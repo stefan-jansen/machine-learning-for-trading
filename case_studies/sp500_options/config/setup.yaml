@@ -12,7 +12,13 @@ universe:
 decision:
   entry_cadence: weekly_friday
   entry_time: friday_close
-  execution_delay: monday_open
+  # The AlgoSeek option chain is one end-of-session quote per contract per day
+  # (LastBidPrice / LastAskPrice / LastMidPrice); it carries no open, high or low.
+  # Every fill in this case study is therefore priced at a close, one session after
+  # the signal. Read by backtest_loaders.get_backtest_config and resolved through
+  # backtest_presets._EXECUTION_MODE_BY_DELAY, where this token maps to next_bar -
+  # the same execution mode MONDAY_OPEN mapped to, so no fill moves.
+  execution_delay: next_session_close
   holding_period_days: 10
   exit_time: 10_days_after_entry_or_expiry
   hedge_cadence: daily_close
@@ -179,12 +185,18 @@ labels:
   # backtests, cohort_metrics, or rank-1 selection. See
   # .agents/issues/2026-05-17-sp500-options-legacy-10d-5d-labels-cleanup.md
   variants: []
-  # Diagnostic-only label buffers: variants below are NOT in the sweep
-  # but their parquets are still computed by 02_labels.py for EDA NBs
-  # (e.g. 90_ic_diagnostic uses fwd_ret_dh_10d for IV-decay analysis).
-  # Listing the buffer here keeps `resolve_label_buffer` from raising
-  # without re-introducing the variant into the sweep / cohort_metrics.
+  # Diagnostic-only labels: the four fixed-horizon variants below are NOT in
+  # the sweep, and their parquets are written by 02_labels.py for the notebooks
+  # that read them (03_financial_features and 05_evaluation contrast the primary
+  # against fwd_ret_dh_10d; 90_ic_diagnostic reads fwd_ret_10d and
+  # fwd_ret_dh_10d for the IV-decay analysis). Declaring each here is what makes
+  # the written label set equal the declared one, and gives
+  # `resolve_label_buffer` / `resolve_label_horizon` a value for each without
+  # re-introducing the variant into the sweep / cohort_metrics.
   variant_buffers:
+    fwd_ret_5d: 5D
+    fwd_ret_10d: 10D
+    fwd_ret_dh_5d: 5D
     fwd_ret_dh_10d: 10D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap.
@@ -197,6 +209,146 @@ labels:
   # non-equal-weight allocation step that runs before the HTM dispatch.
   rebalance_step:
     ret_to_expiry: 5    # weekly_friday schedule, ~30d DTE -> ceil(30/7) = 5
+
+# Read by 03_financial_features. Every window, threshold and ranked column the
+# feature matrix is built from is declared here, and the notebook binds rather
+# than retypes it: the register below, the warmup audit and the timing figure all
+# have to agree on the same numbers, and a window typed in the notebook is a
+# second source of truth for that agreement.
+features:
+  # The straddle selection targets this many calendar days to expiry, which is
+  # also the divisor that puts `instr_dte` on a [0, 1] scale.
+  target_dte: 30
+  # Sessions a position is held: the primary label runs to the ~30-calendar-day
+  # expiry, which is about 21 NYSE sessions. F6 reads the ordering out to twice
+  # this, because a feature whose ordering has decayed inside the holding period
+  # cannot be traded at this cadence.
+  hold_sessions: 21
+  windows:                       # all counted in NYSE sessions
+    underlying_return: [1, 5, 10, 21]
+    realized_volatility: [5, 10, 21, 42, 63]
+    volume_zscore: 20
+    instrument_return: [1, 5]
+    instrument_cost_momentum: 5
+    vrp: [5, 10, 21, 42, 63]
+    vrp_reference: 21            # the VRP horizon the ratio, z-score and rank read
+    vrp_zscore: 252
+    vrp_momentum: [5, 10]
+    iv_zscore: [63, 252]
+    iv_momentum: [5, 10, 21]
+  # A 30-day ATM straddle is not listed for every symbol on every session, so
+  # every window above is counted on the underlying's own session grid rather
+  # than on the straddle rows. This is the share of the sessions in a window
+  # that must carry a straddle quote before the window produces a value.
+  # 03_financial_features section C.4 measures what the setting buys: it prints
+  # the share of quoted rows on which the longest z-score is defined under this
+  # rule and under a rule requiring every session in the window.
+  min_observations_fraction: 0.8
+  thresholds:
+    vega_floor: 0.001                # theta/vega is unreadable as vega goes to zero
+    realized_volatility_floor: 0.01  # 1% annualized, the floor of the IV/RV ratio
+  # Percentile within the decision date. The source column on the left, the
+  # shipped column name on the right; every later stage reads these names.
+  ranked:
+    vrp_21d: vrp_21d_pctl
+    iv_atm: iv_atm_pctl
+    instr_rel_spread: spread_pctl
+    iv_rv_ratio: iv_rv_ratio_pctl
+  # The one null policy, applied once: a row is kept when the premium the thesis
+  # is about can be measured on it at the reference horizon. Nothing else belongs
+  # here. Requiring a column with a longer lookback - `iv_mom_10d`, say - drops
+  # every symbol quoted in bursts shorter than that lookback, which is a liquidity
+  # screen on the universe rather than a warmup rule, and 03_financial_features
+  # prints what it would cost. Such columns are still shipped; they are null on
+  # the rows where the quote cadence cannot support them.
+  null_policy: [vrp_21d, rv_21d]
+  # Columns written for the backtest and the reader to price a position against,
+  # and excluded from the register because they are not features.
+  metadata: [underlying_price, instr_mid, instr_bid, instr_ask]
+  families:
+    - name: instrument_state
+      pattern: instr_rel_spread|instr_pct_of_S|instr_dte|dte_normalized|instr_delta|abs_net_delta|instr_gamma|instr_theta|instr_vega|theta_vega_ratio|instr_ret_*
+      role: state
+      hypothesis: What the straddle costs and how it is exposed decides whether a premium is collectable, not whether one is on offer
+      inputs: straddle quotes and Greeks
+      lookback: 5
+      lag: 0
+      frame: one symbol's own straddle series
+      representation: level, ratio and change
+      failure_mode: the 30-day ATM straddle is a different contract most days, so a change in its price is not a return anyone held
+    - name: surface_level
+      pattern: iv_atm|call_iv|put_iv|iv_skew_atm
+      role: signal
+      hypothesis: What the market charges for one month of variance today, and how asymmetrically
+      inputs: straddle implied volatilities
+      lookback: 0
+      lag: 0
+      frame: one symbol on one session
+      representation: annualized volatility level
+      failure_mode: an IV level that has not converged is a solver artefact, which is what the quality family flags
+    - name: surface_dynamics
+      pattern: iv_atm_z_*|iv_mom_*
+      role: signal
+      hypothesis: Implied volatility is mean-reverting, so where it sits against its own recent history ranks better than its level
+      inputs: straddle implied volatilities
+      lookback: 252
+      lag: 0
+      frame: one symbol's own session history
+      representation: z-score and change
+      failure_mode: a symbol quoted intermittently has fewer observations in the window than sessions, which the minimum-observation rule bounds
+    - name: variance_risk_premium
+      pattern: vrp_5d|vrp_10d|vrp_21d|vrp_42d|vrp_63d|iv_rv_ratio|vrp_zscore_252|vrp_mom_*|instr_cost_mom_5d
+      role: signal
+      hypothesis: Implied variance exceeds subsequently realized variance, and the gap is wider for some names than others
+      inputs: straddle implied volatility and underlying realized volatility
+      lookback: 252
+      lag: 0
+      frame: one symbol's own session history
+      representation: difference, ratio, z-score and change
+      failure_mode: it contrasts a forward-looking quote with a backward-looking estimate, so it is a premium only if realized volatility persists
+    - name: realized_volatility
+      pattern: rv_*
+      role: state
+      hypothesis: What the underlying has actually done sets the scale the premium is read against
+      inputs: underlying adjusted closes
+      lookback: 63
+      lag: 0
+      frame: one security identity's own session history
+      representation: annualized volatility level
+      failure_mode: a return that spans a security identity change is a corporate action, not a move
+    - name: cross_sectional
+      pattern: '*_pctl'
+      role: signal
+      hypothesis: The strategy sells some straddles and not others, so only relative standing within the date can drive it
+      inputs: the level features named in features.ranked
+      # The percentile is a within-date operation and adds no lookback of its own, so this is the
+      # longest window any of its four ranked sources reads: vrp_21d and iv_rv_ratio both read
+      # rv_21d, and iv_atm and instr_rel_spread are contemporaneous.
+      lookback: 21
+      lag: 0
+      frame: every symbol quoted on the decision date
+      representation: percentile in (0, 100)
+      failure_mode: on a thin date the percentile is an ordering of a few dozen names and moves for reasons the level did not
+    - name: underlying
+      pattern: ret_*|volume_zscore
+      role: state
+      hypothesis: Direction and participation in the underlying condition what a short-volatility position earns
+      inputs: underlying adjusted closes and volume
+      lookback: 21
+      lag: 0
+      frame: one security identity's own session history
+      representation: return and z-score
+      failure_mode: volume is not adjusted for splits, so its z-score restarts with the security identity
+    - name: quality
+      pattern: qc_*
+      role: state
+      hypothesis: Nothing - these should not predict, and are carried so a model can be checked for leaning on them
+      inputs: solver convergence codes
+      lookback: 0
+      lag: 0
+      frame: one symbol on one session
+      representation: indicator
+      failure_mode: a control that does predict is evidence the panel is contaminated, not evidence of a signal
 
 modeling:
   gbm:

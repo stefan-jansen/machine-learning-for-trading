@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -141,14 +141,15 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # highest- and lowest-expected-return stocks. The strategy buys
 # the top decile and shorts the bottom decile, rebalancing daily.
 #
-# The feature set (63 features) emphasizes short-term return
-# patterns (5d to 252d momentum, 12-month skip-month), volatility
-# at multiple horizons, risk-adjusted momentum (Sharpe ratios),
-# technical indicators (RSI, MACD, ADX, CCI, stochastic, NATR),
-# moving-average ratios, cross-sectional ranks (momentum, Sharpe,
-# volatility, liquidity, reversal, size), composite signals
-# (momentum, quality, contrarian), and interaction terms
-# (momentum × size). No fundamental or alternative data — the
+# The models are fit on 71 features: the 62 built in
+# `03_financial_features` and the 9 built in `04_model_based_features`.
+# The 62 emphasize short-term return patterns (5d to 252d momentum,
+# 12-month skip-month), volatility at multiple horizons, risk-adjusted
+# momentum (Sharpe ratios), technical indicators (RSI, MACD, ADX, CCI,
+# stochastic, NATR), moving-average ratios, cross-sectional ranks
+# (momentum, Sharpe, volatility, liquidity, illiquidity, reversal, RSI),
+# composite signals (momentum, quality, contrarian), and interaction
+# terms (momentum × liquidity). No fundamental or alternative data — the
 # signal is purely price-volume derived.
 #
 # The universe spans all cap sizes deliberately: this means
@@ -360,7 +361,7 @@ print(f"\nAll labels trained: {all_labels}")
 # ## 3. Headline Comparative View
 #
 # Before comparing model families, we establish a baseline. If the
-# simplest possible model — OLS or ridge regression on 63 features —
+# simplest possible model — OLS or ridge regression on 71 features —
 # produces zero or negative IC, the 1-day prediction problem is
 # fundamentally too hard for this cross-section.
 
@@ -395,7 +396,7 @@ print(
 # linear model correctly ranks stocks beyond chance — weak but persistent,
 # and amplified by the 3,200-stock cross-section where even small ranking
 # accuracy produces reliable decile sorts. The minimal regularization
-# benefit suggests the 63 features are not severely multicollinear at
+# benefit suggests the 71 features are not severely multicollinear at
 # this cross-sectional breadth.
 #
 # The real surprise is GBM. The best GBM configuration (63 leaves, MAE
@@ -633,7 +634,7 @@ plot_correlation_matrix(corr_matrix, corr_labels)
 # families is **0.00** — effectively zero. This is the lowest correlation
 # observed across all nine case studies. Each model family produces
 # fundamentally different stock rankings on most days: ridge learns a
-# linear combination of 63 features, GBM learns nonlinear splits and
+# linear combination of 71 features, GBM learns nonlinear splits and
 # interactions, deep learning captures temporal patterns, and causal DML
 # estimates treatment effects after orthogonalization.
 #
@@ -698,7 +699,10 @@ plot_learning_curves(cp_data, cp_families)
 #
 # Feature importance from a single model fit is anecdotal. Recurring
 # importance across 16 walk-forward folds is strong evidence. We examine
-# which of the 63 features consistently drive the best model's predictions.
+# which features consistently drive the best model's predictions. The
+# booster's own importance covers all 71; where no booster file is
+# available, the fallback correlates predictions against the 62
+# financial columns only.
 #
 # For daily equity prediction, we expect short-term reversal features
 # (5d momentum, overnight return proxies) and liquidity indicators to

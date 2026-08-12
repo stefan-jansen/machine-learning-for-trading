@@ -81,7 +81,9 @@ def test_us_equities_pilot_helpers_preserve_current_outputs() -> None:
     assert mds.date_col == "timestamp"
     assert mds.entity_cols == ["symbol"]
     assert mds.join_cols == ["symbol", "timestamp"]
-    assert len(mds.feature_names) == 72
+    # 62 financial + 9 temporal. `03_financial_features` dropped `size_rank`, which was a
+    # bit-for-bit duplicate of `liq_rank`, and both artifacts on disk carry the new counts.
+    assert len(mds.feature_names) == 71
     assert len(mds.splits) == 16
     assert mds.label_buffer == "1D"
     assert mds.task_type == "regression"
@@ -112,3 +114,50 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     assert len(mds.splits) == 2
     assert mds.label_buffer == "15min"
     assert mds.task_type == "regression"
+
+
+def test_universe_reduction_breaks_row_count_ties_on_entity_name() -> None:
+    """Tied row counts must reduce to the same universe on every call.
+
+    ``max_symbols`` picks the entities with the most rows. When counts tie at the
+    cutoff, an unstable sort lets two callers reducing the same dataset to the
+    same size pick different symbols - a reduced stage-04 run and the reduced
+    model notebooks downstream of it, for instance. The symbols only one of them
+    chose then carry null model-based features, which runs clean and is wrong.
+
+    The panel gives every symbol the same row count, so the cutoff is decided
+    entirely by the tie-break, and the frame is then reordered to show the
+    reduction does not follow frame order.
+    """
+    import polars as pl
+
+    from utils.modeling import reduce_to_top_entities
+
+    dataset = pl.DataFrame(
+        {
+            "symbol": [s for s in ("DELTA", "ALPHA", "CHARLIE", "BRAVO") for _ in range(3)],
+            "value": list(range(12)),
+        }
+    )
+
+    def kept(frame: pl.DataFrame) -> list[str]:
+        return sorted(reduce_to_top_entities(frame, "symbol", 2)["symbol"].unique())
+
+    assert kept(dataset) == ["ALPHA", "BRAVO"]
+    assert kept(dataset.sort("value", descending=True)) == ["ALPHA", "BRAVO"]
+    assert kept(dataset.sample(fraction=1.0, shuffle=True, seed=7)) == ["ALPHA", "BRAVO"]
+
+
+def test_universe_reduction_prefers_history_over_name() -> None:
+    """The name is the tie-break, never the criterion: more rows still wins."""
+    import polars as pl
+
+    from utils.modeling import reduce_to_top_entities
+
+    dataset = pl.DataFrame(
+        {"symbol": ["ZULU"] * 5 + ["ALPHA"] * 2 + ["BRAVO"] * 2, "value": list(range(9))}
+    )
+    assert sorted(reduce_to_top_entities(dataset, "symbol", 2)["symbol"].unique()) == [
+        "ALPHA",
+        "ZULU",
+    ]

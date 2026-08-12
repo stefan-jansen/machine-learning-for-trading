@@ -23,6 +23,7 @@ before any other config. No imports or function calls needed.
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -53,6 +54,7 @@ COLORS = {
     "positive": "#10b981",  # Success green - profits, gains
     "negative": "#ef4444",  # Error red - losses (use sparingly!)
     "neutral": "#334155",  # Slate gray - neutral elements
+    "recede": "#94a3b8",  # Light slate - structure that must not compete with the data
     # Backgrounds
     "bg_light": "#FAFAF9",  # Warm off-white (light mode)
     "bg_dark": "#0a1628",  # Deep blue (dark mode)
@@ -65,6 +67,36 @@ GRAYSCALE = {
     "amber": 0.65,  # ~65% gray
     "silver": 0.97,  # ~97% gray (nearly white)
 }
+
+# Categorical cyclers for `axes.prop_cycle`. The print track pairs GRAY_CYCLER
+# with LINESTYLE_CYCLER so a B&W readout stays legible; the color track relies
+# on hue alone (no linestyle pairing - see apply_book_style). Color order
+# prioritizes perceptual separation for the first 4 entries (most figures use
+# <=4 series). GRAY_CYCLER mirrors the GRAY_FILLS weight order (secondary widened
+# to #808080 for print contrast) while keeping every entry dark enough to read
+# as a line on white.
+#
+# The sixth entry was `slate`, and slate is a second navy: CIEDE2000 8.1 from
+# `blue`, and 48 against 28 once a page is reduced to gray. So every six-series
+# chart drew its first and last series as one line, which is what a reader saw in
+# the stage-03 coverage figure and in the six products of ch16's futures backtest.
+# `recede` is the only entry in the locked palette that parts from navy on both
+# readings at once - CIEDE2000 50.1, gray 160 against 28 - and it stays clear of
+# the other five in color (nearest is 30.6, to `positive`). It is light, so it
+# reads as the least emphatic series; that is the trade a sixth series buys, and
+# there is no seventh. Beyond six, pair the hue with a line style (`_cycle` in
+# case_studies/utils/feature_engineering.py) rather than extending this list.
+COLOR_CYCLER = [
+    COLORS["blue"],  # navy   - primary
+    COLORS["amber"],  # gold   - secondary
+    COLORS["copper"],  # orange - tertiary
+    COLORS["positive"],  # green  - fourth
+    COLORS["negative"],  # red    - fifth (semantic, use sparingly)
+    COLORS["recede"],  # light slate - sixth (only when >=6 series)
+]
+GRAY_CYCLER = ["#000000", "#808080", "#404040", "#a8a8a8", "#666666", "#c8c8c8"]
+LINESTYLE_CYCLER = ["-", "--", ":", "-.", "-", "--"]
+MARKER_CYCLER = ["o", "s", "^", "D", "v", "P"]
 
 # =============================================================================
 # MATPLOTLIB STYLE CONFIGURATIONS
@@ -172,13 +204,11 @@ def ml4t_palette(n: int = 5, categorical: bool = False) -> list[str]:
         List of hex color strings
     """
     if categorical:
-        colors = [
-            COLORS["blue"],
-            COLORS["amber"],
-            COLORS["slate"],
-            COLORS["copper"],
-            COLORS["silver_muted"],
-        ]
+        # The cycle's first five, so the one categorical helper a notebook is told to
+        # call and the cycle a bare figure draws from cannot disagree. This list had
+        # `slate` third, so three categories already drew two navies, and
+        # `silver_muted` fifth, which is #e8e8e6 and barely visible on the page at all.
+        colors = list(COLOR_CYCLER[:5])
     else:
         colors = [
             COLORS["blue"],
@@ -269,6 +299,57 @@ def format_pct_axis(ax: Axes, axis: Literal["x", "y", "both"] = "y") -> None:
         ax.xaxis.set_major_formatter(formatter)
 
 
+SUBTITLE_SIZE = 9
+
+
+def _wrap_text_to_axes(ax: Axes, text: object, minimum: int = 24) -> int:
+    """Break *text* onto as many lines as it takes to fit the axes' width.
+
+    Returns the number of lines added, which the caller pays for in layout.
+
+    The break points come from measuring the drawn text rather than from a
+    characters-per-inch estimate: the ratio of the rendered width to the axes' width
+    says directly how much of the string fits on one line, and it holds for whatever
+    font, size and DPI are actually in force. That ratio is an average over the
+    string, so a line that draws a run of unusually wide characters can still come
+    out slightly over; the second pass measures the wrapped text and takes it back.
+    """
+    figure = ax.figure
+    if figure is None or figure.canvas is None:
+        return 0
+    # A renderer, not a draw. `matplotlibrc` turns constrained layout on for every
+    # figure in the repo, and drawing here runs that engine before the caller has
+    # added its legend or called `tight_layout` - which on a small figure collapses
+    # the axes and warns, into the notebook's own output. Measuring needs a renderer
+    # and nothing else.
+    renderer = getattr(figure.canvas, "get_renderer", None)
+    if renderer is None:
+        return 0
+    renderer = renderer()
+    axes_box = ax.get_window_extent(renderer)
+    # The axes' width is what the subtitle should sit within; the room between the
+    # subtitle's own left edge and the figure's is what it must not exceed, on pain
+    # of `bbox="tight"` widening the canvas. Callers run `tight_layout` after this,
+    # which moves the axes' left edge right to make room for tick labels, so the
+    # second bound is taken with a margin covering that shift.
+    limit = min(axes_box.width, (figure.bbox.x1 - axes_box.x0) * 0.92)
+    if limit <= 0:
+        return 0
+    # `get_window_extent` on a multi-line Text returns the bounding box of every
+    # line, so its width is the widest line's, which is the one that has to fit.
+    for _ in range(2):
+        drawn = text.get_window_extent(renderer)
+        if drawn.width <= limit:
+            break
+        longest = max(text.get_text().split("\n"), key=len)
+        per_char = drawn.width / max(len(longest), 1)
+        # `fill` treats its input as one paragraph and collapses the newlines a
+        # previous pass put in, so this re-wraps the subtitle rather than wrapping
+        # the wrapping.
+        text.set_text(textwrap.fill(text.get_text(), max(minimum, int(limit / per_char))))
+    return text.get_text().count("\n")
+
+
 def add_message_title(
     ax: Axes,
     message: str,
@@ -282,15 +363,9 @@ def add_message_title(
     frequency, period); `source` is a small bottom-left note. No figure number — the
     publisher captions separately.
     """
-    ax.set_title(
-        message,
-        loc="left",
-        color=COLORS["blue"],
-        fontweight="semibold",
-        pad=15 if subtitle else 8,
-    )
+    extra_lines = 0
     if subtitle:
-        ax.annotate(
+        note = ax.annotate(
             subtitle,
             xy=(0, 1),
             xycoords="axes fraction",
@@ -298,9 +373,31 @@ def add_message_title(
             textcoords="offset points",
             ha="left",
             va="bottom",
-            fontsize=9,
+            fontsize=SUBTITLE_SIZE,
             color=COLORS["neutral"],
         )
+        # A subtitle was one line anchored to the axes' left edge and never measured
+        # against the axes' width, and every figure here saves with
+        # `savefig.bbox="tight"`. So a subtitle wider than the axes did not overflow
+        # and did not wrap: it widened the saved canvas to fit itself, and the figure
+        # came out with the plot in the left quarter and one line of gray running
+        # across the rest - which reads as a broken render rather than a long
+        # subtitle. Three of the six figures in us_firm_characteristics/03 hit it on
+        # a single pass, and nothing warned. Wrapping here retires the whole class:
+        # no caller can trip it, and no caller has to count characters against an
+        # axes width it cannot see.
+        extra_lines = _wrap_text_to_axes(ax, note)
+    ax.set_title(
+        message,
+        loc="left",
+        color=COLORS["blue"],
+        fontweight="semibold",
+        # The subtitle sits inside the title's pad and is anchored by its bottom, so
+        # each wrapped line grows up towards the title. `tight_layout` reserves the
+        # pad, so paying for those lines here is what keeps the figure from
+        # overlapping them.
+        pad=(15 + extra_lines * (SUBTITLE_SIZE + 2)) if subtitle else 8,
+    )
     if source:
         ax.figure.text(
             0.01, 0.005, source, ha="left", va="bottom", fontsize=8, color=COLORS["neutral"]
@@ -318,6 +415,24 @@ def show_with_alt(fig: object, alt: str) -> None:
 
     display(fig, metadata={"image/png": {"alt": alt}})
     plt.close(fig)
+
+
+def show_plotly_with_alt(fig: object, alt: str) -> None:
+    """Render a Plotly *fig* carrying alt text for screen readers.
+
+    Neither `fig.show()` nor `display(fig, metadata=...)` attaches it. Plotly returns
+    its own metadata from `_repr_mimebundle_`, and IPython uses that in preference to
+    a caller's, so the alt is silently dropped and the PNG reaches the page described
+    as "No description has been provided for this image". Publishing the bundle
+    directly is what carries it through.
+
+    The alt text is a sentence saying what the chart shows, not a repeat of the title.
+    """
+    from IPython.display import publish_display_data
+
+    bundle = fig._repr_mimebundle_()
+    data, metadata = bundle if isinstance(bundle, tuple) else (bundle, {})
+    publish_display_data(data=data, metadata={**metadata, "image/png": {"alt": alt}})
 
 
 def label_line_ends(ax: Axes, xpad_points: int = 4, expand_right: float = 0.10) -> None:
@@ -472,14 +587,11 @@ def _register_plotly_template() -> None:
                 showgrid=True,
                 gridwidth=0.5,
             ),
-            colorway=[
-                COLORS["blue"],
-                COLORS["amber"],
-                COLORS["slate"],
-                COLORS["copper"],
-                COLORS["positive"],
-                COLORS["negative"],
-            ],
+            # The list itself, not a copy of it. This carried `slate` third, so a bare
+            # `go.Figure` with three traces already drew two of them in navy - the same
+            # defect as the Matplotlib cycle and one series sooner. Deriving it removes
+            # the possibility of the two drifting apart again.
+            colorway=list(COLOR_CYCLER),
             legend=dict(
                 bgcolor="rgba(255,255,255,0.8)",
                 bordercolor=COLORS["silver_muted"],
@@ -546,25 +658,6 @@ COLOR_FILLS = {
     "canvas": "#ffffff",
 }
 
-# Categorical cyclers for `axes.prop_cycle`. The print track pairs GRAY_CYCLER
-# with LINESTYLE_CYCLER so a B&W readout stays legible; the color track relies
-# on hue alone (no linestyle pairing — see apply_book_style). Color order
-# prioritizes perceptual separation for the first 4 entries (most figures use
-# ≤4 series); slate is positioned last because it reads as a second navy next
-# to blue. GRAY_CYCLER mirrors the GRAY_FILLS weight order (secondary widened
-# to #808080 for print contrast) while keeping every entry dark enough to read
-# as a line on white.
-COLOR_CYCLER = [
-    COLORS["blue"],  # navy   — primary
-    COLORS["amber"],  # gold   — secondary
-    COLORS["copper"],  # orange — tertiary
-    COLORS["positive"],  # green  — fourth
-    COLORS["negative"],  # red    — fifth (semantic, use sparingly)
-    COLORS["slate"],  # navy   — sixth (only when ≥6 series; reads close to blue)
-]
-GRAY_CYCLER = ["#000000", "#808080", "#404040", "#a8a8a8", "#666666", "#c8c8c8"]
-LINESTYLE_CYCLER = ["-", "--", ":", "-.", "-", "--"]
-MARKER_CYCLER = ["o", "s", "^", "D", "v", "P"]
 
 # =============================================================================
 # CANONICAL FIGURE SIZES (Packt embed width = 5.833")

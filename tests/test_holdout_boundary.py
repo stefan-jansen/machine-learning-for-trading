@@ -35,6 +35,14 @@ HOLDOUT_SCOPED_NOTEBOOKS = [
     ("case_studies/cme_futures/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/fx_pairs/02_labels.py", "cross_sectional_ic_series("),
     ("case_studies/us_firm_characteristics/02_labels.py", "cross_sectional_ic_series("),
+    (
+        "case_studies/sp500_equity_option_analytics/02_labels.py",
+        "cross_sectional_ic_series(",
+    ),
+    ("case_studies/sp500_options/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/nasdaq100_microstructure/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/us_equities_panel/02_labels.py", "cross_sectional_ic_series("),
+    ("case_studies/us_equities_panel/03_financial_features.py", "ic_results[feat] = "),
 ]
 
 
@@ -137,11 +145,15 @@ def test_holdout_filter_precedes_first_ic_computation(rel_path: str, first_ic_ma
 # short-term-reversal characteristic, against the label at three candidate lags and only the
 # previous row's return carries it.
 LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
+    "case_studies/us_equities_panel/02_labels.py",
     "case_studies/etfs/02_labels.py",
     "case_studies/etfs/05_evaluation.py",
     "case_studies/crypto_perps_funding/02_labels.py",
     "case_studies/cme_futures/02_labels.py",
     "case_studies/fx_pairs/02_labels.py",
+    "case_studies/sp500_equity_option_analytics/02_labels.py",
+    "case_studies/sp500_options/02_labels.py",
+    "case_studies/nasdaq100_microstructure/02_labels.py",
 ]
 
 # Of the four above, only etfs/05 uses a market-wide calendar; the other three
@@ -161,18 +173,87 @@ LABEL_ENDPOINT_PURGED_NOTEBOOKS = [
 # ``entity_col`` names the column the endpoint must be shifted within, which is the
 # entity a label may not cross. It is ``symbol`` for seven of the nine case studies and
 # ``product`` for cme_futures.
+# ``sp500_equity_option_analytics/02_labels`` is deliberately absent: its entity is the
+# security (``sec_id``), not the ticker. A ticker there is reassigned to another company
+# after a merger or a spin-off, and ``adj_factor`` restarts with the new security, so
+# shifting within ``symbol`` would be the under-purge this list exists to prevent rather
+# than the fix for it. It is in both lists above, where the mechanism is what is checked.
+# ``nasdaq100_microstructure/02_labels`` is deliberately absent from this third list while
+# being present in the two above. Its labels are intraday and may not cross an overnight
+# gap, so the entity a label may not cross is the compound ``["symbol", "session_date"]``
+# and its endpoint is derived with ``.over(GROUP_COLS)``. The regex below binds a single
+# quoted column name, so it cannot express a compound key -- listing the notebook here
+# would produce a false red against a seal that is strictly stronger than the per-symbol
+# one this test checks.
 # ``etfs/03_financial_features`` is deliberately absent. It was listed here while it
 # purged on a shifted label endpoint; public #447 replaced that mechanism with a seal
 # that rebuilds the whole panel with the holdout withheld and compares all 57 columns,
 # which is checked by executing the notebook rather than by reading its source. A
 # source pattern cannot see the stronger check, so listing it here only produces a
-# false red.
+# false red. See agent-workspace #141.
+# ``sp500_options/02_labels`` is deliberately absent, and for the opposite reason to
+# ``etfs/05``: its endpoint is not an approximation that needs the per-symbol form. The
+# hold-to-expiry label settles on the expiration written into the contract and the
+# fixed-horizon variants on the exit session recorded in the round-trip artifact, so
+# ``_label_end`` is the exact resolution date of each individual trade rather than a
+# calendar shift of the signal date. The notebook checks the recorded exit dates against a
+# shift of the panel calendar by the declared horizon, which is what
+# ``test_holdout_purge_is_on_the_label_endpoint`` above matches on.
+# ``us_equities_panel/02_labels`` is deliberately absent from this third list while being in
+# the two above. Its endpoint is not shifted within ``symbol`` at all: the row is looked up at
+# the session numbered one higher in that stock's own series, so the entity boundary is part of
+# the join key rather than of a window function, and a stock that missed the closing session
+# gets no endpoint instead of a later one. That is what this list's per-symbol requirement is
+# for, reached by a construction the regex below cannot express.
 PER_SYMBOL_ENDPOINT_NOTEBOOKS = [
     ("case_studies/etfs/02_labels.py", "symbol"),
     ("case_studies/crypto_perps_funding/02_labels.py", "symbol"),
     ("case_studies/cme_futures/02_labels.py", "product"),
     ("case_studies/fx_pairs/02_labels.py", "symbol"),
 ]
+
+
+def test_us_equities_panel_03_restricts_the_evaluation_on_the_label_endpoint() -> None:
+    """``us_equities_panel/03_financial_features`` needs its own check, not a list entry.
+
+    It belongs in ``HOLDOUT_SCOPED_NOTEBOOKS`` and cannot join
+    ``LABEL_ENDPOINT_PURGED_NOTEBOOKS``: the winsorization figure draws a
+    counterfactual bound from development rows with
+    ``filter(pl.col("timestamp") < HOLDOUT_START)``, which is a per-date quantile
+    that crosses no boundary but which that list's leaky-filter regex would reject.
+
+    Membership of the scoped list alone is a vacuous gate here, and this test exists
+    because the review of the commit that added it said so: the winsorization
+    comparison against ``HOLDOUT_START`` precedes the first IC computation on its own,
+    so deleting the endpoint restriction entirely would leave that check green. What
+    has to hold is the mechanism -- the endpoint comes from the label's own horizon,
+    the evaluation frame is restricted on it, and that happens before any IC is
+    computed.
+    """
+    rel_path = "case_studies/us_equities_panel/03_financial_features.py"
+    source = (REPO_ROOT / rel_path).read_text()
+
+    assert re.search(r"pl\.col\(\"session\"\)\s*-\s*horizon", source), (
+        f"{rel_path}: the label endpoint must be looked up at the session numbered "
+        "PRIMARY_HORIZON higher, as 02_labels writes it, not read off the next row"
+    )
+    assert "rows_sessions_ahead(raw_df, PRIMARY_HORIZON)" in source, (
+        f"{rel_path}: the endpoint must be derived for the declared primary horizon, "
+        "not for a bare integer that can drift from setup.yaml"
+    )
+
+    restriction = source.find('.filter(pl.col("_label_end") < HOLDOUT_START)')
+    assert restriction != -1, (
+        f"{rel_path}: the evaluation frame must be restricted to rows whose label "
+        "window closes strictly before the holdout. A filter on the observation date "
+        "reads holdout prices while appearing not to."
+    )
+    first_ic = source.find("ic_results[feat] = ")
+    assert first_ic != -1, f"{rel_path}: first-IC marker not found -- update this test"
+    assert restriction < first_ic, (
+        f"{rel_path}: the endpoint restriction must be applied before the first IC "
+        f"computation (restriction at char {restriction}, first IC at {first_ic})"
+    )
 
 
 @pytest.mark.parametrize("rel_path", LABEL_ENDPOINT_PURGED_NOTEBOOKS, ids=lambda p: p)
@@ -194,9 +275,21 @@ def test_holdout_purge_is_on_the_label_endpoint(rel_path: str) -> None:
         "forward-label window (shift the dense calendar by the label horizon), "
         "not on the signal date -- see case_studies/etfs/05_evaluation.py"
     )
-    assert re.search(r"\.shift\(-\s*[A-Za-z_]*horizon", source, re.IGNORECASE), (
-        f"{rel_path}: the label endpoint must be shifted by the declared label "
-        "horizon, not by a bare integer that can drift from the label config"
+    # Two mechanisms move a row to its label's endpoint by the declared horizon, and the
+    # second is the stronger one. Shifting rows is correct only where the entity trades every
+    # session inside the window; looking the row up at the session numbered `horizon` higher
+    # is correct whether it does or not, and returns nothing rather than a later date where
+    # the entity missed that session. ``us_equities_panel/02_labels`` uses the second after
+    # agent-workspace #218, so the pattern accepts either -- what it still refuses is a bare
+    # integer, which can drift from the horizon declared in setup.yaml.
+    assert re.search(
+        r"\.shift\(-\s*[A-Za-z_]*horizon|pl\.col\(\"session\"\)\s*-\s*[A-Za-z_]*horizon",
+        source,
+        re.IGNORECASE,
+    ), (
+        f"{rel_path}: the label endpoint must be moved by the declared label horizon - by a "
+        "shift of the entity's rows or by a lookup on the session counter - and not by a bare "
+        "integer that can drift from the label config"
     )
 
     # The endpoint must actually gate a frame, not merely be computed.
@@ -435,38 +528,72 @@ def test_a_gapped_calendar_separates_the_two_purges() -> None:
 def evaluation_notebook_label() -> tuple[str, int]:
     """The label file and horizon ``05_evaluation`` actually uses.
 
-    05 hardcodes both, so the equivalence check has to run on its values rather
-    than the configured ones -- otherwise a config change would leave the check
-    validating a purge the notebook does not perform. Requiring them to equal the
-    configured label is what makes the hardcoding safe, and is the assertion that
-    fails if `labels.primary` moves and 05 is not moved with it.
+    05 used to hardcode both, and this helper read the two literals so the
+    equivalence check below ran on the notebook's values rather than the
+    configured ones. It no longer hardcodes them: it takes the label from
+    ``setup.yaml`` and the horizon from ``resolve_label_buffer``, so there is one
+    source of truth and a config change moves the notebook with it.
+
+    What has to be checked therefore moves too. The risk was 05 purging on a
+    label the case study no longer selects; that is now prevented by
+    construction, but only while 05 really does bind both to the config. So this
+    asserts the binding structurally and resolves the values the same way the
+    notebook does, and the caller keeps its teeth by comparing the
+    buffer-derived horizon against the one implied by the label's own name --
+    two independent config entries that a typo can still separate.
     """
     tree = ast.parse((REPO_ROOT / "case_studies" / "etfs" / "05_evaluation.py").read_text())
 
-    # Parsed rather than pattern-matched: a text match on an assignment reports
-    # the value it can see, so `HAC_MAXLAGS = 21 * 2` reads as 21 while the
-    # notebook purges on 42, and a match anywhere in the file is satisfied by a
-    # call the label frame is not built from.
-    literals: dict[str, object] = {}
-    horizon_alias: ast.expr | None = None
+    # Parsed rather than pattern-matched: a text match anywhere in the file is
+    # satisfied by a call the label frame is not built from.
+    bindings: dict[str, ast.expr] = {}
     for node in tree.body:
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
         target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        if target.id in ("PRIMARY_LABEL_FILE", "HAC_MAXLAGS") and isinstance(
-            node.value, ast.Constant
-        ):
-            literals[target.id] = node.value.value
-        elif target.id == "LABEL_HORIZON":
-            horizon_alias = node.value
+        if isinstance(target, ast.Name):
+            bindings[target.id] = node.value
 
-    assert set(literals) == {"PRIMARY_LABEL_FILE", "HAC_MAXLAGS"}, (
-        "05_evaluation no longer assigns PRIMARY_LABEL_FILE and HAC_MAXLAGS a "
-        "plain literal each; read its label and horizon from wherever it now "
-        f"takes them (found {sorted(literals)})"
+    def _calls_named(node: ast.AST, func: str) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and (
+                (isinstance(sub.func, ast.Name) and sub.func.id == func)
+                or (isinstance(sub.func, ast.Attribute) and sub.func.attr == func)
+            )
+            for sub in ast.walk(node)
+        )
+
+    missing = {"PRIMARY_LABEL", "HAC_MAXLAGS", "LABEL_HORIZON"} - set(bindings)
+    assert not missing, (
+        "05_evaluation no longer binds "
+        f"{sorted(missing)}; read its label and horizon from wherever it now "
+        "takes them"
     )
+
+    # The label must come from setup.yaml, not from a literal reintroduced here.
+    primary_src = ast.dump(bindings["PRIMARY_LABEL"])
+    assert "'labels'" in primary_src and "'primary'" in primary_src, (
+        "05_evaluation's PRIMARY_LABEL is no longer read from "
+        "SETUP['labels']['primary'], so it can now name a label setup.yaml does "
+        "not select"
+    )
+    assert not isinstance(bindings["PRIMARY_LABEL"], ast.Constant), (
+        "05_evaluation hardcodes PRIMARY_LABEL again; it must be read from setup.yaml"
+    )
+
+    # ...and the HAC bandwidth from the label's configured buffer.
+    assert _calls_named(bindings["HAC_MAXLAGS"], "match") and "LABEL_BUFFER" in {
+        sub.id for sub in ast.walk(bindings["HAC_MAXLAGS"]) if isinstance(sub, ast.Name)
+    }, (
+        "05_evaluation's HAC_MAXLAGS is no longer derived from LABEL_BUFFER, so "
+        "the HAC correction and the label can drift apart"
+    )
+    assert _calls_named(bindings.get("LABEL_BUFFER", ast.Constant(None)), "resolve_label_buffer"), (
+        "05_evaluation no longer resolves LABEL_BUFFER through resolve_label_buffer"
+    )
+
+    horizon_alias = bindings["LABEL_HORIZON"]
     assert isinstance(horizon_alias, ast.Name) and horizon_alias.id == "HAC_MAXLAGS", (
         "05_evaluation's purge horizon is no longer HAC_MAXLAGS itself, so this "
         "helper would report a horizon the notebook does not use"
@@ -493,8 +620,8 @@ def evaluation_notebook_label() -> tuple[str, int]:
         and any(isinstance(t, ast.Name) and t.id == "label_df" for t in node.targets)
         for read in calls_to(node.value, "read_parquet")
     ]
-    assert label_reads and all("PRIMARY_LABEL_FILE" in names_in(read) for read in label_reads), (
-        "05_evaluation must load label_df through PRIMARY_LABEL_FILE; a hardcoded "
+    assert label_reads and all("PRIMARY_LABEL" in names_in(read) for read in label_reads), (
+        "05_evaluation must load label_df through PRIMARY_LABEL; a hardcoded "
         "path there would leave the constant, and this check, describing a file "
         "the notebook does not read"
     )
@@ -516,7 +643,23 @@ def evaluation_notebook_label() -> tuple[str, int]:
             "_label_end; another horizon there purges a window this check is not "
             "measuring"
         )
-    return str(literals["PRIMARY_LABEL_FILE"]), int(literals["HAC_MAXLAGS"])  # type: ignore[arg-type]
+    # Resolved through the same function 05 calls, so a label spec that overrides
+    # setup.yaml moves this check with the notebook rather than silently past it.
+    #
+    # The setup mapping is read from SETUP_YAML rather than through
+    # `load_setup_config`, which resolves the case-study directory from the
+    # environment: under CI's ML4T_OUTPUT_DIR it returns a different file and the
+    # helper died on `KeyError: 'labels'`. This test is a static check on the
+    # committed source, so it must read the committed config.
+    from utils.artifact_specs import resolve_label_buffer
+
+    setup = yaml.safe_load(SETUP_YAML.read_text())
+    primary = str(setup["labels"]["primary"])
+    buffer = resolve_label_buffer("etfs", primary, setup)
+    assert buffer, f"no label buffer configured for {primary}"
+    match = re.match(r"^(\d+)", str(buffer))
+    assert match, f"label buffer {buffer!r} does not start with an integer"
+    return f"{primary}.parquet", int(match.group(1))
 
 
 def test_the_two_purges_agree_on_the_shipped_label_panel() -> None:
@@ -608,3 +751,120 @@ def test_the_narrative_states_the_configured_horizon() -> None:
         f"while setup.yaml configures a {horizon}-day horizon "
         f"({setup['labels']['primary']})"
     )
+
+
+def test_the_holdout_fold_trains_on_everything_before_the_seal(tmp_path, monkeypatch) -> None:
+    """The holdout retrain is the one fit the sealed holdout ever sees, so the window it
+    trains on has to be everything available before the seal.
+
+    ``generate_cv_splits`` steps backward from the holdout boundary: fold 0 is the most
+    recent fold and carries the *latest* training start, and the list runs newest to
+    oldest. ``append_holdout_fold_if_needed`` took ``splits[0]["train_start"]``, which is
+    the shortest window of the set, not the longest. On etfs that is 2008-01-02 against an
+    earliest fold start of 2005-01-03 - three years dropped from the retrain, silently,
+    and only on the holdout path where nothing else would show it.
+    """
+    import pandas as pd
+
+    import utils.modeling as modeling
+    from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "config").mkdir(parents=True)
+    (case_dir / "config" / "setup.yaml").write_text(
+        yaml.safe_dump({"evaluation": {"holdout_start": "2018-01-02", "holdout_end": "2018-12-31"}})
+    )
+    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+
+    # Newest fold first, as generate_cv_splits emits them.
+    splits = [
+        {
+            "fold": i,
+            "train_start": pd.Timestamp(f"{2008 - i}-01-02"),
+            "train_end": pd.Timestamp(f"{2017 - i}-11-29"),
+            "val_start": pd.Timestamp(f"{2017 - i}-12-29"),
+            "val_end": pd.Timestamp(f"{2018 - i}-11-29"),
+        }
+        for i in range(3)
+    ]
+    mds = ModelingDataset.__new__(ModelingDataset)
+    mds.splits = splits
+    mds._input_lineage = object()
+
+    append_holdout_fold_if_needed(mds, "holdout", "whatever")
+
+    holdout = mds.splits[-1]
+    assert holdout["fold"] == 3
+    assert holdout["train_start"] == pd.Timestamp("2006-01-02"), (
+        "the holdout fold must start at the earliest train_start across folds, "
+        f"not splits[0]'s {splits[0]['train_start']}"
+    )
+    assert holdout["train_end"] == pd.Timestamp("2018-01-02")
+    assert mds._input_lineage is None, "the memoized lineage describes the pre-append fold set"
+
+
+def test_the_holdout_fold_covers_every_bar_of_the_final_configured_session(
+    tmp_path, monkeypatch
+) -> None:
+    """An intraday panel loses its whole last session to a midnight upper bound.
+
+    ``holdout_end`` is configured as a date. Parsed it is that date at midnight,
+    and every fold filter here is ``timestamp <= val_end``, so on minute bars the
+    entire final session sorts after the bound and is written but never scored.
+    Measured on nasdaq100_microstructure: the producer side was fixed in
+    ``04_model_based_features`` and the holdout fold went 19,800,687 to 19,839,297
+    rows, none of which the consumer could read.
+    """
+    import pandas as pd
+
+    import utils.modeling as modeling
+    from utils.modeling import ModelingDataset, append_holdout_fold_if_needed
+
+    case_dir = tmp_path / "cs"
+    (case_dir / "config").mkdir(parents=True)
+    (case_dir / "config" / "setup.yaml").write_text(
+        yaml.safe_dump({"evaluation": {"holdout_start": "2021-01-04", "holdout_end": "2021-12-31"}})
+    )
+    monkeypatch.setattr(modeling, "get_case_study_dir", lambda _cs: case_dir)
+
+    mds = ModelingDataset.__new__(ModelingDataset)
+    mds.splits = [
+        {
+            "fold": 0,
+            "train_start": pd.Timestamp("2020-01-02 09:30"),
+            "train_end": pd.Timestamp("2020-12-30 15:58"),
+            "val_start": pd.Timestamp("2020-12-31 09:32"),
+            "val_end": pd.Timestamp("2020-12-31 15:58"),
+        }
+    ]
+    mds._input_lineage = object()
+
+    append_holdout_fold_if_needed(mds, "holdout", "whatever")
+    holdout = mds.splits[-1]
+
+    # The decision minutes of the final configured session, as an intraday panel
+    # carries them. Not one of these is at midnight.
+    final_session = pd.date_range("2021-12-31 09:32", "2021-12-31 15:58", freq="2min")
+    in_window = (final_session >= holdout["val_start"]) & (final_session <= holdout["val_end"])
+    assert in_window.all(), (
+        f"{(~in_window).sum()} of {len(final_session)} bars of the final configured "
+        f"session fall outside [{holdout['val_start']}, {holdout['val_end']}]"
+    )
+    # And it stops there: the session after the configured end stays out.
+    next_session = pd.Timestamp("2022-01-03 09:32")
+    assert next_session > holdout["val_end"]
+
+
+def test_a_holdout_end_naming_an_instant_is_taken_literally() -> None:
+    """A config that names a time of day means that time, not the end of the day."""
+    import pandas as pd
+
+    from utils.modeling import _inclusive_end_of
+
+    assert _inclusive_end_of("2021-12-31 15:58") == pd.Timestamp("2021-12-31 15:58")
+    assert _inclusive_end_of("2021-12-31") > pd.Timestamp("2021-12-31 23:59:59")
+    assert _inclusive_end_of("2021-12-31") < pd.Timestamp("2022-01-01")
+
+    # An explicitly configured midnight is an instant, not a day. It parses to the
+    # same Timestamp as the bare date, so the configured string is what decides.
+    assert _inclusive_end_of("2021-12-31 00:00:00") == pd.Timestamp("2021-12-31")

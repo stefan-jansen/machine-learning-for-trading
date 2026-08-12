@@ -203,3 +203,36 @@ def test_effective_sample_size_is_computed_per_entity() -> None:
         effective_sample_size(two, horizon=horizon, bar_col="bar")[1]
         > effective_sample_size(one, horizon=horizon, bar_col="bar")[1]
     )
+
+
+def test_effective_sample_size_sums_entities_in_a_fixed_order() -> None:
+    """The same frame returns the same float every call, to the last bit.
+
+    `effective_sample_size` accumulates one float per entity, and adding floats is not
+    associative, so a total near a rounding boundary lands on either side of it depending
+    on the order the groups came back in. `sp500_options/02_labels` reported N_eff 39,746
+    on one production run and 39,747 on the next, from identical inputs and unchanged
+    label digests. Entities of deliberately unequal size make the summation order visible:
+    the exact total differs between permutations, so a run that fixes the order and a run
+    that does not cannot both satisfy the assertion below.
+    """
+    sizes = [4000] + [7] * 120
+    symbols = [f"S{i:03d}" for i in range(len(sizes))]
+    frame = pl.DataFrame(
+        {
+            "symbol": [s for s, n in zip(symbols, sizes, strict=True) for _ in range(n)],
+            "bar": [b for n in sizes for b in range(n)],
+        }
+    )
+    first = effective_sample_size(frame, horizon=10, bar_col="bar")
+    for _ in range(4):
+        assert effective_sample_size(frame, horizon=10, bar_col="bar") == first
+
+    # The fixed order is the order the entities appear in, so summing the per-entity
+    # results left to right in that order reproduces the total exactly.
+    by_hand = 0.0
+    for symbol in symbols:
+        by_hand += effective_sample_size(
+            frame.filter(pl.col("symbol") == symbol), horizon=10, bar_col="bar"
+        )[1]
+    assert first[1] == by_hand

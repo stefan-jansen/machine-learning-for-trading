@@ -54,6 +54,8 @@ def _run_full_notebook(
 ) -> dict:
     import papermill as pm
 
+    from tests.pm_helpers import KERNEL_THREAD_CAPS
+
     start = time.perf_counter()
     ipynb_path = _sync_if_needed(py_path, sync_policy)
     tmp_out = Path(tempfile.gettempdir()) / f"ml4t-full-{os.getpid()}-{py_path.stem}.ipynb"
@@ -67,6 +69,7 @@ def _run_full_notebook(
         "PLOTLY_RENDERER": "json",
         "PYTHONUNBUFFERED": "1",
         "MATPLOTLIBRC": str(rc_file),
+        **KERNEL_THREAD_CAPS,
     }
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)

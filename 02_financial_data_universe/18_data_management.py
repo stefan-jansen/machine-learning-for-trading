@@ -340,15 +340,17 @@ for symbol in symbols:
 # ### Inspect Partition Structure
 
 # %%
-# See the actual file layout
-hive_root = STORAGE_DIR / "hive_demo"
-parquet_files = sorted(hive_root.rglob("*.parquet"))
-print(f"Total Parquet files: {len(parquet_files)}")
-print("\nExample partition paths (first 8):")
-for f in parquet_files[:8]:
-    rel = f.relative_to(hive_root)
-    size_kb = f.stat().st_size / 1024
-    print(f"  {rel}  ({size_kb:.1f} KB)")
+# Ask the store what it wrote. The directory names are not addressable from outside -
+# the key is encoded for filesystem safety, and each write commits into a new generation
+# directory so a failed write cannot leave a half-written partition visible - so
+# `partitions()` is how a caller reports the layout.
+for symbol in symbols:
+    parts = storage.partitions(stored_keys[symbol])
+    print(f"{symbol}: {len(parts)} partitions, {sum(p.size_bytes for p in parts) / 1024:.1f} KB")
+
+print("\nAAPL partitions (first 8):")
+for part in storage.partitions(stored_keys["AAPL"])[:8]:
+    print(f"  {part.label}  ({part.size_bytes / 1024:.1f} KB)")
 
 # %% [markdown]
 # The two-year `AAPL` load lands as one Parquet file per calendar month — the
@@ -358,16 +360,12 @@ for f in parquet_files[:8]:
 # near-uniform, and every new month is a new partition, never a rewrite.
 
 # %%
-aapl_parts = []
-for f in parquet_files:
-    parts = f.relative_to(hive_root).parts
-    if not parts[0].endswith("AAPL"):
-        continue
-    year = int(parts[1].split("=")[1])
-    month = int(parts[2].split("=")[1])
-    aapl_parts.append({"period": f"{year}-{month:02d}", "size_kb": f.stat().st_size / 1024})
-
-aapl_sizes = pl.DataFrame(aapl_parts).sort("period")
+aapl_sizes = pl.DataFrame(
+    [
+        {"period": part.label, "size_kb": part.size_bytes / 1024}
+        for part in storage.partitions(stored_keys["AAPL"])
+    ]
+)
 
 fig = go.Figure(
     go.Bar(

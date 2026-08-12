@@ -321,6 +321,29 @@ features:
     volume: [21, 63]
   ranked: [ret_126d, sharpe_126d, vol_63d]
   regime_threshold: 0.005  # 10y-2y spread separating the two curve regimes
+  # Periods for the ml4t.engineer oscillator, trend and regime calls in C.2, and the
+  # windows C.3 and C.4 read. Declared here rather than typed into the notebook so the
+  # register, the warmup audit and the timing figure read one source for every window.
+  oscillators:
+    rsi: [7, 14]
+    macd_fast: 12
+    macd_slow: 26
+    adx: 14
+    cci: [14, 21]
+    stochastic: 14
+    aroon: 25
+    natr: 14
+    choppiness: 14
+    hurst: 100
+    sma: [50, 200]
+    ema: 26
+    bollinger: 20
+  state:
+    obv_zscore: 63       # on-balance-volume z-score
+    positive_share: 63   # share of up sessions
+    extremes: 252        # distance from the 52-week high and low
+    correlation: 63      # SPY-TLT rolling correlation
+    curve_zscore: 252    # yield-curve slope z-score, over trading sessions
   families:
     - name: momentum
       pattern: ret_*d|skip_recent_*|mom_accel_*

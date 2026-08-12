@@ -78,9 +78,24 @@ labels:
   variant_buffers:
     fwd_ret_1m_win: 1M
     fwd_class_1m: 1M
+  # How far past its own timestamp each label's outcome resolves. This is the quantity
+  # generate_cv_splits seals the last validation fold on, and it is not the buffer above.
+  # The release pairs the characteristics observed at the close of month t-1 with the return
+  # earned over month t and dates the row by month t, so a row's return is already realised on
+  # the timestamp the row carries, and no validation month has to be given back before the
+  # holdout opens. 02_labels section D measures that alignment rather than assuming it: ST_REV,
+  # a firm's own most recent monthly return, has rank correlation +0.904 with the previous
+  # row's label and -0.028 with its own.
+  # The buffer above stays 1M. Separating a training window from the validation window that
+  # follows it is a different decision from when an outcome becomes known, and that one is
+  # deliberately conservative here.
+  horizons:
+    fwd_ret_1m: 0D
+    fwd_ret_1m_win: 0D
+    fwd_class_1m: 0D
   # Vectorized-backtest thinning step per label: number of schedule slots
   # to advance per trade so holding periods don't overlap. Authored from
-  # (schedule cadence, label horizon); add an entry here for any new label.
+  # (schedule cadence, the span the label measures over); add an entry for any new label.
   rebalance_step:
     fwd_ret_1m: 1
     fwd_ret_1m_win: 1
@@ -90,6 +105,189 @@ labels:
   # AUC/accuracy/log_loss are computed against the binary label itself.
   classification_eval_label:
     fwd_class_1m: fwd_ret_1m
+
+features:
+  # Window over which the feature matrix is built. Both endpoints are inclusive and
+  # 03_financial_features binds them from here rather than retyping them.
+  window:
+    start: 1990-01-01
+    end: 2016-12-31
+
+  # The feature register. Rendered by case_studies.utils.feature_engineering
+  # .register_frame and drawn as the timing contract by plot_timing_contract, so
+  # `lookback` and `lag` are read by the figure as well as by the prose.
+  #
+  # `lookback` and `lag` are counted in months, this case study's bar.
+  #
+  # A caveat that belongs with the numbers rather than under them: the release does
+  # not publish a per-characteristic estimation window. What is published is the
+  # update convention (decision.yearly_update, decision.monthly_update), and some
+  # characteristics name their own window - r36_13 reads 36 months back to 13. The
+  # lookbacks below are those two sources and nothing else; where a characteristic
+  # publishes neither, the entry is the span of one provider observation. The lag is
+  # the load-bearing column for look-ahead and it is fully sourced: an annual variable
+  # is published at the end of June against a December fiscal year end.
+  families:
+    - name: value
+      pattern: "BEME|E2P|CF2P|D2P|S2P|A2ME"
+      role: signal
+      hypothesis: A firm priced low against its fundamentals earns the higher subsequent return
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: cheapness that reflects permanent impairment rather than mispricing
+
+    - name: quality
+      pattern: "PROF|ROE|ROA|OP|PM|PCM|RNA"
+      role: signal
+      hypothesis: A more profitable firm earns the higher subsequent return at the same price
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: margins mean-revert faster than the annual update reports them
+
+    - name: investment
+      pattern: "Investment|NOA|DPI2A|NI|OA|AC"
+      role: signal
+      hypothesis: A firm growing its asset base aggressively earns the lower subsequent return
+      inputs: released annual accounting characteristics, provider rank-transformed
+      lookback: 24
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: a growth measure spans two annual observations, so one restatement moves both
+
+    - name: momentum
+      pattern: "r12_2|r2_1|r12_7|r36_13|ST_REV|LT_Rev|SUV|Rel2High"
+      role: signal
+      hypothesis: Recent relative price trends persist over a quarter to a year and reverse beyond it
+      inputs: released monthly price and return characteristics, provider rank-transformed
+      lookback: 36
+      lag: 0
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: trends break at a reversal faster than a 12-month window unwinds
+
+    - name: risk
+      pattern: "Beta|MktBeta|IdioVol|Resid_Var|Variance|Spread|LTurnover|LME"
+      role: state
+      hypothesis: Volatility, liquidity and size describe the regime a signal is read in
+      inputs: released monthly risk and liquidity characteristics, provider rank-transformed
+      lookback: 12
+      lag: 0
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: >-
+        LME travels with this family in the provider's grouping but behaves as a signal,
+        so a family-level reading of the group mixes a size premium with regime description
+
+    - name: other
+      pattern: "Q|C|CF|AT|ATO|CTO|D2A|FC2Y|Lev|OL|SGA2S"
+      role: signal
+      hypothesis: Leverage, turnover and cost structure carry information the five named families omit
+      inputs: released accounting characteristics, provider rank-transformed
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: provider cross-sectional rank in [-0.5, 0.5]
+      failure_mode: a residual grouping has no single thesis, so a family average over it means little
+
+    # The constructed columns are split by the timing of the members they read, not
+    # bundled under one row per construction. A single `composite` entry would have to
+    # claim one lookback and one lag for `composite_value` (annual accounting, published
+    # end-June) and `composite_momentum` (monthly prices, no publication lag), and would
+    # be wrong about one of them whichever pair it named.
+    #
+    # A construction that mixes the two gets its own row, and the row spans everything it
+    # reads: lookback 18 and lag 0. An earlier version gave these the accounting member's
+    # lag of 6, which made `plot_timing_contract` draw them as reading nothing from the six
+    # months before the decision - and they do, through the momentum member. The composite
+    # itself is knowable at the decision timestamp, because its accounting member was
+    # published six months earlier and its price member is current, so the lag is zero and
+    # the window reaches back to the oldest input.
+
+    - name: composite accounting
+      pattern: "composite_value|composite_quality|composite_value_quality"
+      role: signal
+      hypothesis: Averaging ranks within and across families cancels characteristic-specific noise
+      inputs: the released value and quality characteristics, within the same row
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: equal-weight mean of member ranks, on the members' own scale
+      failure_mode: an equal weight asserts the members are equally informative, which is untested here
+
+    - name: composite investment
+      pattern: "composite_investment"
+      role: signal
+      hypothesis: Averaging the investment characteristics cancels measure-specific noise
+      inputs: the released investment characteristics, within the same row
+      lookback: 24
+      lag: 6
+      frame: cross section
+      representation: equal-weight mean of member ranks, on the members' own scale
+      failure_mode: its members span two annual observations, so one restatement moves the composite twice
+
+    - name: composite momentum
+      pattern: "composite_momentum"
+      role: signal
+      hypothesis: Averaging the two 12-month momentum measures cancels their formation-window differences
+      inputs: r12_2 and r12_7, within the same row
+      lookback: 12
+      lag: 0
+      frame: cross section
+      representation: equal-weight mean of member ranks, on the members' own scale
+      failure_mode: both members skip a recent month, so neither reflects the last few weeks
+
+    - name: interaction accounting
+      pattern: "interaction_value_x_quality|interaction_value_x_roe"
+      role: signal
+      hypothesis: Some theses are conditional - cheap is worth more when the firm is also profitable
+      inputs: BEME with PROF or ROE, within the same row
+      lookback: 12
+      lag: 6
+      frame: cross section
+      representation: product of two member ranks, so the sign encodes agreement
+      failure_mode: a product of two centred ranks is large at both extremes and cannot separate them
+
+    - name: composite mixed
+      pattern: "composite_value_momentum|composite_quality_momentum"
+      role: signal
+      hypothesis: Pairing a slow accounting view with a fast price view cancels noise in both
+      inputs: an annual accounting composite and the 12-month momentum composite, within the same row
+      lookback: 18
+      lag: 0
+      frame: cross section
+      representation: equal-weight mean of two composites, on the members' own scale
+      failure_mode: >-
+        the two halves move at different speeds, so the average is stale against the price
+        member and current against the accounting one at the same time
+
+    - name: interaction mixed
+      pattern: "interaction_size_x_value"
+      role: signal
+      hypothesis: The value premium is larger among smaller firms
+      inputs: LME and BEME, within the same row
+      lookback: 18
+      lag: 0
+      frame: cross section
+      representation: product of two member ranks, so the sign encodes agreement
+      failure_mode: size is current while book-to-market is six months old, so the product pairs two different dates
+
+    - name: interaction momentum
+      pattern: "interaction_momentum_x_ivol"
+      role: signal
+      hypothesis: Momentum reads differently at high idiosyncratic volatility than at low
+      inputs: r12_2 and IdioVol, within the same row
+      lookback: 12
+      lag: 0
+      frame: cross section
+      representation: product of two member ranks, so the sign encodes agreement
+      failure_mode: a product of two centred ranks is large at both extremes and cannot separate them
 
 backtest:
   rebalance:

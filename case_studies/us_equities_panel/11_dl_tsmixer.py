@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -16,7 +16,7 @@
 # # TSMixer — US Equities Panel
 #
 # TSMixer alternates time-mixing (across the 60-day lookback) and feature-mixing
-# (across 72 features), seeking cross-feature interactions that LSTM's sequential
+# (across 71 features), seeking cross-feature interactions that LSTM's sequential
 # gating might miss. On ETFs, TSMixer achieves the highest IC because the
 # 99-ETF panel has structured sector and style groupings. The question is whether
 # TSMixer's mixing layers find similar structure across 3,199 heterogeneous stocks.
@@ -44,8 +44,8 @@ import yaml
 
 from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.deep_learning import (
-    _resolve_arch_name,
     create_model,
+    resolve_arch_name,
     run_dl_cv,
 )
 from utils.modeling import load_configs, load_modeling_dataset
@@ -253,11 +253,11 @@ if MC_DROPOUT:
         torch_device = torch.device(device_str)
         best_cfg_dict = dl_configs[0]
         arch_name = best_cfg_dict["params"].get(
-            "architecture", _resolve_arch_name(best_cfg_dict["config_name"])
+            "architecture", resolve_arch_name(best_cfg_dict["config_name"])
         )
-        from case_studies.utils.deep_learning import _build_arch_kwargs
+        from case_studies.utils.deep_learning import build_arch_kwargs
 
-        best_cfg = _build_arch_kwargs(
+        best_cfg = build_arch_kwargs(
             best_cfg_dict, n_features, best_cfg_dict["params"].get("lookback", 60)
         )
         mc_model = create_model(arch_name, best_cfg).to(torch_device)

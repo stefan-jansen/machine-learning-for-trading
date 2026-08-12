@@ -11,12 +11,15 @@ Pins:
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from utils.data_quality import (
     apply_max_symbols,
     check_ohlc_invariants,
     describe_coverage,
     null_rate,
+    validate_features,
+    validate_modeling_inputs,
 )
 
 
@@ -213,3 +216,107 @@ def test_null_rate_reports_per_column() -> None:
     # 1/3 ≈ 33.33 for a, 2/3 ≈ 66.66 for b
     assert round(by_col["a"], 2) == 33.33
     assert round(by_col["b"], 2) == 66.67
+
+
+# -----------------------------------------------------------------------------
+# validate_features
+# -----------------------------------------------------------------------------
+
+
+def test_validate_features_warm_up_nan_is_not_an_extreme_value() -> None:
+    # The head every rolling window leaves, on a quantity bounded well below the
+    # threshold. Polars evaluates NaN > x as True, so this was reported as extreme.
+    entropy = pl.DataFrame({"fft_spectral_entropy": [float("nan")] * 4 + [4.7, 4.6]})
+    assert validate_features(entropy, ["fft_spectral_entropy"]) == []
+
+
+def test_validate_features_still_reports_a_genuine_extreme_beside_a_nan_head() -> None:
+    df = pl.DataFrame({"f": [float("nan"), 1.0, 5e6]})
+    (issue,) = validate_features(df, ["f"])
+    assert "f(1)" in issue and "|x| >" in issue
+
+
+def test_validate_features_reports_an_all_nan_column_as_carrying_no_value() -> None:
+    df = pl.DataFrame({"f": [float("nan"), float("nan")]})
+    (issue,) = validate_features(df, ["f"])
+    assert "carry no value" in issue and "'f'" in issue
+
+
+def test_validate_features_reports_an_all_null_column_as_carrying_no_value() -> None:
+    df = pl.DataFrame({"f": [None, None]}, schema={"f": pl.Float64})
+    (issue,) = validate_features(df, ["f"])
+    assert "carry no value" in issue
+
+
+def test_validate_features_reports_infinities_separately_from_nan() -> None:
+    df = pl.DataFrame({"f": [float("nan"), float("inf"), 1.0]})
+    (issue,) = validate_features(df, ["f"])
+    assert issue.startswith("CRITICAL") and "f(1)" in issue
+
+
+def test_validate_features_handles_an_integer_column() -> None:
+    # is_nan and is_infinite are undefined on an integer series.
+    df = pl.DataFrame({"f": [1, 2, 3]})
+    assert validate_features(df, ["f"]) == []
+    assert validate_features(pl.DataFrame({"f": [1, 2 * 10**9]}), ["f"], max_abs_value=1e6) != []
+
+
+def test_validate_features_refuses_a_column_the_frame_does_not_have() -> None:
+    with pytest.raises(ValueError, match="cannot find 1 of the 1 columns"):
+        validate_features(pl.DataFrame({"a": [1.0]}), ["absent"])
+
+
+def test_validate_features_refuses_an_empty_column_list() -> None:
+    with pytest.raises(ValueError, match="no columns to check"):
+        validate_features(pl.DataFrame({"a": [1.0]}), [])
+
+
+def test_validate_features_allow_missing_reports_the_skipped_names_rather_than_hiding_them() -> (
+    None
+):
+    issues = validate_features(pl.DataFrame({"a": [1.0]}), ["a", "absent"], allow_missing=True)
+    (issue,) = issues
+    assert issue.startswith("WARNING") and "1 of 2" in issue and "absent" in issue
+
+
+def test_the_gate_refuses_a_feature_frame_that_holds_none_of_the_columns_named() -> None:
+    """The nasdaq100_microstructure/05 shape: the financial frame, the model-based names.
+
+    Two artifacts share a key and are joined further down the notebook, so the
+    column list and the frame both exist and neither looks wrong on its own. Every
+    name was skipped and the gate printed ALL CLEAR over nothing.
+    """
+    keys = {"timestamp": [1, 2], "symbol": ["A", "B"]}
+    financial = pl.DataFrame({**keys, "ret_5m": [0.01, -0.02], "spread": [0.3, 0.4]})
+    model_based = pl.DataFrame({**keys, "regime_prob": [0.7, 0.2], "ffd_close": [1.5, 1.6]})
+    labels = pl.DataFrame({**keys, "fwd_ret_15m": [0.01, -0.01]})
+    model_based_cols = [c for c in model_based.columns if c not in keys]
+
+    with pytest.raises(ValueError, match="cannot find 2 of the 2 columns"):
+        validate_modeling_inputs(
+            features_df=financial,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )
+
+    # Against the frame those names come from it passes, and it reads a value:
+    # an infinity in a model-based column is what the gate is there to stop.
+    assert (
+        validate_modeling_inputs(
+            features_df=model_based,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )["n_critical"]
+        == 0
+    )
+
+    broken = model_based.with_columns(pl.Series("regime_prob", [float("inf"), 0.2]))
+    with pytest.raises(ValueError, match="critical issues"):
+        validate_modeling_inputs(
+            features_df=broken,
+            label_df=labels,
+            feature_cols=model_based_cols,
+            label_col="fwd_ret_15m",
+        )

@@ -73,6 +73,17 @@ def ci_env_setup():
         env_file.unlink()
 
 
+def _holds_datasets(path: Path) -> bool:
+    """True where a data directory holds parquet at either documented depth.
+
+    The same test ``sitecustomize._has_datasets`` applies, and for the same
+    reason: ``data/`` is tracked for its ``config.yaml`` and ``download.py``
+    while every parquet under it is gitignored, so existing and being non-empty
+    say nothing about whether there is data to read.
+    """
+    return any(next(path.glob(p), None) for p in ("*/*.parquet", "*/*/*.parquet"))
+
+
 def _resolve_data_path() -> Path | None:
     """Find ML4T_DATA_PATH from env var, .env file, or default location.
 
@@ -91,7 +102,12 @@ def _resolve_data_path() -> Path | None:
         if p.exists() and any(p.iterdir()):
             return p
 
-    # 2. Read from .env file (works in xdist workers)
+    # 2. Read from .env file (works in xdist workers).
+    #    Non-empty is not the test here either, for the same reason it is not in
+    #    step 1: a .env naming the repo's own data/ passes it on the strength of
+    #    the tracked skeleton, which reintroduces exactly what the marker above
+    #    and the glob in step 4 both exist to block. CI writes such a .env by
+    #    hand, so this branch is the one that fires there.
     env_file = REPO_ROOT / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
@@ -100,7 +116,7 @@ def _resolve_data_path() -> Path | None:
                 val = line.split("=", 1)[1].strip().strip('"').strip("'")
                 if val and not val.startswith("#"):
                     p = Path(val).expanduser().resolve()
-                    if p.exists() and any(p.iterdir()):
+                    if _holds_datasets(p):
                         return p
 
     # 3. Well-known test-data repo location
@@ -158,6 +174,41 @@ def intermediates_dir(test_data_dir):
     if idir.exists() and any(idir.iterdir()):
         return idir
     return None
+
+
+SEEDED_SUBDIRS = ("features", "labels", "evaluation", "run_log", "results", "benchmark")
+
+
+def seed_case_study_intermediates(src: Path, dst: Path) -> None:
+    """Make ``dst`` hold the fixture's intermediates for one case study, and only those.
+
+    Replace, never fill a gap. CI checks the fixture out into a clean container every
+    time; a lane re-running into an existing ``ML4T_OUTPUT_DIR`` used to keep whatever
+    the previous run had left, which for ``run_log/registry.db`` means every training
+    run, prediction set and backtest that run registered. The notebooks then resolved
+    identities neither the fixture nor production carries, so the same code produced a
+    different failure list locally than it did in CI.
+
+    A destination subdir is removed whether or not the fixture still ships a source for
+    it. One the fixture has stopped shipping is precisely the leftover nothing would
+    ever overwrite.
+
+    ``src`` also holds top-level files (``etfs/eligibility.csv``, ``protocol.yaml``,
+    ``baseline_checkpoint.yaml``) that downstream notebooks read through
+    ``get_case_study_dir()``, so they are copied too.
+    """
+    for subdir in SEEDED_SUBDIRS:
+        src_sub = src / subdir
+        dst_sub = dst / subdir
+        if dst_sub.exists():
+            shutil.rmtree(dst_sub)
+        if src_sub.exists():
+            shutil.copytree(src_sub, dst_sub)
+
+    for item in src.iterdir():
+        if item.is_file():
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, dst / item.name)
 
 
 @pytest.fixture(scope="session")
@@ -231,24 +282,7 @@ def seeded_output_dir(tmp_path_factory):
             if not src.exists():
                 continue
             dst = output_dir / cs_id
-            # Copy features, labels, evaluation, run_log, results, benchmark —
-            # anything that downstream notebooks look for in get_case_study_dir()
-            for subdir in ["features", "labels", "evaluation", "run_log", "results", "benchmark"]:
-                src_sub = src / subdir
-                dst_sub = dst / subdir
-                if src_sub.exists() and not dst_sub.exists():
-                    shutil.copytree(src_sub, dst_sub)
-            # Copy top-level intermediate files (e.g. etfs/eligibility.csv,
-            # protocol.yaml, baseline_checkpoint.yaml) that sit directly in
-            # intermediates/{cs_id}/ rather than in a subdir. Downstream
-            # notebooks (etfs 02_labels, 03_financial_features) read these via
-            # get_case_study_dir(); without this they fail with FileNotFoundError.
-            for item in src.iterdir():
-                if item.is_file():
-                    dst_file = dst / item.name
-                    if not dst_file.exists():
-                        dst.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(item, dst_file)
+            seed_case_study_intermediates(src, dst)
             # Schema reconciliation: test-data predictions parquets were
             # generated with an older column convention (y_score / y_true /
             # fold_id). Production registry uses (prediction / actual / fold).
@@ -267,8 +301,9 @@ def seeded_output_dir(tmp_path_factory):
             if not src.exists():
                 continue
             dst = output_dir / extra_id
-            if not dst.exists():
-                shutil.copytree(src, dst)
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
 
     # Seed minimal results fixtures so downstream notebooks (latent factors, DL,
     # backtest) can find baseline results without depending on upstream execution.

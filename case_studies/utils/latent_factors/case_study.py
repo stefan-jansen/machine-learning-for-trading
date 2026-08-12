@@ -113,7 +113,7 @@ def load_case_study_context(
     modeling_dataset = load_modeling_dataset(
         case_study_id, resolved_primary, max_symbols=max_symbols
     )
-    input_data_spec = _training_input_identity(case_study_id, resolved_primary)
+    input_data_spec = training_input_identity(case_study_id, resolved_primary)
     splits = modeling_dataset.splits[:max_folds] if max_folds else modeling_dataset.splits
 
     return LatentFactorCaseStudyContext(
@@ -263,7 +263,7 @@ def run_case_study_variants(
         modeling_dataset = load_modeling_dataset(
             context.case_study_id, variant_label, max_symbols=context.max_symbols
         )
-        input_data_spec = _training_input_identity(context.case_study_id, variant_label)
+        input_data_spec = training_input_identity(context.case_study_id, variant_label)
         # Honour the same max_folds truncation the primary run uses, so a
         # `max_folds=2` smoke test does not silently retrain variants on the
         # full split set.
@@ -317,7 +317,7 @@ def run_case_study_variants(
     return results
 
 
-def _training_input_identity(case_study_id: str, label: str) -> dict[str, Any]:
+def training_input_identity(case_study_id: str, label: str) -> dict[str, Any]:
     """Return portable content identity for every materialized modeling input."""
     case_dir = get_case_study_dir(case_study_id)
     inputs = {
@@ -394,3 +394,10 @@ def _merge_model_kwargs(
         merged.setdefault(model_name, {})
         merged[model_name].update(params)
     return merged
+
+
+# Deprecated private aliases. Thirty notebook cells import these names with their leading
+# underscore, which is what made them look private in the first place; each is a
+# cross-module interface and is now public. The aliases keep those callers working until
+# each notebook is re-executed with the public name, and go when the last one moves.
+_training_input_identity = training_input_identity

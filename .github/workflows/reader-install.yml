@@ -88,6 +88,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get install -y build-essential python3-dev
 
+      # The macOS half of the same statement. This one is not decorative: the runner has no
+      # libomp, so without it `import lightgbm` raises before any of the OpenMP-order work below
+      # can be exercised - which is exactly what a reader following docs/installation.md hit,
+      # since the doc did not name it until now.
+      - name: Install the prerequisites the docs name
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
       # docs/installation.md, "Local Setup with uv"
       - name: Install uv as the docs instruct
         run: |
@@ -130,6 +138,13 @@ jobs:
           MPLBACKEND: Agg
           PLOTLY_RENDERER: json
         run: uv run python 01_process_is_edge/factor_regimes.py
+
+      # This job already walks the install on Apple Silicon, but it never fit a
+      # model, so it could not see the OpenMP collision that cost a reader a
+      # kernel and a day (R2P issues #7 and #10). One multithreaded LightGBM fit
+      # on the real import path is what closes that.
+      - name: LightGBM fits multithreaded after scikit-learn is on the path
+        run: uv run python .github/scripts/smoke_lightgbm_openmp.py
 
       - name: Report the footprint a reader pays
         if: always()

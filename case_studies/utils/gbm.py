@@ -20,6 +20,15 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+# Import lightgbm before ml4t.diagnostic, which transitively loads
+# scikit-learn. Both scikit-learn and LightGBM ship their own OpenMP runtime
+# and the first one loaded wins for the whole process; on macOS ARM64 the
+# loser's first multithreaded fit dies inside
+# `__kmp_suspend_initialize_thread`, taking the kernel with it and printing no
+# traceback. Every function below re-imports lightgbm locally for reading;
+# this one exists only to lose no race, for every case study that imports this
+# module. `import x` sorts ahead of `from x import y`, so isort keeps it here.
+import lightgbm  # noqa: F401
 import numpy as np
 import polars as pl
 
@@ -580,7 +589,7 @@ def prepare_gbm_folds(
         Each dict has: fold, X_train, y_train, y_train_lgb, X_val, y_val,
         y_val_lgb, dates, entities, n_train, n_val.
     """
-    from utils.modeling import _replace_temporal_columns
+    from utils.modeling import replace_temporal_columns
 
     dates_series = dataset_pd[date_col]
     entity_series = dataset_pd.get(entity_col)
@@ -596,7 +605,7 @@ def prepare_gbm_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
-            train_rows = _replace_temporal_columns(
+            train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
                 temporal_by_fold,
@@ -604,7 +613,7 @@ def prepare_gbm_folds(
                 temporal_feature_names,
                 fold_id,
             )
-            val_rows = _replace_temporal_columns(
+            val_rows = replace_temporal_columns(
                 dataset_pd,
                 val_mask,
                 temporal_by_fold,

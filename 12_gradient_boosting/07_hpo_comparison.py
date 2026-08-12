@@ -20,23 +20,18 @@
 #
 # **Chapter 12, Section 12.4**: Advanced Hyperparameter Tuning with Optuna
 #
-# > **GPU recommended**: This notebook trains models with PyTorch/CUDA. It will run on CPU
-# > but training may be very slow. For GPU acceleration:
-# > ```bash
-# > docker compose run --rm ml4t-gpu python 12_gradient_boosting/07_hpo_comparison.py
-# > ```
-#
-#
 # ## Purpose
-# This notebook compares grid search against Optuna's Bayesian optimization
-# on the same parameter budget, demonstrating the efficiency advantage of
-# TPE-based sampling. It also investigates validation overfitting — how
+# This notebook compares grid search against Optuna's Bayesian optimization on
+# the same parameter budget, first on a space grid can enumerate and then on a
+# continuous one it cannot. It also investigates validation overfitting — how
 # test IC diverges from validation IC as trial count increases.
 #
 # ## Key Insight
-# Grid search is simple but scales poorly. Optuna finds better solutions
-# with fewer evaluations through intelligent sampling, and continuous
-# spaces unlock configurations that discrete grids miss entirely.
+# The comparison is decided by the space, not by the sampler. On a grid small
+# enough to exhaust, search has nothing to exploit and exhaustion wins by
+# construction; a continuous space is where sampling reaches configurations a
+# discrete grid cannot represent at all. The wall times reported along the way
+# are single uncontrolled runs, not a cost comparison.
 #
 # ## Cross-References
 # - **Section 12.4**: TPE, pruning, validation overfitting (Box 12.3)
@@ -55,18 +50,25 @@
 import time
 import warnings
 
+# lightgbm must be imported before anything that loads scikit-learn, which
+# includes ml4t.diagnostic transitively. Both ship their own OpenMP runtime and
+# the first one loaded wins for the whole process; on macOS ARM64, getting
+# scikit-learn's libomp first makes LightGBM's next multithreaded fit segfault
+# in __kmp_suspend_initialize_thread, killing the kernel with no traceback.
+# This notebook fits with n_jobs=-1, so it is squarely exposed. Plain `import`
+# statements sort ahead of `from ... import` ones, so one canonical block keeps
+# this order and isort will not undo it.
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
+import optuna
 import pandas as pd
 import polars as pl
+from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from optuna.samplers import TPESampler
 from sklearn.model_selection import ParameterGrid
 
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
-import optuna
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
-from optuna.samplers import TPESampler
 
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
@@ -80,7 +82,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
+    ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic")
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
@@ -207,7 +209,13 @@ for i, params in enumerate(grid):
         print(f"  {i + 1}/{N_GRID} completed...")
 
 grid_time = time.time() - grid_start
-best_grid = max(grid_results, key=lambda x: x["ic"])
+# Select over finite ICs only. `max()` compares with `<`, and every comparison
+# against NaN is false, so a NaN anywhere in the list makes it return whichever
+# element came first rather than the best one - silently, and with no warning.
+scored = [r for r in grid_results if np.isfinite(r["ic"])]
+if not scored:
+    raise RuntimeError("No grid configuration produced a finite IC.")
+best_grid = max(scored, key=lambda x: x["ic"])
 print(f"Done in {grid_time:.1f}s — Best IC: {best_grid['ic']:.4f}")
 
 # %% [markdown]
@@ -249,17 +257,20 @@ comparison_df = pl.DataFrame(
 comparison_df
 
 # %% [markdown]
-# **Interpretation**: On this small discrete grid the two methods tie. Grid ran
-# every one of the 54 combinations and found the global best (val IC 0.0178);
-# Optuna, given the same 54-trial budget on the same categorical space, rediscovered
-# the identical best configuration (val IC 0.0178) — with only 54 candidates to
-# choose from, TPE has no room to beat exhaustion and no room to lose to it. Wall
-# times are within a few seconds of each other on this machine and are dominated by
-# LightGBM fitting, not by the sampler. The lesson is not that one method wins but
-# that on a space this small there is nothing to optimize: the chapter's
-# recommendation stands — grid is fine for ≤4 parameters × ≤3 values each. Optuna's
-# advantage appears only in the continuous space tested next, which grid cannot
-# represent at all.
+# **Interpretation**: On this small discrete grid, exhaustion is the safer method.
+# Grid ran every one of the 54 combinations, so it found the global best by
+# construction. Optuna, given the same 54-trial budget on the same categorical
+# space, came in below it: TPE samples with replacement, so 54 trials do not cover
+# 54 points, and on a space this small there is nothing for the sampler to exploit
+# in exchange. Search only pays where the space is too big to enumerate. The
+# wall-time column is one uncontrolled measurement on a shared machine, and the
+# two searches fit different sets of configurations, which cost different amounts
+# to train — so it is neither a benchmark nor evidence that either method is
+# cheaper. The lesson is not that one method wins but that on a space this small
+# there is nothing to optimize: the chapter's recommendation stands — grid is
+# fine for ≤4 parameters × ≤3 values each. What the continuous space tested next
+# adds is reach, to configurations a discrete grid cannot represent at all; that
+# is a property of the space, and it is not a measurement of the sampler.
 
 # %% [markdown]
 # ## 6. Optuna with Continuous Space
@@ -362,23 +373,24 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# **Interpretation**: The gap between the two curves is the point. Raising the
-# budget from 25 to 50 trials lets TPE find a configuration that lifts the best
-# *validation* IC from 0.0226 to 0.0567 — a 150 % jump — but the corresponding
-# *test* IC on the sealed 2024–2025 holdout barely moves, from 0.0802 to 0.0845
-# (about 5 %). Almost none of the extra validation IC transfers: the additional
-# trials mostly bought a configuration that fits the validation window's noise,
-# the signature Box 12.3 warns about. (The test IC sits *above* the val IC in
+# **Interpretation**: The gap between the two curves is the point. Read the table
+# above by column: best *validation* IC rises with every increase in budget and
+# then plateaus, while *test* IC on the sealed 2024–2025 holdout peaks partway
+# through and then falls. Past that peak the extra trials are buying fit to the
+# validation window's noise and paying for it out of sample — the signature Box
+# 12.3 warns about, and the reason a budget is a parameter to choose rather than
+# maximize. (The test IC sits *above* the val IC in
 # absolute terms only because the 2024–2025 holdout was an unusually strong,
 # trending regime for this ETF universe — a level artifact of that window, not
 # evidence that tuning helped.) This single-fold, fixed-seed setup shows the
 # *direction* of overfitting but is a blunt instrument for quantifying it, because
-# it lacks trial-level variance. Section 10 sharpens the picture: after refitting
-# on `train + val`, Optuna's val-best continuous configuration produces a *worse*
-# holdout IC than grid search's val-best discrete configuration — exactly the
-# inversion validation overfitting predicts. For a higher-resolution view of the
-# same effect, `04_optuna_tuning` shows how single-fold HPO collapses to a
-# one-tree model on a different fold.
+# it lacks trial-level variance. Section 10 asks a different question — how the two
+# selected configurations compare after refitting on `train + val` — and does not
+# reproduce this curve's shape, which is the honest state of the evidence rather
+# than a contradiction: a budget sweep within one space and a comparison of two
+# picks from different spaces are not the same experiment. For a higher-resolution
+# view of the effect this section does show, `04_optuna_tuning` shows how
+# single-fold HPO collapses to a one-tree model on a different fold.
 
 # %% [markdown]
 # ## 9. Visualization
@@ -402,7 +414,7 @@ for bar, ic in zip(bars, ics, strict=False):
         fontsize=10,
     )
 ax1.set_ylabel("Validation IC")
-ax1.set_title("Continuous search triples the discrete grid's validation IC")
+ax1.set_title("The continuous space reaches a higher validation IC than either discrete search")
 
 # Right: convergence
 ax2 = axes[1]
@@ -447,18 +459,23 @@ final_df
 # %% [markdown]
 # **Interpretation**: This is the load-bearing comparison of the notebook, and it
 # is measured on the case study's **sealed 2024–2025 holdout** — never seen during
-# any search. Grid's val-best discrete configuration (val IC 0.0178) generalises to
-# test IC 0.087; Optuna's val-best continuous configuration, which scored more than
-# three times higher on validation (val IC 0.0567), generalises to only test IC
-# 0.050. The configuration that maximised validation IC is the one that generalised
-# *worst* — the canonical signature of validation overfitting (Box 12.3): Optuna
-# found a region of the larger continuous space that fit the one-year validation
-# window's noise and did not carry to the held-out period. The lesson is not that
-# grid beats Optuna — the continuous space is strictly larger and contains plenty of
-# strong configurations, and on this ETF target every IC here is thin. The lesson is
-# that when validation IC is low and noisy, the configuration that maximises it is
-# not the configuration that generalises, and the only reliable defence is a holdout
-# the search cannot touch (and walk-forward HPO, demonstrated in `04_optuna_tuning`).
+# any search. Two configurations are compared, and two only: the one each search
+# selected on validation. The continuous selection beats the discrete one out of
+# sample here. That says the configuration Optuna picked was better, not that the
+# continuous space is better than the grid — the rest of the grid was never scored
+# on the holdout, so this measures the picks, not the spaces.
+#
+# Read it against the budget sweep above rather than on its own. *How long* you
+# search within a space stops helping and starts hurting, which is what the test
+# curve turning down shows. Neither result licenses trusting the validation number
+# itself — on this ETF target every IC here is thin.
+#
+# **Do not read a single run of this notebook as a verdict on grid versus Optuna.**
+# An earlier execution of this same code, on an earlier vintage of the ETF
+# artifacts, ranked them the other way round. That instability is the finding: when
+# validation IC is low and noisy, the search method is not what decides the outcome,
+# and the only reliable defence is a holdout the search cannot touch — plus
+# walk-forward HPO, demonstrated in `04_optuna_tuning`.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -483,8 +500,11 @@ final_df
 #
 # 1. **Grid Search**: Fine for <=4 parameters with <=3 values each
 # 2. **Optuna**: Preferred for >4 parameters or continuous ranges
-# 3. **Budget**: 50–100 trials for standard GBM tuning — more risks
-#    validation overfitting (see Section 8 above)
+# 3. **Budget**: 50–100 trials is the common convention for GBM tuning, but it is
+#    a parameter, not a default. Choose it with nested or walk-forward
+#    validation, then score the holdout once. Section 8 reads the sealed holdout
+#    across budgets to *show* that the turn exists; that is a diagnostic run
+#    after the fact, not a way to select the budget
 # 4. **Always**: Hold out a test set untouched during optimization
 #
 # **Next**: See `04_optuna_tuning` for the full Optuna workflow with pruning

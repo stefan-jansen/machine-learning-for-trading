@@ -435,52 +435,101 @@ def validate_features(
     df: pl.DataFrame,
     feature_cols: Sequence[str],
     max_abs_value: float = 1e6,
+    allow_missing: bool = False,
 ) -> list[str]:
-    """Check feature columns for infinities, all-null, and extreme values.
+    """Check feature columns for infinities, absent values, and extreme values.
+
+    A NaN counts as absent here, not as a number. Polars evaluates ``NaN > x`` as
+    True, so a feature carrying the warm-up head every rolling window leaves would
+    otherwise be reported as holding values above ``max_abs_value``: a 252-session
+    warm-up over 30 products reported 7,560 extreme values for a Shannon entropy
+    bounded well below ten. Reading it the other way round also matters - a column
+    that is entirely NaN carries no value at all, and was previously reported as
+    neither absent nor extreme.
+
+    A column named in ``feature_cols`` that ``df`` does not carry raises. A check
+    that cannot find what it is checking has not passed, and reporting success is
+    the one thing it must not do: called with one frame's column names against a
+    different frame, this skipped all 22 columns it was given and reported the
+    panel clean. An empty ``feature_cols`` fails for the same reason. Where a
+    caller genuinely holds a superset - a column list spanning several artifacts,
+    checked one artifact at a time - pass ``allow_missing=True`` and the absent
+    names are reported as a warning instead.
 
     Args:
         df: DataFrame containing feature columns
         feature_cols: List of feature column names to validate
         max_abs_value: Threshold for flagging extreme values
+        allow_missing: Report columns absent from ``df`` as a warning rather than
+            raising. The default refuses them.
 
     Returns list of warning/error strings.
+
+    Raises:
+        ValueError: If ``feature_cols`` is empty, or names a column ``df`` does
+            not carry and ``allow_missing`` is False.
     """
     issues: list[str] = []
-    n_rows = df.height
+
+    if not feature_cols:
+        raise ValueError(
+            "validate_features was given no columns to check. A gate over nothing "
+            "reports success without reading a value; pass the columns the frame "
+            "carries, or do not call the gate."
+        )
+
+    missing = [col for col in feature_cols if col not in df.columns]
+    if missing and not allow_missing:
+        raise ValueError(
+            f"validate_features cannot find {len(missing)} of the {len(feature_cols)} "
+            f"columns it was asked to check: {missing[:10]}"
+            f"{'...' if len(missing) > 10 else ''}. The frame carries "
+            f"{len(df.columns)} columns. Pass the frame these names come from, or "
+            f"allow_missing=True if the list deliberately spans several frames."
+        )
+    if missing:
+        issues.append(
+            f"WARNING: {len(missing)} of {len(feature_cols)} columns are not in the frame "
+            f"and were not checked: {missing[:10]}{'...' if len(missing) > 10 else ''}"
+        )
 
     inf_cols = []
-    null_cols = []
+    absent_cols = []
     extreme_cols = []
 
     for col in feature_cols:
         if col not in df.columns:
             continue
 
-        series = df[col]
-        n_null = series.null_count()
-        non_null = series.drop_nulls()
+        present = df[col].drop_nulls()
+        is_float = present.dtype.is_float()
+        if is_float:
+            present = present.filter(present.is_not_nan())
 
-        if n_null == n_rows:
-            null_cols.append(col)
+        if present.len() == 0:
+            absent_cols.append(col)
             continue
 
-        if non_null.len() > 0:
-            n_inf = non_null.filter(non_null.is_infinite()).len()
+        if is_float:
+            n_inf = present.filter(present.is_infinite()).len()
             if n_inf > 0:
                 inf_cols.append((col, n_inf))
+            # The three conditions are reported separately, so an infinity is not
+            # also counted among the finite values that ran large.
+            present = present.filter(present.is_finite())
 
-            n_extreme = non_null.filter(non_null.abs() > max_abs_value).len()
-            if n_extreme > 0:
-                extreme_cols.append((col, n_extreme))
+        n_extreme = present.filter(present.abs() > max_abs_value).len()
+        if n_extreme > 0:
+            extreme_cols.append((col, n_extreme))
 
     if inf_cols:
         details = ", ".join(f"{c}({n})" for c, n in inf_cols[:10])
         issues.append(f"CRITICAL: {len(inf_cols)} features have infinite values: {details}")
 
-    if null_cols:
+    if absent_cols:
         issues.append(
-            f"WARNING: {len(null_cols)} features are entirely null: "
-            f"{null_cols[:10]}{'...' if len(null_cols) > 10 else ''}"
+            f"WARNING: {len(absent_cols)} features carry no value, null or NaN throughout: "
+            f"{absent_cols[:10]}{'...' if len(absent_cols) > 10 else ''}"
         )
 
     if extreme_cols:
@@ -503,6 +552,7 @@ def validate_modeling_inputs(
     max_abs_return: float = 0.5,
     max_abs_feature: float = 1e6,
     fail_on_critical: bool = True,
+    allow_missing_features: bool = False,
 ) -> dict:
     """Run all data quality checks before modeling.
 
@@ -520,12 +570,16 @@ def validate_modeling_inputs(
         max_abs_return: Max plausible absolute return for labels
         max_abs_feature: Max plausible absolute feature value
         fail_on_critical: If True, raise ValueError on CRITICAL issues
+        allow_missing_features: Passed to ``validate_features``. The default
+            refuses a feature column ``features_df`` does not carry, because the
+            gate would otherwise skip it and still report the panel clean.
 
     Returns:
         Dict with 'issues' (list of strings), 'n_critical', 'n_warning'
 
     Raises:
-        ValueError: If fail_on_critical=True and any CRITICAL issues found
+        ValueError: If fail_on_critical=True and any CRITICAL issues found, or if
+            ``feature_cols`` names a column ``features_df`` does not carry
     """
     all_issues: list[str] = []
 
@@ -537,7 +591,14 @@ def validate_modeling_inputs(
     all_issues.extend(validate_labels(label_df, label_col, max_abs_return))
 
     # 3. Feature checks
-    all_issues.extend(validate_features(features_df, feature_cols, max_abs_feature))
+    all_issues.extend(
+        validate_features(
+            features_df,
+            feature_cols,
+            max_abs_feature,
+            allow_missing=allow_missing_features,
+        )
+    )
 
     # Summarize
     n_critical = sum(1 for i in all_issues if i.startswith("CRITICAL"))

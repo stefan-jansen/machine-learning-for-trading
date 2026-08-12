@@ -1,14 +1,25 @@
-"""Convert the AlgoSeek archives to the parquet layout the loaders read.
+"""Convert the AlgoSeek CSV archives to the parquet layout the loaders read.
 
-AlgoSeek publishes two datasets for this book at https://algoseek.com/ml-for-trading/,
-as plain Dropbox links with no signup and no account. Both are CSV; every loader in
-``data/equities/loader.py`` reads zstd parquet under a Hive layout, so a reader who
-downloads the archives still cannot run anything until this script has run.
+AlgoSeek publishes three datasets for this book at https://algoseek.com/ml-for-trading/,
+as plain Dropbox links with no signup and no account. Two of them are CSV, and every
+loader in ``data/equities/loader.py`` reads zstd parquet under a Hive layout, so a
+reader who downloads those two cannot run anything until this script has run.
 
     nasdaq-100-constituents-taq-ext.zip   5.9 GB    NASDAQ-100 extended minute bars
                                                     505 days, 2020-01-02 to 2021-12-31
-    options_daily_greeks_sp500.zip       13.8 GB    S&P 500 daily option chains + Greeks
+    options_daily_greeks_sp500.zip       14.1 GB    S&P 500 daily option chains + Greeks
                                                     1,259 days 2017-2021, 634 symbols
+
+The third, ``symbol=AAPL.zip`` (67 MB, NASDAQ-100 trade-and-quote ticks), is already
+parquet in the layout ``load_nasdaq100_taq()`` scans. It needs no conversion, only
+unzipping into place. Name the members: Dropbox writes a stray root entry into that
+archive, and unzipping without ``"*.parquet"`` warns and exits 2:
+
+    unzip -q "symbol=AAPL.zip" "*.parquet" \\
+        -d "$ML4T_DATA_PATH/equities/market/microstructure/trade_and_quotes/symbol=AAPL"
+
+The fourth dataset the book uses, the S&P 500 daily bars, ships inside this repository
+at ``data/equities/market/sp500/daily_bars.parquet``; nothing to download or convert.
 
 Run from the repository root, once per archive:
 
@@ -341,7 +352,17 @@ class DaySource:
 
     def _days_from_zip(self) -> Iterator[tuple[str, object]]:
         archive = zipfile.ZipFile(self.path)
-        names = [n for n in archive.namelist() if "__MACOSX" not in n]
+        # The options archive AlgoSeek serves today was re-zipped on a macOS machine:
+        # it nests everything under one top-level folder and carries explicit directory
+        # entries, a __MACOSX shadow tree and .DS_Store files. A directory entry sits in
+        # a day's folder and reads back as zero bytes, which read_csv rejects, so match
+        # the data members by suffix rather than taking every name under a day.
+        suffix = ".csv.gz" if self.dataset == "sp500-options" else ".csv"
+        names = [
+            info.filename
+            for info in archive.infolist()
+            if not info.is_dir() and "__MACOSX" not in info.filename
+        ]
 
         # NASDAQ-100: one inner zip per day. Options: members grouped by day directory.
         inner_zips = [n for n in names if _DAY_ZIP.search(n)]
@@ -353,6 +374,8 @@ class DaySource:
 
         by_day: dict[str, list[str]] = defaultdict(list)
         for name in names:
+            if not name.endswith(suffix):
+                continue
             day = _day_of(Path(name))
             if day:
                 by_day[day].append(name)

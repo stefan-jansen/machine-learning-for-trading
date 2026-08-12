@@ -18,23 +18,23 @@
 #
 # Every model in this case study is trained to predict the label defined here, so an error
 # in it is silent where it is made and reaches every metric and every backtest after it.
-# This notebook fixes what the label is and when it is known, proves that the panel really
-# is aligned the way the provider documents, measures how much independent information the
-# rows carry, establishes the floor a feature has to clear, and writes the files stage 03
-# reads.
+# This notebook fixes what the label is and when it is known, checks against the data that
+# the panel is paired the way the provider documents, measures how much independent
+# information the rows carry, measures what the simplest signal the study already names
+# earns against the label, and writes the label files the rest of the pipeline is built on.
 #
 # ## Learning objectives
 #
-# - Read the alignment of a pre-built research panel out of the data instead of trusting
-#   the accompanying prose, and say which date a label resolves on
-# - Assert that a label exists exactly where its outcome was observed, rather than counting
-#   the rows that carry one
-# - Separate a threshold that is point-in-time by construction from one that has to be
-#   fitted inside a training fold
-# - Price the overlap between consecutive labels, and see what an effective row count says
-#   when there is none
-# - Establish the floor a feature has to clear, under a standard error computed on the
-#   series of monthly decisions rather than on the pooled firm-months
+# - Work out from the data which month's return a pre-built research panel has already
+#   paired with each row, instead of taking the provider's description on trust
+# - Check that a label is missing on exactly the rows whose outcome was never observed - a
+#   count of how many rows carry a label cannot tell you that
+# - Decide whether a rule that sorts firms into classes needs re-estimating inside each
+#   training period, or whether the way it is built already keeps later data out of it
+# - Measure how much of one row's outcome the next row's label repeats, and turn a row
+#   count into the number of independent observations it is worth
+# - Measure what a signal the study already names earns against the label, so that a
+#   feature built afterwards is compared against a number fixed before it existed
 #
 # ## Book reference, prerequisites and artifacts
 #
@@ -42,9 +42,10 @@
 # `load_firm_characteristics()`, whose breadth and cost feasibility
 # [`01_feasibility_analysis`](01_feasibility_analysis.ipynb) establishes, and
 # `config/setup.yaml`, which declares the label set, the buffer and the holdout boundary.
-# Writes `labels/prices.parquet` for the backtest loader, one parquet per declared label,
-# a `.digest.json` sidecar beside each of them, and `config/cv_config.json`, which
-# `04_evaluation.py` reads for its fold boundaries.
+# Writes `labels/prices.parquet`, which the backtest reads to price positions; one parquet
+# per declared label; a small JSON record beside each of those files describing what is in
+# it; and `config/cv_config.json`, the committed record of the fold boundaries these labels
+# imply.
 
 # %%
 """US Firm Characteristics: Label Engineering."""
@@ -91,10 +92,14 @@ END_DATE = "2016-12-31"
 # horizon or a boundary typed into a cell is a second copy of a value the rest of the
 # pipeline reads from the file, and the two drift apart the first time either is edited.
 #
-# `resolve_label_horizon` prefers an explicit `labels.horizons` entry and falls back to the
-# cross-validation buffer. The two fields are separate, because the gap that keeps folds
-# independent need not equal the horizon an outcome resolves over; here they coincide, and
-# both are declared in months.
+# Three durations are declared, and conflating any two of them is the mistake this panel
+# invites. `labels.buffer` is the gap left between a training window and the validation window
+# that follows it. `labels.horizons` is how far past its own timestamp a label's outcome
+# resolves, which is what the splitter seals the last validation fold on. The span the label
+# measures over is a third thing again, and it is what a Newey-West lag and an effective sample
+# size are counted in. Here the buffer is one month, the outcome horizon is zero because the
+# release dates each row by the month its return was earned in, and the span is the one month
+# the buffer was sized to. Section D measures the alignment the middle one rests on.
 
 # %%
 SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
@@ -102,15 +107,16 @@ SETUP = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 PRIMARY_LABEL = SETUP["labels"]["primary"]
 LABEL_NAMES = [PRIMARY_LABEL, *SETUP["labels"].get("variants", [])]
 WINSORIZED_LABEL, CLASS_LABEL = LABEL_NAMES[1], LABEL_NAMES[2]
-HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
+OUTCOME_HORIZON = resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
 LABEL_BUFFER = resolve_label_buffer(CASE_STUDY_ID, PRIMARY_LABEL, SETUP)
-HORIZON_MONTHS = int(HORIZON.rstrip("Mm"))
+LABEL_SPAN_MONTHS = int(str(LABEL_BUFFER).rstrip("Mm"))
 HOLDOUT_START = date.fromisoformat(str(SETUP["evaluation"]["holdout_start"]))
 BASELINE_SIGNAL = SETUP["causal"]["treatment"]
 KEYS = ["timestamp", "symbol"]
 
 print(
-    f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, horizon {HORIZON}, buffer {LABEL_BUFFER}\n"
+    f"Labels: {LABEL_NAMES}, primary {PRIMARY_LABEL}, span {LABEL_SPAN_MONTHS} month, "
+    f"buffer {LABEL_BUFFER}, outcome horizon {OUTCOME_HORIZON}\n"
     f"Study window {START_DATE} to {END_DATE}, holdout opens {HOLDOUT_START}"
 )
 
@@ -149,13 +155,17 @@ print(
 # here.
 #
 # Nothing else is transformed. The characteristics arrive cross-sectionally rank-transformed
-# by the provider, and the return is the raw monthly total return. The universe is the
-# provider's completeness rule - a firm-month is retained only where every characteristic is
-# available - so entity eligibility is applied upstream of this notebook and no further
-# screen runs here or in stage 03. A screen would be safe here in any case, which it is not
-# in the case studies that build a label by shifting a price series: dropping rows there
-# makes a shift count survivors instead of periods, so the window silently spans whatever
-# was removed. Nothing here counts positions, so nothing here can.
+# by the provider, and the return is the raw monthly total return. Which firms are in the
+# universe is decided by the provider's completeness rule - a firm-month is kept only where
+# every characteristic is available - so that screen runs before this notebook, and neither
+# this notebook nor stage 03 drops a further row.
+#
+# Where a label is built by shifting a price series rather than read from a column, the order
+# of those two steps matters and getting it wrong is silent. A shift counts rows, so dropping
+# ineligible rows first makes the shift step over whatever was removed: a one-month label then
+# spans however long the gap was, and still looks like a full column. Applying the screen after
+# the label, or expressing the horizon as a length of time so that a gap produces a null,
+# avoids it.
 
 # %%
 window = pl.col("timestamp").is_between(
@@ -185,8 +195,11 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # where $P_{i,t}$ is firm $i$'s adjusted month-end close in month $t$, and the row carrying
 # $r_{i,t}$ also carries the characteristics observed at the close of month $t-1$. That is
 # Chapter 7.2's close-to-close convention, with the decision taken at the earlier of the two
-# closes. `setup.yaml` places the fill at the next open, and that difference is a real gap,
-# left to `13_costs.py`, which sweeps commission and spread rather than the return definition.
+# closes. The strategy that consumes the label fills at the next open instead, as
+# `setup.yaml` declares, so the label omits whatever the price moves overnight between the
+# decision close and that open. Nothing in this release can measure that gap - it publishes
+# no opening price - so it is inherited as a known difference between the label and the
+# traded return rather than corrected here.
 #
 # The provider computes $r_{i,t}$, so the labelling library has nothing to shift and is not
 # called: `fixed_time_horizon_labels` divides a price column by its own lag, and this release
@@ -201,13 +214,15 @@ print(f"market_data digest: {MARKET_DATA_DIGEST}")
 # construction, which Section E measures rather than assumes.
 #
 # A label resolves on the month-end that dates the row carrying it, because the return the
-# row reports was earned over the month ending there. That endpoint is carried alongside the
-# labels, and every diagnostic below is sealed on it rather than on the date a decision was
-# taken. Every diagnostic from Section D on reads that development frame; the assertions and
-# the boundary figure below are the exception, because they read the null structure of the
-# files being written rather than any value in them. The `month` column numbers the panel's
-# own month-end grid, which Sections D and F count on so that a firm skipping a month-end
-# does not read as two adjacent observations.
+# row reports was earned over the month ending there. The date a label resolves on is what
+# decides whether it may be looked at: a row whose outcome lands on or after
+# `evaluation.holdout_start` falls inside the period held back for the final test, so it is
+# written to the label files but excluded from every measurement below. The files themselves
+# keep every row, because the later stages need the held-back months to score on.
+#
+# The `month` column numbers the panel's own month-end grid. Sections D and F count on it
+# rather than on position among the rows, so that two rows either side of a month a firm
+# skipped are not read as consecutive observations.
 
 # %%
 month_ends = firm_chars.select("timestamp").unique().sort("timestamp").with_row_index("month")
@@ -243,11 +258,12 @@ print(
 # quantity the label claims. Each property below fails silently and leaves plausible numbers
 # behind, so each is asserted rather than described.
 #
-# The first assertion is the one that catches a fabricated tail. A firm's last retained
-# month closes its label window, and a construction that shifted a price series would leave
-# that month with no outcome - which has to be a null, never a value. The rest pin the two
-# monthly joins: a duplicated month-end in either would fan the panel out, and a clipped
-# return outside its own month's percentiles would mean a join matched the wrong month.
+# The first assertion is the one that catches a fabricated tail. A firm's last month in the
+# panel closes its label window, and a construction that shifted a price series would leave
+# that month with no outcome - which has to be a null, never a value. The rest check the two
+# monthly joins: a duplicated month-end in either would multiply the panel's rows, and a
+# clipped return falling outside its own month's percentiles would mean a join had matched
+# the wrong month.
 
 # %%
 missing = labels_df["ret"].is_null()
@@ -297,18 +313,21 @@ for described, column in (
     print(f"ST_REV against {described:>21} return: rank correlation {value:+.3f}")
 
 # %% [markdown]
-# Position zero below is each firm's last retained month. Every label has to be present
+# Position zero below is each firm's last month in the panel. Every label has to be present
 # there, because the outcome that month reports was earned before the row was written. The
 # grey line is the same panel under one forward shift, and it is the failure this figure
 # exists to make visible: a scalar count of valid rows reports both shapes as complete.
+#
+# The horizontal axis counts month-ends on the panel's own grid, not rows, so a firm that
+# is absent for a month reads as two month-ends apart and not as one.
 
 # %%
 profile = (
     labels_df.with_columns(
-        (pl.len().over("symbol") - 1 - pl.int_range(pl.len()).over("symbol")).alias("from_end"),
-        pl.col(PRIMARY_LABEL).shift(-HORIZON_MONTHS).over("symbol").alias("_shifted"),
+        (pl.col("month").max().over("symbol") - pl.col("month")).alias("from_end"),
+        pl.col(PRIMARY_LABEL).shift(-LABEL_SPAN_MONTHS).over("symbol").alias("_shifted"),
     )
-    .filter(pl.col("from_end") <= HORIZON_MONTHS + 4)
+    .filter(pl.col("from_end") <= LABEL_SPAN_MONTHS + 4)
     .group_by("from_end")
     .agg(pl.col(c).is_not_null().mean() for c in [*LABEL_NAMES, "_shifted"])
     .sort("from_end")
@@ -323,14 +342,14 @@ ax.plot(
     back, profile["_shifted"], "--", ds="steps-mid", lw=1.4, c=COLORS["neutral"], label="shifted"
 )
 ax.set(
-    xlabel="Month-ends back from each firm's last retained month",
+    xlabel="Month-ends back from each firm's last month in the panel",
     ylabel="Share of firms carrying a label",
     ylim=(-0.08, 1.12),
 )
 add_message_title(
     ax,
-    "Provider alignment leaves every firm's last month labelled",
-    subtitle="All three labels sit on one another; a shift would empty the leftmost position",
+    "Every firm's last month in the panel carries a label",
+    subtitle="All three labels sit on one another; one forward shift empties position zero",
 )
 ax.legend(loc="lower right", frameon=False, ncol=2)
 show_with_alt(fig, "Non-null label rate by month-ends back from each firm's last observation.")
@@ -338,18 +357,16 @@ show_with_alt(fig, "Non-null label rate by month-ends back from each firm's last
 # %% [markdown]
 # ## E. Distribution and base rate
 #
-# What scale is the label, and does it mean the same thing across regimes? The label files
-# keep every row, because the seal governs what this notebook looks at rather than what it
-# writes.
+# What scale is the label, and does it mean the same thing across regimes?
 #
 # Both continuous labels go on one axis with identical bins and a logarithmic count axis.
-# The claim the figure has to support is about shape rather than width - two dispersion
-# scalars would carry the width - and the shape here is that the two series are
+# The claim the figure has to support is about shape rather than width - two standard
+# deviations would carry the width - and the shape here is that the two series are
 # indistinguishable through the body and separate only in the tails, where the winsorized
-# label stops at the widest boundary any month produced and the raw one runs on. The axis is
-# narrower than the raw label's range, so the rows past it are counted below rather than
-# drawn. Those boundaries reach past one-and-a-half times the anchor price in the widest
-# month, so a tighter axis would cut the figure off exactly where the two labels separate.
+# label stops at the widest boundary any month produced and the raw one runs on. The axis
+# has to reach past that widest boundary or the figure is cut off exactly where the two
+# labels part; it still stops well short of the raw label's largest return, and the rows
+# past it are counted underneath rather than drawn.
 
 # %%
 bins = np.linspace(-1.0, 2.0, 91)
@@ -412,12 +429,16 @@ for ax, (column, color, reference, ylabel) in zip(axes, panels, strict=True):
     ax.axhline(reference, color=COLORS["neutral"], ls="--", lw=1.1)
     ax.set_ylabel(ylabel)
     ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-axes[1].set(ylim=(0.44, 0.52), xlabel="Year")
+# Bound the lower panel symmetrically about the even split, by the series it actually draws.
+# Centring keeps the distance from balance readable as a distance; taking the bound from the
+# monthly range instead would leave most of the panel blank and flatten the annual series.
+reach = (annual["upper_share"] - 0.5).abs().max() * 1.3
+axes[1].set(ylim=(0.5 - reach, 0.5 + reach), xlabel="Year")
 add_message_title(
     axes[0],
     "Dispersion shifts across regimes while the median split stays balanced",
-    subtitle="Annual means of the monthly cross-section; dashed lines mark the median year "
-    "and an even split",
+    subtitle="Annual means of the monthly cross-section; dashed lines mark the typical year's "
+    "dispersion and an even split",
 )
 show_with_alt(fig, "Annual mean cross-firm return dispersion above, upper-class share below.")
 
@@ -443,15 +464,18 @@ print(
 # %% [markdown]
 # ## F. Overlap and effective sample size
 #
-# A label sampled more often than its own horizon makes consecutive rows share part of one
-# forward window, and the row count then overstates the evidence. Here the sampling grid and
-# the horizon are the same month, so consecutive labels are built from disjoint returns. Two
-# measurements say so in different units: the autocorrelation profile, and the row count once
-# average uniqueness is priced in.
+# Where a label is sampled more often than the period it measures over, consecutive rows
+# report overlapping stretches of the same price path, and the row count then claims more
+# evidence than the data holds. Here a firm is observed once a month and each label measures
+# one month, so consecutive labels are built from returns that share nothing. Two
+# measurements say so in different units: the autocorrelation profile, and the row count
+# after each row is discounted by how much of its window another row also covers - the
+# average-uniqueness weighting of Chapter 7.2.
 #
-# Both count on `month`, each row's position on the panel's own month-end grid, rather than
-# on position among the rows that survive into the development frame. Closing over the months
-# a firm skips would pair windows that share nothing.
+# Both read `month`, each row's position on the panel's own month-end grid, rather than its
+# position among the rows that reach this point. A firm absent for a month would otherwise
+# have the rows either side of the gap treated as consecutive, pairing windows that in fact
+# share nothing.
 
 # %%
 MAX_LAG = 12
@@ -463,19 +487,19 @@ palette = (COLORS["blue"], COLORS["amber"], COLORS["copper"])
 for name, color in zip(LABEL_NAMES, palette, strict=True):
     ax.plot(lags, acf[name], "o-", ms=3, lw=1.6, c=color, label=name)
 ax.axhline(0, color=COLORS["neutral"], lw=0.8)
-ax.axvline(HORIZON_MONTHS, color=COLORS["neutral"], ls=":", lw=1.5)
 ax.set(xlabel="Lag in month-ends", ylabel="Panel autocorrelation")
 add_message_title(
     ax,
     "Monthly labels carry weak reversal rather than an overlap decay",
-    subtitle="Dotted line marks the horizon; an overlapping label falls from near one to zero at it",
+    subtitle="Consecutive labels share no return interval, so every lag drawn is already "
+    "overlap-free",
 )
 ax.legend(loc="lower right", frameon=False)
 show_with_alt(fig, "Panel autocorrelation of all three labels against lag in month-ends.")
 
 # A horizon-h label consumes the h returns realised over its window and its neighbour one
 # period later shares h-1 of them, so at a one-period horizon nothing is shared at all.
-n_rows, n_eff = effective_sample_size(dev, horizon=HORIZON_MONTHS, bar_col="month")
+n_rows, n_eff = effective_sample_size(dev, horizon=LABEL_SPAN_MONTHS, bar_col="month")
 assert n_eff == n_rows, "a one-month label overlaps nothing, so every row must weigh one"
 print(
     f"{PRIMARY_LABEL}: N={n_rows:,}, N_eff={n_eff:,.0f}, ratio {n_eff / n_rows:.4f}; "
@@ -494,18 +518,25 @@ print(
 # %% [markdown]
 # ## G. Baseline floor
 #
-# One signal against the primary label on the sealed development window, with no feature
-# engineering: the raw momentum characteristic `setup.yaml` names as the treatment its causal
-# stage estimates, taken exactly as the provider ranked it. Measuring the floor before
-# building features is what makes a later improvement meaningful.
+# One signal, measured against the primary label over the development months only and with
+# no feature engineering: the raw momentum characteristic `setup.yaml` names as the treatment
+# whose effect `09_causal_dml.py` estimates, taken exactly as the provider ranked it. This is
+# the number a feature built in the next notebook has to beat, and it is only worth beating
+# if it was fixed before any feature existed.
 #
-# The information coefficient is the cross-sectional rank correlation on each month-end,
-# averaged over month-ends, which is the quantity a ranking model is scored on; pooling every
-# firm-month instead mixes a cross-sectional claim with a time-series one. The library call
-# returns its series ordered by time, which the standard error depends on. The minimum
-# cross-section is half the median month, so it means the same thing on a universe of another
-# size. The standard error is HAC-adjusted, which here widens an interval that a monthly
-# series of one-month outcomes was already close to independent over.
+# The information coefficient is the rank correlation between the signal and the outcome
+# across the firms trading in one month, computed for each month-end and then averaged. That
+# is the quantity a ranking model is scored on; pooling every firm-month into one correlation
+# instead answers a different question, mixing how firms rank against each other with how the
+# market moved from month to month. The library call returns the series ordered by time,
+# which the standard error below depends on.
+#
+# A month with too thin a cross-section produces a rank correlation too noisy to average in,
+# so months below a minimum count are left out. That minimum is set at half the median
+# month's firm count rather than at a fixed number, so the same rule transfers to a universe
+# of a different size. The standard error is Newey-West adjusted, which allows for one
+# month's information coefficient being related to the next month's; the count the statistic
+# reports is the number of month-ends that actually entered it.
 
 # %%
 baseline = dev.drop_nulls([BASELINE_SIGNAL, PRIMARY_LABEL])
@@ -520,11 +551,14 @@ ic = cross_sectional_ic_series(
     entity_col="symbol",
     min_obs=min_obs,
 ).sort("timestamp")  # HAC autocovariances are meaningless over a permutation of time
-stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=HORIZON_MONTHS)
+stats = compute_ic_hac_stats(ic, ic_col="ic", label_horizon=LABEL_SPAN_MONTHS)
 
+# `ic` carries one row per month-end whatever its cross-section, with the correlation left
+# null below `min_obs`; the statistic drops those, so its own count is what is reported.
 print(
     f"Baseline: {BASELINE_SIGNAL} against {PRIMARY_LABEL}, minimum cross-section {min_obs} firms\n"
-    f"  month-ends scored {ic.height:,} of {dev['timestamp'].n_unique()}\n"
+    f"  month-ends entering the statistic {stats['n_periods']:,} "
+    f"of {dev['timestamp'].n_unique()}\n"
     f"  mean IC {stats['mean_ic']:+.5f}, HAC standard error {stats['hac_se']:.5f}\n"
     f"  HAC t {stats['t_stat']:+.2f} on {stats['effective_lags']} Bartlett lags, "
     f"naive t {stats['naive_t_stat']:+.2f}, p {stats['p_value']:.3g}"
@@ -535,16 +569,23 @@ print(
 # over all 312 development month-ends, on a cross-section of at least 1293 firms. Under the
 # naive standard error that is a t-statistic of +6.89; the Newey-West rule picks 5 lags here,
 # above the none a one-month horizon requires on its own, and the HAC statistic is +6.14 with
-# a standard error of 0.00716. The floor a feature has to clear is therefore not zero: it is
-# a mean IC of 0.04398 that the data separates clearly from zero, before any feature exists.
+# a standard error of 0.00716. So a feature is not compared against zero: it has to improve
+# on a mean information coefficient of 0.04398 that the data already separates from zero,
+# fixed here before any feature exists.
 
 # %% [markdown]
 # ## H. Artifacts and the audit record
 #
-# Each file is written with a digest sidecar beside it, recording the content digest of the
-# values written, the row count, the key columns, the notebook that wrote it and the digests
-# of what it was built from. That last field is what ties a label to its data vintage. The
-# characteristic panel goes out first, because the backtest loader prices this case study's
+# Every file written here gets a small JSON record saved next to it. Its job is to let a
+# later reader tell one version of a file apart from another without opening either, and to
+# say where the contents came from. It holds a digest - a short string computed from the
+# values in the file, which changes if any of them change - together with the row count, the
+# columns that identify a row, the notebook that wrote the file, and the digest of each file
+# or dataset it was built from. That last field is what ties a label back to the release of
+# the data it was computed from: without it, a re-run against a refreshed download looks
+# exactly like a re-run against the same one.
+#
+# The characteristic panel goes out first, because the backtest prices this case study's
 # positions from it and all three labels derive from its `ret` column; the two variants
 # additionally carry the primary label's digest, which is what they transform.
 
@@ -571,18 +612,27 @@ for name in LABEL_NAMES:
     print(f"{name}.parquet: {records[name]['n_rows']:,} rows, digest {records[name]['digest']}")
 
 # %% [markdown]
-# The folds that train models are derived per label by `case_studies/utils/cv_window.py` from
-# `config/setup.yaml` and the timeline of the label parquet written above, so which rows land
-# in these files is what sets where the fold boundaries fall. The same generator writes them
-# to `config/cv_config.json`, which `04_evaluation.py` reads to score its feature ICs fold by
-# fold.
+# The training and validation periods the model stages use are worked out per label by
+# `case_studies/utils/cv_window.py`, from `config/setup.yaml` and the range of dates in the
+# label file written above - so which rows land in that file is what decides where the period
+# boundaries fall. Every stage that needs those periods derives them the same way rather than
+# reading a file an earlier notebook happened to write, so none of them depends on the order the
+# pipeline was run in. The cell below runs the generator once more and saves the result to
+# `config/cv_config.json` as a committed record of the geometry these labels imply, which is what
+# makes a change in it show up in a diff.
+#
+# The two durations the generator is given are the ones separated above. `label_buffer` sets the
+# gap between a training window and its validation window. `outcome_horizon` is how far past the
+# last validation date an outcome is still unresolved, and it is what decides how much of the
+# last fold has to be given back before the holdout opens - zero here, because a row's return is
+# realised on the timestamp the row carries.
 
 # %%
 splits = generate_cv_splits(
     labels_df.select("timestamp"),
     case_study_id=CASE_STUDY_ID,
     label_buffer=LABEL_BUFFER,
-    outcome_horizon=HORIZON,
+    outcome_horizon=OUTCOME_HORIZON,
 )
 assert len(splits) == int(SETUP["evaluation"]["n_splits"])
 assert max(split["val_end"] for split in splits).date() < HOLDOUT_START
@@ -611,7 +661,8 @@ print(f"Saved {display_path(cv_path)}: {len(splits)} folds, validation through {
 # the values computed above rather than written by hand.
 
 # %%
-readers = {PRIMARY_LABEL: "03_financial_features.py, which joins it into the trainable panel"}
+shared = "cv_window.py, for this label's training and validation periods; the model stages"
+readers = {PRIMARY_LABEL: f"{shared}; 03_financial_features.py, to check firm identities match"}
 print("\nLabel audit record")
 for name in LABEL_NAMES:
     series = dev[name]
@@ -621,12 +672,13 @@ for name in LABEL_NAMES:
         else f"mean {series.mean():+.5f}, std {series.std():.5f}"
     )
     print(
-        f"\n{name}\n  anchor       adjusted month-end close of the month before the row's"
-        f"\n  horizon      {HORIZON}, the month the row is dated by"
-        f"\n  resolution   fixed at that month's close; monthly bars need no intraday tie-break"
-        f"\n  overlap      {HORIZON_MONTHS - 1} months shared by consecutive rows"
+        f"\n{name}\n  anchor       the adjusted close of the month before the one dating the row"
+        f"\n  span         {LABEL_SPAN_MONTHS} month, the month the row is dated by"
+        f"\n  resolution   fixed at that month's close, the timestamp the row itself carries;"
+        f" monthly bars need no intraday tie-break"
+        f"\n  overlap      {LABEL_SPAN_MONTHS - 1} months shared by consecutive rows"
         f"\n  base rate    {base_rate}"
-        f"\n  consumed by  {readers.get(name, 'the model stages, through config/training/')}"
+        f"\n  consumed by  {readers.get(name, shared)}"
     )
 
 # %% [markdown]
@@ -639,21 +691,26 @@ for name in LABEL_NAMES:
 # 2. **Assert that a label exists exactly where its outcome was observed.** A count of valid
 #    rows reports a fabricated tail and a complete one identically; the null rate read
 #    against each entity's own last period separates them.
-# 3. **A threshold taken across the cross-section needs no fold scoping; one taken along
-#    time does.** A month's own median and percentiles use only information that month
-#    already carries, so they can be applied to every row of the sample at once.
-# 4. **A row count only overstates the evidence when forward windows overlap.** Sampling a
-#    label at its own horizon leaves average uniqueness at one, which an effective count has
-#    to return exactly - and that is the case which catches an off-by-one inside it.
-# 5. **Set the floor with the signal the design names, not the strongest one available.**
-#    The number a later feature has to beat is only meaningful if it was fixed before the
-#    features existed.
+# 3. **A threshold read across the firms trading in one period can be applied to the whole
+#    sample at once; one read along the time axis has to be re-estimated inside each
+#    training period.** A month's own median and percentiles use only information that month
+#    already carries, so no later month can reach a row through them.
+# 4. **A row count only overstates the evidence when forward windows overlap.** Observing a
+#    label once per period it measures over leaves each row fully independent, so an
+#    effective count must return the row count itself - a case worth checking, because it is
+#    the one where the answer is known in advance.
+# 5. **Set the comparison with the signal the design names, not the strongest one
+#    available.** The number a later feature has to beat is only meaningful if it was fixed
+#    before the features existed.
 #
 # **Known limitations.** The release is anonymized and its firm axis persists only inside
 # each published block, so nothing here reconciles against a named security or a
 # corporate-action record. The provider computes the return, so its conventions for delisting
-# and dividend reinvestment are inherited rather than checked. The baseline is one
-# characteristic of the several dozen the release carries.
+# and dividend reinvestment are inherited rather than checked. The label measures close to
+# close while the strategy fills at the next open, and this release carries no opening price
+# to measure that difference with. The comparison signal is one characteristic of the several
+# dozen the release carries.
 #
-# **Next**: `03_financial_features.py` builds fundamental, momentum and cross-sectional rank
-# features from these characteristics and evaluates them against these labels.
+# **Next**: `03_financial_features.py` builds value, quality, investment, momentum and risk
+# features from these characteristics, and the composites and interactions over them;
+# `04_evaluation.py` is where those features are scored against these labels.

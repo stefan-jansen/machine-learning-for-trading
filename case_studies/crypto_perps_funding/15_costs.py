@@ -49,7 +49,9 @@ import polars as pl
 from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
+    get_rebalance_step,
     load_backtest_prices_for,
+    thin_to_rebalance_dates,
     warmup_periods_for,
 )
 from case_studies.utils.backtest_presets import (
@@ -294,11 +296,21 @@ funding = (
         & (pl.col("timestamp") <= prices["timestamp"].max())
     )
 )
-panel_sizes = predictions.group_by("timestamp").len().rename({"len": "n_assets"})
+# Breadth is a property of the settlements the allocator actually sizes, not of every settlement
+# scored. The runner thins predictions to non-overlapping rebalance dates before allocating, so the
+# same thinning is applied here rather than reproduced by hand - a step applied twice thins by its
+# square, which is the failure this shares a helper to avoid.
+rebalance_panel = thin_to_rebalance_dates(
+    predictions,
+    cadence=strategy["rebalance"]["cadence"],
+    step=get_rebalance_step(CASE_STUDY, LABEL),
+)
+panel_sizes = rebalance_panel.group_by("timestamp").len().rename({"len": "n_assets"})
 capped_timestamps = panel_sizes.filter(pl.col("n_assets") < 2 * allocation["top_k"]).height
 print(
     f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"settlements: {funding.height:,}; dynamically capped timestamps: {capped_timestamps}"
+    f"settlements: {funding.height:,}; rebalance settlements: {panel_sizes.height:,}; "
+    f"dynamically capped: {capped_timestamps}"
 )
 
 # %% [markdown]
@@ -492,6 +504,19 @@ print(
 # The frozen curve is retained as history. The corrected curves enforce a disjoint long-short book;
 # the total-return curve additionally settles official funding. Their horizontal-zero crossings
 # determine the implementation budget.
+#
+# The two corrected curves are replayed here, so they measure the carrier only where the replay can
+# reproduce what the carrier does. The carrier is long-short at `top_k`, so it needs `2 * top_k`
+# perpetuals in a settlement to take a position on both sides - the same breadth the capped-settlement
+# count above is measured against. A cross-section that never reaches it hands the selector
+# everything it has on every settlement, the selection that the edge consists of never happens, and
+# the curve that comes back describes a different strategy. Its crossing is then not a budget, so it
+# is not reported as one even when the arithmetic produces a number; on the reduced surface used for
+# execution tests there is none to report anyway, because the replayed Sharpe is already negative at
+# zero cost. An injected test grid can separately stop short of a crossing by being shorter than the
+# registered one, and is reported unavailable for that reason instead. The frozen curve is read from
+# the registry rather than replayed, so neither condition reaches it and its crossing is still
+# required whenever the registered grid is the one in hand.
 
 
 # %%
@@ -512,21 +537,34 @@ def _breakeven(frame: pl.DataFrame, metric: str) -> float | None:
 price_breakeven = _breakeven(replay, "price_only_sharpe")
 funding_breakeven = _breakeven(replay, "with_funding_sharpe")
 stored_breakeven = _breakeven(replay, "stored_sharpe")
+required_breadth = 2 * allocation["top_k"]
+widest_panel = panel_sizes["n_assets"].max()
+selection_is_degenerate = widest_panel < required_breadth
+
 if using_fallback_grid:
     print("Frozen registry breakeven: unavailable for an unregistered test grid")
+elif stored_breakeven is None or not np.isfinite(stored_breakeven):
+    raise RuntimeError("The registered cost curve has no finite zero crossing")
+else:
+    print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
+
+if selection_is_degenerate:
+    print(
+        f"Corrected price-only breakeven: unavailable\n"
+        f"Corrected funding-inclusive breakeven: unavailable\n"
+        f"  the widest replay cross-section is {widest_panel}, and this long-short carrier needs "
+        f"{required_breadth} to hold top-{allocation['top_k']} on both sides"
+    )
+elif using_fallback_grid:
     for label, value in (
         ("Corrected price-only", price_breakeven),
         ("Corrected funding-inclusive", funding_breakeven),
     ):
-        rendered = "unavailable" if value is None else f"{value:.2f} bps"
-        print(f"{label} breakeven: {rendered}")
+        rendered = f"{value:.2f} bps" if value is not None and np.isfinite(value) else "unavailable"
+        print(f"{label} breakeven: {rendered} (unregistered test grid)")
+elif any(value is None or not np.isfinite(value) for value in (price_breakeven, funding_breakeven)):
+    raise RuntimeError("A replayed cost curve has no finite zero crossing")
 else:
-    if any(
-        value is None or not np.isfinite(value)
-        for value in (stored_breakeven, price_breakeven, funding_breakeven)
-    ):
-        raise RuntimeError("A registered cost curve has no finite zero crossing")
-    print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
     print(f"Corrected price-only breakeven: {price_breakeven:.2f} bps")
     print(f"Corrected funding-inclusive breakeven: {funding_breakeven:.2f} bps")
 

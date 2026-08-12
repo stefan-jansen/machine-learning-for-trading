@@ -508,6 +508,11 @@ Found an error, a broken link, or have a suggestion? Early feedback is especiall
 
 Code: [MIT License](LICENSE) · Book content: © 2026 Stefan Jansen. All rights reserved.
 
+`data/equities/market/sp500/daily_bars.parquet` is © AlgoSeek LLC, redistributed here with
+AlgoSeek's permission for readers of the book. AlgoSeek retains all rights to it; cite
+[algoseek.com](https://algoseek.com) as the source in anything you publish from it. The MIT license
+covers the code, not this file. See [data/README.md](data/README.md#attribution).
+
 <p align="center">
   <a href="https://amzn.to/4eigy2F">Get the book</a> •
   <a href="https://ml4trading.io">ml4trading.io</a> •

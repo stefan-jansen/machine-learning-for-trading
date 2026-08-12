@@ -25,6 +25,7 @@ import json
 import os
 import random
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,7 @@ from utils.artifact_specs import (
     resolve_market_semantics,
     resolve_storage_path,
 )
-from utils.cv_splits import generate_cv_splits, make_wf_config
+from utils.cv_splits import earliest_train_start, generate_cv_splits, make_wf_config
 
 RANDOM_SEED = 42
 MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing windows.
@@ -416,11 +417,128 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
+def verify_artifact_sidecars(
+    artifacts: Mapping[str, Path],
+    *,
+    require_sidecar: bool = True,
+    values: bool = True,
+) -> dict[str, str]:
+    """Check each input artifact against the digest sidecar its producer wrote.
+
+    ``case_studies/utils/artifact_digest.py`` writes ``<artifact>.digest.json``
+    beside every artifact, recording the content hash, the row count and the key
+    columns. Until this function existed nothing read one: stage 02 and stage 03
+    wrote them and the chain stopped, so an upstream value change could not reach
+    a downstream identity. What it closes is narrow and worth stating exactly - the
+    registry records feature-set *names* and no digest of feature *values*, so a
+    model trained on corrected features and one trained on the leaky version it
+    replaced produce the identical training_hash unless something reads the values.
+
+    Raises on a digest that disagrees with the file. Whether a *missing* sidecar
+    also raises is the caller's to choose, because the two carry different
+    evidence. A disagreeing sidecar is a value that moved without its record
+    moving with it, which is the defect itself, and it is never acceptable. A
+    missing sidecar means the producer recorded nothing, which cannot be told
+    apart from a silent change but is also the state of every artifact written
+    before the sidecar existed.
+
+    Returns the verified digest per artifact, so the caller can carry it into the
+    training spec. Artifacts skipped under ``require_sidecar=False``, and every
+    artifact under ``values=False``, are absent from the mapping rather than
+    present with a null.
+
+    ``values`` chooses what the check costs, and the two settings answer different
+    questions. With it, the parquet is read and every row hashed, which is what the
+    recorded content digest is - order-independent, so it moves when and only when
+    a value moves. Without it, only the row count is compared, which parquet
+    metadata answers without reading a column. The cheap check cannot see a value
+    change that preserves the row count, and it does see the case that a crash
+    creates: ``write_artifact`` writes the parquet before its sidecar, so an
+    interrupted regeneration leaves new data beside the previous record, and new
+    data almost always has a different number of rows.
+
+    ``load_modeling_dataset`` runs the cheap check on every load and the full one
+    under ``verify_input_digests``; ``scripts/verify_artifact_sidecars.py`` runs the
+    full one over every case study, once, after a regeneration. That split is about
+    cost: hashing us_equities_panel's feature matrix is a multi-GB read plus a sort
+    over 68M row hashes.
+
+    Whether a *missing* sidecar raises is the caller's to choose, because presence
+    and disagreement carry different evidence. A missing sidecar means the producer
+    recorded nothing, which is the state of every artifact written before the
+    sidecar existed, and requiring presence before those are regenerated fails for
+    absence rather than for a changed value. Measured rather than assumed: on
+    2026-08-09 the production artifacts carried 49 sidecars out of 51, both gaps in
+    sp500_options, while the CI fixtures under
+    ``ml4t/third-edition-test-data/intermediates`` carried **none** - 0 of 7 for
+    cme_futures, 0 of 5 for etfs, 0 of 6 for fx_pairs, 0 of 6 for us_equities_panel.
+    """
+    from case_studies.utils.artifact_digest import read_digest, sidecar_path, value_digest
+
+    verified: dict[str, str] = {}
+    problems: list[str] = []
+    for name, path in sorted(artifacts.items()):
+        side = sidecar_path(path)
+        if not side.exists():
+            if require_sidecar:
+                problems.append(f"{name}: no digest sidecar beside {path.name}")
+            continue
+        try:
+            record = read_digest(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            problems.append(f"{name}: sidecar unreadable ({exc})")
+            continue
+        recorded = record.get("digest")
+        if not recorded:
+            problems.append(f"{name}: sidecar records no digest")
+            continue
+
+        rows = record.get("n_rows")
+        if not values:
+            if rows is None:
+                continue
+            try:
+                actual_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                problems.append(f"{name}: {path.name} unreadable ({exc})")
+                continue
+            if int(rows) != int(actual_rows):
+                problems.append(
+                    f"{name}: {path.name} holds {actual_rows} rows, its sidecar records {rows}"
+                )
+            continue
+
+        try:
+            frame = pl.read_parquet(path)
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            problems.append(f"{name}: {path.name} unreadable ({exc})")
+            continue
+        actual = value_digest(frame)
+        if actual != recorded:
+            problems.append(f"{name}: {path.name} hashes {actual}, its sidecar records {recorded}")
+            continue
+        if rows is not None and int(rows) != frame.height:
+            problems.append(
+                f"{name}: {path.name} holds {frame.height} rows, its sidecar records {rows}"
+            )
+            continue
+        verified[name] = recorded
+
+    if problems:
+        raise ValueError(
+            "input artifacts do not match the digests their producers recorded, so a "
+            "training run built on them would carry an identity that does not describe "
+            "its inputs: " + "; ".join(problems)
+        )
+    return verified
+
+
 def load_modeling_dataset(
     case_study_id: str,
     primary_label: str,
     max_symbols: int = 0,
     symbols: list[str] | None = None,
+    verify_input_digests: bool = False,
 ) -> ModelingDataset:
     """Load and join features + temporal + labels for a case study.
 
@@ -574,9 +692,7 @@ def load_modeling_dataset(
         primary_entity = entity_cols[0]
         dataset = dataset.filter(pl.col(primary_entity).is_in(list(symbols)))
     elif max_symbols > 0 and entity_cols:
-        primary_entity = entity_cols[0]
-        top = dataset.group_by(primary_entity).len().sort("len", descending=True).head(max_symbols)
-        dataset = dataset.filter(pl.col(primary_entity).is_in(top[primary_entity]))
+        dataset = reduce_to_top_entities(dataset, entity_cols[0], max_symbols)
 
     # Feature columns = everything except IDs and label
     feature_names = [c for c in dataset.columns if c not in ID_COLS and c != label_col]
@@ -607,6 +723,25 @@ def load_modeling_dataset(
             splits,
             date_col=date_col,
         )
+        # The artifact carries one fold set, built on the primary label's geometry, and
+        # the rows above were selected from it by ``fold`` id. So the values this load
+        # returns for fold F were fit on data through the *primary* label's train_end,
+        # and a label whose own validation opens earlier than that is scored on sessions
+        # its features already saw. Coverage does not see this: an artifact can cover
+        # every date a variant is scored on and still have been fit past the start of
+        # that window. Checked here rather than in a notebook because every model
+        # notebook reaches its data through this call, and only the label being loaded
+        # is checked, so the cost is one label timeline rather than all of them.
+        from case_studies.utils.cv_window import (
+            assert_variant_folds_are_out_of_sample,
+            configured_labels,
+        )
+
+        configured = configured_labels(case_study_id)
+        if configured and primary_label != configured[0]:
+            assert_variant_folds_are_out_of_sample(
+                case_study_id, configured[0], variants=[primary_label]
+            )
 
     # WalkForwardConfig for library integration
     # Normalize month-based buffers to days (pd.Timedelta rejects 'M' as ambiguous)
@@ -660,6 +795,21 @@ def load_modeling_dataset(
         input_artifacts["model_based"] = temporal_path
     if eval_label_path is not None:
         input_artifacts["eval_label"] = eval_label_path
+    # Two depths, and the flag chooses between them rather than between checking
+    # and not. The row-count comparison reads parquet metadata and no column, so it
+    # runs always: write_artifact writes the parquet before its sidecar, and an
+    # interrupted regeneration therefore leaves new data beside the previous
+    # record, which almost always has a different number of rows. Comparing the
+    # content digest is what catches a value change that keeps the row count, and
+    # that means hashing every row - a multi-GB read plus a sort over 68M row
+    # hashes on us_equities_panel, paid per load. It is the same work
+    # scripts/verify_artifact_sidecars.py does once over everything after a
+    # regeneration, which is where a sweep should pay it.
+    verify_artifact_sidecars(
+        input_artifacts,
+        require_sidecar=verify_input_digests,
+        values=verify_input_digests,
+    )
     return ModelingDataset(
         dataset=dataset,
         feature_names=feature_names,
@@ -685,6 +835,58 @@ def load_modeling_dataset(
     )
 
 
+def reduce_to_top_entities(
+    dataset: pl.DataFrame,
+    primary_entity: str,
+    max_symbols: int,
+) -> pl.DataFrame:
+    """Keep the ``max_symbols`` entities with the most rows, ties broken by name.
+
+    Row counts tie readily on these panels, and a tie broken by frame order is
+    not stable across runs or across callers. The entity name is the secondary
+    key so that every caller reducing the same dataset to the same size gets the
+    same universe. Without it a reduced stage-04 run and the reduced model
+    notebooks downstream of it can choose different equal-history symbols, and
+    the ones only a single side chose carry null temporal features - a wrong
+    answer that runs clean rather than a failure.
+
+    Production runs set ``max_symbols=0`` and never reach this.
+    """
+    top = (
+        dataset.group_by(primary_entity)
+        .len()
+        .sort(["len", primary_entity], descending=[True, False])
+        .head(max_symbols)
+    )
+    # implode: is_in against a bare Series of the same dtype is deprecated in
+    # polars as ambiguous, and membership in the value set is what is meant.
+    return dataset.filter(pl.col(primary_entity).is_in(top[primary_entity].implode()))
+
+
+def _inclusive_end_of(boundary: str) -> pd.Timestamp:
+    """Widen a configured end *date* to cover every bar of that session.
+
+    ``setup.yaml`` configures ``holdout_end`` as a date. Parsed, it is that date
+    at midnight, and every fold filter in this module is ``timestamp <= val_end``.
+    On a daily panel the bar already sits at midnight and the two agree. On an
+    intraday panel every bar of the final session sorts *after* midnight, so the
+    whole session is excluded from every modeling path: nasdaq100_microstructure
+    writes 2021-12-31 into its holdout fold - 38,610 rows added when the producer
+    side was fixed - and no consumer scores one of them.
+
+    A boundary that already carries a time of day is meant literally and is
+    returned unchanged, so a config can still name an instant inside a session -
+    including an explicit midnight. That is why this reads the configured *string*
+    rather than the parsed Timestamp: "2021-12-31" and "2021-12-31 00:00:00" parse
+    to the same instant, and only the first one means the whole day.
+    """
+    parsed = pd.Timestamp(boundary)
+    names_a_time = any(sep in str(boundary) for sep in (" ", "T"))
+    if names_a_time or parsed != parsed.normalize():
+        return parsed
+    return parsed + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+
+
 def append_holdout_fold_if_needed(
     mds: ModelingDataset,
     prediction_split: str,
@@ -692,13 +894,19 @@ def append_holdout_fold_if_needed(
 ) -> None:
     """Append a holdout fold to ``mds.splits`` when ``prediction_split=='holdout'``.
 
-    Mirrors the etfs reference pattern at
-    ``case_studies/etfs/04_model_based_features.py`` lines 109-116: train on
-    everything from the first CV fold's ``train_start`` through ``holdout_start``,
-    validate on ``[holdout_start, holdout_end]``. The combined fold becomes
-    fold N+1, so downstream code iterating ``mds.splits`` produces one
-    holdout prediction set per (training run, config) pair without any other
-    change to the training loop.
+    The holdout fold trains on everything available before ``holdout_start`` and
+    validates on ``[holdout_start, holdout_end]``. It becomes fold N+1, so downstream
+    code iterating ``mds.splits`` produces one holdout prediction set per
+    (training run, config) pair without any other change to the training loop.
+
+    "Everything available" is ``min(train_start)`` across the CV folds, not
+    ``splits[0]["train_start"]``. ``generate_cv_splits`` steps backward from the holdout
+    boundary, so fold 0 is the most *recent* fold and carries the *latest* training start.
+    Measured on etfs: ``splits[0]`` starts 2008-01-02 where the earliest fold starts
+    2005-01-03, so indexing the list built a holdout retrain that silently discarded three
+    years. ``case_studies/etfs/04_model_based_features.py`` says so in its CV Fold Setup
+    prose - "Indexing the list hands it the shortest window of the set, silently" - and
+    this function cited that notebook while doing the thing it warns against.
 
     Idempotent — if the trailing fold already covers the holdout window
     (val_end matches setup.yaml's holdout_end), no fold is appended.
@@ -734,17 +942,21 @@ def append_holdout_fold_if_needed(
     # made the idempotency check below never match (str(Timestamp) != YAML
     # string) and risked a tz-naive/aware comparison on the pandas filter path.
     ho_start_ts = pd.Timestamp(holdout_start)
-    ho_end_ts = pd.Timestamp(holdout_end)
-    trailing = mds.splits[-1]
-    if (
-        trailing.get("val_end") is not None
-        and pd.Timestamp(trailing.get("val_end")) == ho_end_ts
-        and pd.Timestamp(trailing.get("val_start")) == ho_start_ts
-    ):
-        return  # already covered
+    ho_end_ts = _inclusive_end_of(holdout_end)
+    # Any fold covering the holdout window, not just the trailing one: the CV
+    # folds run newest first and only the appended holdout fold lands at the end,
+    # so reading one position is a second place the ordering has to be right.
+    already_covered = any(
+        s.get("val_end") is not None
+        and pd.Timestamp(s["val_end"]) == ho_end_ts
+        and pd.Timestamp(s["val_start"]) == ho_start_ts
+        for s in mds.splits
+    )
+    if already_covered:
+        return
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": pd.Timestamp(mds.splits[0]["train_start"]),
+        "train_start": earliest_train_start(mds.splits),
         "train_end": ho_start_ts,
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,
@@ -1047,7 +1259,7 @@ def validate_temporal_fold_coverage(
         )
 
 
-def _replace_temporal_columns(
+def replace_temporal_columns(
     dataset_pd: pd.DataFrame,
     mask: np.ndarray,
     temporal_by_fold: pd.DataFrame,
@@ -1135,7 +1347,7 @@ def prepare_cv_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
-            train_rows = _replace_temporal_columns(
+            train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
                 temporal_by_fold,
@@ -1143,7 +1355,7 @@ def prepare_cv_folds(
                 temporal_feature_names,
                 fold_id,
             )
-            val_rows = _replace_temporal_columns(
+            val_rows = replace_temporal_columns(
                 dataset_pd,
                 val_mask,
                 temporal_by_fold,
@@ -1337,7 +1549,7 @@ def prepare_single_fold(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if _has_fold_temporal:
-            train_rows = _replace_temporal_columns(
+            train_rows = replace_temporal_columns(
                 dataset,
                 train_mask,
                 temporal_by_fold,
@@ -1345,7 +1557,7 @@ def prepare_single_fold(
                 temporal_feature_names,
                 fold_id,
             )
-            val_rows = _replace_temporal_columns(
+            val_rows = replace_temporal_columns(
                 dataset,
                 val_mask,
                 temporal_by_fold,
@@ -1526,3 +1738,10 @@ def compute_classification_metrics(
                 metrics[f"auc_class_{c}"] = auc
 
     return metrics
+
+
+# Deprecated private aliases. Thirty notebook cells import these names with their leading
+# underscore, which is what made them look private in the first place; each is a
+# cross-module interface and is now public. The aliases keep those callers working until
+# each notebook is re-executed with the public name, and go when the last one moves.
+_replace_temporal_columns = replace_temporal_columns

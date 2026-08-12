@@ -436,10 +436,21 @@ jobs:
         # scipy/statsmodels/scikit-learn are the import surface of
         # case_studies/utils/causal.py, so the p-value tail test can actually
         # run its numeric case rather than skipping past the behavior it pins.
+        #
+        # matplotlib and hmmlearn are the import surface of the shared stage-03
+        # and stage-04 helpers below. Neither pulls torch or an ml4t-* package,
+        # so this stays a fast per-commit gate.
+        #
+        # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
+        # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
+        # variant-geometry guard hangs off exactly that frame, so without pyarrow
+        # the tests that establish the guard runs on a real load fail at the
+        # conversion rather than at the property. Found by this job, not by
+        # inspection: the helper-level tests never reach the conversion and passed.
         run: |
           uv venv --python 3.14
           uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -513,6 +524,62 @@ jobs:
         run: |
           .venv/bin/python -m pytest tests/test_pvalue_tail_precision.py -v --tb=short
 
+      # The helpers the case-study stages share. One defect in any of these is a
+      # defect in eight rendered notebooks at once, which is exactly why they are
+      # fixed centrally rather than per notebook - and why the fix needs a gate
+      # rather than trusting that eight re-runs would catch a regression.
+      #
+      # The last three are the guards over what load_modeling_dataset returns,
+      # and adding them here is the point rather than tidiness. Both
+      # assert_variant_folds_are_out_of_sample and verify_artifact_sidecars
+      # shipped with tests that no job invoked, which is the same shape as the
+      # defect they were written to catch: a check nothing runs establishes
+      # nothing. They need no data and no ml4t-* package - every ml4t import in
+      # utils/cv_splits.py is inside a function, and these tests substitute the
+      # functions that reach them.
+      - name: Run shared case-study helper tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+          MPLBACKEND: Agg
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_data_quality.py \
+            tests/test_feature_engineering_figures.py \
+            tests/test_temporal.py \
+            tests/test_variant_fold_geometry.py \
+            tests/test_artifact_sidecar_verification.py \
+            tests/test_artifact_digest.py \
+            -v --tb=short
+
+      # Reads only committed notebook JSON and its paired .py, so it belongs to
+      # the fast per-commit gate rather than to a job that needs data. What it
+      # holds is the state a 44-notebook re-execution depends on: a pair without
+      # cell_metadata_filter desyncs on the run, and the notebook-sync gate then
+      # refuses every commit in the repo, not only that notebook's.
+      - name: Every stage 01-05 notebook pair survives a re-execution
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_notebook_pair_metadata_filter.py \
+            -q --tb=short
+
+      # The order us_equities_panel/03 builds its features in: per-symbol
+      # windows on the complete price series, then the eligibility screen, then
+      # the cross-sectional ranks. Built the other way round, a "252-session"
+      # lookback counts 252 *eligible* rows and silently reaches back over a
+      # stock's absence from the universe. The fix landed months ago; this file
+      # is the guard, and it was written on a branch and never reached main, so
+      # nothing has been checking the property since. It parses the notebook and
+      # runs its functions over a synthetic panel, so it needs no data.
+      - name: us_equities_panel builds features in the order the screen requires
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_us_equities_panel_feature_ordering.py \
+            -q --tb=short
+
       # The methodology ratchet. Both files are static AST/source scans over the
       # notebook tree, so they need no data and no model deps, and both were
       # ungated: nothing invoked either one. The cost of that showed up the first
@@ -530,6 +597,42 @@ jobs:
             tests/test_leakage_detectors.py \
             tests/test_holdout_boundary.py \
             -v --tb=short
+
+      # Where every entry point in the repo looks for data. Forty tests covered
+      # the rule and no job ran any of them, so the contract was unguarded on
+      # every PR — found when adding the linked-worktree fallback turned three
+      # of them red and CI stayed green, because the failure only appears in a
+      # worktree and the file did not run anywhere anyway.
+      #
+      # The precondition is the load-bearing half. `anchor_ran` skips rather
+      # than fails when the startup hook did not load, which is right locally
+      # (Debian's own sitecustomize.py shadows this one on a system-interpreter
+      # venv) and wrong here: it would turn the whole step green while testing
+      # nothing. Asserting the same condition the fixture skips on makes that
+      # state red instead. It has to be the hook FIRING, not the module being
+      # importable — cwd is on sys.path, so `import sitecustomize` succeeds in
+      # the workspace whether or not anything ran it at startup.
+      - name: Run data-root anchoring contract
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python - <<'PY'
+          import os, subprocess, sys
+          env = {k: v for k, v in os.environ.items() if k != "ML4T_DATA_PATH"}
+          out = subprocess.run(
+              [sys.executable, "-c", "import os; print(os.environ.get('ML4T_DATA_PATH', ''))"],
+              env=env, cwd=os.environ["ML4T_PATH"], capture_output=True, text=True,
+          )
+          if not out.stdout.strip():
+              sys.exit("sitecustomize did not run at startup; every test below would skip")
+          print("startup hook ran ->", out.stdout.strip())
+          PY
+          .venv/bin/python -m pytest \
+            tests/test_data_root_anchor.py \
+            tests/test_sitecustomize_data_root.py \
+            -v --tb=short -rs
 
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)

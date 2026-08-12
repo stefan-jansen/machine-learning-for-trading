@@ -760,18 +760,120 @@ def _backfill_all_backtest_artifacts(cs_dir: Path) -> None:
         df.write_parquet(path)
 
 
+# The identifier a prediction artifact names its assets with. `symbol` everywhere
+# except cme_futures, which uses `product`; the older test-data vintages also carry
+# `entity` and `ticker`. Resolved from the frame rather than declared per case study
+# so a reference panel can be read whichever convention wrote it.
+ENTITY_COLUMN_CANDIDATES = ("symbol", "product", "entity", "ticker")
+
+# Distinct dates a seeded artifact carries. Matches the fabricated grid's budget:
+# a reference panel is adopted for its keys, not for its length.
+SEEDED_DATE_BUDGET = 60
+
+
+def _reference_panels(cs_dir: Path, hash_rows: list, survives, entity_col: str, _pl) -> dict:
+    """One key/target panel per (split, label), taken from an artifact left in place.
+
+    Which artifact: the panel that the most untouched artifacts in the group already
+    share, then the larger panel, then the lowest hash. The choice has to come out
+    the same on every regeneration, and seeding onto the panel the group already
+    agrees on is what makes the seeded sets joinable with the copied ones rather
+    than only with each other.
+
+    Only artifacts this function will not rewrite are eligible, so the panel is one
+    that survives seeding. The dates are subsampled to ``SEEDED_DATE_BUDGET``; they
+    are a subset of the reference's own dates, which the registry places inside the
+    split window, so the split boundary the fabricated grid enforces still holds.
+    """
+    groups: dict = {}
+    for p_hash, split, label in hash_rows:
+        if survives(p_hash):
+            groups.setdefault((split, label), []).append(p_hash)
+
+    panels = {}
+    for key, hashes in groups.items():
+        by_signature: dict = {}
+        for p_hash in sorted(hashes):
+            frame = _pl.read_parquet(
+                cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
+            )
+            entity = next((c for c in ENTITY_COLUMN_CANDIDATES if c in frame.columns), None)
+            if entity is None or not {"timestamp", "actual"} <= set(frame.columns):
+                continue
+            # Only ever compared for equality, so stringifying the identifiers is
+            # enough and keeps a column carrying nulls from raising in sorted().
+            signature = (
+                frame.height,
+                tuple(sorted(map(str, frame[entity].unique().to_list()))),
+                tuple(map(str, frame["timestamp"].unique().sort().to_list())),
+            )
+            by_signature.setdefault(signature, []).append((p_hash, frame, entity))
+        if not by_signature:
+            continue
+        _, entries = min(
+            by_signature.items(),
+            key=lambda item: (-len(item[1]), -item[0][0], item[1][0][0]),
+        )
+        _, frame, entity = entries[0]
+        panels[key] = _subsampled_panel(frame, entity, entity_col, _pl)
+    return panels
+
+
+def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
+    """A reference artifact reduced to the canonical seeded columns and date budget.
+
+    Keeps the reference's own timestamp and identifier dtypes: a seeded artifact has
+    to meet the reference on an exact join, and a cast on either side of that key
+    would silently drop every row. The identifier is still renamed to the case
+    study's declared ``entity_col`` - cme_futures registers ``product`` while its
+    copied artifacts carry ``symbol``, and the notebooks resolve that column per
+    frame, so following the reference's name here would change what every seeded
+    cme artifact is called to fix a join that already works on values.
+    """
+    dates = frame["timestamp"].unique().sort()
+    step = max(1, dates.len() // SEEDED_DATE_BUDGET)
+    kept = dates.gather(range(0, dates.len(), step))
+    if kept[-1] != dates[-1]:
+        kept = kept.append(dates[-1:])
+    panel = frame.filter(_pl.col("timestamp").is_in(kept.implode()))
+    if "fold" in panel.columns:
+        fold = _pl.col("fold")
+    else:
+        # Mirrors the fabricated grid: folds partition dates, never rows, or every
+        # symbol lands in one fold and per-symbol conformal calibration breaks.
+        fold = (
+            _pl.col("timestamp")
+            .rank("dense")
+            .sub(1)
+            .floordiv(max(1, kept.len() // 2 + 1))
+            .mod(2)
+            .alias("fold")
+        )
+    return panel.select(
+        _pl.col(entity).alias(entity_col),
+        _pl.col("timestamp"),
+        fold.alias("fold"),
+        _pl.col("actual"),
+    )
+
+
 def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     """Generate synthetic prediction parquets for every hash in the registry.
 
-    Uses real symbols from setup.yaml. Each hash gets dates drawn from the window
-    its own registry row declares — the CV validation window for ``validation``
-    rows, the configured holdout for ``holdout`` rows — so a seeded artifact can
-    never claim decisions outside the split it is registered under. Predictions
-    are random noise. Crypto artifacts are normalized even when copied
-    intermediates exist because its model analysis requires one common key and
-    target panel - except each label's cohort-leader prediction, which a
-    replay notebook pins by hash and checks against real historical values;
-    those keep whatever real artifact already exists on disk.
+    Every hash registered under one (split, label) is seeded on one key and target
+    panel, so any two of them join. Where the fixture already carries an artifact
+    this function leaves alone, that artifact supplies the panel - see
+    ``_reference_panels``. Otherwise the panel is built from setup.yaml's symbols
+    over the window the registry row declares - the CV validation window for
+    ``validation`` rows, the configured holdout for ``holdout`` rows - so a seeded
+    artifact can never claim decisions outside the split it is registered under.
+    Predictions are random noise either way.
+
+    Crypto artifacts are normalized even when copied intermediates exist because its
+    model analysis requires that one common panel - except each label's cohort-leader
+    prediction, which a replay notebook pins by hash and checks against real
+    historical values; those keep whatever real artifact already exists on disk, and
+    are the panel the rest of the label is seeded onto.
     """
     db_path = cs_dir / "run_log" / "registry.db"
     if not db_path.exists():
@@ -966,26 +1068,58 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         # The exemption above can only preserve an artifact that exists. A leader with
         # none still falls through to the synthetic write, and the notebook that pins
         # its hash then fails a >0.99 correlation gate against real prices several
-        # stages downstream, nowhere near this function. Nothing here can reconstruct
-        # the artifact - it has to be copied in from the production run_log - so the
-        # gap is reported by hash at regeneration time rather than left to surface as
-        # an unexplained correlation failure. Not fatal: seven of the nine fixtures
-        # are missing at least one leader artifact today, so raising would stop every
-        # regeneration on a pre-existing gap this function did not introduce.
+        # stages downstream, nowhere near this function. The gap is reported by hash
+        # at regeneration time rather than left to surface there. Not fatal: seven of
+        # the nine fixtures are missing at least one leader artifact today, so raising
+        # would stop every regeneration on a pre-existing gap this function did not
+        # introduce.
+        #
+        # Do NOT close the gap by copying the production artifact in. A copied fixture
+        # is stale the moment anything upstream is regenerated, and every case study is
+        # being retrained end to end. What the correlation gate needs is a panel whose
+        # entities and timestamps are the ones the fixture's own labels carry, and whose
+        # historical target is derived from the same synthetic series the scores come
+        # from, so the check is satisfied by construction. That is what the branch below
+        # already does wherever a reference panel exists; a leader with no artifact of
+        # its own is the case that still falls back to a fabricated grid.
         warnings.warn(
             f"{cs_id}: no predictions.parquet on disk for cohort-leader prediction(s) "
-            f"{', '.join(missing_leaders)}; each gets synthetic scores that a replay "
-            "notebook's historical-target check will reject. Copy the real artifacts "
-            "from the production run_log into the fixture.",
+            f"{', '.join(missing_leaders)}; each gets synthetic scores on a fabricated "
+            "entity grid that a replay notebook's historical-target check will reject. "
+            "Generate the artifact against the fixture's own labels, deriving its "
+            "target from the series the scores come from; never copy the production one.",
             RuntimeWarning,
             stacklevel=2,
         )
+
+    def _survives(p_hash: str) -> bool:
+        """True when the loop below leaves this artifact exactly as it is."""
+        pred_file = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
+        return pred_file.is_file() and (p_hash in cohort_leader_hashes or not rewrite_existing)
+
+    # Two prediction sets of one (split, label) have to be joinable on
+    # (timestamp, entity), or a notebook that pairs them measures nothing:
+    # 14_latent_factors/09_case_study_insights ranks a latent and a supervised
+    # configuration against their common target and read "Aligned targets disagree:
+    # maximum gap None" - max() over an empty join - because the latent set was a
+    # fabricated weekday grid over SYM0..SYM4 and the supervised set was an artifact
+    # copied from production. Placeholder symbols cannot meet real ones on any key,
+    # so where the fixture already carries an artifact this function will not
+    # rewrite, the seeded sets take its keys, folds and realized targets and
+    # synthesize only the score. Groups with no such artifact keep the fabricated
+    # grid, which is still the only option there.
+    reference_panels = _reference_panels(cs_dir, hash_rows, _survives, entity_col, _pl)
+
     for p_hash, split, label in hash_rows:
         pred_dir = cs_dir / "run_log" / "predictions" / p_hash
         pred_file = pred_dir / "predictions.parquet"
-        if pred_file.exists() and (p_hash in cohort_leader_hashes or not rewrite_existing):
+        if _survives(p_hash):
             continue
-        template, n = _template_for(_window_for(split, label))
+        reference = reference_panels.get((split, label))
+        if reference is not None:
+            template, n = reference, reference.height
+        else:
+            template, n = _template_for(_window_for(split, label))
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()

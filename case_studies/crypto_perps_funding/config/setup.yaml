@@ -164,6 +164,133 @@ labels:
     fwd_dir_8h: fwd_ret_8h
     fwd_dir_8h_3c: fwd_ret_8h
 
+# The feature-specification register and every window `03_financial_features`
+# reads. A window typed into the notebook is a second copy of a number the
+# warmup audit and the timing figure both have to agree with, so all of them
+# are declared once here and bound. Windows are counted in 8-hour settlement
+# bars; the map key is the suffix the emitted column carries.
+features:
+  bar_hours: 8
+  # Fee tier, not a liquidity screen: these five clear at the maker spread and
+  # the rest pay taker. Same five the `costs.fee_schedule` note above names.
+  majors: [BNBUSDT, BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT]
+  ranked: premium_index_close
+  # Two features above this absolute rank correlation carry one ordering, so a linear
+  # model cannot separate their contributions. F5 cuts the redundancy tree here.
+  redundancy_cut: 0.7
+  windows:
+    premium_momentum: {8h: 1, 24h: 3, 72h: 9, 168h: 21, 336h: 42, 720h: 90}
+    premium_volatility: {24h: 3, 72h: 9, 168h: 21, 336h: 42}
+    premium_zscore: {7d: 21, 14d: 42}
+    premium_dev_mean: {7d: 21, 14d: 42}
+    premium_quantile: {7d: 21, 14d: 42, 30d: 90}
+    premium_rsi: {24h: 3, 72h: 9}
+    price_volatility: {7d: 21, 14d: 42}
+    premium_persistence: {7d: 21}
+    premium_regime: {72h: 9}
+    funding_zscore: {14d: 42}
+    funding_half_life: {14d: 42}
+    funding_change: {24h: 3}
+    funding_cashflow: {7d: 7}
+  # Bounds that shape an emitted value rather than guard a denominator. The
+  # z-score clip holds a settlement-day outlier off the scale a model reads;
+  # the AR(1) clip keeps the half-life finite at a unit root.
+  clip:
+    zscore: 10.0
+    vol_ratio: 10.0
+    ar1: 0.999
+    half_life: [0.5, 100.0]
+  families:
+    - name: carry
+      pattern: funding_rate|funding_rate_*|cum_positive_funding_7d|funding_half_life_14d|premium_level|premium_rank|premium_zscore_*
+      role: signal
+      hypothesis: A perpetual whose holders are paying to stay long is crowded, and the crowding unwinds.
+      inputs: official funding settlements, premium index close
+      lookback: 43
+      lag: 0
+      frame: per symbol, except the premium percentile which is within the decision timestamp
+      representation: level, trailing z-score, cross-sectional percentile, mean-reversion speed
+      failure_mode: Funding is clamped by the exchange, so the level saturates in the regimes that matter most.
+    - name: mean_reversion
+      pattern: premium_dev_mean_*|premium_quantile_pos_*|premium_persistence_*
+      role: signal
+      hypothesis: A premium far from its own recent range reverts faster than one near the middle of it.
+      inputs: premium index close
+      lookback: 90
+      lag: 0
+      frame: per symbol
+      representation: deviation from a trailing mean, rolling percentile, sign persistence
+      failure_mode: A trending premium looks extreme against its own window for as long as the trend lasts.
+    - name: momentum
+      pattern: premium_change_*|premium_accel_*
+      role: signal
+      hypothesis: A premium that has been widening keeps widening over the next settlement or two.
+      inputs: premium index close
+      lookback: 90
+      lag: 0
+      frame: per symbol
+      representation: differences at six horizons, plus differences between horizons
+      failure_mode: Momentum and mean reversion read the same series with opposite signs and cancel.
+    - name: volatility
+      pattern: premium_vol_*|price_vol_*|vol_ratio_*
+      role: state
+      hypothesis: Liquidation cascades widen both the premium and the price, and the two carry different information.
+      inputs: premium index close, perpetual close
+      lookback: 43
+      lag: 0
+      frame: per symbol
+      representation: trailing dispersion at four horizons, plus short-over-long ratios
+      failure_mode: A ratio of two dispersions is unstable when the denominator window is quiet.
+    - name: cross_sectional
+      pattern: premium_vs_median|premium_xs_zscore|xs_funding_dispersion
+      role: state
+      hypothesis: Whether a premium is high depends on what the rest of the universe is paying that settlement.
+      inputs: premium index close, official funding settlements
+      lookback: 1
+      lag: 0
+      frame: within the decision timestamp
+      representation: distance from the cross-sectional median, cross-sectional z-score, dispersion
+      failure_mode: The panel is unbalanced, so early dates rank against a handful of symbols.
+    - name: regime
+      pattern: premium_regime_*|premium_rsi_*|funding_session|cost_tier_alt
+      role: state
+      hypothesis: A sustained premium and the settlement slot condition how any signal should be read.
+      inputs: premium index close, symbol, decision timestamp
+      lookback: 10
+      lag: 0
+      frame: per symbol, except the session which is a property of the timestamp
+      representation: signed regime average, bounded oscillator, categorical slot and fee tier
+      failure_mode: The fee tier is a fixed list, so it does not follow a symbol across a tier change.
+
+# What `04_model_based_features` decides, declared here for the same reason the
+# feature windows above are. Every count is in 8-hour settlement bars, the unit
+# `features.bar_hours` sets and `features.windows` already uses.
+model_based:
+  # Trailing returns a symbol needs inside a fold's training window before either
+  # model is fitted for it. 500 settlements is about five and a half months; below
+  # that the leverage term of a GJR recursion and the transition matrix of a
+  # two-state chain are estimated off too few regime switches to mean anything.
+  min_train_bars: 500
+  garch:
+    # The conditional-volatility z-score compares a symbol's current forecast
+    # against its own recent level: 90 bars is 30 days.
+    vol_zscore_window: 90
+    # Bound on the emitted z-score, so one liquidation cascade does not set the
+    # scale a model reads. Same role as `features.clip.zscore`.
+    zscore_clip: 10.0
+  hmm:
+    # Calm funding and stressed funding.
+    n_states: 2
+    # Expectation-maximization reaches a local optimum, so the fit is repeated
+    # from this many starting points and the highest training likelihood is kept.
+    n_restarts: 10
+  incremental_ic:
+    # A settlement needs this many symbols quoting before its cross-sectional rank
+    # correlation is used, and a feature needs this many usable settlements before
+    # its mean is reported.
+    min_cross_section: 10
+    min_decision_times: 20
+
 modeling:
   gbm:
     libraries: [lightgbm]

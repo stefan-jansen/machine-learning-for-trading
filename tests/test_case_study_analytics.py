@@ -11,7 +11,7 @@ The tests pin three layers:
    case-study IDs must agree on keys, so a new case study can't be added
    to one dict and forgotten in another.
 
-2. **Path resolution** — ``_cs_dir`` / ``_registry_path`` honor
+2. **Path resolution** — ``_cs_dir`` / ``registry_path`` honor
    ``ML4T_OUTPUT_DIR`` for test isolation.
 
 3. **Query contracts** — against a seeded SQLite registry:
@@ -104,7 +104,7 @@ def test_registry_path_is_three_levels_deep(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
     (tmp_path / "etfs" / "run_log").mkdir(parents=True)
     (tmp_path / "etfs" / "run_log" / "registry.db").touch()
-    p = analytics._registry_path("etfs")
+    p = analytics.registry_path("etfs")
     assert p == tmp_path / "etfs" / "run_log" / "registry.db"
 
 

@@ -55,6 +55,14 @@
 
 import warnings
 
+# lightgbm must be imported before scikit-learn. Both ship their own OpenMP
+# runtime and the first one loaded wins for the whole process; on macOS ARM64,
+# getting scikit-learn's libomp first makes LightGBM's next multithreaded fit
+# segfault in __kmp_suspend_initialize_thread, killing the kernel with no
+# traceback. The `import lightgbm` further down, beside the training cell that
+# uses it, cannot fix this - by then the module header has already lost the
+# race - so the binding is established here and re-stated there for the reader.
+import lightgbm as lgb  # noqa: F401
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl

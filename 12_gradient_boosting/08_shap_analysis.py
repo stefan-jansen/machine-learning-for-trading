@@ -51,22 +51,28 @@
 import warnings
 from pathlib import Path
 
+# lightgbm must be imported before scikit-learn. Both ship their own OpenMP
+# runtime and the first one loaded wins for the whole process; on macOS ARM64,
+# loading scikit-learn's libomp first makes LightGBM's first multithreaded fit
+# segfault in __kmp_suspend_initialize_thread. This notebook fits an
+# LGBMRegressor three times. Plain `import` statements sort ahead of
+# `from ... import` ones, so this order is what isort produces and will not
+# drift back.
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from sklearn.inspection import permutation_importance
-
-warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
 import shap
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from sklearn.inspection import permutation_importance
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
 from utils.modeling import load_modeling_dataset
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
+
+warnings.filterwarnings("ignore")
 
 
 def cross_sectional_ic_mean(
@@ -86,7 +92,7 @@ def cross_sectional_ic_mean(
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
+    ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic")
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 

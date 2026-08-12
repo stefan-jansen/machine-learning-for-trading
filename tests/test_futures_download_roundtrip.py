@@ -96,7 +96,16 @@ class _FakeClient:
 
     def __init__(self):
         self.calls: list[tuple] = []
+        self.cost_calls: list[tuple] = []
+        self.cost_fails = False
         self.timeseries = self
+        self.metadata = self
+
+    def get_cost(self, dataset, symbols, schema, start, end, stype_in):
+        if self.cost_fails:
+            raise RuntimeError("metadata.get_cost unavailable")
+        self.cost_calls.append((tuple(symbols), start, end, stype_in))
+        return 1.0
 
     def get_range(self, dataset, symbols, schema, start, end, stype_in):
         self.calls.append((tuple(symbols), start, end, stype_in))
@@ -177,3 +186,74 @@ def test_dry_run_writes_nothing(tmp_path, stub_databento):
     assert rows == 0
     assert stub_databento.calls == []
     assert not dl.get_partition_path(tmp_path, "RTY", 2017).exists()
+
+
+# ---------------------------------------------------------------------------
+# 3. The cost estimate must cover exactly what the download requests
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_covers_the_same_range_the_download_requests(tmp_path, stub_databento):
+    """The estimate and the paid request must span the same window.
+
+    ``download_full_product`` takes no year list: it re-requests the product's
+    whole range in one call. An estimate built from the *missing* years alone
+    therefore understates the bill whenever a product is partially present, and
+    ``--max-cost`` would wave through a download costing more than it checked.
+    """
+    config = dl.FuturesConfig.load(CONFIG_YAML)
+
+    dl.estimate_cost(config, ["RTY"])
+    dl.download_full_product("RTY", config, tmp_path, dry_run=False)
+
+    estimated = stub_databento.cost_calls[-1]
+    requested = stub_databento.calls[-1]
+    assert estimated == requested, (
+        f"estimate covered {estimated[1]}..{estimated[2]} but the paid request "
+        f"covered {requested[1]}..{requested[2]}"
+    )
+
+
+def test_unknown_cost_is_not_reported_as_free(stub_databento):
+    """A failed estimate must return None, never 0.0.
+
+    0.0 compares below any ``--max-cost`` and would start a paid download on the
+    strength of an estimate that never succeeded.
+    """
+    config = dl.FuturesConfig.load(CONFIG_YAML)
+    stub_databento.cost_fails = True
+
+    assert dl.estimate_cost(config, ["RTY"]) is None
+
+
+def test_request_end_follows_config_default_end(tmp_path, stub_databento):
+    """``download_full_product`` must request through ``config.default_end``.
+
+    This is what makes ``--end-date`` cost anything: the CLI lowers
+    ``config.default_end`` itself rather than keeping a local end date, because
+    the download reads that field directly. An override that only narrowed the
+    coverage window would leave the request, and the bill, at the full range.
+    """
+    config = dl.FuturesConfig.load(CONFIG_YAML)
+    config.default_end = min(config.default_end, "2018-01-01")
+
+    dl.download_full_product("RTY", config, tmp_path, dry_run=False)
+    assert stub_databento.calls[-1][2] == "2018-01-01"
+
+
+def test_dry_run_survives_an_unknown_cost(tmp_path, stub_databento, monkeypatch, capsys):
+    """``--dry-run`` must still run when the estimate fails.
+
+    An unknown cost blocks anything paid, but a dry run buys nothing and is exactly
+    what the failure message tells the reader to reach for. Exiting before the
+    dry-run branch made that suggestion impossible to follow.
+    """
+    stub_databento.cost_fails = True
+    monkeypatch.setattr(dl, "resolve_data_dir", lambda _: tmp_path)
+    monkeypatch.setattr(sys, "argv", ["download.py", "--product", "RTY", "--dry-run", "--force"])
+
+    assert dl.main() == 0
+    out = capsys.readouterr().out
+    assert "[DRY RUN]" in out
+    assert "unknown" in out
+    assert stub_databento.calls == [], "a dry run must not request any data"

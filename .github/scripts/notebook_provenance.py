@@ -54,16 +54,6 @@ Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 as they are re-run through the canonical path, and the gate enforces only where
 provenance exists. Flip to ``--strict`` once the backfill is complete.
 
-SCOPE. ``check`` takes the paths it should judge, and the pre-commit hook passes
-the staged ones. It used to take none and walk the whole repository on every
-commit, which meant any stale pair anywhere blocked every commit in that
-worktree: on 2026-08-04 ``public-ch11-12`` held nine stale notebooks, so a
-one-word fix to a chapter 11 markdown cell could not be committed until nine
-unrelated notebooks had been re-run. The gate's purpose is to stop a stale
-notebook being *committed*, and that only ever needed the commit's own files.
-``--all`` keeps the repository-wide sweep for CI, which is where a whole-tree
-answer is the thing being asked for.
-
 Usage::
 
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
@@ -270,6 +260,209 @@ def git_blob(path: Path) -> str:
     ).stdout.strip()
 
 
+ALT_FUNCS = frozenset({"show_with_alt", "show_plotly_with_alt"})
+
+
+def _alt_call_name(func: ast.expr) -> str | None:
+    """The called name for a bare ``f(...)`` or a qualified ``mod.f(...)``, else None.
+
+    Both forms occur in the corpus: ``from utils.style import show_plotly_with_alt``
+    gives the bare call, and ``import utils.style as style`` gives the qualified one.
+    Matching only ``ast.Name`` left the qualified form outside the exception, so a
+    corrected caption there was still read as a stale run.
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _percent_cells(src: str) -> list[tuple[str, str, str]]:
+    """(marker line, kind, body) per jupytext percent cell.
+
+    Comparing cell structure and raw source, rather than an AST, is deliberate. An AST
+    is blind to three things that change a notebook's outputs: a trailing semicolon,
+    which suppresses a cell's automatic display; a moved ``# %%``, which changes which
+    code shares a cell and therefore which value is the cell's last expression; and a
+    changed cell tag, which changes how the cell is treated. All three leave the AST
+    identical, so an AST comparison would forgive them.
+    """
+    cells: list[tuple[str, str, list[str]]] = []
+    marker, kind, buf = "", "code", []
+    for line in src.splitlines(keepends=True):
+        if line.startswith("# %%"):
+            cells.append((marker, kind, buf))
+            marker = line
+            kind = "markdown" if "[markdown]" in line or "[raw]" in line else "code"
+            buf = []
+            continue
+        buf.append(line)
+    cells.append((marker, kind, buf))
+    return [(m, k, "".join(b)) for m, k, b in cells]
+
+
+def _blank_alts(code: str) -> tuple[str, list[str]] | None:
+    """(*code* with each alt literal replaced by a placeholder, the literals in source order).
+
+    None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
+    byte offset, and replaces from the end so earlier spans keep their offsets.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    data = code.encode("utf-8")
+    line_start = [0]
+    for line in data.splitlines(keepends=True):
+        line_start.append(line_start[-1] + len(line))
+
+    found: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and _alt_call_name(node.func) in ALT_FUNCS
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            arg = node.args[1]
+            if arg.end_lineno is None or arg.end_col_offset is None:
+                return None
+            found.append(
+                (
+                    line_start[arg.lineno - 1] + arg.col_offset,
+                    line_start[arg.end_lineno - 1] + arg.end_col_offset,
+                    arg.value,
+                )
+            )
+    # ast.walk is breadth-first, not source order; the outputs it is compared against
+    # are in source order.
+    found.sort()
+    for begin, finish, _ in reversed(found):
+        data = data[:begin] + b'"<alt>"' + data[finish:]
+    return data.decode("utf-8"), [alt for _, _, alt in found]
+
+
+def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
+    """Whether each top-level statement is terminated by ``;``, in source order.
+
+    An AST cannot see this and it changes the outputs: Jupyter suppresses the automatic
+    display of a cell's last expression when it ends with a semicolon, so ``summary``
+    and ``summary;`` produce identical ASTs and different notebooks. Only top-level
+    statements matter, because only the last of them is auto-displayed.
+    """
+    lines = code.encode("utf-8").splitlines()
+    flags = []
+    for stmt in tree.body:
+        if stmt.end_lineno is None or stmt.end_col_offset is None:
+            flags.append(False)
+            continue
+        line = lines[stmt.end_lineno - 1] if stmt.end_lineno - 1 < len(lines) else b""
+        rest = line[stmt.end_col_offset :].split(b"#", 1)[0].strip()
+        flags.append(rest.startswith(b";"))
+    return tuple(flags)
+
+
+def _comparable(src: str) -> list[tuple] | None:
+    """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
+
+    Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
+    plus its semicolon flags. The AST dump is taken without attributes so that neither
+    a longer alt string nor ``ruff format`` rewrapping a call can move it - both are
+    formatting, and formatting cannot change an output.
+
+    What the AST would miss is added back explicitly. The marker line carries the cell
+    tags, so retagging is a change. The list of cells carries the ``# %%`` boundaries,
+    so moving one is a change - it decides which code shares a cell and therefore which
+    value is the cell's last expression. The semicolon flags carry display suppression.
+
+    A markdown cell's body is dropped: it is a comment in the ``.py`` and cannot affect
+    outputs, so its text may change freely while its marker and position still count.
+    """
+    out: list[tuple] = []
+    for marker, kind, body in _percent_cells(src):
+        if kind != "code":
+            # Only when the body really is all comments. A percent-format markdown cell
+            # holds nothing else, so a non-comment line means the marker does not
+            # describe the content - and dropping the body would then hide executable
+            # code. Measured: appending `fig;` after the last `# %% [markdown]` marker
+            # of a real notebook was forgiven until this compared the body.
+            if all(not ln.strip() or ln.lstrip().startswith("#") for ln in body.splitlines()):
+                out.append((marker, kind))
+            else:
+                out.append((marker, kind, body))
+            continue
+        blanked = _blank_alts(body)
+        if blanked is None:
+            return None
+        try:
+            tree = ast.parse(blanked[0])
+        except SyntaxError:
+            return None
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(blanked[0], tree)))
+    return out
+
+
+def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
+    """Whether the ``.py`` drifted from its stamp ONLY in alt text already in the outputs.
+
+    A stamp records the ``.py`` blob that was executed, and any edit to the ``.py``
+    moves the blob, so the gate reads a corrected figure description as a notebook
+    that needs re-executing. For alt text that is the wrong answer, and expensively
+    so: ``show_plotly_with_alt`` publishes ``metadata={..., "image/png": {"alt": alt}}``
+    and takes the image itself from ``fig._repr_mimebundle_()``, which never sees the
+    alt string. So the alt in a notebook's output metadata is a verbatim copy of the
+    source literal, and re-executing to change one cannot produce different outputs.
+    ``nasdaq100_microstructure/04`` is 90 minutes and 43 GB to restate four sentences.
+
+    Both halves have to hold, and neither is a judgement:
+
+    * every cell lines up - same markers, same kinds, same order - and every code cell's
+      source is byte-identical once the alt literals are blanked, so nothing that
+      executes changed. Only markdown bodies are free, because they are comments in the
+      ``.py``, and
+    * every alt in the notebook's output metadata already equals the literal in its own
+      cell, so the outputs on disk are the ones this source produces.
+
+    Anything else - a changed constant, a reordered call, a trailing semicolon, a moved
+    ``# %%``, an alt the outputs do not carry - is stale, which is what the stamp is for.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # the stamped blob is not in this repo; cannot compare
+    old_cells = _comparable(old.stdout)
+    new_cells = _comparable(py.read_text(encoding="utf-8"))
+    if old_cells is None or new_cells is None or old_cells != new_cells:
+        return False
+
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        if not any(fn in src for fn in ALT_FUNCS):
+            continue
+        blanked = _blank_alts(src)
+        if blanked is None:
+            return False
+        carried = [
+            (out.get("metadata") or {}).get("image/png", {}).get("alt")
+            for out in cell.get("outputs", [])
+            if "image/png" in out.get("data", {})
+        ]
+        if len(blanked[1]) != len(carried) or any(
+            a != c for a, c in zip(blanked[1], carried, strict=True)
+        ):
+            return False
+    return True
+
+
 def contradicts_injected_cell(nb: dict, parameters: dict[str, object]) -> str | None:
     """Why ``parameters`` disagrees with the notebook's injected cell, or None.
 
@@ -327,40 +520,85 @@ def stamp_notebook(
     return stamp
 
 
-def selected_notebooks(paths: list[str]) -> list[Path]:
-    """The notebooks these paths ask about: each ``.ipynb``, and each ``.py``'s pair.
+def stamped_at(ref: str = "HEAD") -> set[str]:
+    """Repo-relative notebooks whose committed version at *ref* carries a stamp.
 
-    A ``.py`` is included because editing it is exactly what makes its notebook
-    stale, so a commit that stages only the ``.py`` is the case the gate exists
-    to catch.
+    One `git grep` over the tree rather than a read per notebook, because the answer
+    is needed for every unstamped file and there are several hundred of them.
     """
-    out: set[Path] = set()
-    for raw in paths:
-        p = (REPO_ROOT / raw).resolve()
-        if SKIP_PARTS & set(p.parts):
-            continue
-        if p.suffix == ".ipynb":
-            candidate = p
-        elif p.suffix == ".py":
-            candidate = p.with_suffix(".ipynb")
-        else:
-            continue
-        if candidate.name.startswith("_executed_") or candidate.name.startswith("_lock_"):
-            continue
-        if candidate.exists():
-            out.add(candidate)
-    return sorted(out)
+    result = subprocess.run(
+        ["git", "grep", "-l", f'"{STAMP_KEY}"', ref, "--", "*.ipynb"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    prefix = f"{ref}:"
+    return {line[len(prefix) :] for line in result.stdout.splitlines() if line.startswith(prefix)}
+
+
+def stamp_reference(base_branch: str = "main") -> str:
+    """The commit a stamp must not have disappeared since.
+
+    Not ``HEAD``. Comparing the working tree with ``HEAD`` catches a removal that has
+    not been committed yet and nothing else: once it is committed both sides are
+    unstamped, and the check goes quiet exactly where it is needed, which is CI
+    reading a pushed branch. The fork point from the base branch makes the question
+    "did this branch drop a stamp", and answers it the same way in the pre-commit
+    hook, in CI, and days later.
+
+    Falls back to ``HEAD`` when there is no base branch to fork from - a fresh clone
+    with no remote, or work on ``main`` itself, where the fork point IS ``HEAD``.
+    """
+    for ref in (f"origin/{base_branch}", base_branch):
+        merge_base = subprocess.run(
+            ["git", "merge-base", "HEAD", ref],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if merge_base.returncode == 0 and merge_base.stdout.strip():
+            return merge_base.stdout.strip()
+    return "HEAD"
+
+
+def destamped(ref: str | None = None) -> list[str]:
+    """Notebooks stamped at *ref* and unstamped now.
+
+    The gate says nothing about a notebook with no stamp, which is deliberate - the
+    corpus is being stamped as notebooks are re-run, and failing the ones that have
+    not been yet would fail hundreds of teaching notebooks that are not the subject.
+    The hole that leaves is that DROPPING a stamp turns the check off for that file
+    instead of failing it, which is the same shape as a review that passes because
+    it never looked. A stamp is only ever added, so a notebook that had one and does
+    not is a regression whatever removed it.
+    """
+    return sorted(
+        rel
+        for rel in stamped_at(ref or stamp_reference())
+        if (REPO_ROOT / rel).exists()
+        and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        .get("metadata", {})
+        .get(STAMP_KEY)
+    )
 
 
 def check_all(
-    strict: bool = False, notebooks: list[Path] | None = None
-) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified) repo-relative offenders."""
+    strict: bool = False,
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+    """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
+
+    Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
+    never silent: a notebook in that list has a ``.py`` that no longer matches its
+    stamp, and the reason it is allowed is printed rather than assumed.
+    """
     stale: list[str] = []
     testmode: list[str] = []
     contradicted: list[str] = []
     unverified: list[str] = []
-    for nb_path in iter_notebooks() if notebooks is None else notebooks:
+    alt_only: list[str] = []
+    for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
         if py is None:
@@ -373,14 +611,18 @@ def check_all(
         if not stamp:
             unverified.append(rel)
             continue
-        if stamp.get("source_py_blob") != git_blob(py):
-            stale.append(rel)
+        stamped_blob = stamp.get("source_py_blob")
+        if stamped_blob != git_blob(py):
+            if alt_text_only_drift(stamped_blob, py, nb):
+                alt_only.append(rel)
+            else:
+                stale.append(rel)
         if not stamp.get("production", False):
             testmode.append(f"{rel} (params={stamp.get('parameters')})")
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-    return stale, testmode, contradicted, unverified
+    return stale, testmode, contradicted, unverified, alt_only
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
@@ -404,14 +646,13 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    if args.all:
-        notebooks = None
-    else:
-        notebooks = selected_notebooks(args.paths)
-        if not notebooks:
-            return 0
-    stale, testmode, contradicted, unverified = check_all(strict=args.strict, notebooks=notebooks)
-    fail = bool(stale or testmode or contradicted) or (args.strict and bool(unverified))
+    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict)
+    lost = destamped()
+    fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
+    if lost:
+        print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
+        for r in lost:
+            print(f"  {r}")
     if stale:
         print(
             "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
@@ -431,6 +672,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
         )
         for r in contradicted:
             print(f"  {r}")
+    if alt_only:
+        print(
+            "ALT-TEXT ONLY (the .py drifted from its stamp only in figure alt text the "
+            "outputs already carry, so re-executing could not change them — allowed):"
+        )
+        for r in alt_only:
+            print(f"  {r}")
     if unverified:
         verb = "UNVERIFIED (no provenance stamp"
         verb += (
@@ -442,7 +690,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if not fail:
         print(
             f"notebook sync OK: {len(stale)} stale, {len(testmode)} test-mode, "
-            f"{len(contradicted)} contradicted, {len(unverified)} unverified (advisory)"
+            f"{len(contradicted)} contradicted, {len(alt_only)} alt-text-only, "
+            f"{len(unverified)} unverified (advisory)"
         )
     return 1 if fail else 0
 
@@ -471,10 +720,6 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
-    cp.add_argument(
-        "--all", action="store_true", help="judge every notebook in the repo, not just PATHS"
-    )
-    cp.add_argument("paths", nargs="*", help="notebooks and/or paired .py files to judge")
     cp.set_defaults(func=_cmd_check)
 
     args = ap.parse_args()

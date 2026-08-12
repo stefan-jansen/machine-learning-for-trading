@@ -64,6 +64,31 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 OVERRIDES_PATH = REPO_ROOT / "tests" / "overrides.yaml"
 
+# Thread-pool caps for the papermill kernel.
+#
+# scikit-learn, NumPy's BLAS, numexpr and their dependencies each default to one
+# thread per core. A notebook kernel therefore opens ~24 threads per pool on this
+# box, and several suites run at once, so the pools oversubscribe the machine by
+# about an order of magnitude. OpenMP pools spin rather than block while they
+# wait, so the cost lands as wall-clock time inside whichever cell happens to be
+# running and reads as that cell timing out. Measured on
+# 11_ml_pipeline/02_regularization_paths: the ten-fit LASSO alpha grid took 761 s
+# for one fold unpinned and 0.90 s pinned, with identical iteration counts, so the
+# optimizer did identical work both times. End to end that notebook went from a
+# 300 s cell timeout to passing in 41 s.
+#
+# CI runners have few cores and lose nothing. A notebook that genuinely wants more
+# threads asks the library rather than the environment (LightGBM's num_threads and
+# torch.set_num_threads both win over these), or a caller raises them via
+# extra_env, which is applied after this table.
+KERNEL_THREAD_CAP = os.environ.get("ML4T_TEST_THREADS", "1")
+KERNEL_THREAD_CAPS = {
+    "OMP_NUM_THREADS": KERNEL_THREAD_CAP,
+    "OPENBLAS_NUM_THREADS": KERNEL_THREAD_CAP,
+    "MKL_NUM_THREADS": KERNEL_THREAD_CAP,
+    "NUMEXPR_NUM_THREADS": KERNEL_THREAD_CAP,
+}
+
 # Cache loaded overrides
 _overrides_cache: dict | None = None
 
@@ -904,6 +929,7 @@ def run_notebook(
         "MPLBACKEND": "Agg",
         "PLOTLY_RENDERER": "json",
         "DISABLE_HPO": "1",
+        **KERNEL_THREAD_CAPS,
     }
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)

@@ -55,6 +55,25 @@ sudo apt install build-essential python3-dev   # Ubuntu, Debian, and inside WSL2
 xcode-select --install                         # macOS
 ```
 
+**macOS also needs the OpenMP runtime, and this one fails later rather than at `uv sync`.** The
+LightGBM wheel links against `libomp`, which macOS does not ship and the compiler tools do not
+install. Without it the environment builds cleanly and then Chapter 12 stops at its first import:
+
+```
+OSError: dlopen(.../lightgbm/lib/lib_lightgbm.dylib): Library not loaded: @rpath/libomp.dylib
+```
+
+The supported way to get it is [Homebrew](https://brew.sh), which a fresh macOS does not have
+either. Install it first if `brew` is not already on your `PATH`. Its installer prints PATH
+instructions rather than applying them, so the `eval` below is what it asks you to run, given
+here for Apple Silicon (`/usr/local/bin/brew` on Intel):
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/opt/homebrew/bin/brew shellenv)"      # puts brew on PATH in this shell
+brew install libomp                            # macOS, both chips
+```
+
 `python3-dev` is the second half of the requirement on any distribution whose own `python3` is
 already 3.14 or newer, Ubuntu 26.04 being the first. `uv` downloads a managed CPython only when
 no installed interpreter satisfies the project's floor; when the system one does, `uv` builds
@@ -308,6 +327,8 @@ databases that run as containers. Everything else is `uv`.
 
 ```bash
 xcode-select --install                        # compiler, if you do not have it already
+brew install libomp                           # OpenMP runtime; LightGBM will not import without it.
+                                              # Needs Homebrew - see the prerequisites section above
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env                   # puts uv on PATH in this shell
 git clone https://github.com/stefan-jansen/machine-learning-for-trading.git

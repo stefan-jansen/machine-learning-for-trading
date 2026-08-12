@@ -29,17 +29,20 @@ import polars as pl
 from matplotlib.figure import Figure
 from scipy.cluster.hierarchy import dendrogram, fcluster, linkage, set_link_color_palette
 from scipy.spatial.distance import squareform
+from scipy.stats import spearmanr
 
 from utils.style import COLOR_CYCLER, COLORS, FIGSIZE, add_message_title, show_with_alt
 
 __all__ = [
     "FeatureFamily",
+    "QuantileProfile",
     "assert_values_agree",
     "assign_families",
     "cross_sectional_percentile",
     "drawdown_block",
     "families_from_config",
     "family_coverage",
+    "has_value",
     "plot_coverage_through_time",
     "plot_cross_sectional_dispersion",
     "plot_feature_distributions",
@@ -47,6 +50,7 @@ __all__ = [
     "plot_redundancy_clusters",
     "momentum_volatility_block",
     "plot_timing_contract",
+    "quantile_profile",
     "register_frame",
     "relative_volume_block",
     "rolling_zscore",
@@ -385,6 +389,27 @@ def trailing_sharpe(
 # ---------------------------------------------------------------------------
 
 
+def has_value(dtype: pl.DataType, column: str) -> pl.Expr:
+    """True where the column holds a number: neither null nor NaN.
+
+    Polars counts NaN as a value, so ``is_not_null()`` is True for it, and the
+    feature calls do not agree on which one a warm-up head is written with -
+    polars' own ``rolling_mean`` emits null, ``ml4t.engineer.features.momentum``
+    emits NaN. Reading a NaN as covered breaks both directions: ``warmup_audit``
+    takes the first bar as populated for any NaN-warmup column and raises the
+    look-ahead assertion on a column that is correctly warmed up, which is what
+    ``rsi_14d`` did in fx_pairs, and ``family_coverage`` draws a stretch holding
+    no values as fully covered, which is silent.
+
+    A notebook should not have to normalize its frame before a helper can count
+    it, so both helpers apply this rather than expecting a ``fill_nan(None)``.
+    """
+    populated = pl.col(column).is_not_null()
+    if dtype.is_float():
+        populated = populated & pl.col(column).is_not_nan()
+    return populated
+
+
 def warmup_audit(
     df: pl.DataFrame,
     expected: Mapping[str, int],
@@ -399,13 +424,16 @@ def warmup_audit(
     bars. A column that is populated **earlier** than its lookback allows is
     reading rows it cannot see, so the check raises rather than reporting.
 
+    A NaN is not a value here: see :func:`has_value`.
+
     Returns the per-column census so the notebook can show it.
     """
     keys = [entity] if isinstance(entity, str) else list(entity)
     ranked = df.sort([*keys, time]).with_columns(pl.col(time).cum_count().over(keys).alias("_bar"))
+    schema = ranked.schema
     rows = []
     for column, bars in expected.items():
-        observed = ranked.filter(pl.col(column).is_not_null())["_bar"].min()
+        observed = ranked.filter(has_value(schema[column], column))["_bar"].min()
         observed = None if observed is None else int(observed)
         rows.append(
             {
@@ -493,7 +521,11 @@ def family_coverage(
     time: str = "timestamp",
     every: str | None = None,
 ) -> pl.DataFrame:
-    """Non-null share per family per decision timestamp.
+    """Share of a family's columns holding a value, per decision timestamp.
+
+    A NaN is not a value here: see :func:`has_value`. Counting one as covered
+    draws a warm-up head, or any stretch a library call filled with NaN, as a
+    dense line.
 
     *every* buckets the time axis (``"1mo"``) where the panel has more decision
     timestamps than a chart can resolve.
@@ -501,14 +533,127 @@ def family_coverage(
     frame = df
     if every is not None:
         frame = frame.with_columns(pl.col(time).dt.truncate(every).alias(time))
+    schema = frame.schema
     families: dict[str, list[str]] = {}
     for column, family in assignment.items():
         families.setdefault(family, []).append(column)
     aggs = [
-        pl.mean_horizontal([pl.col(c).is_not_null() for c in cols]).mean().alias(family)
+        pl.mean_horizontal([has_value(schema[c], c) for c in cols]).mean().alias(family)
         for family, cols in families.items()
     ]
     return frame.group_by(time).agg(aggs).sort(time)
+
+
+@dataclass(frozen=True)
+class QuantileProfile:
+    """What each quantile of a feature earned, one decision time at a time."""
+
+    means: list[float]
+    medians: list[float]
+    monotonicity: float
+    spread: float
+    periods_used: int
+    periods_available: int
+
+
+def quantile_profile(
+    frame: pl.DataFrame,
+    feature: str,
+    label: str,
+    *,
+    date_col: str,
+    n_quantiles: int = 5,
+    min_cross_section: int | None = None,
+    demean_within_date: bool = False,
+) -> QuantileProfile | None:
+    """Average and median label by feature quantile, averaged over decision times.
+
+    Sorting on a feature and reading what each quantile went on to earn is the
+    shape behind a rank correlation, and the two have to be built on the same
+    inferential unit or they answer different questions while appearing to agree.
+    Both averages here are therefore taken twice: first across the assets in one
+    quantile at one decision time, and then across decision times. Every decision
+    time counts once however many assets it quoted, which is what a portfolio
+    rebalanced at every decision time earns and what the information coefficient
+    already measures.
+
+    Pooling every row into one average instead is the failure this exists to
+    prevent, and it is silent: the profile comes out looking the same, weighted by
+    how many assets happened to be quoted rather than by time.
+
+    Quantiles are assigned inside each decision time, so a quantile means "high
+    relative to the assets quoted alongside it" rather than "high relative to the
+    whole history". Cutting the pooled sample instead lets a period when the whole
+    market sat high place all of its assets in the top quantile, which mixes
+    movement over time into a diagnostic that is meant to be purely across assets.
+
+    A decision time enters only when it quotes at least *min_cross_section* assets
+    (the number of quantiles, where none is given) and at least *n_quantiles*
+    distinct feature values. A feature taking two values cannot be split five ways,
+    and forcing it produces boundaries that fall inside a tie, where the split
+    reports the order the rows sit in rather than the feature.
+
+    Set *demean_within_date* where every quantile earns whatever the market earned
+    that period and the difference between quantiles is the only quantity a
+    long-short book collects: the label is then taken relative to its own decision
+    time's average before the quantiles are formed.
+
+    Returns ``None`` where nothing survives the floor, or where the surviving rows
+    do not fill all *n_quantiles* quantiles - both mean the feature has no profile
+    to read, not that its profile is flat.
+    """
+    valid = frame.select(date_col, feature, label).drop_nulls()
+    periods_available = valid[date_col].n_unique()
+    floor = max(min_cross_section or n_quantiles, n_quantiles)
+    valid = valid.filter(
+        (pl.len().over(date_col) >= floor)
+        & (pl.col(feature).n_unique().over(date_col) >= n_quantiles)
+    )
+    periods_used = valid[date_col].n_unique()
+    if not valid.height:
+        return None
+
+    scored = label
+    if demean_within_date:
+        scored = "_excess"
+        valid = valid.with_columns(
+            (pl.col(label) - pl.col(label).mean().over(date_col)).alias(scored)
+        )
+
+    # Imported here rather than at module scope. `test-unit` builds a deliberately small
+    # environment for this module's figure tests - its own comment says matplotlib and
+    # hmmlearn are the whole import surface and that nothing here pulls an `ml4t-*`
+    # package, which is what keeps it a fast per-commit gate. A module-level import of
+    # `ml4t.diagnostic` fails that job at collection, which is exactly what it did.
+    from ml4t.diagnostic.signal import quantize_factor
+
+    binned = quantize_factor(valid, n_quantiles=n_quantiles, factor_col=feature, date_col=date_col)
+    profile = (
+        binned.group_by([date_col, "quantile"])
+        .agg(
+            pl.col(scored).mean().alias("_mean"),
+            pl.col(scored).median().alias("_median"),
+        )
+        .group_by("quantile")
+        .agg(
+            pl.col("_mean").mean().alias("mean"),
+            pl.col("_median").mean().alias("median"),
+        )
+        .sort("quantile")
+    )
+    means = profile["mean"].to_list()
+    medians = profile["median"].to_list()
+    if len(means) < n_quantiles or any(value is None for value in means):
+        return None
+
+    return QuantileProfile(
+        means=[float(value) for value in means],
+        medians=[float(value) for value in medians],
+        monotonicity=float(spearmanr(range(len(means)), means).statistic),
+        spread=float(means[-1] - means[0]),
+        periods_used=int(periods_used),
+        periods_available=int(periods_available),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -519,15 +664,19 @@ def family_coverage(
 def _cycle(n: int) -> list[tuple[str, str]]:
     """Colour and line style per series, so more series than hues stay separable.
 
-    The palette has six hues. Beyond that, cycling colour alone puts two series in
-    the same navy and the reader cannot tell which line is which; the style cycles
-    at a different rate, so each pair is distinct.
+    The style turns over once per full pass through the palette, so the first six
+    series are told apart by hue alone and only a seventh onwards needs a dash to
+    part it from the series six earlier.
+
+    It used to turn over every *five*. ``COLOR_CYCLER``'s sixth entry was ``slate``,
+    a second navy, so a solid first and a solid sixth series were one line, and
+    parting them by style was the only lever this helper had. The palette now ends
+    in ``recede``, which is a hue away from navy in colour and in gray, so the
+    workaround is gone and with it the combinations it cost.
     """
     styles = ["-", "--", ":", "-."]
-    return [
-        (COLOR_CYCLER[i % len(COLOR_CYCLER)], styles[(i // len(COLOR_CYCLER)) % len(styles)])
-        for i in range(n)
-    ]
+    hues = len(COLOR_CYCLER)
+    return [(COLOR_CYCLER[i % hues], styles[(i // hues) % len(styles)]) for i in range(n)]
 
 
 def plot_coverage_through_time(
@@ -560,7 +709,16 @@ def plot_coverage_through_time(
     # is for: where, and by how much, a family is actually thin.
     minima = [coverage[f].min() for f in families]
     lowest = min([float(v) for v in minima if v is not None], default=1.0)
-    ax.set_ylim(min(lowest - 0.02 * (1 - lowest) - 0.002, 0.999), 1.0005)
+    # The headroom scales with the range too, for the same reason the floor does. The
+    # stage-03 notebooks pass the panel before the null policy, so every family starts at
+    # zero and the axis spans the full unit; a fixed 1.0005 ceiling then leaves the dense
+    # stretch half a thousandth below the top, drawn underneath the spine. That stretch is
+    # what the figure claims - the families fill and never thin again - so it has to be
+    # visible as a line rather than as the frame.
+    ax.set_ylim(
+        min(lowest - 0.02 * (1 - lowest) - 0.002, 0.999),
+        1.0 + max(0.0005, 0.03 * (1 - lowest)),
+    )
     ax.set_ylabel("non-null share")
     ax.legend(fontsize=6, ncol=3, frameon=False, loc="lower right")
     add_message_title(ax, title, subtitle=subtitle)
@@ -720,6 +878,7 @@ def plot_timing_contract(
     ax.set_yticklabels([f.name for f in reversed(families)], fontsize=7)
     ax.axvline(0, color=COLORS["negative"], linewidth=1)
     ax.set_xlabel(f"{bar_unit} before the decision timestamp")
+    legend = None
     if any(f.lag for f in families):
         ax.barh(
             0,
@@ -731,11 +890,34 @@ def plot_timing_contract(
             linewidth=0.8,
             label="published but not yet available",
         )
-        ax.legend(fontsize=7, frameon=False, loc="lower left")
+        # Below the axes, and owned by the figure. Inside them at the bottom left it
+        # sat on the last family's bar - the register declares the families and the
+        # axes grow one row per family, so the more a case study declares the further
+        # the bottom row reaches under the legend, and at the eight of
+        # us_firm_characteristics and cme_futures the entry crossed the `interaction`
+        # bar and touched the tick labels under it. There is no in-axes corner that is
+        # safe here: a lag bar can reach any of them, because which families are
+        # lagged and how far is exactly what the figure is drawn to show.
+        legend = fig.legend(
+            *ax.get_legend_handles_labels(),
+            fontsize=7,
+            frameon=False,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+        )
+    # A strip under the bottom row that belongs to the "decision" label and to nothing
+    # else, and the label anchored to the axes' floor rather than to a data coordinate
+    # guessed once. At -0.45 it was inside the bottom row's bar - which spans 0.55 - so
+    # it was drawn over the last family's lookback and its lag hatch, the same thing the
+    # legend was doing a few lines above and in the same corner. How far the label
+    # reached into the bar varied with the family count, because that sets the axes
+    # height and so what 7pt is worth in data units.
+    ax.set_ylim(-1.0, len(families) - 0.5)
     ax.annotate(
         "decision",
-        xy=(0, -0.45),
-        xytext=(-3, 0),
+        xy=(0, 0),
+        xycoords=ax.get_xaxis_transform(),
+        xytext=(-3, 3),
         textcoords="offset points",
         ha="right",
         va="bottom",
@@ -743,7 +925,17 @@ def plot_timing_contract(
         color=COLORS["negative"],
     )
     add_message_title(ax, title, subtitle=subtitle)
-    fig.tight_layout()
+    # The strip the legend needs is measured after it is drawn, not guessed from the
+    # entry count, so a longer label cannot clip and a shorter one cannot leave a band
+    # of dead space. Same reservation `plot_persistence` makes for its own legend.
+    if legend is not None:
+        fig.canvas.draw()
+        strip = legend.get_window_extent(fig.canvas.get_renderer()).transformed(
+            fig.transFigure.inverted()
+        )
+        fig.tight_layout(rect=(0.0, strip.height + 0.02, 1.0, 1.0))
+    else:
+        fig.tight_layout()
     show_with_alt(fig, alt)
 
 
@@ -760,8 +952,11 @@ def plot_redundancy_clusters(
 ) -> dict[str, int]:
     """F5. Hierarchical clustering on distance :math:`1 - |\\rho|`, with the cut drawn.
 
-    Returns the cluster each column falls in, which is what ``05_evaluation`` needs
-    in order to pick one representative per cluster on a fold-aware criterion.
+    Returns the cluster each column falls in, which the calling notebook uses to state
+    how many distinct orderings its matrix carries. Nothing downstream reads it: the
+    feature screens in ``05_evaluation`` test one column at a time, and the one case
+    study that does pick a representative per cluster builds its own clusters from its
+    own fold ICs rather than from this tree.
     """
     columns = list(columns)
     frame = df.select(columns)
@@ -783,13 +978,19 @@ def plot_redundancy_clusters(
     labels = fcluster(tree, t=height, criterion="distance")
 
     fig, ax = plt.subplots(figsize=(FIGSIZE["single"][0], max(2.4, 0.13 * len(columns) + 1.2)))
-    set_link_color_palette([c for c, _ in _cycle(6)])
+    # Five hues, not six: the sixth is `slate`, a second navy, and a cluster drawn in it
+    # is indistinguishable from one drawn in `blue`. Above the cut the links are the
+    # figure's background - they say only "these two clusters eventually join" - so they
+    # recede to a light slate. They were `neutral`, #334155, which is the same dark
+    # blue-grey as `blue` and `slate` at the same weight, so all three read as one thing
+    # and the cluster structure the figure exists to show was not visible.
+    set_link_color_palette([c for c, _ in _cycle(5)])
     dendrogram(
         tree,
         labels=columns,
         orientation="left",
         color_threshold=height,
-        above_threshold_color=COLORS["neutral"],
+        above_threshold_color=COLORS["recede"],
         ax=ax,
     )
     ax.axvline(height, color=COLORS["amber"], linestyle="--", linewidth=1)
@@ -805,9 +1006,18 @@ def plot_redundancy_clusters(
 def _bootstrap_median_interval(
     values: np.ndarray, *, seed: int, draws: int = 500, level: float = 0.95
 ) -> tuple[float, float]:
-    """Percentile bootstrap interval for the median of *values*, resampling entities."""
+    """Percentile bootstrap interval for the median of *values*, resampling entities.
+
+    *values* is sorted first. The median does not care what order it arrives in, but
+    ``rng.choice`` draws by index, so the same entities in a different order give the
+    same seed a different resample and a different interval. The callers read their
+    values out of a ``group_by``, whose row order Polars does not guarantee, so the
+    ribbon moved between runs on byte-identical input - a seed that fixed the sampling
+    and not the ordering (#329, #333).
+    """
     if values.size < 3:
         return float("nan"), float("nan")
+    values = np.sort(values)
     rng = np.random.default_rng(seed)
     medians = np.median(rng.choice(values, size=(draws, values.size), replace=True), axis=1)
     lo, hi = np.quantile(medians, [(1 - level) / 2, (1 + level) / 2])
@@ -856,6 +1066,20 @@ def plot_persistence(
     # ago", which is a different date for every entity and crosses any stretch the
     # entity was absent for - after an eligibility gate, by months or years.
     dates = frame[time].unique().sort()
+    # Both lag maps below are built from Python objects and handed to
+    # `replace_strict`, which types its output from the values it was given, not from
+    # the column it replaces. A Python `datetime` carries microseconds, so on a panel
+    # stamped in anything else the new column came back `datetime[us]` and the join
+    # that follows failed outright:
+    #
+    #   SchemaError: `_then`: datetime[us, UTC] does not match `_then`: datetime[ms, UTC]
+    #
+    # Binance stamps in milliseconds, so the whole crypto_perps_funding pipeline is
+    # `datetime[ms]` and this figure could not be drawn for it at all; its notebook
+    # cast the frame it passed here and nothing else, which fixes one caller and
+    # leaves the helper broken for the next. Pinning the return type to the column's
+    # own dtype fixes it for every panel, at whatever precision it is stamped in.
+    when = frame.schema[time]
     acf: dict[str, list[float]] = {c: [] for c in columns}
     lower: dict[str, list[float]] = {c: [] for c in columns}
     upper: dict[str, list[float]] = {c: [] for c in columns}
@@ -863,7 +1087,7 @@ def plot_persistence(
     for lag in lags:
         back = dict(zip(dates[lag:].to_list(), dates[: -int(lag)].to_list(), strict=True))
         pairs = frame.with_columns(
-            pl.col(time).replace_strict(back, default=None).alias("_then")
+            pl.col(time).replace_strict(back, default=None, return_dtype=when).alias("_then")
         ).join(
             frame.select(
                 *keys,
@@ -901,7 +1125,12 @@ def plot_persistence(
     acf["_n"] = counts
 
     width, height = FIGSIZE["dual_h_tall"]
-    fig, (left, right) = plt.subplots(1, 2, figsize=(width, height + 0.5))
+    # The left panel carries a full lag axis and every curve the prose reads off; the right
+    # is a horizontal bar per feature on a 0-1 axis. Equal columns compressed the panel that
+    # holds the information and left a band of white between the two.
+    fig, (left, right) = plt.subplots(
+        1, 2, figsize=(width, height + 0.5), gridspec_kw={"width_ratios": [2, 1]}
+    )
     # An interval around each curve, at each lag. A single width drawn around zero is
     # a white-noise significance band, which is a different statement and not one this
     # estimator supports: the quantity plotted is a median over ETFs, so its
@@ -913,16 +1142,17 @@ def plot_persistence(
     left.set_xlabel("lag (bars)")
     left.set_ylabel("autocorrelation")
     # Below the axes, not inside them. A persistent feature fills the upper half and a
-    # decaying one fills the lower left, so every in-axes position covers either a
-    # curve or the y-axis label depending on the data - which is not something the
-    # caller should have to tune per notebook.
-    left.legend(
-        fontsize=6,
-        ncol=3,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
-        frameon=False,
-    )
+    # decaying one fills the lower left, so every in-axes position covers either a curve
+    # or the y-axis label depending on the data - which is not something the caller
+    # should have to tune per notebook.
+    #
+    # It belongs to the FIGURE, not to the left panel. `tight_layout` packs each axes
+    # together with its decorations, and a legend of feature names centred under a
+    # panel is far wider than the panel - so the whole column was sized to the legend
+    # and the axes inside it shrank to whatever was left. Measured on four names of
+    # `premium_vol_ratio_7d_30d` length: the lag panel held 27% of the figure with the
+    # legend attached and 42% without it. A figure legend is outside that packing, so
+    # the space it needs is reserved once, in the `rect` below.
 
     # One cross-sectional rank correlation per consecutive pair of decision dates, then
     # the median over pairs. Pooling every entity-date row into one correlation instead
@@ -943,7 +1173,9 @@ def plot_persistence(
             time, *keys, pl.col(column).rank().over(time).alias("_r")
         ).drop_nulls()
         joined = (
-            ranked.with_columns(pl.col(time).replace_strict(step, default=None).alias("_prev"))
+            ranked.with_columns(
+                pl.col(time).replace_strict(step, default=None, return_dtype=when).alias("_prev")
+            )
             .join(
                 ranked.select(*keys, pl.col(time).alias("_prev"), pl.col("_r").alias("_r_prev")),
                 on=[*keys, "_prev"],
@@ -957,14 +1189,44 @@ def plot_persistence(
     right.barh(range(len(columns)), stability, color=COLORS["blue"], height=0.6)
     right.set_yticks(range(len(columns)))
     right.set_yticklabels(columns, fontsize=6)
+    # Feature names on the OUTER edge. `width_ratios` divides the axes, not the figure,
+    # and these labels are drawn outside the right panel - so on the inner edge they take
+    # their width out of the gap between the panels, and `tight_layout` pays for it by
+    # shrinking both. Names in this corpus run to `premium_vol_ratio_7d_30d`, which left
+    # the autocorrelation panel - the one the prose reads four curves off - at about a
+    # third of the figure. On the outer edge they grow into the right margin, which
+    # nothing else is using.
+    right.yaxis.set_ticks_position("right")
+    right.yaxis.set_label_position("right")
     # The lower bound follows the data and is never clipped at zero: a negative value is
     # rank reversal between rebalances, which is the most interesting thing this panel can
     # show and the one an axis pinned at zero hides.
     lowest = float(np.nanmin(stability))
     right.set_xlim(min(lowest, 0.0) - 0.08, 1.0)
     right.axvline(0, color=COLORS["neutral"], linewidth=0.8)
-    right.set_xlabel("rank correlation, consecutive rebalances", fontsize=8)
+    # Wrapped, and anchored to the panel's right edge rather than centred under it. On one
+    # centred line this label is wider than the panel, so it ran past the right edge of the
+    # figure and was cut mid-word - "consecutive rebala" - in every stage-03 render. How far
+    # past depends on how long the feature names are, since those are the panel's y-tick
+    # labels and they set how much width is left; anchoring makes it grow into the gap
+    # between the panels instead, which no case study can exhaust.
+    right.set_xlabel("rank correlation,\nconsecutive rebalances", fontsize=8, ha="right", x=1.0)
     add_message_title(left, title, subtitle=subtitle)
-    fig.tight_layout(w_pad=2.5)
+    # The legend is drawn, measured, and only then is the strip it needs reserved. A
+    # guess from the row count leaves a band of dead space under one notebook's figure
+    # and clips another's, because how tall it is depends on the feature names.
+    legend = fig.legend(
+        *left.get_legend_handles_labels(),
+        fontsize=6,
+        ncol=min(3, len(columns)),
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.0),
+        frameon=False,
+    )
+    fig.canvas.draw()
+    strip = legend.get_window_extent(fig.canvas.get_renderer()).transformed(
+        fig.transFigure.inverted()
+    )
+    fig.tight_layout(rect=(0.0, strip.height + 0.02, 1.0, 1.0))
     show_with_alt(fig, alt)
     return None

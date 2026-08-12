@@ -58,6 +58,56 @@ def test_crypto_prediction_hashes_share_keys_and_targets(tmp_path):
     assert frames[0].height > 1
 
 
+def test_a_seeded_hash_joins_the_copied_artifact_it_shares_a_label_with(tmp_path):
+    """14/09_case_study_insights pairs a latent and a supervised prediction set of one
+    case study on their common (timestamp, entity) keys. Seeding the latent one onto a
+    fabricated grid of placeholder symbols while the supervised one is an artifact
+    copied from production leaves that join empty, which the notebook reported as
+    "Aligned targets disagree: maximum gap None" - max() over no rows.
+    """
+    cs_dir = tmp_path / "us_equities_panel"
+    run_log = cs_dir / "run_log"
+    run_log.mkdir(parents=True)
+    with sqlite3.connect(run_log / "registry.db") as connection:
+        connection.execute(
+            "CREATE TABLE prediction_sets "
+            "(prediction_hash TEXT PRIMARY KEY, training_hash TEXT, split TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE training_runs (training_hash TEXT PRIMARY KEY, label TEXT)"
+        )
+        connection.execute("INSERT INTO training_runs VALUES ('train_a', 'fwd_ret_1d')")
+        connection.executemany(
+            "INSERT INTO prediction_sets VALUES (?, ?, ?)",
+            [("hash_copied", "train_a", "validation"), ("hash_seeded", "train_a", "validation")],
+        )
+
+    copied_dir = run_log / "predictions" / "hash_copied"
+    copied_dir.mkdir(parents=True)
+    days = [date(2015, 1, 5 + offset) for offset in range(5)]
+    copied = pl.DataFrame(
+        {
+            "symbol": [s for _ in days for s in ("AAPL", "MSFT")],
+            "timestamp": [d for d in days for _ in range(2)],
+            "fold": [0] * 10,
+            "prediction": [0.01 * i for i in range(10)],
+            "actual": [0.002 * i for i in range(10)],
+        }
+    )
+    copied.write_parquet(copied_dir / "predictions.parquet")
+
+    _backfill_all_prediction_parquets(cs_dir, "us_equities_panel")
+
+    seeded = pl.read_parquet(run_log / "predictions" / "hash_seeded" / "predictions.parquet")
+    joined = seeded.join(copied, on=["timestamp", "symbol"], how="inner")
+    assert joined.height == seeded.height, "the seeded set shares no keys with the copied one"
+    gap = joined.select((pl.col("actual") - pl.col("actual_right")).abs().max()).item()
+    assert gap == 0.0, "the two sets disagree on the realized target they are scored against"
+    assert not seeded["prediction"].equals(copied["prediction"]), (
+        "the seeded set copied the scores too, so it is not an independent configuration"
+    )
+
+
 def test_seeded_predictions_stay_inside_the_split_they_are_registered_under(tmp_path, monkeypatch):
     """A ``validation`` hash must not be handed decisions from the holdout period.
 

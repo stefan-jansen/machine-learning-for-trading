@@ -3,7 +3,7 @@ name = "ml4t"
 version = "3.0.0"
 description = "Machine Learning for Algorithmic Trading — 3rd Edition"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.14,<3.15"
 license = "MIT"
 authors = [{ name = "Stefan Jansen" }]
 
@@ -35,6 +35,9 @@ dependencies = [
     # Machine Learning
     # ===================
     "scikit-learn>=1.4",
+    # Imported directly by case_studies/utils/temporal.py to pin the BLAS thread count
+    # around HMM fits, so it is declared rather than relied on through scikit-learn.
+    "threadpoolctl>=3.1",
     "xgboost>=3.1",
     "lightgbm>=4.6",
     "catboost>=1.2.8",
@@ -45,14 +48,16 @@ dependencies = [
     "gymnasium>=1.2",
     "stable-baselines3>=2.7",
     # ===================
-    # ML4T Libraries (PyPI, pre-release)
+    # ML4T Libraries (PyPI)
     # ===================
-    # b19: the missing-data errors name the download command a reader can run and
-    # the path the data root resolved from, instead of a Python API call.
-    "ml4t-data>=0.1.0b19",
-    "ml4t-diagnostic>=0.1.0b25",
-    "ml4t-engineer>=0.1.0b10",
-    "ml4t-backtest>=0.1.0b20",
+    # ml4t-live is the only one still pre-release; the rest are on stable releases.
+    # ml4t-data 0.1.2: HiveStorage.partitions() reports what a write committed, the anomaly
+    # detectors accept a date-typed timestamp column, and get_metadata() no longer lets a
+    # null in the provider block erase the timestamp an update just wrote.
+    "ml4t-data>=0.1.2",
+    "ml4t-diagnostic>=0.1.0",
+    "ml4t-engineer>=0.1.2",
+    "ml4t-backtest>=0.1.1",
     "ml4t-live>=0.1.0b3",
     # ===================
     # Deep Learning
@@ -179,7 +184,7 @@ dependencies = [
     "llama-index-embeddings-huggingface>=0.7.0",
     "chromadb>=1.5.5",
     "pfhedge>=0.22.0",
-    "ml4t-models>=0.1.0b0",
+    "ml4t-models>=0.1.0",
     "llama-index-vector-stores-chroma>=0.5.5",
     "llama-index-llms-openai>=0.7.7",
     # Ch24 Autonomous Agents (required at notebook runtime; Docker installs
@@ -245,9 +250,9 @@ dev = [
 ]
 
 [tool.uv]
-# ml4t-engineer only has pre-release versions on PyPI. Spelled "if-necessary" rather
-# than the deprecated "if-necessary-or-explicit", which makes uv print a deprecation
-# warning on every single `uv run` a reader types.
+# ml4t-live has only pre-release versions on PyPI; every other ml4t-* is on a stable
+# release. Spelled "if-necessary" rather than the deprecated "if-necessary-or-explicit",
+# which makes uv print a deprecation warning on every single `uv run` a reader types.
 prerelease = "if-necessary"
 
 # Download CPython rather than reusing whatever the machine already has. uv reuses

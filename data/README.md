@@ -34,10 +34,10 @@ cross-asset (factors, macro, prediction markets, news, text).
 | ------------------------ | ------------ | ------------- | ------------ | ------- | --------- | ---------------- | ------ |
 | ETF Universe             | Equity       | Market        | Daily        | 100     | 2006-2025 | Yahoo Finance    | No     |
 | US Equities              | Equity       | Market        | Daily        | 3,199   | 1962-2018 | NASDAQ DL        | Free   |
-| S&P 500 Bars             | Equity       | Market        | Daily        | ~638    | 2017-2021 | AlgoSeek         | Pending|
+| S&P 500 Bars             | Equity       | Market        | Daily        | 638     | 2017-2021 | AlgoSeek         | No     |
 | S&P 500 Options          | Equity       | Market        | Daily        | 634     | 2017-2021 | AlgoSeek         | Convert|
 | NASDAQ-100 Bars          | Equity       | Market        | Minute       | ~100    | 2020-2021 | AlgoSeek         | Convert|
-| TAQ Tick                 | Equity       | Market        | Tick         | 1       | Mar 2020  | AlgoSeek         | Pending|
+| TAQ Tick                 | Equity       | Market        | Tick         | 1       | Mar 2020  | AlgoSeek         | Unzip  |
 | MBO Tick                 | Equity       | Market        | Tick         | 1       | Nov 2024  | Databento        | Manual |
 | NASDAQ ITCH              | Equity       | Market        | Tick         | all     | varies    | NASDAQ FTP       | No     |
 | IEX DEEP/TOPS            | Equity       | Market        | Tick         | all     | varies    | IEX public       | No     |
@@ -70,9 +70,10 @@ unauthenticated script. `Free` — script-download, free API key required.
 `Manual` — reader downloads from a hosted URL or provider portal and
 places the files under `$ML4T_DATA_PATH` (no script); the DataBento MBO
 one-off has step-by-step instructions below. `Convert` — AlgoSeek hosts
-the archive openly, and one script turns it into what the loaders read; see
-[AlgoSeek datasets](#algoseek-datasets). `Pending` — AlgoSeek has not
-published this one yet, and nothing you can run substitutes for it.
+the archive openly, and one script turns it into what the loaders read.
+`Unzip` — AlgoSeek hosts it openly as parquet already in the loader's layout,
+so unpacking it is the whole of the work. Both: see
+[AlgoSeek datasets](#algoseek-datasets).
 
 ---
 
@@ -137,15 +138,20 @@ for users who already have a `DATABENTO_API_KEY`.
 
 ### AlgoSeek datasets
 
-AlgoSeek publishes two of the four datasets this book uses at
+The book uses four AlgoSeek datasets. **Three are published** at
 <https://algoseek.com/ml-for-trading/> — plain download links, no account, no
-API key. Both are CSV; every loader reads parquet, so one conversion step sits
-between the download and the notebooks.
+API key, no license request. **The fourth, the S&P 500 daily bars, ships inside
+this repository**, so there is nothing to fetch for it and nothing to configure.
 
-| Archive | Size | What it is |
-| --- | --- | --- |
-| `nasdaq-100-constituents-taq-ext.zip` | 5.9 GB | NASDAQ-100 extended minute bars, 505 days, 2020-01-02 to 2021-12-31 |
-| `options_daily_greeks_sp500.zip` | 13.8 GB | S&P 500 daily option chains with Greeks, 1,259 days 2017-2021, 634 symbols |
+| Dataset | Archive | Size | What it is |
+| --- | --- | --- | --- |
+| NASDAQ-100 minute bars | `nasdaq-100-constituents-taq-ext.zip` | 5.9 GB | Extended-hours minute bars, up to 90 fields, 505 days 2020-01-02 to 2021-12-31 |
+| S&P 500 options | `options_daily_greeks_sp500.zip` | 14.1 GB | Daily option chains with Greeks, 1,259 days 2017-2021, 634 symbols |
+| NASDAQ-100 TAQ ticks | `symbol=AAPL.zip` | 67 MB | Trade and NBBO quote events, AAPL on 2020-03-13 and 2020-03-16, 21,284,141 rows |
+| S&P 500 daily bars | *(in this repo)* | 8.6 MB | Daily OHLCV with split factors, 638 symbols, 2017-01-03 to 2021-12-31, 635,703 rows |
+
+The two large archives are CSV and every loader reads parquet, so one conversion
+step sits between the download and the notebooks:
 
 ```bash
 # NASDAQ-100 minute bars -> equities/market/nasdaq100/minute_bars/
@@ -167,16 +173,35 @@ considerably faster for the options archive: it holds 1,275,314 gzipped files,
 and reading them out of the zip pays the archive's index on every open. Both
 conversions resume, so an interrupted run continues where it stopped.
 
-**Two datasets are not published yet.** AlgoSeek staged them for hosting and has
-not packaged them; nothing in this repo substitutes for either.
+The TAQ ticks are already parquet in the layout the loader scans, so unpacking
+them is the whole of the work. Name the members — Dropbox writes a stray root
+entry into that archive, and unzipping without `"*.parquet"` warns and exits 2:
 
-| Missing | Blocks |
-| --- | --- |
-| S&P 500 daily bars | `18_transaction_costs/01_cost_taxonomy`, `02_spread_estimation`, `03_market_impact_calibration`, and the `sp500_equity_option_analytics` backtest |
-| NASDAQ-100 TAQ ticks | `03_market_microstructure/11_algoseek_taq_eda`, `12_algoseek_taq_lob_reconstruction` |
+```bash
+unzip -q "symbol=AAPL.zip" "*.parquet" \
+    -d "$ML4T_DATA_PATH/equities/market/microstructure/trade_and_quotes/symbol=AAPL"
+```
 
-The published minute-bar archive cannot stand in for the ticks: it is
-quote-aware bar aggregates, and reconstructing an order book needs the events.
+The minute-bar archive cannot stand in for the ticks. Despite the `taq-ext` in
+its name it is quote-aware bar aggregates, and reconstructing an order book needs
+the individual events.
+
+The S&P 500 daily bars need no step at all. `ML4T_DATA_PATH` defaults to this
+`data/` directory, and the loader falls back to the repository copy even when you
+have pointed `ML4T_DATA_PATH` somewhere else:
+
+```python
+from data import load_sp500_daily_bars
+bars = load_sp500_daily_bars(symbols=["AAPL"], start_date="2020-01-01")
+```
+
+#### Attribution
+
+The S&P 500 daily bars in `data/equities/market/sp500/daily_bars.parquet` are
+© AlgoSeek LLC, redistributed here with AlgoSeek's permission for readers of
+*Machine Learning for Trading*. AlgoSeek retains all rights to the data. Cite
+AlgoSeek (<https://algoseek.com>) as the source in anything you publish from it.
+The same applies to the three datasets you download from the page above.
 
 ### Update Existing Data
 
@@ -325,16 +350,16 @@ consulting the top-level doc.
 
 | Loader | Dataset | Source |
 | ------ | ------- | ------ |
-| `load_sp500_index()` | S&P 500 index OHLCV | Bundled |
+| `load_sp500_index()` | S&P 500 index OHLCV (1980-2025) | Bundled |
 | `load_us_equities()` | 3,199 US stocks (1962-2018) | NASDAQ DL |
-| `load_sp500_daily_bars()` | S&P 500 daily OHLCV | AlgoSeek |
+| `load_sp500_daily_bars()` | S&P 500 daily OHLCV (638 symbols, 2017-2021) | AlgoSeek, bundled |
 | `load_sp500_options()` | Raw options chains (legacy) | AlgoSeek |
 | `load_sp500_options_eda()` | Options EDA slice (8 symbols, 2019-2020) | AlgoSeek (slim) |
 | `load_sp500_options_straddles_raw()` | ATM-band raw chains, lifecycle-preserving (2017-2021) | AlgoSeek (slim) |
 | `load_sp500_options_surface()` | Daily IV surface summary | Materialized |
 | `load_sp500_options_straddles()` | Daily ATM straddles | Materialized |
 | `load_nasdaq100_bars()` | NASDAQ-100 bars (minute default; resampling, quotes, full microstructure) | AlgoSeek |
-| `load_nasdaq100_taq()` | TAQ tick data (AAPL, 2020-03-13 / 2020-03-16) | AlgoSeek (slim) |
+| `load_nasdaq100_taq()` | TAQ tick data (AAPL, 2020-03-13 / 2020-03-16) | AlgoSeek |
 | `load_mbo_data()` | MBO order book data | Databento |
 | `load_nasdaq_itch()` | NASDAQ ITCH messages | NASDAQ FTP |
 | `load_iex_hist()` | IEX DEEP/TOPS data | IEX (free) |
@@ -383,7 +408,14 @@ their own scripts when a chapter needs them.
 |---|---|
 | US Equities | ~670 MB |
 | CME Futures | ~85 MB |
-| AlgoSeek slim package, ITCH, MBO | ~6 GB |
+| AlgoSeek NASDAQ-100 minute bars | 5.9 GB archive, 3.5 GB converted |
+| AlgoSeek TAQ ticks | 67 MB, no conversion |
+| AlgoSeek S&P 500 options | 14.1 GB archive; the raw conversion is the peak, and the slices the notebooks read are 1.7 GB |
+| ITCH, MBO | ~1 GB plus 4-6 GB per ITCH date |
+
+The S&P 500 daily bars are not in this table: they ship with the repository.
+Delete each AlgoSeek archive once its conversion has finished — nothing reads it
+again, and the converter resumes from what it has already written.
 
 The **Free** row is where most readers land, because `--free-only` is what the README tells you
 to run. It is 4.1 GB rather than 75 MB entirely because of firm characteristics, which is 4.0 GB

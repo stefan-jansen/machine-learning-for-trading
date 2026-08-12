@@ -107,13 +107,13 @@ deep notebooks are marked GPU-only. Gradient boosting on GPU is also not bitwise
 a CPU run. See [installation](installation.md) for the GPU setup.
 
 **AlgoSeek data.** Three case studies read AlgoSeek data: `nasdaq100_microstructure`,
-`sp500_options` and `sp500_equity_option_analytics`. AlgoSeek publishes the NASDAQ-100 minute bars
-and the S&P 500 option chains openly — no account, no API key, no license request — and one script
-converts them to what the loaders read; see
-[AlgoSeek datasets](../data/README.md#algoseek-datasets). Two of the four datasets are not published
-yet: the S&P 500 daily bars, without which `sp500_equity_option_analytics` cannot backtest and three
-Chapter 18 notebooks cannot run, and the NASDAQ-100 TAQ ticks, without which the two Chapter 3
-order-book notebooks cannot run. Everything else in those case studies rebuilds from raw data.
+`sp500_options` and `sp500_equity_option_analytics`. All four datasets they need are available with
+no account, no API key and no license request. AlgoSeek publishes three of them openly — the
+NASDAQ-100 minute bars and the S&P 500 option chains, which one script converts to what the loaders
+read, and the NASDAQ-100 TAQ ticks, which only need unzipping. The fourth, the S&P 500 daily bars,
+ships inside this repository by AlgoSeek's permission, so nothing is downloaded or configured for
+it. See [AlgoSeek datasets](../data/README.md#algoseek-datasets). Everything else in those case
+studies rebuilds from raw data.
 
 ## 4. Not promised
 

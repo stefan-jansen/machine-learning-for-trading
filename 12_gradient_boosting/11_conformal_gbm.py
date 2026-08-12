@@ -53,6 +53,14 @@
 
 import warnings
 
+# lightgbm must be imported before anything that loads scikit-learn, and
+# ml4t.diagnostic loads it transitively. Both ship their own OpenMP runtime and
+# the first one loaded wins for the whole process; on macOS ARM64, getting
+# scikit-learn's libomp first makes LightGBM's next multithreaded fit segfault
+# in __kmp_suspend_initialize_thread, killing the kernel with no traceback.
+# Plain `import` statements sort ahead of `from ... import` ones, so one
+# canonical block keeps this order and isort will not undo it.
+import lightgbm as lgb
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,8 +68,6 @@ import polars as pl
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
 
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
@@ -441,7 +447,7 @@ def mean_cross_sectional_ic(dates, symbols, predictions, returns) -> float:
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
+    ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic")
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
@@ -528,12 +534,13 @@ eval_df
 
 # %% [markdown]
 # **Interpretation**: With complete timestamp groups and horizon-sized embargoes,
-# Crypto reaches 0.922 coverage and Futures reaches 0.880, while ETF coverage falls
-# to 0.851, 4.9 percentage points below the 0.90 target. The finite-sample guarantee
-# assumes exchangeability between calibration and validation residuals; these
-# walk-forward results show why empirical coverage still matters when financial
-# residuals shift over time. Predictive ordering is also modest: mean daily IC is
-# 0.046 for ETFs, 0.003 for Crypto, and -0.012 for Futures.
+# the coverage column in the table above does not land on its 0.90 target: one
+# asset class overshoots it and the other two fall short, ETFs by the widest
+# margin. The finite-sample guarantee assumes exchangeability between calibration
+# and validation residuals; these walk-forward results show why empirical coverage
+# still matters when financial residuals shift over time. Predictive ordering is
+# modest throughout, and the ranking by coverage is not the ranking by IC - the
+# best-covered asset class here is not the best-ranked one, so read both columns.
 
 # %% [markdown]
 # ## 5. Coverage Visualization
@@ -847,15 +854,17 @@ if processed_datasets:
     plt.show()
 
 # %% [markdown]
-# **Interpretation** (purged 2023 ETF validation fold):
-# - Split conformal reaches 0.753 coverage at width 0.211, showing that a fixed
-#   calibration quantile can fail when the next residual regime changes sharply.
-# - Quantile regression narrows average width to 0.160 but reaches only 0.850
-#   coverage and carries no conformal coverage guarantee.
-# - CQR reaches 0.927 coverage at width 0.218 by calibrating the asymmetric
-#   quantile models.
-# - ACI reaches 0.843 coverage at width 0.312 after delaying each update until
-#   its forward outcome matures. CQR is closest to the 0.90 target in this fold.
+# **Interpretation** (purged 2023 ETF validation fold), reading the table above:
+# - Split conformal undercovers the most, showing that a fixed calibration
+#   quantile can fail when the next residual regime changes sharply.
+# - Quantile regression buys the narrowest intervals and still undercovers, and
+#   it carries no conformal coverage guarantee at all.
+# - CQR is the only one of the four to reach the 0.90 target, by calibrating the
+#   asymmetric quantile models rather than a single symmetric width.
+# - ACI uses the widest intervals of the four and still misses, because each
+#   update waits for its forward outcome to mature.
+# Width and coverage do not move together here: the widest method is not the best
+# covered, which is the point of the comparison.
 
 # %% [markdown]
 # ## 7. Position Sizing Application
@@ -912,17 +921,16 @@ sizing_df
 # %% [markdown]
 # ## 8. Key Takeaways
 #
-# 1. **Always verify empirical coverage**: Across purged walk-forward folds,
-#    Crypto reaches 0.922 coverage and Futures 0.880, while ETFs reach only
-#    0.851 against the 0.90 target. The exchangeability condition is not exact
-#    for financial panels, so the theoretical guarantee does not replace a
-#    time-ordered empirical check.
+# 1. **Always verify empirical coverage**: across purged walk-forward folds no
+#    asset class lands on its 0.90 target - one overshoots, the rest fall short,
+#    ETFs furthest. The exchangeability condition is not exact for financial
+#    panels, so the theoretical guarantee does not replace a time-ordered
+#    empirical check.
 #
-# 2. **Adaptivity can matter more than width**: On the 2023 ETF validation
-#    fold, split conformal covers 0.753 and plain quantile regression covers
-#    0.850. CQR reaches 0.927, while label-mature timestamp-batched ACI reaches
-#    0.843. ACI uses the widest intervals here, yet still misses the target as
-#    the residual regime changes.
+# 2. **Adaptivity can matter more than width**: on the 2023 ETF validation fold,
+#    CQR is the only method to reach the target while ACI uses the widest
+#    intervals of the four and still misses, because the residual regime changes
+#    underneath it. Wider is not better covered.
 #
 # 3. **Match the wrapper to the estimator**: Split conformal and ACI can wrap
 #    a point-prediction model without an error-distribution assumption. QR and

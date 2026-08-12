@@ -60,26 +60,26 @@ import torch  # noqa: F401
 from IPython.display import Markdown, display
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
+from scipy.stats import rankdata
 from sklearn.metrics import roc_auc_score
 
 # %%
-# The registry helpers enforce exact snapshot identity, complete day/fold
-# coverage, and exact artifact lineage before comparisons are assembled.
+# Every comparison below ranks only configurations that covered the same folds
+# and the same number of days, so a shorter evaluation window cannot win.
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     PRIMARY_LABELS,
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
-    collect_complete_fold_ic_per_cs,
-    collect_complete_gbm_checkpoint_trajectories,
-    collect_complete_grid_per_cs,
-    collect_complete_multi_label_per_cs,
-    collect_complete_rank1_per_cs,
-    load_exact_gbm_feature_importance,
+    collect_fold_ic_per_cs,
+    collect_gbm_checkpoint_trajectories,
+    collect_grid_per_cs,
+    collect_multi_label_per_cs,
+    collect_rank1_per_cs,
+    load_gbm_feature_importance,
     parse_gbm_config,
     plot_cross_cs_forest,
-    require_registry_sha256,
 )
 from case_studies.utils.model_analysis import (
     load_metrics_from_registry,
@@ -95,58 +95,15 @@ warnings.filterwarnings("ignore")
 FAMILY = "gbm"
 BASELINE_FAMILY = "linear"
 SEED = 42
-REGISTRY_SNAPSHOT = "2026-07-22-v3.1-map-r3"
-REGISTRY_MAP_SHA256 = "9bb3fd027d12a650cda72ac09773bb0985d638a59c457c3c08680a0c3d22c909"
-REGISTRY_SHA256_PINS = {
-    "etfs": "771c02b3db7047b9c6e25c60c18d8b3b02dfc4ade2cb6b791b40f6b410f29509",
-    "crypto_perps_funding": "c7c1e67f8fe4476d7631061e61ce89de1a521606a7c0ff807ba1dcdad23fc485",
-    "nasdaq100_microstructure": "9154d213dd1020fbeb2f64213a82bb8b44b8c20d4ed14db842ab735b2b275bd0",
-    "sp500_equity_option_analytics": "953e580467ae704a6b05e6fbbd03599bf799eb6ac084455d8a4bdcb8dcf62164",
-    "us_firm_characteristics": "d50310f512ce0c95edbb9b0c31ae0501a4b0246c0618a02bab4ba6e7fd80015d",
-    "fx_pairs": "1d0e4ef26766ef6857c562438fb3eced253111ae3fe3777895af98cc79ce8f9d",
-    "cme_futures": "58b408c9e9ec008606c04b8bc68b0ef3865c9f14b7ba064af2b378adb45794dc",
-    "sp500_options": "395ed2debf0ad736a9736c3936cbfc1a9dd28cc54eb23acfb97c8017c094958a",
-    "us_equities_panel": "3175eca6747ebc5e3fc886576e94aef755de9e8a8eeb16d3d967f7f74793a39e",
-}
-REGISTRY_VERSION_STATUS = {
-    "cme_futures": "accepted_sdf_temporal_corrected",
-    "crypto_perps_funding": "accepted",
-    "etfs": "accepted_pre_ipca",
-    "fx_pairs": "accepted",
-    "nasdaq100_microstructure": "provisional_snapshot_20260722T182456",
-    "sp500_equity_option_analytics": "accepted_v3.1_garch_corrected",
-    "sp500_options": "accepted_current_r8_gpu",
-    "us_equities_panel": "provisional_snapshot_20260720T222537",
-    "us_firm_characteristics": "accepted",
-}
-REGISTRY_FOREIGN_KEY_DEBT: dict[str, int] = {}
 
 
 # %%
 set_global_seeds(SEED)
 
-# %%
-registry_rows = []
-for cs in CASE_STUDY_IDS:
-    expected = REGISTRY_SHA256_PINS[cs]
-    observed = require_registry_sha256(cs, expected)
-    registry_rows.append(
-        {
-            "case_study": SHORT_NAMES[cs],
-            "registry_snapshot": REGISTRY_SNAPSHOT,
-            "registry_map_sha256": REGISTRY_MAP_SHA256,
-            "registry_sha256": observed,
-            "publication_status": REGISTRY_VERSION_STATUS[cs],
-            "foreign_key_violations": REGISTRY_FOREIGN_KEY_DEBT.get(cs, 0),
-        }
-    )
-registry_provenance = pl.DataFrame(registry_rows)
-print("Read-only provenance for the pinned teaching registry map:")
-registry_provenance
 # %% [markdown]
 # ## 1. Scope and Coverage
 #
-# The current pinned grid spans four tree-depth profiles
+# The GBM grid spans four tree-depth profiles
 # (7 / 15 / 31 / 63 leaves) × 3 regression loss functions (MSE / MAE /
 # Huber), evaluated at 10 boosting checkpoints per configuration. Direction
 # labels add a binary-logistic variant. The headline metric is average daily
@@ -189,10 +146,9 @@ coverage_df
 # overlaps zero.
 
 # %%
-gbm_rank1 = collect_complete_rank1_per_cs(
+gbm_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 print(
     "Highest-IC GBM configuration per case study (primary label, average daily IC ± HAC 95 % CI):"
@@ -219,8 +175,8 @@ forest_ax.set_xlabel("Average daily IC (HAC 95 % CI)")
 fig.show()
 
 # %% [markdown]
-# The next cell derives the cross-case conclusion from the pinned rows. It
-# deliberately avoids fixed case names or values while producer gates remain open.
+# The next cell derives the cross-case conclusion from the selected rows, naming
+# no case study or value that it has not just computed.
 
 # %%
 clear_zero = gbm_rank1.filter((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))[
@@ -231,14 +187,10 @@ overlap_zero = gbm_rank1.filter((pl.col("ic_ci_lo") <= 0) & (pl.col("ic_ci_hi") 
 ].to_list()
 display(
     Markdown(
-        f"**Computed reading ({REGISTRY_SNAPSHOT}).** "
+        "**Computed reading.** "
         f"The GBM HAC interval excludes zero for {len(clear_zero)} of "
         f"{gbm_rank1.height} case studies ({', '.join(clear_zero) or 'none'}). "
-        f"It overlaps zero for {', '.join(overlap_zero) or 'none'}. "
-        "These are pinned-map results. NASDAQ-100 uses status "
-        f"`{REGISTRY_VERSION_STATUS['nasdaq100_microstructure']}` with "
-        f"{REGISTRY_FOREIGN_KEY_DEBT.get('nasdaq100_microstructure', 0)} recorded "
-        "foreign-key violations, so its provisional row is descriptive rather than final."
+        f"It overlaps zero for {', '.join(overlap_zero) or 'none'}."
     )
 )
 
@@ -252,11 +204,10 @@ display(
 
 
 # %%
-grid_primary = collect_complete_grid_per_cs(
+grid_primary = collect_grid_per_cs(
     CASE_STUDY_IDS,
     FAMILY,
     config_parser=parse_gbm_config,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 grid_regression = grid_primary.filter(pl.col("objective_kind") == "regression")
 print(
@@ -446,7 +397,7 @@ display(
 # the IC that propagates to the selected row in `prediction_metrics`.
 
 # %%
-ckpt_df = collect_complete_gbm_checkpoint_trajectories(gbm_rank1)
+ckpt_df = collect_gbm_checkpoint_trajectories(gbm_rank1)
 if ckpt_df.is_empty() or "short_name" not in ckpt_df.columns:
     msg = (
         "collect_gbm_checkpoint_trajectories returned no rows - "
@@ -535,7 +486,7 @@ display(
 # Ch11 §4 - the linear panels frame the GBM panels' fold-stability picture.
 
 # %%
-gbm_fold = collect_complete_fold_ic_per_cs(gbm_rank1)
+gbm_fold = collect_fold_ic_per_cs(gbm_rank1)
 gbm_fold_summary = (
     gbm_fold.group_by(["case_study", "short_name"])
     .agg(
@@ -756,16 +707,21 @@ display(
 # family's HAC interval comes from its chronological daily IC series.
 
 # %%
-linear_rank1 = collect_complete_rank1_per_cs(
+linear_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family=BASELINE_FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
-linear_fold = collect_complete_fold_ic_per_cs(linear_rank1)
+linear_fold = collect_fold_ic_per_cs(linear_rank1)
 
 
 # %%
-delta_primary = (
+# `select_rank1` makes a family's own candidates comparable - same folds, same
+# number of days - but it does that within a family. Two families can each be
+# internally comparable and still be scored over different windows, which is what
+# the day counts printed below reveal. Subtracting across such a pair attributes
+# a window difference to the model family, so those pairs are dropped rather than
+# shown with a caveat.
+delta_all = (
     gbm_rank1.select(
         "case_study",
         "short_name",
@@ -786,39 +742,67 @@ delta_primary = (
     .with_columns(delta=pl.col("gbm_ic") - pl.col("linear_ic"))
     .sort("delta", descending=True)
 )
-print("Descriptive GBM minus Linear daily-IC delta at matched full coverage:")
-delta_primary.select(
-    "short_name",
-    pl.col("gbm_ic").round(4),
-    pl.col("linear_ic").round(4),
-    pl.col("delta").round(4),
-    "gbm_days",
-    "linear_days",
-)
+delta_excluded = delta_all.filter(pl.col("gbm_days") != pl.col("linear_days"))
+delta_primary = delta_all.filter(pl.col("gbm_days") == pl.col("linear_days"))
+
+if not delta_excluded.is_empty():
+    display(
+        Markdown(
+            f"**Excluded for unequal coverage:** {delta_excluded.height} of "
+            f"{delta_all.height} case studies have a GBM and a Linear winner scored "
+            "over a different number of days. Their difference would mix a window "
+            "effect into a family effect, so they are left out of the chart below."
+        )
+    )
+    display(delta_excluded.select("short_name", "gbm_days", "linear_days"))
+
+if delta_primary.is_empty():
+    display(
+        Markdown(
+            "**No comparison survives.** No case study has a GBM and a Linear "
+            "winner scored over the same number of days, so there is no matched "
+            "primary-label delta to report."
+        )
+    )
+else:
+    print("Descriptive GBM minus Linear daily-IC delta at matched full coverage:")
+    display(
+        delta_primary.select(
+            "short_name",
+            pl.col("gbm_ic").round(4),
+            pl.col("linear_ic").round(4),
+            pl.col("delta").round(4),
+            "gbm_days",
+            "linear_days",
+        )
+    )
 
 # %%
-fig, ax = plt.subplots(figsize=(9, 4.5))
-y = np.arange(delta_primary.height)
-delta = delta_primary["delta"].to_numpy()
-colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in delta]
-ax.barh(y, delta, color=colors, alpha=0.9)
-ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
-ax.set_yticks(y)
-ax.set_yticklabels(delta_primary["short_name"].to_list())
-ax.invert_yaxis()
-ax.set_xlabel("Average daily IC point-estimate delta (GBM - Linear)")
-ax.set_title("Full-coverage GBM minus Linear at the primary label")
-fig.tight_layout()
-fig.show()
+if not delta_primary.is_empty():
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    y = np.arange(delta_primary.height)
+    delta = delta_primary["delta"].to_numpy()
+    colors = [COLORS["blue"] if value >= 0 else COLORS["amber"] for value in delta]
+    ax.barh(y, delta, color=colors, alpha=0.9)
+    ax.axvline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
+    ax.set_yticks(y)
+    ax.set_yticklabels(delta_primary["short_name"].to_list())
+    ax.invert_yaxis()
+    ax.set_xlabel("Average daily IC point-estimate delta (GBM - Linear)")
+    ax.set_title("Matched-coverage GBM minus Linear at the primary label")
+    fig.tight_layout()
+    fig.show()
 
 # %%
 n_positive = delta_primary.filter(pl.col("delta") > 0).height
 display(
     Markdown(
-        f"**Computed comparison.** GBM has the higher full-coverage daily-IC point estimate "
-        f"in {n_positive} of {delta_primary.height} case studies. This chart is descriptive: "
-        "the two model families have separate daily-series HAC intervals, so no paired-fold "
-        "confidence claim is attached to their difference."
+        f"**Computed comparison.** GBM has the higher daily-IC point estimate in "
+        f"{n_positive} of the {delta_primary.height} case studies whose two winners were "
+        f"scored over the same number of days, out of {delta_all.height} with a winner in "
+        "both families. This chart is descriptive: the two model families have separate "
+        "daily-series HAC intervals, so no paired-fold confidence claim is attached to "
+        "their difference."
     )
 )
 
@@ -861,25 +845,25 @@ def regression_labels(cs: str, family: str) -> list[str]:
 
 
 # %% [markdown]
-# Both families now pass through the same complete-coverage selector before
-# their point estimates are joined.
+# Both families pass through the same complete-coverage selector, which makes
+# each family's winner comparable against its own alternatives. It does not make
+# the two winners comparable to each other, so the join below keeps only the
+# cells where both were scored over the same number of days.
 
 # %%
-gbm_horizon = collect_complete_multi_label_per_cs(
+gbm_horizon = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
     labels=lambda cs: regression_labels(cs, FAMILY),
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
-lin_horizon = collect_complete_multi_label_per_cs(
+lin_horizon = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=BASELINE_FAMILY,
     labels=lambda cs: regression_labels(cs, BASELINE_FAMILY),
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 
 # %% [markdown]
-# The pinned registries contain two ambiguous optional cells: NASDAQ-100 GBM
+# Two optional family-label cells are ambiguous: NASDAQ-100 GBM
 # `fwd_ret_5m` has two complete rank-one candidates, while the S&P
 # equity-option Linear `fwd_ret_risk_adj_5d` cell has five. Those family-label
 # cells are excluded rather than resolved arbitrarily. Primary labels and all
@@ -889,18 +873,20 @@ lin_horizon = collect_complete_multi_label_per_cs(
 # Matched case-study and label rows form the descriptive family-difference panel.
 
 # %%
-facet_df = (
+facet_all = (
     gbm_horizon.select(
         "case_study",
         "short_name",
         "label",
         pl.col("ic_mean_daily").alias("gbm_ic"),
+        pl.col("ic_n_days").alias("gbm_days"),
     )
     .join(
         lin_horizon.select(
             "case_study",
             "label",
             pl.col("ic_mean_daily").alias("lin_ic"),
+            pl.col("ic_n_days").alias("lin_days"),
         ),
         on=["case_study", "label"],
         how="inner",
@@ -908,14 +894,41 @@ facet_df = (
     .with_columns(delta=pl.col("gbm_ic") - pl.col("lin_ic"))
     .sort(["short_name", "label"])
 )
-print(f"GBM-minus-Linear deltas across {facet_df.height} (CS, label) cells:")
-facet_df.select(
-    "short_name",
-    "label",
-    pl.col("gbm_ic").round(4).alias("gbm"),
-    pl.col("lin_ic").round(4).alias("lin"),
-    pl.col("delta").round(4).alias("delta"),
-)
+# Same cross-family coverage rule as 5a: each family's winner is comparable
+# within its own family, which does not make the two comparable to each other.
+facet_excluded = facet_all.filter(pl.col("gbm_days") != pl.col("lin_days"))
+facet_df = facet_all.filter(pl.col("gbm_days") == pl.col("lin_days"))
+
+if not facet_excluded.is_empty():
+    display(
+        Markdown(
+            f"**Excluded for unequal coverage:** {facet_excluded.height} of "
+            f"{facet_all.height} (case study, label) cells pair winners scored over a "
+            "different number of days."
+        )
+    )
+    display(facet_excluded.select("short_name", "label", "gbm_days", "lin_days"))
+
+if facet_df.is_empty():
+    display(
+        Markdown(
+            "**No comparison survives.** No (case study, label) cell pairs a GBM and a "
+            "Linear winner scored over the same number of days."
+        )
+    )
+else:
+    print(f"GBM-minus-Linear deltas across {facet_df.height} matched-coverage (CS, label) cells:")
+    display(
+        facet_df.select(
+            "short_name",
+            "label",
+            pl.col("gbm_ic").round(4).alias("gbm"),
+            pl.col("lin_ic").round(4).alias("lin"),
+            pl.col("delta").round(4).alias("delta"),
+            "gbm_days",
+            "lin_days",
+        )
+    )
 
 # %%
 if not facet_df.is_empty():
@@ -942,18 +955,27 @@ if not facet_df.is_empty():
     fig.show()
 
 # %%
-facet_positive = facet_df.filter(pl.col("delta") > 0).height
-largest_facet = facet_df.sort("delta", descending=True).row(0, named=True)
-smallest_facet = facet_df.sort("delta").row(0, named=True)
-display(
-    Markdown(
-        f"**Computed horizon comparison.** GBM has the higher point estimate in "
-        f"{facet_positive} of {facet_df.height} matched case-study/label cells. The range runs "
-        f"from {smallest_facet['short_name']} {smallest_facet['label']} "
-        f"({smallest_facet['delta']:+.4f}) to {largest_facet['short_name']} "
-        f"{largest_facet['label']} ({largest_facet['delta']:+.4f})."
+if facet_df.is_empty():
+    display(
+        Markdown(
+            "**No horizon comparison.** Every (case study, label) cell paired winners "
+            "scored over a different number of days, so there is no matched range to "
+            "report."
+        )
     )
-)
+else:
+    facet_positive = facet_df.filter(pl.col("delta") > 0).height
+    largest_facet = facet_df.sort("delta", descending=True).row(0, named=True)
+    smallest_facet = facet_df.sort("delta").row(0, named=True)
+    display(
+        Markdown(
+            f"**Computed horizon comparison.** GBM has the higher point estimate in "
+            f"{facet_positive} of {facet_df.height} matched case-study/label cells. The range "
+            f"runs from {smallest_facet['short_name']} {smallest_facet['label']} "
+            f"({smallest_facet['delta']:+.4f}) to {largest_facet['short_name']} "
+            f"{largest_facet['label']} ({largest_facet['delta']:+.4f})."
+        )
+    )
 
 # %% [markdown]
 # ## 6. Multi-Label Horizon and Metric Symmetry
@@ -1001,7 +1023,12 @@ if plot_horizon.height > 0:
     markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
     linestyles = ["-", "--", "-.", ":", "-", "--", "-.", ":"]
     for idx, cs in enumerate(cs_sorted):
-        sub = plot_horizon.filter(pl.col("short_name") == cs).sort("horizon_days")
+        # Sorted on (horizon_days, label), not horizon_days alone. Two targets can
+        # share a horizon - sp500_equity_option_analytics trains both fwd_ret_5d
+        # and fwd_ret_risk_adj_5d, and HORIZON_DAYS maps both to 5.0 - and their
+        # tie order decides which point the line and the CI band reach first, so
+        # sorting on the horizon alone made the published figure differ run to run.
+        sub = plot_horizon.filter(pl.col("short_name") == cs).sort(["horizon_days", "label"])
         if sub.height < 2:
             continue
         x = sub["horizon_days"].to_numpy()
@@ -1143,11 +1170,10 @@ def gbm_direction_b_auc(selected: dict, dir_label: str) -> dict | None:
 direction_labels = {
     cs: [direction_label for _, direction_label in pairs] for cs, pairs in SYMMETRY_PAIRS.items()
 }
-direction_rank1 = collect_complete_multi_label_per_cs(
+direction_rank1 = collect_multi_label_per_cs(
     SYMMETRY_PAIRS,
     family=FAMILY,
     labels=lambda cs: direction_labels[cs],
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 
 # %% [markdown]
@@ -1320,9 +1346,15 @@ def _feature_ranks(
     gbm_imp = dict(
         gbm_imp_df.group_by("feature").agg(pl.col("importance").mean().alias("imp")).iter_rows()
     )
-    common = set(gbm_imp) & set(ridge_imp)
-    gbm_order = sorted(common, key=gbm_imp.get, reverse=True)
-    ridge_order = sorted(common, key=ridge_imp.get, reverse=True)
+    # Ties are broken by feature name, not by set iteration order. Gain
+    # importances tie readily - every feature the booster never split on scores
+    # zero - and `sorted` is stable, so ranking a set left the tied block in
+    # whatever order that set happened to iterate. Python randomizes string
+    # hashing per process, so the same registries produced different ranks from
+    # one run to the next.
+    common = sorted(set(gbm_imp) & set(ridge_imp))
+    gbm_order = sorted(common, key=lambda feature: (-gbm_imp[feature], feature))
+    ridge_order = sorted(common, key=lambda feature: (-ridge_imp[feature], feature))
     return (
         {feature: rank for rank, feature in enumerate(gbm_order, 1)},
         {feature: rank for rank, feature in enumerate(ridge_order, 1)},
@@ -1348,7 +1380,7 @@ def feature_rank_shift(cs: str) -> dict | None:
         return None
     gbm_row = gbm_selected.row(0, named=True)
     linear_row = linear_selected.row(0, named=True)
-    gbm_imp_df = load_exact_gbm_feature_importance(
+    gbm_imp_df = load_gbm_feature_importance(
         cs,
         gbm_row["training_hash"],
         gbm_row["config_name"],
@@ -1446,8 +1478,14 @@ if rank_shift_summary:
 
 # %%
 def pairwise_rank_correlation(fold_arrays: list[np.ndarray]) -> tuple[float, float] | None:
-    """Return mean and minimum pairwise feature-rank correlation."""
-    ranks = [np.argsort(np.argsort(-values)) for values in fold_arrays]
+    """Return mean and minimum pairwise feature-rank correlation.
+
+    Ranks are tie-aware. A double ``argsort`` assigns distinct ordinals to equal
+    importances and breaks those ties by array position, which both overstates
+    the correlation between folds that agree only up to a tie and makes the
+    result depend on row order. Spearman is defined on average ranks.
+    """
+    ranks = [rankdata(-values, method="average") for values in fold_arrays]
     pairs = [
         np.corrcoef(ranks[i], ranks[j])[0, 1]
         for i in range(len(ranks))
@@ -1469,7 +1507,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     if selected.is_empty():
         return None
     row = selected.row(0, named=True)
-    gbm_imp_df = load_exact_gbm_feature_importance(
+    gbm_imp_df = load_gbm_feature_importance(
         cs,
         row["training_hash"],
         row["config_name"],
@@ -1480,7 +1518,7 @@ def feature_rank_stability(cs: str) -> dict | None:
     top_features = (
         gbm_imp_df.group_by("feature")
         .agg(pl.col("importance").mean().alias("mean_imp"))
-        .sort("mean_imp", descending=True)
+        .sort(["mean_imp", "feature"], descending=[True, False])
         .head(10)["feature"]
         .to_list()
     )
@@ -1541,33 +1579,80 @@ if not stability_df.is_empty():
 # three families is shown side by side at the primary label.
 
 # %%
-tabm_rank1 = collect_complete_rank1_per_cs(
+tabm_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family="tabular_dl",
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
-    allow_missing=True,
 )
 
+# Same coverage rule as 5a and 5b, applied across three families instead of two.
+# Each family's winner is comparable within its own family and not necessarily to
+# the others, so a family is shown for a case study only where it covers the same
+# number of days as that case study's GBM winner. GBM is the reference because
+# this frame is built from it and the chart is ordered by it. A family that does
+# not match becomes null and is drawn as a gap, exactly as a family with no
+# result at all already is.
 three_way = (
-    gbm_rank1.select("case_study", "short_name", pl.col("ic_mean_daily").alias("gbm_ic"))
+    gbm_rank1.select(
+        "case_study",
+        "short_name",
+        pl.col("ic_mean_daily").alias("gbm_ic"),
+        pl.col("ic_n_days").alias("gbm_days"),
+    )
     .join(
-        linear_rank1.select("case_study", pl.col("ic_mean_daily").alias("lin_ic")),
+        linear_rank1.select(
+            "case_study",
+            pl.col("ic_mean_daily").alias("lin_ic"),
+            pl.col("ic_n_days").alias("lin_days"),
+        ),
         on="case_study",
         how="left",
     )
     .join(
-        tabm_rank1.select("case_study", pl.col("ic_mean_daily").alias("tabm_ic")),
+        tabm_rank1.select(
+            "case_study",
+            pl.col("ic_mean_daily").alias("tabm_ic"),
+            pl.col("ic_n_days").alias("tabm_days"),
+        ),
         on="case_study",
         how="left",
+    )
+    .with_columns(
+        lin_ic=pl.when(pl.col("lin_days") == pl.col("gbm_days"))
+        .then(pl.col("lin_ic"))
+        .otherwise(None),
+        tabm_ic=pl.when(pl.col("tabm_days") == pl.col("gbm_days"))
+        .then(pl.col("tabm_ic"))
+        .otherwise(None),
     )
     .sort("gbm_ic", descending=True)
 )
+
+_lin_mismatch = pl.col("lin_days").is_not_null() & (pl.col("lin_days") != pl.col("gbm_days"))
+_tabm_mismatch = pl.col("tabm_days").is_not_null() & (pl.col("tabm_days") != pl.col("gbm_days"))
+coverage_masked = three_way.filter(_lin_mismatch | _tabm_mismatch)
+# Counted per family cell, not per row: one case study can mismatch on both
+# Linear and TabM, and a row count would report that as one.
+n_masked_cells = three_way.select((_lin_mismatch.sum() + _tabm_mismatch.sum()).alias("n")).item()
+if not coverage_masked.is_empty():
+    display(
+        Markdown(
+            f"**Masked for unequal coverage:** {n_masked_cells} case study/family "
+            f"cells across {coverage_masked.height} case studies have a winner scored over "
+            "a different number of days than the GBM winner, so they are left blank rather "
+            "than plotted beside it."
+        )
+    )
+    display(coverage_masked.select("short_name", "gbm_days", "lin_days", "tabm_days"))
+
 print("Linear / GBM / TabM highest-validation-IC average daily IC per case study (primary label):")
-three_way.select(
-    "short_name",
-    pl.col("lin_ic").round(4).alias("linear"),
-    pl.col("gbm_ic").round(4).alias("gbm"),
-    pl.col("tabm_ic").round(4).alias("tabm"),
+display(
+    three_way.select(
+        "short_name",
+        pl.col("lin_ic").round(4).alias("linear"),
+        pl.col("gbm_ic").round(4).alias("gbm"),
+        pl.col("tabm_ic").round(4).alias("tabm"),
+        "gbm_days",
+    )
 )
 
 # %%
@@ -1601,45 +1686,57 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# The comparison remains coverage-explicit: a missing family stays null and is
-# never replaced by a result from another label or an incomplete validation span.
+# The comparison is coverage-explicit in both directions: a family with no result
+# stays null, and so does a family whose winner was scored over a different number
+# of days than the GBM winner it would sit beside. Neither is replaced by a result
+# from another label or a different validation span.
 
 # %%
 tabm_present = set(tabm_rank1["case_study"].to_list())
 tabm_missing = [SHORT_NAMES[cs] for cs in CASE_STUDY_IDS if cs not in tabm_present]
+tabm_mismatched = three_way.filter(
+    pl.col("tabm_days").is_not_null() & (pl.col("tabm_days") != pl.col("gbm_days"))
+)["short_name"].to_list()
 tabm_above_gbm = three_way.filter(pl.col("tabm_ic") > pl.col("gbm_ic"))["short_name"].to_list()
 display(
     Markdown(
-        f"**Computed three-family reading.** TabM coverage is missing for "
-        f"{', '.join(tabm_missing) or 'no case study'}. Among comparable rows, TabM's "
-        f"point estimate exceeds GBM for {', '.join(tabm_above_gbm) or 'none'}."
+        f"**Computed three-family reading.** TabM has no result for "
+        f"{', '.join(tabm_missing) or 'no case study'}, and is masked for unequal coverage "
+        f"in {', '.join(tabm_mismatched) or 'no case study'}. Among the rows where both "
+        "families were scored over the same number of days, TabM's point estimate exceeds "
+        f"GBM for {', '.join(tabm_above_gbm) or 'none'}."
     )
 )
 
 # %% [markdown]
 # ## 8. Cross-CS Takeaways
 #
-# The synthesis below is computed from the exact selected prediction hashes,
-# complete day/fold panels, and pinned registry identities.
+# The synthesis below is computed from the selected prediction hashes and their
+# complete fold panels.
 
 # %%
-top_delta = delta_primary.row(0, named=True)
-display(
-    Markdown(
-        "**Key takeaways**\n\n"
+if delta_primary.is_empty():
+    delta_takeaway = (
+        "- No case study has a GBM and a Linear winner scored over the same number of "
+        "days, so there is no matched primary-label comparison to summarize.\n"
+    )
+else:
+    top_delta = delta_primary.row(0, named=True)
+    delta_takeaway = (
         f"- GBM has the higher average-daily-IC point estimate in {n_positive} of "
-        f"{delta_primary.height} full-coverage primary-label comparisons.\n"
+        f"{delta_primary.height} matched-coverage primary-label comparisons.\n"
         f"- The largest GBM-minus-linear point estimate is {top_delta['short_name']} "
         f"at {top_delta['delta']:+.4f}; family differences remain descriptive without a "
         "registered daily paired-difference estimator.\n"
-        f"- {len(HORIZON_EXCLUSIONS)} ambiguous optional family-horizon cells are excluded "
+    )
+display(
+    Markdown(
+        "**Key takeaways**\n\n"
+        + delta_takeaway
+        + f"- {len(HORIZON_EXCLUSIONS)} ambiguous optional family-horizon cells are excluded "
         "rather than selected arbitrarily.\n"
         f"- TabM exceeds GBM on {len(tabm_above_gbm)} comparable rows; missing TabM coverage "
-        "remains null rather than being substituted.\n"
-        "- NASDAQ-100 uses provisional snapshot status "
-        f"`{REGISTRY_VERSION_STATUS['nasdaq100_microstructure']}` with "
-        f"{REGISTRY_FOREIGN_KEY_DEBT.get('nasdaq100_microstructure', 0)} recorded foreign-key "
-        "violations.\n\n"
+        "remains null rather than being substituted.\n\n"
         "**Next**: Ch13 extends the comparison with temporal deep-learning architectures; "
         "Ch14 adds latent-factor models on qualifying panels."
     )

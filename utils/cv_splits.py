@@ -29,6 +29,7 @@ Design decisions:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -269,15 +270,30 @@ def generate_cv_splits(
     Returns
     -------
     list[dict]
-        List of split dicts with keys: ``fold``, ``train_start``,
-        ``train_end``, ``val_start``, ``val_end``.
+        Split dicts with keys ``fold``, ``train_start``, ``train_end``,
+        ``val_start``, ``val_end``, **ordered newest first**. Fold 0 validates
+        on the most recent window and carries the *latest* ``train_start``; the
+        last element is the oldest fold and carries the earliest. The order is
+        asserted before the list is returned, so it cannot change silently.
+
+        Index it only when you mean a position in that order. For "the most
+        recent fold" and "everything available before the holdout", call
+        :func:`most_recent_split` and :func:`earliest_train_start`, which read
+        the boundaries rather than the position and are correct whatever order
+        the list is in. ``splits[0]["train_start"]`` under a comment reading
+        "train on everything up to holdout_start" is the measured failure: on
+        etfs it starts 2013-01-17 where the earliest fold starts 2006-01-13.
     """
     from ml4t.diagnostic.splitters import WalkForwardCV
     from ml4t.diagnostic.splitters.config import WalkForwardConfig as LibWalkForwardConfig
 
-    # Legacy path: pre-computed explicit splits
+    # Legacy path: pre-computed explicit splits. Held to the same contract as the
+    # generated ones, because the caller cannot tell which path produced its list
+    # and reads fold 0 the same way either way.
     if cv_config is not None and "splits" in cv_config:
-        return cv_config["splits"]
+        precomputed = cv_config["splits"]
+        _assert_newest_first(precomputed, source="the precomputed splits in cv_config")
+        return precomputed
 
     # Normalize label buffer (strip ISO prefix, convert M → days)
     label_buffer = _normalize_label_buffer(label_buffer)
@@ -384,4 +400,81 @@ def generate_cv_splits(
             }
         )
 
+    _assert_newest_first(splits)
     return splits
+
+
+def _assert_newest_first(
+    splits: list[dict[str, Any]],
+    source: str = "generate_cv_splits",
+) -> None:
+    """Fail if the folds are not ordered newest first.
+
+    The order is a property of ``fold_direction="backward"`` in the library
+    config, and roughly forty call sites depend on it - some by indexing, some
+    by writing the fold id into an artifact that a later stage reads back by id.
+    If a library change reversed it, every one of them would keep running and
+    quietly mean the opposite. This turns that into an immediate failure.
+
+    It applies to a ``cv_config`` carrying explicit splits too. A caller cannot
+    tell which path produced its list, so a stored fold set that runs oldest
+    first hands fold id 0 to the earliest window while everything built through
+    the generated path gives it to the latest. Measured on the two committed
+    configs: ``us_firm_characteristics/config/cv_config.json`` runs newest first
+    and agrees, ``fx_pairs/config/cv_config.json`` runs oldest first - fold 0
+    validates from 2015-10-28, fold 7 from 2022-12-15 - while
+    ``fx_pairs/04_model_based_features`` tags its artifact through
+    ``generate_cv_splits``. The two meanings of "fold 0" then meet in a join.
+    """
+    val_starts = [_split_value(s, "val_start", "test_start") for s in splits]
+    if any(later >= earlier for earlier, later in zip(val_starts, val_starts[1:], strict=False)):
+        raise RuntimeError(
+            f"{source} produced folds that are not ordered newest first: "
+            f"val_starts {[str(v) for v in val_starts]}. Fold 0 is read as the most "
+            "recent fold everywhere, and stage-04 artifacts carry these ids, so an "
+            "ascending set joins each fold against the wrong end of the sample. "
+            "Renumber the source rather than reversing it at the call site."
+        )
+    # The ids, not just the order. Reversing an ascending list leaves fold 0 on the
+    # oldest window while the list reads newest first, and every join is by id.
+    ids = [s["fold"] for s in splits]
+    if ids != list(range(len(splits))):
+        raise RuntimeError(
+            f"{source} produced fold ids {ids} against list positions "
+            f"{list(range(len(splits)))}. The list runs newest first, so fold 0 is "
+            "the most recent fold and the ids have to follow the positions - a "
+            "downstream artifact is joined on the id, never on the position."
+        )
+
+
+def _split_value(split: dict[str, Any], *names: str) -> Any:
+    """Read the first key a split carries, so a stored config's spelling still resolves."""
+    for name in names:
+        if split.get(name) is not None:
+            return split[name]
+    raise KeyError(f"split carries none of {names}: {sorted(split)}")
+
+
+def most_recent_split(splits: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The fold whose validation window ends last.
+
+    Reads the boundaries rather than a list position, so it is correct whichever
+    end of the list that fold sits at. Use it wherever a caller means "the latest
+    fold" - ``splits[-1]`` under the name ``last_fold`` takes the *earliest* one.
+    """
+    if not splits:
+        raise ValueError("No splits to choose from")
+    return max(splits, key=lambda s: pd.Timestamp(s["val_end"]))
+
+
+def earliest_train_start(splits: Sequence[dict[str, Any]]) -> pd.Timestamp:
+    """The earliest training start across the folds - "everything available".
+
+    A holdout retrain trains on the whole history before the holdout boundary,
+    which is ``min(train_start)`` over the fold set and never one fold's own
+    start. Folds run newest first, so ``splits[0]["train_start"]`` is the latest
+    start in the set and hands the retrain the shortest window it could have had.
+    """
+    if not splits:
+        raise ValueError("No splits to choose from")
+    return min(pd.Timestamp(s["train_start"]) for s in splits)

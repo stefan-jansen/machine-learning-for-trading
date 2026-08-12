@@ -128,7 +128,7 @@ def _cs_dir(case_study: str | None = None) -> Path:
     return REPO_ROOT / "case_studies"
 
 
-def _registry_path(case_study: str) -> Path:
+def registry_path(case_study: str) -> Path:
     return _cs_dir(case_study) / case_study / "run_log" / "registry.db"
 
 
@@ -180,7 +180,7 @@ def load_model_ic(
 
     frames = []
     for cs_id in cs_list:
-        db_path = _registry_path(cs_id)
+        db_path = registry_path(cs_id)
         if not db_path.exists():
             continue
 
@@ -295,7 +295,7 @@ def load_classification_metrics(
 
     frames = []
     for cs_id in cs_list:
-        db_path = _registry_path(cs_id)
+        db_path = registry_path(cs_id)
         if not db_path.exists():
             continue
 
@@ -421,7 +421,7 @@ def load_chapter_backtests(
 
     frames = []
     for cs_id in cs_list:
-        db_path = _registry_path(cs_id)
+        db_path = registry_path(cs_id)
         if not db_path.exists():
             continue
 
@@ -558,7 +558,7 @@ def load_carrier_cost_curves(case_studies: list[str] | None = None) -> pl.DataFr
 
     frames = []
     for cs_id in cs_list:
-        db_path = _registry_path(cs_id)
+        db_path = registry_path(cs_id)
         if not db_path.exists():
             continue
 
@@ -623,3 +623,10 @@ def load_carrier_cost_curves(case_studies: list[str] | None = None) -> pl.DataFr
         .with_columns(cadence=pl.col("case_study").replace(CADENCE_MAP))
         .sort("case_study", "cost_bps")
     )
+
+
+# Deprecated private aliases. Thirty notebook cells import these names with their leading
+# underscore, which is what made them look private in the first place; each is a
+# cross-module interface and is now public. The aliases keep those callers working until
+# each notebook is re-executed with the public name, and go when the last one moves.
+_registry_path = registry_path

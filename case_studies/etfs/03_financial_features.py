@@ -35,14 +35,16 @@
 # Chapter 8, Sections 8.1-8.6. Reads split- and dividend-adjusted daily bars via `load_etfs()`,
 # the Treasury constant-maturity series via `load_macro()`, the tradability gate
 # `eligibility.csv` from [`01_feasibility_analysis`](01_feasibility_analysis.ipynb), and
-# `config/setup.yaml`. Writes `features/financial.parquet` with a `.digest.json` sidecar, read
-# by [`04_model_based_features`](04_model_based_features.ipynb), which builds regime and
-# memory-preserving features on top of it, and by
+# `config/setup.yaml`. Writes `features/financial.parquet` with a `.digest.json` sidecar, read by
 # [`05_evaluation`](05_evaluation.ipynb), which tests fold by fold whether any of it predicts.
+# [`04_model_based_features`](04_model_based_features.ipynb) builds a second matrix from the same
+# prices, of features that are themselves model outputs, and `05_evaluation` evaluates the two
+# together.
 
 # %%
 """ETFs: Feature Engineering."""
 
+import logging
 import warnings
 from datetime import date
 
@@ -51,7 +53,7 @@ import yaml
 from ml4t.engineer.features.momentum import adx, aroon, cci, macd, rsi, stochastic
 from ml4t.engineer.features.regime import choppiness_index, hurst_exponent
 from ml4t.engineer.features.trend import ema, sma
-from ml4t.engineer.features.volatility import natr
+from ml4t.engineer.features.volatility import bollinger_bands, natr
 from ml4t.engineer.features.volume import obv
 
 from case_studies.utils.artifact_digest import value_digest, write_artifact
@@ -72,6 +74,7 @@ from case_studies.utils.feature_engineering import (
     plot_redundancy_clusters,
     plot_timing_contract,
     register_frame,
+    rolling_zscore,
     trailing_volume_ratio,
     warmup_audit,
 )
@@ -80,14 +83,16 @@ from utils.artifact_specs import resolve_label_horizon
 from utils.paths import display_path, get_case_study_dir
 
 warnings.filterwarnings("ignore")
+logging.disable(logging.INFO)
 
 CASE_DIR = get_case_study_dir("etfs")
 FEATURES_DIR = CASE_DIR / "features"
 
+# %% [markdown]
+# The start of the sample is a parameter so the matrix can be rebuilt over a shorter window
+# without editing the notebook; left unset it reads the whole history.
+
 # %% tags=["parameters"]
-# Production runs START_DATE as None; CI overrides it to shorten the window. The CI fixture is
-# already reduced in breadth, so there is no symbol cap here - the cross-sectional families
-# below need a cross-section to rank within.
 START_DATE = None
 
 # %% [markdown]
@@ -103,13 +108,23 @@ START_DATE = None
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 FAMILIES = families_from_config(setup)
 WINDOWS = setup["features"]["windows"]
+OSCILLATORS = setup["features"]["oscillators"]
+STATE = setup["features"]["state"]
 RANKED = setup["features"]["ranked"]
 REGIME_THRESHOLD = setup["features"]["regime_threshold"]
+MACRO_LAG_DAYS = setup["modeling"]["latent_factors"]["macro_context"]["availability_lag_days"]
 DECISION_CYCLE = int(resolve_label_horizon("etfs", setup["labels"]["primary"], setup).rstrip("Dd"))
 HOLDOUT_START = date.fromisoformat(setup["evaluation"]["holdout_start"])
 
-print(f"{len(FAMILIES)} declared families, decision cycle {DECISION_CYCLE} sessions")
-print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it")
+print(f"{len(FAMILIES)} feature families are declared, each with its own lookback and lag")
+print(
+    f"Positions are re-decided every {DECISION_CYCLE} sessions, so a feature has to hold its "
+    f"ordering that long to be usable at this cadence"
+)
+print(
+    f"Dates from {HOLDOUT_START} onward are the holdout; D.3 rebuilds the matrix without them "
+    f"and compares the two builds value by value"
+)
 
 # %% [markdown]
 # ## A. What the thesis says should carry information
@@ -118,11 +133,11 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it"
 # equities, bonds, commodities and currencies, the ones that have gained relative to the rest
 # continue to over the following month. Three things follow.
 #
-# The **carrier** is trailing relative performance, so the matrix holds returns and
-# risk-adjusted returns at eight horizons rather than one - which horizon the effect lives at
-# is an empirical question, not a modelling assumption. The skip-recent construction drops the
-# most recent month from the long window, because that month reverses where the twelve before
-# it continue.
+# What the ranking is formed on is trailing relative performance, so the matrix holds returns
+# and risk-adjusted returns at eight horizons rather than one - which horizon the effect lives
+# at is an empirical question, not a modelling assumption. The skip-recent construction drops the
+# most recent month from the six- and twelve-month windows, because that month reverses where
+# the ones before it continue.
 #
 # The **conditioning** is regime: a cross-asset rotation only works while the assets disagree,
 # so the matrix also carries volatility, drawdown, trend strength, the equity-bond correlation
@@ -131,8 +146,10 @@ print(f"Holdout starts {HOLDOUT_START}; Section D rebuilds the panel without it"
 # and what no assertion can recover from the values.
 #
 # The **representation** matters as much as the quantity. A raw return has a distribution that
-# drifts with the volatility of the period, so the three carrier features are also carried as
-# cross-sectional percentiles, comparable across dates by construction.
+# drifts with the volatility of the period, so the three features `config/setup.yaml` lists as
+# ranked - the six-month return, its risk-adjusted version and the three-month volatility - are
+# carried as cross-sectional percentiles as well as levels, comparable across dates by
+# construction.
 #
 # The register is declared in `config/setup.yaml`, one row per family: what it reads, how far
 # back, and with what delay. A `lag` of zero means the input is on the tape at the decision
@@ -150,11 +167,13 @@ register_frame(FAMILIES).select(
 # %% [markdown]
 # ## B. Inputs and their observability
 #
-# Daily bars are split- and dividend-adjusted, so a trailing return spans a corporate action
-# without a jump. Eligibility is a per-year tradability gate holding the cross-section to ETFs
-# that traded at volume that year, rather than letting a fund listed in 2019 appear in a 2011
-# ranking. The Treasury series skips market holidays, which is why C.4 joins it backward in time
-# rather than on an exact date.
+# Three inputs. Daily bars are split- and dividend-adjusted, so a trailing return spans a
+# corporate action without a jump. The tradability gate is a table of fund-years written by
+# [`01_feasibility_analysis`](01_feasibility_analysis.ipynb), which admits a fund to a year on
+# the turnover it averaged in the year before, so membership is decided by what was already
+# known and a fund listed in 2019 cannot appear in a 2011 ranking. The 10-year minus 2-year
+# Treasury spread is the third, and the only input not on the tape at the decision; C.4 says
+# what is done about that.
 
 # %%
 prices = (
@@ -172,19 +191,49 @@ yield_curve = (
     .drop_nulls()
     .sort("timestamp")
 )
-print(f"{len(prices):,} bars over {prices['symbol'].n_unique()} ETFs")
-print(f"{len(yield_curve):,} sessions of 10y-2y spread")
+print(
+    f"{len(prices):,} daily bars covering {prices['symbol'].n_unique()} of the "
+    f"{len(setup['universe']['assets'])} declared funds, {prices['timestamp'].min()} to "
+    f"{prices['timestamp'].max()}"
+)
+print(f"The tradability gate admits {len(eligibility):,} fund-years")
+print(
+    f"The Treasury spread carries {len(yield_curve):,} rows, one per calendar day from "
+    f"{yield_curve['timestamp'].min()} to {yield_curve['timestamp'].max()}, repeating the last "
+    f"published value on weekends and holidays"
+)
+
+# %% [markdown]
+# The longest window below runs over 252 sessions, roughly one trading year, so how much history
+# a fund brings decides when it can carry a feature at all. Grouping the funds by the year of
+# their first bar says where that constraint bites. What to read off the table is the split
+# between the block present from the beginning, which fills every window inside the first year
+# and never falls out again, and the funds that arrive later, a handful at a time, each of which
+# spends its own first year producing nulls in the long-window families. That thin tail is what
+# F1's coverage dips are, what Section E's null policy removes, and why the matrix starts a year
+# after the price history does.
+
+# %%
+prices.group_by("symbol").agg(
+    pl.col("timestamp").min().alias("first"), pl.len().alias("sessions")
+).with_columns(pl.col("first").dt.year().alias("first traded")).group_by("first traded").agg(
+    pl.len().alias("funds"),
+    pl.col("sessions").min().alias("fewest sessions"),
+    pl.col("sessions").median().cast(pl.Int32).alias("median sessions"),
+).sort("first traded")
 
 # %% [markdown]
 # ## C. Feature construction, one subsection per family
 #
 # ### C.1 Momentum, volatility and their differences
 #
-# The trailing return, volatility and risk-adjusted return block is shared with the other
-# panel case studies, because three of them had computed it character for character with five
-# different denominator guards between them. What stays here is what is specific to this
-# universe: the skip-recent windows, the differences between horizons, and the ratio of a short
-# volatility window to a long one.
+# The trailing return, volatility and risk-adjusted return block comes from
+# `case_studies/utils`, shared with the other panel case studies, so `ret_126d` means one
+# construction and one denominator guard wherever it appears. What stays here is what is
+# specific to this universe: the skip-recent windows, the differences between horizons, and the
+# ratio of a short volatility window to a long one. The skip-recent pair counts both its start and
+# the stretch it drops in the month of sessions `config/setup.yaml` declares, so the month dropped
+# and the window it is dropped from cannot drift apart.
 
 
 # %%
@@ -196,12 +245,13 @@ def momentum_features(df: pl.DataFrame) -> pl.DataFrame:
         return_windows=WINDOWS["momentum"],
         volatility_windows=WINDOWS["volatility"],
     )
-    held = pl.col("close").shift(WINDOWS["skip_recent"]).over("symbol")
+    month = WINDOWS["skip_recent"]
+    held = pl.col("close").shift(month).over("symbol")
     return df.with_columns(
-        (held / pl.col("close").shift(252).over("symbol").clip(lower_bound=EPS) - 1).alias(
+        (held / pl.col("close").shift(12 * month).over("symbol").clip(lower_bound=EPS) - 1).alias(
             "skip_recent_12_1"
         ),
-        (held / pl.col("close").shift(126).over("symbol").clip(lower_bound=EPS) - 1).alias(
+        (held / pl.col("close").shift(6 * month).over("symbol").clip(lower_bound=EPS) - 1).alias(
             "skip_recent_6_1"
         ),
         (pl.col("ret_21d") - pl.col("ret_63d")).alias("mom_accel_short"),
@@ -215,7 +265,47 @@ def momentum_features(df: pl.DataFrame) -> pl.DataFrame:
 # %% [markdown]
 # ### C.2 Oscillators, trend ratios and range
 #
-# These come from `ml4t.engineer.features` rather than being written here. The smoothing
+# Everything in this block reads one fund's price against its own recent path. The
+# constructions fall into four groups, and a reader who has not met them needs to know what
+# each measures before the matrix can be read at all.
+#
+# **Where the price sits inside its recent range.** The relative strength index weighs the
+# sessions that closed up against those that closed down over its window and reports the result
+# between 0 and 100, so 50 is a window with as much up movement as down. The stochastic reports
+# on the same scale where the close sits between the window's lowest low and its highest high.
+# The commodity channel index measures the same idea without bounds: how far the session's
+# average of high, low and close sits from that average over the window, in units of the
+# window's own mean deviation. Bollinger %B is the fourth, and the notebook assembles it from
+# the bands rather than taking it ready-made: 0 is two standard deviations below the window's
+# mean close, 1 is two above, and the value is where the close falls between them.
+#
+# **How strongly the price is trending.** The average directional index summarizes how much of
+# the session-to-session movement went one way rather than back and forth, without saying which
+# way, so it separates a trend from a range without taking a side. Aroon counts how recently
+# the window's high and its low occurred; subtracting the two counts gives one number that is
+# positive when the high is the more recent. The moving-average convergence-divergence line is
+# the gap between a fast and a slow exponential average of the close, which widens as a move
+# accelerates and crosses zero when it turns.
+#
+# **How far the price moved and how much ground it covered doing so.** The normalized average
+# true range is the typical session's high-to-low span, counting any overnight gap, as a
+# percentage of the price - normalizing by price is what makes it comparable across funds
+# quoted at different levels. The choppiness index divides those spans summed session by session
+# by the span of the whole window: a market that ends near where it started after covering a lot
+# of ground reads high, one that travelled in a straight line reads low. The Hurst exponent asks
+# whether the size of a move grows with the length of the interval faster or slower than
+# independent increments would give. Above one half, a move tends to be followed by another in
+# the same direction; below one half, by a reversal; one half is what a random walk gives. It is
+# estimated by comparing the range of the cumulative move against its dispersion at many
+# interval lengths at once, which is why it needs a window several times longer than the others
+# here.
+#
+# **Where the price sits against its own averages.** The close divided by its 50- and
+# 200-session simple averages and by its 26-session exponential average. Above one, the fund is
+# trading above that average. Dividing rather than subtracting is what makes the three
+# comparable across funds, for the same reason the range is normalized by price.
+#
+# All of them come from `ml4t.engineer.features` rather than being written here. The smoothing
 # convention inside an oscillator is where two implementations of one name diverge - Wilder's
 # recursive average and a simple moving average of the same gains give different numbers - and
 # a shared implementation is what keeps `rsi_14` meaning one thing across the nine case studies.
@@ -224,84 +314,106 @@ def momentum_features(df: pl.DataFrame) -> pl.DataFrame:
 # %%
 def oscillator_features(df: pl.DataFrame) -> pl.DataFrame:
     """Bounded oscillators, moving-average ratios, normalized range and regime exponents."""
+    adx_p, stoch_p, aroon_p = OSCILLATORS["adx"], OSCILLATORS["stochastic"], OSCILLATORS["aroon"]
+    natr_p, chop_p, hurst_p = OSCILLATORS["natr"], OSCILLATORS["choppiness"], OSCILLATORS["hurst"]
+    ema_p, bb_p = OSCILLATORS["ema"], OSCILLATORS["bollinger"]
     df = df.with_columns(
-        rsi("close", period=7).over("symbol").alias("rsi_7"),
-        rsi("close", period=14).over("symbol").alias("rsi_14"),
-        macd("close", fast_period=12, slow_period=26).over("symbol").alias("macd_line"),
-        adx("high", "low", "close", period=14).over("symbol").alias("adx_14"),
-        cci("high", "low", "close", period=14).over("symbol").alias("cci_14"),
-        cci("high", "low", "close", period=21).over("symbol").alias("cci_21"),
-        stochastic("high", "low", "close", fastk_period=14).over("symbol").alias("stoch_k"),
-        aroon("high", "low", timeperiod=25).over("symbol").alias("_aroon"),
-        natr("high", "low", "close", period=14).over("symbol").alias("natr_14"),
-        choppiness_index("high", "low", "close", period=14).over("symbol").alias("chop_14"),
-        hurst_exponent("close", period=100).over("symbol").alias("hurst_100"),
-        (pl.col("close") / sma("close", period=50).over("symbol")).alias("sma_ratio_50"),
-        (pl.col("close") / sma("close", period=200).over("symbol")).alias("sma_ratio_200"),
-        (pl.col("close") / ema("close", period=26).over("symbol")).alias("ema_ratio_26"),
-        pl.col("close").rolling_mean(20).over("symbol").alias("_mid"),
-        pl.col("close").rolling_std(20).over("symbol").alias("_sd"),
+        *[rsi("close", period=p).over("symbol").alias(f"rsi_{p}") for p in OSCILLATORS["rsi"]],
+        macd("close", fast_period=OSCILLATORS["macd_fast"], slow_period=OSCILLATORS["macd_slow"])
+        .over("symbol")
+        .alias("macd_line"),
+        adx("high", "low", "close", period=adx_p).over("symbol").alias(f"adx_{adx_p}"),
+        *[
+            cci("high", "low", "close", period=p).over("symbol").alias(f"cci_{p}")
+            for p in OSCILLATORS["cci"]
+        ],
+        stochastic("high", "low", "close", fastk_period=stoch_p).over("symbol").alias("stoch_k"),
+        aroon("high", "low", timeperiod=aroon_p).over("symbol").alias("_aroon"),
+        natr("high", "low", "close", period=natr_p).over("symbol").alias(f"natr_{natr_p}"),
+        choppiness_index("high", "low", "close", period=chop_p)
+        .over("symbol")
+        .alias(f"chop_{chop_p}"),
+        hurst_exponent("close", period=hurst_p).over("symbol").alias(f"hurst_{hurst_p}"),
+        *[
+            (pl.col("close") / sma("close", period=p).over("symbol")).alias(f"sma_ratio_{p}")
+            for p in OSCILLATORS["sma"]
+        ],
+        (pl.col("close") / ema("close", period=ema_p).over("symbol")).alias(f"ema_ratio_{ema_p}"),
+        bollinger_bands("close", period=bb_p).over("symbol").alias("_bb"),
     )
+    band = pl.col("_bb").struct.field("upper") - pl.col("_bb").struct.field("lower")
     return df.with_columns(
         (pl.col("_aroon").struct.field("up") - pl.col("_aroon").struct.field("down")).alias(
             "aroon_diff"
         ),
-        pl.when(pl.col("_sd") > 0)
-        .then((pl.col("close") - (pl.col("_mid") - 2 * pl.col("_sd"))) / (4 * pl.col("_sd")))
-        .alias("bb_pctb_20"),
-    ).drop(["_aroon", "_mid", "_sd"])
+        pl.when(band > 0)
+        .then((pl.col("close") - pl.col("_bb").struct.field("lower")) / band)
+        .alias(f"bb_pctb_{bb_p}"),
+    ).drop(["_aroon", "_bb"])
 
 
 # %% [markdown]
 # ### C.3 Drawdown, volume and distance from extremes
 #
-# `max_dd_63d` is the share by which price currently sits below its highest close of the
+# `max_dd_63d` is the share by which the price currently sits below its highest close of the
 # trailing quarter, so it is zero at a new high and negative otherwise - the *current*
-# drawdown, not the worst decline inside the window, which is a different statistic. Relative
-# volume is clipped at the 1st and 99th percentile of its own date, because an index rebalance
-# puts one ETF orders of magnitude above its own average and one such row otherwise sets the
-# scale every model sees.
+# drawdown, not the worst decline inside the window, which is a different statistic.
+#
+# On-balance volume is a running total that adds the session's share volume when the fund
+# closed up and subtracts it when it closed down, so it rises while buying pressure leads and
+# falls while selling pressure does. The level of that total says nothing on its own, because it
+# depends on how long the fund has traded and how much it trades; what is carried is its
+# distance from its own trailing mean in trailing standard deviations, which is comparable
+# across funds and across time.
+#
+# The last two read the 52-week extremes directly. The close over its highest close of the past
+# year is one at a new high and falls away below it; the close over its lowest is one at a new
+# low and rises above it. The share of the past quarter's sessions that closed up sits beside
+# them as the same question asked without reference to any extreme.
+#
+# Relative volume - the session's volume over its own trailing mean - is built with the same
+# per-fund block, and C.7 says why the extreme values it produces are cut back within the date
+# rather than here.
 
 
 # %%
 def drawdown_and_extremes(df: pl.DataFrame) -> pl.DataFrame:
     """Drawdown, on-balance volume and position in the 52-week range."""
+    obv_w, share_w, range_w = STATE["obv_zscore"], STATE["positive_share"], STATE["extremes"]
     df = drawdown_block(df, entity="symbol", windows=WINDOWS["drawdown"])
     df = df.with_columns(obv("close", "volume").over("symbol").alias("_obv"))
     return df.with_columns(
-        (
-            (pl.col("_obv") - pl.col("_obv").rolling_mean(63).over("symbol"))
-            / pl.col("_obv").rolling_std(63).over("symbol").clip(lower_bound=EPS)
-        ).alias("obv_zscore_63d"),
+        rolling_zscore("_obv", obv_w, "symbol").alias(f"obv_zscore_{obv_w}d"),
         (pl.col("log_return") > 0)
         .cast(pl.Float64)
-        .rolling_mean(63)
+        .rolling_mean(share_w)
         .over("symbol")
-        .alias("pct_positive_63d"),
+        .alias(f"pct_positive_{share_w}d"),
         (
-            pl.col("close") / pl.col("close").rolling_max(252).over("symbol").clip(lower_bound=EPS)
+            pl.col("close")
+            / pl.col("close").rolling_max(range_w).over("symbol").clip(lower_bound=EPS)
         ).alias("dist_52w_high"),
         (
-            pl.col("close") / pl.col("close").rolling_min(252).over("symbol").clip(lower_bound=EPS)
+            pl.col("close")
+            / pl.col("close").rolling_min(range_w).over("symbol").clip(lower_bound=EPS)
         ).alias("dist_52w_low"),
     ).drop("_obv")
 
 
 # %% [markdown]
-# ### C.4 Cross-asset state, macro state and cross-sectional position
+# ### C.4 Cross-asset state and macro state
 #
 # The SPY-TLT correlation and the curve slope are one number per date, shared by every ETF. A
 # rolling window reads row order rather than the timestamp column, so the pair is re-sorted after
-# the join that builds it, and the curve joins backward in time so a market holiday carries the
-# previous session's spread forward and never a later one's. Three carrier features are then also
-# carried as their percentile within the date; ranking all eight horizons would add nothing,
-# because eight highly correlated returns carry one ordering between them.
+# the join that builds it, and the curve is joined backward in time so a market holiday carries
+# the previous session's spread forward and never a later one's.
 
 
 # %%
-def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
-    """Equity-bond correlation and yield-curve state, broadcast to every row."""
-    pair = (
+def equity_bond_correlation(df: pl.DataFrame) -> pl.DataFrame:
+    """The trailing SPY-TLT return correlation, one row per date."""
+    corr_w = STATE["correlation"]
+    return (
         df.filter(pl.col("symbol") == "SPY")
         .select("timestamp", pl.col("log_return").alias("_spy"))
         .join(
@@ -314,33 +426,75 @@ def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
         .sort("timestamp")
         .select(
             "timestamp",
-            pl.rolling_corr(pl.col("_spy"), pl.col("_tlt"), window_size=63).alias(
-                "corr_spy_tlt_63d"
+            pl.rolling_corr(pl.col("_spy"), pl.col("_tlt"), window_size=corr_w).alias(
+                f"corr_spy_tlt_{corr_w}d"
             ),
         )
     )
-    # Stamped with its availability date, not its observation date. `config/setup.yaml`
-    # declares the macro policy as `alfred_initial_release_close_lagged`: a value dated t
-    # is available for a decision at the close of t+1. The offset is a calendar day rather
-    # than a shift down the Treasury series, because the two calendars differ - a shift
-    # would mean "the next day the Treasury published", so on Columbus Day, when NYSE
-    # trades and FRED does not, it would add a second session of delay.
-    curve = yield_curve.select(
-        pl.col("timestamp").dt.offset_by("1d"),
-        pl.when(pl.col("slope") > REGIME_THRESHOLD).then(1).otherwise(0).alias("regime"),
-        pl.col("slope").alias("yield_curve_slope"),
-        (
-            (pl.col("slope") - pl.col("slope").rolling_mean(252))
-            / pl.col("slope").rolling_std(252).clip(lower_bound=EPS)
-        ).alias("yield_curve_zscore"),
-    )
+
+
+# %% [markdown]
+# The Treasury spread is the one input that is not on the tape at the decision: the value
+# describing a day is published after that day has ended, so a decision taken at its close could
+# not have read it. `config/setup.yaml` declares the macro policy - `alfred_initial_release_close_lagged`
+# - and with it how long a published value waits before a decision may use it, and each value is
+# re-stamped with the date it becomes readable rather than the date it describes. F4 draws the
+# resulting gap; it is the only family in the register that has one.
+#
+# The stamped series is then reduced to the trading calendar before the z-score's window runs.
+# The register counts every family's lookback in trading sessions, and the Treasury frame carries
+# a row for every calendar day, so a window run over it before that reduction would be counting
+# weekends.
+
+
+# %%
+def yield_curve_state(df: pl.DataFrame) -> pl.DataFrame:
+    """Curve level, regime flag and trailing z-score, on the session calendar."""
+    zscore_w = STATE["curve_zscore"]
+    available = yield_curve.select(
+        pl.col("timestamp").dt.offset_by(f"{MACRO_LAG_DAYS}d"), "slope"
+    ).sort("timestamp")
     return (
-        df.join(pair, on="timestamp", how="left")
+        df.select("timestamp")
+        .unique()
         .sort("timestamp")
-        .join_asof(curve, on="timestamp", strategy="backward")
+        .join_asof(available, on="timestamp", strategy="backward")
+        .select(
+            "timestamp",
+            pl.when(pl.col("slope") > REGIME_THRESHOLD).then(1).otherwise(0).alias("regime"),
+            pl.col("slope").alias("yield_curve_slope"),
+            (
+                (pl.col("slope") - pl.col("slope").rolling_mean(zscore_w))
+                / pl.col("slope").rolling_std(zscore_w).clip(lower_bound=EPS)
+            ).alias("yield_curve_zscore"),
+        )
     )
 
 
+# %% [markdown]
+# Both state frames carry one row per date, so a left join broadcasts each to every ETF trading
+# that day without changing the panel's row count.
+
+
+# %%
+def regime_and_state(df: pl.DataFrame) -> pl.DataFrame:
+    """Equity-bond correlation and yield-curve state, broadcast to every row."""
+    return (
+        df.join(equity_bond_correlation(df), on="timestamp", how="left")
+        .join(yield_curve_state(df), on="timestamp", how="left")
+        .sort(["symbol", "timestamp"])
+    )
+
+
+# %% [markdown]
+# ### C.5 The tradability gate
+#
+# `01_feasibility_analysis` decided, one fund-year at a time, which ETFs traded at enough volume
+# to be worth ranking. Applying that here is a semi-join on the row's own calendar year, which
+# filters and cannot duplicate a row.
+
+
+# %%
 def gate_to_eligible(df: pl.DataFrame) -> pl.DataFrame:
     """Drop the rows the annual tradability gate excludes, before anything ranks them."""
     return (
@@ -354,14 +508,21 @@ def gate_to_eligible(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def per_entity_features(df: pl.DataFrame) -> pl.DataFrame:
-    """Everything computed from one ETF's own history, gate not yet applied.
+# %% [markdown]
+# ### C.6 What is computable before the gate
+#
+# None of the four blocks above needs the eligible cross-section: three read one fund's own
+# history, and the fourth reads two named funds and the Treasury series and broadcasts one value
+# per date. So they all run on every bar the ETF traded, before the gate removes any. The
+# relative-volume ratio runs in this group for the same reason:
+# its trailing mean has to see every bar, or a fund admitted to the universe this year divides by
+# the mean of its first few eligible days, and one that re-enters after a gap averages across the
+# gap.
 
-    The relative-volume ratio is here rather than after the gate: its trailing mean
-    has to read every bar the ETF traded, or an ETF admitted to the universe this
-    year divides by a mean of its first few eligible days, and one that re-enters
-    after a gap averages across the gap. Only the clip is a cross-sectional step.
-    """
+
+# %%
+def per_entity_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Everything computable before the gate: per-fund history plus the broadcast state."""
     return (
         df.pipe(momentum_features)
         .pipe(oscillator_features)
@@ -371,6 +532,23 @@ def per_entity_features(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# %% [markdown]
+# ### C.7 The two steps taken within a date
+#
+# A percentile and a clip are properties of the cross-section they are taken over, so both run
+# after the gate: ranking an ETF against one the strategy cannot trade moves the number written
+# for every ETF that it can. Which features are carried as their percentile within the date as
+# well as their level is `config/setup.yaml`'s `ranked` list, so the same ones are ranked in
+# every stage that reads the register.
+#
+# The clip cuts relative volume back to the 1st and 99th percentile of its own date. An index
+# rebalance puts one fund's volume orders of magnitude above its own trailing mean for a single
+# session, and one such row otherwise sets the scale every model sees for the whole column.
+# Cutting within the date rather than over the column is what keeps the bound from being fitted
+# on the sample, which is the property D.3 checks.
+
+
+# %%
 def clip_and_rank(df: pl.DataFrame) -> pl.DataFrame:
     """The two within-date steps, over the eligible cross-section only."""
     clipped = clip_within_date(
@@ -381,17 +559,26 @@ def clip_and_rank(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def build_features(df: pl.DataFrame) -> pl.DataFrame:
-    """The whole construction, as one function Section D can re-run on a shorter panel.
+# %% [markdown]
+# ### C.8 The construction as one function
+#
+# The three groups run in that order - per entity, then the gate, then within the date - and
+# wrapping them in one function is what lets D.3 re-run the identical construction on a shorter
+# panel and compare the results value by value.
 
-    The eligibility gate sits after everything computed per entity and before the two
-    statistics computed within a date. A percentile and a clip are properties of the
-    cross-section they are taken over, so an ETF the strategy cannot trade must not be in
-    that cross-section: ranking against it moves the number written for every ETF that is.
-    """
+
+# %%
+def build_features(df: pl.DataFrame) -> pl.DataFrame:
+    """The whole construction, as one function Section D can re-run on a shorter panel."""
     return df.pipe(per_entity_features).pipe(gate_to_eligible).pipe(clip_and_rank)
 
 
+# %% [markdown]
+# The panel is built once here in two stages, because D.2 audits the warmup on the ungated frame:
+# the gate drops the early rows the warmup stretch is made of.
+
+
+# %%
 EXCLUDED = {"symbol", "timestamp", "open", "high", "low", "close", "volume", "log_return"}
 per_entity = per_entity_features(prices)
 built = per_entity.pipe(gate_to_eligible).pipe(clip_and_rank)
@@ -415,21 +602,27 @@ print(f"{len(built):,} eligible bars carrying {len(feature_cols)} features")
 # a leading stretch of nulls as long as its lookback. The audit checks that length rather than
 # describing it: a column carrying a value before its window could have filled is reading bars
 # that do not exist, and that is the failure it raises on. It runs on the panel before the
-# eligibility gate, because the gate drops the early rows the warmup stretch is made of.
+# eligibility gate, because the gate drops the early rows the warmup stretch is made of. The
+# lengths it checks are the declared windows themselves, so each column is audited against the
+# number its own construction ran on.
 
 # %%
+longest_return = max(WINDOWS["momentum"])
+longest_vol = max(WINDOWS["volatility"])
+longest_drawdown = max(WINDOWS["drawdown"])
+trend_slow, hurst_p, obv_w = max(OSCILLATORS["sma"]), OSCILLATORS["hurst"], STATE["obv_zscore"]
 warmup_audit(
     per_entity,
     {
-        "ret_252d": 252,
-        "skip_recent_12_1": 252,
-        "sharpe_252d": 252,
-        "vol_252d": 252,
-        "dist_52w_high": 252,
-        "sma_ratio_200": 200,
-        "max_dd_126d": 126,
-        "hurst_100": 100,
-        "obv_zscore_63d": 63,
+        f"ret_{longest_return}d": longest_return,
+        "skip_recent_12_1": 12 * WINDOWS["skip_recent"],
+        f"sharpe_{longest_return}d": longest_return,
+        f"vol_{longest_vol}d": longest_vol,
+        "dist_52w_high": STATE["extremes"],
+        f"sma_ratio_{trend_slow}": trend_slow,
+        f"max_dd_{longest_drawdown}d": longest_drawdown,
+        f"hurst_{hurst_p}": hurst_p,
+        f"obv_zscore_{obv_w}d": obv_w,
     },
     entity="symbol",
 )
@@ -461,8 +654,10 @@ seal.filter(pl.col("column").is_in(["ret_126d", "ret_126d_rank", "yield_curve_zs
 # The panel key is `symbol` + `timestamp`. Raw OHLC, volume and the intermediate log return are
 # excluded: they are the inputs the features are made of, and a model handed the contemporaneous
 # log return beside a label derived from the same prices would be reading its own answer. One
-# null policy is applied once - a row is kept when the longest carrier feature has warmed up,
-# which is the point past which every family is dense.
+# null policy is applied once - a row is kept when the six-month risk-adjusted return has warmed
+# up. Most of the warmup stretch is already gone by then, because the eligibility gate admits a
+# fund only from its second year, so what stays thin is the 252-session families, and F1 shows
+# where.
 
 # %%
 features = (
@@ -487,13 +682,15 @@ register_frame(FAMILIES, feature_cols).select(["family", "columns", "role", "rep
 plot_coverage_through_time(
     family_coverage(features, assignment, every="1mo"),
     warmup_boundary=features["timestamp"].min(),
-    title="No family is ever more than about one percent thin",
+    title="Only the longest-window families are ever thin, and only early",
     subtitle="Monthly non-null share per feature family, on an axis scaled to the data",
     alt=(
-        "Line chart of non-null share by feature family on a y-axis spanning roughly 0.985 to "
-        "one. Most families sit exactly at one throughout. The long-window families - momentum, "
-        "risk-adjusted momentum, extremes - dip by up to about one percent in scattered months, "
-        "and no family is ever materially incomplete."
+        "Line chart of non-null share by feature family on a y-axis that starts at about 0.985 "
+        "and ends just above one. Six of the ten families sit exactly at one throughout. The "
+        "four that do not - "
+        "extremes and consistency, momentum, volatility, risk-adjusted momentum, all built on "
+        "252-session windows - dip in three or four months before 2012 and nowhere else, the "
+        "deepest to about 0.987, and no family is ever materially incomplete."
     ),
 )
 
@@ -532,10 +729,11 @@ plot_feature_distributions(
     subtitle="Trailing return and risk-adjusted return, display tails clipped at 0.5%",
     alt=(
         "Six histograms in two rows. Along the top the trailing returns broaden from a narrow "
-        "right-skewed peak spanning about plus or minus 0.2 at 21 sessions to a wide body "
-        "reaching 0.75 at 252. Below, the annualized risk-adjusted returns move the other way, "
-        "from roughly minus five to ten at 21 sessions down to minus two to three at 252, and "
-        "are close to symmetric at every horizon."
+        "spike spanning about minus 0.22 to 0.21 at 21 sessions to a wide body running from "
+        "about minus 0.55 to 0.88 at 252, every one of them sharply peaked with long tails "
+        "either side. Below, the annualized risk-adjusted returns move the other way, from "
+        "roughly minus eight to eleven at 21 sessions in to about minus two to four at 252, "
+        "and all three are broad single-peaked bells rather than spikes."
     ),
 )
 
@@ -554,8 +752,10 @@ plot_cross_sectional_dispersion(
     subtitle="10th-90th percentile of the six-month trailing return across the eligible universe",
     alt=(
         "Shaded band of the 10th to 90th percentile of six-month trailing return by month, with "
-        "the median drawn through it. The band is a few tens of percent wide in calm periods "
-        "and widens sharply in 2020 and again in 2022."
+        "the median drawn through it. In most months the band is between about 0.15 and 0.30 "
+        "wide. It is widest through 2008 and 2009, reaching about 0.62, when the median also "
+        "falls to about minus 0.4, and it widens again to about 0.44 in 2020. The 2022 widening "
+        "is smaller, about 0.34, and more than a tenth of all months are at least that wide."
     ),
 )
 
@@ -564,8 +764,9 @@ plot_cross_sectional_dispersion(
 #
 # Clustering on the distance $1 - |\rho|$ groups features that carry the same ordering, whatever
 # the sign. Above the cut two features are close enough that a linear model cannot separate
-# their contributions. This states the clusters; choosing one representative from each needs a
-# fold-aware criterion and belongs to `05_evaluation`.
+# their contributions. This states the clusters and stops there: `05_evaluation` measures each
+# feature's predictive content fold by fold and reports which pairs are one piece of evidence
+# counted twice, and the modelling notebooks decide what to keep.
 
 # %%
 clusters = plot_redundancy_clusters(
@@ -573,12 +774,15 @@ clusters = plot_redundancy_clusters(
     feature_cols,
     cut=0.7,
     title="Adjacent horizons pair off; short and long momentum stay apart",
-    subtitle=r"Average linkage on $1 - |\rho|$, cut drawn at $|\rho| = 0.7$",
+    subtitle=r"Average linkage on rank-correlation distance, cut drawn at $|\rho| = 0.7$",
     alt=(
         "Dendrogram of every feature in the matrix. Neighbouring horizons join at very small "
-        "distances - the five- and ten-day returns with their risk-adjusted twins, the six- and "
-        "nine-month returns with the 200-day trend ratio - but the short-horizon block and the "
-        "long-horizon block only merge near the root, and the volatility, oscillator and macro "
+        "distances - the five- and ten-day returns with their risk-adjusted twins, the six-month "
+        "return with its risk-adjusted twin, its skip-recent version and the 200-day trend ratio "
+        "- and the bounded oscillators join that shortest-horizon block rather than standing "
+        "apart from it. The nine- and twelve-month returns form a block of their own that stays "
+        "separate from the six-month one at the cut and joins it only further out; the "
+        "short-horizon and long-horizon blocks join later still. Volatility and the macro "
         "features attach as separate branches."
     ),
 )
@@ -611,19 +815,19 @@ plot_persistence(
     entity="symbol",
     max_lag=2 * DECISION_CYCLE,
     decision_dates=DECISION_DATES,
-    title="The long-window carriers still hold their ordering a month out",
+    title="Six-month features hold their ordering a month out; one-month ones do not",
     subtitle=(
         f"Median over ETFs to {2 * DECISION_CYCLE} sessions; rank correlation across rebalances"
     ),
     alt=(
         "Two panels. On the left, autocorrelation against lag: the six-month return, the "
-        "three-month volatility and the six-month risk-adjusted return are all still above "
-        "0.7 at 42 sessions, while the one-month return reaches zero at exactly 21 sessions - "
-        "the length of its own window - and the 14-day oscillator levels off near 0.2. The "
+        "three-month volatility and the six-month risk-adjusted return decay slowly and are all "
+        "still above 0.6 at 42 sessions, while the one-month return reaches zero at about 21 "
+        "sessions - the length of its own window - and the 14-day oscillator falls below 0.1. The "
         "bootstrap ribbon around each curve is only a few hundredths wide. On the right, the "
         "cross-sectional rank correlation between consecutive rebalances separates the features "
-        "sharply: about 0.95 for the three-month volatility and 0.85 for the two six-month "
-        "carriers, against 0.2 for the oscillator and almost nothing for the one-month return, "
+        "sharply: about 0.98 for the three-month volatility and 0.83 for the two six-month "
+        "features, against 0.2 for the oscillator and almost nothing for the one-month return, "
         "whose window is about one rebalance long."
     ),
 )
@@ -631,12 +835,18 @@ plot_persistence(
 # %% [markdown]
 # ## G. Emit
 #
-# The parquet is written with a sidecar recording the digest of its values, its row count and key
-# columns, and the digests of what it was built from. The digest is computed over content rather
-# than file bytes, so row order and parquet metadata leave it alone and any feature value moves
-# it. That is the property the registry's own hashes lack: a feature-set *name* reaches the
-# registry, a feature-set *value* does not, so a corrected feature moves every number downstream
-# without changing anything the registry stores.
+# The matrix goes to a parquet file, and beside it a small JSON file records what was written.
+# Its purpose is to let a later stage tell whether the matrix it is reading is the one it was
+# tested against, without re-reading the whole file: it holds a digest of the values, the row
+# count, the key columns, and the digest of each input this notebook read.
+#
+# A digest is a short string computed from the contents, so that two files holding the same
+# values get the same string and any change in a value gets a different one. Computing it over
+# the values rather than over the bytes of the file is what makes it usable here: rewriting the
+# parquet with the rows in another order, or with different compression, leaves the digest
+# alone, while a single corrected feature value moves it. Recording the inputs' digests
+# alongside it is what makes the record a chain - a downstream stage can see not only that the
+# matrix changed but that it changed because its input did.
 
 # %%
 FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -654,8 +864,8 @@ record = write_artifact(
 print(f"Wrote {display_path(FEATURES_DIR / 'financial.parquet')}")
 
 # %% [markdown] tags=["results"]
-# The matrix carries **57 features** on **396,186 rows** across **99 ETFs**, from **2007-01-03**
-# to **2025-12-31**, under content digest **a1e90493a7de9d0f**. Cutting the redundancy tree
+# The matrix carries **57 features** on **404,500 rows** across **99 ETFs**, from **2007-01-03**
+# to **2025-12-31**, under content digest **9c02a41ef4364257**. Cutting the redundancy tree
 # leaves **22 clusters**, so well over half the columns repeat an ordering another column
 # already carries.
 
@@ -667,12 +877,13 @@ print(f"{len(set(clusters.values()))} redundancy clusters")
 # %% [markdown]
 # ## Key takeaways
 #
-# - **State the timing contract before writing the feature.** The register fixes each family's
-#   lookback and lag in the configuration, and the warmup assertion, the timing figure and the
-#   review a reader can run all read those numbers rather than re-deriving them from the code.
-# - **Test the seal by construction, not by inspection.** Rebuilding the panel with later dates
-#   withheld and comparing values catches any transform that fits across the sample, including
-#   the ones nobody thought to flag.
+# - **State the timing contract before writing the feature.** The configuration fixes each family's
+#   lookback and lag in the register and every window the construction runs, so the timing figure
+#   and the warmup assertion read those declarations rather than numbers retyped in the code.
+# - **Check that later dates were not read, by rebuilding rather than by inspecting.**
+#   Constructing the panel a second time with the holdout withheld and comparing the two value
+#   by value catches any transform that fits across the sample, including the ones nobody
+#   thought to flag.
 # - **Rank inside the date.** A percentile taken within one timestamp is comparable across dates
 #   in a way a raw level, whose distribution drifts with the period's volatility, is not.
 # - **Read the matrix before modelling it.** Distribution, dispersion, redundancy and decay each
@@ -682,8 +893,8 @@ print(f"{len(set(clusters.values()))} redundancy clusters")
 # ### Known limitations
 #
 # - The cross-asset regime feature is one pair, SPY against TLT. It describes the equity-bond
-#   relationship and says nothing about commodities or currencies, which are a third of the
-#   universe.
+#   relationship and says nothing about the commodity and currency funds the universe also
+#   holds.
 # - The eligibility gate is annual, so an ETF that lost liquidity in June stays in the
 #   cross-section until December.
 # - The yield-curve features carry the configured one-session availability lag, but they read

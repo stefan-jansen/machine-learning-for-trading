@@ -1,0 +1,80 @@
+{% extends 'lab/index.html.j2' %}
+
+{#
+  The `lab` template reads width, height and the background hints out of an output's
+  `image/png` metadata and never reads `alt`, so the description
+  `utils.style.show_with_alt` stores there is dropped on export. `HTMLExporter` then
+  fills every `<img>` that has no alt with "No description has been provided for this
+  image", which is what the rendered page has been saying for every figure in the book.
+
+  These two blocks are `lab/base.html.j2`'s, with the alt attribute added. Nothing else
+  differs, so a figure with no alt text renders exactly as it did before.
+#}
+
+{% block data_png scoped %}
+<div class="jp-RenderedImage jp-OutputArea-output {{ extra_class }}">
+{%- if 'image/png' in output.metadata.get('filenames', {}) %}
+<img src="{{ output.metadata.filenames['image/png'] | posix_path | escape_html }}"
+{%- else %}
+<img src="data:image/png;base64,{{ output.data['image/png'] | escape_html }}"
+{%- endif %}
+{%- set alt=output | get_metadata('alt', 'image/png') -%}
+{%- if alt is not none %}
+alt="{{ alt | escape_html }}"
+{%- endif %}
+{%- set width=output | get_metadata('width', 'image/png') -%}
+{%- if width is not none %}
+width={{ width | escape_html }}
+{%- endif %}
+{%- set height=output | get_metadata('height', 'image/png') -%}
+{%- if height is not none %}
+height={{ height | escape_html }}
+{%- endif %}
+class="
+{%- if output | get_metadata('unconfined', 'image/png') %}
+unconfined
+{%- endif %}
+{%- if output | get_metadata('needs_background', 'image/png') == 'light' %}
+jp-needs-light-background
+{%- endif %}
+{%- if output | get_metadata('needs_background', 'image/png') == 'dark' %}
+jp-needs-dark-background
+{%- endif %}
+"
+>
+</div>
+{%- endblock data_png %}
+
+{% block data_jpg scoped %}
+<div class="jp-RenderedImage jp-OutputArea-output {{ extra_class }}">
+{%- if 'image/jpeg' in output.metadata.get('filenames', {}) %}
+<img src="{{ output.metadata.filenames['image/jpeg'] | posix_path | escape_html }}"
+{%- else %}
+<img src="data:image/jpeg;base64,{{ output.data['image/jpeg'] | escape_html }}"
+{%- endif %}
+{%- set alt=output | get_metadata('alt', 'image/jpeg') -%}
+{%- if alt is not none %}
+alt="{{ alt | escape_html }}"
+{%- endif %}
+{%- set width=output | get_metadata('width', 'image/jpeg') -%}
+{%- if width is not none %}
+width={{ width | escape_html }}
+{%- endif %}
+{%- set height=output | get_metadata('height', 'image/jpeg') -%}
+{%- if height is not none %}
+height={{ height | escape_html }}
+{%- endif %}
+class="
+{%- if output | get_metadata('unconfined', 'image/jpeg') %}
+unconfined
+{%- endif %}
+{%- if output | get_metadata('needs_background', 'image/jpeg') == 'light' %}
+jp-needs-light-background
+{%- endif %}
+{%- if output | get_metadata('needs_background', 'image/jpeg') == 'dark' %}
+jp-needs-dark-background
+{%- endif %}
+"
+>
+</div>
+{%- endblock data_jpg %}

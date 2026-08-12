@@ -886,9 +886,9 @@ def run_tabm_cv(
         val_mask = (dates_series >= split["val_start"]) & (dates_series <= split["val_end"])
 
         if has_fold_temporal:
-            from utils.modeling import _replace_temporal_columns
+            from utils.modeling import replace_temporal_columns
 
-            train_df = _replace_temporal_columns(
+            train_df = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
                 temporal_by_fold,
@@ -896,7 +896,7 @@ def run_tabm_cv(
                 temporal_feature_names,
                 split["fold"],
             )
-            val_df = _replace_temporal_columns(
+            val_df = replace_temporal_columns(
                 dataset_pd,
                 val_mask,
                 temporal_by_fold,

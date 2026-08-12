@@ -265,23 +265,26 @@ extension_products:
 # ============================================================================
 # Individual contracts are downloaded separately for ES and CL only
 # to demonstrate roll mechanics. See databento_individual.py
+#
+# Requested by parent symbol (ES.FUT) rather than contract by contract, so one
+# request returns every listed contract for the product. That includes calendar
+# spreads, which is deliberate: 02_futures_continuous filters them out on price
+# and the filter is part of the lesson. It is also why `close` can be negative.
 individual:
-  schema: "ohlcv-1h"
-  stype_in: "raw_symbol"
-  output_dir: "futures/individual"
+  schema: "ohlcv-1d"     # rtype 35; the roll demo is a daily-volume argument
+  stype_in: "parent"     # one request per product, not one per contract
+  output_dir: "futures/market/individual"   # where data/futures/loader.py looks
+  start: "2016-01-01"
+  end: "2025-12-31"
 
   products:
     ES:
       name: "E-mini S&P 500"
       months: [3, 6, 9, 12]  # H, M, U, Z (quarterly)
-      download_window_months: 6
 
     CL:
       name: "Crude Oil"
       months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]  # Monthly
-      download_window_months: 2
-
-  years: [2024, 2025]
 
 # ============================================================================
 # OUTPUT STRUCTURE

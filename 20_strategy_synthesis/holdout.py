@@ -24,6 +24,14 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+# lightgbm has to be imported before anything that loads scikit-learn, which
+# `ml4t.diagnostic` does transitively. Both ship their own OpenMP runtime and
+# the first one loaded wins for the whole process; on macOS ARM64 the loser's
+# first multithreaded fit dies in `__kmp_suspend_initialize_thread`, killing
+# the kernel with no traceback. `_train_gbm` re-imports it locally for reading;
+# this one is here only to lose no race. Plain `import` statements sort ahead
+# of `from ... import` ones, so isort keeps this above the ml4t line.
+import lightgbm  # noqa: F401
 import numpy as np
 import polars as pl
 import torch  # win the cudart-resolution race vs ml4t.diagnostic  # noqa: F401

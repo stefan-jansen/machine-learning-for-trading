@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -58,23 +58,28 @@ import warnings
 from collections import defaultdict
 from typing import Any
 
+# lightgbm and torch must be imported before scikit-learn. All three ship their
+# own OpenMP runtime and the first one loaded wins for the whole process; on
+# macOS ARM64, loading scikit-learn's libomp first makes LightGBM's first
+# multithreaded fit segfault in __kmp_suspend_initialize_thread. Plain `import`
+# statements sort ahead of `from ... import` ones, so this order is what isort
+# produces and will not drift back. torch also has to precede ml4t.diagnostic,
+# which dlopens an older libcudart and otherwise wins symbol resolution.
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import torch
+from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
 
 warnings.filterwarnings("ignore")
-
-import lightgbm as lgb
-import torch
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
-
-from utils.modeling import load_modeling_dataset
 
 
 def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
@@ -88,7 +93,7 @@ def cross_sectional_ic_mean(y_true, y_pred, dates, symbols):
         date_col="timestamp",
         entity_col="symbol",
     )
-    ic_clean = ic_per_date.drop_nulls("ic")
+    ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic")
     return float(ic_clean["ic"].mean()) if ic_clean.height else float("nan")
 
 
@@ -345,9 +350,9 @@ def predict_torch_mlp(model, X_test, device="cpu"):
 # the few large residuals at the expense of the cross-sectional ranking that
 # IC rewards. A LightGBM regressor trained with MSE (`regression_l2`) on this
 # fold structure still fits normally — dozens of trees, non-degenerate
-# predictions — but its test IC comes out lower (negative on fold 0, ≈ −0.02
-# versus the MAE model's +0.03), which is why every trainable model here
-# defaults to MAE.
+# predictions — but its test IC comes out lower, negative on fold 0 where the
+# MAE model is positive, which is why every trainable model here defaults to
+# MAE.
 # * **TabPFN** — zero-shot: no training, no validation needed.
 #
 # The test slice is held strictly out — none of the early-stopping signals
@@ -696,23 +701,24 @@ plt.show()
 # %% [markdown]
 # **Interpretation**: The results illustrate the high-noise regime of monthly
 # return prediction on a small ETF universe. With L1/MAE loss across all
-# trainable models, **LightGBM leads** (mean IC +0.074) followed by TabM
-# (+0.049) and the minimal 64-32 MLP at +0.016 — capacity alone is
-# not enough to extract signal from this feature set. (TabPFN was skipped in
-# this run — its gated-license weights need a free Prior Labs token — so only
-# the three trainable models are scored here.) LightGBM also trains in well
-# under a second per fold (~0.7 s wall on this GPU box — on par with the
-# minimal MLP and roughly 3× faster than TabM's ensemble; early stopping
-# fires between 2 and 113 trees, averaging 42), reinforcing the operational
-# case for GBMs even when DL alternatives are within striking distance on
-# accuracy. Wall-clock times are hardware-dependent and swing run to run;
-# only the orders of magnitude and the TabM-is-slowest ranking are stable.
+# trainable models, the summary table above ranks **LightGBM first**, then
+# TabM, then the minimal 64-32 MLP: capacity alone is not enough to extract
+# signal from this feature set. (TabPFN was skipped in this run - its
+# gated-license weights need a free Prior Labs token - so only the three
+# trainable models are scored here.) LightGBM also trains in well under a
+# second per fold, on par with the minimal MLP and several times faster than
+# TabM's ensemble, with early stopping firing after a small fraction of the
+# tree budget. That reinforces the operational case for GBMs even where a DL
+# alternative is within striking distance on accuracy. Wall-clock times are
+# hardware-dependent and swing run to run; only the orders of magnitude and
+# the TabM-is-slowest ranking are stable.
 #
-# Per-fold IC swings are large for every model (LightGBM: −0.05 → +0.17;
-# TabM: −0.03 → +0.12), so single-fold rankings are not reliable
-# evidence of architectural superiority — but the consistent ordering
-# across 8 chronologically-distinct folds is meaningful. Tuned GBMs in
-# `04_optuna_tuning` widen the gap further.
+# Read the ordering, not the digits. Per-fold IC swings are larger than the
+# gaps between models - each model's per-fold range in the table above spans
+# both signs - so a single fold's ranking is not evidence of architectural
+# superiority. What carries the argument is that the ordering holds across 8
+# chronologically distinct folds. Tuned GBMs in `04_optuna_tuning` widen the
+# gap further.
 
 # %% [markdown]
 # ## 7. When to Use Deep Learning
@@ -720,47 +726,45 @@ plt.show()
 # See Section 12.3 for the full decision framework. This notebook provides the
 # empirical evidence behind the "Recommended family" column. Key findings:
 #
-# - **LightGBM (with L1/MAE loss + early stopping) leads on this benchmark**
-#   — mean IC +0.074 across 8 folds at <1 s/fold. Operational case is
-#   simple too: minimal infrastructure, tight tuning loop, mature ecosystem.
-# - **TabM** is the strongest tabular DL contender at +0.049 mean IC and
-#   ~2 s/fold on GPU, validating its parameter-efficient-ensembling
-#   premise without dethroning the GBM. Best-val checkpointing fires at an
-#   average epoch of 30 (range 5–85), so the 200-epoch cap is doing
-#   real work for some folds and wasted compute for others.
+# - **LightGBM (with L1/MAE loss + early stopping) leads on this benchmark**,
+#   at under a second per fold. Operational case is simple too: minimal
+#   infrastructure, tight tuning loop, mature ecosystem.
+# - **TabM** is the strongest tabular DL contender, validating its
+#   parameter-efficient-ensembling premise without dethroning the GBM.
+#   Best-val checkpointing fires well before the 200-epoch cap on most folds
+#   and near it on others, so the cap is doing real work for some folds and
+#   wasting compute on the rest.
 # - **TabPFN** — the gated-license foundation model — was skipped in this
 #   production run because its weights need a free Prior Labs token. Install
 #   the token (see the skip note above) to add a zero-shot signal-checking
 #   probe before investing in tuning.
-# - **A minimal 64-32 ReLU MLP** is the simplest neural net you can write
-#   and lands at +0.016 mean IC — visibly weaker than TabM,
-#   confirming the chapter's premise that capacity alone is not enough on
-#   tabular financial data; you need either an ensemble (TabM), a
-#   foundation model (TabPFN), or a real tabular learner (LightGBM).
+# - **A minimal 64-32 ReLU MLP** is the simplest neural net you can write and
+#   lands visibly below TabM, confirming the chapter's premise that capacity
+#   alone is not enough on tabular financial data; you need either an ensemble
+#   (TabM), a foundation model (TabPFN), or a real tabular learner (LightGBM).
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **LightGBM with L1/MAE + early stopping leads** (mean IC +0.074
-#    across 8 folds, ~0.7 s wall per fold). TabM is the strongest tabular
-#    DL contender (+0.049) and the minimal 64-32 MLP lands at +0.016 —
-#    capacity alone is not a strategy. (TabPFN was skipped this run — its
-#    gated-license weights need a Prior Labs token.)
+# 1. **LightGBM with L1/MAE + early stopping leads**, at under a second per
+#    fold. TabM is the strongest tabular DL contender and the minimal 64-32
+#    MLP trails both: capacity alone is not a strategy. (TabPFN was skipped
+#    this run - its gated-license weights need a Prior Labs token.)
 # 2. **The loss function is load-bearing on noisy financial targets.**
 #    Swapping LightGBM's objective from MSE to MAE on this 21-day-return
-#    target lifts fold-0 test IC from ≈ −0.02 to +0.03 and makes MAE the
-#    benchmark leader — squared error over-weights the heavy-tailed large
+#    target turns fold 0's test IC from negative to positive and makes MAE the
+#    benchmark leader: squared error over-weights the heavy-tailed large
 #    residuals and erodes the cross-sectional ranking. The codebase's 9
 #    case-study GBM benchmark independently confirms MAE achieves the
-#    highest IC on 8 of 9 regression-primary case studies (see
+#    highest IC on most regression-primary case studies (see
 #    `12_case_study_insights` §3a).
 # 3. **Validation curves matter even when accuracy is noisy.** TabM's
 #    train/val L1 trajectory and LightGBM's `best_iter` distribution show
 #    where each model actually converges; the IC table alone hides the
 #    overfitting risk that fixed-epoch / fixed-tree-count schedules
 #    introduce. Always carve a held-out val slice and stop on it.
-# 4. **Walk-forward variance is large** — per-fold IC swings of ±0.1+
-#    across all models make single-split comparisons unreliable. Report
+# 4. **Walk-forward variance is large** - per-fold IC swings wider than the
+#    gaps between models make single-split comparisons unreliable. Report
 #    mean ± std across folds, not a single number.
 # 5. **Tuning matters more than architecture** — default hyperparameters
 #    leave performance on the table for every family; Section 12.4 (Optuna)

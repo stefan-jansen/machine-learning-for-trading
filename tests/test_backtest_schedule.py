@@ -154,6 +154,22 @@ class TestExecutionDelayMapping:
         assert _resolve_execution_mode("MONDAY_OPEN") == ExecutionMode.NEXT_BAR
         assert _resolve_execution_mode("monday_open") == ExecutionMode.NEXT_BAR
 
+    def test_next_session_close_maps_to_next_bar(self):
+        """Regression: sp500_options' token must not reach the silent fallback.
+
+        `build_resolved_backtest_config` resolves an unrecognised token through
+        `.get(fill_timing, "next_bar")`, which yields the right mode without the
+        token ever being declared. This asserts the declared path.
+        """
+        from ml4t.backtest import ExecutionMode
+
+        from case_studies.utils.backtest_presets import (
+            resolve_execution_mode as _resolve_execution_mode,
+        )
+
+        assert _resolve_execution_mode("NEXT_SESSION_CLOSE") == ExecutionMode.NEXT_BAR
+        assert _resolve_execution_mode("next_session_close") == ExecutionMode.NEXT_BAR
+
     def test_1_bar_maps_to_next_bar(self):
         from ml4t.backtest import ExecutionMode
 
