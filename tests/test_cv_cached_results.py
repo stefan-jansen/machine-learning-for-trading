@@ -266,6 +266,39 @@ def test_result_assembly_reports_and_rejects_invalid_checkpoint_scores() -> None
     ]
 
 
+def test_result_assembly_normalizes_checkpoint_key_types_before_join() -> None:
+    curves = pl.DataFrame([{"config": "lstm", "epoch": 10, "ic_mean": 0.03, "ic_n_days": 3}])
+    predictions = _predictions("lstm", 10).with_columns(pl.col("epoch").cast(pl.Int32))
+
+    result = cv_results.assemble_cv_result(
+        curves,
+        predictions,
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert result["best_config_name"] == "lstm"
+    assert result["best_epoch"] == 10
+
+
+def test_result_assembly_excludes_curve_without_prediction_rows() -> None:
+    curves = pl.DataFrame(
+        [
+            {"config": "lstm", "epoch": 10, "ic_mean": 0.03, "ic_n_days": 3},
+            {"config": "lstm", "epoch": 25, "ic_mean": 0.90, "ic_n_days": 3},
+        ]
+    )
+
+    result = cv_results.assemble_cv_result(
+        curves,
+        _predictions("lstm", 10),
+        date_col="timestamp",
+        entity_col="symbol",
+    )
+
+    assert result["best_epoch"] == 10
+
+
 def test_result_assembly_rejects_mixed_known_and_unknown_coverage() -> None:
     curves = pl.DataFrame(
         [

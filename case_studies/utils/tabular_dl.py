@@ -385,6 +385,45 @@ def _n_invalid_scores(frame: pl.DataFrame) -> int:
     )
 
 
+def _checkpoint_prediction_frame(
+    config_name: str,
+    fold: int,
+    checkpoint_preds: dict[int, np.ndarray],
+    val_dates: np.ndarray,
+    val_entities: np.ndarray | None,
+    y_val: np.ndarray,
+    date_col: str,
+    entity_col: str,
+    *,
+    eval_actual: np.ndarray | None = None,
+    eval_col: str = "eval_actual",
+) -> pl.DataFrame:
+    """Build the checkpoint frame used when incremental persistence is disabled."""
+    dates = pl.Series(date_col, val_dates)
+    if dates.dtype == pl.Object:
+        dates = dates.map_elements(str, return_dtype=pl.String).str.to_datetime(strict=False)
+
+    frames = []
+    for epoch, scores in checkpoint_preds.items():
+        n_rows = len(scores)
+        entities = val_entities if val_entities is not None else np.array(["unknown"] * n_rows)
+        frame = pl.DataFrame(
+            {
+                date_col: dates,
+                entity_col: entities,
+                "y_true": y_val.astype(np.float64),
+                "y_score": scores.astype(np.float64),
+                "fold_id": np.full(n_rows, fold, dtype=np.int32),
+                "config": [config_name] * n_rows,
+                "epoch": np.full(n_rows, epoch, dtype=np.int32),
+            }
+        )
+        if eval_actual is not None:
+            frame = frame.with_columns(pl.Series(eval_col, eval_actual.astype(np.float64)))
+        frames.append(frame)
+    return pl.concat(frames) if frames else pl.DataFrame()
+
+
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
     """Reassemble one config's predictions from its per-fold incremental saves."""
     parquet_files = sorted(incr_dir.glob(f"{config_name}_fold*.parquet"))
@@ -538,7 +577,17 @@ def _load_cached_tabm_config(
         )
     if not curves:
         raise ValueError(f"No cached {prediction_split} checkpoints for {config_name}")
-    best = max(curves, key=lambda row: row["ic_mean"])
+    full_days = max(int(row["ic_n_days"]) for row in curves)
+    eligible = [
+        row
+        for row in curves
+        if np.isfinite(float(row["ic_mean"]))
+        and int(row["n_invalid"]) == 0
+        and int(row["ic_n_days"]) == full_days
+    ]
+    if not eligible:
+        raise ValueError(f"No selectable cached checkpoint for {config_name}")
+    best = max(eligible, key=lambda row: row["ic_mean"])
     result = {
         "config_name": config_name,
         "best_epoch": best["epoch"],
@@ -1022,6 +1071,7 @@ def run_tabm_cv(
     config_results: list[dict[str, Any]] = list(cached_results)
     all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []
+    in_memory_prediction_frames: list[pl.DataFrame] = []
 
     # Set up incremental save directory
     run_save_dir = save_dir / label_col if save_dir is not None else None
@@ -1062,6 +1112,7 @@ def run_tabm_cv(
         print(f"\n  {config_name}:")
 
         fold_checkpoint_ics: dict[int, list[float]] = {}
+        config_prediction_frames: list[pl.DataFrame] = []
         tabpfn_available = True
 
         for fd in fold_data:
@@ -1110,6 +1161,21 @@ def run_tabm_cv(
                             entity_col,
                             eval_actual=fd["y_eval_val"] if eval_col else None,
                             eval_col=eval_col or "eval_actual",
+                        )
+                    else:
+                        config_prediction_frames.append(
+                            _checkpoint_prediction_frame(
+                                config_name,
+                                fd["fold"],
+                                {1: preds},
+                                fd["val_dates"],
+                                fd["val_entities"],
+                                fd["y_val"],
+                                date_col,
+                                entity_col,
+                                eval_actual=fd["y_eval_val"] if eval_col else None,
+                                eval_col=eval_col or "eval_actual",
+                            )
                         )
 
                     fold_elapsed = time.perf_counter() - fold_t0
@@ -1172,6 +1238,21 @@ def run_tabm_cv(
                         eval_actual=fd["y_eval_val"] if eval_col else None,
                         eval_col=eval_col or "eval_actual",
                     )
+                else:
+                    config_prediction_frames.append(
+                        _checkpoint_prediction_frame(
+                            config_name,
+                            fd["fold"],
+                            checkpoint_preds,
+                            fd["val_dates"],
+                            fd["val_entities"],
+                            fd["y_val"],
+                            date_col,
+                            entity_col,
+                            eval_actual=fd["y_eval_val"] if eval_col else None,
+                            eval_col=eval_col or "eval_actual",
+                        )
+                    )
 
                 del model, checkpoint_preds
                 if torch.cuda.is_available():
@@ -1208,8 +1289,12 @@ def run_tabm_cv(
         cfg_all_preds = (
             _load_incremental_preds_for_config(incr_dir, config_name)
             if incr_dir is not None
-            else pl.DataFrame()
+            else (
+                pl.concat(config_prediction_frames) if config_prediction_frames else pl.DataFrame()
+            )
         )
+        if incr_dir is None and cfg_all_preds.height:
+            in_memory_prediction_frames.append(cfg_all_preds)
         checkpoint_metrics: dict[int, dict[str, float]] = {}
         if cfg_all_preds.height:
             actual_col = eval_col if eval_col else "y_true"
@@ -1365,7 +1450,7 @@ def run_tabm_cv(
 
         gc.collect()
 
-    prediction_frames = list(cached_prediction_frames)
+    prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
     if incr_dir is not None:
         for config_name in [cfg["config_name"] for cfg in configs]:
             frame = _load_incremental_preds_for_config(incr_dir, config_name)

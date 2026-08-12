@@ -62,16 +62,22 @@ def assemble_cv_result(
         curve_df = curve_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("ic_std"))
     if "ic_n_days" not in curve_df.columns:
         curve_df = curve_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("ic_n_days"))
+    curve_df = curve_df.with_columns(pl.col("epoch").cast(pl.Int64))
 
     prediction_coverage = pl.DataFrame()
     prediction_keys = {"config", "epoch", "y_score"}
     if all_predictions.height > 0 and prediction_keys.issubset(all_predictions.columns):
-        prediction_coverage = all_predictions.group_by(["config", "epoch"]).agg(
-            (
-                pl.col("y_score").is_null().sum()
-                + pl.col("y_score").is_nan().sum()
-                + pl.col("y_score").is_infinite().sum()
-            ).alias("_prediction_n_invalid")
+        prediction_coverage = (
+            all_predictions.with_columns(pl.col("epoch").cast(pl.Int64))
+            .group_by(["config", "epoch"])
+            .agg(
+                (
+                    pl.col("y_score").is_null().sum()
+                    + pl.col("y_score").is_nan().sum()
+                    + pl.col("y_score").is_infinite().sum()
+                ).alias("_prediction_n_invalid"),
+                pl.lit(True).alias("_has_prediction_rows"),
+            )
         )
 
     if "n_invalid" not in curve_df.columns:
@@ -79,7 +85,8 @@ def assemble_cv_result(
     if prediction_coverage.height > 0:
         curve_df = curve_df.join(prediction_coverage, on=["config", "epoch"], how="left")
         curve_df = curve_df.with_columns(
-            pl.col("_prediction_n_invalid").fill_null(pl.col("n_invalid")).alias("n_invalid")
+            pl.col("_prediction_n_invalid").fill_null(pl.col("n_invalid")).alias("n_invalid"),
+            pl.col("_has_prediction_rows").fill_null(False),
         ).drop("_prediction_n_invalid")
 
     curve_df = curve_df.with_columns(
@@ -90,7 +97,10 @@ def assemble_cv_result(
         pl.col("n_invalid").cast(pl.Int64),
     ).sort(["config", "epoch"])
 
-    eligible = curve_df.filter(pl.col("ic_mean").is_finite() & (pl.col("n_invalid") == 0))
+    eligibility = pl.col("ic_mean").is_finite() & (pl.col("n_invalid") == 0)
+    if "_has_prediction_rows" in curve_df.columns:
+        eligibility &= pl.col("_has_prediction_rows")
+    eligible = curve_df.filter(eligibility)
     full_coverage_days: float | None = None
     if require_full_coverage and not eligible.is_empty():
         finite_days = eligible.filter(pl.col("ic_n_days").is_finite())
@@ -175,7 +185,7 @@ def assemble_cv_result(
             date_col=date_col,
             entity_col=entity_col,
         ),
-        "all_learning_curves": curve_df,
+        "all_learning_curves": curve_df.drop("_has_prediction_rows", strict=False),
         "training_log": _as_frame(training_log),
         "full_coverage_days": full_coverage_days,
     }

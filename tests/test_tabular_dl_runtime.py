@@ -433,6 +433,124 @@ def test_cached_replay_rejects_corrupted_daily_registry_metrics(
         )
 
 
+def test_cached_replay_selects_full_decision_time_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    dates = (
+        [pd.Timestamp("2020-04-01")] * 5
+        + [pd.Timestamp("2020-05-01")] * 5
+        + [pd.Timestamp("2020-06-01")] * 5
+    )
+    symbols = list(range(5)) * 3
+    actual = list(range(5)) * 3
+    full = pl.DataFrame(
+        {
+            "timestamp": dates,
+            "symbol": symbols,
+            "y_true": actual,
+            "y_score": list(reversed(range(5))) + list(range(5)) * 2,
+            "fold_id": [0] * 5 + [1] * 5 + [2] * 5,
+        }
+    ).with_columns(pl.col("y_score").cast(pl.Float64))
+    partial = full.with_columns(
+        pl.when(pl.col("timestamp") == pd.Timestamp("2020-06-01"))
+        .then(0.0)
+        .otherwise(pl.col("y_true"))
+        .alias("y_score")
+    )
+    frames = {10: full, 20: partial}
+    _install_cache(monkeypatch, tmp_path, frames)
+
+    metrics = {}
+    for epoch, frame in frames.items():
+        stats = tabular_dl.cross_sectional_ic(
+            frame,
+            frame,
+            pred_col="y_score",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col="symbol",
+            method="spearman",
+            min_obs=5,
+        )
+        metrics[f"prediction-{epoch}"] = pl.DataFrame(
+            {
+                "ic_mean_daily": [stats["ic_mean"]],
+                "ic_std_daily": [stats["ic_std"]],
+            }
+        )
+    monkeypatch.setattr(
+        registry,
+        "load_prediction_metrics",
+        lambda _case_study, *, prediction_hash: metrics[prediction_hash],
+    )
+
+    result, _, curves = tabular_dl._load_cached_tabm_config(
+        case_study="probe",
+        training_spec={"family": "tabular_dl", "label": "label", "seed": 42},
+        config_name="tabm_probe",
+        prediction_split="validation",
+        date_col="timestamp",
+        entity_col="symbol",
+        eval_col=None,
+        expected_checkpoints=(10, 20),
+        expected_keys=full.select("timestamp", "symbol", "fold_id"),
+    )
+
+    assert {row["epoch"]: row["ic_n_days"] for row in curves} == {10: 3, 20: 2}
+    assert result["best_epoch"] == 10
+
+
+def test_training_without_save_dir_keeps_checkpoint_eligibility_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _classification_frame()
+    splits = [
+        {
+            "fold": 0,
+            "train_start": pd.Timestamp("2020-01-01"),
+            "train_end": pd.Timestamp("2020-03-01"),
+            "val_start": pd.Timestamp("2020-04-01"),
+            "val_end": pd.Timestamp("2020-05-01"),
+        }
+    ]
+
+    def fake_fold(**kwargs):
+        actual = kwargs["y_eval_val"].astype(np.float32)
+        return {1: 0.1, 2: 0.9}, {1: actual, 2: np.full_like(actual, np.inf)}, {}
+
+    monkeypatch.setattr(tabular_dl, "TabMModel", lambda **_kwargs: object())
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", fake_fold)
+
+    result = tabular_dl.run_tabm_cv(
+        frame,
+        splits,
+        configs=[
+            {
+                "family": "tabular_dl",
+                "config_name": "tabm_probe",
+                "params": {},
+                "n_epochs": 2,
+                "checkpoint_interval": 1,
+            }
+        ],
+        n_features=1,
+        feature_names=["feature"],
+        label_col="label",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        save_dir=None,
+    )
+
+    curves = {row["epoch"]: row for row in result["all_learning_curves"].to_dicts()}
+    assert result["best_epoch"] == 1
+    assert curves[1]["n_invalid"] == 0
+    assert curves[2]["n_invalid"] == 100
+    assert result["all_predictions"].height == 200
+
+
 def test_complete_registry_replays_predictions_instead_of_returning_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
