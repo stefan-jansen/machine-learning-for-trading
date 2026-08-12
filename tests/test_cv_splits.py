@@ -68,9 +68,9 @@ def test_map_calendar_id(setup_name, expected) -> None:
 @pytest.mark.parametrize(
     "raw, normalized",
     [
-        ("P5Y", "5Y"),
-        ("P1Y", "1Y"),
-        ("1Y", "1Y"),
+        ("P5Y", "5YE"),
+        ("P1Y", "1YE"),
+        ("1Y", "1YE"),
         ("PT8H", "8h"),
         ("8H", "8h"),  # H → h for pd.Timedelta compatibility
         ("21D", "21D"),
@@ -505,8 +505,8 @@ def test_make_walk_forward_config_nyse_label_horizon_is_int_trading_days() -> No
     assert cfg.label_horizon == 21
     assert cfg.calendar_id == "NYSE"
     assert cfg.n_splits == 8
-    assert cfg.train_size == "10Y"
-    assert cfg.test_size == "1Y"  # val_size → test_size alias
+    assert cfg.train_size == "10YE"
+    assert cfg.test_size == "1YE"  # val_size → test_size alias
     assert cfg.fold_direction == "backward"
 
 

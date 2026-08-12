@@ -109,8 +109,8 @@ def test_every_image_override_targets_a_valid_image() -> None:
     assert not invalid, f"packages mapped to unknown images: {invalid}"
 
 
-def test_okx_sdk_is_classified_as_optional(classified) -> None:
-    assert "okx" in classified["optional"]
+def test_okx_sdk_is_classified_in_reader_image(classified) -> None:
+    assert "okx" in classified["ml4t"]
 
 
 def test_every_override_target_appears_in_at_least_one_source_file(scanned_imports) -> None:

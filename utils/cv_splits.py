@@ -70,11 +70,12 @@ def _map_calendar_id(calendar: str | None) -> str | None:
 def _normalize_duration(s: str) -> str:
     """Strip ISO 8601 prefix (P, PT) and normalize unit aliases.
 
-    Examples: P5Y → 5Y, P1Y → 1Y, PT8H → 8h, 21D → 21D (unchanged).
+    Examples: P5Y → 5YE, P1Y → 1YE, PT8H → 8h, 21D → 21D (unchanged).
     """
     s = re.sub(r"^P?T?", "", s)
     s = re.sub(r"(\d+)H$", r"\1h", s)
     s = re.sub(r"(\d+)T$", r"\1min", s)
+    s = re.sub(r"(\d+)Y$", r"\1YE", s)
     return s
 
 

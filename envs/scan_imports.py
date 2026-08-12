@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import asyncio
 import importlib
 import os
 import sys
@@ -84,7 +85,6 @@ IMAGE_OVERRIDES: dict[str, str] = {
     "tables": "benchmark",
     # optional — broker / market-data SDKs readers may skip
     "databento": "optional",
-    "okx": "optional",
     "voyageai": "optional",
 }
 
@@ -175,7 +175,11 @@ def try_import(module_name: str) -> tuple[bool, str]:
     when a package imports OK but its configured data directory doesn't
     exist locally, which is not an environment setup failure.
     """
+    loop: asyncio.AbstractEventLoop | None = None
     try:
+        if module_name == "ib_async":
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         importlib.import_module(module_name)
         return True, ""
     except (FileNotFoundError, NotADirectoryError):
@@ -184,6 +188,10 @@ def try_import(module_name: str) -> tuple[bool, str]:
         return False, f"ImportError: {e}"
     except Exception as e:  # noqa: BLE001 — report anything that broke the import
         return False, f"{type(e).__name__}: {e}"
+    finally:
+        if loop is not None:
+            loop.close()
+            asyncio.set_event_loop(None)
 
 
 def main() -> int:
