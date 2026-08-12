@@ -2205,9 +2205,10 @@ def run_plumbing_test(
     This validates the backtest pipeline produces no spurious alpha
     from random inputs.
     """
+    backtest_config = get_backtest_config(case_study)
     strategy_spec = ensure_backtest_spec(
         case_study,
-        get_backtest_config(case_study),
+        backtest_config,
         strategy_spec,
         prices=prices,
         prediction_hash="plumbing_test",
@@ -2217,8 +2218,24 @@ def run_plumbing_test(
     rebal_spec = strategy.get("rebalance", {})
 
     if rebal_spec["mode"] == "vectorized":
-        if predictions is None or label is None:
-            raise ValueError("Vectorized plumbing tests require predictions and label")
+        label = label or backtest_config.primary_label
+        if predictions is None:
+            from case_studies.utils.registry import load_prediction_index, read_predictions
+
+            prediction_index = load_prediction_index(
+                case_study,
+                label=label,
+                split="validation",
+            )
+            if prediction_index.is_empty():
+                raise ValueError(
+                    f"Vectorized plumbing test found no validation predictions for "
+                    f"{case_study}/{label}"
+                )
+            predictions = read_predictions(
+                case_study,
+                prediction_index.row(0, named=True)["prediction_hash"],
+            )
 
         random_predictions = normalize_prediction_columns(predictions)
         rng = np.random.default_rng(seed)
