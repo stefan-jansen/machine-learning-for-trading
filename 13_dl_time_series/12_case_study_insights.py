@@ -752,8 +752,8 @@ def dl_tabular_delta(cs: str) -> dict | None:
 
 # %% [markdown]
 # The comparison selects complete-coverage rows from each family, then
-# computes both point estimates from the dates they share. It is not
-# paired-fold inference.
+# computes both point estimates from their shared evaluation timestamps. The
+# table does not estimate uncertainty for the difference between models.
 
 # %%
 delta_rows = [entry for cs in CASE_STUDY_IDS if (entry := dl_tabular_delta(cs)) is not None]
@@ -920,8 +920,8 @@ diagnostic_df.select(
 display(
     Markdown(
         f"**Computed baseline comparison.** DL has the higher shared-timestamp point estimate "
-        f"in {n_above} of {delta_df.height} comparable case studies. The conclusion is "
-        "descriptive until a daily-series difference estimator is registered and verified."
+        f"in {n_above} of {delta_df.height} comparable case studies. The table does not test "
+        "whether these differences are statistically distinguishable."
     )
 )
 
