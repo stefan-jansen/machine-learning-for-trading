@@ -228,6 +228,19 @@ def _resolve_model_configuration(
     for field in ("max_iter", "n_epochs_cond", "n_epochs_moment", "n_epochs_unc"):
         if field in reductions:
             model_kwargs[field] = int(reductions[field])
+    if model_name == "sdf" and reductions:
+        reduced_budget = max(
+            int(model_kwargs.get("n_epochs_unc", 256)),
+            int(model_kwargs.get("n_epochs_cond", 1024)),
+        )
+        configured = model_kwargs.get("checkpoint_epochs")
+        if configured is not None:
+            compatible = sorted(
+                {int(epoch) for epoch in configured if 1 <= int(epoch) <= reduced_budget}
+            )
+            if reduced_budget not in compatible:
+                compatible.append(reduced_budget)
+            model_kwargs["checkpoint_epochs"] = compatible
     if n_factors < 1 or n_epochs < 0:
         raise ValueError("latent-factor n_factors must be positive and n_epochs non-negative")
 
@@ -416,10 +429,9 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     expected = _prepare_expected_keys(case, model_name)
     macro_context = None
     if model_name == "sdf":
-        macro_context = {
-            **(case.macro_context_spec or {"policy": "unspecified", "version": "v1"}),
-            "resolved_fold_digest": _resolved_macro_digest(case),
-        }
+        macro_context = dict(case.macro_context_spec or {"policy": "unspecified", "version": "v1"})
+        if case.macro_panel is not None:
+            macro_context["resolved_fold_digest"] = _resolved_macro_digest(case)
     input_lineage = case.input_data_spec
     spec = {
         "identity_version": 2,
@@ -456,6 +468,12 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "input_data_spec": input_lineage,
         "macro_context": macro_context,
         "runtime": {
+            "deterministic_algorithms": deterministic,
+            "device": device,
+            "fold_workers": fold_workers,
+            "num_threads": num_threads,
+        },
+        "numerical_runtime": {
             "deterministic_algorithms": deterministic,
             "device": device,
             "fold_workers": fold_workers,
@@ -727,6 +745,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
                 temporal_keys=context.case.temporal_keys,
                 temporal_feature_names=context.case.temporal_feature_names,
                 fold_workers=context.fold_workers,
+                checkpoint_surface="fitted_state",
             )
             model_stage = staging / context.model_name
             _save_fold_extras(

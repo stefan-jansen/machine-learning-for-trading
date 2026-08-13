@@ -451,6 +451,7 @@ def run_latent_factor_cv(
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
     fold_workers: int = 1,
+    checkpoint_surface: str = "physical",
 ) -> dict[str, Any]:
     """Run walk-forward latent factor CV from the raw dated dataset."""
     del panel_data
@@ -463,6 +464,8 @@ def run_latent_factor_cv(
         raise ValueError("fold_workers must be a positive integer")
     if fold_workers > 1 and models != ["ipca"]:
         raise ValueError("parallel fold execution is currently supported only for IPCA-only runs")
+    if checkpoint_surface not in {"fitted_state", "physical"}:
+        raise ValueError("checkpoint_surface must be 'physical' or 'fitted_state'")
 
     model_kwargs = model_kwargs or {}
     runtime_spec = configure_latent_torch_runtime(
@@ -733,6 +736,21 @@ def run_latent_factor_cv(
         fold_elapsed: float,
     ) -> None:
         state[model_name]["fold_extras"].append({"fold_id": split["fold"], **extra})
+        if checkpoint_surface == "physical":
+            physical = set(
+                _expected_latent_checkpoints(
+                    model_name,
+                    n_epochs=n_epochs,
+                    model_kwargs=model_kwargs.get(model_name, {}),
+                )
+            )
+            checkpoint_preds = {
+                epoch: predictions
+                for epoch, predictions in checkpoint_preds.items()
+                if epoch in physical
+            }
+            if not checkpoint_preds:
+                raise ValueError(f"{model_name} produced no physical checkpoints")
         checkpoint_ics: dict[int, float] = {}
         for epoch, predictions in checkpoint_preds.items():
             frame = _build_prediction_frame(

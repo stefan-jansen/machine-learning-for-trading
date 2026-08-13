@@ -525,6 +525,99 @@ def test_sdf_identity_hashes_resolved_fallback_macro_values(tmp_path, monkeypatc
     assert first != second
 
 
+def test_macro_disabled_sdf_request_retains_disabled_identity(tmp_path, monkeypatch) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+    context = latent_case_study.load_case_study_context("etfs")
+    context.macro_context_spec = {
+        "alignment": "none",
+        "availability_lag_days": 0,
+        "input_digest": None,
+        "policy": "disabled",
+        "series": [],
+        "version": "v1",
+    }
+    context.model_kwargs["sdf"] = {
+        "beta_checkpoint_epochs": [1],
+        "beta_default_checkpoint": 1,
+        "beta_n_epochs": 1,
+        "checkpoint_epochs": [1],
+        "n_epochs_cond": 1,
+        "n_epochs_moment": 1,
+        "n_epochs_unc": 1,
+    }
+
+    resolved = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="sdf",
+        overrides={"device": "cpu", "use_macro": False},
+    ).resolve()
+
+    assert resolved.spec["macro_context"] == context.macro_context_spec
+
+
+def test_latent_numerical_runtime_changes_training_identity(tmp_path, monkeypatch) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+    requests = [
+        {"deterministic_algorithms": True, "device": "cpu", "num_threads": 1},
+        {"deterministic_algorithms": True, "device": "cuda", "num_threads": 1},
+        {"deterministic_algorithms": True, "device": "cpu", "num_threads": 2},
+        {"deterministic_algorithms": False, "device": "cpu", "num_threads": 1},
+    ]
+
+    identities = {
+        study.model(
+            family="latent_factors",
+            label="fwd_ret_1d",
+            config_name="pca",
+            overrides=runtime,
+        )
+        .resolve()
+        .identity
+        for runtime in requests
+    }
+
+    assert len(identities) == len(requests)
+
+
+def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch) -> None:
+    presets = latent_case_study._load_preset_model_kwargs("etfs", "fwd_ret_21d")
+    study = _latent_study(tmp_path, monkeypatch)
+    context = latent_case_study.load_case_study_context("etfs")
+    context.model_kwargs["sdf"] = presets["sdf"]
+    context.macro_context_spec = {
+        "alignment": "none",
+        "availability_lag_days": 0,
+        "input_digest": None,
+        "policy": "disabled",
+        "series": [],
+        "version": "v1",
+    }
+
+    resolved = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="sdf",
+        overrides={"device": "cpu", "use_macro": False},
+        execution_tier="preview",
+        preview_reductions={
+            "n_epochs_cond": 1,
+            "n_epochs_moment": 1,
+            "n_epochs_unc": 1,
+        },
+    ).resolve()
+
+    assert resolved.spec["model"]["params"]["checkpoint_epochs"] == [1]
+    assert [item["value"] for item in resolved.spec["checkpoint_schedule"]] == [
+        -3,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+    ]
+
+
 def test_cae_fitted_artifact_reconstructs_every_checkpoint(tmp_path) -> None:
     rng = np.random.default_rng(42)
     chars_train = rng.normal(size=(4, 5, 3)).astype(np.float32)
