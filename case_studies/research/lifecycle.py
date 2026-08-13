@@ -86,6 +86,31 @@ def _strategy_roster_is_resolved(
     )
 
 
+def _candidate_prices_are_canonical(candidates: CandidateSet) -> bool:
+    price_digests: dict[tuple[str, int], str] = {}
+    for member_hash in candidates.members:
+        member = Result.open(candidates.study, member_hash)
+        if not isinstance(member, BacktestResult):
+            return False
+        training_spec = member.lineage()["training_spec"]
+        label = training_spec.get("label")
+        if not isinstance(label, str) or not label:
+            return False
+        warmup = strategy_warmup_periods(member.spec())
+        cache_key = (label, warmup)
+        if cache_key not in price_digests:
+            prices = load_backtest_prices_for(
+                candidates.study.case_study,
+                label,
+                split="validation",
+                warmup_periods=warmup,
+            )
+            price_digests[cache_key] = value_digest(prices)
+        if member.spec().get("input_identity", {}).get("prices") != price_digests[cache_key]:
+            return False
+    return True
+
+
 class Lifecycle:
     def __init__(self, study: Study) -> None:
         self.study = study
@@ -117,6 +142,8 @@ class Lifecycle:
         candidates = CandidateSet.open(self.study, candidate_set_hash)
         if candidates.member_kind != "backtest" or selected_backtest_hash not in candidates.members:
             raise ValueError("selected backtest must be an exact member of the candidate set")
+        if not _candidate_prices_are_canonical(candidates):
+            raise ValueError("research lock requires canonical validation prices for every member")
         if candidates.best_validation_sharpe().hash != selected_backtest_hash:
             raise ValueError("research lock must select highest validation backtest Sharpe")
         selected = Result.open(self.study, selected_backtest_hash)
