@@ -54,11 +54,11 @@ class RegistrySelectionError(ValueError):
     """Raised when registry candidates cannot support a comparable rank-one selection."""
 
 
-def compare_daily_ic_on_shared_dates(
+def compare_ic_on_shared_timestamps(
     left: pl.DataFrame,
     right: pl.DataFrame,
 ) -> dict[str, float | int]:
-    """Average two daily IC series over their exact date intersection."""
+    """Average two IC series over their exact evaluation-timestamp intersection."""
     required = {"date", "ic"}
     for name, frame in (("left", left), ("right", right)):
         missing = required - set(frame.columns)
@@ -69,7 +69,7 @@ def compare_daily_ic_on_shared_dates(
         return (
             frame.select("date", "ic")
             .drop_nulls()
-            .with_columns(pl.col("date").cast(pl.Date))
+            .with_columns(pl.col("date").cast(pl.Datetime("ns")))
             .filter(pl.col("ic").is_finite())
             .group_by("date")
             .agg(pl.col("ic").mean().alias(value_name))
@@ -77,11 +77,11 @@ def compare_daily_ic_on_shared_dates(
 
     shared = _daily(left, "left_ic").join(_daily(right, "right_ic"), on="date", how="inner")
     if shared.is_empty():
-        raise RegistrySelectionError("daily IC series have no shared dates")
+        raise RegistrySelectionError("IC series have no shared evaluation timestamps")
     return {
         "left_ic": float(shared["left_ic"].mean()),
         "right_ic": float(shared["right_ic"].mean()),
-        "n_days": shared.height,
+        "n_timestamps": shared.height,
     }
 
 

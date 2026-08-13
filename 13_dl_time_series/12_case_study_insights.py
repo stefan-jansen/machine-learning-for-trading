@@ -78,7 +78,7 @@ from case_studies.utils.insight_chapter import (
     collect_grid_per_cs,
     collect_multi_label_per_cs,
     collect_rank1_per_cs,
-    compare_daily_ic_on_shared_dates,
+    compare_ic_on_shared_timestamps,
     conformal_coverage_for_selected_prediction,
     plot_cross_cs_forest,
     plot_multi_label_horizon,
@@ -676,7 +676,7 @@ if not conformal_df.is_empty():
 # The DL family enters a contested space - for every case study it is
 # compared to the highest-IC tabular configuration across linear, GBM, and
 # TabM. The selected models are rescored over the exact intersection of their
-# daily IC dates. The notebook does not infer uncertainty from a small set of
+# evaluation timestamps. The notebook does not infer uncertainty from a small set of
 # fold summaries.
 
 
@@ -735,7 +735,7 @@ def dl_tabular_delta(cs: str) -> dict | None:
     baseline_daily = load_daily_metrics_series(cs, best_row["prediction_hash"])
     if dl_daily.is_empty() or baseline_daily.is_empty():
         return None
-    matched = compare_daily_ic_on_shared_dates(dl_daily, baseline_daily)
+    matched = compare_ic_on_shared_timestamps(dl_daily, baseline_daily)
     return {
         "case_study": cs,
         "short_name": SHORT_NAMES[cs],
@@ -745,7 +745,7 @@ def dl_tabular_delta(cs: str) -> dict | None:
         "best_baseline_family": best_fam,
         "best_baseline_ic": matched["right_ic"],
         "baseline_prediction_hash": best_row["prediction_hash"],
-        "matched_days": matched["n_days"],
+        "matched_timestamps": matched["n_timestamps"],
         "delta": matched["left_ic"] - matched["right_ic"],
     }
 
@@ -759,7 +759,7 @@ def dl_tabular_delta(cs: str) -> dict | None:
 delta_rows = [entry for cs in CASE_STUDY_IDS if (entry := dl_tabular_delta(cs)) is not None]
 
 delta_df = pl.DataFrame(delta_rows).sort("delta", descending=True)
-print("DL minus highest-IC full-coverage tabular baseline on shared dates (primary label):")
+print("DL minus highest-IC full-coverage tabular baseline on shared timestamps (primary label):")
 delta_df.select(
     "short_name",
     "dl_arch",
@@ -767,7 +767,7 @@ delta_df.select(
     pl.col("dl_ic").round(4).alias("dl"),
     pl.col("best_baseline_ic").round(4).alias("base"),
     pl.col("delta").round(4),
-    "matched_days",
+    "matched_timestamps",
     "dl_prediction_hash",
     "baseline_prediction_hash",
 )
@@ -823,9 +823,9 @@ def format_scatter_axes(ax: plt.Axes, xs: np.ndarray, ys: np.ndarray) -> None:
     ax.plot([lo, hi], [lo, hi], color=COLORS["neutral"], linestyle="--")
     ax.axhline(0, color=COLORS["silver_muted"], linewidth=0.5)
     ax.axvline(0, color=COLORS["silver_muted"], linewidth=0.5)
-    ax.set_xlabel("Selected tabular baseline IC on shared dates")
-    ax.set_ylabel("Selected DL IC on shared dates")
-    ax.set_title("DL vs highest-IC tabular baseline on shared dates")
+    ax.set_xlabel("Selected tabular baseline IC on shared timestamps")
+    ax.set_ylabel("Selected DL IC on shared timestamps")
+    ax.set_title("DL vs highest-IC tabular baseline on shared timestamps")
 
 
 # %% [markdown]
@@ -898,7 +898,7 @@ for r in delta_df.iter_rows(named=True):
             "dl_arch": r["dl_arch"],
             "dl_ic": r["dl_ic"],
             "delta": r["delta"],
-            "matched_days": r["matched_days"],
+            "matched_timestamps": r["matched_timestamps"],
         }
     )
 
@@ -913,7 +913,7 @@ diagnostic_df.select(
     pl.col("tab_ic").round(4).alias("tab_ic"),
     pl.col("dl_ic").round(4).alias("dl_ic"),
     pl.col("delta").round(4).alias("delta"),
-    "matched_days",
+    "matched_timestamps",
 )
 
 # %%

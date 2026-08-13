@@ -11,26 +11,26 @@ import pytest
 from case_studies.utils import insight_chapter
 
 
-def test_compare_daily_ic_uses_only_shared_dates() -> None:
+def test_compare_ic_uses_only_shared_intraday_timestamps() -> None:
     left = pl.DataFrame(
         {
-            "date": ["2026-01-02", "2026-01-03", "2026-01-04"],
+            "date": ["2026-01-02 09:30", "2026-01-02 10:00", "2026-01-03 09:30"],
             "ic": [0.9, 0.2, 0.4],
         }
     ).with_columns(pl.col("date").str.to_datetime().cast(pl.Datetime("ms")))
     right = pl.DataFrame(
         {
-            "date": ["2026-01-03", "2026-01-04", "2026-01-05"],
+            "date": ["2026-01-02 10:00", "2026-01-03 09:30", "2026-01-03 10:00"],
             "ic": [0.1, 0.3, -0.9],
         }
     ).with_columns(pl.col("date").str.to_datetime().cast(pl.Datetime("us")))
 
-    result = insight_chapter.compare_daily_ic_on_shared_dates(left, right)
+    result = insight_chapter.compare_ic_on_shared_timestamps(left, right)
 
     assert result == {
         "left_ic": pytest.approx(0.3),
         "right_ic": pytest.approx(0.2),
-        "n_days": 2,
+        "n_timestamps": 2,
     }
 
 

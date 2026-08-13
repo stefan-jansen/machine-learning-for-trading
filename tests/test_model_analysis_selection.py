@@ -3,6 +3,7 @@ import polars as pl
 
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
+    load_daily_metrics_series,
     load_fold_metrics_from_registry,
     load_metrics_from_registry,
     load_predictions,
@@ -113,6 +114,28 @@ def test_registry_loaders_preserve_exact_prediction_identity(tmp_path, monkeypat
     assert metrics["ic_mean"].to_list() == [0.20, 0.10]
     assert set(folds["prediction_hash"].to_list()) == set(prediction_hashes)
     assert exact["prediction_hash"].unique().to_list() == [prediction_hashes[1]]
+
+
+def test_daily_metrics_series_computes_missing_derived_artifact(tmp_path, monkeypatch) -> None:
+    predictions = pl.DataFrame(
+        {
+            "timestamp": ["2026-01-02 09:30"] * 5 + ["2026-01-02 10:00"] * 5,
+            "symbol": ["A", "B", "C", "D", "E"] * 2,
+            "fold_id": [0] * 10,
+            "y_true": list(range(5)) * 2,
+            "y_score": list(range(5)) + list(reversed(range(5))),
+        }
+    ).with_columns(pl.col("timestamp").str.to_datetime())
+    monkeypatch.setattr("case_studies.utils.model_analysis.get_case_study_dir", lambda _: tmp_path)
+    monkeypatch.setattr(
+        "case_studies.utils.model_analysis.load_predictions",
+        lambda *_args, **_kwargs: predictions,
+    )
+
+    result = load_daily_metrics_series("test", "prediction-a").sort("date")
+
+    assert result["date"].n_unique() == 2
+    assert result["ic"].to_list() == [1.0, -1.0]
 
 
 def test_prediction_correlation_averages_daily_cross_sectional_spearman() -> None:
