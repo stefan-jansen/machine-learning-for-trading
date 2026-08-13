@@ -29,6 +29,7 @@ from case_studies.utils.sweep_config import (
     get_entry_schemes_for,
     get_portfolio_risk_controls,
     get_position_risk_controls,
+    get_signal_nasdaq100_schemes_for,
     get_top_k_values_for,
     load_sweep,
 )
@@ -152,6 +153,24 @@ def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
     top_k = [scheme["top_k"] for scheme in schemes if scheme["method"] == "equal_weight_top_k"]
     assert top_k == [5]
     assert load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"] == [5, 10]
+
+
+def test_nasdaq_baseline_excludes_explicit_slot_strategies() -> None:
+    baseline = get_entry_schemes_for(
+        "nasdaq100_microstructure",
+        "fwd_ret_15m",
+        n_assets=115,
+        long_short=True,
+    )
+    specialized = get_signal_nasdaq100_schemes_for(
+        "nasdaq100_microstructure",
+        "fwd_ret_15m",
+        n_assets=115,
+    )
+
+    assert baseline
+    assert {scheme["method"] for scheme in baseline} == {"equal_weight_top_k"}
+    assert any(scheme["method"] == "slot_persistent_signal_exit" for scheme in specialized)
 
 
 # ---------------------------------------------------------------------------
