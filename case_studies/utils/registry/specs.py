@@ -58,6 +58,8 @@ def _canonical_value(value: Any, *, path: str = "$") -> Any:
         return 0.0 if value == 0 else value
     if isinstance(value, Enum):
         return _canonical_value(value.value, path=path)
+    if isinstance(value, Path):
+        return value.as_posix()
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError(f"canonical mappings require string keys at {path}")
