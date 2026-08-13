@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import polars as pl
@@ -122,7 +123,7 @@ def test_legacy_result_reopens_without_being_inferred_complete(tmp_path: Path) -
 def test_read_only_legacy_registry_reopens_without_schema_writes(tmp_path: Path) -> None:
     release = _seed_release(tmp_path)
     db_path = release / "case_studies" / "etfs" / "run_log" / "registry.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             "CREATE TABLE training_runs ("
             "training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL, "
@@ -155,7 +156,7 @@ def test_read_only_legacy_registry_reopens_without_schema_writes(tmp_path: Path)
 def test_workspace_open_migrates_copied_legacy_registry(tmp_path: Path) -> None:
     release = _seed_release(tmp_path)
     db_path = release / "case_studies" / "etfs" / "run_log" / "registry.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             "CREATE TABLE training_runs ("
             "training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL, "
@@ -169,7 +170,7 @@ def test_workspace_open_migrates_copied_legacy_registry(tmp_path: Path) -> None:
         db.commit()
 
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(training_runs)")}
         coverage_table = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_coverage'"
@@ -197,7 +198,7 @@ def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
     case_dir = tmp_path / "legacy" / "etfs"
     db_path = case_dir / "run_log" / "registry.db"
     db_path.parent.mkdir(parents=True)
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.execute(
             """
             CREATE TABLE training_runs (
@@ -257,7 +258,7 @@ def test_invalid_coverage_registration_is_atomic(tmp_path: Path) -> None:
             expected_keys=expected,
         )
 
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
         assert db.execute("SELECT COUNT(*) FROM prediction_sets").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM prediction_coverage").fetchone()[0] == 0
     assert not list((study.root / "run_log" / "predictions").glob("*"))

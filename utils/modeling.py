@@ -1421,6 +1421,7 @@ def prepare_cv_folds(
                 "entities": val_meta[entity_col].values if entity_col else None,
                 "n_train": len(X_train),
                 "n_val": len(X_val),
+                "preprocessor": preprocessor,
             }
         )
 

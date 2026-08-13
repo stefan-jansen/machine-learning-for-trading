@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -115,7 +116,7 @@ class CandidateSet:
     @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:
         db_path = study.root / "run_log" / "registry.db"
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
                 "SELECT name, member_kind, comparison_contract_json FROM candidate_sets "
                 "WHERE set_hash = ?",
@@ -147,7 +148,7 @@ class CandidateSet:
         if self.member_kind != "backtest":
             raise ValueError("validation Sharpe selection requires backtest members")
         placeholders = ",".join("?" for _ in self.members)
-        with sqlite3.connect(self.study.root / "run_log" / "registry.db") as db:
+        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
             rows = db.execute(
                 f"""
                 SELECT m.backtest_hash, m.sharpe

@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+
+import polars as pl
+import pytest
+
+from case_studies.research import (
+    LabelDefinition,
+    ModelRun,
+    Study,
+    get_adapter,
+    register_adapter,
+    registered_adapters,
+)
+from case_studies.utils import linear
+from tests.test_research_workspace import _seed_release
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    yield
+    os.environ.pop("ML4T_OUTPUT_DIR", None)
+    from case_studies.research import workspace
+
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
+
+
+def _linear_study(tmp_path, monkeypatch):
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
+    symbols = [f"S{index}" for index in range(6)]
+    rows = []
+    for date_index, date in enumerate(dates):
+        for symbol_index, symbol in enumerate(symbols):
+            x1 = float(symbol_index - 2.5)
+            x2 = float(date_index) + x1 / 10
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "timestamp": date,
+                    "x1": x1,
+                    "x2": x2,
+                    "fwd_ret_1d": 0.03 * x1 + 0.01 * x2,
+                }
+            )
+    dataset = pl.DataFrame(rows).with_columns(pl.col("timestamp").str.to_date())
+    study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        dataset.select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-02",
+            "val_start": "2024-01-03",
+            "val_end": "2024-01-03",
+        },
+        {
+            "fold": 1,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-03",
+            "val_start": "2024-01-04",
+            "val_end": "2024-01-04",
+        },
+    ]
+    modeling_dataset = SimpleNamespace(
+        dataset=dataset,
+        feature_names=["x1", "x2"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        join_cols=["symbol", "timestamp"],
+        splits=splits,
+        task_type="regression",
+        class_values=[],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        eval_label_col=None,
+        input_lineage={
+            "artifacts": {
+                "financial": {"sha256": "features-v1", "size": 1},
+                "label": {"sha256": "label-v1", "size": 1},
+            },
+            "feature_names": ["x1", "x2"],
+            "splits": splits,
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr(linear, "load_modeling_dataset", lambda *args, **kwargs: modeling_dataset)
+    monkeypatch.setattr(
+        linear,
+        "_load_preset",
+        lambda config_name: {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha": 1.0},
+        },
+    )
+    return study
+
+
+def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    notebook_request = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        overrides={"alpha": 2.5},
+    )
+    api_request = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        overrides={"alpha": 2.5},
+    )
+
+    notebook_resolved = notebook_request.resolve()
+    api_resolved = api_request.resolve()
+
+    assert notebook_resolved.identity == api_resolved.identity
+    assert notebook_resolved.spec == api_resolved.spec
+    assert notebook_resolved.spec["model"]["effective_params_by_fold"]["0"]["alpha"] == 2.5
+
+
+def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+
+    fresh = request.run()
+    cached = request.run()
+
+    assert isinstance(fresh, ModelRun)
+    assert fresh.training.hash == cached.training.hash
+    assert fresh.predictions[0].hash == cached.predictions[0].hash
+    assert fresh.predictions[0].complete
+    assert fresh.predictions[0].coverage()["n_expected"] == 12
+    assert fresh.predictions[0].load().select("symbol", "timestamp", "fold").height == 12
+    model_dir = fresh.training.root / "run_log" / "training" / fresh.training.hash / "models"
+    assert sorted(path.name for path in model_dir.glob("fold_*.joblib")) == [
+        "fold_0.joblib",
+        "fold_1.joblib",
+    ]
+
+
+def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    base = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").resolve()
+    changed = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        overrides={"alpha": 3.0},
+    ).resolve()
+
+    assert base.identity != changed.identity
+
+
+def test_preview_request_requires_hash_covered_reductions(tmp_path) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    with pytest.raises(ValueError, match="declare every reduction"):
+        study.model(
+            family="linear",
+            label="fwd_ret_21d",
+            config_name="ridge",
+            execution_tier="preview",
+        )
+
+
+def test_model_and_causal_adapters_have_one_extension_seam() -> None:
+    register_adapter("model", "fixture_family", "case_studies.utils.linear")
+    register_adapter("causal", "fixture_causal", "case_studies.utils.causal")
+
+    assert get_adapter("model", "fixture_family") is linear
+    assert get_adapter("causal", "fixture_causal").__name__ == "case_studies.utils.causal"
+    assert "tabular_dl" in {binding.name for binding in registered_adapters("model")}
+    assert "dml" in {binding.name for binding in registered_adapters("causal")}

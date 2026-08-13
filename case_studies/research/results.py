@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -67,7 +68,7 @@ class Result:
             db_path = root / "run_log" / "registry.db"
             if not db_path.exists():
                 continue
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 tables = {
                     row[0]
                     for row in db.execute(
@@ -140,7 +141,7 @@ class Result:
             "prediction": ("prediction_sets", "prediction_hash"),
             "backtest": ("backtest_runs", "backtest_hash"),
         }[self.kind]
-        with sqlite3.connect(self.root / "run_log" / "registry.db") as db:
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             record = _record(db, f"SELECT * FROM {table} WHERE {key} = ?", (self.hash,))
         assert record is not None
         return record
@@ -229,7 +230,7 @@ class TrainingResult(Result):
 @dataclass(frozen=True)
 class PredictionResult(Result):
     def coverage(self) -> dict[str, Any] | None:
-        with sqlite3.connect(self.root / "run_log" / "registry.db") as db:
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             exists = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_coverage'"
             ).fetchone()
@@ -267,7 +268,7 @@ class BacktestResult(Result):
         if not isinstance(prediction, PredictionResult) or not prediction.complete:
             return False
         returns = self.root / "run_log" / "backtest" / self.hash / "daily_returns.parquet"
-        with sqlite3.connect(self.root / "run_log" / "registry.db") as db:
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             metrics = db.execute(
                 "SELECT 1 FROM backtest_metrics WHERE backtest_hash = ?", (self.hash,)
             ).fetchone()
@@ -323,6 +324,11 @@ class ResultsCatalog:
         predictions,
         expected_keys,
         allow_partial: bool = False,
+        metrics: dict[str, float | dict] | None = None,
+        task_type: str = "regression",
+        class_values: list | None = None,
+        eval_col: str | None = None,
+        label: str | None = None,
     ) -> PredictionResult:
         self.study.require_writable()
         if training.study != self.study or training.kind != "training":
@@ -338,6 +344,11 @@ class ResultsCatalog:
             predictions=predictions,
             expected_keys=expected_keys,
             allow_partial=allow_partial,
+            metrics=metrics,
+            task_type=task_type,
+            class_values=class_values,
+            eval_col=eval_col,
+            label=label,
             case_dir=case_dir,
         )
         result = Result.open(

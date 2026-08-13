@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -62,7 +63,7 @@ class Strategy:
 
     def _active_lock_record(self) -> dict[str, Any]:
         db_path = self.study.root / "run_log" / "registry.db"
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
                 "SELECT lock_json FROM research_locks WHERE state = 'LOCKED' LIMIT 1"
             ).fetchone()
