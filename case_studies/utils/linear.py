@@ -332,7 +332,7 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
     return ModelRun(training=training, predictions=(prediction,))
 
 
-def _validate_fitted_state(model_dir: Path, context: LinearContext) -> None:
+def _validate_fitted_state(model_dir: Path, context: LinearContext) -> dict[str, Any]:
     manifest = model_dir / "manifest.json"
     if not manifest.is_file():
         raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
@@ -350,6 +350,10 @@ def _validate_fitted_state(model_dir: Path, context: LinearContext) -> None:
         or _sha256(prediction_path) != prediction_record.get("sha256")
     ):
         raise ValueError(f"fitted-state prediction frame mismatch: {model_dir}")
+    fit_elapsed_s = record.get("fit_elapsed_s")
+    if not isinstance(fit_elapsed_s, int | float) or fit_elapsed_s <= 0:
+        raise ValueError(f"fitted-state manifest has no valid fit duration: {model_dir}")
+    return record
 
 
 def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) -> np.ndarray:
@@ -400,10 +404,21 @@ def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
         return
     runtime = json.loads(runtime_path.read_text())
     runtime.update(fields)
-    runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, runtime_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path) -> pl.DataFrame:
+def _fit_predictions(
+    spec: dict[str, Any],
+    context: LinearContext,
+    staging: Path,
+    *,
+    started_at: float,
+) -> pl.DataFrame:
     cls = _MODEL_CLASSES[spec["model"]["class"]]
     prediction_frames = []
     files = {}
@@ -436,6 +451,7 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
                     "name": prediction_path.name,
                     "sha256": _sha256(prediction_path),
                 },
+                "fit_elapsed_s": time.perf_counter() - started_at,
                 "schema_version": 1,
             },
             indent=2,
@@ -467,13 +483,15 @@ def run_resolved_request(
     recovering = model_dir.exists()
     if recovering:
         predictions = _predict_from_fitted_state(model_dir, context)
+        fit_elapsed_s = float(_validate_fitted_state(model_dir, context)["fit_elapsed_s"])
     else:
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
         staging.mkdir(parents=True)
         try:
-            predictions = _fit_predictions(spec, context, staging)
+            predictions = _fit_predictions(spec, context, staging, started_at=started)
             os.replace(staging, model_dir)
-            _write_runtime_fields(runtime_path, fit_elapsed_s=time.perf_counter() - started)
+            fit_elapsed_s = float(_validate_fitted_state(model_dir, context)["fit_elapsed_s"])
+            _write_runtime_fields(runtime_path, fit_elapsed_s=fit_elapsed_s)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -491,10 +509,10 @@ def run_resolved_request(
         label=context.label_col,
     )
     if recovering:
-        runtime = json.loads(runtime_path.read_text()) if runtime_path.exists() else {}
         _write_runtime_fields(
             runtime_path,
-            elapsed_s=float(runtime.get("fit_elapsed_s", 0.0)),
+            fit_elapsed_s=fit_elapsed_s,
+            elapsed_s=fit_elapsed_s,
             recovery_elapsed_s=time.perf_counter() - started,
         )
     else:

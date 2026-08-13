@@ -213,6 +213,45 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     assert runtime["elapsed_s"] == runtime["fit_elapsed_s"]
 
 
+def test_linear_runner_recovers_fit_runtime_after_model_install_interrupt(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    original_runtime_write = linear._write_runtime_fields
+    calls = 0
+
+    def interrupt_runtime_write(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("interrupted after model install")
+        return original_runtime_write(*args, **kwargs)
+
+    monkeypatch.setattr(linear, "_write_runtime_fields", interrupt_runtime_write)
+    with pytest.raises(RuntimeError, match="interrupted after model install"):
+        request.run()
+    resolved = request.resolve()
+    training_hash = linear.training_hash_from_spec(resolved.spec)
+    model_dir = study.storage_root() / "run_log" / "training" / training_hash / "models"
+    manifest = json.loads((model_dir / "manifest.json").read_text())
+    assert manifest["fit_elapsed_s"] > 0
+    monkeypatch.setattr(linear, "_write_runtime_fields", original_runtime_write)
+    monkeypatch.setattr(
+        linear,
+        "_fit_predictions",
+        lambda *args, **kwargs: pytest.fail("installed fitted state must not retrain"),
+    )
+
+    recovered = request.run()
+
+    runtime = json.loads((model_dir.parent / "runtime.json").read_text())
+    assert recovered.predictions[0].complete
+    assert runtime["fit_elapsed_s"] == manifest["fit_elapsed_s"]
+    assert runtime["elapsed_s"] == manifest["fit_elapsed_s"]
+    assert runtime["recovery_elapsed_s"] > 0
+
+
 def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:
     study = _linear_study(tmp_path, monkeypatch)
     base = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").resolve()
