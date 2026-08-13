@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .specs import (
-    IDENTITY_VERSION,
+    SUPPORTED_IDENTITY_VERSIONS,
+    _hashable_strategy_spec,
     _validate_spec,
     backtest_hash_from_parts,
     build_training_spec,
@@ -262,10 +263,11 @@ def register_training_run(
     t_hash = training_hash_from_spec(spec)
     spec_json_str = canonical_json(spec)
 
-    if spec.get("identity_version") == IDENTITY_VERSION:
+    if spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS:
+        identity_version = int(spec["identity_version"])
         tier = spec.get("execution_tier")
         if tier not in {"canonical", "preview"}:
-            raise ValueError("version-2 training spec requires execution_tier canonical or preview")
+            raise ValueError("versioned training spec requires execution_tier canonical or preview")
         db = _open_registry(case_dir)
         try:
             existing = db.execute(
@@ -277,7 +279,7 @@ def register_training_run(
                 existing_spec = json.loads(existing[0])
                 if project_training_identity(existing_spec) != project_training_identity(
                     spec
-                ) or existing[1:] != (IDENTITY_VERSION, tier):
+                ) or existing[1:] != (identity_version, tier):
                     raise ValueError(f"immutable training identity conflict for {t_hash}")
                 return t_hash
 
@@ -309,7 +311,7 @@ def register_training_run(
                         canonical_json(runtime_provenance)
                         if runtime_provenance is not None
                         else None,
-                        IDENTITY_VERSION,
+                        identity_version,
                         tier,
                     ),
                 )
@@ -641,10 +643,10 @@ def register_prediction_set(
         raise ValueError(f"unknown training_hash {training_hash}")
     identity_version, _execution_tier = parent
     coverage = None
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
             raise ValueError(
-                "version-2 prediction registration requires predictions and expected_keys"
+                "versioned prediction registration requires predictions and expected_keys"
             )
         from .completeness import evaluate_prediction_coverage
 
@@ -676,7 +678,7 @@ def register_prediction_set(
         identity_version=identity_version,
     )
 
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         assert coverage is not None
         pred_dir = _prediction_dir(case_dir, p_hash)
         pred_path = pred_dir / "predictions.parquet"
@@ -809,7 +811,7 @@ def register_prediction_set(
             # Store per-fold metrics
             register_fold_metrics(case_study, p_hash, fold_m, case_dir=case_dir)
         except Exception as exc:
-            if identity_version == IDENTITY_VERSION:
+            if identity_version in SUPPORTED_IDENTITY_VERSIONS:
                 raise
             logger.warning("Could not compute fold metrics for %s: %s", p_hash, exc)
 
@@ -969,7 +971,7 @@ def register_backtest_run(
         stage = _infer_stage(strategy_spec, case_dir=case_dir, prediction_hash=prediction_hash)
 
     identity_version = strategy_spec.get("identity_version")
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
         try:
             ancestry = db.execute(
@@ -995,9 +997,11 @@ def register_backtest_run(
     b_hash = backtest_hash_from_parts(
         prediction_hash, strategy_spec, identity_version=identity_version
     )
-    spec_json_str = canonical_json(strategy_spec)
+    stored_strategy_spec = dict(strategy_spec)
+    stored_strategy_spec.pop("_runtime_backtest_config", None)
+    spec_json_str = canonical_json(stored_strategy_spec)
 
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
         try:
             existing = db.execute(
@@ -1007,7 +1011,11 @@ def register_backtest_run(
         finally:
             db.close()
         if existing is not None:
-            if existing != (prediction_hash, spec_json_str):
+            existing_spec = json.loads(existing[1] or "{}")
+            same_identity = canonical_json(
+                _hashable_strategy_spec(existing_spec)
+            ) == canonical_json(_hashable_strategy_spec(strategy_spec))
+            if existing[0] != prediction_hash or not same_identity:
                 raise ValueError(f"immutable backtest identity conflict for {b_hash}")
             import polars as pl
 
@@ -1103,7 +1111,7 @@ def register_backtest_run(
     try:
         db.execute("DELETE FROM backtest_fold_metrics WHERE backtest_hash = ?", (b_hash,))
         db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (b_hash,))
-        if identity_version == IDENTITY_VERSION:
+        if identity_version in SUPPORTED_IDENTITY_VERSIONS:
             existing = db.execute(
                 "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
                 (b_hash,),

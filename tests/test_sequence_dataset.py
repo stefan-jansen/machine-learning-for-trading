@@ -19,6 +19,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from case_studies.utils.sequence_dataset import (
+    materialize_store_metadata,
+    prepare_fold_sequence_stores,
+    sequence_validation_keys,
+)
+
 
 def _synthetic_fold_df(
     *,
@@ -131,6 +137,74 @@ def test_val_sequence_count_matches_val_calendar_days():
         f"(one per val trading day); got {actual_per_symbol}. "
         f"Shortfall indicates warmup drop."
     )
+
+
+def test_sequence_store_carries_fitted_training_preprocessing():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df()
+    train_store, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+
+    assert train_store.feature_mean is not None
+    assert train_store.feature_scale is not None
+    np.testing.assert_array_equal(val_store.feature_mean, train_store.feature_mean)
+    np.testing.assert_array_equal(val_store.feature_scale, train_store.feature_scale)
+
+
+@pytest.mark.parametrize("missing_validation_row", [False, True])
+def test_declared_validation_keys_equal_sequence_store(missing_validation_row):
+    df, train_mask, val_mask, val_start_ts, val_end_ts = _synthetic_fold_df()
+    if missing_validation_row:
+        df = df.loc[
+            ~((df["symbol"] == "S1") & (df["timestamp"] == pd.Timestamp("2021-02-01")))
+        ].reset_index(drop=True)
+        train_mask = df["timestamp"] <= pd.Timestamp("2020-12-31")
+        val_mask = df["timestamp"].between(val_start_ts, val_end_ts, inclusive="both")
+    df.loc[(df["symbol"] == "S2") & (df["timestamp"] == pd.Timestamp("2021-03-01")), "y"] = np.nan
+    split = {
+        "fold": 3,
+        "train_start": pd.Timestamp("2020-01-01"),
+        "train_end": pd.Timestamp("2020-12-31"),
+        "val_start": val_start_ts,
+        "val_end": val_end_ts,
+    }
+
+    _, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+    _, timestamps, symbols = materialize_store_metadata(val_store)
+    actual = {
+        (str(symbol), pd.Timestamp(timestamp), 3)
+        for symbol, timestamp in zip(symbols, timestamps, strict=True)
+    }
+    declared = sequence_validation_keys(
+        df,
+        [split],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+    )
+
+    assert set(declared.iter_rows()) == actual
 
 
 def test_val_sequence_targets_never_include_train_period():

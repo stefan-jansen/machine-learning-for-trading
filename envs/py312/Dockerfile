@@ -1,5 +1,5 @@
 # ML4T Python 3.12 Environment (x86 only)
-# For packages without Python 3.14 support: gensim, signatory, esig, pfhedge, pycausalimpact
+# For packages without Python 3.14 support: gensim, signatory, esig, pycausalimpact
 # Also covers notebooks hitting Python 3.14 torch CUDA import bug
 #
 # Covers:
@@ -14,7 +14,10 @@
 #   Ch12 NB10 (shap_nlp_sentiment)   — torch CUDA + shap
 #   Ch14 NB06 (conditional_autoencoder) — torch CUDA + shap
 #   Ch15 NB06 (fed_announcement_bsts) - tfcausalimpact in isolated /opt/bsts
-#   Ch21 deep_hedging_pfhedge        — pfhedge (unmaintained, numpy<2)
+#
+# Ch21 deep_hedging_pfhedge is NOT here: pfhedge is a main dependency and 0.22.0
+# imports and prices on Python 3.14 under numpy 2.3.5, so that notebook runs in
+# the default image and declares `ml4t-gpu`.
 #
 # Usage:
 #   docker compose --profile py312 run --rm py312 python 10_text_feature_engineering/01_word2vec_training.py
@@ -42,12 +45,39 @@ RUN /opt/ml4t/bin/pip install --no-cache-dir pip setuptools wheel
 
 WORKDIR /build
 COPY envs/py312/pyproject.toml /build/
-RUN uv pip install --python /opt/ml4t/bin/python --no-cache /build
+COPY pyproject.toml uv.lock /build/root/
 
-# x86-only signature stack (signatory + esig) for Ch05/Ch09 notebooks
+# Derive a fully-pinned constraint from uv.lock so this image reproduces the
+# locked environment readers get from `uv sync`, the same way envs/ml4t and
+# envs/benchmark do. Without it this image free-resolved and drifted off the
+# lock: the published image carries numpy 2.4.6 where the lock pins 2.3.5,
+# pyarrow 25.0.0 where the lock pins 23.0.1, polars 1.42.1 for 1.41.1, plotly
+# 6.9.0 for 6.7.0, and an ml4t-diagnostic older than the one in the lock. A
+# reader on the container path and a reader on `uv sync` were running different
+# libraries.
+#
+# One package is held away from the lock: kaleido, capped <1.0 here because 1.x
+# needs a Chrome runtime this image does not carry (fig.write_image is wrapped in
+# try/except for that reason). Same exemption, same reason, as
+# envs/benchmark/Dockerfile.
+# Only packages the lock knows about are pinned; this image's 3.12-only extras
+# (gensim, signatory, esig, pyrecombine, roughpy) are absent from the lock and
+# resolve freely.
+RUN cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
+      | grep -iE '^[a-z0-9._-]+==' \
+      | grep -viE '^kaleido==' \
+      > /tmp/locked-constraints.txt && \
+    test -s /tmp/locked-constraints.txt
+RUN uv pip install --python /opt/ml4t/bin/python --no-cache \
+    --constraint /tmp/locked-constraints.txt /build
+
+# x86-only signature stack (signatory + esig) for Ch05/Ch09 notebooks.
+# numpy carries the constraint too, or this step would immediately undo the
+# pinning above - it is what pulled numpy to 2.4.6 in the published image.
 RUN /opt/ml4t/bin/pip install --no-cache-dir --no-build-isolation "signatory>=1.2" && \
     /opt/ml4t/bin/pip install --no-cache-dir --no-deps "esig>=1.0" && \
-    /opt/ml4t/bin/pip install --no-cache-dir "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
+    /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
+        "numpy>=2,<2.5" "pyrecombine>=1.0" "roughpy>=0.2"
 
 # tfcausalimpact requires pandas<=2.2 and NumPy 1.x, while the signature stack
 # above requires NumPy 2.x. Keep both valid dependency sets in isolated
@@ -61,7 +91,7 @@ RUN uv pip install --python /opt/bsts/bin/python --no-cache /build/bsts && \
 COPY envs/py312/kernels/bsts-quiet/kernel.json /opt/bsts/share/jupyter/kernels/bsts-quiet/kernel.json
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
-RUN /opt/ml4t/bin/pip install --no-cache-dir \
+RUN /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
     "pytest>=8.0" "pytest-timeout>=2.3"
 
 WORKDIR /app

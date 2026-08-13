@@ -1273,6 +1273,39 @@ def validate_temporal_fold_coverage(
         )
 
 
+def validate_temporal_split_geometry(
+    requested_splits: list[dict[str, Any]],
+    canonical_splits: list[dict[str, Any]],
+    temporal_by_fold: pl.DataFrame | pd.DataFrame | None,
+) -> None:
+    """Require requests to use the fold geometry that fitted temporal features."""
+    if temporal_by_fold is None:
+        return
+    fields = ("train_start", "train_end", "val_start", "val_end")
+    canonical = {int(split["fold"]): split for split in canonical_splits}
+    failures: list[str] = []
+    for requested in requested_splits:
+        fold = int(requested["fold"])
+        fitted = canonical.get(fold)
+        if fitted is None:
+            failures.append(f"fold {fold} has no fitted temporal artifact geometry")
+            continue
+        mismatches = [
+            field
+            for field in fields
+            if pd.Timestamp(requested[field]).tz_localize(None)
+            != pd.Timestamp(fitted[field]).tz_localize(None)
+        ]
+        if mismatches:
+            failures.append(f"fold {fold} differs in {mismatches}")
+    if failures:
+        raise ValueError(
+            "Custom CV cannot reuse fold-specific temporal features fitted on different "
+            f"boundaries: {'; '.join(failures)}. Use canonical folds or regenerate the "
+            "temporal artifact for the requested geometry."
+        )
+
+
 def replace_temporal_columns(
     dataset_pd: pd.DataFrame,
     mask: np.ndarray,

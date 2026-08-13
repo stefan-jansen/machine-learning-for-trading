@@ -122,7 +122,7 @@ loaded from `.env`):
 
 Key libraries:
 - `ml4t-backtest` — backtest engine and strategy base class
-- `ml4t-live` (>=0.1.0b1) — live engine, `SafeBroker` with enforced position/order/daily-loss caps, persisted `RiskState`, startup reconciliation, `VirtualPortfolio` for shadow mode, and the `ml4t-live` CLI (`status`, `shadow`)
+- `ml4t-live` (>=0.1.0) - live engine, `SafeBroker` with enforced position/order/daily-loss caps, persisted `RiskState`, startup reconciliation, `VirtualPortfolio` for shadow mode, and the `ml4t-live` CLI (`status`, `shadow`)
 - `alpaca-py` — Alpaca broker integration
 - `ib_async` — Interactive Brokers connection
 - `python-okx` — OKX exchange SDK (used by NB09)

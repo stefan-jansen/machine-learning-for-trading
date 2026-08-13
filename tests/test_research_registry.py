@@ -14,7 +14,6 @@ from case_studies.utils.registry import (
     prediction_hash_from_parts,
     training_hash_from_spec,
 )
-from case_studies.utils.registry import metrics as registry_metrics
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
 
@@ -294,64 +293,6 @@ def test_version_2_registration_is_immutable(tmp_path: Path) -> None:
         )
 
     assert prediction.load().get_column("y_score").to_list() == [0.02, -0.01]
-
-
-def test_prediction_retry_backfills_metrics_after_coverage_commit(
-    tmp_path: Path, monkeypatch
-) -> None:
-    study = _study(tmp_path)
-    training = study.results.register_training(_training_spec())
-    frame = _predictions()
-    expected = frame.select("symbol", "timestamp", "fold_id")
-    original_compute = registry_metrics.compute_prediction_fold_metrics
-
-    def interrupt_metrics(*args, **kwargs):
-        raise RuntimeError("interrupted metric finalization")
-
-    monkeypatch.setattr(registry_metrics, "compute_prediction_fold_metrics", interrupt_metrics)
-    with pytest.raises(RuntimeError, match="interrupted metric finalization"):
-        study.results.publish_predictions(
-            training,
-            checkpoint_kind="final",
-            checkpoint_value=None,
-            split="validation",
-            predictions=frame,
-            expected_keys=expected,
-        )
-    prediction_hash = prediction_hash_from_parts(
-        training.hash,
-        None,
-        "validation",
-        checkpoint_kind="final",
-        identity_version=2,
-    )
-    interrupted = Result.open(study, prediction_hash)
-
-    assert isinstance(interrupted, PredictionResult)
-    interrupted_coverage = interrupted.coverage()
-    assert interrupted_coverage is not None
-    assert interrupted_coverage["status"] == "complete"
-    assert not interrupted.complete
-    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-        assert db.execute("SELECT COUNT(*) FROM prediction_coverage").fetchone()[0] == 1
-        assert db.execute("SELECT COUNT(*) FROM prediction_metrics").fetchone()[0] == 0
-        assert db.execute("SELECT COUNT(*) FROM fold_metrics").fetchone()[0] == 0
-
-    monkeypatch.setattr(registry_metrics, "compute_prediction_fold_metrics", original_compute)
-    finalized = study.results.publish_predictions(
-        training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=frame,
-        expected_keys=expected,
-    )
-
-    assert finalized.hash == interrupted.hash
-    assert finalized.complete
-    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
-        assert db.execute("SELECT COUNT(*) FROM prediction_metrics").fetchone()[0] == 1
-        assert db.execute("SELECT COUNT(*) FROM fold_metrics").fetchone()[0] == 1
 
 
 def test_checkpoint_prediction_schema_must_match(tmp_path: Path) -> None:

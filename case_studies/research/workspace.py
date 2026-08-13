@@ -17,9 +17,11 @@ from utils.paths import REPO_ROOT
 from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
+    from .catalog import PredictionCatalog
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
     from .models import ModelRequest
+    from .recovery import ExecutionLedger
     from .results import ResultsCatalog
     from .strategy import Strategy
 
@@ -178,6 +180,7 @@ class Study:
                 output_root,
                 repo_root=release_root,
                 manifest=manifest,
+                include_release_run_log=False,
             )
         study = cls(
             case_study=case_study,
@@ -287,10 +290,26 @@ class Study:
         return ResultsCatalog(self)
 
     @property
+    def predictions(self) -> PredictionCatalog:
+        from .catalog import PredictionCatalog
+
+        return PredictionCatalog(self)
+
+    @property
+    def release_case_root(self) -> Path:
+        return self.release_root / "case_studies" / self.case_study
+
+    @property
     def lifecycle(self) -> Lifecycle:
         from .lifecycle import Lifecycle
 
         return Lifecycle(self)
+
+    @property
+    def executions(self) -> ExecutionLedger:
+        from .recovery import ExecutionLedger
+
+        return ExecutionLedger(self)
 
     def strategy(self, **request) -> Strategy:
         from .strategy import Strategy

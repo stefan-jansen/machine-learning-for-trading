@@ -38,7 +38,7 @@ from utils.cv_splits import (
     make_wf_config,
     most_recent_split,
 )
-from utils.modeling import validate_temporal_fold_coverage
+from utils.modeling import validate_temporal_fold_coverage, validate_temporal_split_geometry
 
 # -----------------------------------------------------------------------------
 # Pure: _map_calendar_id
@@ -415,6 +415,41 @@ def test_temporal_fold_metadata_remap_restores_coverage(backward_temporal_fixtur
     validate_temporal_fold_coverage(dataset, remapped, splits, date_col="timestamp")
 
     assert remapped["value"].sort().to_list() == values_before
+
+
+def test_custom_cv_cannot_reuse_temporal_features_from_different_geometry() -> None:
+    canonical = [
+        {
+            "fold": 0,
+            "train_start": "2018-01-01",
+            "train_end": "2019-12-31",
+            "val_start": "2020-01-01",
+            "val_end": "2020-12-31",
+        }
+    ]
+    requested = [{**canonical[0], "val_start": "2019-07-01"}]
+    temporal = pl.DataFrame({"fold": [0], "timestamp": [pd.Timestamp("2020-01-01")]})
+
+    with pytest.raises(ValueError, match=r"fold 0 differs in \['val_start'\]"):
+        validate_temporal_split_geometry(requested, canonical, temporal)
+
+
+def test_custom_cv_can_select_exact_fitted_temporal_fold_geometry() -> None:
+    canonical = [
+        {
+            "fold": fold,
+            "train_start": f"{2018 + fold}-01-01",
+            "train_end": f"{2019 + fold}-12-31",
+            "val_start": f"{2020 + fold}-01-01",
+            "val_end": f"{2020 + fold}-12-31",
+        }
+        for fold in (0, 1)
+    ]
+    temporal = pl.DataFrame(
+        {"fold": [0, 1], "timestamp": [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]}
+    )
+
+    validate_temporal_split_geometry([canonical[1]], canonical, temporal)
 
 
 @pytest.fixture

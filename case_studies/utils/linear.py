@@ -5,7 +5,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -20,7 +19,9 @@ from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRe
 
 from case_studies.research.contracts import ExecutionTier
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
+from case_studies.research.recovery import ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
@@ -247,13 +248,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     effective = _effective_params(config, request["overrides"], folds)
     expected = _expected_keys(folds, entity_col, mds.date_col)
     input_lineage = mds.input_lineage
-    spec = {
-        "identity_version": 2,
-        "execution_tier": tier.value,
-        "family": "linear",
-        "label": label_ref.name,
-        "seed": 42,
-        "config_name": request["config_name"],
+    computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": input_lineage["artifacts"],
         "feature_names": list(mds.feature_names),
@@ -285,7 +280,17 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
-        spec["preview_reductions"] = reductions
+        computation["preview_reductions"] = reductions
+    runtime_provenance = _runtime_provenance(study)
+    spec = ResolvedSpec.create(
+        family="linear",
+        label=label_ref.name,
+        seed=42,
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=request["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
     context = LinearContext(
         folds=tuple(folds),
         feature_names=tuple(mds.feature_names),
@@ -296,7 +301,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         expected_keys=expected,
-        runtime_provenance=_runtime_provenance(study),
+        runtime_provenance=runtime_provenance,
     )
     return spec, context
 
@@ -308,7 +313,7 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
         None,
         "validation",
         checkpoint_kind="final",
-        identity_version=2,
+        identity_version=spec["identity_version"],
     )
     try:
         training = Result.open(
@@ -328,32 +333,24 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
     if not prediction.complete:
         return None
-    _validate_fitted_state(model_dir, context)
-    return ModelRun(training=training, predictions=(prediction,))
-
-
-def _validate_fitted_state(model_dir: Path, context: LinearContext) -> dict[str, Any]:
     manifest = model_dir / "manifest.json"
-    if not manifest.is_file():
-        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
-    record = json.loads(manifest.read_text())
     expected_files = {f"fold_{int(fold['fold'])}.joblib" for fold in context.folds}
+    if not manifest.is_file():
+        return None
+    record = json.loads(manifest.read_text())
     if set(record.get("files") or {}) != expected_files:
-        raise ValueError(f"fitted-state manifest does not match resolved folds: {model_dir}")
+        return None
     if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
-        raise ValueError(f"fitted-state digest mismatch: {model_dir}")
-    prediction_record = record.get("predictions") or {}
-    prediction_path = model_dir / str(prediction_record.get("name", ""))
-    if (
-        prediction_record.get("name") != "validation_predictions.parquet"
-        or not prediction_path.is_file()
-        or _sha256(prediction_path) != prediction_record.get("sha256")
-    ):
-        raise ValueError(f"fitted-state prediction frame mismatch: {model_dir}")
-    fit_elapsed_s = record.get("fit_elapsed_s")
-    if not isinstance(fit_elapsed_s, int | float) or fit_elapsed_s <= 0:
-        raise ValueError(f"fitted-state manifest has no valid fit duration: {model_dir}")
-    return record
+        return None
+    return ModelRun(
+        training=training,
+        predictions=(prediction,),
+        diagnostics={
+            "cache_hit": True,
+            "reused_folds": sorted(int(fold["fold"]) for fold in context.folds),
+            "fitted_folds": [],
+        },
+    )
 
 
 def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) -> np.ndarray:
@@ -385,20 +382,6 @@ def _prediction_frame(
     return frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
 
 
-def _predict_from_fitted_state(model_dir: Path, context: LinearContext) -> pl.DataFrame:
-    _validate_fitted_state(model_dir, context)
-    predictions = pl.read_parquet(model_dir / "validation_predictions.parquet")
-    required = {"symbol", "timestamp", "fold", "prediction", "actual"}
-    if not required <= set(predictions.columns):
-        raise ValueError("fitted-state prediction frame is missing required columns")
-    keys = predictions.select("symbol", "timestamp", "fold")
-    if keys.height != context.expected_keys.height or value_digest(
-        keys, ("symbol", "timestamp", "fold")
-    ) != value_digest(context.expected_keys, ("symbol", "timestamp", "fold")):
-        raise ValueError("fitted-state prediction frame does not match expected coverage")
-    return predictions.sort("symbol", "timestamp", "fold")
-
-
 def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
     if not runtime_path.exists():
         return
@@ -412,54 +395,79 @@ def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _fit_predictions(
+def _fit_or_reuse_predictions(
     spec: dict[str, Any],
     context: LinearContext,
-    staging: Path,
-    *,
-    started_at: float,
-) -> pl.DataFrame:
-    cls = _MODEL_CLASSES[spec["model"]["class"]]
+    training: TrainingResult,
+    ledger: ExecutionLedger,
+) -> tuple[pl.DataFrame, list[int], list[int]]:
+    computation = spec["computation"]
+    cls = _MODEL_CLASSES[computation["model"]["class"]]
     prediction_frames = []
-    files = {}
+    model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    shard_dir = training.root / "run_log" / "training" / training.hash / "prediction_folds"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    reused_folds = []
+    fitted_folds = []
     for fold in context.folds:
         fold_id = int(fold["fold"])
-        params = spec["model"]["effective_params_by_fold"][str(fold_id)]
+        params = computation["model"]["effective_params_by_fold"][str(fold_id)]
+        artifact = model_dir / f"fold_{fold_id}.joblib"
+        shard = shard_dir / f"fold_{fold_id}.parquet"
+        if ledger.reusable_fold(
+            training_hash=training.hash,
+            candidate_identity=training.hash,
+            fold_id=fold_id,
+            fitted_state=artifact,
+            prediction_shard=shard,
+            resolved_settings=params,
+        ):
+            prediction_frames.append(pl.read_parquet(shard))
+            reused_folds.append(fold_id)
+            continue
+
         model = cls(**params)
         model.fit(fold["X_train"], fold["y_train"])
         predictions = _fold_predictions(model, fold, context)
-
-        artifact = staging / f"fold_{fold_id}.joblib"
-        joblib.dump(
-            {
-                "feature_names": context.feature_names,
-                "model": model,
-                "preprocessor": fold["preprocessor"],
-            },
-            artifact,
-        )
-        files[artifact.name] = _sha256(artifact)
-        prediction_frames.append(_prediction_frame(fold, predictions, context))
-    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
-    prediction_path = staging / "validation_predictions.parquet"
-    predictions.write_parquet(prediction_path)
-    (staging / "manifest.json").write_text(
-        json.dumps(
-            {
-                "files": files,
-                "predictions": {
-                    "name": prediction_path.name,
-                    "sha256": _sha256(prediction_path),
+        frame = _prediction_frame(fold, predictions, context)
+        artifact_temp = model_dir / f".{artifact.name}.{uuid.uuid4().hex}.tmp"
+        shard_temp = shard_dir / f".{shard.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            joblib.dump(
+                {
+                    "feature_names": context.feature_names,
+                    "model": model,
+                    "preprocessor": fold["preprocessor"],
                 },
-                "fit_elapsed_s": time.perf_counter() - started_at,
-                "schema_version": 1,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
+                artifact_temp,
+            )
+            frame.write_parquet(shard_temp)
+            os.replace(artifact_temp, artifact)
+            os.replace(shard_temp, shard)
+            ledger.complete_fold(
+                training_hash=training.hash,
+                candidate_identity=training.hash,
+                fold_id=fold_id,
+                fitted_state=artifact,
+                prediction_shard=shard,
+                resolved_settings=params,
+            )
+        finally:
+            artifact_temp.unlink(missing_ok=True)
+            shard_temp.unlink(missing_ok=True)
+        prediction_frames.append(frame)
+        fitted_folds.append(fold_id)
+
+    files = {path.name: _sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))}
+    manifest = model_dir / "manifest.json"
+    manifest_temp = model_dir / f".manifest.{uuid.uuid4().hex}.tmp"
+    manifest_temp.write_text(
+        json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
     )
-    return predictions
+    os.replace(manifest_temp, manifest)
+    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    return predictions, reused_folds, fitted_folds
 
 
 def run_resolved_request(
@@ -478,43 +486,33 @@ def run_resolved_request(
         runtime_provenance=context.runtime_provenance,
     )
     train_dir = training.root / "run_log" / "training" / training.hash
-    model_dir = train_dir / "models"
-    runtime_path = train_dir / "runtime.json"
-    recovering = model_dir.exists()
-    if recovering:
-        predictions = _predict_from_fitted_state(model_dir, context)
-        fit_elapsed_s = float(_validate_fitted_state(model_dir, context)["fit_elapsed_s"])
-    else:
-        staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-        staging.mkdir(parents=True)
-        try:
-            predictions = _fit_predictions(spec, context, staging, started_at=started)
-            os.replace(staging, model_dir)
-            fit_elapsed_s = float(_validate_fitted_state(model_dir, context)["fit_elapsed_s"])
-            _write_runtime_fields(runtime_path, fit_elapsed_s=fit_elapsed_s)
-        except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
-            raise
-
-    prediction = study.results.publish_predictions(
-        training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=predictions,
-        expected_keys=context.expected_keys,
-        task_type=context.task_type,
-        class_values=list(context.class_values) or None,
-        eval_col="eval_actual" if context.eval_label_col else None,
-        label=context.label_col,
-    )
-    if recovering:
-        _write_runtime_fields(
-            runtime_path,
-            fit_elapsed_s=fit_elapsed_s,
-            elapsed_s=fit_elapsed_s,
-            recovery_elapsed_s=time.perf_counter() - started,
+    ledger = ExecutionLedger(study, training.root)
+    attempt = ledger.start(training.hash)
+    try:
+        predictions, reused_folds, fitted_folds = _fit_or_reuse_predictions(
+            spec, context, training, ledger
         )
-    else:
-        _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
-    return ModelRun(training=training, predictions=(prediction,))
+        prediction = study.results.publish_predictions(
+            training,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            split="validation",
+            predictions=predictions,
+            expected_keys=context.expected_keys,
+            task_type=context.task_type,
+            class_values=list(context.class_values) or None,
+            eval_col="eval_actual" if context.eval_label_col else None,
+            label=context.label_col,
+        )
+        diagnostics = {
+            "cache_hit": False,
+            "reused_folds": reused_folds,
+            "fitted_folds": fitted_folds,
+        }
+        attempt.finish("completed", diagnostics)
+    except Exception as exc:
+        attempt.finish("failed", {"error_type": type(exc).__name__, "error": str(exc)})
+        raise
+    runtime_path = train_dir / "runtime.json"
+    _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
+    return ModelRun(training=training, predictions=(prediction,), diagnostics=diagnostics)

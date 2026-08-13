@@ -25,6 +25,7 @@ def create_experiment(
     *,
     repo_root: Path = REPO_ROOT,
     manifest: dict | None = None,
+    include_release_run_log: bool = True,
 ) -> Path:
     """Copy available generated state into a new ML4T_OUTPUT_DIR."""
     source = repo_root / "case_studies" / case_study
@@ -55,6 +56,9 @@ def create_experiment(
         for name in GENERATED_DIRS:
             candidate = source / name
             if candidate.is_dir():
+                if name == "run_log" and not include_release_run_log:
+                    (staging / name).mkdir()
+                    continue
                 shutil.copytree(candidate, staging / name)
 
         # config/ is a version-controlled input, not a generated artifact, but the

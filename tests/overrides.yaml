@@ -885,7 +885,6 @@
     TOTAL_TIMESTEPS: 1000
   timeout: 600
 21_rl_execution_hedging/05_deep_hedging_pfhedge:
-  docker_env: py312
   gpu: true
   parameters:
     N_EPOCHS: 2

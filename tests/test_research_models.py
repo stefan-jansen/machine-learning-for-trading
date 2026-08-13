@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from types import SimpleNamespace
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -31,6 +32,7 @@ from case_studies.utils.latent_factors.library_bridge import (
 )
 from case_studies.utils.latent_factors.sae import run_sae_fold
 from case_studies.utils.latent_factors.sdf import run_sdf_fold
+from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 from utils import modeling
 
@@ -146,7 +148,10 @@ def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkey
 
     assert notebook_resolved.identity == api_resolved.identity
     assert notebook_resolved.spec == api_resolved.spec
-    assert notebook_resolved.spec["model"]["effective_params_by_fold"]["0"]["alpha"] == 2.5
+    assert (
+        notebook_resolved.spec["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]
+        == 2.5
+    )
 
 
 def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) -> None:
@@ -193,8 +198,8 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     }
     monkeypatch.setattr(ResultsCatalog, "publish_predictions", original_publish)
     monkeypatch.setattr(
-        linear,
-        "_fit_predictions",
+        linear.Ridge,
+        "fit",
         lambda *args, **kwargs: pytest.fail("valid fitted state must not retrain"),
     )
 
@@ -207,49 +212,28 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     assert fitted_digests == {
         path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
     }
+    assert recovered.diagnostics == {
+        "cache_hit": False,
+        "reused_folds": [0, 1],
+        "fitted_folds": [],
+    }
     runtime = json.loads((model_dir.parent / "runtime.json").read_text())
-    assert runtime["fit_elapsed_s"] > 0
-    assert runtime["recovery_elapsed_s"] > 0
-    assert runtime["elapsed_s"] == runtime["fit_elapsed_s"]
+    assert runtime["elapsed_s"] > 0
 
 
-def test_linear_runner_recovers_fit_runtime_after_model_install_interrupt(
-    tmp_path, monkeypatch
-) -> None:
-    study = _linear_study(tmp_path, monkeypatch)
-    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
-    original_runtime_write = linear._write_runtime_fields
-    calls = 0
+def test_linear_runtime_update_is_atomic(tmp_path, monkeypatch) -> None:
+    runtime_path = tmp_path / "runtime.json"
+    runtime_path.write_text('{"status": "registered"}\n')
 
-    def interrupt_runtime_write(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("interrupted after model install")
-        return original_runtime_write(*args, **kwargs)
+    def interrupt_replace(*args, **kwargs):
+        raise RuntimeError("interrupted runtime update")
 
-    monkeypatch.setattr(linear, "_write_runtime_fields", interrupt_runtime_write)
-    with pytest.raises(RuntimeError, match="interrupted after model install"):
-        request.run()
-    resolved = request.resolve()
-    training_hash = linear.training_hash_from_spec(resolved.spec)
-    model_dir = study.storage_root() / "run_log" / "training" / training_hash / "models"
-    manifest = json.loads((model_dir / "manifest.json").read_text())
-    assert manifest["fit_elapsed_s"] > 0
-    monkeypatch.setattr(linear, "_write_runtime_fields", original_runtime_write)
-    monkeypatch.setattr(
-        linear,
-        "_fit_predictions",
-        lambda *args, **kwargs: pytest.fail("installed fitted state must not retrain"),
-    )
+    monkeypatch.setattr(linear.os, "replace", interrupt_replace)
+    with pytest.raises(RuntimeError, match="interrupted runtime update"):
+        linear._write_runtime_fields(runtime_path, elapsed_s=1.0)
 
-    recovered = request.run()
-
-    runtime = json.loads((model_dir.parent / "runtime.json").read_text())
-    assert recovered.predictions[0].complete
-    assert runtime["fit_elapsed_s"] == manifest["fit_elapsed_s"]
-    assert runtime["elapsed_s"] == manifest["fit_elapsed_s"]
-    assert runtime["recovery_elapsed_s"] > 0
+    assert json.loads(runtime_path.read_text()) == {"status": "registered"}
+    assert list(tmp_path.glob(".runtime.json.*.tmp")) == []
 
 
 def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:
@@ -326,7 +310,7 @@ def test_model_adapters_reject_custom_cv_for_fold_scoped_temporal_features(
         context = latent_case_study.load_case_study_context("etfs")
         selector = "case_studies.utils.latent_factors.adapter._select_splits"
         config_name = "pca"
-    context.temporal_by_fold = object()
+    context.temporal_by_fold = pl.DataFrame({"fold": [0]}).to_pandas()
     context.temporal_keys = ["symbol", "timestamp"]
     context.temporal_feature_names = ["temporal_value"]
     context.temporal_artifact_splits = [dict(context.splits[0])]
@@ -600,11 +584,14 @@ def test_lightgbm_huber_alpha_is_a_residual_unit_threshold() -> None:
         num_boost_round=20,
     )
 
+    mse_predictions = np.asarray(mse.predict(features), dtype=np.float64)
+    huber_predictions = np.asarray(huber.predict(features), dtype=np.float64)
+    scaled_predictions = np.asarray(scaled_huber.predict(features), dtype=np.float64)
     assert alpha == pytest.approx(0.5 * np.std(labels))
-    assert np.max(np.abs(mse.predict(features) - huber.predict(features))) > 0.01
+    assert np.max(np.abs(mse_predictions - huber_predictions)) > 0.01
     np.testing.assert_allclose(
-        scaled_huber.predict(features),
-        label_scale * huber.predict(features),
+        scaled_predictions,
+        label_scale * huber_predictions,
         rtol=1e-5,
         atol=1e-7,
     )
@@ -695,7 +682,7 @@ def test_multiclass_effective_params_use_resolved_class_count() -> None:
 @pytest.mark.parametrize("model_name", ["pca", "ipca"])
 def test_real_pca_presets_resolve_checkpoint_metadata(model_name) -> None:
     presets = latent_case_study._load_preset_model_kwargs("etfs", "fwd_ret_21d")
-    case = SimpleNamespace(model_kwargs=presets)
+    case = cast(LatentFactorCaseStudyContext, SimpleNamespace(model_kwargs=presets))
 
     model_kwargs, _, _, _, checkpoint_metadata = latent_adapter._resolve_model_configuration(
         case,
@@ -840,13 +827,16 @@ def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch
 
 
 def test_sdf_rejects_unimplemented_expected_return_mapper() -> None:
-    case = SimpleNamespace(
-        model_kwargs={
-            "sdf": {
-                "expected_return_mapper": "neural",
-                "output_mode": "expected_returns",
+    case = cast(
+        LatentFactorCaseStudyContext,
+        SimpleNamespace(
+            model_kwargs={
+                "sdf": {
+                    "expected_return_mapper": "neural",
+                    "output_mode": "expected_returns",
+                }
             }
-        }
+        ),
     )
 
     with pytest.raises(ValueError, match="supports only 'linear'"):
@@ -902,7 +892,7 @@ def test_sdf_fitted_heads_reconstruct_every_checkpoint(tmp_path) -> None:
     macro_train = rng.normal(size=(10, 2)).astype(np.float32)
     macro_val = rng.normal(size=(3, 2)).astype(np.float32)
     artifact_dir = tmp_path / "sdf"
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "state_dim_sdf": 2,
         "state_dim_moment": 2,
         "hidden_dim": 4,
@@ -1186,6 +1176,38 @@ def test_preview_request_requires_hash_covered_reductions(tmp_path) -> None:
             config_name="ridge",
             execution_tier="preview",
         )
+
+
+def test_version_3_linear_preview_registers_identity_covered_reductions(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    resolved = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        execution_tier="preview",
+        preview_reductions={"folds": [0]},
+    ).resolve()
+
+    training = study.results.register_training(
+        resolved.spec,
+        execution_tier="preview",
+    )
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+
+    assert resolved.spec["computation"]["preview_reductions"] == {"folds": [0]}
+    assert training.execution_tier == "preview"
+    assert prediction.complete
+    assert training.complete
 
 
 def test_model_and_causal_adapters_have_one_extension_seam() -> None:

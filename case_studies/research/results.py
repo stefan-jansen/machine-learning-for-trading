@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.registry import register_prediction_set, register_training_run
+from case_studies.utils.registry.specs import (
+    IDENTITY_VERSION,
+    SUPPORTED_IDENTITY_VERSIONS,
+)
 
 from .contracts import ExecutionTier
 
@@ -43,6 +47,25 @@ def _training_identity_projection(db: sqlite3.Connection, alias: str = "") -> st
     return f"{identity}, {tier}"
 
 
+def _stored_source(
+    db: sqlite3.Connection,
+    result_hash: str,
+    result_kind: str,
+    default: str,
+) -> tuple[str, Path | None]:
+    tables = {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "overlay_references" not in tables:
+        return default, None
+    row = db.execute(
+        "SELECT source_root FROM overlay_references WHERE result_hash = ? AND result_kind = ?",
+        (result_hash, result_kind),
+    ).fetchone()
+    return ("released", Path(row[0]).resolve()) if row is not None else (default, None)
+
+
 @dataclass(frozen=True)
 class Result:
     study: Study
@@ -50,6 +73,8 @@ class Result:
     kind: str
     execution_tier: str
     identity_version: int | None
+    origin: str = "workspace"
+    source_root: Path | None = None
 
     @classmethod
     def open(
@@ -59,12 +84,19 @@ class Result:
         *,
         include_preview: bool = False,
     ) -> Result:
-        roots = [(study.root, ExecutionTier.CANONICAL.value)]
+        roots = []
+        if not study.read_only:
+            roots.append((study.root, ExecutionTier.CANONICAL.value, "workspace"))
+        roots.append((study.release_case_root, ExecutionTier.CANONICAL.value, "released"))
         if include_preview and not study.read_only and study.output_root is not None:
             roots.append(
-                (study.output_root / ".preview" / study.case_study, ExecutionTier.PREVIEW.value)
+                (
+                    study.output_root / ".preview" / study.case_study,
+                    ExecutionTier.PREVIEW.value,
+                    "workspace",
+                )
             )
-        for root, namespace in roots:
+        for root, namespace, origin in roots:
             db_path = root / "run_log" / "registry.db"
             if not db_path.exists():
                 continue
@@ -85,8 +117,15 @@ class Result:
                 )
                 if training is not None:
                     tier = training["execution_tier"] or namespace
+                    result_origin, source_root = _stored_source(db, result_hash, "training", origin)
                     return TrainingResult(
-                        study, result_hash, "training", tier, training["identity_version"]
+                        study,
+                        result_hash,
+                        "training",
+                        tier,
+                        training["identity_version"],
+                        result_origin,
+                        source_root,
                     )
                 prediction = None
                 if "prediction_sets" in tables:
@@ -103,8 +142,17 @@ class Result:
                     )
                 if prediction is not None:
                     tier = prediction["execution_tier"] or namespace
+                    result_origin, source_root = _stored_source(
+                        db, result_hash, "prediction", origin
+                    )
                     return PredictionResult(
-                        study, result_hash, "prediction", tier, prediction["identity_version"]
+                        study,
+                        result_hash,
+                        "prediction",
+                        tier,
+                        prediction["identity_version"],
+                        result_origin,
+                        source_root,
                     )
                 backtest = None
                 if {"prediction_sets", "backtest_runs"} <= tables:
@@ -123,12 +171,21 @@ class Result:
                 if backtest is not None:
                     tier = backtest["execution_tier"] or namespace
                     return BacktestResult(
-                        study, result_hash, "backtest", tier, backtest["identity_version"]
+                        study,
+                        result_hash,
+                        "backtest",
+                        tier,
+                        backtest["identity_version"],
+                        origin,
                     )
         raise KeyError(f"Unknown result hash {result_hash!r}")
 
     @property
     def root(self) -> Path:
+        if self.source_root is not None:
+            return self.source_root
+        if self.origin == "released":
+            return self.study.release_case_root
         return self.study.storage_root(self.execution_tier)
 
     @property
@@ -201,6 +258,7 @@ class Result:
     def protocol(self) -> dict[str, Any]:
         lineage = self.lineage()
         training = lineage["training_spec"]
+        computation = training.get("computation", training)
         split = None
         if self.kind == "prediction":
             split = self.registry_record()["split"]
@@ -212,9 +270,9 @@ class Result:
             )
             split = prediction.registry_record()["split"]
         return {
-            "label_artifact": training.get("label_artifact"),
-            "feature_artifacts": training.get("feature_artifacts"),
-            "cv": training.get("cv"),
+            "label_artifact": computation.get("label_artifact"),
+            "feature_artifacts": computation.get("feature_artifacts"),
+            "cv": computation.get("cv"),
             "split": split,
             "execution_tier": self.execution_tier,
         }
@@ -224,7 +282,49 @@ class Result:
 class TrainingResult(Result):
     @property
     def complete(self) -> bool:
-        return self.identity_version == 2 and bool(self.spec())
+        if self.identity_version not in SUPPORTED_IDENTITY_VERSIONS or not self.spec():
+            return False
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            completed_attempt = (
+                db.execute(
+                    "SELECT 1 FROM execution_attempts "
+                    "WHERE scientific_identity = ? AND status = 'completed' LIMIT 1",
+                    (self.hash,),
+                ).fetchone()
+                if "execution_attempts" in tables
+                else None
+            )
+            prediction_hashes = (
+                [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT prediction_hash FROM prediction_sets WHERE training_hash = ?",
+                        (self.hash,),
+                    ).fetchall()
+                ]
+                if "prediction_sets" in tables
+                else []
+            )
+        if completed_attempt is not None:
+            return True
+        return any(
+            isinstance(
+                result := Result.open(
+                    self.study,
+                    prediction_hash,
+                    include_preview=self.execution_tier == ExecutionTier.PREVIEW.value,
+                ),
+                PredictionResult,
+            )
+            and result.complete
+            for prediction_hash in prediction_hashes
+        )
 
 
 @dataclass(frozen=True)
@@ -247,7 +347,7 @@ class PredictionResult(Result):
         coverage = self.coverage()
         prediction_file = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
         if (
-            self.identity_version != 2
+            self.identity_version not in SUPPORTED_IDENTITY_VERSIONS
             or not coverage
             or coverage["status"] != "complete"
             or not prediction_file.is_file()
@@ -303,15 +403,23 @@ class ResultsCatalog:
         self.study.require_writable()
         tier = ExecutionTier(execution_tier)
         resolved = dict(spec)
-        resolved.setdefault("identity_version", 2)
+        resolved.setdefault("identity_version", IDENTITY_VERSION)
         resolved.setdefault("execution_tier", tier.value)
-        if resolved["identity_version"] != 2 or resolved["execution_tier"] != tier.value:
+        if (
+            resolved["identity_version"] not in SUPPORTED_IDENTITY_VERSIONS
+            or resolved["execution_tier"] != tier.value
+        ):
             raise ValueError(
                 "training spec identity version or execution tier conflicts with request"
             )
-        if tier is ExecutionTier.PREVIEW and not resolved.get("preview_reductions"):
+        if resolved["identity_version"] == IDENTITY_VERSION:
+            from .identity import ResolvedSpec
+
+            ResolvedSpec.from_dict(resolved)
+        computation = resolved.get("computation", resolved)
+        if tier is ExecutionTier.PREVIEW and not computation.get("preview_reductions"):
             raise ValueError("preview training specs must identity-cover every preview reduction")
-        if tier is ExecutionTier.CANONICAL and resolved.get("preview_reductions"):
+        if tier is ExecutionTier.CANONICAL and computation.get("preview_reductions"):
             raise ValueError("canonical training specs cannot contain preview reductions")
         case_dir = self.study.activate(tier)
         training_hash = register_training_run(
@@ -349,6 +457,10 @@ class ResultsCatalog:
             raise ValueError("training result belongs to another study")
         tier = ExecutionTier(training.execution_tier)
         case_dir = self.study.activate(tier)
+        from .cv import EligibilityManifest
+
+        if isinstance(expected_keys, EligibilityManifest):
+            expected_keys = expected_keys.eligible_keys
         prediction_hash = register_prediction_set(
             self.study.case_study,
             training.hash,

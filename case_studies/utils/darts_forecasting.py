@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +27,164 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
 BASE_TARGET_COL = "_darts_target_1d"
+_DARTS_PERIOD_COL = "_darts_expected_period"
+_CME_MAX_SESSION_GAP_DAYS = 5
+
+
+def darts_checkpoint_path(root: Path, config_name: str, fold: int, checkpoint: int) -> Path:
+    return Path(root) / config_name / f"fold_{fold:02d}" / f"epoch_{checkpoint:04d}.pt"
+
+
+def _darts_checkpoint_files(path: Path) -> tuple[Path, Path, Path]:
+    path = Path(path)
+    return path, Path(f"{path}.ckpt"), Path(f"{path}.json")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_darts_checkpoint(
+    path: Path,
+    *,
+    model: Any,
+    architecture: str,
+    metadata: dict[str, Any],
+) -> Path:
+    """Persist an immutable Darts model, Lightning weights, and digest record."""
+    path = Path(path)
+    model_path, weights_path, sidecar_path = _darts_checkpoint_files(path)
+    existing = [item for item in (model_path, weights_path, sidecar_path) if item.exists()]
+    if existing:
+        raise FileExistsError(f"immutable Darts checkpoint conflict: {existing[0]}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    temporary_model = path.with_name(f".{path.name}.{token}.tmp")
+    temporary_weights = Path(f"{temporary_model}.ckpt")
+    temporary_sidecar = path.with_name(f".{path.name}.{token}.json.tmp")
+    published: list[Path] = []
+    try:
+        model.save(str(temporary_model), clean=True)
+        if not temporary_model.is_file() or not temporary_weights.is_file():
+            raise RuntimeError(f"Darts did not persist both checkpoint files for {path}")
+        record = {
+            "schema_version": 1,
+            "architecture": architecture,
+            "metadata": metadata,
+            "model_sha256": _file_sha256(temporary_model),
+            "model_size": temporary_model.stat().st_size,
+            "weights_sha256": _file_sha256(temporary_weights),
+            "weights_size": temporary_weights.stat().st_size,
+        }
+        temporary_sidecar.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        for source, target in (
+            (temporary_model, model_path),
+            (temporary_weights, weights_path),
+            (temporary_sidecar, sidecar_path),
+        ):
+            os.replace(source, target)
+            published.append(target)
+    except Exception:
+        for item in published:
+            item.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary_model.unlink(missing_ok=True)
+        temporary_weights.unlink(missing_ok=True)
+        temporary_sidecar.unlink(missing_ok=True)
+    return path
+
+
+def load_darts_checkpoint(path: Path):
+    """Load a Darts checkpoint after both persisted files pass their digests."""
+    model_path, weights_path, sidecar_path = _darts_checkpoint_files(Path(path))
+    if not all(item.is_file() for item in (model_path, weights_path, sidecar_path)):
+        raise FileNotFoundError(f"Darts checkpoint population is incomplete: {model_path}")
+    record = json.loads(sidecar_path.read_text())
+    if record.get("schema_version") != 1:
+        raise ValueError(f"unsupported Darts checkpoint schema at {model_path}")
+    if record.get("model_sha256") != _file_sha256(model_path) or record.get(
+        "weights_sha256"
+    ) != _file_sha256(weights_path):
+        raise ValueError(f"Darts checkpoint digest does not match its sidecar: {model_path}")
+    model_cls = {
+        "nbeats": NBEATSModel,
+        "tsmixer": TSMixerModel,
+    }.get(record.get("architecture"))
+    if model_cls is None:
+        raise ValueError(f"unsupported Darts architecture at {model_path}")
+    model = model_cls.load(
+        str(model_path),
+        pl_trainer_kwargs=_trainer_kwargs("cpu"),
+        weights_only=False,
+    )
+    return model, record["metadata"]
+
+
+def validate_darts_checkpoint_population(
+    root: Path,
+    *,
+    config_name: str,
+    fold_ids: list[int] | tuple[int, ...],
+    checkpoints: list[int] | tuple[int, ...],
+    architecture: str,
+) -> tuple[Path, ...]:
+    """Require the exact Darts fitted-state population declared by one request."""
+    expected = tuple(
+        darts_checkpoint_path(root, config_name, fold, checkpoint)
+        for fold in sorted({int(value) for value in fold_ids})
+        for checkpoint in sorted({int(value) for value in checkpoints})
+    )
+    if not expected:
+        raise ValueError("Darts checkpoint validation requires folds and checkpoint values")
+    expected_files: set[Path] = set()
+    for path in expected:
+        expected_files.update(_darts_checkpoint_files(path))
+        try:
+            _model_path, _weights_path, sidecar_path = _darts_checkpoint_files(path)
+            if not all(item.is_file() for item in _darts_checkpoint_files(path)):
+                raise FileNotFoundError(path)
+            record = json.loads(sidecar_path.read_text())
+            if (
+                record.get("schema_version") != 1
+                or record.get("model_sha256") != _file_sha256(path)
+                or record.get("weights_sha256") != _file_sha256(Path(f"{path}.ckpt"))
+            ):
+                raise ValueError(path)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as error:
+            raise ValueError(f"Darts fitted checkpoint population is incomplete: {path}") from error
+        fold = int(path.parent.name.removeprefix("fold_"))
+        checkpoint = int(path.stem.removeprefix("epoch_"))
+        required_metadata = {
+            "config_name": config_name,
+            "fold": fold,
+            "checkpoint_kind": "epoch",
+            "checkpoint_value": checkpoint,
+        }
+        mismatches = {
+            key: (record.get("metadata", {}).get(key), value)
+            for key, value in required_metadata.items()
+            if record.get("metadata", {}).get(key) != value
+        }
+        if record.get("architecture") != architecture:
+            mismatches["architecture"] = (record.get("architecture"), architecture)
+        if mismatches:
+            raise ValueError(f"Darts fitted checkpoint metadata mismatch at {path}: {mismatches}")
+
+    config_root = Path(root) / config_name
+    actual_files = {path for path in config_root.glob("fold_*/epoch_*.pt*") if path.is_file()}
+    extras = actual_files - expected_files
+    if extras:
+        raise ValueError(
+            "Darts fitted checkpoint population contains undeclared artifacts: "
+            f"{[str(path) for path in sorted(extras)]}"
+        )
+    return expected
 
 
 def uses_darts_backend(configs: list[dict[str, Any]]) -> bool:
@@ -39,11 +200,11 @@ def uses_darts_backend(configs: list[dict[str, Any]]) -> bool:
 
 @dataclass
 class _FoldSeries:
-    entity: str
+    identity: dict[str, Any]
     full_target: TimeSeries
     full_covariates: TimeSeries
-    train_target: TimeSeries
-    train_covariates: TimeSeries
+    train_target: TimeSeries | None
+    train_covariates: TimeSeries | None
     prediction_start_pos: int
     val_start_pos: int
     val_end_pos: int
@@ -336,6 +497,42 @@ def _resolve_sampling(
     return stride, max_samples_per_ts
 
 
+def _attach_expected_periods(
+    dataset_pd: pd.DataFrame,
+    *,
+    date_col: str,
+    calendar_id: str | None,
+    case_study: str | None = None,
+) -> pd.DataFrame:
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    result = dataset_pd.copy()
+    if case_study == "cme_futures":
+        product_dates = (
+            result[["product", date_col]]
+            .drop_duplicates()
+            .sort_values(["product", date_col], kind="mergesort")
+        )
+        within_product = product_dates.groupby("product", sort=False)
+        sequence = within_product.cumcount()
+        breaks = within_product[date_col].diff().dt.days.gt(_CME_MAX_SESSION_GAP_DAYS)
+        product_dates[_DARTS_PERIOD_COL] = (
+            sequence + breaks.groupby(product_dates["product"], sort=False).cumsum()
+        )
+        return result.merge(
+            product_dates,
+            on=["product", date_col],
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        )
+    result[_DARTS_PERIOD_COL] = _sequence_period_numbers(
+        result[date_col],
+        calendar_id=calendar_id,
+    )
+    return result
+
+
 def _load_base_target_frame(
     case_study: str,
     dataset_pd: pd.DataFrame,
@@ -359,9 +556,16 @@ def _load_base_target_frame(
     if case_study == "cme_futures":
         from data import load_cme_futures
 
+        join_keys = [date_col, "product", "position"]
+        missing_keys = set(join_keys) - set(dataset_pd.columns)
+        if missing_keys:
+            raise ValueError(f"CME Darts dataset is missing panel keys: {sorted(missing_keys)}")
+        target_df = load_cme_futures().rename({"session_date": "timestamp", "tenor": "position"})
+        eligible_keys = pl.from_pandas(dataset_pd[join_keys].drop_duplicates()).with_columns(
+            *(pl.col(key).cast(target_df.schema[key]) for key in join_keys)
+        )
         target_df = (
-            load_cme_futures()
-            .rename({"session_date": "timestamp", "tenor": "position"})
+            target_df.join(eligible_keys, on=join_keys, how="inner", validate="m:1")
             .sort(["product", "position", "timestamp"])
             .with_columns(
                 (
@@ -373,9 +577,6 @@ def _load_base_target_frame(
             )
             .select(["timestamp", "product", "position", BASE_TARGET_COL])
         )
-        join_keys = [date_col, "product"]
-        if "position" in dataset_pd.columns:
-            join_keys.append("position")
         assert isinstance(target_df, pl.DataFrame)
         return target_df.to_pandas(), join_keys
 
@@ -416,6 +617,91 @@ def _attach_base_target(
     return merged
 
 
+def _panel_identity_columns(dataset_pd: pd.DataFrame, entity_col: str) -> list[str]:
+    identity_cols = [entity_col]
+    if "position" in dataset_pd.columns and entity_col != "position":
+        identity_cols.append("position")
+    return identity_cols
+
+
+def darts_validation_keys(
+    dataset_pd: pd.DataFrame,
+    splits: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    feature_names: list[str],
+    label_col: str,
+    date_col: str,
+    entity_col: str,
+    case_study: str,
+    temporal_by_fold=None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
+) -> pl.DataFrame:
+    """Return exact finite validation keys eligible for Darts forecasting."""
+    input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
+        config, _parse_label_horizon(label_col)
+    )
+    from utils.cv_splits import make_walk_forward_config
+
+    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+    dataset_pd = _attach_expected_periods(
+        dataset_pd,
+        date_col=date_col,
+        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        case_study=case_study,
+    )
+    identity_cols = _panel_identity_columns(dataset_pd, entity_col)
+    frames: list[pl.DataFrame] = []
+    has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    for split in splits:
+        fold_dataset = (
+            _overlay_fold_temporal_features(
+                dataset_pd,
+                split,
+                date_col,
+                temporal_by_fold,
+                temporal_keys,
+                temporal_feature_names,
+            )
+            if has_fold_temporal
+            else dataset_pd
+        )
+        states = _prepare_fold_series(
+            fold_dataset,
+            split,
+            feature_names,
+            label_col,
+            date_col,
+            entity_col,
+            input_chunk_length,
+            output_chunk_length,
+        )
+        rows = [
+            {
+                **state.identity,
+                "timestamp": pd.Timestamp(state.dates[position]),
+                "fold": int(split["fold"]),
+            }
+            for state in states
+            for position in range(state.prediction_start_pos - 1, state.val_end_pos + 1)
+            if state.val_start_pos >= 0
+            if np.isfinite(state.y_true[position])
+        ]
+        if rows:
+            frames.append(pl.from_dicts(rows))
+    if not frames:
+        identity_schema = pl.from_pandas(dataset_pd[identity_cols].head(0)).schema
+        return pl.DataFrame(
+            schema={**identity_schema, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
+        )
+    key_cols = [*identity_cols, "timestamp", "fold"]
+    expected = pl.concat(frames).sort(key_cols)
+    if expected.n_unique(key_cols) != expected.height:
+        raise ValueError("Darts request produced duplicate expected prediction keys")
+    return expected
+
+
 def _prepare_fold_series(
     dataset_pd: pd.DataFrame,
     split: dict[str, Any],
@@ -430,7 +716,17 @@ def _prepare_fold_series(
     train_end = pd.Timestamp(split["train_end"]).to_datetime64()
     val_start = pd.Timestamp(split["val_start"]).to_datetime64()
     val_end = pd.Timestamp(split["val_end"]).to_datetime64()
-    cols = [date_col, entity_col, label_col, BASE_TARGET_COL, *feature_names]
+    if _DARTS_PERIOD_COL not in dataset_pd.columns:
+        raise ValueError("Darts dataset is missing expected-period identity")
+    identity_cols = _panel_identity_columns(dataset_pd, entity_col)
+    cols = [
+        date_col,
+        *identity_cols,
+        label_col,
+        BASE_TARGET_COL,
+        _DARTS_PERIOD_COL,
+        *feature_names,
+    ]
     fold_mask = (dataset_pd[date_col] >= train_start) & (dataset_pd[date_col] <= val_end)
     fold_df = dataset_pd.loc[fold_mask, cols].copy().dropna(subset=[BASE_TARGET_COL])
     train_df = fold_df.loc[fold_df[date_col] <= train_end].copy()
@@ -446,48 +742,60 @@ def _prepare_fold_series(
     fold_df.loc[:, feature_names] = ((feature_frame - means) / stds).fillna(0.0).astype(np.float32)
 
     series: list[_FoldSeries] = []
-    for entity, sym_df in fold_df.groupby(entity_col, sort=False):
-        sym_df = sym_df.sort_values(date_col).reset_index(drop=True)
-        dates = sym_df[date_col].to_numpy()
-        train_cut = int((dates <= train_end).sum())
-        val_positions = np.flatnonzero((dates >= val_start) & (dates <= val_end))
-        if len(val_positions) == 0:
-            continue
-        if train_cut < input_chunk_length + output_chunk_length:
-            continue
-
-        val_start_pos = int(val_positions[0])
-        val_end_pos = int(val_positions[-1])
-        prediction_start_pos = val_start_pos + 1
-        if prediction_start_pos <= 0 or prediction_start_pos >= len(sym_df):
-            continue
-
-        t = np.arange(len(sym_df), dtype=np.int32)
-        target_df = pd.DataFrame(
-            {"t": t, BASE_TARGET_COL: sym_df[BASE_TARGET_COL].to_numpy(np.float32)}
-        )
-        cov_df = pd.DataFrame(
-            {"t": t, **{f: sym_df[f].to_numpy(np.float32) for f in feature_names}}
-        )
-
-        full_target = TimeSeries.from_dataframe(target_df, time_col="t", value_cols=BASE_TARGET_COL)
-        full_covariates = TimeSeries.from_dataframe(cov_df, time_col="t", value_cols=feature_names)
-
-        series.append(
-            _FoldSeries(
-                entity=str(entity),
-                full_target=full_target,
-                full_covariates=full_covariates,
-                train_target=full_target[:train_cut],
-                train_covariates=full_covariates[:train_cut],
-                prediction_start_pos=prediction_start_pos,
-                val_start_pos=val_start_pos,
-                val_end_pos=val_end_pos,
-                dates=dates,
-                y_true=sym_df[label_col].to_numpy(np.float32),
-                n_train_samples=train_cut,
+    identity_grouper: str | list[str] = (
+        identity_cols[0] if len(identity_cols) == 1 else identity_cols
+    )
+    for identity_key, entity_df in fold_df.groupby(identity_grouper, sort=False):
+        identity_values = identity_key if isinstance(identity_key, tuple) else (identity_key,)
+        identity = dict(zip(identity_cols, identity_values, strict=True))
+        entity_df = entity_df.sort_values(date_col).reset_index(drop=True)
+        segments = entity_df[_DARTS_PERIOD_COL].diff().ne(1).cumsum()
+        for _, sym_df in entity_df.groupby(segments, sort=False):
+            sym_df = sym_df.reset_index(drop=True)
+            dates = sym_df[date_col].to_numpy()
+            train_cut = int((dates <= train_end).sum())
+            val_positions = np.flatnonzero((dates >= val_start) & (dates <= val_end))
+            can_train = train_cut >= input_chunk_length + output_chunk_length
+            val_start_pos = int(val_positions[0]) if len(val_positions) else -1
+            val_end_pos = int(val_positions[-1]) if len(val_positions) else -1
+            first_prediction_base = max(val_start_pos, input_chunk_length - 1)
+            prediction_start_pos = first_prediction_base + 1 if val_start_pos >= 0 else -1
+            can_predict = (
+                val_start_pos >= 0
+                and first_prediction_base <= val_end_pos
+                and prediction_start_pos <= len(sym_df)
             )
-        )
+            if not can_train and not can_predict:
+                continue
+
+            t = np.arange(len(sym_df), dtype=np.int32)
+            target_df = pd.DataFrame(
+                {"t": t, BASE_TARGET_COL: sym_df[BASE_TARGET_COL].to_numpy(np.float32)}
+            )
+            cov_df = pd.DataFrame(
+                {"t": t, **{f: sym_df[f].to_numpy(np.float32) for f in feature_names}}
+            )
+            full_target = TimeSeries.from_dataframe(
+                target_df, time_col="t", value_cols=BASE_TARGET_COL
+            )
+            full_covariates = TimeSeries.from_dataframe(
+                cov_df, time_col="t", value_cols=feature_names
+            )
+            series.append(
+                _FoldSeries(
+                    identity=identity,
+                    full_target=full_target,
+                    full_covariates=full_covariates,
+                    train_target=full_target[:train_cut] if can_train else None,
+                    train_covariates=full_covariates[:train_cut] if can_train else None,
+                    prediction_start_pos=prediction_start_pos if can_predict else -1,
+                    val_start_pos=val_start_pos if can_predict else -1,
+                    val_end_pos=val_end_pos if can_predict else -1,
+                    dates=dates,
+                    y_true=sym_df[label_col].to_numpy(np.float32),
+                    n_train_samples=train_cut if can_train else 0,
+                )
+            )
 
     return series
 
@@ -528,19 +836,29 @@ def _predict_fold(
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
-        forecasts = model.historical_forecasts(
-            state.full_target,
-            past_covariates=state.full_covariates,
-            start=state.prediction_start_pos,
-            start_format="position",
-            forecast_horizon=output_chunk_length,
-            stride=1,
-            retrain=False,
-            overlap_end=True,
-            last_points_only=False,
-            verbose=False,
-            show_warnings=False,
-        )
+        if state.val_start_pos < 0:
+            continue
+        if state.prediction_start_pos == len(state.full_target):
+            forecasts = model.predict(
+                output_chunk_length,
+                series=state.full_target,
+                past_covariates=state.full_covariates,
+                verbose=False,
+            )
+        else:
+            forecasts = model.historical_forecasts(
+                state.full_target,
+                past_covariates=state.full_covariates,
+                start=state.prediction_start_pos,
+                start_format="position",
+                forecast_horizon=output_chunk_length,
+                stride=1,
+                retrain=False,
+                overlap_end=True,
+                last_points_only=False,
+                verbose=False,
+                show_warnings=False,
+            )
         if isinstance(forecasts, TimeSeries):
             forecasts = [forecasts]
 
@@ -552,11 +870,13 @@ def _predict_fold(
                 continue
             if base_pos < 0 or base_pos >= len(state.dates):
                 continue
+            if not np.isfinite(state.y_true[base_pos]):
+                continue
             score_path = forecast.values(copy=False).reshape(-1).astype(np.float64, copy=False)
             rows.append(
                 {
                     date_col: pd.Timestamp(state.dates[base_pos]),
-                    entity_col: state.entity,
+                    **state.identity,
                     "y_true": float(state.y_true[base_pos]),
                     "y_score": float(np.expm1(score_path.sum())),
                     "fold_id": fold_id,
@@ -590,6 +910,8 @@ def run_darts_cv(
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
+    checkpoint_root: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -618,6 +940,14 @@ def run_darts_cv(
 
     label_horizon = _parse_label_horizon(label_col)
     dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+    from utils.cv_splits import make_walk_forward_config
+
+    dataset_pd = _attach_expected_periods(
+        dataset_pd,
+        date_col=date_col,
+        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        case_study=case_study,
+    )
 
     config_results: list[dict[str, Any]] = []
     learning_rows: list[dict[str, Any]] = []
@@ -635,6 +965,7 @@ def run_darts_cv(
         started_at = datetime.now(UTC).isoformat()
         elapsed_total = 0.0
         cfg_prediction_frames: list[pl.DataFrame] = []
+        expected_fold_ids: list[int] = []
 
         print(
             f"Darts CV: {config_name} ({params['architecture']}) "
@@ -667,12 +998,20 @@ def run_darts_cv(
                 input_chunk_length,
                 output_chunk_length,
             )
-            if not fold_series:
-                print(f"  Fold {split['fold']}: skipped (insufficient series after filtering)")
+            training_states = [state for state in fold_series if state.train_target is not None]
+            prediction_states = [state for state in fold_series if state.val_start_pos >= 0]
+            if not training_states or not prediction_states:
+                if strict:
+                    raise ValueError(
+                        f"Darts fold {split['fold']} has no trainable or predictable series "
+                        "after gap filtering"
+                    )
+                print(f"  Fold {split['fold']}: skipped (insufficient gap-free series)")
                 continue
+            expected_fold_ids.append(int(split["fold"]))
 
             stride, max_samples_per_ts = _resolve_sampling(
-                fold_series,
+                training_states,
                 input_chunk_length,
                 output_chunk_length,
                 max_train_sequences,
@@ -683,10 +1022,13 @@ def run_darts_cv(
                     msg += f", max_samples_per_ts={max_samples_per_ts}"
                 print(msg)
             else:
-                print(f"  Fold {split['fold']}: {len(fold_series)} series")
+                print(
+                    f"  Fold {split['fold']}: {len(training_states)} training series, "
+                    f"{len(prediction_states)} validation series"
+                )
 
-            train_series = [state.train_target for state in fold_series]
-            train_covariates = [state.train_covariates for state in fold_series]
+            train_series = [state.train_target for state in training_states]
+            train_covariates = [state.train_covariates for state in training_states]
             epoch_rows: list[dict[str, Any]] = []
             checkpoint_frames: list[pl.DataFrame] = []
             checkpoint_ics: dict[int, float] = {}
@@ -710,7 +1052,7 @@ def run_darts_cv(
                         config_name=config_name,
                         fold=split["fold"],
                         n_epochs=n_epochs,
-                        n_train=int(sum(state.n_train_samples for state in fold_series)),
+                        n_train=int(sum(state.n_train_samples for state in training_states)),
                         log_dir=log_dir,
                         epoch_rows=epoch_rows,
                     )
@@ -728,10 +1070,27 @@ def run_darts_cv(
                     max_samples_per_ts=max_samples_per_ts,
                 )
                 epochs_trained += epochs_to_train
+                if checkpoint_root is not None:
+                    write_darts_checkpoint(
+                        darts_checkpoint_path(
+                            checkpoint_root,
+                            config_name,
+                            int(split["fold"]),
+                            epochs_trained,
+                        ),
+                        model=model,
+                        architecture=str(params["architecture"]),
+                        metadata={
+                            "config_name": config_name,
+                            "fold": int(split["fold"]),
+                            "checkpoint_kind": "epoch",
+                            "checkpoint_value": epochs_trained,
+                        },
+                    )
 
                 checkpoint_preds = _predict_fold(
                     model,
-                    fold_series,
+                    prediction_states,
                     split["fold"],
                     date_col,
                     entity_col,
@@ -739,6 +1098,11 @@ def run_darts_cv(
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:
+                    if strict:
+                        raise ValueError(
+                            f"Darts fold {split['fold']} checkpoint {epochs_trained} "
+                            "produced no validation predictions"
+                        )
                     print(
                         f"        checkpoint {epochs_trained:3d}/{n_epochs}: "
                         f"no validation predictions ({elapsed:.1f}s elapsed)",
@@ -894,6 +1258,16 @@ def run_darts_cv(
             f"  {config_name}: epoch={best_epoch}, IC={best_ic:+.4f} "
             f"(std={best_ic_std:.4f}, {elapsed_total:.1f}s)"
         )
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
+            validate_darts_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=expected_fold_ids,
+                checkpoints=declared_epoch_checkpoints(n_epochs, checkpoint_interval),
+                architecture=str(params["architecture"]),
+            )
 
     if not config_results:
         raise RuntimeError("Darts run produced no config results.")

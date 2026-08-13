@@ -218,6 +218,7 @@ CHAPTER_PACKAGES = {
         "gymnasium",
         "numpy",
         "pandas",
+        "pfhedge",
         "sklearn",
         "stable_baselines3",
         "torch",
@@ -237,11 +238,12 @@ PY312_PACKAGES = {
     9: ["esig"],
     10: ["gensim"],
     15: ["causalimpact"],  # tfcausalimpact pip dist; module imports as `causalimpact`
-    21: ["pfhedge"],
+    # Ch21 is not here: pfhedge is a main dependency and works on Python 3.14, so
+    # it belongs to the ml4t image, not to the py312-only set.
 }
 
 # All py312-only package names (for skip detection in ml4t image)
-PY312_ONLY = {"esig", "gensim", "signatory", "pfhedge", "causalimpact"}
+PY312_ONLY = {"esig", "gensim", "signatory", "causalimpact"}
 
 # =========================================================================
 # Benchmark image — database clients
