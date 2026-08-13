@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import math
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import polars as pl
+import yaml
 
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import _run_engine
 
 CASE_STUDY = "nasdaq100_microstructure"
+
+
+def _minutes(token: str) -> int:
+    values = {
+        "1m": 1,
+        "15m": 15,
+        "1_minute": 1,
+        "15_minute": 15,
+    }
+    return values[token]
 
 
 def _minute_prices() -> pl.DataFrame:
@@ -61,6 +75,22 @@ def test_nasdaq_backtest_loader_defaults_to_minute_bars(monkeypatch) -> None:
     assert loaded["timestamp"].n_unique() == 7
 
 
+def test_production_nasdaq_cadence_matches_declared_rebalance_steps() -> None:
+    config_dir = Path("case_studies") / CASE_STUDY / "config"
+    setup = yaml.safe_load((config_dir / "setup.yaml").read_text())
+    backtest = yaml.safe_load((config_dir / "backtest" / "base.yaml").read_text())
+
+    cadence_minutes = _minutes(setup["decision"]["bar_frequency"])
+    assert cadence_minutes == _minutes(backtest["calendar"]["data_frequency"])
+
+    for label, step in setup["labels"]["rebalance_step"].items():
+        match = re.search(r"_(\d+)m$", label)
+        assert match is not None, label
+        horizon_minutes = int(match.group(1))
+        expected_step = max(1, math.ceil((horizon_minutes - 1) / cadence_minutes))
+        assert step == expected_step, label
+
+
 def test_minute_engine_fills_next_bar_and_replacement_at_label_exit() -> None:
     prices = _minute_prices()
     predictions = _minute_predictions(prices)
@@ -107,4 +137,8 @@ def test_minute_engine_fills_next_bar_and_replacement_at_label_exit() -> None:
     assert aapl["timestamp"].to_list() == [
         start + timedelta(minutes=1),
         start + timedelta(minutes=5),
+    ]
+    msft = fills.filter(pl.col("asset") == "MSFT").select("timestamp", "side")
+    assert msft.to_dicts() == [
+        {"timestamp": start + timedelta(minutes=5), "side": "buy"},
     ]
