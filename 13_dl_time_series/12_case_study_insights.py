@@ -919,7 +919,7 @@ diagnostic_df.select(
 # %%
 display(
     Markdown(
-        f"**Computed baseline comparison.** DL has the higher shared-date point estimate "
+        f"**Computed baseline comparison.** DL has the higher shared-timestamp point estimate "
         f"in {n_above} of {delta_df.height} comparable case studies. The conclusion is "
         "descriptive until a daily-series difference estimator is registered and verified."
     )
