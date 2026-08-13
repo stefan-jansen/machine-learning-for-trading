@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,7 @@ def run_ipca_fold(
     tol: float = 1e-6,
     factor_ridge: float = 1e-6,
     gamma_ridge: float = 1e-6,
+    artifact_dir: Path | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Fit IPCA on unbalanced dated cross-sections and forecast with train premiums."""
     return run_ipca_fold_with_library(
@@ -33,4 +35,5 @@ def run_ipca_fold(
         tol=tol,
         factor_ridge=factor_ridge,
         gamma_ridge=gamma_ridge,
+        artifact_dir=artifact_dir,
     )

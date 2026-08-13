@@ -621,7 +621,7 @@ def test_sdf_expected_spec_includes_library_output_defaults() -> None:
     actual["output_mode"] = "beta_network"
     actual["expected_return_mapper"] = "linear"
 
-    assert checkpoints == (256, 512, 768, 1024, 1280)
+    assert checkpoints == (-3, -2, -1, 0, 256, 512, 768, 1024, 1280)
     assert spec["output_mode"] == "beta_network"
     assert spec["expected_return_mapper"] == "linear"
     assert registry.training_hash_from_spec(spec) == registry.training_hash_from_spec(actual)
@@ -709,9 +709,9 @@ def test_latent_registration_builds_complete_training_identity(
     assert isinstance(spec, dict)
     assert spec["n_epochs"] == 5
     assert spec["checkpoint_interval"] == 5
-    assert spec["checkpoint_epochs"] == [5]
+    assert spec["checkpoint_epochs"] == [0, 5]
     assert spec["params"]["input_digest"] == "input-a"
-    assert captured["checkpoints"] == [5]
+    assert captured["checkpoints"] == [0, 5]
 
 
 @pytest.mark.gpu

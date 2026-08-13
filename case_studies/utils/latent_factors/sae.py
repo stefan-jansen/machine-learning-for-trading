@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -34,6 +35,7 @@ def run_sae_fold(
     seed: int = 42,
     device: str = "cpu",
     log_fn=print,
+    artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     """Train the SAE and emit predictions on the requested checkpoint grid."""
     # `n_factors` is part of the runner-API contract for parity with PCA/IPCA/CAE/SDF
@@ -60,4 +62,5 @@ def run_sae_fold(
         task_type=task_type,
         seed=seed,
         device=device,
+        artifact_dir=artifact_dir,
     )

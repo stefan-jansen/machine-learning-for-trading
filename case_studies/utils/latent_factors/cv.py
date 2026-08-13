@@ -119,6 +119,8 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval", 5),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
+        if model_name == "cae":
+            return tuple(sorted({0, *physical}))
         return tuple(physical)
     if model_name == "sdf":
         n_epochs_unc = int(model_kwargs.get("n_epochs_unc", 256))
@@ -128,7 +130,7 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval"),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
-        labels: set[int] = set()
+        labels: set[int] = {-3, -2, -1, 0}
         labels.update(epoch for epoch in physical if epoch <= n_epochs_unc)
         labels.update(n_epochs_unc + epoch for epoch in physical if epoch <= n_epochs_cond)
         return tuple(sorted(labels))
@@ -666,7 +668,11 @@ def run_latent_factor_cv(
     need_pca_inputs = "pca" in active_models
     need_ragged_inputs = any(model_name != "pca" for model_name in active_models)
 
-    def runner_kwargs(model_name: str, model_input: dict[str, Any]) -> dict[str, Any]:
+    def runner_kwargs(
+        model_name: str,
+        model_input: dict[str, Any],
+        fold_id: int,
+    ) -> dict[str, Any]:
         runner = _MODEL_RUNNERS[model_name]
         kwargs: dict[str, Any] = {"n_factors": n_factors}
         if model_name in {"cae", "sae"}:
@@ -684,6 +690,9 @@ def run_latent_factor_cv(
         if model_name == "sdf" and model_input.get("macro_train") is not None:
             kwargs["macro_train"] = model_input["macro_train"]
             kwargs["macro_val"] = model_input["macro_val"]
+        model_dir = model_dirs[model_name]
+        if model_dir is not None and "artifact_dir" in inspect.signature(runner).parameters:
+            kwargs["artifact_dir"] = model_dir / "artifacts" / f"fold_{fold_id}"
         if model_name in model_kwargs:
             merge_preset_into_runner_kwargs(
                 kwargs,
@@ -696,6 +705,7 @@ def run_latent_factor_cv(
     def fit_fold(
         model_name: str,
         model_input: dict[str, Any],
+        fold_id: int,
     ) -> tuple[dict[int, np.ndarray], dict[str, Any], float]:
         fold_started = time.perf_counter()
         result = _MODEL_RUNNERS[model_name](
@@ -703,7 +713,7 @@ def run_latent_factor_cv(
             model_input["returns_train"],
             model_input["chars_val"],
             model_input["returns_val"],
-            **runner_kwargs(model_name, model_input),
+            **runner_kwargs(model_name, model_input, fold_id),
         )
         if isinstance(result[0], dict):
             checkpoint_preds, extra = result
@@ -811,7 +821,7 @@ def run_latent_factor_cv(
             ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ipca-fold") as pool,
         ):
             futures = {
-                pool.submit(fit_fold, "ipca", model_input): int(split["fold"])
+                pool.submit(fit_fold, "ipca", model_input, int(split["fold"])): int(split["fold"])
                 for split, model_input in prepared_folds
             }
             for future in as_completed(futures):
@@ -871,7 +881,11 @@ def run_latent_factor_cv(
             )
             for model_name in active_models:
                 model_input = fold_inputs["pca"] if model_name == "pca" else fold_inputs["ragged"]
-                checkpoint_preds, extra, fold_elapsed = fit_fold(model_name, model_input)
+                checkpoint_preds, extra, fold_elapsed = fit_fold(
+                    model_name,
+                    model_input,
+                    int(split["fold"]),
+                )
                 record_fold(
                     split=split,
                     model_name=model_name,

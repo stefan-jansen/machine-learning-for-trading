@@ -19,6 +19,16 @@ from case_studies.research import (
 from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
 from case_studies.utils import linear
+from case_studies.utils.latent_factors import adapter as latent_adapter
+from case_studies.utils.latent_factors.cae import run_cae_fold
+from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
+from case_studies.utils.latent_factors.cv import _expected_latent_checkpoints
+from case_studies.utils.latent_factors.ipca import run_ipca_fold
+from case_studies.utils.latent_factors.library_bridge import (
+    predict_latent_fold_from_artifact,
+)
+from case_studies.utils.latent_factors.sae import run_sae_fold
+from case_studies.utils.latent_factors.sdf import run_sdf_fold
 from tests.test_research_workspace import _seed_release
 from utils import modeling
 
@@ -379,6 +389,286 @@ def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
     assert effective["0"]["alpha"] == pytest.approx(0.5 * np.std(folds[0]["y_train"]))
     assert effective["1"]["alpha"] == pytest.approx(0.5 * np.std(folds[1]["y_train"]))
     assert effective["0"]["alpha"] != effective["1"]["alpha"]
+
+
+def test_cae_fitted_artifact_reconstructs_every_checkpoint(tmp_path) -> None:
+    rng = np.random.default_rng(42)
+    chars_train = rng.normal(size=(4, 5, 3)).astype(np.float32)
+    chars_val = rng.normal(size=(2, 5, 3)).astype(np.float32)
+    returns_train = rng.normal(size=(4, 5)).astype(np.float32)
+    returns_val = rng.normal(size=(2, 5)).astype(np.float32)
+    artifact_dir = tmp_path / "cae"
+
+    fresh, _ = run_cae_fold(
+        chars_train,
+        returns_train,
+        chars_val,
+        returns_val,
+        n_factors=2,
+        n_epochs=2,
+        checkpoint_interval=1,
+        batch_size=20,
+        device="cpu",
+        artifact_dir=artifact_dir,
+    )
+    loaded = predict_latent_fold_from_artifact(
+        "cae",
+        artifact_dir=artifact_dir,
+        chars_train=chars_train,
+        returns_train=returns_train,
+        chars_val=chars_val,
+        returns_val=returns_val,
+        device="cpu",
+    )
+
+    assert sorted(fresh) == sorted(loaded) == [0, 1, 2]
+    assert all(np.array_equal(fresh[epoch], loaded[epoch]) for epoch in fresh)
+    assert sorted(path.name for path in artifact_dir.glob("*.ml4t")) == [
+        "forecaster_0.ml4t",
+        "forecaster_1.ml4t",
+        "forecaster_2.ml4t",
+        "model.ml4t",
+    ]
+
+
+def test_sdf_fitted_heads_reconstruct_every_checkpoint(tmp_path) -> None:
+    rng = np.random.default_rng(42)
+    chars_train = rng.normal(size=(10, 5, 3)).astype(np.float32)
+    chars_val = rng.normal(size=(3, 5, 3)).astype(np.float32)
+    returns_train = rng.normal(scale=0.05, size=(10, 5)).astype(np.float32)
+    returns_val = rng.normal(scale=0.05, size=(3, 5)).astype(np.float32)
+    macro_train = rng.normal(size=(10, 2)).astype(np.float32)
+    macro_val = rng.normal(size=(3, 2)).astype(np.float32)
+    artifact_dir = tmp_path / "sdf"
+    kwargs = {
+        "state_dim_sdf": 2,
+        "state_dim_moment": 2,
+        "hidden_dim": 4,
+        "n_instruments": 2,
+        "n_epochs_unc": 1,
+        "n_epochs_moment": 1,
+        "n_epochs_cond": 1,
+        "checkpoint_epochs": [1],
+        "beta_n_epochs": 1,
+        "beta_checkpoint_epochs": [1],
+        "beta_default_checkpoint": 1,
+        "output_mode": "beta_network",
+        "device": "cpu",
+    }
+
+    fresh, _ = run_sdf_fold(
+        chars_train,
+        returns_train,
+        chars_val,
+        returns_val,
+        macro_train=macro_train,
+        macro_val=macro_val,
+        artifact_dir=artifact_dir,
+        **kwargs,
+    )
+    loaded = predict_latent_fold_from_artifact(
+        "sdf",
+        artifact_dir=artifact_dir,
+        chars_train=chars_train,
+        returns_train=returns_train,
+        chars_val=chars_val,
+        returns_val=returns_val,
+        macro_train=macro_train,
+        macro_val=macro_val,
+        output_mode="beta_network",
+        device="cpu",
+    )
+
+    expected = _expected_latent_checkpoints("sdf", n_epochs=0, model_kwargs=kwargs)
+    assert sorted(fresh) == sorted(loaded) == list(expected) == [-3, -2, -1, 0, 1, 2]
+    assert all(np.array_equal(fresh[checkpoint], loaded[checkpoint]) for checkpoint in fresh)
+
+
+@pytest.mark.parametrize("model_name", ["ipca", "sae"])
+def test_other_latent_fitted_artifacts_reconstruct_predictions(tmp_path, model_name) -> None:
+    rng = np.random.default_rng(42)
+    chars_train = rng.normal(size=(12, 5, 3)).astype(np.float32)
+    chars_val = rng.normal(size=(3, 5, 3)).astype(np.float32)
+    returns_train = rng.normal(scale=0.05, size=(12, 5)).astype(np.float32)
+    returns_val = rng.normal(scale=0.05, size=(3, 5)).astype(np.float32)
+    artifact_dir = tmp_path / model_name
+    if model_name == "ipca":
+        predictions, _ = run_ipca_fold(
+            chars_train,
+            returns_train,
+            chars_val,
+            returns_val,
+            n_factors=2,
+            max_iter=20,
+            tol=1.0,
+            artifact_dir=artifact_dir,
+        )
+        fresh = {0: predictions}
+    else:
+        fresh, _ = run_sae_fold(
+            chars_train,
+            returns_train,
+            chars_val,
+            returns_val,
+            n_factors=2,
+            n_epochs=2,
+            checkpoint_interval=1,
+            main_hidden_units=[4, 4, 4, 4],
+            aux_hidden_dim=4,
+            bottleneck_dim=2,
+            device="cpu",
+            artifact_dir=artifact_dir,
+        )
+    loaded = predict_latent_fold_from_artifact(
+        model_name,
+        artifact_dir=artifact_dir,
+        chars_train=chars_train,
+        returns_train=returns_train,
+        chars_val=chars_val,
+        returns_val=returns_val,
+        device="cpu",
+    )
+
+    assert sorted(fresh) == sorted(loaded)
+    assert all(np.array_equal(fresh[checkpoint], loaded[checkpoint]) for checkpoint in fresh)
+
+
+def _latent_study(tmp_path, monkeypatch):
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    dates = [f"2024-01-{day:02d}" for day in range(1, 17)]
+    symbols = [f"S{index}" for index in range(6)]
+    rows = []
+    for date_index, date in enumerate(dates):
+        for symbol_index, symbol in enumerate(symbols):
+            x1 = float(symbol_index - 2.5)
+            x2 = float(date_index) + x1 / 10
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "timestamp": date,
+                    "x1": x1,
+                    "x2": x2,
+                    "fwd_ret_1d": 0.03 * x1 + 0.002 * date_index * x1 + 0.01 * x2,
+                }
+            )
+    frame = pl.DataFrame(rows).with_columns(pl.col("timestamp").str.to_date())
+    study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        frame.select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-10",
+            "val_start": "2024-01-11",
+            "val_end": "2024-01-13",
+        },
+        {
+            "fold": 1,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-13",
+            "val_start": "2024-01-14",
+            "val_end": "2024-01-16",
+        },
+    ]
+    context = LatentFactorCaseStudyContext(
+        case_study_id="etfs",
+        case_dir=study.root,
+        setup={},
+        primary_label="fwd_ret_1d",
+        variant_labels=[],
+        model_kwargs={"pca": {"n_factors": 1}},
+        setup_model_kwargs={},
+        persistent_entities=True,
+        macro_panel=None,
+        macro_context_spec=None,
+        input_data_spec={
+            "version": "v1",
+            "files": [
+                {"role": "financial", "sha256": "sha256:features-v1"},
+                {"role": "label", "sha256": "sha256:label-v1"},
+            ],
+            "input_digest": "sha256:fixture-v1",
+        },
+        dataset=frame,
+        feature_names=["x1", "x2"],
+        task_type="regression",
+        class_values=[],
+        eval_label_col=None,
+        date_col="timestamp",
+        entity_col="symbol",
+        splits=splits,
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        device="cpu",
+        num_threads=1,
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.latent_factors.case_study.load_case_study_context",
+        lambda *args, **kwargs: context,
+    )
+    monkeypatch.setattr(latent_adapter, "_source_identity", lambda: {"fixture": "v1"})
+    return study
+
+
+def test_latent_runner_persists_and_reconstructs_fitted_state(tmp_path, monkeypatch) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+    request = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="pca",
+        overrides={"device": "cpu", "n_factors": 1},
+    )
+
+    resolved = request.resolve()
+    fresh = resolved.run()
+    cached = request.run()
+
+    assert resolved.spec["checkpoint_schedule"] == [{"kind": "epoch", "value": 0}]
+    assert fresh.training.hash == cached.training.hash
+    assert fresh.predictions[0].hash == cached.predictions[0].hash
+    assert fresh.predictions[0].complete
+    assert fresh.predictions[0].coverage()["n_expected"] == 36
+    model_dir = fresh.training.root / "run_log" / "training" / fresh.training.hash / "models"
+    assert sorted(model_dir.glob("pca/artifacts/fold_*/model.ml4t")) == [
+        model_dir / "pca" / "artifacts" / "fold_0" / "model.ml4t",
+        model_dir / "pca" / "artifacts" / "fold_1" / "model.ml4t",
+    ]
+
+
+def test_latent_runner_reuses_fitted_state_after_registration_interrupt(
+    tmp_path, monkeypatch
+) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+    request = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="pca",
+        overrides={"device": "cpu", "n_factors": 1},
+    )
+    original_publish = ResultsCatalog.publish_predictions
+
+    def interrupt_registration(*args, **kwargs):
+        raise RuntimeError("interrupted registration")
+
+    monkeypatch.setattr(ResultsCatalog, "publish_predictions", interrupt_registration)
+    with pytest.raises(RuntimeError, match="interrupted registration"):
+        request.run()
+    monkeypatch.setattr(ResultsCatalog, "publish_predictions", original_publish)
+    monkeypatch.setattr(
+        latent_adapter,
+        "run_latent_factor_cv",
+        lambda *args, **kwargs: pytest.fail("valid fitted state must not retrain"),
+    )
+
+    recovered = request.run()
+
+    assert len(recovered.predictions) == 1
+    assert recovered.predictions[0].complete
 
 
 def test_preview_request_requires_hash_covered_reductions(tmp_path) -> None:
