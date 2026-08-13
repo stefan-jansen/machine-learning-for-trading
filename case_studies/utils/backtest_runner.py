@@ -710,24 +710,15 @@ def substitute_continuous_return_for_classification(
     return joined
 
 
-def _apply_cost_feasible_filter(
-    predictions: pl.DataFrame,
+def resolve_cost_feasible_universe(
     case_study: str,
     prediction_hash: str | None,
-) -> pl.DataFrame:
-    """Restrict predictions to the frozen, per-split cost-feasible universe.
-
-    The split is resolved from the prediction set's registry entry; the
-    symbol list is read from ``setup.yaml::universe.cost_feasible.{split}``.
-    Raises if the split cannot be resolved or the list is absent — a silent
-    full-universe fallback would change the registered result.
-    """
-    from pathlib import Path as _Path
-
-    import yaml as _yaml
+) -> tuple[str, list[str]]:
+    """Resolve the frozen cost-feasible roster for a registered prediction set."""
+    import yaml
 
     from case_studies.utils.cv_window import lookup_split
-    from utils import CASE_STUDIES_DIR
+    from utils.paths import get_case_study_dir
 
     if not prediction_hash:
         raise ValueError(
@@ -742,9 +733,7 @@ def _apply_cost_feasible_filter(
             f"lookup_split returned {split!r}. The prediction set must be "
             f"registered with a 'validation' or 'holdout' split first."
         )
-    setup = _yaml.safe_load(
-        (_Path(CASE_STUDIES_DIR) / case_study / "config" / "setup.yaml").read_text()
-    )
+    setup = yaml.safe_load((get_case_study_dir(case_study) / "config" / "setup.yaml").read_text())
     symbols = (((setup.get("universe") or {}).get("cost_feasible")) or {}).get(split)
     if not symbols:
         raise KeyError(
@@ -752,6 +741,44 @@ def _apply_cost_feasible_filter(
             f"case_study={case_study!r}; required when "
             f"signal.universe_filter='cost_feasible'."
         )
+    resolved = [str(symbol) for symbol in symbols]
+    if len(resolved) != len(set(resolved)):
+        raise ValueError(
+            f"setup.yaml::universe.cost_feasible.{split} contains duplicate symbols "
+            f"for case_study={case_study!r}."
+        )
+    return split, sorted(resolved)
+
+
+def _apply_cost_feasible_filter(
+    predictions: pl.DataFrame,
+    case_study: str,
+    prediction_hash: str | None,
+    signal_config: dict,
+) -> pl.DataFrame:
+    """Restrict predictions to the exact cost-feasible roster in Strategy identity."""
+    has_split = "universe_split" in signal_config
+    has_symbols = "universe_symbols" in signal_config
+    if has_split != has_symbols:
+        raise ValueError(
+            "cost-feasible Strategy identity requires both universe_split and universe_symbols"
+        )
+    if has_split:
+        split = str(signal_config["universe_split"])
+        symbols = [str(symbol) for symbol in signal_config["universe_symbols"]]
+        if split not in {"validation", "holdout"} or not symbols:
+            raise ValueError("cost-feasible Strategy identity has an invalid split or empty roster")
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("cost-feasible Strategy identity contains duplicate symbols")
+        if prediction_hash:
+            registered_split, _ = resolve_cost_feasible_universe(case_study, prediction_hash)
+            if split != registered_split:
+                raise ValueError(
+                    f"cost-feasible Strategy split {split!r} does not match prediction split "
+                    f"{registered_split!r}"
+                )
+    else:
+        split, symbols = resolve_cost_feasible_universe(case_study, prediction_hash)
     filtered = predictions.filter(pl.col("symbol").is_in(list(symbols)))
     if filtered.is_empty() and not predictions.is_empty():
         raise ValueError(
@@ -759,7 +786,7 @@ def _apply_cost_feasible_filter(
             f"case_study={case_study!r} split={split!r}: the prediction set's "
             f"symbols do not intersect the frozen cost-feasible list (e.g. a "
             f"point-in-time ticker mismatch like FB/META). Refusing to run a "
-            f"zero-row backtest — same 'no silent fallback' intent as above."
+            f"zero-row backtest."
         )
     return filtered
 
@@ -781,18 +808,16 @@ def apply_universe_filter(
     spread column is ``instr_rel_spread`` on the prices frame.
 
     When ``signal_config["universe_filter"] == "cost_feasible"``
-    (nasdaq100_microstructure), the backtest restricts predictions to a
-    FROZEN, per-split symbol list committed under
-    ``setup.yaml::universe.cost_feasible.{validation,holdout}``. The list is
-    the cost-feasible universe — the cheapest-to-trade names by round-trip
-    cost, profiled strictly before each window (no look-ahead — see
-    ``build_cost_feasible_universe.py``); the split is resolved from the
-    prediction set's registry entry via ``lookup_split``. Like ``liquid``,
-    only the filter *name* enters the backtest hash, not the resolved symbols.
+    (nasdaq100_microstructure), the backtest restricts predictions to the
+    per-split symbol list resolved before Strategy identity is computed. The
+    exact split and symbols are part of the strategy specification and its
+    hash. Legacy callers without those fields resolve the same list from
+    ``setup.yaml::universe.cost_feasible.{validation,holdout}`` and the
+    registered prediction split.
 
     Returns predictions unchanged when no filter applies. Built into
-    ``run_backtest`` so any caller — sweep notebooks, ``generate_holdout``,
-    ad-hoc scripts — gets the same filter as the bespoke sp500_options
+    ``run_backtest`` so any caller, including sweep notebooks and holdout
+    generation, gets the same filter as the bespoke sp500_options
     pipeline, driven purely by the strategy spec.
     """
     if not signal_config:
@@ -801,7 +826,12 @@ def apply_universe_filter(
     if uf in ("", "full", "none"):
         return predictions
     if uf == "cost_feasible":
-        return _apply_cost_feasible_filter(predictions, case_study, prediction_hash)
+        return _apply_cost_feasible_filter(
+            predictions,
+            case_study,
+            prediction_hash,
+            signal_config,
+        )
     if uf != "liquid":
         raise ValueError(
             f"universe_filter={uf!r} not supported. Allowed: 'liquid', 'cost_feasible', or 'full'."
