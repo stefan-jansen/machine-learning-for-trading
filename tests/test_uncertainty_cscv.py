@@ -91,7 +91,7 @@ def test_compute_cohort_metrics_populates_pbo_with_fold_returns() -> None:
 
     out = compute_cohort_metrics(
         returns_by_hash,
-        periods_per_year=252.0,
+        periods_per_year=252,
         fold_returns_by_hash=fold_returns_by_hash,
         rademacher_n_simulations=50,
         rademacher_seed=0,
@@ -108,3 +108,42 @@ def test_compute_cohort_metrics_populates_pbo_with_fold_returns() -> None:
     assert out["pbo_median_oos_rank"] is not None
     assert out["pbo_mean_degradation"] is not None
     assert out["pbo_n_folds"] == float(n_folds)
+
+
+def test_bootstrap_uncertainty_uses_seeded_generator() -> None:
+    from case_studies.utils.uncertainty import (
+        compute_backtest_uncertainty,
+        compute_independent_diff_uncertainty,
+        compute_paired_uncertainty,
+    )
+
+    rng = np.random.default_rng(17)
+    baseline = rng.normal(0.0002, 0.01, size=80)
+    challenger = baseline + rng.normal(0.0001, 0.002, size=80)
+
+    backtest = compute_backtest_uncertainty(challenger, n_boot=20, seed=41)
+    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=41)
+    independent = compute_independent_diff_uncertainty(
+        challenger,
+        baseline[:60],
+        n_boot=20,
+        seed=41,
+    )
+
+    assert backtest["bootstrap_n"] == 20.0
+    assert paired["bootstrap_n"] == 20.0
+    assert independent["bootstrap_n"] == 20.0
+    assert backtest == compute_backtest_uncertainty(challenger, n_boot=20, seed=41)
+    assert paired == compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=41)
+    repeated_independent = compute_independent_diff_uncertainty(
+        challenger,
+        baseline[:60],
+        n_boot=20,
+        seed=41,
+    )
+    assert independent.keys() == repeated_independent.keys()
+    np.testing.assert_allclose(
+        list(independent.values()),
+        list(repeated_independent.values()),
+        equal_nan=True,
+    )
