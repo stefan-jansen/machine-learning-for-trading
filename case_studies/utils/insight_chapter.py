@@ -44,6 +44,7 @@ import polars as pl
 import torch  # noqa: F401
 
 from case_studies.utils.analytics import PRIMARY_LABELS, SHORT_NAMES
+from case_studies.utils.conformal import split_conformal_coverage
 from utils.paths import get_case_study_dir
 
 LabelResolver = Callable[[str], str | None]
@@ -307,8 +308,6 @@ def conformal_coverage_for_selected_prediction(
     levels: tuple[float, ...] = (0.80, 0.90, 0.95),
 ) -> pl.DataFrame:
     """Measure split-conformal coverage for one exact selected prediction artifact."""
-    import numpy as np
-
     required = {
         "case_study",
         "family",
@@ -338,77 +337,43 @@ def conformal_coverage_for_selected_prediction(
     if not prediction_path.exists():
         raise RegistrySelectionError(f"missing prediction artifact: {prediction_path}")
     predictions = pl.read_parquet(prediction_path)
-    renames = {}
-    if "actual" in predictions.columns and "y_true" not in predictions.columns:
-        renames["actual"] = "y_true"
-    if "prediction" in predictions.columns and "y_score" not in predictions.columns:
-        renames["prediction"] = "y_score"
-    if "fold" in predictions.columns and "fold_id" not in predictions.columns:
-        renames["fold"] = "fold_id"
-    if renames:
-        predictions = predictions.rename(renames)
-
-    required_columns = {"y_true", "y_score", "fold_id"}
+    required_columns = {"timestamp", "y_true", "y_score", "fold_id"}
+    legacy_columns = {"actual": "y_true", "prediction": "y_score", "fold": "fold_id"}
+    present_legacy = {
+        legacy: canonical
+        for legacy, canonical in legacy_columns.items()
+        if legacy in predictions.columns and canonical not in predictions.columns
+    }
+    if present_legacy:
+        predictions = predictions.rename(present_legacy)
     missing_columns = required_columns - set(predictions.columns)
     if missing_columns:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"prediction artifact missing {sorted(missing_columns)}"
         )
-    predictions = predictions.drop_nulls(required_columns).with_columns(
-        (pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid")
-    )
-    if predictions.is_empty():
-        raise RegistrySelectionError(
-            f"{selected['case_study']}/{selected['prediction_hash']}: no finite predictions"
-        )
-    for column in ("y_true", "y_score", "abs_resid"):
-        if not np.isfinite(predictions[column].to_numpy()).all():
-            raise RegistrySelectionError(
-                f"{selected['case_study']}/{selected['prediction_hash']}: "
-                f"non-finite {column} values"
-            )
-
     fold_ids = sorted(predictions["fold_id"].unique().to_list())
     if fold_ids != list(range(n_folds)):
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
-    calibration = predictions.filter(pl.col("fold_id") == 0)
-    test = predictions.filter(pl.col("fold_id") != 0)
-    if calibration.height < 30 or test.height < 30:
+    try:
+        coverage_rows = split_conformal_coverage(predictions, levels=levels)
+    except ValueError as error:
         raise RegistrySelectionError(
-            f"{selected['case_study']}/{selected['prediction_hash']}: "
-            "conformal calibration or test panel has fewer than 30 rows"
-        )
-
-    scale = float(predictions["y_true"].std() or 0.0)
-    if not math.isfinite(scale) or scale <= 0:
-        raise RegistrySelectionError(
-            f"{selected['case_study']}/{selected['prediction_hash']}: invalid target scale"
-        )
-    calibration_residuals = calibration["abs_resid"].to_numpy()
-    test_residuals = test["abs_resid"].to_numpy()
-    n_calibration = len(calibration_residuals)
-    rows = []
-    for level in levels:
-        if not 0 < level < 1:
-            raise RegistrySelectionError(f"invalid conformal level: {level}")
-        quantile_level = min(math.ceil((n_calibration + 1) * level) / n_calibration, 1.0)
-        quantile = float(np.quantile(calibration_residuals, quantile_level))
-        rows.append(
-            {
-                "case_study": selected["case_study"],
-                "family": selected["family"],
-                "config_name": selected["config_name"],
-                "prediction_hash": selected["prediction_hash"],
-                "nominal_level": float(level),
-                "empirical_coverage": float((test_residuals <= quantile).mean()),
-                "mean_interval_width_frac_std": float((2.0 * quantile) / scale),
-                "n_test": int(len(test_residuals)),
-            }
-        )
+            f"{selected['case_study']}/{selected['prediction_hash']}: {error}"
+        ) from error
+    rows = [
+        {
+            "case_study": selected["case_study"],
+            "family": selected["family"],
+            "config_name": selected["config_name"],
+            "prediction_hash": selected["prediction_hash"],
+            **row,
+        }
+        for row in coverage_rows
+    ]
     return pl.DataFrame(rows)
 
 
