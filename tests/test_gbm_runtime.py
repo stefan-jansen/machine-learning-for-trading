@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 import numpy as np
 import pandas as pd
@@ -86,7 +87,20 @@ def test_gpu_runtime_params_fail_when_cuda_is_unavailable(monkeypatch: pytest.Mo
 def test_gpu_runtime_params_record_cuda_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gbm, "_best_gpu_device", lambda _library: "cuda")
 
-    assert gbm.lightgbm_runtime_params("cuda") == {"device_type": "cuda"}
+    params = gbm.lightgbm_runtime_params("cuda")
+    assert params["device_type"] == "cuda"
+    assert {
+        params[key]
+        for key in (
+            "bagging_seed",
+            "data_random_seed",
+            "drop_seed",
+            "extra_seed",
+            "feature_fraction_seed",
+            "objective_seed",
+            "seed",
+        )
+    } == {42}
 
 
 def test_runtime_params_reject_unknown_device() -> None:
@@ -475,7 +489,7 @@ def test_training_registration_records_runtime_without_changing_hash(tmp_path) -
         json.loads((tmp_path / "run_log" / "training" / training_hash / "runtime.json").read_text())
         == runtime
     )
-    with sqlite3.connect(tmp_path / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(tmp_path / "run_log" / "registry.db")) as db:
         [runtime_json] = db.execute(
             "SELECT runtime_json FROM training_runs WHERE training_hash = ?", (training_hash,)
         ).fetchone()
@@ -485,7 +499,7 @@ def test_training_registration_records_runtime_without_changing_hash(tmp_path) -
 def test_runtime_provenance_migrates_a_training_only_registry(tmp_path) -> None:
     run_log = tmp_path / "run_log"
     run_log.mkdir()
-    with sqlite3.connect(run_log / "registry.db") as db:
+    with closing(sqlite3.connect(run_log / "registry.db")) as db:
         db.execute(
             """
             CREATE TABLE training_runs (

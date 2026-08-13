@@ -1,4 +1,5 @@
 checkpoint_interval: 50
+huber_alpha_scale: 0.5
 max_iterations: 500
 params:
   bagging_fraction: 0.8

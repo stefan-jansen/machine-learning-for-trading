@@ -15,10 +15,19 @@ Usage:
 from __future__ import annotations
 
 import gc
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import shutil
+import subprocess
 import time
+import uuid
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Import lightgbm before ml4t.diagnostic, which transitively loads
 # scikit-learn. Both scikit-learn and LightGBM ship their own OpenMP runtime
@@ -39,9 +48,46 @@ import polars as pl
 # torch first ensures its bundled CUDA runtime wins. Same pattern as in
 # `case_studies/utils/latent_factors/__init__.py` and `model_analysis.py`.
 import torch  # noqa: F401
+import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
+from case_studies.utils.artifact_digest import value_digest
 from utils.modeling import RANDOM_SEED, seed_everything
+
+if TYPE_CHECKING:
+    from case_studies.research.workspace import Study
+
+
+_GBM_PREVIEW_FIELDS = {
+    "checkpoint_interval",
+    "folds",
+    "max_iterations",
+    "max_symbols",
+    "train_sample_frac",
+}
+_GBM_REQUEST_FIELDS = {
+    "checkpoint_interval",
+    "device",
+    "huber_alpha_scale",
+    "max_bin",
+    "max_iterations",
+    "num_threads",
+}
+
+
+@dataclass(frozen=True)
+class GBMContext:
+    folds: tuple[dict[str, Any], ...]
+    feature_names: tuple[str, ...]
+    label_col: str
+    eval_label_col: str | None
+    date_col: str
+    entity_col: str
+    task_type: str
+    class_values: tuple[Any, ...]
+    expected_keys: pl.DataFrame
+    runtime_provenance: dict[str, Any]
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -222,7 +268,16 @@ def lightgbm_runtime_params(
                 "LightGBM CUDA was requested but is unavailable. "
                 "Use device='cpu' or install a CUDA-enabled LightGBM build."
             )
-        return {"device_type": gpu_device}
+        return {
+            "device_type": gpu_device,
+            "seed": int(seed),
+            "data_random_seed": int(seed),
+            "feature_fraction_seed": int(seed),
+            "bagging_seed": int(seed),
+            "drop_seed": int(seed),
+            "extra_seed": int(seed),
+            "objective_seed": int(seed),
+        }
     raise ValueError(f"Unsupported LightGBM device: {device!r}")
 
 
@@ -605,6 +660,9 @@ def prepare_gbm_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
@@ -664,6 +722,7 @@ def prepare_gbm_folds(
 
         # Classification: remap labels to 0-indexed for LightGBM
         if is_classification:
+            assert class_values is not None
             y_train_lgb, _ = _remap_labels_for_lgb(y_train.astype(int), class_values)
             y_val_lgb, _ = _remap_labels_for_lgb(y_val.astype(int), class_values)
         else:
@@ -877,6 +936,7 @@ def train_gbm_config(
     task_type: str = "regression",
     class_values: list | None = None,
     save_dir: Path | None = None,
+    effective_params_by_fold: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Train a single GBM config across all CV folds.
 
@@ -921,20 +981,20 @@ def train_gbm_config(
     is_classification = task_type == "classification" and class_values
 
     # Build LightGBM params from preset
-    params = dict(config["params"])
-    params["metric"] = "None"
-    params["verbosity"] = params.get("verbosity", -1)
+    base_params = dict(config["params"])
+    base_params["metric"] = "None"
+    base_params["verbosity"] = base_params.get("verbosity", -1)
 
     # Runtime settings are recorded as provenance by the caller. Numerical
     # model parameters such as max_bin are declared separately in the hashed
     # training spec and never inferred from this runtime backend.
-    params.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
+    base_params.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
     if max_bin is not None:
-        params["max_bin"] = max_bin
+        base_params["max_bin"] = max_bin
 
     # Classification: ensure num_class for multiclass
     if is_classification and class_values and len(class_values) > 2:
-        params["num_class"] = len(class_values)
+        base_params["num_class"] = len(class_values)
 
     checkpoints = list(gbm_checkpoint_iterations(config))
 
@@ -949,6 +1009,12 @@ def train_gbm_config(
     for fd in fold_data:
         if fd["n_train"] == 0 or fd["n_val"] == 0:
             continue
+
+        params = (
+            dict(effective_params_by_fold[str(int(fd["fold"]))])
+            if effective_params_by_fold is not None
+            else dict(base_params)
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -993,7 +1059,8 @@ def train_gbm_config(
         for cp in checkpoints:
             raw_preds = model.predict(fd["X_val"], num_iteration=cp)
             if is_classification:
-                preds = _extract_gbm_score(raw_preds, class_values, len(fd["X_val"]))
+                assert class_values is not None
+                preds = _extract_gbm_score(np.asarray(raw_preds), class_values, len(fd["X_val"]))
             else:
                 preds = raw_preds
             ic_frame = pl.DataFrame(
@@ -1285,3 +1352,504 @@ def register_gbm_result(
         fm_df.write_parquet(reg_dir / "fold_metrics.parquet")
 
     return t_hash
+
+
+def _gbm_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _gbm_source_identity() -> dict[str, str]:
+    from utils import modeling
+
+    assert modeling.__file__ is not None
+    paths = (Path(__file__), Path(modeling.__file__))
+    return {path.name: _gbm_sha256(path) for path in paths}
+
+
+def _gbm_runtime_identity() -> dict[str, str]:
+    return {
+        "lightgbm": importlib.metadata.version("lightgbm"),
+        "numpy": importlib.metadata.version("numpy"),
+    }
+
+
+def _gbm_runtime_provenance(study: Study, device: str) -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    lock_path = study.release_root / "uv.lock"
+    record: dict[str, Any] = {
+        "device": device,
+        "entry_point": "case_studies.utils.gbm",
+        "lock_digest": _gbm_sha256(lock_path) if lock_path.is_file() else None,
+        "packages": _gbm_runtime_identity(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "source_commit": commit,
+    }
+    if device == "cuda":
+        record["cuda_runtime"] = torch.version.cuda
+        record["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    return record
+
+
+def _gbm_normalize_folds(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+    return tuple(
+        {
+            key: int(split[key]) if key == "fold" else str(split[key])
+            for key in fields
+            if split.get(key) is not None
+        }
+        for split in splits
+    )
+
+
+def _gbm_select_splits(
+    mds,
+    request: dict[str, Any],
+    label_timeline: pl.DataFrame,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cv = request.get("cv")
+    if cv is None:
+        splits = list(mds.splits)
+        normalized = _gbm_normalize_folds(splits)
+        cv_record = {
+            "request": {"source": "case_study_default"},
+            "folds": list(normalized),
+            "identity": value_digest(pl.DataFrame(list(normalized))),
+        }
+    else:
+        resolved = cv.resolve(label_timeline, date_col=mds.date_col)
+        splits = [dict(fold) for fold in resolved.normalized_folds]
+        cv_record = resolved.as_dict()
+    requested_folds = request["preview_reductions"].get("folds")
+    if requested_folds is not None:
+        selected = {int(fold) for fold in requested_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        if {int(split["fold"]) for split in splits} != selected:
+            raise ValueError("preview fold reduction refers to an unavailable fold")
+        cv_record = {**cv_record, "preview_folds": sorted(selected)}
+    if not splits:
+        raise ValueError("GBM request resolved no cross-validation folds")
+    return splits, cv_record
+
+
+def _gbm_expected_keys(folds: list[dict[str, Any]], entity_col: str, date_col: str) -> pl.DataFrame:
+    frames = []
+    for fold in folds:
+        frame = pl.DataFrame(
+            {
+                "symbol": fold["entities"],
+                "timestamp": fold["dates"],
+                "fold": [int(fold["fold"])] * int(fold["n_val"]),
+            }
+        )
+        frames.append(frame)
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("GBM request produced duplicate expected prediction keys")
+    return expected
+
+
+def _validate_lightgbm_params(params: dict[str, Any]) -> None:
+    import lightgbm as lgb
+
+    aliases = lgb.basic._ConfigAliases  # noqa: SLF001
+    aliases.get("num_leaves")
+    valid = {alias for values in (aliases.aliases or {}).values() for alias in values}
+    unknown = set(params) - valid
+    if unknown:
+        raise ValueError(f"unsupported LightGBM parameters: {sorted(unknown)}")
+
+
+def _gbm_effective_params_by_fold(
+    config: dict[str, Any],
+    folds: list[dict[str, Any]],
+    *,
+    device: str,
+    max_bin: int,
+    num_threads: int,
+    seed: int,
+) -> dict[str, dict[str, Any]]:
+    base = dict(config["params"])
+    base["metric"] = "None"
+    base["verbosity"] = base.get("verbosity", -1)
+    base["max_bin"] = max_bin
+    base.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
+    scale = config.get("huber_alpha_scale")
+    if base.get("objective") == "huber" and "alpha" not in base and scale is None:
+        raise ValueError("Huber GBM configs must declare huber_alpha_scale or alpha")
+    effective = {}
+    for fold in folds:
+        params = dict(base)
+        if params.get("objective") == "huber" and "alpha" not in params:
+            assert scale is not None
+            std = float(np.nanstd(fold["y_train"]))
+            params["alpha"] = max(float(scale) * std, float(np.finfo(np.float32).eps))
+        _validate_lightgbm_params(params)
+        effective[str(int(fold["fold"]))] = params
+    return effective
+
+
+def _load_gbm_request_config(
+    study: Study,
+    label: str,
+    config_name: str,
+    overrides: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from utils.modeling import load_configs
+
+    configs = load_configs(study.case_study, label, family="gbm")
+    matches = [config for config in configs if config["config_name"] == config_name]
+    if len(matches) != 1:
+        raise ValueError(f"unknown GBM config {config_name!r}")
+    config = {**matches[0], "params": dict(matches[0]["params"])}
+    request_fields = {key: value for key, value in overrides.items() if key in _GBM_REQUEST_FIELDS}
+    config.update(
+        {
+            key: value
+            for key, value in request_fields.items()
+            if key in {"checkpoint_interval", "huber_alpha_scale", "max_iterations"}
+        }
+    )
+    config["params"].update(
+        {key: value for key, value in overrides.items() if key not in _GBM_REQUEST_FIELDS}
+    )
+    return config, request_fields
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    from case_studies.research.contracts import ExecutionTier
+    from utils.modeling import load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _GBM_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported GBM preview reductions: {sorted(unknown_reductions)}")
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"])
+    max_symbols = int(reductions.get("max_symbols", 0))
+    train_sample_frac = float(reductions.get("train_sample_frac", 1.0))
+    if not 0 < train_sample_frac <= 1:
+        raise ValueError("train_sample_frac must be in (0, 1]")
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("GBM runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"GBM runner does not support entity key {entity_col!r}")
+    splits, cv_record = _gbm_select_splits(
+        mds,
+        request,
+        label_ref.load().select(mds.date_col).unique(),
+    )
+    folds = prepare_gbm_folds(
+        mds.dataset.to_pandas(),
+        splits,
+        mds.feature_names,
+        mds.label_col,
+        mds.date_col,
+        entity_col,
+        task_type=mds.task_type,
+        class_values=mds.class_values,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=mds.temporal_keys,
+        temporal_feature_names=mds.temporal_feature_names,
+        train_sample_frac=train_sample_frac,
+        eval_label_col=mds.eval_label_col,
+        seed=RANDOM_SEED,
+    )
+    if len(folds) != len(splits) or any(not fold["n_train"] or not fold["n_val"] for fold in folds):
+        raise ValueError("GBM request did not prepare every declared fold")
+    config, request_fields = _load_gbm_request_config(
+        study,
+        label_ref.name,
+        request["config_name"],
+        request["overrides"],
+    )
+    if tier is ExecutionTier.PREVIEW:
+        for field in ("max_iterations", "checkpoint_interval"):
+            if field in reductions:
+                config[field] = int(reductions[field])
+    setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
+    setup_gbm = (setup.get("modeling") or {}).get("gbm") or {}
+    device = str(request_fields.get("device", setup_gbm.get("device", "cpu"))).lower()
+    if device == "gpu":
+        device = "cuda"
+    max_bin = int(request_fields.get("max_bin", 63 if device == "cuda" else 255))
+    num_threads = int(request_fields.get("num_threads", DEFAULT_GBM_CPU_THREADS))
+    if device not in {"cpu", "cuda"} or max_bin < 2 or num_threads < 1:
+        raise ValueError("invalid GBM execution configuration")
+    effective = _gbm_effective_params_by_fold(
+        config,
+        folds,
+        device=device,
+        max_bin=max_bin,
+        num_threads=num_threads,
+        seed=RANDOM_SEED,
+    )
+    checkpoints = gbm_checkpoint_iterations(config)
+    expected = _gbm_expected_keys(folds, entity_col, mds.date_col)
+    input_lineage = mds.input_lineage
+    spec = {
+        "identity_version": 2,
+        "execution_tier": tier.value,
+        "family": "gbm",
+        "label": label_ref.name,
+        "seed": RANDOM_SEED,
+        "config_name": request["config_name"],
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "task": {
+            "type": mds.task_type,
+            "class_values": list(mds.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+        "cv": cv_record,
+        "model": {
+            "class": "lightgbm.Booster",
+            "implementation": "lightgbm",
+            "effective_params_by_fold": effective,
+            "huber_alpha_scale": config.get("huber_alpha_scale"),
+            "max_iterations": int(config["max_iterations"]),
+        },
+        "checkpoint_schedule": [
+            {"kind": "iteration", "value": checkpoint} for checkpoint in checkpoints
+        ],
+        "expected_prediction_keys": {
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+            "n_rows": expected.height,
+            "n_folds": expected.get_column("fold").n_unique(),
+        },
+        "input_data_spec": input_lineage,
+        "sampling": {"train_sample_frac": train_sample_frac, "max_symbols": max_symbols},
+        "source_identity": _gbm_source_identity(),
+        "runtime_identity": _gbm_runtime_identity(),
+    }
+    if tier is ExecutionTier.PREVIEW:
+        spec["preview_reductions"] = reductions
+    context = GBMContext(
+        folds=tuple(folds),
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=entity_col,
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        expected_keys=expected,
+        runtime_provenance=_gbm_runtime_provenance(study, device),
+    )
+    return spec, context
+
+
+def _gbm_manifest_files(model_dir: Path) -> dict[str, str]:
+    manifest = model_dir / "manifest.json"
+    if not manifest.is_file():
+        return {}
+    record = json.loads(manifest.read_text())
+    return dict(record.get("files") or {})
+
+
+def _valid_gbm_model_dir(model_dir: Path, context: GBMContext) -> bool:
+    files = _gbm_manifest_files(model_dir)
+    expected = {f"boosters/fold_{int(fold['fold'])}.txt" for fold in context.folds}
+    return set(files) == expected and all(
+        (model_dir / name).is_file() and _gbm_sha256(model_dir / name) == digest
+        for name, digest in files.items()
+    )
+
+
+def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
+    from case_studies.research.models import ModelRun
+    from case_studies.research.results import PredictionResult, Result, TrainingResult
+    from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+
+    include_preview = spec["execution_tier"] == "preview"
+    training_hash = training_hash_from_spec(spec)
+    try:
+        training = Result.open(study, training_hash, include_preview=include_preview)
+        predictions = tuple(
+            Result.open(
+                study,
+                prediction_hash_from_parts(
+                    training_hash,
+                    checkpoint["value"],
+                    "validation",
+                    checkpoint_kind="iteration",
+                    identity_version=2,
+                ),
+                include_preview=include_preview,
+            )
+            for checkpoint in spec["checkpoint_schedule"]
+        )
+    except KeyError:
+        return None
+    if not isinstance(training, TrainingResult) or any(
+        not isinstance(result, PredictionResult) or not result.complete for result in predictions
+    ):
+        return None
+    prediction_results = tuple(
+        result for result in predictions if isinstance(result, PredictionResult)
+    )
+    model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    if not _valid_gbm_model_dir(model_dir, context):
+        return None
+    return ModelRun(training=training, predictions=prediction_results)
+
+
+def _gbm_prediction_frame(
+    entries: list[dict[str, Any]], checkpoint: int, context: GBMContext
+) -> pl.DataFrame:
+    frames = []
+    for entry in entries:
+        if int(entry["n_trees"]) != checkpoint:
+            continue
+        frame = pl.DataFrame(
+            {
+                "symbol": entry["entities"],
+                "timestamp": entry["dates"],
+                "fold": [int(entry["fold"])] * len(entry["y_pred"]),
+                "prediction": entry["y_pred"],
+                "actual": entry["y_true"],
+            }
+        )
+        if entry.get("y_eval") is not None:
+            frame = frame.with_columns(pl.Series("eval_actual", entry["y_eval"]))
+        frames.append(frame)
+    if len(frames) != len(context.folds):
+        raise ValueError(f"GBM checkpoint {checkpoint} is missing a declared fold")
+    return pl.concat(frames).sort("symbol", "timestamp", "fold")
+
+
+def _write_gbm_manifest(staging: Path, folds: tuple[dict[str, Any], ...]) -> None:
+    expected = [staging / "boosters" / f"fold_{int(fold['fold'])}.txt" for fold in folds]
+    missing = [path for path in expected if not path.is_file()]
+    if missing:
+        raise ValueError(f"GBM fit did not persist every fold booster: {missing}")
+    files = {str(path.relative_to(staging)): _gbm_sha256(path) for path in expected}
+    (staging / "manifest.json").write_text(
+        json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _predict_from_gbm_models(
+    model_dir: Path,
+    spec: dict[str, Any],
+    context: GBMContext,
+) -> dict[str, Any]:
+    import lightgbm as lgb
+
+    predictions = []
+    is_classification = context.task_type == "classification" and context.class_values
+    for fold in context.folds:
+        model = lgb.Booster(model_file=str(model_dir / "boosters" / f"fold_{fold['fold']}.txt"))
+        for checkpoint in spec["checkpoint_schedule"]:
+            value = int(checkpoint["value"])
+            raw = np.asarray(model.predict(fold["X_val"], num_iteration=value))
+            score = (
+                _extract_gbm_score(raw, list(context.class_values), len(fold["X_val"]))
+                if is_classification
+                else raw
+            )
+            predictions.append(
+                {
+                    "dates": fold["dates"],
+                    "entities": fold["entities"],
+                    "y_true": fold["y_val"],
+                    "y_eval": fold.get("y_eval"),
+                    "y_pred": score,
+                    "fold": fold["fold"],
+                    "n_trees": value,
+                }
+            )
+    return {"learning_curves": [], "predictions": predictions}
+
+
+def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext):
+    from case_studies.research.models import ModelRun
+
+    cached = _cached_model_run(study, spec, context)
+    if cached is not None:
+        return cached
+    started = time.perf_counter()
+    training = study.results.register_training(
+        spec,
+        execution_tier=spec["execution_tier"],
+        runtime_provenance=context.runtime_provenance,
+    )
+    train_dir = training.root / "run_log" / "training" / training.hash
+    model_dir = train_dir / "models"
+    if model_dir.exists():
+        if not _valid_gbm_model_dir(model_dir, context):
+            raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+        result = _predict_from_gbm_models(model_dir, spec, context)
+    else:
+        staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+        staging.mkdir(parents=True)
+        try:
+            result = train_gbm_config(
+                {
+                    "config_name": spec["config_name"],
+                    "max_iterations": spec["model"]["max_iterations"],
+                    "checkpoint_interval": spec["checkpoint_schedule"][0]["value"],
+                    "params": {},
+                },
+                list(context.folds),
+                feature_names=list(context.feature_names),
+                device="cpu",
+                entity_col=context.entity_col,
+                date_col=context.date_col,
+                task_type=context.task_type,
+                class_values=list(context.class_values) or None,
+                save_dir=staging,
+                effective_params_by_fold=spec["model"]["effective_params_by_fold"],
+            )
+            _write_gbm_manifest(staging, context.folds)
+            os.replace(staging, model_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    prediction_results = []
+    for checkpoint in spec["checkpoint_schedule"]:
+        value = int(checkpoint["value"])
+        frame = _gbm_prediction_frame(result["predictions"], value, context)
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="iteration",
+                checkpoint_value=value,
+                split="validation",
+                predictions=frame,
+                expected_keys=context.expected_keys,
+                task_type=context.task_type,
+                class_values=list(context.class_values) or None,
+                eval_col="eval_actual" if context.eval_label_col else None,
+                label=spec["label"],
+            )
+        )
+    curves_path = train_dir / "learning_curves.parquet"
+    if not curves_path.exists() and result["learning_curves"]:
+        pl.DataFrame(result["learning_curves"]).write_parquet(curves_path)
+    runtime_path = train_dir / "runtime.json"
+    if runtime_path.exists():
+        runtime = json.loads(runtime_path.read_text())
+        runtime["elapsed_s"] = time.perf_counter() - started
+        temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, runtime_path)
+    return ModelRun(training=training, predictions=tuple(prediction_results))
