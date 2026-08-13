@@ -64,14 +64,14 @@ RUN /opt/ml4t/bin/pip freeze | grep -E '^(torch|torchaudio|torchvision)==' > /tm
 
 # Pre-install the ml4t libraries so they land in their own cached layer. Exact
 # versions are enforced by the uv.lock-derived constraint applied to the resolve
-# step below, so this only needs the lower bounds (--pre allows the pre-only builds).
-RUN /opt/ml4t/bin/pip install --no-cache-dir --pre \
-    "ml4t-data>=0.1.0b15" \
-    "ml4t-diagnostic>=0.1.0b25" \
-    "ml4t-engineer>=0.1.0b8" \
-    "ml4t-live>=0.1.0b3" \
-    "ml4t-backtest>=0.1.0b16" \
-    "ml4t-models>=0.1.0a1"
+# step below, so this only needs the lower bounds.
+RUN /opt/ml4t/bin/pip install --no-cache-dir \
+    "ml4t-data>=0.1.2" \
+    "ml4t-diagnostic>=0.1.1" \
+    "ml4t-engineer>=0.1.3" \
+    "ml4t-live>=0.1.0" \
+    "ml4t-backtest>=0.1.3" \
+    "ml4t-models>=0.1.2"
 
 # amd64 only: Install CUDA toolkit (nvcc + headers) for building LightGBM with CUDA
 # Minimal install: nvcc-12.6 + runtime dev headers (12.4 not packaged for Ubuntu 24.04)
@@ -135,11 +135,10 @@ RUN sed -i '/"lightgbm/d; /"torch>=/d' /build/pyproject.toml
 # --constraint pins every package to its uv.lock version (reproducible, no drift).
 # --override keeps the preinstalled cu128 torch stack (excluded from the constraint).
 # Force cvxpy>=1.5 for numpy 2.x C API compat (riskfolio-lib pins 1.4).
-# --prerelease=if-necessary-or-explicit allows the explicitly-pinned pre-only builds
-# (e.g. the ml4t libs) while otherwise preferring the stable versions in the lock.
+# Allow prereleases only when no stable release satisfies the constraints.
 RUN echo 'cvxpy>=1.5' >> /tmp/ml4t-constraints.txt && \
     uv pip install --python /opt/ml4t/bin/python --no-cache \
-    --prerelease=if-necessary-or-explicit \
+    --prerelease=if-necessary \
     --constraint /tmp/locked-constraints.txt \
     --override /tmp/ml4t-constraints.txt '/build[live]'
 

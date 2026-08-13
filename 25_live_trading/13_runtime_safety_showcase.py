@@ -45,7 +45,7 @@
 # - Use the `ml4t-live` CLI to inspect the persisted state file out of process.
 #
 # **Prerequisites**
-# - `ml4t-live >= 0.1.0b1` installed (`uv sync` from repo root).
+# - `ml4t-live >= 0.1.0` installed (`uv sync` from repo root).
 # - Read §25.7 for the operational framing; `10_safety_risk_demo` for the configurable surface.
 # - No broker credentials, no exchange access — every demo runs against a synthetic broker.
 

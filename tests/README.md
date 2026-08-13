@@ -155,7 +155,7 @@ Each notebook is assigned to exactly one Docker environment via `docker_env` in 
 |-------------|---------------|-----------|-----------------|
 | `ml4t` | `ml4t` | ~410 | CPU, all Python packages |
 | `gpu` | `ml4t-gpu` | ~31 | NVIDIA GPU (PyTorch CUDA) |
-| `py312` | `py312` | ~10 | gensim, signatory, esig, pfhedge, tfcausalimpact (Python 3.12) |
+| `py312` | `py312` | ~10 | gensim, signatory, esig, tfcausalimpact (Python 3.12) |
 | `benchmark` | `benchmark` + database services | 2 | TimescaleDB, ClickHouse, QuestDB, InfluxDB |
 | `neo4j` | `ml4t` + Neo4j service | 7 | Neo4j graph database |
 

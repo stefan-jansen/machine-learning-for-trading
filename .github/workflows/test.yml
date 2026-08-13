@@ -265,8 +265,7 @@ jobs:
              || [[ "${{ steps.filter.outputs.ch08-09 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch10 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch14-15 }}" == "true" ]] \
-             || [[ "${{ steps.filter.outputs.docker-notebooks }}" == "true" ]] \
-             || [[ "${{ steps.filter.outputs.ch21 }}" == "true" ]]; then
+             || [[ "${{ steps.filter.outputs.docker-notebooks }}" == "true" ]]; then
             run_py312="true"
           fi
           echo "run_py312=$run_py312" >> "$GITHUB_OUTPUT"
@@ -771,8 +770,8 @@ jobs:
             -k "$FILTER"
 
   # ---------------------------------------------------------------------------
-  # Py312 Docker image (Python 3.12: gensim, signatory, esig, pfhedge,
-  # tfcausalimpact, plus notebooks affected by the Py3.14 torch CUDA bug)
+  # Py312 Docker image (Python 3.12: gensim, signatory, esig, tfcausalimpact,
+  # plus notebooks affected by the Py3.14 torch CUDA bug)
   # ---------------------------------------------------------------------------
   test-py312:
     timeout-minutes: 45
@@ -807,8 +806,7 @@ jobs:
                 or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
                 or 01_timegan or 07_dp_gan \
                 or 10_shap_nlp_sentiment or 06_conditional_autoencoder \
-                or 06_fed_announcement_bsts \
-                or deep_hedging_pfhedge"
+                or 06_fed_announcement_bsts"
 
   # ---------------------------------------------------------------------------
   # Neo4j Docker service (Ch23 Knowledge Graphs)

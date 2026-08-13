@@ -21,7 +21,7 @@
 #
 # WHICH IMAGE DO I NEED?
 #   Most readers: ml4t only (covers Ch01-Ch27 + case studies)
-#   Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06, Ch21 deep_hedging:
+#   Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06:
 #       ml4t-py312 (amd64; on Apple Silicon read the committed .ipynb outputs, or run it
 #       under Rosetta with DOCKER_DEFAULT_PLATFORM=linux/amd64)
 #   Ch02 storage benchmarks: benchmark + database services
@@ -220,10 +220,11 @@ services:
 
   # ============================================
   # PY312 (Python 3.12, x86 Only)
-  # For packages without Python 3.14 support: gensim, signatory, esig, pfhedge,
+  # For packages without Python 3.14 support: gensim, signatory, esig,
   # tfcausalimpact, plus notebooks hitting the Python 3.14 torch CUDA import bug.
   # Covers: Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06,
-  # Ch15 NB06, Ch21 deep_hedging.
+  # Ch15 NB06. Ch21 deep hedging is NOT here: pfhedge is a main dependency and
+  # 0.22.0 works on Python 3.14, so that notebook runs in the default image.
   # Start with: docker compose --profile py312 run --rm py312 python ...
   # This service reserves no GPU, so it starts on macOS and on any machine
   # without NVIDIA. Use the py312-gpu service below where a GPU is available.
@@ -243,9 +244,9 @@ services:
     container_name: ml4t-py312
     profiles: ["py312"]
 
-  # Same image with an NVIDIA GPU attached, for the seven GPU-tagged py312 notebooks
-  # (Ch05 NB01/03/07, Ch10 NB03, Ch12 NB10, Ch14 NB06, Ch21 deep_hedging), whether they
-  # train or run inference. Linux and Windows WSL2 only, exactly like ml4t-gpu.
+  # Same image with an NVIDIA GPU attached, for the six GPU-tagged py312 notebooks
+  # (Ch05 NB01/03/07, Ch10 NB03, Ch12 NB10, Ch14 NB06), whether they train or run
+  # inference. Linux and Windows WSL2 only, exactly like ml4t-gpu.
   # Start with: docker compose --profile py312-gpu run --rm py312-gpu python ...
   py312-gpu:
     <<: *common
