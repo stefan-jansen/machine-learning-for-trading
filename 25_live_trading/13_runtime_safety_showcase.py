@@ -692,23 +692,23 @@ for key in (
     cli_env.pop(key, None)
 
 result = subprocess.run(
-    [str(Path(sys.executable).with_name("ml4t-live")), "status", "--state-file", str(cli_state)],
+    [sys.executable, "-m", "ml4t.live.cli.main", "status", "--state-file", str(cli_state)],
     capture_output=True,
     text=True,
     timeout=20,
     check=False,
     env=cli_env,
 )
-assert result.returncode == 0
+assert result.returncode == 0, f"stdout={result.stdout!r}; stderr={result.stderr!r}"
 print(f"exit_code: {result.returncode}")
 print(result.stdout.strip())
 if result.stderr:
     print(f"stderr: {result.stderr.strip()[:200]}")
 
 _cleanup_state_path(cli_state)
-assert not list(STATE_DIR.iterdir())
+assert not list(STATE_DIR.iterdir()), list(STATE_DIR.iterdir())
 STATE_DIR.rmdir()
-assert not STATE_DIR.exists()
+assert not STATE_DIR.exists(), STATE_DIR
 print("Temporary state artifacts: cleaned")
 
 # %% [markdown]
