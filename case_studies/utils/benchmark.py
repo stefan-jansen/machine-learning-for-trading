@@ -186,6 +186,27 @@ def _decision_periods_per_year(
     return min(float(daily_periods_per_year), schedule_periods / rebalance_step)
 
 
+def _period_end_map(timestamps: pl.Series, outcome_horizon: str) -> pl.DataFrame:
+    """Map each label timestamp to the endpoint of its declared outcome horizon."""
+    match = re.fullmatch(r"(\d+)(min|H|D|M)", outcome_horizon)
+    if match is None:
+        raise ValueError(f"Unsupported benchmark outcome horizon {outcome_horizon!r}")
+    value = int(match.group(1))
+    timeline = pl.DataFrame({"timestamp": timestamps.unique().sort()})
+    if value == 0:
+        return timeline.with_columns(pl.col("timestamp").alias("period_end"))
+    unit = match.group(2)
+    if unit == "min":
+        return timeline.with_columns(
+            (pl.col("timestamp") + pl.duration(minutes=value)).alias("period_end")
+        )
+    if unit == "H":
+        return timeline.with_columns(
+            (pl.col("timestamp") + pl.duration(hours=value)).alias("period_end")
+        )
+    return timeline.with_columns(pl.col("timestamp").shift(-value).alias("period_end"))
+
+
 def build_equal_weight_benchmark(
     labels: pl.DataFrame,
     *,
@@ -195,6 +216,7 @@ def build_equal_weight_benchmark(
     windows: Mapping[str, Window | None],
     cadence: str,
     rebalance_step: int,
+    outcome_horizon: str,
     calendar: str,
     periods_per_year: int,
     label_digest: str,
@@ -215,6 +237,9 @@ def build_equal_weight_benchmark(
         raise ValueError("At least one benchmark window is required")
     start = min(window[0] for window in active_windows)
     end = max(window[1] for window in active_windows)
+    period_ends = _period_end_map(labels.get_column("timestamp"), outcome_horizon).drop_nulls(
+        "period_end"
+    )
     scoped = labels.filter(
         pl.col("timestamp").cast(pl.Date).is_between(start, end, closed="both")
         & pl.col(entity_col).cast(pl.String).is_in(roster)
@@ -238,12 +263,16 @@ def build_equal_weight_benchmark(
         .drop_nulls(label)
         .group_by("timestamp")
         .agg(pl.col(label).mean().alias("decision_return"))
+        .join(period_ends, on="timestamp", how="inner")
         .sort("timestamp")
     )
     daily = (
         decision_returns.with_columns(pl.col("timestamp").cast(pl.Date).alias("timestamp"))
         .group_by("timestamp", maintain_order=True)
-        .agg(((pl.col("decision_return") + 1.0).product() - 1.0).alias("ew_return"))
+        .agg(
+            pl.col("period_end").max().cast(pl.Date),
+            ((pl.col("decision_return") + 1.0).product() - 1.0).alias("ew_return"),
+        )
         .sort("timestamp")
     )
     if daily.is_empty():
@@ -283,6 +312,7 @@ def build_equal_weight_benchmark(
         "configuration": {
             "cadence": cadence,
             "rebalance_step": rebalance_step,
+            "outcome_horizon": outcome_horizon,
             "calendar": calendar,
             "entity_col": entity_col,
             "daily_periods_per_year": periods_per_year,
@@ -337,6 +367,11 @@ def generate_benchmark(
         "validation": canonical_window(case_study, label, split="validation"),
         "holdout": canonical_window(case_study, label, split="holdout"),
     }
+    from utils.artifact_specs import resolve_label_horizon
+
+    outcome_horizon = resolve_label_horizon(case_study, label, setup)
+    if not outcome_horizon:
+        raise ValueError(f"Benchmark generation requires an outcome horizon for {label!r}")
     returns, metadata = build_equal_weight_benchmark(
         pl.read_parquet(label_path),
         case_study=case_study,
@@ -345,6 +380,7 @@ def generate_benchmark(
         windows=resolved_windows,
         cadence=_resolve_decision_cadence(setup),
         rebalance_step=int(setup["labels"]["rebalance_step"][label]),
+        outcome_horizon=outcome_horizon,
         calendar=str(setup["evaluation"]["calendar"]),
         periods_per_year=int(setup["evaluation"]["periods_per_year"]),
         label_digest=str(digest),

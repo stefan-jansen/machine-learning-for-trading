@@ -18,7 +18,11 @@ from case_studies.utils.benchmark import (
     load_benchmark_returns,
     write_benchmark,
 )
-from case_studies.utils.paired_metrics import _align_challenger_to_benchmark_periods
+from case_studies.utils.paired_metrics import (
+    _align_challenger_to_benchmark_periods,
+    populate_paired_metrics_for_studies,
+    validation_strategy_sql_filter,
+)
 
 
 def _minute_labels() -> pl.DataFrame:
@@ -52,6 +56,7 @@ def _build() -> tuple[pl.DataFrame, dict]:
         },
         cadence="1_minute",
         rebalance_step=4,
+        outcome_horizon="1min",
         calendar="NYSE",
         periods_per_year=252,
         label_digest="label-digest",
@@ -62,8 +67,16 @@ def test_benchmark_uses_declared_roster_and_restarts_schedule_each_session() -> 
     returns, metadata = _build()
 
     assert returns.to_dicts() == [
-        {"timestamp": date(2021, 6, 30), "ew_return": pytest.approx(1.02**2 - 1)},
-        {"timestamp": date(2021, 7, 1), "ew_return": pytest.approx(1.03**2 - 1)},
+        {
+            "timestamp": date(2021, 6, 30),
+            "period_end": date(2021, 6, 30),
+            "ew_return": pytest.approx(1.02**2 - 1),
+        },
+        {
+            "timestamp": date(2021, 7, 1),
+            "period_end": date(2021, 7, 1),
+            "ew_return": pytest.approx(1.03**2 - 1),
+        },
     ]
     assert metadata["n_symbols_in_universe"] == 2
     assert metadata["n_symbols_observed"] == 2
@@ -79,7 +92,7 @@ def test_benchmark_uses_declared_roster_and_restarts_schedule_each_session() -> 
 
 
 def test_intraday_benchmark_pairs_as_daily_compounded_returns() -> None:
-    benchmark, metadata = _build()
+    benchmark, _ = _build()
     challenger = pl.DataFrame(
         {
             "timestamp": [date(2021, 6, 29), date(2021, 6, 30), date(2021, 7, 1)],
@@ -90,8 +103,6 @@ def test_intraday_benchmark_pairs_as_daily_compounded_returns() -> None:
     aligned = _align_challenger_to_benchmark_periods(
         challenger,
         benchmark.rename({"ew_return": "ret"}),
-        benchmark_periods_per_year=metadata["periods_per_year"],
-        daily_periods_per_year=252.0,
     )
 
     assert aligned.to_dicts() == [
@@ -126,13 +137,18 @@ def test_benchmark_aligns_minute_labels_to_fifteen_minute_decision_grid() -> Non
         windows={"validation": (date(2021, 6, 30), date(2021, 6, 30))},
         cadence="15_minute",
         rebalance_step=4,
+        outcome_horizon="1min",
         calendar="NYSE",
         periods_per_year=252,
         label_digest="digest",
     )
 
     assert returns.to_dicts() == [
-        {"timestamp": date(2021, 6, 30), "ew_return": pytest.approx(1.01**2 - 1)},
+        {
+            "timestamp": date(2021, 6, 30),
+            "period_end": date(2021, 6, 30),
+            "ew_return": pytest.approx(1.01**2 - 1),
+        },
     ]
 
 
@@ -154,6 +170,7 @@ def test_sparse_daily_schedule_uses_decision_period_annualization() -> None:
         windows={"validation": (date(2021, 1, 1), date(2021, 3, 31))},
         cadence="daily_close",
         rebalance_step=21,
+        outcome_horizon="5D",
         calendar="NYSE",
         periods_per_year=252,
         label_digest="digest",
@@ -163,6 +180,37 @@ def test_sparse_daily_schedule_uses_decision_period_annualization() -> None:
     assert metadata["periods_per_year"] == 12.0
     assert metadata["by_period"]["validation"]["periods_per_year"] == 12.0
     assert metadata["configuration"]["daily_periods_per_year"] == 252
+
+
+def test_monthly_five_day_label_persists_its_five_observation_period_end() -> None:
+    dates = pl.date_range(date(2021, 1, 1), date(2021, 3, 31), eager=True)
+    labels = pl.DataFrame(
+        {
+            "timestamp": dates,
+            "symbol": ["A"] * len(dates),
+            "label": [0.01] * len(dates),
+        }
+    )
+
+    returns, metadata = build_equal_weight_benchmark(
+        labels,
+        case_study="sample",
+        label="label",
+        symbols=["A"],
+        windows={"validation": (date(2021, 1, 1), date(2021, 3, 31))},
+        cadence="monthly_month_end",
+        rebalance_step=1,
+        outcome_horizon="5D",
+        calendar="NYSE",
+        periods_per_year=252,
+        label_digest="digest",
+    )
+
+    assert returns.select("timestamp", "period_end").to_dicts() == [
+        {"timestamp": date(2021, 1, 31), "period_end": date(2021, 2, 5)},
+        {"timestamp": date(2021, 2, 28), "period_end": date(2021, 3, 5)},
+    ]
+    assert metadata["periods_per_year"] == 12.0
 
 
 @pytest.mark.parametrize(
@@ -196,6 +244,7 @@ def test_sparse_benchmark_alignment_compounds_daily_challenger_periods() -> None
     benchmark = pl.DataFrame(
         {
             "timestamp": [date(2021, 1, 1), date(2021, 1, 22), date(2021, 2, 12)],
+            "period_end": [date(2021, 1, 6), date(2021, 1, 27), date(2021, 2, 17)],
             "ret": [0.20, 0.21, 0.22],
         }
     )
@@ -203,21 +252,48 @@ def test_sparse_benchmark_alignment_compounds_daily_challenger_periods() -> None
     aligned = _align_challenger_to_benchmark_periods(
         challenger,
         benchmark,
-        benchmark_periods_per_year=12.0,
-        daily_periods_per_year=252.0,
     )
 
     assert aligned.to_dicts() == [
         {
             "timestamp": date(2021, 1, 1),
-            "ret": pytest.approx(1.01**21 - 1.0),
+            "ret": pytest.approx(1.01**5 - 1.0),
             "ret_b": 0.20,
         },
         {
             "timestamp": date(2021, 1, 22),
-            "ret": pytest.approx(1.01**21 - 1.0),
+            "ret": pytest.approx(1.01**5 - 1.0),
             "ret_b": 0.21,
         },
+    ]
+
+
+def test_daily_forward_label_pairs_with_pnl_at_its_period_end() -> None:
+    challenger = pl.DataFrame(
+        {
+            "timestamp": [date(2021, 1, 1), date(2021, 1, 2)],
+            "ret": [0.99, 0.03],
+        }
+    )
+    benchmark = pl.DataFrame(
+        {
+            "timestamp": [date(2021, 1, 1)],
+            "period_end": [date(2021, 1, 2)],
+            "ret": [0.02],
+        }
+    )
+
+    aligned = _align_challenger_to_benchmark_periods(
+        challenger,
+        benchmark,
+    )
+
+    assert aligned.to_dicts() == [
+        {
+            "timestamp": date(2021, 1, 1),
+            "ret": pytest.approx(0.03),
+            "ret_b": 0.02,
+        }
     ]
 
 
@@ -228,7 +304,12 @@ def test_paired_metric_path_uses_benchmark_frequency_and_compounded_periods(
 
     decisions = [date(2021, 1, 1) + timedelta(days=3 * offset) for offset in range(8)]
     benchmark = pl.DataFrame({"timestamp": decisions, "ret": [0.02] * len(decisions)})
-    challenger_dates = pl.date_range(decisions[0] + timedelta(days=1), decisions[-1], eager=True)
+    benchmark = benchmark.with_columns(
+        (pl.col("timestamp") + pl.duration(days=2)).alias("period_end")
+    )
+    challenger_dates = pl.date_range(
+        decisions[0] + timedelta(days=1), decisions[-1] + timedelta(days=2), eager=True
+    )
     challenger = pl.DataFrame(
         {"timestamp": challenger_dates, "ret": [0.01] * len(challenger_dates)}
     )
@@ -260,10 +341,147 @@ def test_paired_metric_path_uses_benchmark_frequency_and_compounded_periods(
     )
 
     assert "skip" not in result
-    assert observed["challenger"].tolist() == pytest.approx([1.01**3 - 1.0] * 7)
-    assert observed["benchmark"].tolist() == pytest.approx([0.02] * 7)
+    assert observed["challenger"].tolist() == pytest.approx([1.01**2 - 1.0] * 8)
+    assert observed["benchmark"].tolist() == pytest.approx([0.02] * 8)
     assert observed["computed_ppy"] == 12.0
     assert observed["registered_ppy"] == 12.0
+
+
+def test_multi_study_producer_routes_each_configuration_and_tags_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils import paired_metrics
+
+    first_explorer = object()
+    second_explorer = object()
+    first_pin = pl.col("config_name") == "first"
+    calls: list[dict] = []
+
+    def populate(cs, explorer, **kwargs):
+        calls.append({"cs": cs, "explorer": explorer, **kwargs})
+        return [{"kind": f"{cs}_pair"}]
+
+    monkeypatch.setattr(paired_metrics, "populate_paired_metrics", populate)
+
+    rows = populate_paired_metrics_for_studies(
+        {"first": first_explorer, "second": second_explorer},
+        label_restrictions={"first": frozenset({"label"})},
+        rungs={"first": {"universe_filter": "full"}},
+        carrier_pin_predicates={"first": first_pin},
+        frequencies={"first": "monthly"},
+        verbose=True,
+    )
+
+    assert rows == [
+        {"kind": "first_pair", "cs": "first"},
+        {"kind": "second_pair", "cs": "second"},
+    ]
+    assert calls == [
+        {
+            "cs": "first",
+            "explorer": first_explorer,
+            "label_restriction": frozenset({"label"}),
+            "rung": {"universe_filter": "full"},
+            "carrier_pin_predicate": first_pin,
+            "freq": "monthly",
+            "verbose": True,
+        },
+        {
+            "cs": "second",
+            "explorer": second_explorer,
+            "label_restriction": None,
+            "rung": None,
+            "carrier_pin_predicate": None,
+            "freq": "daily",
+            "verbose": True,
+        },
+    ]
+
+
+def test_chapter20_executes_the_public_multi_study_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils import paired_metrics
+
+    explorers = {"sample": object()}
+    label_restrictions = {"sample": frozenset({"label"})}
+    rungs = {"sample": {"universe_filter": "full"}}
+    carrier_pins = {"sample": pl.col("config_name") == "carrier"}
+    frequencies = {"sample": "monthly"}
+    observed: dict[str, object] = {}
+
+    def populate(actual_explorers, **kwargs):
+        observed.update({"explorers": actual_explorers, **kwargs})
+        return []
+
+    monkeypatch.setattr(paired_metrics, "populate_paired_metrics_for_studies", populate)
+    notebook = json.loads(Path("20_strategy_synthesis/01_aggregate_synthesis.ipynb").read_text())
+    producer_cell = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if "all_paired_rows = populate_paired_metrics_for_studies(" in "".join(cell["source"])
+    )
+    namespace = {
+        "explorers": explorers,
+        "_CLUSTER_LABEL_RESTRICTIONS": label_restrictions,
+        "_CLUSTER_RUNG_RESTRICTIONS": rungs,
+        "_CARRIER_PIN_PREDICATES": carrier_pins,
+        "FREQ_MAP": frequencies,
+        "pl": pl,
+    }
+
+    exec(compile(producer_cell, "01_aggregate_synthesis.ipynb", "exec"), namespace)
+
+    assert namespace["all_paired_rows"] == []
+    assert observed == {
+        "explorers": explorers,
+        "label_restrictions": label_restrictions,
+        "rungs": rungs,
+        "carrier_pin_predicates": carrier_pins,
+        "frequencies": frequencies,
+    }
+
+
+def test_validation_strategy_filter_routes_resolution_through_one_public_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils import paired_metrics
+
+    explorer = object()
+    rung = {"universe_filter": "full"}
+    carrier_pin = pl.col("config_name") == "carrier"
+    strategy_spec = {"signal": {"method": "top_k"}}
+    observed: dict[str, object] = {}
+
+    def resolve(cs, actual_explorer, **kwargs):
+        observed.update({"cs": cs, "explorer": actual_explorer, **kwargs})
+        return strategy_spec
+
+    def clauses(actual_spec):
+        observed["strategy_spec"] = actual_spec
+        return ["signal_method = ?"], ["top_k"]
+
+    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", resolve)
+    monkeypatch.setattr(paired_metrics, "_full_strategy_clauses", clauses)
+
+    sql_clauses, params = validation_strategy_sql_filter(
+        "sample",
+        explorer,
+        label_restriction=frozenset({"label"}),
+        rung=rung,
+        carrier_pin_predicate=carrier_pin,
+    )
+
+    assert sql_clauses == ["signal_method = ?"]
+    assert params == ["top_k"]
+    assert observed == {
+        "cs": "sample",
+        "explorer": explorer,
+        "label_restriction": frozenset({"label"}),
+        "rung": rung,
+        "carrier_pin_predicate": carrier_pin,
+        "strategy_spec": strategy_spec,
+    }
 
 
 def test_cme_benchmark_uses_product_as_the_panel_key() -> None:
@@ -277,6 +495,7 @@ def test_cme_benchmark_uses_product_as_the_panel_key() -> None:
         windows={"validation": (date(2021, 6, 30), date(2021, 7, 1))},
         cadence="1_minute",
         rebalance_step=4,
+        outcome_horizon="1min",
         calendar="CME",
         periods_per_year=252,
         label_digest="digest",
@@ -336,6 +555,7 @@ def test_benchmark_rejects_invalid_label_rows(mutate, match: str) -> None:
             windows={"validation": (date(2021, 6, 30), date(2021, 7, 1))},
             cadence="1_minute",
             rebalance_step=4,
+            outcome_horizon="1min",
             calendar="NYSE",
             periods_per_year=252,
             label_digest="digest",
@@ -367,7 +587,7 @@ def test_generator_reads_declared_universe_and_label_digest(
         "universe": {"symbols": ["A", "B"], "n_assets": 2},
         "decision": {"bar_frequency": "1_minute"},
         "evaluation": {"calendar": "NYSE", "periods_per_year": 252},
-        "labels": {"rebalance_step": {"label": 4}},
+        "labels": {"primary": "label", "buffer": "1min", "rebalance_step": {"label": 4}},
     }
     (case_dir / "config" / "setup.yaml").write_text(yaml.safe_dump(setup))
     label_path = case_dir / "labels" / "label.parquet"

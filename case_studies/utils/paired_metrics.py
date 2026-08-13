@@ -6,12 +6,11 @@ Chapter 20 still lands a populated ``backtest_paired_metrics`` table. It renders
 §2 (stage-transition waterfall), §6 (holdout decay + holdout-vs-benchmark) and
 §7 (benchmark-aware diagnostics) without inline bootstrap recomputation.
 
-The logic is extracted verbatim from the two producer loops in
-``20_strategy_synthesis/01_aggregate_synthesis.py``; the only change is that the
-per-case-study selection config (label restriction, rung pin, carrier pin,
-frequency) is passed in as arguments rather than read from Ch20 module globals,
-so a single case study can run standalone. The Chapter-20 aggregate can later
-call this function per case study and become a pure reader.
+This module is the shared implementation used by the case-study analysis
+notebooks and the Chapter 20 aggregate. It owns selection, benchmark cadence,
+explicit outcome-period alignment, uncertainty computation, and registry
+writes. Callers provide per-case-study restrictions rather than reproducing
+that computation locally.
 
 Six pair types are produced per case study:
 
@@ -31,6 +30,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -158,6 +158,7 @@ def _benchmark_returns_from_artifact(
         bench_hash,
         df.select(
             pl.col("timestamp").cast(pl.Date).alias("timestamp"),
+            pl.col("period_end").cast(pl.Date),
             pl.col("ew_return").cast(pl.Float64).alias("ret"),
         ),
         bench_label,
@@ -168,19 +169,18 @@ def _benchmark_returns_from_artifact(
 def _align_challenger_to_benchmark_periods(
     challenger: pl.DataFrame,
     benchmark: pl.DataFrame,
-    *,
-    benchmark_periods_per_year: float,
-    daily_periods_per_year: float,
 ) -> pl.DataFrame:
     """Align daily challenger P&L to the benchmark's retained decision periods."""
-    if benchmark_periods_per_year >= daily_periods_per_year:
-        return challenger.join(benchmark, on="timestamp", how="inner", suffix="_b")
+    if "period_end" not in benchmark.columns:
+        raise ValueError("benchmark returns require an explicit period_end")
+    same_session = benchmark.select((pl.col("period_end") == pl.col("timestamp")).all()).item()
+    if same_session:
+        return challenger.join(benchmark, on="timestamp", how="inner", suffix="_b").select(
+            "timestamp", "ret", "ret_b"
+        )
 
-    intervals = (
-        benchmark.sort("timestamp")
-        .with_columns(pl.col("timestamp").shift(-1).alias("_period_end"))
-        .drop_nulls("_period_end")
-        .rename({"timestamp": "_period_start", "ret": "ret_b"})
+    intervals = benchmark.rename(
+        {"timestamp": "_period_start", "period_end": "_period_end", "ret": "ret_b"}
     )
     if intervals.is_empty():
         return pl.DataFrame(schema={"timestamp": pl.Date, "ret": pl.Float64, "ret_b": pl.Float64})
@@ -414,6 +414,25 @@ def _val_rank1_full_spec(
     return None
 
 
+def validation_strategy_sql_filter(
+    cs: str,
+    explorer: BacktestExplorer,
+    *,
+    label_restriction: frozenset[str] | None = None,
+    rung: dict | None = None,
+    carrier_pin_predicate: pl.Expr | None = None,
+) -> tuple[list[str], list[object]]:
+    """Return SQL clauses and parameters for the resolved validation carrier."""
+    strategy_spec = _val_rank1_full_spec(
+        cs,
+        explorer,
+        label_restriction=label_restriction,
+        rung=rung,
+        carrier_pin_predicate=carrier_pin_predicate,
+    )
+    return _full_strategy_clauses(strategy_spec)
+
+
 def _holdout_lineage_for(
     cs: str,
     leader_label: str,
@@ -602,8 +621,6 @@ def _populate_pair(
             _align_challenger_to_benchmark_periods(
                 challenger_returns,
                 benchmark_returns,
-                benchmark_periods_per_year=effective_ppy,
-                daily_periods_per_year=ppy,
             )
             if comparison_periods_per_year is not None
             else challenger_returns.join(
@@ -692,10 +709,9 @@ def populate_paired_metrics(
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
 
-    Extracted from the two producer loops in
-    ``20_strategy_synthesis/01_aggregate_synthesis.py``, specialized to a single
-    case study. The per-CS selection config that Ch20 reads from module globals
-    is passed in:
+    This is the authoritative single-case producer used by case-study analysis
+    notebooks and the aggregate producer. Per-case selection configuration is
+    passed in:
 
     * ``label_restriction`` — ``holdout.LABEL_RESTRICTIONS.get(cs)`` (e.g.
       sp500_options → ``frozenset({'ret_to_expiry'})``); None for most CSs.
@@ -754,8 +770,6 @@ def populate_paired_metrics(
                 aligned = _align_challenger_to_benchmark_periods(
                     chal,
                     base,
-                    benchmark_periods_per_year=comparison_ppy,
-                    daily_periods_per_year=ppy,
                 )
                 if aligned.height >= min_n:
                     c_arr, b_arr = _joint_coerce(
@@ -969,6 +983,39 @@ def populate_paired_metrics(
 
     _report(cs, rows, verbose)
     return rows
+
+
+def populate_paired_metrics_for_studies(
+    explorers: Mapping[str, BacktestExplorer],
+    *,
+    label_restrictions: Mapping[str, frozenset[str]] | None = None,
+    rungs: Mapping[str, dict] | None = None,
+    carrier_pin_predicates: Mapping[str, pl.Expr] | None = None,
+    frequencies: Mapping[str, str] | None = None,
+    verbose: bool = False,
+) -> list[dict]:
+    """Populate paired metrics for each supplied case study and tag every row."""
+    label_restrictions = label_restrictions or {}
+    rungs = rungs or {}
+    carrier_pin_predicates = carrier_pin_predicates or {}
+    frequencies = frequencies or {}
+
+    combined: list[dict] = []
+    for cs, explorer in explorers.items():
+        rows = populate_paired_metrics(
+            cs,
+            explorer,
+            label_restriction=label_restrictions.get(cs),
+            rung=rungs.get(cs),
+            carrier_pin_predicate=carrier_pin_predicates.get(cs),
+            freq=frequencies.get(cs, "daily"),
+            verbose=verbose,
+        )
+        for row in rows:
+            tagged = dict(row)
+            tagged.setdefault("cs", cs)
+            combined.append(tagged)
+    return combined
 
 
 def _report(cs: str, rows: list[dict], verbose: bool) -> None:
