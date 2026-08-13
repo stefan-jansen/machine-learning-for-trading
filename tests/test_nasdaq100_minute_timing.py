@@ -201,19 +201,18 @@ def test_minute_engine_closes_each_session_before_the_next_session() -> None:
                     "ask_open": 100.01,
                 }
             )
-            if offset <= 15:
-                prediction_rows.append(
-                    {
-                        "timestamp": timestamp,
-                        "symbol": "AAPL",
-                        "y_score": 1.0,
-                        "y_true": 0.0,
-                        "fold_id": 0,
-                        "model_id": "timing",
-                        "source": "timing",
-                    }
-                )
-        weight_rows.append({"timestamp": start, "symbol": "AAPL", "weight": 1.0})
+            prediction_rows.append(
+                {
+                    "timestamp": timestamp,
+                    "symbol": "AAPL",
+                    "y_score": 1.0,
+                    "y_true": 0.0,
+                    "fold_id": 0,
+                    "model_id": "timing",
+                    "source": "timing",
+                }
+            )
+            weight_rows.append({"timestamp": timestamp, "symbol": "AAPL", "weight": 1.0})
 
     prices = pl.DataFrame(price_rows)
     predictions = pl.DataFrame(prediction_rows)
@@ -252,7 +251,7 @@ def test_minute_engine_closes_each_session_before_the_next_session() -> None:
     assert fills is not None
     assert fills.select("timestamp", "side").head(3).to_dicts() == [
         {"timestamp": session_starts[0] + timedelta(minutes=1), "side": "buy"},
-        {"timestamp": session_starts[0] + timedelta(minutes=15), "side": "sell"},
+        {"timestamp": session_starts[0] + timedelta(minutes=43), "side": "sell"},
         {"timestamp": session_starts[1] + timedelta(minutes=1), "side": "buy"},
     ]
     portfolio_state = result["portfolio_state_df"]

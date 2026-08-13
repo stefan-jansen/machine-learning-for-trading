@@ -497,40 +497,35 @@ def run_cadence_cost_backtest(
 
     spec["cadence_sweep"] = True
 
-    try:
-        result = run_backtest(
-            CASE_STUDY_ID,
-            best_pred_hash,
-            spec,
-            prices=cadence_prices,
-            predictions=aligned_preds,
-            label=LABEL,
-            register=True,
-            initial_cash=bt_config.initial_cash,
-            calendar=bt_config.calendar,
-        )
-        sharpe = result.metrics.get("sharpe", 0)
-        n_trades = result.metrics.get("num_trades", 0)
+    result = run_backtest(
+        CASE_STUDY_ID,
+        best_pred_hash,
+        spec,
+        prices=cadence_prices,
+        predictions=aligned_preds,
+        label=LABEL,
+        register=True,
+        initial_cash=bt_config.initial_cash,
+        calendar=bt_config.calendar,
+    )
+    sharpe = result.metrics.get("sharpe", 0)
+    n_trades = result.metrics.get("num_trades", 0)
 
-        cadence_results.append(
-            {
-                "cadence": cadence_label,
-                "cost_per_share": cost_ps,
-                "cost_label": COST_LABELS[COST_PER_SHARE_GRID.index(cost_ps)],
-                "sharpe": sharpe,
-                "num_trades": n_trades,
-                "cagr": result.metrics.get("cagr", 0),
-                "max_drawdown": result.metrics.get("max_drawdown", 0),
-            }
-        )
-        print(
-            f"  [{n_done}/{state['n_total']}] {cadence_label} @ {cost_ps * 100:.1f}¢/sh: "
-            f"Sharpe={sharpe:.3f}, trades={n_trades:,}"
-        )
-    except Exception as e:
-        print(
-            f"  [{n_done}/{state['n_total']}] {cadence_label} @ {cost_ps * 100:.1f}¢/sh: FAILED — {e}"
-        )
+    cadence_results.append(
+        {
+            "cadence": cadence_label,
+            "cost_per_share": cost_ps,
+            "cost_label": COST_LABELS[COST_PER_SHARE_GRID.index(cost_ps)],
+            "sharpe": sharpe,
+            "num_trades": n_trades,
+            "cagr": result.metrics.get("cagr", 0),
+            "max_drawdown": result.metrics.get("max_drawdown", 0),
+        }
+    )
+    print(
+        f"  [{n_done}/{state['n_total']}] {cadence_label} @ {cost_ps * 100:.1f}¢/sh: "
+        f"Sharpe={sharpe:.3f}, trades={n_trades:,}"
+    )
 
 
 # %%
@@ -557,8 +552,7 @@ for cadence in CADENCES if best_pred_hash else []:
         predictions_15m if freq == "15m" else align_predictions_to_bars(predictions_minute, bar_ts)
     )
     if aligned_preds.is_empty():
-        print(f"  {cadence_label}: no aligned predictions — skipping")
-        continue
+        raise ValueError(f"{cadence_label}: no predictions align to the cadence price grid")
 
     print(
         f"\n--- {cadence_label} cadence: {len(bar_ts)} bars, {len(aligned_preds)} aligned predictions ---"
@@ -570,6 +564,10 @@ for cadence in CADENCES if best_pred_hash else []:
 
 # %%
 elapsed_cadence = time.time() - t0
+if len(cadence_results) != sweep_state["n_total"]:
+    raise RuntimeError(
+        f"Cadence sweep produced {len(cadence_results)} of {sweep_state['n_total']} grid cells"
+    )
 print(f"Cadence sweep: {sweep_state['n_done']} backtests in {elapsed_cadence:.0f}s")
 
 # %% [markdown]

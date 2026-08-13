@@ -444,39 +444,48 @@ def _add_intraday_session_exit_targets(
 
     timestamp = schedule.name or "timestamp"
     price_times = prices.get_column("timestamp").unique().sort()
+    valid_decisions: list[datetime] = []
+    flat_decisions: list[datetime] = []
+    sessions = schedule.dt.date().unique(maintain_order=True).to_list()
+    for session in sessions:
+        session_prices = price_times.filter(price_times.dt.date() == session).to_list()
+        price_index = {price_time: index for index, price_time in enumerate(session_prices)}
+        session_decisions = schedule.filter(schedule.dt.date() == session).to_list()
+        for decision in session_decisions:
+            if decision not in price_index:
+                raise ValueError(f"Rebalance decision {decision!s} is absent from the price grid")
+            if price_index[decision] + step + 1 < len(session_prices):
+                valid_decisions.append(decision)
+
+    valid_schedule = pl.Series(timestamp, valid_decisions, dtype=schedule.dtype)
     entry_schedule = pl.Series(
         timestamp,
-        [decision for decision in schedule.to_list() if targets.get(decision)],
+        [decision for decision in valid_decisions if targets.get(decision)],
+        dtype=schedule.dtype,
     )
     if entry_schedule.is_empty():
-        return schedule
+        return valid_schedule
     schedule_by_session = (
         pl.DataFrame({timestamp: entry_schedule})
         .with_columns(pl.col(timestamp).dt.date().alias("_session"))
         .group_by("_session", maintain_order=True)
         .agg(pl.col(timestamp).max().alias("last_decision"))
     )
-    flat_decisions: list[datetime] = []
     for row in schedule_by_session.iter_rows(named=True):
         session_prices = price_times.filter(price_times.dt.date() == row["_session"]).to_list()
-        try:
-            decision_index = session_prices.index(row["last_decision"])
-        except ValueError as exc:
-            raise ValueError(
-                f"Rebalance decision {row['last_decision']!s} is absent from the price grid"
-            ) from exc
+        decision_index = session_prices.index(row["last_decision"])
         flat_index = decision_index + step
-        if flat_index + 1 >= len(session_prices):
-            raise ValueError(
-                "Intraday schedule cannot close before the session ends: "
-                f"decision={row['last_decision']!s}, step={step}, "
-                f"remaining_bars={len(session_prices) - decision_index - 1}"
-            )
         flat_decision = session_prices[flat_index]
         targets[flat_decision] = {}
         flat_decisions.append(flat_decision)
 
-    return pl.concat([schedule, pl.Series(timestamp, flat_decisions)]).unique().sort()
+    return (
+        pl.concat(
+            [valid_schedule, pl.Series(timestamp, flat_decisions, dtype=schedule.dtype)],
+        )
+        .unique()
+        .sort()
+    )
 
 
 # ---------------------------------------------------------------------------
