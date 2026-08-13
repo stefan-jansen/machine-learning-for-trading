@@ -1348,6 +1348,7 @@ def _run_engine(
     from case_studies.utils.backtest_loaders import (
         get_rebalance_step,
         resolve_rebalance_timestamps,
+        thin_rebalance_schedule,
     )
 
     cadence = rebalance_spec.get("cadence", "monthly_month_end")
@@ -1355,8 +1356,12 @@ def _run_engine(
     schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
     if case_study and label:
         step = get_rebalance_step(case_study, label)
-        if step > 1:
-            schedule_dates = schedule_dates.gather_every(step)
+        schedule_dates = thin_rebalance_schedule(
+            schedule_dates,
+            cadence=cadence,
+            step=step,
+            calendar=calendar,
+        )
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,

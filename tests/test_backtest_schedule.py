@@ -7,7 +7,7 @@ These tests validate the fixes for:
 - Finding 4: Vectorized path must use resolved schedule, not gather_every
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 import pytest
@@ -327,6 +327,38 @@ class TestGetRebalanceStep:
 
         with pytest.raises(KeyError, match="rebalance_step"):
             get_rebalance_step("sp500_options", "fwd_ret_unknown_label")
+
+
+def test_intraday_nonoverlap_step_restarts_at_each_equity_session() -> None:
+    from case_studies.utils.backtest_loaders import thin_to_rebalance_dates
+
+    first = datetime(2024, 1, 2, 9, 30)
+    second = datetime(2024, 1, 3, 9, 30)
+    timestamps = [
+        *(first + timedelta(minutes=offset) for offset in range(6)),
+        *(second + timedelta(minutes=offset) for offset in range(6)),
+    ]
+    predictions = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * len(timestamps),
+            "y_score": [0.0] * len(timestamps),
+        }
+    )
+
+    thinned = thin_to_rebalance_dates(
+        predictions,
+        cadence="1_minute",
+        step=4,
+        calendar="NYSE",
+    )
+
+    assert thinned["timestamp"].to_list() == [
+        first,
+        first + timedelta(minutes=4),
+        second,
+        second + timedelta(minutes=4),
+    ]
 
 
 # ---------------------------------------------------------------------------
