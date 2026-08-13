@@ -110,7 +110,7 @@ COPY pyproject.toml uv.lock /build/
 # device-links the CUDA-13-built libnccl_static.a, which nvcc 12.6's nvlink cannot read
 # ("nvlink error: Uncompress failed (target: sm_80)"). Reading the version from the lock
 # means the image cannot drift off the version readers get from `uv sync`.
-RUN cd /build && uv export --frozen --extra live --no-emit-project --no-hashes \
+RUN cd /build && uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
       --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-all.txt && \
     grep -viE '^(torch|torchvision|torchaudio|lightgbm|triton|setuptools)==|^nvidia-' \

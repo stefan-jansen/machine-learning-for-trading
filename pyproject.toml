@@ -238,6 +238,7 @@ rag = [
 dev = [
     "pytest>=8.0",
     "pytest-rerunfailures>=15.0",
+    "pytest-timeout>=2.3",
     "jupytext>=1.16",
     "pre-commit>=3.6",
     # Pinned exactly, and the same version .pre-commit-config.yaml pins. Two
