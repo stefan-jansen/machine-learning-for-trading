@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.specs import (
     canonical_json,
     compute_hash,
@@ -170,6 +172,12 @@ class Lifecycle:
         training = Result.open(self.study, holdout_training_hash)
         prediction = Result.open(self.study, holdout_prediction_hash)
         backtest = Result.open(self.study, holdout_backtest_hash)
+        canonical_holdout_prices = load_backtest_prices_for(
+            self.study.case_study,
+            str(lock.record["label"]),
+            split="holdout",
+        )
+        canonical_price_digest = value_digest(canonical_holdout_prices)
         valid = (
             isinstance(training, TrainingResult)
             and training.complete
@@ -187,6 +195,7 @@ class Lifecycle:
             and backtest.complete
             and backtest.execution_tier == "canonical"
             and backtest.registry_record()["prediction_hash"] == prediction.hash
+            and backtest.spec().get("input_identity", {}).get("prices") == canonical_price_digest
             and _locked_strategy_projection(backtest.spec())
             == _locked_strategy_projection(lock.record["strategy_spec"])
         )

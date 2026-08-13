@@ -37,6 +37,17 @@ def _prices() -> pl.DataFrame:
     ).with_columns(pl.col("timestamp").str.to_date())
 
 
+def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame) -> None:
+    from case_studies.research import lifecycle, strategy
+
+    def load_prices(case_study: str, label: str, *, split: str):
+        assert (case_study, label, split) == ("etfs", "fwd_ret_21d", "holdout")
+        return prices
+
+    monkeypatch.setattr(lifecycle, "load_backtest_prices_for", load_prices)
+    monkeypatch.setattr(strategy, "load_backtest_prices_for", load_prices)
+
+
 def test_fake_prediction_to_backtest_flow_survives_restart(tmp_path: Path) -> None:
     release = _seed_release(tmp_path)
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
@@ -172,7 +183,7 @@ def test_preview_prediction_to_backtest_flow_stays_isolated(tmp_path: Path) -> N
         Result.open(study, preview_backtest.hash)
 
 
-def test_lock_transition_failure_is_atomic(tmp_path: Path) -> None:
+def test_lock_transition_failure_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     release = _seed_release(tmp_path)
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
     training = study.results.register_training(_training_spec())
@@ -192,6 +203,10 @@ def test_lock_transition_failure_is_atomic(tmp_path: Path) -> None:
     ).run(prices=_prices())
     candidates = CandidateSet.create(study, "selection", [backtest])
     assert candidates.best_validation_sharpe().hash == backtest.hash
+    _patch_holdout_prices(
+        monkeypatch,
+        _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp")),
+    )
     invalid_holdout_spec = _training_spec(
         cv={"phase": "holdout", "train_end": "2024-01-04"},
         model={"class": "Ridge", "params": {"alpha": 2.0}},
@@ -226,7 +241,9 @@ def test_lock_transition_failure_is_atomic(tmp_path: Path) -> None:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
 
 
-def test_locked_holdout_lineage_transitions_once(tmp_path: Path) -> None:
+def test_locked_holdout_lineage_transitions_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     release = _seed_release(tmp_path)
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
     frame = _predictions()
@@ -250,6 +267,8 @@ def test_locked_holdout_lineage_transitions_once(tmp_path: Path) -> None:
     ).run(prices=_prices())
     candidates = CandidateSet.create(study, "selection", [validation_backtest])
     holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"})
+    holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
+    _patch_holdout_prices(monkeypatch, holdout_prices)
     lock = study.lifecycle.lock(
         candidate_set_hash=candidates.hash,
         selected_backtest_hash=validation_backtest.hash,
@@ -281,16 +300,36 @@ def test_locked_holdout_lineage_transitions_once(tmp_path: Path) -> None:
     holdout_backtest = study.strategy(
         prediction=holdout_prediction,
         **request,
-    ).run(prices=_prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp")))
+    ).run()
+
+    with pytest.raises(ValueError, match="canonical holdout prices"):
+        study.strategy(prediction=holdout_prediction, **request).run(prices=holdout_prices)
     with pytest.raises(ValueError, match="locked validation strategy"):
         study.strategy(
             prediction=holdout_prediction,
             signal={"method": "equal_weight_top_k", "top_k": 2},
             execution_mode="vectorized",
-        ).run(prices=_prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp")))
+        ).run()
+
+    from case_studies.research import lifecycle
+
+    changed_prices = holdout_prices.with_columns((pl.col("close") + 1).alias("close"))
+    monkeypatch.setattr(
+        lifecycle,
+        "load_backtest_prices_for",
+        lambda case_study, label, *, split: changed_prices,
+    )
+    with pytest.raises(ValueError, match="exact complete canonical lineage"):
+        study.lifecycle.record_holdout(
+            lock.hash,
+            holdout_training_hash=holdout_training.hash,
+            holdout_prediction_hash=holdout_prediction.hash,
+            holdout_backtest_hash=holdout_backtest.hash,
+        )
     assert study.lifecycle.open(lock.hash).state == "LOCKED"
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
+    _patch_holdout_prices(monkeypatch, holdout_prices)
 
     evaluated = study.lifecycle.record_holdout(
         lock.hash,
@@ -307,3 +346,99 @@ def test_locked_holdout_lineage_transitions_once(tmp_path: Path) -> None:
             holdout_prediction_hash=holdout_prediction.hash,
             holdout_backtest_hash=holdout_backtest.hash,
         )
+
+
+def test_locked_conformal_holdout_uses_validation_residuals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    timestamps = pl.date_range(date(2023, 12, 18), date(2024, 1, 9), eager=True)
+    validation = pl.DataFrame(
+        {
+            "timestamp": [value for value in timestamps for _ in range(2)],
+            "symbol": [symbol for _ in timestamps for symbol in ("A", "B")],
+            "fold_id": [
+                fold for index in range(len(timestamps)) for fold in ([int(index >= 15)] * 2)
+            ],
+            "y_true": [0.01, -0.02] * len(timestamps),
+            "y_score": [0.02, -0.01] * len(timestamps),
+        }
+    )
+    prices = pl.DataFrame(
+        {
+            "timestamp": [value for value in timestamps for _ in range(2)],
+            "symbol": [symbol for _ in timestamps for symbol in ("A", "B")],
+            "close": [
+                100.0 + index if symbol == "A" else 100.0 - 0.3 * index
+                for index in range(len(timestamps))
+                for symbol in ("A", "B")
+            ],
+            "volume": [1_000] * (2 * len(timestamps)),
+        }
+    ).with_columns(
+        open=pl.col("close"),
+        high=pl.col("close") + 1,
+        low=pl.col("close") - 1,
+    )
+    training = study.results.register_training(_training_spec())
+    validation_prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=validation,
+        expected_keys=validation.select("symbol", "timestamp", "fold_id"),
+    )
+    request = {
+        "signal": {"method": "equal_weight_top_k", "top_k": 1},
+        "allocation": {
+            "method": "conformal_weighted",
+            "alpha": 0.2,
+            "min_calibration_n": 1,
+        },
+        "execution_mode": "vectorized",
+    }
+    validation_backtest = study.strategy(
+        prediction=validation_prediction,
+        **request,
+    ).run(prices=prices)
+    holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
+    _patch_holdout_prices(monkeypatch, holdout_prices)
+    candidates = CandidateSet.create(study, "conformal-selection", [validation_backtest])
+    holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-09"})
+    lock = study.lifecycle.lock(
+        candidate_set_hash=candidates.hash,
+        selected_backtest_hash=validation_backtest.hash,
+        selection_evidence={"metric": "validation_backtest_sharpe"},
+        holdout_training_spec=holdout_spec,
+    )
+    holdout_training = study.results.register_training(holdout_spec)
+    holdout_frame = _predictions().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
+    holdout_prediction = study.results.publish_predictions(
+        holdout_training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="holdout",
+        predictions=holdout_frame,
+        expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
+    )
+
+    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+    widths = pl.read_parquet(
+        study.root
+        / "run_log"
+        / "predictions"
+        / holdout_prediction.hash
+        / "conformal_widths.parquet"
+    )
+    evaluated = study.lifecycle.record_holdout(
+        lock.hash,
+        holdout_training_hash=holdout_training.hash,
+        holdout_prediction_hash=holdout_prediction.hash,
+        holdout_backtest_hash=holdout_backtest.hash,
+    )
+
+    assert widths.get_column("fold_id").unique().to_list() == [-1]
+    assert widths.get_column("calibration_n").min() == 2
+    assert evaluated.state == "HOLDOUT_EVALUATED"

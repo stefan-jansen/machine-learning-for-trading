@@ -41,6 +41,39 @@ DEFAULT_MIN_CALIBRATION_N: int = 30
 CALIBRATION_VERSION: str = "walk_forward_v2"
 POOLED_FALLBACK: str = "pooled_prior_oos"
 
+HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
+    "etfs/fwd_ret_21d": 21,
+    "cme_futures/fwd_ret_5d": 5,
+    "cme_futures/fwd_ret_21d": 21,
+    "fx_pairs/fwd_ret_1d": 1,
+    "fx_pairs/fwd_ret_5d": 5,
+    "fx_pairs/fwd_ret_21d": 21,
+    "crypto_perps_funding/fwd_ret_24h": 3,
+    "crypto_perps_funding/fwd_ret_8h": 1,
+    "nasdaq100_microstructure/fwd_ret_15m": 1,
+    "nasdaq100_microstructure/fwd_ret_60m": 4,
+    "nasdaq100_microstructure/fwd_ret_5m": 1,
+    "sp500_equity_option_analytics/fwd_ret_5d": 5,
+    "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
+    "us_equities_panel/fwd_ret_5d": 5,
+    "us_equities_panel/fwd_ret_1d": 1,
+    "us_equities_panel/fwd_ret_21d": 21,
+    "us_firm_characteristics/fwd_ret_1m_win": 1,
+    "us_firm_characteristics/fwd_ret_1m": 1,
+    "us_firm_characteristics/fwd_class_1m": 1,
+}
+
+
+def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
+    """Return the reviewed label horizon in prediction data steps."""
+    key = f"{case_study}/{label}"
+    try:
+        return HOLDOUT_CONFORMAL_EMBARGO_STEPS[key]
+    except KeyError as error:
+        raise KeyError(
+            f"No conformal holdout embargo is defined for {key}; add a reviewed data-step value"
+        ) from error
+
 
 def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict[str, Any]:
     """Return a spec whose conformal allocation carries its full identity."""

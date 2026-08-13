@@ -161,6 +161,11 @@ def test_workspace_open_migrates_copied_legacy_registry(tmp_path: Path) -> None:
             "training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL, "
             "spec_json TEXT, created_at TEXT NOT NULL)"
         )
+        db.execute(
+            "CREATE TABLE prediction_sets ("
+            "prediction_hash TEXT PRIMARY KEY, training_hash TEXT NOT NULL, "
+            "split TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
         db.commit()
 
     study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
@@ -172,6 +177,20 @@ def test_workspace_open_migrates_copied_legacy_registry(tmp_path: Path) -> None:
 
     assert {"identity_version", "execution_tier"} <= columns
     assert coverage_table == (1,)
+
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+
+    assert training.complete
+    assert prediction.complete
 
 
 def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:

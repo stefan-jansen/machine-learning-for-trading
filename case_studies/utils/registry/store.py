@@ -448,22 +448,34 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         if "stage" not in cols:
             db.execute("ALTER TABLE backtest_runs ADD COLUMN stage TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS idx_backtest_stage ON backtest_runs(stage)")
+            cols.add("stage")
 
     # Migration 2: add runtime columns to training_runs
     if "training_runs" in tables:
         tr_cols = {row[1] for row in db.execute("PRAGMA table_info(training_runs)").fetchall()}
-        if "config_name" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN config_name TEXT")
-        if "started_at" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN started_at TEXT")
-        if "elapsed_s" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN elapsed_s REAL")
-        if "runtime_json" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN runtime_json TEXT")
-        if "identity_version" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN identity_version INTEGER")
-        if "execution_tier" not in tr_cols:
-            db.execute("ALTER TABLE training_runs ADD COLUMN execution_tier TEXT")
+        training_columns = {
+            "config_name": "TEXT",
+            "spec_json": "TEXT",
+            "git_commit": "TEXT",
+            "entry_point": "TEXT",
+            "started_at": "TEXT",
+            "elapsed_s": "REAL",
+            "runtime_json": "TEXT",
+            "identity_version": "INTEGER",
+            "execution_tier": "TEXT",
+        }
+        for column, sql_type in training_columns.items():
+            if column not in tr_cols:
+                db.execute(f"ALTER TABLE training_runs ADD COLUMN {column} {sql_type}")
+
+    if "prediction_sets" in tables:
+        prediction_cols = {
+            row[1] for row in db.execute("PRAGMA table_info(prediction_sets)").fetchall()
+        }
+        prediction_columns = {"checkpoint_value": "INTEGER", "checkpoint_kind": "TEXT"}
+        for column, sql_type in prediction_columns.items():
+            if column not in prediction_cols:
+                db.execute(f"ALTER TABLE prediction_sets ADD COLUMN {column} {sql_type}")
 
     if "prediction_coverage" in tables:
         coverage_cols = {
@@ -474,10 +486,16 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
 
     # Migration 2b: add runtime columns to backtest_runs
     if "backtest_runs" in tables:
-        if "started_at" not in cols:
-            db.execute("ALTER TABLE backtest_runs ADD COLUMN started_at TEXT")
-        if "elapsed_s" not in cols:
-            db.execute("ALTER TABLE backtest_runs ADD COLUMN elapsed_s REAL")
+        backtest_columns = {
+            "spec_json": "TEXT",
+            "stage": "TEXT",
+            "git_commit": "TEXT",
+            "started_at": "TEXT",
+            "elapsed_s": "REAL",
+        }
+        for column, sql_type in backtest_columns.items():
+            if column not in cols:
+                db.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {sql_type}")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

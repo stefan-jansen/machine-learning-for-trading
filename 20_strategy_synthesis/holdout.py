@@ -51,7 +51,10 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.carrier_pins import prioritize_carrier_hash
-from case_studies.utils.conformal import compute_holdout_conformal_widths
+from case_studies.utils.conformal import (
+    compute_holdout_conformal_widths,
+    holdout_conformal_embargo_steps,
+)
 from case_studies.utils.registry import (
     register_backtest_run,
     register_prediction_metrics,
@@ -86,54 +89,6 @@ def _parse_buffer_to_days(buffer: str) -> int:
         n = int(buf.replace("min", "").replace("T", ""))
         return 1  # intraday → 1 day minimum
     return 0
-
-
-# Forward-return label horizon in data-step units. Drives the conformal
-# calibration embargo so that no val residual uses returns realized inside the
-# holdout window (a residual at val timestamp t depends on returns over
-# (t, t+h]; if t+h falls inside the holdout window the residual leaks
-# holdout-period prices into calibration). Mirrors EMBARGO_STEPS in the
-# now-archived ``scripts/run_conformal_holdout_sweep.py``. sp500_options is
-# absent - see project_sp500_options_conformal_permanently_skipped.
-HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
-    "etfs/fwd_ret_21d": 21,
-    "cme_futures/fwd_ret_5d": 5,
-    "cme_futures/fwd_ret_21d": 21,
-    "fx_pairs/fwd_ret_1d": 1,
-    "fx_pairs/fwd_ret_5d": 5,
-    "fx_pairs/fwd_ret_21d": 21,
-    "crypto_perps_funding/fwd_ret_24h": 3,
-    "crypto_perps_funding/fwd_ret_8h": 1,
-    "nasdaq100_microstructure/fwd_ret_15m": 1,
-    "nasdaq100_microstructure/fwd_ret_60m": 4,
-    "nasdaq100_microstructure/fwd_ret_5m": 1,
-    "sp500_equity_option_analytics/fwd_ret_5d": 5,
-    "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
-    "us_equities_panel/fwd_ret_5d": 5,
-    "us_equities_panel/fwd_ret_1d": 1,
-    "us_equities_panel/fwd_ret_21d": 21,
-    "us_firm_characteristics/fwd_ret_1m_win": 1,
-    "us_firm_characteristics/fwd_ret_1m": 1,
-    "us_firm_characteristics/fwd_class_1m": 1,
-}
-
-
-def _holdout_conformal_embargo(cs_id: str, label: str) -> int:
-    """Embargo step count for the val→holdout conformal calibration.
-
-    Refuses to fall back to 0 silently: any new (cs, label) combination
-    must be added to ``HOLDOUT_CONFORMAL_EMBARGO_STEPS`` explicitly so
-    that the horizon is reviewed.
-    """
-    key = f"{cs_id}/{label}"
-    if key not in HOLDOUT_CONFORMAL_EMBARGO_STEPS:
-        raise KeyError(
-            f"No conformal embargo defined for {key}. Add it to "
-            f"HOLDOUT_CONFORMAL_EMBARGO_STEPS in 20_strategy_synthesis/"
-            f"holdout.py. Silent fallback to 0 would leak holdout-period "
-            f"prices into calibration residuals."
-        )
-    return HOLDOUT_CONFORMAL_EMBARGO_STEPS[key]
 
 
 def _delete_pre_registered_prediction(cs_id: str, prediction_hash: str) -> None:
@@ -1259,7 +1214,7 @@ def generate_holdout(
                     task_type=mds.task_type,
                     class_values=mds.class_values or None,
                 )
-                embargo = _holdout_conformal_embargo(cs_id, label)
+                embargo = holdout_conformal_embargo_steps(cs_id, label)
                 alpha = float(alloc_spec.get("alpha", 0.20))
                 widths = compute_holdout_conformal_widths(
                     cs_id,

@@ -16,7 +16,11 @@ from case_studies.utils.backtest_loaders import (
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
-from case_studies.utils.conformal import ensure_conformal_calibration_identity
+from case_studies.utils.conformal import (
+    compute_holdout_conformal_widths,
+    ensure_conformal_calibration_identity,
+    holdout_conformal_embargo_steps,
+)
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
 
 from .contracts import ExecutionTier
@@ -114,6 +118,8 @@ class Strategy:
 
     def resolve(self, *, prices: pl.DataFrame | None = None) -> dict[str, Any]:
         self.study.activate(ExecutionTier.CANONICAL)
+        if self.split == "holdout" and prices is not None:
+            raise ValueError("locked holdout strategy must load canonical holdout prices")
         case_config = get_backtest_config(self.study.case_study)
         resolved_prices = prices
         if resolved_prices is None:
@@ -164,6 +170,8 @@ class Strategy:
 
     def run(self, *, prices: pl.DataFrame | None = None) -> BacktestResult:
         self.study.require_writable()
+        if self.split == "holdout" and prices is not None:
+            raise ValueError("locked holdout strategy must load canonical holdout prices")
         predictions = self.prediction.load()
         resolved_prices = prices
         self.study.activate(ExecutionTier.CANONICAL)
@@ -176,6 +184,18 @@ class Strategy:
         )
         case_config = get_backtest_config(self.study.case_study)
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
+        allocation = spec.get("strategy", {}).get("allocation", {})
+        if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
+            lock_record = self._active_lock_record()
+            compute_holdout_conformal_widths(
+                self.study.case_study,
+                lock_record["prediction_hash"],
+                self.prediction.hash,
+                alpha=float(allocation.get("alpha", 0.2)),
+                min_calibration_n=int(allocation["min_calibration_n"]),
+                embargo_steps=holdout_conformal_embargo_steps(self.study.case_study, self.label),
+                write=True,
+            )
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
         result = run_backtest(
