@@ -37,8 +37,9 @@ CASE_STUDY_ID = "us_equities_panel"
 # ## Result references
 #
 # The released study is read-only here. A hash printed by either execution notebook can be opened
-# with `study.results.open(result_hash)`. The returned result exposes its specification, protocol,
-# lineage, coverage, and artifacts without a registry-wide metric query.
+# with `study.results.open(result_hash)`. Training and prediction results expose their specification,
+# protocol, lineage, and artifacts without a registry-wide metric query. Prediction results also
+# expose exact coverage.
 
 # %%
 study = Study.open(CASE_STUDY_ID)
