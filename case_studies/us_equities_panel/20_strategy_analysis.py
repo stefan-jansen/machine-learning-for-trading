@@ -47,6 +47,9 @@ import numpy as np
 import polars as pl
 
 from case_studies.research import BacktestResult, CandidateSet, LifecycleState, Study
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
 from case_studies.utils.registry.specs import project_training_identity
 from utils.style import COLORS
@@ -77,6 +80,54 @@ if research_lock.state != LifecycleState.HOLDOUT_EVALUATED.value:
     raise ValueError("strategy analysis requires one completed holdout evaluation")
 if research_lock.record["candidate_set_hash"] != validation_set.hash:
     raise ValueError("research lock names a different validation candidate set")
+
+# The official analysis restricts the general CandidateSet abstraction to one canonical comparison
+# protocol. Each backtest must use the canonical validation price window plus its declared warmup.
+IDENTITY_PROTOCOL_FIELDS = {"label_artifact", "feature_artifacts", "cv"}
+comparable_fields = set(validation_set.comparison_contract.get("comparable_fields", ()))
+variable_identity_fields = IDENTITY_PROTOCOL_FIELDS & comparable_fields
+if variable_identity_fields:
+    raise ValueError(f"validation set varies identity fields {sorted(variable_identity_fields)}")
+validation_protocol = validation_set.comparison_contract.get("protocol", {})
+missing_identity_fields = {
+    field for field in IDENTITY_PROTOCOL_FIELDS if not validation_protocol.get(field)
+}
+if missing_identity_fields:
+    raise ValueError(f"validation set lacks identity fields {sorted(missing_identity_fields)}")
+if (
+    validation_protocol.get("split") != "validation"
+    or validation_protocol.get("execution_tier") != "canonical"
+):
+    raise ValueError("strategy analysis requires canonical validation results")
+
+canonical_price_digests = {}
+for candidate_hash in validation_set.members:
+    candidate = study.results.open(candidate_hash)
+    if not isinstance(candidate, BacktestResult) or not candidate.complete:
+        raise ValueError(f"{candidate_hash} is not a complete backtest result")
+    candidate_protocol = candidate.protocol()
+    if any(
+        candidate_protocol.get(field) != validation_protocol[field]
+        for field in IDENTITY_PROTOCOL_FIELDS
+    ):
+        raise ValueError(f"{candidate_hash} differs from the validation input protocol")
+    training_spec = candidate.lineage()["training_spec"]
+    label = training_spec.get("label")
+    if not label:
+        raise ValueError(f"{candidate_hash} has no label")
+    strategy_spec = candidate.spec()
+    warmup_periods = strategy_warmup_periods(strategy_spec)
+    price_key = (str(label), warmup_periods)
+    if price_key not in canonical_price_digests:
+        canonical_prices = load_backtest_prices_for(
+            CASE_STUDY_ID,
+            str(label),
+            split="validation",
+            warmup_periods=warmup_periods,
+        )
+        canonical_price_digests[price_key] = value_digest(canonical_prices)
+    if strategy_spec.get("input_identity", {}).get("prices") != canonical_price_digests[price_key]:
+        raise ValueError(f"{candidate_hash} does not use canonical validation prices")
 
 selected_validation = validation_set.best_validation_sharpe()
 if not isinstance(selected_validation, BacktestResult) or not selected_validation.complete:
