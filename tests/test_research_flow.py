@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CandidateSet, Result, Strategy, Study
+from case_studies.research import CandidateSet, PredictionResult, Result, Strategy, Study
 from tests.test_research_registry import _predictions, _training_spec
 from tests.test_research_workspace import _seed_release
 
@@ -56,6 +56,19 @@ def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame)
     monkeypatch.setattr(lifecycle, "load_backtest_prices_for", load_prices)
     monkeypatch.setattr(strategy, "load_backtest_prices_for", load_prices)
     return warmups
+
+
+def _publish_validation_prediction(study: Study) -> PredictionResult:
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    return study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
 
 
 def test_fake_prediction_to_backtest_flow_survives_restart(tmp_path: Path) -> None:
@@ -157,6 +170,62 @@ def test_strategy_normalizes_conformal_identity_before_hashing(tmp_path: Path) -
     assert allocation["calibration_version"] == "walk_forward_v2"
     assert allocation["min_calibration_n"] == 30
     assert allocation["sparse_fallback"] == "pooled_prior_oos"
+
+
+def test_strategy_default_lookback_ignores_larger_unrelated_sweep_variant(
+    tmp_path: Path,
+) -> None:
+    from case_studies.utils.backtest_loaders import warmup_periods_for
+
+    release = _seed_release(tmp_path)
+    setup_path = release / "case_studies" / "etfs" / "config" / "setup.yaml"
+    setup_path.write_text(
+        setup_path.read_text()
+        + "execution:\n"
+        + "  allocator_lookback: 3\n"
+        + "backtest:\n"
+        + "  sweep:\n"
+        + "    allocators:\n"
+        + "      - method: risk_parity\n"
+        + "        vol_window: 99\n"
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    prediction = _publish_validation_prediction(study)
+    strategy = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        allocation={"method": "inverse_vol"},
+        execution_mode="vectorized",
+    )
+
+    spec = strategy.resolve(prices=_prices())
+
+    assert warmup_periods_for("etfs") == 99
+    assert spec["strategy"]["allocation"]["vol_window"] == 3
+
+
+def test_strategy_preserves_explicit_lookback_alias_without_injecting_vol_window(
+    tmp_path: Path,
+) -> None:
+    from case_studies.research.strategy import strategy_warmup_periods
+
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    prediction = _publish_validation_prediction(study)
+    strategy = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        allocation={"method": "inverse_vol", "lookback": 7},
+        execution_mode="vectorized",
+    )
+
+    spec = strategy.resolve(prices=_prices())
+    allocation = spec["strategy"]["allocation"]
+
+    assert allocation["lookback"] == 7
+    assert "vol_window" not in allocation
+    assert strategy_warmup_periods(spec) == 7
 
 
 def test_preview_prediction_to_backtest_flow_stays_isolated(tmp_path: Path) -> None:

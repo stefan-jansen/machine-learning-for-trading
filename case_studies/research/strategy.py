@@ -13,7 +13,6 @@ from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
     load_contract_specs_from_yaml,
-    warmup_periods_for,
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
@@ -23,6 +22,7 @@ from case_studies.utils.conformal import (
     holdout_conformal_embargo_steps,
 )
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
+from case_studies.utils.sweep_config import get_allocator_lookback
 
 from .contracts import ExecutionTier
 from .results import BacktestResult, PredictionResult, Result
@@ -139,11 +139,11 @@ class Strategy:
         allocation = deepcopy(self.allocation)
         method = allocation.get("method")
         if method in _MOMENT_ALLOCATORS:
-            lookback = warmup_periods_for(self.study.case_study)
-            if lookback <= 0 and not any(key in allocation for key in ("vol_window", "lookback")):
-                raise ValueError(f"rolling allocator {method!r} has no configured lookback")
-            key = "lookback" if method in {"mvo", "mvo_ledoit_wolf"} else "vol_window"
-            allocation.setdefault(key, lookback)
+            if method in {"mvo", "mvo_ledoit_wolf"}:
+                if "lookback" not in allocation:
+                    allocation["lookback"] = get_allocator_lookback(self.study.case_study)
+            elif not any(key in allocation for key in ("vol_window", "lookback")):
+                allocation["vol_window"] = get_allocator_lookback(self.study.case_study)
         return allocation
 
     def _warmup_periods(self) -> int:
