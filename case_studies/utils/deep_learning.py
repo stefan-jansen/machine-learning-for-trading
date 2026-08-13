@@ -124,7 +124,7 @@ def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
     if config.get("library") == "darts":
         packages.update(
             {
-                "darts": importlib.metadata.version("u8darts"),
+                "darts": importlib.metadata.version("darts"),
                 "pytorch-lightning": importlib.metadata.version("pytorch-lightning"),
             }
         )
@@ -189,6 +189,9 @@ def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]]
         cv_record = {**cv_record, "preview_folds": sorted(selected)}
     if not splits:
         raise ValueError("sequence request resolved no cross-validation folds")
+    from utils.modeling import validate_temporal_split_geometry
+
+    validate_temporal_split_geometry(splits, mds.splits, mds.temporal_by_fold)
     return splits, cv_record
 
 

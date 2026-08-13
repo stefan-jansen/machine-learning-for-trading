@@ -156,6 +156,9 @@ def _tabm_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], di
         cv_record = {**cv_record, "preview_folds": sorted(selected)}
     if not splits:
         raise ValueError("TabM request resolved no cross-validation folds")
+    from utils.modeling import validate_temporal_split_geometry
+
+    validate_temporal_split_geometry(splits, mds.splits, mds.temporal_by_fold)
     return splits, cv_record
 
 

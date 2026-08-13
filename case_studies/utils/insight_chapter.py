@@ -352,14 +352,17 @@ def conformal_coverage_for_selected_prediction(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"prediction artifact missing {sorted(missing_columns)}"
         )
-    fold_ids = sorted(predictions["fold_id"].unique().to_list())
+    usable = predictions.drop_nulls(required_columns)
+    for column in ("y_true", "y_score"):
+        usable = usable.filter(pl.col(column).cast(pl.Float64, strict=False).is_finite())
+    fold_ids = sorted(usable["fold_id"].unique().to_list())
     if fold_ids != list(range(n_folds)):
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
     try:
-        coverage_rows = split_conformal_coverage(predictions, levels=levels)
+        coverage_rows = split_conformal_coverage(usable, levels=levels)
     except ValueError as error:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: {error}"

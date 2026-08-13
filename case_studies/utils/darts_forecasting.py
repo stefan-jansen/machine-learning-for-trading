@@ -27,6 +27,7 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
 BASE_TARGET_COL = "_darts_target_1d"
+_DARTS_PERIOD_COL = "_darts_expected_period"
 
 
 def darts_checkpoint_path(root: Path, config_name: str, fold: int, checkpoint: int) -> Path:
@@ -201,8 +202,8 @@ class _FoldSeries:
     entity: str
     full_target: TimeSeries
     full_covariates: TimeSeries
-    train_target: TimeSeries
-    train_covariates: TimeSeries
+    train_target: TimeSeries | None
+    train_covariates: TimeSeries | None
     prediction_start_pos: int
     val_start_pos: int
     val_end_pos: int
@@ -495,6 +496,22 @@ def _resolve_sampling(
     return stride, max_samples_per_ts
 
 
+def _attach_expected_periods(
+    dataset_pd: pd.DataFrame,
+    *,
+    date_col: str,
+    calendar_id: str | None,
+) -> pd.DataFrame:
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    result = dataset_pd.copy()
+    result[_DARTS_PERIOD_COL] = _sequence_period_numbers(
+        result[date_col],
+        calendar_id=calendar_id,
+    )
+    return result
+
+
 def _load_base_target_frame(
     case_study: str,
     dataset_pd: pd.DataFrame,
@@ -593,7 +610,14 @@ def darts_validation_keys(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         config, _parse_label_horizon(label_col)
     )
+    from utils.cv_splits import make_walk_forward_config
+
     dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+    dataset_pd = _attach_expected_periods(
+        dataset_pd,
+        date_col=date_col,
+        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+    )
     frames: list[pl.DataFrame] = []
     has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
     for split in splits:
@@ -626,7 +650,8 @@ def darts_validation_keys(
                 "fold": int(split["fold"]),
             }
             for state in states
-            for position in range(state.val_start_pos, state.val_end_pos + 1)
+            for position in range(state.prediction_start_pos - 1, state.val_end_pos + 1)
+            if state.val_start_pos >= 0
             if np.isfinite(state.y_true[position])
         ]
         if rows:
@@ -655,7 +680,16 @@ def _prepare_fold_series(
     train_end = pd.Timestamp(split["train_end"]).to_datetime64()
     val_start = pd.Timestamp(split["val_start"]).to_datetime64()
     val_end = pd.Timestamp(split["val_end"]).to_datetime64()
-    cols = [date_col, entity_col, label_col, BASE_TARGET_COL, *feature_names]
+    if _DARTS_PERIOD_COL not in dataset_pd.columns:
+        raise ValueError("Darts dataset is missing expected-period identity")
+    cols = [
+        date_col,
+        entity_col,
+        label_col,
+        BASE_TARGET_COL,
+        _DARTS_PERIOD_COL,
+        *feature_names,
+    ]
     fold_mask = (dataset_pd[date_col] >= train_start) & (dataset_pd[date_col] <= val_end)
     fold_df = dataset_pd.loc[fold_mask, cols].copy().dropna(subset=[BASE_TARGET_COL])
     train_df = fold_df.loc[fold_df[date_col] <= train_end].copy()
@@ -671,48 +705,55 @@ def _prepare_fold_series(
     fold_df.loc[:, feature_names] = ((feature_frame - means) / stds).fillna(0.0).astype(np.float32)
 
     series: list[_FoldSeries] = []
-    for entity, sym_df in fold_df.groupby(entity_col, sort=False):
-        sym_df = sym_df.sort_values(date_col).reset_index(drop=True)
-        dates = sym_df[date_col].to_numpy()
-        train_cut = int((dates <= train_end).sum())
-        val_positions = np.flatnonzero((dates >= val_start) & (dates <= val_end))
-        if len(val_positions) == 0:
-            continue
-        if train_cut < input_chunk_length + output_chunk_length:
-            continue
-
-        val_start_pos = int(val_positions[0])
-        val_end_pos = int(val_positions[-1])
-        prediction_start_pos = val_start_pos + 1
-        if prediction_start_pos <= 0 or prediction_start_pos >= len(sym_df):
-            continue
-
-        t = np.arange(len(sym_df), dtype=np.int32)
-        target_df = pd.DataFrame(
-            {"t": t, BASE_TARGET_COL: sym_df[BASE_TARGET_COL].to_numpy(np.float32)}
-        )
-        cov_df = pd.DataFrame(
-            {"t": t, **{f: sym_df[f].to_numpy(np.float32) for f in feature_names}}
-        )
-
-        full_target = TimeSeries.from_dataframe(target_df, time_col="t", value_cols=BASE_TARGET_COL)
-        full_covariates = TimeSeries.from_dataframe(cov_df, time_col="t", value_cols=feature_names)
-
-        series.append(
-            _FoldSeries(
-                entity=str(entity),
-                full_target=full_target,
-                full_covariates=full_covariates,
-                train_target=full_target[:train_cut],
-                train_covariates=full_covariates[:train_cut],
-                prediction_start_pos=prediction_start_pos,
-                val_start_pos=val_start_pos,
-                val_end_pos=val_end_pos,
-                dates=dates,
-                y_true=sym_df[label_col].to_numpy(np.float32),
-                n_train_samples=train_cut,
+    for entity, entity_df in fold_df.groupby(entity_col, sort=False):
+        entity_df = entity_df.sort_values(date_col).reset_index(drop=True)
+        segments = entity_df[_DARTS_PERIOD_COL].diff().ne(1).cumsum()
+        for _, sym_df in entity_df.groupby(segments, sort=False):
+            sym_df = sym_df.reset_index(drop=True)
+            dates = sym_df[date_col].to_numpy()
+            train_cut = int((dates <= train_end).sum())
+            val_positions = np.flatnonzero((dates >= val_start) & (dates <= val_end))
+            can_train = train_cut >= input_chunk_length + output_chunk_length
+            val_start_pos = int(val_positions[0]) if len(val_positions) else -1
+            val_end_pos = int(val_positions[-1]) if len(val_positions) else -1
+            first_prediction_base = max(val_start_pos, input_chunk_length - 1)
+            prediction_start_pos = first_prediction_base + 1 if val_start_pos >= 0 else -1
+            can_predict = (
+                val_start_pos >= 0
+                and first_prediction_base <= val_end_pos
+                and prediction_start_pos < len(sym_df)
             )
-        )
+            if not can_train and not can_predict:
+                continue
+
+            t = np.arange(len(sym_df), dtype=np.int32)
+            target_df = pd.DataFrame(
+                {"t": t, BASE_TARGET_COL: sym_df[BASE_TARGET_COL].to_numpy(np.float32)}
+            )
+            cov_df = pd.DataFrame(
+                {"t": t, **{f: sym_df[f].to_numpy(np.float32) for f in feature_names}}
+            )
+            full_target = TimeSeries.from_dataframe(
+                target_df, time_col="t", value_cols=BASE_TARGET_COL
+            )
+            full_covariates = TimeSeries.from_dataframe(
+                cov_df, time_col="t", value_cols=feature_names
+            )
+            series.append(
+                _FoldSeries(
+                    entity=str(entity),
+                    full_target=full_target,
+                    full_covariates=full_covariates,
+                    train_target=full_target[:train_cut] if can_train else None,
+                    train_covariates=full_covariates[:train_cut] if can_train else None,
+                    prediction_start_pos=prediction_start_pos if can_predict else -1,
+                    val_start_pos=val_start_pos if can_predict else -1,
+                    val_end_pos=val_end_pos if can_predict else -1,
+                    dates=dates,
+                    y_true=sym_df[label_col].to_numpy(np.float32),
+                    n_train_samples=train_cut if can_train else 0,
+                )
+            )
 
     return series
 
@@ -753,6 +794,8 @@ def _predict_fold(
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
+        if state.val_start_pos < 0:
+            continue
         forecasts = model.historical_forecasts(
             state.full_target,
             past_covariates=state.full_covariates,
@@ -847,6 +890,13 @@ def run_darts_cv(
 
     label_horizon = _parse_label_horizon(label_col)
     dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+    from utils.cv_splits import make_walk_forward_config
+
+    dataset_pd = _attach_expected_periods(
+        dataset_pd,
+        date_col=date_col,
+        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+    )
 
     config_results: list[dict[str, Any]] = []
     learning_rows: list[dict[str, Any]] = []
@@ -897,17 +947,20 @@ def run_darts_cv(
                 input_chunk_length,
                 output_chunk_length,
             )
-            if not fold_series:
+            training_states = [state for state in fold_series if state.train_target is not None]
+            prediction_states = [state for state in fold_series if state.val_start_pos >= 0]
+            if not training_states or not prediction_states:
                 if strict:
                     raise ValueError(
-                        f"Darts fold {split['fold']} has no series after eligibility filtering"
+                        f"Darts fold {split['fold']} has no trainable or predictable series "
+                        "after gap filtering"
                     )
-                print(f"  Fold {split['fold']}: skipped (insufficient series after filtering)")
+                print(f"  Fold {split['fold']}: skipped (insufficient gap-free series)")
                 continue
             expected_fold_ids.append(int(split["fold"]))
 
             stride, max_samples_per_ts = _resolve_sampling(
-                fold_series,
+                training_states,
                 input_chunk_length,
                 output_chunk_length,
                 max_train_sequences,
@@ -918,10 +971,13 @@ def run_darts_cv(
                     msg += f", max_samples_per_ts={max_samples_per_ts}"
                 print(msg)
             else:
-                print(f"  Fold {split['fold']}: {len(fold_series)} series")
+                print(
+                    f"  Fold {split['fold']}: {len(training_states)} training series, "
+                    f"{len(prediction_states)} validation series"
+                )
 
-            train_series = [state.train_target for state in fold_series]
-            train_covariates = [state.train_covariates for state in fold_series]
+            train_series = [state.train_target for state in training_states]
+            train_covariates = [state.train_covariates for state in training_states]
             epoch_rows: list[dict[str, Any]] = []
             checkpoint_frames: list[pl.DataFrame] = []
             checkpoint_ics: dict[int, float] = {}
@@ -945,7 +1001,7 @@ def run_darts_cv(
                         config_name=config_name,
                         fold=split["fold"],
                         n_epochs=n_epochs,
-                        n_train=int(sum(state.n_train_samples for state in fold_series)),
+                        n_train=int(sum(state.n_train_samples for state in training_states)),
                         log_dir=log_dir,
                         epoch_rows=epoch_rows,
                     )
@@ -983,7 +1039,7 @@ def run_darts_cv(
 
                 checkpoint_preds = _predict_fold(
                     model,
-                    fold_series,
+                    prediction_states,
                     split["fold"],
                     date_col,
                     entity_col,

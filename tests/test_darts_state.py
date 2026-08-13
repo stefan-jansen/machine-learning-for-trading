@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pandas_market_calendars as mcal
 import pytest
 from darts import TimeSeries
 from darts.models import TSMixerModel
@@ -101,8 +102,11 @@ def test_darts_checkpoint_population_rejects_missing_weights(tmp_path) -> None:
         )
 
 
-def test_darts_runner_persists_state_with_exact_prediction_keys(tmp_path, monkeypatch) -> None:
-    dates = pd.date_range("2024-01-02", periods=16, freq="B")
+def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
+    tmp_path, monkeypatch
+) -> None:
+    dates = mcal.get_calendar("NYSE").valid_days("2024-01-02", "2024-02-15")[:20]
+    dates = dates.tz_localize(None)
     dataset = pd.DataFrame(
         [
             {
@@ -115,6 +119,8 @@ def test_darts_runner_persists_state_with_exact_prediction_keys(tmp_path, monkey
             for day, timestamp in enumerate(dates)
         ]
     )
+    missing_date = dates[12]
+    dataset = dataset.loc[dataset["timestamp"] != missing_date].reset_index(drop=True)
 
     def attach_base_target(frame, _case_study, _date_col):
         return frame.assign(**{BASE_TARGET_COL: np.log1p(frame["fwd_ret_1d"] / 10)})
@@ -175,6 +181,10 @@ def test_darts_runner_persists_state_with_exact_prediction_keys(tmp_path, monkey
     predictions = result["all_predictions"].rename({"fold_id": "fold"})
 
     assert evaluate_prediction_coverage(expected, predictions).complete
+    observed_dates = set(expected["timestamp"].dt.date().to_list())
+    assert missing_date.date() not in observed_dates
+    assert not {date.date() for date in dates[13:16]} & observed_dates
+    assert {date.date() for date in dates[16:]} <= observed_dates
     assert (
         len(
             validate_darts_checkpoint_population(
