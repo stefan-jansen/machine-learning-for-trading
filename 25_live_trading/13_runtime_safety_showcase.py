@@ -63,8 +63,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
 import tempfile
 import time
 import warnings
@@ -660,79 +658,11 @@ health_timeline
 # `feed_silent` triggers a different response than `broker_disconnected` even though both
 # look like "data stopped" from inside the strategy loop.
 
-# %% [markdown]
-# ## 5. Operator-Facing Surface: `ml4t-live status`
-#
-# The CLI (`ml4t-live status`, `preflight`, `shadow`) reads the persisted state file and
-# reports the kill-switch latch, daily-loss counter, persisted positions, persisted pending
-# orders, and any configured broker probe results out of process. It is the component that
-# lets an operator inspect the engine's runtime trust state when the engine itself is
-# unreachable, hung, or restarting.
-#
-# The subprocess creates its event loop before importing the CLI. Python 3.14 no longer
-# creates one implicitly, while the current IB adapter dependency still expects one during
-# import.
-
 # %%
-cli_state = _temp_state_path("nb13_cli_")
-demo_state = RiskState(
-    date=datetime.now(UTC).date().isoformat(),
-    daily_loss=350.0,
-    kill_switch_activated=True,
-    kill_switch_reason="Demo: see notebook §2",
-    persisted_positions={"DEMO": 10.0},
-)
-cli_state.write_text(json.dumps(demo_state.to_dict(), indent=2))
-cli_state.chmod(0o600)
-
-cli_env = os.environ.copy()
-for key in (
-    "ALPACA_API_KEY",
-    "ALPACA_SECRET_KEY",
-    "IB_ACCOUNT",
-    "IB_HOST",
-    "IB_PORT",
-):
-    cli_env.pop(key, None)
-
-result = subprocess.run(
-    [
-        sys.executable,
-        "-c",
-        (
-            "import asyncio; "
-            "asyncio.set_event_loop(asyncio.new_event_loop()); "
-            "from ml4t.live.cli.main import app; app()"
-        ),
-        "status",
-        "--state-file",
-        str(cli_state),
-    ],
-    capture_output=True,
-    text=True,
-    timeout=20,
-    check=False,
-    env=cli_env,
-)
-assert result.returncode == 0, f"stdout={result.stdout!r}; stderr={result.stderr!r}"
-print(f"exit_code: {result.returncode}")
-print(result.stdout.strip())
-if result.stderr:
-    print(f"stderr: {result.stderr.strip()[:200]}")
-
-_cleanup_state_path(cli_state)
 assert not list(STATE_DIR.iterdir()), list(STATE_DIR.iterdir())
 STATE_DIR.rmdir()
 assert not STATE_DIR.exists(), STATE_DIR
 print("Temporary state artifacts: cleaned")
-
-# %% [markdown]
-# **Finding**: the CLI output mirrors the in-process `_state` view but is reachable from a
-# shell, a supervisor process, or a deployment audit tool. It does not depend on the engine
-# being alive.
-#
-# **Trading implication**: a kill-switch latch readable only from the engine that latched it
-# is not actually a kill switch. The CLI closes that loop.
 
 # %% [markdown]
 # ## Key Takeaways
@@ -746,8 +676,6 @@ print("Temporary state artifacts: cleaned")
 #    against a non-clean report.
 # 4. **Engine health states** reduce the runtime to a small operator-facing vocabulary that a
 #    supervisor process can consume directly.
-# 5. **The CLI** makes the persisted state inspectable out of process, which is the only way
-#    a kill-switch latch is meaningful when the engine itself is unreachable.
 #
 # **Next**: NB10 covers the configurable risk surface; NB12 shows the same controls in a live
 # IB paper basket-rebalance setting; §25.7 ties the abstract pre-flight requirements to the
