@@ -342,6 +342,14 @@ def _validate_fitted_state(model_dir: Path, context: LinearContext) -> None:
         raise ValueError(f"fitted-state manifest does not match resolved folds: {model_dir}")
     if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
         raise ValueError(f"fitted-state digest mismatch: {model_dir}")
+    prediction_record = record.get("predictions") or {}
+    prediction_path = model_dir / str(prediction_record.get("name", ""))
+    if (
+        prediction_record.get("name") != "validation_predictions.parquet"
+        or not prediction_path.is_file()
+        or _sha256(prediction_path) != prediction_record.get("sha256")
+    ):
+        raise ValueError(f"fitted-state prediction frame mismatch: {model_dir}")
 
 
 def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) -> np.ndarray:
@@ -375,18 +383,16 @@ def _prediction_frame(
 
 def _predict_from_fitted_state(model_dir: Path, context: LinearContext) -> pl.DataFrame:
     _validate_fitted_state(model_dir, context)
-    frames = []
-    for fold in context.folds:
-        fold_id = int(fold["fold"])
-        payload = joblib.load(model_dir / f"fold_{fold_id}.joblib")
-        if tuple(payload.get("feature_names") or ()) != context.feature_names:
-            raise ValueError(f"fitted-state feature surface mismatch in fold {fold_id}")
-        if "model" not in payload or "preprocessor" not in payload:
-            raise ValueError(f"incomplete fitted-state payload in fold {fold_id}")
-        frames.append(
-            _prediction_frame(fold, _fold_predictions(payload["model"], fold, context), context)
-        )
-    return pl.concat(frames).sort("symbol", "timestamp", "fold")
+    predictions = pl.read_parquet(model_dir / "validation_predictions.parquet")
+    required = {"symbol", "timestamp", "fold", "prediction", "actual"}
+    if not required <= set(predictions.columns):
+        raise ValueError("fitted-state prediction frame is missing required columns")
+    keys = predictions.select("symbol", "timestamp", "fold")
+    if keys.height != context.expected_keys.height or value_digest(
+        keys, ("symbol", "timestamp", "fold")
+    ) != value_digest(context.expected_keys, ("symbol", "timestamp", "fold")):
+        raise ValueError("fitted-state prediction frame does not match expected coverage")
+    return predictions.sort("symbol", "timestamp", "fold")
 
 
 def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
@@ -419,10 +425,25 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
         )
         files[artifact.name] = _sha256(artifact)
         prediction_frames.append(_prediction_frame(fold, predictions, context))
+    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    prediction_path = staging / "validation_predictions.parquet"
+    predictions.write_parquet(prediction_path)
     (staging / "manifest.json").write_text(
-        json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
+        json.dumps(
+            {
+                "files": files,
+                "predictions": {
+                    "name": prediction_path.name,
+                    "sha256": _sha256(prediction_path),
+                },
+                "schema_version": 1,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
     )
-    return pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    return predictions
 
 
 def run_resolved_request(

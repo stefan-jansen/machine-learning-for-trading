@@ -175,8 +175,11 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     study = _linear_study(tmp_path, monkeypatch)
     request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
     original_publish = ResultsCatalog.publish_predictions
+    attempted_predictions = None
 
     def interrupt_registration(*args, **kwargs):
+        nonlocal attempted_predictions
+        attempted_predictions = kwargs["predictions"].clone()
         raise RuntimeError("interrupted registration")
 
     monkeypatch.setattr(ResultsCatalog, "publish_predictions", interrupt_registration)
@@ -199,6 +202,8 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
 
     assert recovered.predictions[0].complete
     assert recovered.predictions[0].coverage()["n_expected"] == 12
+    assert attempted_predictions is not None
+    assert recovered.predictions[0].load().equals(attempted_predictions)
     assert fitted_digests == {
         path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
     }
