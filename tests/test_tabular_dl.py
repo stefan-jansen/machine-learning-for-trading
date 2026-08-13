@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
+import torch
 
-from case_studies.utils.tabular_dl import run_tabm_cv
+from case_studies.utils.deep_model_state import restore_deep_model
+from case_studies.utils.tabular_dl import (
+    TabMModel,
+    _predict_in_chunks,
+    run_tabm_cv,
+)
 
 
 def test_run_tabm_cv_returns_fold_metrics_after_training(tmp_path):
@@ -33,6 +39,7 @@ def test_run_tabm_cv_returns_fold_metrics_after_training(tmp_path):
         }
     ]
 
+    checkpoint_root = tmp_path / "checkpoints"
     result = run_tabm_cv(
         dataset,
         splits,
@@ -43,8 +50,34 @@ def test_run_tabm_cv_returns_fold_metrics_after_training(tmp_path):
         date_col="timestamp",
         device="cpu",
         save_dir=tmp_path,
+        checkpoint_root=checkpoint_root,
     )
 
     assert result["best_config_name"] == "tabm_test"
     assert result["fold_metrics"].height == 1
     assert result["fold_metrics"]["n_entities"].to_list() == [10]
+
+    checkpoint = checkpoint_root / "tabm_test" / "fold_00" / "epoch_0001.pt"
+    restored, preprocessing, metadata = restore_deep_model(
+        checkpoint,
+        lambda architecture, kwargs: TabMModel(**kwargs) if architecture == "tabm" else None,
+    )
+    validation = dataset[dataset["timestamp"] >= timestamps[10]].sort_values(
+        ["timestamp", "symbol"]
+    )
+    raw = validation[["feature"]].to_numpy(dtype=np.float32)
+    imputed = np.where(np.isnan(raw), preprocessing["imputer_statistics"], raw)
+    transformed = (imputed - preprocessing["scaler_mean"]) / preprocessing["scaler_scale"]
+    actual = _predict_in_chunks(restored, transformed, torch.device("cpu"))
+    expected = (
+        result["all_predictions"]
+        .filter(
+            (result["all_predictions"]["config"] == "tabm_test")
+            & (result["all_predictions"]["epoch"] == 1)
+        )
+        .sort("timestamp", "symbol")["y_score"]
+        .to_numpy()
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-7, atol=1e-8)
+    assert metadata["checkpoint_value"] == 1

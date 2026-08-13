@@ -19,6 +19,7 @@ import gc
 import os
 import time
 import warnings
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -255,6 +256,7 @@ def _train_tabm_fold(
     batch_size: int,
     checkpoint_interval: int,
     device: torch.device,
+    state_callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[dict[int, float], dict[int, np.ndarray], dict[int, float]]:
     """Train TabM on one fold, storing predictions at ALL checkpoints.
 
@@ -302,6 +304,8 @@ def _train_tabm_fold(
         # Evaluate and store predictions at checkpoint epochs
         if epoch % checkpoint_interval == 0 or epoch == n_epochs:
             val_preds = _predict_in_chunks(model, X_val, device)
+            if state_callback is not None:
+                state_callback(epoch, model)
             ic_frame = pl.DataFrame(
                 {
                     "timestamp": val_dates,
@@ -790,6 +794,7 @@ def run_tabm_cv(
     num_threads: int = 8,
     input_data_spec: dict[str, Any] | None = None,
     identity_params: dict[str, Any] | None = None,
+    checkpoint_root: Path | None = None,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -1059,6 +1064,12 @@ def run_tabm_cv(
                 "val_entities": val_entities,
                 "n_train": len(X_train),
                 "n_val": len(X_val),
+                "preprocessing": {
+                    "feature_names": list(feature_names),
+                    "imputer_statistics": imputer.statistics_.astype(np.float32),
+                    "scaler_mean": scaler.mean_.astype(np.float32),
+                    "scaler_scale": scaler.scale_.astype(np.float32),
+                },
             }
         )
         print(f"  Fold {split['fold']}: train={len(X_train):,}  val={len(X_val):,}")
@@ -1205,6 +1216,37 @@ def run_tabm_cv(
                 # TabM: train to completion, store ALL checkpoint predictions
                 tabm_kwargs = {"n_features": n_features, **cfg_params}
                 model = TabMModel(**tabm_kwargs)
+                train_kwargs: dict[str, Any] = {}
+                if checkpoint_root is not None:
+                    from case_studies.utils.deep_model_state import write_deep_checkpoint
+
+                    def persist_state(
+                        epoch: int,
+                        fitted_model: nn.Module,
+                        *,
+                        _fold: int = int(fd["fold"]),
+                        _preprocessing: dict[str, Any] = fd["preprocessing"],
+                        _config_name: str = config_name,
+                        _model_kwargs: dict[str, Any] = tabm_kwargs,
+                    ) -> None:
+                        write_deep_checkpoint(
+                            checkpoint_root
+                            / _config_name
+                            / f"fold_{_fold:02d}"
+                            / f"epoch_{epoch:04d}.pt",
+                            model=fitted_model,
+                            architecture="tabm",
+                            model_kwargs=_model_kwargs,
+                            preprocessing=_preprocessing,
+                            metadata={
+                                "config_name": _config_name,
+                                "fold": _fold,
+                                "checkpoint_kind": "epoch",
+                                "checkpoint_value": epoch,
+                            },
+                        )
+
+                    train_kwargs["state_callback"] = persist_state
                 checkpoint_ics, checkpoint_preds, epoch_losses = _train_tabm_fold(
                     model=model,
                     X_train=fd["X_train"],
@@ -1218,6 +1260,7 @@ def run_tabm_cv(
                     batch_size=cfg_batch_size,
                     checkpoint_interval=cfg_checkpoint,
                     device=torch_device,
+                    **train_kwargs,
                 )
 
                 for ep, ic in checkpoint_ics.items():

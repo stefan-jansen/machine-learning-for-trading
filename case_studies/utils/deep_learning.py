@@ -203,6 +203,7 @@ def _train_one_config(
     checkpoint_callback: Callable[[dict[int, np.ndarray], np.ndarray, np.ndarray, np.ndarray], None]
     | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
+    state_callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[dict[int, float], dict[int, np.ndarray], dict[int, float]]:
     """Train a single model config, storing predictions at ALL checkpoints.
 
@@ -295,6 +296,8 @@ def _train_one_config(
             )["ic_mean"]
             checkpoint_ics[epoch] = ic
             checkpoint_preds[epoch] = val_preds.copy()
+            if state_callback is not None:
+                state_callback(epoch, model)
             if checkpoint_callback is not None:
                 checkpoint_callback(checkpoint_preds, y_val, val_dates, val_entities)
             if epoch_callback is not None:
@@ -460,6 +463,7 @@ def run_dl_cv(
     prediction_split: str = "validation",
     identity_params: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
+    checkpoint_root: Path | None = None,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -857,6 +861,48 @@ def run_dl_cv(
                 if _log_dir is not None:
                     flush_fold_training_log(_log_dir, _config_name, _fold, _epoch_rows)
 
+            train_kwargs: dict[str, Any] = {}
+            if checkpoint_root is not None:
+                from case_studies.utils.deep_model_state import write_deep_checkpoint
+
+                if train_store.feature_mean is None or train_store.feature_scale is None:
+                    raise ValueError("sequence fold has no fitted preprocessing state")
+                preprocessing = {
+                    "feature_names": list(feature_names),
+                    "mean": train_store.feature_mean.copy(),
+                    "scale": train_store.feature_scale.copy(),
+                    "lookback": int(lookback),
+                }
+
+                def persist_state(
+                    epoch: int,
+                    fitted_model: nn.Module,
+                    *,
+                    _fold: int = int(split["fold"]),
+                    _config_name: str = config_name,
+                    _architecture: str = arch_name,
+                    _model_kwargs: dict[str, Any] = arch_kwargs,
+                    _preprocessing: dict[str, Any] = preprocessing,
+                ) -> None:
+                    write_deep_checkpoint(
+                        checkpoint_root
+                        / _config_name
+                        / f"fold_{_fold:02d}"
+                        / f"epoch_{epoch:04d}.pt",
+                        model=fitted_model,
+                        architecture=_architecture,
+                        model_kwargs=_model_kwargs,
+                        preprocessing=_preprocessing,
+                        metadata={
+                            "config_name": _config_name,
+                            "fold": _fold,
+                            "checkpoint_kind": "epoch",
+                            "checkpoint_value": epoch,
+                        },
+                    )
+
+                train_kwargs["state_callback"] = persist_state
+
             checkpoint_ics, checkpoint_preds, epoch_losses = _train_one_config(
                 model=model,
                 train_loader=train_loader,
@@ -866,6 +912,7 @@ def run_dl_cv(
                 device=torch_device,
                 checkpoint_callback=_on_checkpoint,
                 epoch_callback=_on_epoch,
+                **train_kwargs,
             )
 
             elapsed = time.perf_counter() - t0

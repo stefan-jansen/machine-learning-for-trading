@@ -133,6 +133,28 @@ def test_val_sequence_count_matches_val_calendar_days():
     )
 
 
+def test_sequence_store_carries_fitted_training_preprocessing():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df()
+    train_store, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=20,
+        val_start=val_start_ts,
+    )
+
+    assert train_store.feature_mean is not None
+    assert train_store.feature_scale is not None
+    np.testing.assert_array_equal(val_store.feature_mean, train_store.feature_mean)
+    np.testing.assert_array_equal(val_store.feature_scale, train_store.feature_scale)
+
+
 def test_val_sequence_targets_never_include_train_period():
     """No val sequence should have a target timestamp < val_start.
 

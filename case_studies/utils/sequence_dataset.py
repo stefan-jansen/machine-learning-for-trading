@@ -26,6 +26,8 @@ class SequenceStore:
     symbol_idx: np.ndarray
     end_idx: np.ndarray
     lookback: int
+    feature_mean: np.ndarray | None = None
+    feature_scale: np.ndarray | None = None
 
     @property
     def n_sequences(self) -> int:
@@ -591,6 +593,8 @@ def prepare_fold_sequence_stores(
         symbol_idx=train_symbol_idx,
         end_idx=train_end_idx,
         lookback=lookback,
+        feature_mean=means.copy(),
+        feature_scale=stds.copy(),
     )
     val_store = SequenceStore(
         features=val_features,
@@ -600,6 +604,8 @@ def prepare_fold_sequence_stores(
         symbol_idx=val_symbol_idx,
         end_idx=val_end_idx,
         lookback=lookback,
+        feature_mean=means.copy(),
+        feature_scale=stds.copy(),
     )
 
     return (
