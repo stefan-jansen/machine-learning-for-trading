@@ -77,9 +77,24 @@ study = Study.open(CASE_STUDY_ID)
 prediction_set = CandidateSet.open(study, PREDICTION_SET_HASH)
 diagnostic_set = CandidateSet.open(study, DIAGNOSTIC_SET_HASH)
 
+IDENTITY_PROTOCOL_FIELDS = {"label_artifact", "feature_artifacts", "cv"}
 for declared_set in (prediction_set, diagnostic_set):
     if declared_set.member_kind != "prediction":
         raise ValueError(f"{declared_set.hash} contains {declared_set.member_kind} results")
+    comparable_fields = set(declared_set.comparison_contract.get("comparable_fields", ()))
+    variable_identity_fields = IDENTITY_PROTOCOL_FIELDS & comparable_fields
+    if variable_identity_fields:
+        raise ValueError(
+            f"{declared_set.hash} varies identity fields {sorted(variable_identity_fields)}"
+        )
+    declared_protocol = declared_set.comparison_contract.get("protocol", {})
+    missing_identity_fields = {
+        field for field in IDENTITY_PROTOCOL_FIELDS if not declared_protocol.get(field)
+    }
+    if missing_identity_fields:
+        raise ValueError(
+            f"{declared_set.hash} lacks identity fields {sorted(missing_identity_fields)}"
+        )
 
 if not set(diagnostic_set.members) <= set(prediction_set.members):
     raise ValueError("diagnostic results must be members of the full prediction set")
