@@ -1238,11 +1238,43 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
+def thin_rebalance_schedule(
+    schedule: pl.Series,
+    *,
+    cadence: str,
+    step: int,
+    calendar: str = "NYSE",
+) -> pl.Series:
+    """Apply a non-overlapping step, resetting intraday equity schedules each session."""
+    if step <= 1 or schedule.len() <= 1:
+        return schedule
+    intraday_equity = cadence in {
+        "1_minute",
+        "15_minute",
+        "30_minute",
+        "1_hour",
+        "2_hour",
+        "4_hour",
+    } and calendar.upper() in {"NYSE", "NASDAQ"}
+    if not intraday_equity:
+        return schedule.gather_every(step)
+    timestamp = schedule.name or "timestamp"
+    return (
+        pl.DataFrame({timestamp: schedule})
+        .with_columns(pl.col(timestamp).dt.date().alias("_session"))
+        .group_by("_session", maintain_order=True)
+        .agg(pl.col(timestamp).gather_every(step))
+        .explode(timestamp)
+        .sort(timestamp)[timestamp]
+    )
+
+
 def thin_to_rebalance_dates(
     predictions: pl.DataFrame,
     cadence: str = "",
     step: int = 1,
     time_col: str = "timestamp",
+    calendar: str = "NYSE",
 ) -> pl.DataFrame:
     """Thin predictions to non-overlapping rebalance dates.
 
@@ -1282,8 +1314,12 @@ def thin_to_rebalance_dates(
     schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
 
     # Step 2: Apply design-time non-overlapping step
-    if step > 1:
-        schedule_dates = schedule_dates.gather_every(step)
+    schedule_dates = thin_rebalance_schedule(
+        schedule_dates,
+        cadence=cadence,
+        step=step,
+        calendar=calendar,
+    )
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)
