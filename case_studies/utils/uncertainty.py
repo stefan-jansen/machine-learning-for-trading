@@ -42,7 +42,7 @@ import warnings
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 import polars as pl
@@ -122,6 +122,11 @@ def resolve_block_length(
 
     if rebalance_step and rebalance_step > 0:
         return max(rebalance_step, floor)
+
+    scale = float(np.std(returns))
+    scale_floor = np.finfo(float).eps * max(1.0, abs(float(np.mean(returns))))
+    if returns.size >= 10 and scale <= scale_floor:
+        return max(int(returns.size ** (1 / 3)), floor, 1)
 
     from ml4t.diagnostic.evaluation.stats import _optimal_block_size
 
@@ -232,16 +237,22 @@ def _sharpe_se_lo(returns: np.ndarray, periods_per_year: int) -> float:
         return float("nan")
     mu = float(np.mean(returns))
     sd = float(np.std(returns, ddof=1))
-    if sd == 0:
+    scale_floor = np.finfo(float).eps * max(1.0, abs(mu))
+    if sd <= scale_floor:
         return float("nan")
     sr = mu / sd  # native frequency
     centered = returns - mu
     m2 = float(np.mean(centered**2))
-    if m2 == 0:
+    if m2 <= scale_floor**2:
         return float("nan")
     skew = float(np.mean(centered**3) / m2**1.5)
     kurt = float(np.mean(centered**4) / m2**2)  # Pearson convention (normal=3)
-    rho = float(np.corrcoef(returns[:-1], returns[1:])[0, 1])
+    previous = returns[:-1]
+    following = returns[1:]
+    if float(np.std(previous)) == 0.0 or float(np.std(following)) == 0.0:
+        rho = 0.0
+    else:
+        rho = float(np.corrcoef(previous, following)[0, 1])
     if not np.isfinite(rho) or abs(rho) >= 0.999:
         rho = 0.0
     var = compute_sharpe_variance(
@@ -277,21 +288,16 @@ def _stationary_bootstrap_metrics(
     max_dds = np.empty(n_boot)
     calmars = np.empty(n_boot)
 
-    np_state = np.random.get_state()
-    np.random.seed(int(rng.integers(0, 2**31 - 1)))
-    try:
-        for i in range(n_boot):
-            idx = _stationary_bootstrap_indices(len(returns), float(block_length))
-            sample = returns[idx]
-            stats = _sample_stats(sample, periods_per_year)
-            sharpes[i] = stats.sharpe
-            sortinos[i] = stats.sortino
-            ann_rets[i] = stats.ann_return
-            vols[i] = stats.volatility
-            max_dds[i] = stats.max_drawdown
-            calmars[i] = stats.calmar
-    finally:
-        np.random.set_state(np_state)
+    for i in range(n_boot):
+        idx = _stationary_bootstrap_indices(len(returns), float(block_length), rng)
+        sample = returns[idx]
+        stats = _sample_stats(sample, periods_per_year)
+        sharpes[i] = stats.sharpe
+        sortinos[i] = stats.sortino
+        ann_rets[i] = stats.ann_return
+        vols[i] = stats.volatility
+        max_dds[i] = stats.max_drawdown
+        calmars[i] = stats.calmar
 
     return {
         "sharpe": sharpes,
@@ -458,25 +464,18 @@ def compute_paired_uncertainty(
     irs = np.empty(n_boot)
     wins = 0
 
-    np_state = np.random.get_state()
-    np.random.seed(int(rng.integers(0, 2**31 - 1)))
-    try:
-        for i in range(n_boot):
-            idx = _stationary_bootstrap_indices(c.size, float(block))
-            cs = _sample_stats(c[idx], periods_per_year)
-            bs = _sample_stats(b[idx], periods_per_year)
-            sharpe_diffs[i] = cs.sharpe - bs.sharpe
-            ret_diffs[i] = cs.ann_return - bs.ann_return
-            max_dd_diffs[i] = cs.max_drawdown - bs.max_drawdown
-            d = c[idx] - b[idx]
-            sd = float(np.std(d, ddof=1))
-            irs[i] = (
-                float(np.mean(d) / sd * np.sqrt(periods_per_year)) if sd > 1e-6 else float("nan")
-            )
-            if cs.sharpe > bs.sharpe:
-                wins += 1
-    finally:
-        np.random.set_state(np_state)
+    for i in range(n_boot):
+        idx = _stationary_bootstrap_indices(c.size, float(block), rng)
+        cs = _sample_stats(c[idx], periods_per_year)
+        bs = _sample_stats(b[idx], periods_per_year)
+        sharpe_diffs[i] = cs.sharpe - bs.sharpe
+        ret_diffs[i] = cs.ann_return - bs.ann_return
+        max_dd_diffs[i] = cs.max_drawdown - bs.max_drawdown
+        d = c[idx] - b[idx]
+        sd = float(np.std(d, ddof=1))
+        irs[i] = float(np.mean(d) / sd * np.sqrt(periods_per_year)) if sd > 1e-6 else float("nan")
+        if cs.sharpe > bs.sharpe:
+            wins += 1
 
     sd_lo, sd_hi = _percentile_ci(sharpe_diffs)
     rd_lo, rd_hi = _percentile_ci(ret_diffs)
@@ -559,22 +558,17 @@ def compute_independent_diff_uncertainty(
     mdds_c = np.empty(n_boot)
     mdds_b = np.empty(n_boot)
 
-    np_state = np.random.get_state()
-    np.random.seed(int(rng.integers(0, 2**31 - 1)))
-    try:
-        for i in range(n_boot):
-            idx_c = _stationary_bootstrap_indices(c.size, float(block_c))
-            idx_b = _stationary_bootstrap_indices(b.size, float(block_b))
-            cs = _sample_stats(c[idx_c], periods_per_year)
-            bs = _sample_stats(b[idx_b], periods_per_year)
-            sharpes_c[i] = cs.sharpe
-            sharpes_b[i] = bs.sharpe
-            rets_c[i] = cs.ann_return
-            rets_b[i] = bs.ann_return
-            mdds_c[i] = cs.max_drawdown
-            mdds_b[i] = bs.max_drawdown
-    finally:
-        np.random.set_state(np_state)
+    for i in range(n_boot):
+        idx_c = _stationary_bootstrap_indices(c.size, float(block_c), rng)
+        idx_b = _stationary_bootstrap_indices(b.size, float(block_b), rng)
+        cs = _sample_stats(c[idx_c], periods_per_year)
+        bs = _sample_stats(b[idx_b], periods_per_year)
+        sharpes_c[i] = cs.sharpe
+        sharpes_b[i] = bs.sharpe
+        rets_c[i] = cs.ann_return
+        rets_b[i] = bs.ann_return
+        mdds_c[i] = cs.max_drawdown
+        mdds_b[i] = bs.max_drawdown
 
     sharpe_diffs = sharpes_c - sharpes_b
     ret_diffs = rets_c - rets_b
@@ -667,7 +661,7 @@ def compute_selection_adjustment(
     names = list(arrays.keys())
     arr_list = [arrays[n] for n in names]
     sharpes = {n: _sample_stats(arrays[n], periods_per_year).sharpe for n in names}
-    leader = max(sharpes, key=sharpes.get)
+    leader = max(sharpes, key=lambda name: sharpes[name])
 
     out: dict[str, Any] = {
         "leader": leader,
@@ -702,12 +696,12 @@ def compute_selection_adjustment(
 
 def compute_reality_check(
     challenger_returns: dict[str, np.ndarray | pl.Series],
-    benchmark_returns: np.ndarray | pl.Series,
+    benchmark_returns: np.ndarray | pl.Series | pl.DataFrame,
     *,
     block_size: int | None = None,
     n_bootstrap: int = 2000,
     seed: int = 0,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """White's reality check: do any of K challengers beat the benchmark?
 
     Returns ``{p_value, test_statistic, best_strategy, k_strategies}``.
@@ -888,7 +882,7 @@ def _align_variants_on_timestamp(
 def compute_cohort_metrics(
     returns_by_hash: dict[str, pl.DataFrame],
     *,
-    periods_per_year: float,
+    periods_per_year: int,
     baseline_returns: pl.DataFrame | np.ndarray | None = None,
     fold_returns_by_hash: dict[str, np.ndarray] | None = None,
     rademacher_n_simulations: int = 2000,
@@ -942,6 +936,7 @@ def compute_cohort_metrics(
         variants must share fold cardinality. Skipped if not provided.
     """
     from ml4t.diagnostic.evaluation.stats import (
+        RASResult,
         compute_min_trl,
         deflated_sharpe_ratio,
         effective_number_of_trials,
@@ -1005,14 +1000,22 @@ def compute_cohort_metrics(
 
     # DSR — raw, MP, ER (three calls; library handles K correctly per method)
     arr_list = [matrix[:, i] for i in range(k_variants)]
-    for suffix, kwargs in (
-        ("raw", {}),
-        ("mp", {"correlation_method": "marchenko_pastur"}),
-        ("er", {"correlation_method": "effective_rank"}),
-    ):
+    methods: tuple[
+        tuple[str, Literal["marchenko_pastur", "effective_rank"] | None],
+        ...,
+    ] = (
+        ("raw", None),
+        ("mp", "marchenko_pastur"),
+        ("er", "effective_rank"),
+    )
+    for suffix, method in methods:
         try:
-            if "correlation_method" in kwargs:
-                dsr = deflated_sharpe_ratio(matrix, periods_per_year=periods_per_year, **kwargs)
+            if method is not None:
+                dsr = deflated_sharpe_ratio(
+                    matrix,
+                    periods_per_year=periods_per_year,
+                    correlation_method=method,
+                )
             else:
                 dsr = deflated_sharpe_ratio(arr_list, periods_per_year=periods_per_year)
             out[f"dsr_{suffix}"] = float(dsr.deflated_sharpe)
@@ -1034,12 +1037,15 @@ def compute_cohort_metrics(
             random_state=rademacher_seed,
         )
         annualized_sharpes = sharpes  # already annualized
-        ras_result = ras_sharpe_adjustment(
-            annualized_sharpes,
-            complexity=complexity,
-            n_samples=n_periods,
-            n_strategies=k_variants,
-            return_result=True,
+        ras_result = cast(
+            RASResult,
+            ras_sharpe_adjustment(
+                annualized_sharpes,
+                complexity=complexity,
+                n_samples=n_periods,
+                n_strategies=k_variants,
+                return_result=True,
+            ),
         )
         out["ras_complexity"] = float(complexity)
         out["ras_n_strategies"] = float(k_variants)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -712,6 +713,71 @@ def test_latent_registration_builds_complete_training_identity(
     assert spec["checkpoint_epochs"] == [5]
     assert spec["params"]["input_digest"] == "input-a"
     assert captured["checkpoints"] == [5]
+
+
+def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils.latent_factors import cv
+
+    dates = pl.date_range(datetime(2020, 1, 1), datetime(2020, 1, 20), "1d", eager=True)
+    rows = [
+        {
+            "timestamp": timestamp,
+            "symbol": f"S{symbol}",
+            "value": float(symbol + date_index / 100),
+            "return": float(symbol + date_index / 100),
+        }
+        for date_index, timestamp in enumerate(dates)
+        for symbol in range(6)
+    ]
+    dataset = pl.DataFrame(rows)
+    split = {
+        "fold": 0,
+        "train_start": dates[0],
+        "train_end": dates[14],
+        "val_start": dates[15],
+        "val_end": dates[19],
+    }
+
+    def fake_cae(chars_train, returns_train, chars_val, returns_val, **_kwargs):
+        del chars_train, returns_train, returns_val
+        physical = chars_val[..., 0]
+        return {0: physical - 1.0, 5: physical}, {"checkpoint_epochs": [0, 5]}
+
+    monkeypatch.setitem(cv._MODEL_RUNNERS, "cae", fake_cae)
+    kwargs = {
+        "panel_data": None,
+        "splits": [split],
+        "models": ["cae"],
+        "n_factors": 1,
+        "n_epochs": 5,
+        "model_kwargs": {"cae": {"checkpoint_interval": 5}},
+        "save_dir": tmp_path / "legacy-cache",
+        "dataset": dataset,
+        "feature_names": ["value"],
+        "label_col": "return",
+        "device": "cpu",
+        "num_threads": 1,
+    }
+
+    fresh = cv.run_latent_factor_cv(**kwargs, use_cache=False)
+    cached = cv.run_latent_factor_cv(**kwargs, use_cache=True)
+
+    fresh_predictions = fresh["all_predictions"]["cae"].sort(
+        "epoch", "fold_id", "timestamp", "symbol"
+    )
+    cached_predictions = cached["all_predictions"]["cae"].sort(
+        "epoch", "fold_id", "timestamp", "symbol"
+    )
+    fresh_metrics = fresh["fold_metrics"]["cae"].sort("epoch", "fold_id")
+    cached_metrics = cached["fold_metrics"]["cae"].sort("epoch", "fold_id")
+
+    assert fresh_predictions.get_column("epoch").unique().to_list() == [5]
+    assert fresh_metrics.get_column("epoch").unique().to_list() == [5]
+    assert fresh_predictions.equals(cached_predictions)
+    assert fresh_metrics.equals(cached_metrics)
 
 
 @pytest.mark.gpu

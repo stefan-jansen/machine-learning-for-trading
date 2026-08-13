@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -42,6 +43,7 @@ def run_sdf_fold(
     log_fn=print,
     seed: int = 42,
     device: str = "cpu",
+    artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     """Train the SDF network and emit checkpoint predictions."""
     del n_factors, log_fn
@@ -73,4 +75,5 @@ def run_sdf_fold(
         weight_decay=weight_decay,
         seed=seed,
         device=device,
+        artifact_dir=artifact_dir,
     )

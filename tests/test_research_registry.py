@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CandidateSet, Result, Study
+from case_studies.research import CandidateSet, PredictionResult, Result, Study
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     prediction_hash_from_parts,
@@ -114,6 +114,7 @@ def test_legacy_result_reopens_without_being_inferred_complete(tmp_path: Path) -
 
     reopened = Result.open(study, "legacy-prediction")
 
+    assert isinstance(reopened, PredictionResult)
     assert reopened.hash == "legacy-prediction"
     assert reopened.identity_version is None
     assert not reopened.complete
@@ -321,6 +322,7 @@ def test_checkpoint_prediction_schema_must_match(tmp_path: Path) -> None:
 
 def test_preview_requires_identity_covered_reductions(tmp_path: Path) -> None:
     study = _study(tmp_path)
+    assert study.output_root is not None
 
     with pytest.raises(ValueError, match="identity-cover"):
         study.results.register_training(

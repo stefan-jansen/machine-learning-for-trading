@@ -28,7 +28,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -123,6 +123,7 @@ class ModelingDataset:
     temporal_by_fold: pd.DataFrame | None = None  # Per-fold temporal features (has 'fold' column)
     temporal_keys: list[str] = field(default_factory=list)  # Join keys for temporal features
     temporal_feature_names: list[str] = field(default_factory=list)  # Temporal feature column names
+    temporal_artifact_splits: list[dict[str, Any]] = field(default_factory=list)
     # Continuous-return label that classification predictions are scored against.
     # None for regression labels. When set, the column lives in ``dataset`` and
     # downstream IC computation must use it instead of the binary ``label_col``.
@@ -498,7 +499,10 @@ def verify_artifact_sidecars(
             if rows is None:
                 continue
             try:
-                actual_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+                actual_rows = cast(
+                    pl.DataFrame,
+                    pl.scan_parquet(path).select(pl.len()).collect(),
+                ).item()
             except (OSError, pl.exceptions.PolarsError) as exc:
                 problems.append(f"{name}: {path.name} unreadable ({exc})")
                 continue
@@ -716,7 +720,9 @@ def load_modeling_dataset(
         outcome_horizon=resolve_label_horizon(case_study_id, primary_label, setup),
         date_col=date_col,
     )
+    temporal_artifact_splits: list[dict[str, Any]] = []
     if temporal_by_fold_pd is not None:
+        assert temporal is not None
         validate_temporal_fold_coverage(
             dataset,
             temporal,
@@ -735,9 +741,16 @@ def load_modeling_dataset(
         from case_studies.utils.cv_window import (
             assert_variant_folds_are_out_of_sample,
             configured_labels,
+            temporal_artifact_fold_boundaries,
         )
 
         configured = configured_labels(case_study_id)
+        artifact_label = configured[0] if configured else primary_label
+        temporal_artifact_splits = temporal_artifact_fold_boundaries(
+            case_study_id,
+            artifact_label,
+            temporal_path,
+        )
         if configured and primary_label != configured[0]:
             assert_variant_folds_are_out_of_sample(
                 case_study_id, configured[0], variants=[primary_label]
@@ -826,6 +839,7 @@ def load_modeling_dataset(
         temporal_by_fold=temporal_by_fold_pd,
         temporal_keys=_temporal_keys,
         temporal_feature_names=_temporal_feature_names,
+        temporal_artifact_splits=temporal_artifact_splits,
         eval_label_col=eval_label_col,
         lineage_inputs={
             "artifacts": input_artifacts,
@@ -1380,6 +1394,9 @@ def prepare_cv_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
@@ -1540,6 +1557,9 @@ def prepare_single_fold(
 
         # Replace temporal columns with fold-specific values if available
         if _has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             fold_temp_pd = temporal_by_fold[temporal_by_fold["fold"] == fold_id].drop(
                 columns=["fold"]
             )
@@ -1583,6 +1603,9 @@ def prepare_single_fold(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if _has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             train_rows = replace_temporal_columns(
                 dataset,
                 train_mask,

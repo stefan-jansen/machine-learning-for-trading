@@ -218,12 +218,13 @@ def test_an_unpopulated_non_worktree_keeps_the_repo_default(clean_env, tmp_path)
     assert os.environ["ML4T_DATA_PATH"] == str(tmp_path / "data")
 
 
-def test_a_linked_worktree_falls_back_to_the_main_working_tree(clean_env):
+def test_a_linked_worktree_falls_back_to_the_main_working_tree(clean_env, monkeypatch):
     main_tree = sc._main_worktree(REPO_ROOT)
     if main_tree is None:
         pytest.skip("this checkout is the main working tree")
     if sc._has_datasets(REPO_ROOT / "data"):
         pytest.skip("this worktree has its own datasets")
+    monkeypatch.setattr(sc, "_data_root_from_dotenv", lambda _repo_root: None)
     sc._anchor_data_root(REPO_ROOT)
     assert os.environ["ML4T_DATA_PATH"] == str(main_tree / "data")
     assert os.environ["ML4T_DATA_PATH_IS_DEFAULT"] == "1"

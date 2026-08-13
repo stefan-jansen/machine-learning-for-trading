@@ -12,6 +12,7 @@ Covers two pieces P2.5 added:
 
 from __future__ import annotations
 
+import warnings
 from math import comb
 
 import numpy as np
@@ -91,7 +92,7 @@ def test_compute_cohort_metrics_populates_pbo_with_fold_returns() -> None:
 
     out = compute_cohort_metrics(
         returns_by_hash,
-        periods_per_year=252.0,
+        periods_per_year=252,
         fold_returns_by_hash=fold_returns_by_hash,
         rademacher_n_simulations=50,
         rademacher_seed=0,
@@ -108,3 +109,53 @@ def test_compute_cohort_metrics_populates_pbo_with_fold_returns() -> None:
     assert out["pbo_median_oos_rank"] is not None
     assert out["pbo_mean_degradation"] is not None
     assert out["pbo_n_folds"] == float(n_folds)
+
+
+def test_bootstrap_uncertainty_uses_seeded_generator() -> None:
+    from case_studies.utils.uncertainty import (
+        compute_backtest_uncertainty,
+        compute_independent_diff_uncertainty,
+        compute_paired_uncertainty,
+    )
+
+    rng = np.random.default_rng(17)
+    baseline = rng.normal(0.0002, 0.01, size=80)
+    challenger = baseline + rng.normal(0.0001, 0.002, size=80)
+
+    backtest = compute_backtest_uncertainty(challenger, n_boot=20, seed=41)
+    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=41)
+    independent = compute_independent_diff_uncertainty(
+        challenger,
+        baseline[:60],
+        n_boot=20,
+        seed=41,
+    )
+
+    assert backtest["bootstrap_n"] == 20.0
+    assert paired["bootstrap_n"] == 20.0
+    assert independent["bootstrap_n"] == 20.0
+    assert backtest == compute_backtest_uncertainty(challenger, n_boot=20, seed=41)
+    assert paired == compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=41)
+    repeated_independent = compute_independent_diff_uncertainty(
+        challenger,
+        baseline[:60],
+        n_boot=20,
+        seed=41,
+    )
+    assert independent.keys() == repeated_independent.keys()
+    np.testing.assert_allclose(
+        list(independent.values()),
+        list(repeated_independent.values()),
+        equal_nan=True,
+    )
+
+
+def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
+    from case_studies.utils.uncertainty import compute_backtest_uncertainty
+
+    sparse_returns = np.r_[np.zeros(70), np.ones(10) * 0.01]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = compute_backtest_uncertainty(sparse_returns, n_boot=100, seed=0)
+
+    assert result["bootstrap_n"] == 100.0

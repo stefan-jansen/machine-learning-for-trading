@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 import case_studies.utils.cv_window as cv_window
+from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.utils.cv_window import assert_variant_folds_are_out_of_sample
 
 
@@ -205,6 +206,13 @@ def _tiny_case_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, splits: li
         "_load_setup_yaml",
         lambda _cs: {"labels": {"primary": "primary", "variants": ["variant"]}},
     )
+    monkeypatch.setattr(
+        cv_window,
+        "temporal_artifact_fold_boundaries",
+        lambda case_study, primary_label, _artifact_path: cv_window.modeling_fold_boundaries(
+            case_study, primary_label
+        ),
+    )
     return modeling
 
 
@@ -234,10 +242,12 @@ def test_loading_a_variant_whose_validation_opens_inside_the_fit_is_refused(
 def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    primary_splits = _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")])
+    variant_splits = _splits([("2020-01-01", "2020-06-24", "2020-06-30", "2020-12-31")])
+    modeling = _tiny_case_study(tmp_path, monkeypatch, variant_splits)
     store = {
-        "primary": _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")]),
-        "variant": _splits([("2020-01-01", "2020-06-24", "2020-06-30", "2020-12-31")]),
+        "primary": primary_splits,
+        "variant": variant_splits,
     }
     monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
 
@@ -246,6 +256,50 @@ def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
     # The check hangs off the fold-tagged artifact, so a fixture that loaded no
     # artifact would pass this file vacuously.
     assert mds.temporal_by_fold is not None
+    assert mds.splits == variant_splits
+    assert mds.temporal_artifact_splits == cv_window.modeling_fold_boundaries("cs", "primary")
+    requested = [
+        {
+            key: value.isoformat() if hasattr(value, "isoformat") else value
+            for key, value in primary_splits[0].items()
+        }
+    ]
+    require_fold_scoped_temporal_compatibility(requested, mds.temporal_artifact_splits)
+
+
+def test_loading_preserves_intraday_temporal_artifact_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    artifact_splits = _splits(
+        [
+            (
+                "2020-01-02 09:32",
+                "2020-06-20 15:22",
+                "2020-06-25 09:31",
+                "2020-12-31 15:58",
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_window,
+        "_derive_modeling_splits",
+        lambda _cs, label: artifact_splits if label == "primary" else None,
+    )
+
+    mds = modeling.load_modeling_dataset("cs", "primary")
+    requested = [
+        {
+            key: value.isoformat() if hasattr(value, "isoformat") else value
+            for key, value in artifact_splits[0].items()
+        }
+    ]
+
+    assert mds.temporal_artifact_splits == artifact_splits
+    require_fold_scoped_temporal_compatibility(requested, mds.temporal_artifact_splits)
+    changed = [{**requested[0], "train_end": "2020-06-20T15:23:00"}]
+    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
+        require_fold_scoped_temporal_compatibility(changed, mds.temporal_artifact_splits)
 
 
 def test_loading_the_primary_label_does_not_check_itself(
@@ -265,3 +319,223 @@ def test_loading_the_primary_label_does_not_check_itself(
     monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
 
     assert modeling.load_modeling_dataset("cs", "primary").label_col == "primary"
+
+
+@pytest.mark.parametrize(
+    ("case_study", "timeline_source", "include_outcome_horizon"),
+    [
+        ("cme_futures", "primary_label", False),
+        ("crypto_perps_funding", "primary_label", True),
+        ("etfs", "primary_label", True),
+        ("fx_pairs", "primary_label", False),
+        ("nasdaq100_microstructure", "primary_label", True),
+        ("sp500_equity_option_analytics", "primary_label", True),
+        ("sp500_options", "financial", False),
+        ("us_equities_panel", "primary_label", True),
+    ],
+)
+def test_legacy_temporal_fold_routes_match_locked_stage04_producers(
+    case_study: str,
+    timeline_source: str,
+    include_outcome_horizon: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import polars as pl
+
+    import utils.artifact_specs as artifact_specs
+    import utils.cv_splits as cv_splits
+
+    case_dir = tmp_path / case_study
+    (case_dir / "features").mkdir(parents=True)
+    (case_dir / "labels").mkdir()
+    pl.DataFrame({"timestamp": [datetime(2020, 1, 2)], "feature": [1.0]}).write_parquet(
+        case_dir / "features" / "financial.parquet"
+    )
+    pl.DataFrame({"timestamp": [datetime(2020, 1, 1)], "primary": [0.1]}).write_parquet(
+        case_dir / "labels" / "primary.parquet"
+    )
+    monkeypatch.setattr(
+        cv_window,
+        "_load_setup_yaml",
+        lambda _case_study: {"labels": {"primary": "primary", "buffer": "5D"}},
+    )
+    monkeypatch.setattr(artifact_specs, "load_feature_spec", lambda *_args: {})
+    monkeypatch.setattr(artifact_specs, "load_label_spec", lambda *_args: {})
+    monkeypatch.setattr(artifact_specs, "resolve_label_buffer", lambda *_args: "5D")
+    monkeypatch.setattr(artifact_specs, "resolve_label_horizon", lambda *_args: "2D")
+    captured = {}
+    producer_folds = _splits(
+        [
+            (
+                "2020-01-02 09:32",
+                "2020-06-20 15:22",
+                "2020-06-25 09:31",
+                "2020-12-31 15:58",
+            )
+        ]
+    )
+
+    def fake_generate(timeline, **kwargs):
+        captured["timestamps"] = timeline.get_column("timestamp").to_list()
+        captured["kwargs"] = kwargs
+        return producer_folds
+
+    monkeypatch.setattr(cv_splits, "generate_cv_splits", fake_generate)
+
+    resolved = cv_window.temporal_artifact_fold_boundaries(
+        case_study,
+        "primary",
+        case_dir / "features" / "model_based.parquet",
+    )
+
+    expected_timestamp = (
+        datetime(2020, 1, 2) if timeline_source == "financial" else datetime(2020, 1, 1)
+    )
+    assert captured["timestamps"] == [expected_timestamp]
+    assert ("outcome_horizon" in captured["kwargs"]) is include_outcome_horizon
+    assert resolved == producer_folds
+
+
+def test_temporal_artifact_sidecar_fold_geometry_precedes_legacy_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from case_studies.utils.artifact_digest import sidecar_path
+
+    artifact = tmp_path / "model_based.parquet"
+    artifact.write_bytes(b"artifact")
+    folds = [
+        {
+            "fold": 0,
+            "train_start": "2020-01-02T09:32:00",
+            "train_end": "2020-06-20T15:22:00",
+            "val_start": "2020-06-25T09:31:00",
+            "val_end": "2020-12-31T15:58:00",
+        }
+    ]
+    sidecar_path(artifact).write_text(json.dumps({"fold_geometry": folds}))
+    monkeypatch.setitem(cv_window._LEGACY_TEMPORAL_FOLD_ROUTES, "unknown", None)
+
+    assert cv_window.temporal_artifact_fold_boundaries("unknown", "primary", artifact) == folds
+
+
+def _available_corpus_artifact(case_study: str) -> Path:
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = (
+        repo_root / "case_studies" / case_study / "features" / "model_based.parquet",
+        repo_root.parent
+        / "code"
+        / "case_studies"
+        / case_study
+        / "features"
+        / "model_based.parquet",
+    )
+    artifact = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if artifact is None:
+        pytest.skip(f"canonical {case_study} model-based artifact is unavailable")
+    return artifact
+
+
+def _comparable_timestamp(value) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+    return timestamp
+
+
+@pytest.mark.parametrize(
+    "case_study",
+    [
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "fx_pairs",
+        "nasdaq100_microstructure",
+        "sp500_equity_option_analytics",
+        "sp500_options",
+        "us_equities_panel",
+    ],
+)
+def test_corpus_temporal_fold_geometry_covers_resolved_validation_windows(
+    case_study: str,
+) -> None:
+    import polars as pl
+
+    artifact = _available_corpus_artifact(case_study)
+    primary_label = cv_window.configured_labels(case_study)[0]
+    resolved = cv_window.temporal_artifact_fold_boundaries(
+        case_study,
+        primary_label,
+        artifact,
+    )
+    observed = (
+        pl.scan_parquet(artifact)
+        .select("fold", "timestamp")
+        .unique()
+        .collect()
+        .partition_by("fold", as_dict=True)
+    )
+
+    for split in resolved:
+        fold_rows = observed.get((split["fold"],))
+        assert fold_rows is not None, f"{case_study} has no artifact rows for fold {split['fold']}"
+        timestamps = [_comparable_timestamp(value) for value in fold_rows["timestamp"]]
+        val_start = _comparable_timestamp(split["val_start"])
+        val_end = _comparable_timestamp(split["val_end"])
+        assert min(timestamps) <= val_start <= val_end <= max(timestamps)
+        assert any(val_start <= timestamp <= val_end for timestamp in timestamps)
+
+
+def test_sp500_options_corpus_uses_financial_timeline_geometry() -> None:
+    import polars as pl
+    import yaml
+
+    from utils.artifact_specs import resolve_label_buffer, resolve_label_horizon
+    from utils.cv_splits import generate_cv_splits
+
+    case_study = "sp500_options"
+    primary_label = "ret_to_expiry"
+    artifact = _available_corpus_artifact(case_study)
+    case_dir = artifact.parent.parent
+    repo_root = Path(__file__).resolve().parents[1]
+    setup = yaml.safe_load(
+        (repo_root / "case_studies" / case_study / "config" / "setup.yaml").read_text()
+    )
+    resolved = cv_window.temporal_artifact_fold_boundaries(
+        case_study,
+        primary_label,
+        artifact,
+    )
+    label_timeline = (
+        pl.scan_parquet(case_dir / "labels" / f"{primary_label}.parquet")
+        .select("timestamp")
+        .unique()
+        .collect()
+    )
+    label_derived = generate_cv_splits(
+        label_timeline,
+        case_study_id=case_study,
+        label_buffer=resolve_label_buffer(case_study, primary_label, setup),
+        outcome_horizon=resolve_label_horizon(case_study, primary_label, setup),
+        date_col="timestamp",
+    )
+    observed_starts = (
+        pl.scan_parquet(artifact)
+        .group_by("fold")
+        .agg(pl.col("timestamp").min().alias("timestamp"))
+        .collect()
+    )
+
+    assert any(
+        _comparable_timestamp(actual["train_start"])
+        != _comparable_timestamp(from_label["train_start"])
+        for actual, from_label in zip(resolved, label_derived, strict=True)
+    )
+    for split in resolved:
+        observed_start = observed_starts.filter(pl.col("fold") == split["fold"]).item(
+            0, "timestamp"
+        )
+        assert _comparable_timestamp(split["train_start"]) == _comparable_timestamp(observed_start)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -76,6 +77,7 @@ def run_pca_fold_with_library(
     returns_val: np.ndarray,
     *,
     n_factors: int,
+    artifact_dir: Path | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     _validate_persistent_returns(returns_train, returns_val)
     train_batch = PersistentPanelBatch(
@@ -94,6 +96,10 @@ def run_pca_fold_with_library(
     val_state = model.extract(val_batch)
     forecaster = ExpandingMeanFactorForecaster()
     forecaster.fit(train_state)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        model.save(artifact_dir / "model.ml4t")
+        forecaster.save(artifact_dir / "forecaster_0.ml4t")
     forecast = forecaster.predict(val_state)
     predictions = (
         BetaLambdaMapper().predict(val_state, forecast).expected_returns.astype(np.float32)
@@ -131,6 +137,7 @@ def run_ipca_fold_with_library(
     tol: float = 1e-6,
     factor_ridge: float = 1e-6,
     gamma_ridge: float = 1e-6,
+    artifact_dir: Path | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     train_batch = _cross_section_batch(chars_train, returns=returns_train)
     val_batch = _cross_section_batch(chars_val)
@@ -149,6 +156,10 @@ def run_ipca_fold_with_library(
     val_state = model.extract(val_batch)
     forecaster = ExpandingMeanFactorForecaster()
     forecaster.fit(train_state)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        model.save(artifact_dir / "model.ml4t")
+        forecaster.save(artifact_dir / "forecaster_0.ml4t")
     forecast = forecaster.predict(val_state)
     predictions = (
         BetaLambdaMapper().predict(val_state, forecast).expected_returns.astype(np.float32)
@@ -193,6 +204,7 @@ def run_cae_fold_with_library(
     task_type: TaskType = "regression",
     seed: int = 42,
     device: str = "cpu",
+    artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     train_batch = _cross_section_batch(
         chars_train,
@@ -223,6 +235,7 @@ def run_cae_fold_with_library(
         val_batch=val_batch,
         returns_val=returns_val,
         task_type=task_type,
+        artifact_dir=artifact_dir,
     )
     extras["factor_source"] = (
         "continuous_returns" if factor_returns_train is not None else "label_column"
@@ -252,6 +265,7 @@ def run_sae_fold_with_library(
     task_type: TaskType = "regression",
     seed: int = 42,
     device: str = "cpu",
+    artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
     train_batch = _cross_section_batch(
         chars_train,
@@ -284,6 +298,7 @@ def run_sae_fold_with_library(
         val_batch=val_batch,
         returns_val=returns_val,
         task_type=task_type,
+        artifact_dir=artifact_dir,
     )
     return extras.pop("checkpoint_predictions"), extras
 
@@ -317,7 +332,10 @@ def run_sdf_fold_with_library(
     weight_decay: float = 0.0,
     seed: int = 42,
     device: str = "cpu",
+    artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    if expected_return_mapper != "linear":
+        raise ValueError("SDF expected_return_mapper currently supports only 'linear'")
     train_batch = _cross_section_batch(
         chars_train,
         returns=returns_train,
@@ -327,7 +345,6 @@ def run_sdf_fold_with_library(
 
     model = StochasticDiscountFactorModel(
         StochasticDiscountFactorConfig(
-            output_mode="weights",
             state_dim_sdf=state_dim_sdf,
             state_dim_moment=state_dim_moment,
             hidden_dim=hidden_dim,
@@ -342,7 +359,6 @@ def run_sdf_fold_with_library(
             beta_checkpoint_interval=beta_checkpoint_interval,
             beta_checkpoint_epochs=tuple(beta_checkpoint_epochs or ()),
             beta_default_checkpoint=beta_default_checkpoint,
-            expected_return_mapper=expected_return_mapper,
             burn_in_epochs=burn_in_epochs,
             lr=lr,
             weight_decay=weight_decay,
@@ -351,6 +367,9 @@ def run_sdf_fold_with_library(
         )
     )
     fit = model.fit(train_batch, validation_batch=val_batch)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        model.save(artifact_dir / "model.ml4t")
 
     checkpoint_predictions: dict[int, np.ndarray] = {}
     checkpoint_metrics: dict[str, dict[str, float | int | None]] = {}
@@ -368,11 +387,15 @@ def run_sdf_fold_with_library(
             beta_fit = beta_head.fit(train_state, train_batch)
             predictions = beta_head.predict(val_batch).signal_values.astype(np.float32)
             beta_head_epochs[str(checkpoint_label)] = beta_fit.best_epoch
+            if artifact_dir is not None:
+                beta_head.save(artifact_dir / f"beta_head_{checkpoint_label}.ml4t")
         elif output_mode == "expected_returns":
             mapper = LinearStochasticDiscountFactorReturnMapper()
             mapper.fit(train_state, train_batch)
             predictions = mapper.predict(val_state).expected_returns.astype(np.float32)
             beta_head_epochs[str(checkpoint_label)] = None
+            if artifact_dir is not None:
+                mapper.save(artifact_dir / f"return_mapper_{checkpoint_label}.ml4t")
         else:
             raise ValueError(f"Unsupported output_mode: {output_mode!r}")
         predictions[~np.isfinite(returns_val)] = np.nan
@@ -406,6 +429,143 @@ def run_sdf_fold_with_library(
     return checkpoint_predictions, extras
 
 
+def predict_latent_fold_from_artifact(
+    model_name: str,
+    *,
+    artifact_dir: Path,
+    chars_train: np.ndarray,
+    returns_train: np.ndarray,
+    chars_val: np.ndarray,
+    returns_val: np.ndarray,
+    factor_returns_train: np.ndarray | None = None,
+    macro_train: np.ndarray | None = None,
+    macro_val: np.ndarray | None = None,
+    output_mode: str = "beta_network",
+    device: str = "cpu",
+) -> dict[int, np.ndarray]:
+    """Reconstruct one fold's predictions from persisted fitted state."""
+    model_path = artifact_dir / "model.ml4t"
+    if not model_path.is_file():
+        raise FileNotFoundError(model_path)
+    if model_name == "pca":
+        model = PCAModel.load(model_path, device=device)
+        train_batch = PersistentPanelBatch(
+            returns=returns_train,
+            timestamps=tuple(range(returns_train.shape[0])),
+            asset_ids=_asset_ids(returns_train.shape[1]),
+        )
+        val_batch = PersistentPanelBatch(
+            timestamps=tuple(range(returns_val.shape[0])),
+            asset_ids=_asset_ids(returns_val.shape[1]),
+        )
+        train_state = model.extract(train_batch)
+        val_state = model.extract(val_batch)
+        forecaster = ExpandingMeanFactorForecaster.load(
+            artifact_dir / "forecaster_0.ml4t",
+            device=device,
+        )
+        predictions = (
+            BetaLambdaMapper()
+            .predict(
+                val_state,
+                forecaster.predict(val_state),
+            )
+            .expected_returns.astype(np.float32)
+        )
+        predictions[~np.isfinite(returns_val)] = np.nan
+        return {0: predictions}
+
+    train_batch = _cross_section_batch(
+        chars_train,
+        returns=returns_train,
+        factor_returns=factor_returns_train,
+        context_features=macro_train,
+    )
+    val_batch = _cross_section_batch(
+        chars_val,
+        returns=returns_val,
+        context_features=macro_val,
+    )
+    if model_name == "ipca":
+        model = IPCAModel.load(model_path, device=device)
+        train_state = model.extract(train_batch)
+        val_state = model.extract(val_batch)
+        forecaster = ExpandingMeanFactorForecaster.load(
+            artifact_dir / "forecaster_0.ml4t",
+            device=device,
+        )
+        predictions = (
+            BetaLambdaMapper()
+            .predict(
+                val_state,
+                forecaster.predict(val_state),
+            )
+            .expected_returns.astype(np.float32)
+        )
+        predictions[~np.isfinite(returns_val)] = np.nan
+        return {0: predictions}
+    if model_name == "cae":
+        model = CAEModel.load(model_path, device=device)
+        checkpoint_predictions: dict[int, np.ndarray] = {}
+        for epoch in model.available_checkpoints:
+            val_state = model.extract(val_batch, checkpoint=epoch)
+            forecaster = ExpandingMeanFactorForecaster.load(
+                artifact_dir / f"forecaster_{int(epoch)}.ml4t",
+                device=device,
+            )
+            predictions = (
+                BetaLambdaMapper()
+                .predict(
+                    val_state,
+                    forecaster.predict(val_state),
+                )
+                .expected_returns.astype(np.float32)
+            )
+            if model.config.task_type == "classification":
+                predictions = _sigmoid(predictions).astype(np.float32)
+            predictions[~np.isfinite(returns_val)] = np.nan
+            checkpoint_predictions[int(epoch)] = predictions
+        return checkpoint_predictions
+    if model_name == "sae":
+        model = SAEModel.load(model_path, device=device)
+        checkpoint_predictions = {}
+        for epoch in model.available_checkpoints:
+            predictions = model.predict(val_batch, checkpoint=epoch).signal_values.astype(
+                np.float32
+            )
+            predictions[~np.isfinite(returns_val)] = np.nan
+            checkpoint_predictions[int(epoch)] = predictions
+        return checkpoint_predictions
+    if model_name == "sdf":
+        model = StochasticDiscountFactorModel.load(model_path, device=device)
+        checkpoint_predictions = {}
+        for epoch in model.available_checkpoints:
+            checkpoint_label = _sdf_checkpoint_label(
+                epoch,
+                n_epochs_unc=model.config.n_epochs_unc,
+            )
+            val_state = model.extract(val_batch, checkpoint=epoch)
+            if output_mode == "weights":
+                predictions = val_state.asset_weights.astype(np.float32)
+            elif output_mode == "beta_network":
+                head = StochasticDiscountFactorBetaNetworkHead.load(
+                    artifact_dir / f"beta_head_{checkpoint_label}.ml4t",
+                    device=device,
+                )
+                predictions = head.predict(val_batch).signal_values.astype(np.float32)
+            elif output_mode == "expected_returns":
+                mapper = LinearStochasticDiscountFactorReturnMapper.load(
+                    artifact_dir / f"return_mapper_{checkpoint_label}.ml4t"
+                )
+                predictions = mapper.predict(val_state).expected_returns.astype(np.float32)
+            else:
+                raise ValueError(f"Unsupported output_mode: {output_mode!r}")
+            predictions[~np.isfinite(returns_val)] = np.nan
+            checkpoint_predictions[checkpoint_label] = predictions
+        return checkpoint_predictions
+    raise ValueError(f"Unsupported latent-factor model: {model_name!r}")
+
+
 def _run_checkpointed_latent_pipeline(
     *,
     model: CAEModel,
@@ -413,8 +573,12 @@ def _run_checkpointed_latent_pipeline(
     val_batch: CrossSectionBatch,
     returns_val: np.ndarray,
     task_type: TaskType,
+    artifact_dir: Path | None,
 ) -> dict[str, Any]:
     fit = model.fit(train_batch, validation_batch=val_batch)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        model.save(artifact_dir / "model.ml4t")
 
     checkpoint_predictions: dict[int, np.ndarray] = {}
     checkpoint_metrics: dict[str, dict[str, float | int | None]] = {}
@@ -424,6 +588,8 @@ def _run_checkpointed_latent_pipeline(
         val_state = model.extract(val_batch, checkpoint=epoch)
         forecaster = ExpandingMeanFactorForecaster()
         forecaster.fit(train_state)
+        if artifact_dir is not None:
+            forecaster.save(artifact_dir / f"forecaster_{int(epoch)}.ml4t")
         forecast = forecaster.predict(val_state)
         predictions = (
             BetaLambdaMapper().predict(val_state, forecast).expected_returns.astype(np.float32)
@@ -456,8 +622,12 @@ def _run_checkpointed_signal_pipeline(
     val_batch: CrossSectionBatch,
     returns_val: np.ndarray,
     task_type: TaskType,
+    artifact_dir: Path | None,
 ) -> dict[str, Any]:
     fit = model.fit(train_batch)
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        model.save(artifact_dir / "model.ml4t")
 
     checkpoint_predictions: dict[int, np.ndarray] = {}
     checkpoint_metrics: dict[str, dict[str, float | int | None]] = {}

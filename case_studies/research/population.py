@@ -39,6 +39,15 @@ class OfficialPopulation:
         normalized = tuple(dict.fromkeys(str(member) for member in members))
         if not normalized or len(normalized) != len(members):
             raise ValueError("official population members must be non-empty and unique")
+        for member_hash in normalized:
+            try:
+                result = Result.open(study, member_hash, include_preview=True)
+            except KeyError:
+                continue
+            if result.execution_tier == "preview":
+                raise ValueError(
+                    f"preview result {member_hash} cannot enter an official population"
+                )
         snapshot = {
             "schema_version": 1,
             "name": name,
