@@ -81,14 +81,11 @@ def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:
     """Return the exact checkpoint surface implied by one effective config."""
     if str(config["config_name"]).startswith("tabpfn"):
         return (1,)
+    from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
     n_epochs = int(config.get("n_epochs", 200))
     checkpoint_interval = int(config.get("checkpoint_interval", 25))
-    if n_epochs < 1 or checkpoint_interval < 1:
-        raise ValueError("n_epochs and checkpoint_interval must be positive")
-    checkpoints = list(range(checkpoint_interval, n_epochs + 1, checkpoint_interval))
-    if not checkpoints or checkpoints[-1] != n_epochs:
-        checkpoints.append(n_epochs)
-    return tuple(checkpoints)
+    return declared_epoch_checkpoints(n_epochs, checkpoint_interval)
 
 
 def _build_tabm_training_spec(
@@ -795,6 +792,7 @@ def run_tabm_cv(
     input_data_spec: dict[str, Any] | None = None,
     identity_params: dict[str, Any] | None = None,
     checkpoint_root: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -946,6 +944,18 @@ def run_tabm_cv(
                 )
                 split_complete = not split_rows.is_empty()
                 if status.complete and split_complete:
+                    if checkpoint_root is not None:
+                        from case_studies.utils.deep_model_state import (
+                            validate_deep_checkpoint_population,
+                        )
+
+                        validate_deep_checkpoint_population(
+                            checkpoint_root,
+                            config_name=cfg["config_name"],
+                            fold_ids=tuple(int(split["fold"]) for split in splits),
+                            checkpoints=_tabm_checkpoint_epochs(cfg),
+                            architecture="tabm",
+                        )
                     cached_result, cached_predictions, cached_curve_rows = _load_cached_tabm_config(
                         case_study=case_study,
                         training_spec=spec,
@@ -1092,6 +1102,8 @@ def run_tabm_cv(
 
     for cfg in configs:
         config_name = cfg["config_name"]
+        if checkpoint_root is not None and config_name.startswith("tabpfn"):
+            raise ValueError("TabPFN fitted-state persistence is not implemented")
         if register and case_study and force_retrain:
             from case_studies.utils.registry import build_training_spec, training_hash_from_spec
 
@@ -1418,6 +1430,17 @@ def run_tabm_cv(
 
         print(f"    → best_epoch={best_cp}, IC={best_ic_val:+.4f} ({elapsed:.1f}s)")
 
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+
+            validate_deep_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=tuple(int(fd["fold"]) for fd in fold_data),
+                checkpoints=_tabm_checkpoint_epochs(cfg),
+                architecture="tabm",
+            )
+
         # Incremental registration: persist this config immediately so a later
         # interruption or re-run doesn't lose work. Safe because config-major
         # loop: this config's folds are all complete at this point.
@@ -1489,6 +1512,8 @@ def run_tabm_cv(
                         f"    registered {config_name} incrementally ({len(epochs)} per-epoch slices)"
                     )
             except Exception as exc:
+                if strict:
+                    raise
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
         gc.collect()

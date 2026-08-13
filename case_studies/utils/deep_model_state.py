@@ -15,6 +15,15 @@ from torch import nn
 SCHEMA_VERSION = 1
 
 
+def declared_epoch_checkpoints(n_epochs: int, checkpoint_interval: int) -> tuple[int, ...]:
+    if n_epochs < 1 or checkpoint_interval < 1:
+        raise ValueError("n_epochs and checkpoint_interval must be positive")
+    checkpoints = list(range(checkpoint_interval, n_epochs + 1, checkpoint_interval))
+    if not checkpoints or checkpoints[-1] != n_epochs:
+        checkpoints.append(n_epochs)
+    return tuple(checkpoints)
+
+
 def _cpu_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     return {name: value.detach().cpu() for name, value in model.state_dict().items()}
 

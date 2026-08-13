@@ -9,6 +9,7 @@ from torch import nn
 
 from case_studies.utils.deep_model_state import (
     checkpoint_sidecar,
+    declared_epoch_checkpoints,
     deep_checkpoint_path,
     load_deep_checkpoint,
     restore_deep_model,
@@ -49,6 +50,11 @@ def test_checkpoint_reconstructs_identical_predictions_and_preprocessing(tmp_pat
     np.testing.assert_array_equal(actual, expected)
     assert restored_preprocessing["feature_names"] == ["value", "quality"]
     assert metadata == {"config_name": "probe", "fold": 0, "checkpoint_value": 5}
+
+
+def test_declared_checkpoint_schedule_includes_the_final_epoch() -> None:
+    assert declared_epoch_checkpoints(10, 5) == (5, 10)
+    assert declared_epoch_checkpoints(11, 5) == (5, 10, 11)
 
 
 def test_checkpoint_is_immutable_and_digest_verified(tmp_path) -> None:

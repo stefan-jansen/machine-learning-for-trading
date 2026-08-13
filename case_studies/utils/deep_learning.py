@@ -464,6 +464,7 @@ def run_dl_cv(
     identity_params: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
     checkpoint_root: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -585,6 +586,22 @@ def run_dl_cv(
                 )
                 split_complete = not split_rows.is_empty()
                 if status.complete and split_complete:
+                    if checkpoint_root is not None:
+                        from case_studies.utils.deep_model_state import (
+                            declared_epoch_checkpoints,
+                            validate_deep_checkpoint_population,
+                        )
+
+                        validate_deep_checkpoint_population(
+                            checkpoint_root,
+                            config_name=cfg["config_name"],
+                            fold_ids=tuple(int(split["fold"]) for split in splits),
+                            checkpoints=declared_epoch_checkpoints(
+                                int(cfg.get("n_epochs", 100)),
+                                int(cfg.get("checkpoint_interval", 5)),
+                            ),
+                            architecture=resolve_arch_name(cfg["config_name"]),
+                        )
                     print(
                         f"  SKIP {cfg['config_name']:25s}  ({status.summary()}, split={prediction_split})"
                     )
@@ -644,6 +661,8 @@ def run_dl_cv(
                 )
 
     if uses_darts_backend(configs):
+        if checkpoint_root is not None:
+            raise ValueError("Darts fitted-state persistence requires its family adapter")
         fresh_result = run_darts_cv(
             dataset_pd,
             splits,
@@ -742,6 +761,11 @@ def run_dl_cv(
         )
 
         if fold_info["train_sequences"] < 100 or fold_info["val_sequences"] < 50:
+            if strict:
+                raise ValueError(
+                    f"Fold {split['fold']} is too small: "
+                    f"train={fold_info['train_sequences']}, val={fold_info['val_sequences']}"
+                )
             print(
                 "    Skipped "
                 f"(train={fold_info['train_sequences']}, val={fold_info['val_sequences']})"
@@ -1049,6 +1073,23 @@ def run_dl_cv(
             f"  {config_name}: best_epoch={best_cp}, IC={best_ic_val:+.4f} ({acc['elapsed_s']:.1f}s)"
         )
 
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import (
+                declared_epoch_checkpoints,
+                validate_deep_checkpoint_population,
+            )
+
+            validate_deep_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=tuple(expected_fold_ids),
+                checkpoints=declared_epoch_checkpoints(
+                    int(cfg.get("n_epochs", 100)),
+                    int(cfg.get("checkpoint_interval", 5)),
+                ),
+                architecture=resolve_arch_name(config_name),
+            )
+
         # Incremental registration: persist every complete checkpoint as soon as
         # aggregation finishes. Registering only the raw-IC peak would prevent a
         # reader from applying the checkpoint-level coverage guard when that peak
@@ -1099,6 +1140,8 @@ def run_dl_cv(
                     f"({len(epoch_scores)} per-epoch slices)"
                 )
             except Exception as exc:
+                if strict:
+                    raise
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
     del config_acc
