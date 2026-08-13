@@ -88,6 +88,16 @@ def test_scanner_excludes_first_party(scanned_imports) -> None:
     assert not first_party_leak, f"first-party leaked: {first_party_leak}"
 
 
+def test_scanner_excludes_repository_scripts(scanned_imports) -> None:
+    repository_scripts = {
+        "check_import_resolution",
+        "notebook_provenance",
+        "sanitize_notebook_paths",
+        "strip_empty_cell_tags",
+    }
+    assert not scanned_imports & repository_scripts
+
+
 # -----------------------------------------------------------------------------
 # Classification invariants
 # -----------------------------------------------------------------------------
@@ -97,6 +107,10 @@ def test_every_image_override_targets_a_valid_image() -> None:
     """Every package in IMAGE_OVERRIDES must map to a recognized image id."""
     invalid = {pkg: img for pkg, img in IMAGE_OVERRIDES.items() if img not in VALID_IMAGES}
     assert not invalid, f"packages mapped to unknown images: {invalid}"
+
+
+def test_okx_sdk_is_classified_in_reader_image(classified) -> None:
+    assert "okx" in classified["ml4t"]
 
 
 def test_every_override_target_appears_in_at_least_one_source_file(scanned_imports) -> None:

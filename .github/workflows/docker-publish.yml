@@ -160,7 +160,7 @@ jobs:
             -e ML4T_PATH=/app \
             -e ML4T_DATA_PATH=/data \
             ${{ env.ML4T_IMAGE }}:latest \
-            python /app/envs/test_all_imports.py
+            python /app/envs/test_all_imports.py --scan
 
       - name: Computation smoke test (${{ matrix.arch }})
         run: |

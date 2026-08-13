@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timezone
@@ -364,7 +365,10 @@ def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
     return tuple(flags)
 
 
-def _comparable(src: str) -> list[tuple] | None:
+_PAPERMILL_MARKER = re.compile(r"\s+papermill=\{.*\}(?=(?:\s+[A-Za-z_][A-Za-z0-9_-]*=)|\r?\n?$)")
+
+
+def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | None:
     """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
 
     Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
@@ -382,6 +386,8 @@ def _comparable(src: str) -> list[tuple] | None:
     """
     out: list[tuple] = []
     for marker, kind, body in _percent_cells(src):
+        if strip_papermill:
+            marker = _PAPERMILL_MARKER.sub("", marker)
         if kind != "code":
             # Only when the body really is all comments. A percent-format markdown cell
             # holds nothing else, so a non-comment line means the marker does not
@@ -405,7 +411,7 @@ def _comparable(src: str) -> list[tuple] | None:
 
 
 def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
-    """Whether the ``.py`` drifted from its stamp ONLY in alt text already in the outputs.
+    """Whether source drift is proven unable to change the executed outputs.
 
     A stamp records the ``.py`` blob that was executed, and any edit to the ``.py``
     moves the blob, so the gate reads a corrected figure description as a notebook
@@ -415,6 +421,11 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
     alt string. So the alt in a notebook's output metadata is a verbatim copy of the
     source literal, and re-executing to change one cannot produce different outputs.
     ``nasdaq100_microstructure/04`` is 90 minutes and 43 GB to restate four sentences.
+
+    Removal of inline Papermill execution metadata is also output-preserving when
+    both paired files now declare ``cell_metadata_filter: tags,-all``. Papermill
+    writes timing and status into cell markers; Jupyter does not execute those
+    values. The exact filter prevents them from returning on the next sync.
 
     Both halves have to hold, and neither is a judgement:
 
@@ -437,8 +448,16 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
     )
     if old.returncode != 0:
         return False  # the stamped blob is not in this repo; cannot compare
-    old_cells = _comparable(old.stdout)
-    new_cells = _comparable(py.read_text(encoding="utf-8"))
+    new_source = py.read_text(encoding="utf-8")
+    filter_value = (nb.get("metadata", {}).get("jupytext", {}) or {}).get("cell_metadata_filter")
+    cleaned_papermill = (
+        "papermill={" in old.stdout
+        and "papermill={" not in new_source
+        and "cell_metadata_filter: tags,-all" in new_source
+        and filter_value == "tags,-all"
+    )
+    old_cells = _comparable(old.stdout, strip_papermill=cleaned_papermill)
+    new_cells = _comparable(new_source)
     if old_cells is None or new_cells is None or old_cells != new_cells:
         return False
 

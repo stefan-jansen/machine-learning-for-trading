@@ -683,6 +683,11 @@ def run_dl_cv(
 
     # Extract lookback from configs (must be uniform for fold-major sequencing)
     lookback = configs[0].get("params", {}).get("lookback", 60)
+    calendar_id = None
+    if case_study:
+        from utils.cv_splits import make_walk_forward_config
+
+        calendar_id = make_walk_forward_config(case_study, date_col=date_col).calendar_id
 
     dates_series = dataset_pd[date_col]
 
@@ -729,6 +734,7 @@ def run_dl_cv(
             temporal_feature_names=temporal_feature_names,
             fold_id=split["fold"],
             val_start=split["val_start"],
+            calendar_id=calendar_id,
         )
 
         if fold_info["train_sequences"] < 100 or fold_info["val_sequences"] < 50:

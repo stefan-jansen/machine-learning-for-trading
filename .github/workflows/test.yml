@@ -448,8 +448,9 @@ jobs:
         # inspection: the helper-level tests never reach the conversion and passed.
         run: |
           uv venv --python 3.14
-          uv pip install pytest numpy polars pyyaml python-dotenv plotly gymnasium requests \
-            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow
+          uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            "ml4t-diagnostic>=0.1.0"
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -483,6 +484,8 @@ jobs:
           .venv/bin/python -m pytest \
             tests/test_ch21_rl_environments.py \
             tests/test_import_resolution.py \
+            tests/test_import_coverage.py::test_scanner_excludes_repository_scripts \
+            tests/test_import_coverage.py::test_okx_sdk_is_classified_in_reader_image \
             -v --tb=short
       # The harness that decides which notebooks run, and the subsampler that
       # builds the fixtures they run against. Both were ungated: the fixture
@@ -547,6 +550,11 @@ jobs:
             tests/test_data_quality.py \
             tests/test_feature_engineering_figures.py \
             tests/test_temporal.py \
+            tests/test_cv_splits.py \
+            tests/test_cv_result_assembly.py \
+            tests/test_ipca_production_config.py \
+            tests/test_registry_cleanup.py \
+            tests/test_sp500_options_evaluation_fold_alignment.py \
             tests/test_variant_fold_geometry.py \
             tests/test_artifact_sidecar_verification.py \
             tests/test_artifact_digest.py \

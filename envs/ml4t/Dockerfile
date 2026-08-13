@@ -110,7 +110,8 @@ COPY pyproject.toml uv.lock /build/
 # device-links the CUDA-13-built libnccl_static.a, which nvcc 12.6's nvlink cannot read
 # ("nvlink error: Uncompress failed (target: sm_80)"). Reading the version from the lock
 # means the image cannot drift off the version readers get from `uv sync`.
-RUN cd /build && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
+RUN cd /build && uv export --frozen --extra live --no-emit-project --no-hashes \
+      --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-all.txt && \
     grep -viE '^(torch|torchvision|torchaudio|lightgbm|triton|setuptools)==|^nvidia-' \
       /tmp/locked-all.txt > /tmp/locked-constraints.txt && \
@@ -140,7 +141,7 @@ RUN echo 'cvxpy>=1.5' >> /tmp/ml4t-constraints.txt && \
     uv pip install --python /opt/ml4t/bin/python --no-cache \
     --prerelease=if-necessary-or-explicit \
     --constraint /tmp/locked-constraints.txt \
-    --override /tmp/ml4t-constraints.txt /build
+    --override /tmp/ml4t-constraints.txt '/build[live]'
 
 # LightGBM: two deterministic paths, no fallbacks within a platform
 # - amd64: CUDA build from source. Mandatory. Build fails if CUDA doesn't work.

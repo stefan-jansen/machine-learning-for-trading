@@ -200,3 +200,225 @@ def test_backwards_compatible_without_val_start():
         assert int(end_positions.min()) == lookback, (
             "Legacy path should start sequences at position=lookback"
         )
+
+
+def test_sequence_windows_do_not_span_missing_entity_periods():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
+        train_end="2021-03-31",
+        val_start="2021-04-01",
+        val_end="2021-06-30",
+    )
+    missing_date = pd.Timestamp("2020-10-15")
+    keep = ~((df["symbol"] == "S0") & (df["timestamp"] == missing_date))
+    df = df.loc[keep].reset_index(drop=True)
+    train_mask = train_mask.loc[keep].reset_index(drop=True)
+    val_mask = val_mask.loc[keep].reset_index(drop=True)
+    lookback = 20
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start_ts,
+    )
+
+    calendar = pd.Index(sorted(df["timestamp"].unique()))
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        positions = calendar.get_indexer(window)
+        assert np.all(np.diff(positions) == 1)
+
+
+def test_fixed_cadence_windows_do_not_span_missing_panel_periods():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    dates = pd.date_range("2021-01-01", periods=100, freq="8h", tz="UTC")
+    missing_date = dates[40]
+    rows = [
+        {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "feat0": float(i),
+            "y": float(i),
+        }
+        for symbol in ("S0", "S1")
+        for i, timestamp in enumerate(dates)
+        if timestamp != missing_date
+    ]
+    df = pd.DataFrame(rows)
+    train_mask = df["timestamp"] < dates[75]
+    val_mask = df["timestamp"] >= dates[75]
+    lookback = 12
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=dates[75],
+    )
+
+    cadence = np.timedelta64(8, "h")
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        assert np.all(np.diff(window) == cadence)
+
+
+def test_weekday_intraday_windows_reject_a_panel_wide_missing_bar():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    session_days = pd.date_range("2021-01-04", periods=4, freq="B")
+    dates = pd.DatetimeIndex(
+        [
+            day + pd.Timedelta(hours=9, minutes=30) + pd.Timedelta(minutes=15 * slot)
+            for day in session_days
+            for slot in range(26)
+        ]
+    )
+    missing_date = session_days[1] + pd.Timedelta(hours=10)
+    rows = [
+        {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "feat0": float(i),
+            "y": float(i),
+        }
+        for symbol in ("S0", "S1")
+        for i, timestamp in enumerate(dates)
+        if timestamp != missing_date
+    ]
+    df = pd.DataFrame(rows)
+    train_mask = df["timestamp"].dt.normalize() < session_days[3]
+    val_mask = df["timestamp"].dt.normalize() == session_days[3]
+    lookback = 2
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=session_days[3] + pd.Timedelta(hours=9, minutes=30),
+        calendar_id="NYSE",
+    )
+
+    complete_positions = dates.get_indexer
+    crossed_session = False
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        assert np.all(np.diff(complete_positions(window)) == 1)
+        crossed_session |= len(pd.DatetimeIndex(window).normalize().unique()) > 1
+    assert crossed_session
+
+
+def test_monthly_period_numbers_preserve_gaps_at_millisecond_resolution():
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    timestamps = pd.Series(
+        np.asarray(["2021-01-31", "2021-02-28", "2021-04-30"], dtype="datetime64[ms]")
+    )
+
+    periods = _sequence_period_numbers(timestamps)
+
+    assert np.diff(periods).tolist() == [1, 2]
+
+
+def test_daily_period_numbers_use_the_declared_market_calendar():
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    around_holiday = pd.Series(
+        pd.to_datetime(["2022-06-29", "2022-06-30", "2022-07-01", "2022-07-05", "2022-07-06"])
+    )
+    missing_session = pd.Series(
+        pd.to_datetime(["2022-06-29", "2022-06-30", "2022-07-01", "2022-07-06", "2022-07-07"])
+    )
+
+    observed = _sequence_period_numbers(around_holiday, calendar_id="NYSE")
+    missing = _sequence_period_numbers(missing_session, calendar_id="NYSE")
+
+    assert np.diff(observed).tolist() == [1, 1, 1, 1]
+    assert np.diff(missing).tolist() == [1, 1, 2, 1]
+
+
+def test_sequence_period_cache_is_recomputed_for_a_declared_calendar():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    dates = pd.to_datetime(["2022-06-30", "2022-07-01", "2022-07-06", "2022-07-07"])
+    df = pd.DataFrame(
+        [
+            {"symbol": symbol, "timestamp": timestamp, "feat0": float(i), "y": float(i)}
+            for symbol in ("S0", "S1")
+            for i, timestamp in enumerate(dates)
+        ]
+    )
+    train_mask = df["timestamp"] <= dates[2]
+    val_mask = df["timestamp"] == dates[3]
+    kwargs = {
+        "train_mask": train_mask,
+        "val_mask": val_mask,
+        "feature_names": ["feat0"],
+        "label_col": "y",
+        "date_col": "timestamp",
+        "entity_col": "symbol",
+        "lookback": 1,
+        "val_start": dates[3],
+    }
+
+    fallback_train, _, _ = prepare_fold_sequence_stores(df, **kwargs)
+    calendar_train, _, _ = prepare_fold_sequence_stores(df, calendar_id="NYSE", **kwargs)
+
+    assert fallback_train.n_sequences == 4
+    assert calendar_train.n_sequences == 2
+
+
+def test_priming_includes_label_buffer_gap_rows():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    train_end = pd.Timestamp("2020-12-30")
+    df, train_mask, val_mask, val_start_ts, _ = _synthetic_fold_df(
+        train_end=str(train_end.date()),
+        val_start="2021-01-04",
+    )
+    gap_mask = (df["timestamp"] > train_end) & (df["timestamp"] < val_start_ts) & ~train_mask
+    assert gap_mask.any()
+    lookback = 20
+
+    _, val_store, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0", "feat1"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=val_start_ts,
+    )
+
+    for symbol_id in range(val_store.n_symbols):
+        entity = val_store.entities[symbol_id]
+        end_positions = val_store.end_idx[val_store.symbol_idx == symbol_id]
+        first_end = int(end_positions.min())
+        last_context = pd.Timestamp(val_store.timestamps[symbol_id][first_end - 1])
+        expected_context = pd.Timestamp(
+            df.loc[(df["symbol"] == entity) & (df["timestamp"] < val_start_ts), "timestamp"].max()
+        )
+        assert last_context == expected_context
+        assert last_context > train_end

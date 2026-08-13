@@ -1,7 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: tags,-papermill
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent

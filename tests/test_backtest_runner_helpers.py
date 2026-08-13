@@ -80,6 +80,61 @@ def test_vectorized_plumbing_test_runs_random_scores(
     assert randomized["y_score"].to_list() != predictions["y_score"].to_list()
 
 
+def test_vectorized_plumbing_test_resolves_primary_predictions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import case_studies.utils.backtest_runner as br
+    import case_studies.utils.registry as registry
+
+    spec = {
+        "version": 2,
+        "strategy": {"rebalance": {"mode": "vectorized"}},
+        "backtest_config": {},
+    }
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 1), datetime(2024, 1, 1)],
+            "symbol": ["A", "B"],
+            "y_score": [0.8, 0.2],
+            "y_true": [0.1, -0.1],
+        }
+    )
+    requested: dict[str, object] = {}
+    backtest_call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        br,
+        "get_backtest_config",
+        lambda _: SimpleNamespace(primary_label="fwd_ret_1d"),
+    )
+    monkeypatch.setattr(br, "ensure_backtest_spec", lambda *args, **kwargs: args[2])
+
+    def fake_index(case_study, *, label, split):
+        requested.update(case_study=case_study, label=label, split=split)
+        return pl.DataFrame({"prediction_hash": ["abc123"]})
+
+    monkeypatch.setattr(registry, "load_prediction_index", fake_index)
+    monkeypatch.setattr(registry, "read_predictions", lambda *_args: predictions)
+
+    def fake_backtest(*args, **kwargs):
+        backtest_call["prediction_hash"] = args[1]
+        backtest_call.update(kwargs)
+        return SimpleNamespace(metrics={"sharpe": 0.0})
+
+    monkeypatch.setattr(br, "run_backtest", fake_backtest)
+
+    observed = run_plumbing_test("demo", pl.DataFrame(), spec)
+
+    assert observed == 0.0
+    assert requested == {
+        "case_study": "demo",
+        "label": "fwd_ret_1d",
+        "split": "validation",
+    }
+    assert backtest_call["prediction_hash"] == "abc123"
+    assert backtest_call["register"] is False
+
+
 def test_align_symbol_dtype_same_dtype_passthrough() -> None:
     target = pl.DataFrame({"symbol": ["A", "B"]})
     other = pl.DataFrame({"symbol": ["C", "D"]})

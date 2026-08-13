@@ -14,35 +14,29 @@ turned every one of them into a tree the ``notebook-sync`` pre-commit gate refus
 Nothing checked the header, which is why it could be dropped by editing a notebook
 by hand or by adding one from a template that predates the convention.
 
-Scoped to stages 01-05, which are clean: 0 of 45 lack the header and 0 carry an
-inline marker. Measured on the same pass, stages 06 and later are not - 125
-notebooks have no ``cell_metadata_filter`` and 5 carry inline markers (3 in
-cme_futures, 2 in etfs) - and they are filed rather than fixed here, because a
-notebook only stops carrying the markers when it is re-executed and stages 06-13
-are re-executed by the retrain, not by this sweep. Widen the glob when that lands.
+The guard covers every paired case-study notebook. The stage 06+ repair found 113
+notebooks without ``cell_metadata_filter`` and five sources with inline markers.
+Leaving the test scoped to stages 01-05 would let the same failure recur on the
+downstream notebooks before their production execution.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_FILTER = "tags,-all"
-STAGE_01_05 = re.compile(r"^0[1-5]_[a-z_]+$")
 
 
 def _paired_notebooks() -> list[Path]:
-    """Every stage 01-05 ``.ipynb`` under ``case_studies`` with a ``.py`` beside it."""
+    """Every ``.ipynb`` under ``case_studies`` with a paired ``.py`` source."""
     return sorted(
         nb
-        for nb in (REPO_ROOT / "case_studies").rglob("*.ipynb")
-        if ".ipynb_checkpoints" not in nb.parts
-        and STAGE_01_05.match(nb.stem)
-        and nb.with_suffix(".py").exists()
+        for nb in (REPO_ROOT / "case_studies").glob("*/*.ipynb")
+        if nb.with_suffix(".py").exists()
     )
 
 

@@ -1,18 +1,19 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.00274, "end_time": "2026-07-10T19:21:44.720474+00:00", "exception": false, "start_time": "2026-07-10T19:21:44.717734+00:00", "status": "completed"}
+# %% [markdown]
 # # CME Futures: Backtest & Signal Evaluation
 #
 # **Chapter 16 — Strategy Simulation**
@@ -44,7 +45,7 @@
 #
 # **Prerequisites:** Completed model training (Ch11–15) for this case study.
 
-# %% papermill={"duration": 2.125768, "end_time": "2026-07-10T19:21:46.847959+00:00", "exception": false, "start_time": "2026-07-10T19:21:44.722191+00:00", "status": "completed"}
+# %%
 """Ch16 Backtest & Signal Evaluation — CME Futures case study."""
 
 import time
@@ -74,7 +75,7 @@ from case_studies.utils.registry import (
 from case_studies.utils.sweep_config import get_entry_schemes_for, get_top_n_predictions
 from utils.paths import get_case_study_dir
 
-# %% papermill={"duration": 0.004414, "end_time": "2026-07-10T19:21:46.853815+00:00", "exception": false, "start_time": "2026-07-10T19:21:46.849401+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 CASE_STUDY_ID = "cme_futures"
 LABEL = ""
 SPLIT = "validation"
@@ -83,7 +84,7 @@ MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None
 
-# %% [markdown] papermill={"duration": 0.000992, "end_time": "2026-07-10T19:21:46.855919+00:00", "exception": false, "start_time": "2026-07-10T19:21:46.854927+00:00", "status": "completed"}
+# %% [markdown]
 # ## 1. Setup & Plumbing Test
 #
 # Before sweeping real predictions, we verify the pipeline is clean. A random
@@ -91,7 +92,7 @@ TOP_N_PREDICTIONS = None
 # weekly cadence means the plumbing test runs quickly — even 30 products × a
 # multi-year history covers relatively few rebalance events.
 
-# %% papermill={"duration": 0.032448, "end_time": "2026-07-10T19:21:46.889392+00:00", "exception": false, "start_time": "2026-07-10T19:21:46.856944+00:00", "status": "completed"}
+# %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_PREDICTIONS is None:
@@ -118,12 +119,12 @@ print(f"""=== Protocol Term Sheet ===
   Long/short:    {bt_config.long_short}
 """)
 
-# %% papermill={"duration": 2.510834, "end_time": "2026-07-10T19:21:49.401540+00:00", "exception": false, "start_time": "2026-07-10T19:21:46.890706+00:00", "status": "completed"}
+# %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
 n_assets = prices["symbol"].n_unique()
 print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 
-# %% papermill={"duration": 0.395673, "end_time": "2026-07-10T19:21:49.799750+00:00", "exception": false, "start_time": "2026-07-10T19:21:49.404077+00:00", "status": "completed"}
+# %%
 strategy_spec = build_backtest_spec(
     CASE_STUDY_ID,
     bt_config,
@@ -161,7 +162,7 @@ except ValueError as e:
     else:
         raise
 
-# %% [markdown] papermill={"duration": 0.001324, "end_time": "2026-07-10T19:21:49.802525+00:00", "exception": false, "start_time": "2026-07-10T19:21:49.801201+00:00", "status": "completed"}
+# %% [markdown]
 # ## 2. Parametric Sweep
 #
 # Sweep all (prediction × entry scheme) combinations using the **same
@@ -172,7 +173,7 @@ except ValueError as e:
 # more constrained than in broader equity case studies. Holding 10–20 of 30
 # products is a meaningful concentration, not diversification.
 
-# %% papermill={"duration": 0.009809, "end_time": "2026-07-10T19:21:49.813399+00:00", "exception": false, "start_time": "2026-07-10T19:21:49.803590+00:00", "status": "completed"}
+# %%
 pred_index = load_prediction_index(
     CASE_STUDY_ID,
     label=LABEL,
@@ -194,7 +195,7 @@ if ic_min is not None:
 else:
     print("  IC range: not yet computed")
 
-# %% papermill={"duration": 0.010411, "end_time": "2026-07-10T19:21:49.825105+00:00", "exception": false, "start_time": "2026-07-10T19:21:49.814694+00:00", "status": "completed"}
+# %%
 entry_schemes = get_entry_schemes_for(
     CASE_STUDY_ID, LABEL, n_assets, long_short=bt_config.long_short
 )
@@ -209,7 +210,7 @@ print(
     f"\nTotal grid: {n_predictions} predictions × {n_schemes} schemes = {total_backtests} backtests"
 )
 
-# %% papermill={"duration": 163.757075, "end_time": "2026-07-10T19:24:33.583492+00:00", "exception": false, "start_time": "2026-07-10T19:21:49.826417+00:00", "status": "completed"}
+# %%
 results = []
 t0 = time.time()
 failed = 0
@@ -318,7 +319,7 @@ print(
     f"\nSweep complete: {len(results)} backtests in {elapsed:.0f}s ({failed} failed, {skipped} skipped)"
 )
 
-# %% [markdown] papermill={"duration": 0.001389, "end_time": "2026-07-10T19:24:33.586681+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.585292+00:00", "status": "completed"}
+# %% [markdown]
 # ## 3. Signal Evaluation
 #
 # This section is **read-only** — it queries the registry via `BacktestExplorer`
@@ -330,13 +331,13 @@ print(
 # comparison will show whether complex architectures add value over a simple
 # linear carry decomposition.
 
-# %% papermill={"duration": 0.007642, "end_time": "2026-07-10T19:24:33.595790+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.588148+00:00", "status": "completed"}
+# %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 print(repr(explorer))
 
-# %% [markdown] papermill={"duration": 0.001322, "end_time": "2026-07-10T19:24:33.598589+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.597267+00:00", "status": "completed"}
+# %% [markdown]
 # ### Top Strategies
 #
 # Best backtests at the signal stage, ranked by Sharpe ratio. The
@@ -348,11 +349,11 @@ print(repr(explorer))
 # 0.56), and the LSTM produces *negative* signal-stage Sharpe on this narrow
 # 30-product panel. The top predictions advance to allocation in Ch17.
 
-# %% papermill={"duration": 0.007123, "end_time": "2026-07-10T19:24:33.607032+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.599909+00:00", "status": "completed"}
+# %%
 top = explorer.best(stage="signal", top_n=10)
 print(top.select("source", "signal_method", "sharpe", "cagr", "max_drawdown"))
 
-# %% [markdown] papermill={"duration": 0.001435, "end_time": "2026-07-10T19:24:33.610022+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.608587+00:00", "status": "completed"}
+# %% [markdown]
 # ### Model Family Comparison
 #
 # Which ML model families produce the most robust trading signals? Does the
@@ -369,11 +370,11 @@ print(top.select("source", "signal_method", "sharpe", "cagr", "max_drawdown"))
 # better trading on this panel - the standout family on IC is the standout on
 # Sharpe.
 
-# %% papermill={"duration": 0.007929, "end_time": "2026-07-10T19:24:33.619294+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.611365+00:00", "status": "completed"}
+# %%
 families = explorer.compare_families(stage="signal")
 print(families)
 
-# %% papermill={"duration": 0.211228, "end_time": "2026-07-10T19:24:33.832150+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.620922+00:00", "status": "completed"}
+# %%
 import matplotlib.pyplot as plt
 
 from utils.style import COLORS, apply_ml4t_style, zero_line
@@ -404,7 +405,7 @@ if not all_signal.is_empty():
 fig.tight_layout()
 fig.show()
 
-# %% [markdown] papermill={"duration": 0.001913, "end_time": "2026-07-10T19:24:33.836196+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.834283+00:00", "status": "completed"}
+# %% [markdown]
 # ### Deflated Sharpe Ratio
 #
 # The DSR corrects observed Sharpe ratios for the number of strategies tested.
@@ -415,12 +416,12 @@ fig.show()
 #
 # $$DSR = \Phi\left[\frac{(\hat{SR} - SR^*) \sqrt{T-1}}{\sqrt{1 - \hat{\gamma}_3 \hat{SR} + \frac{\hat{\gamma}_4 - 1}{4} \hat{SR}^2}}\right]$$
 
-# %% papermill={"duration": 0.084096, "end_time": "2026-07-10T19:24:33.921947+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.837851+00:00", "status": "completed"}
+# %%
 from case_studies.utils.backtest_loaders import print_stage_dsr_summary
 
 print_stage_dsr_summary(explorer, top_n=20, head=10)
 
-# %% [markdown] papermill={"duration": 0.001745, "end_time": "2026-07-10T19:24:33.925739+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.923994+00:00", "status": "completed"}
+# %% [markdown]
 # ### Sharpe Progression Preview
 #
 # For the best signal-stage prediction, show how Sharpe changes across
@@ -429,7 +430,7 @@ print_stage_dsr_summary(explorer, top_n=20, head=10)
 # reveal whether portfolio sizing methods and realistic transaction costs
 # erode or preserve this edge.
 
-# %% papermill={"duration": 0.007216, "end_time": "2026-07-10T19:24:33.934559+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.927343+00:00", "status": "completed"}
+# %%
 if not top.is_empty():
     best_pred = top["prediction_hash"][0]
     prog = explorer.progression(best_pred)
@@ -437,7 +438,7 @@ if not top.is_empty():
         print(f"\nSharpe progression for best prediction ({top['source'][0]}):")
         print(prog.select("stage", "sharpe", "cagr", "max_drawdown"))
 
-# %% [markdown] papermill={"duration": 0.001695, "end_time": "2026-07-10T19:24:33.938234+00:00", "exception": false, "start_time": "2026-07-10T19:24:33.936539+00:00", "status": "completed"}
+# %% [markdown]
 # ## Key Takeaways
 #
 # 1. **IC and Sharpe agree on this panel**: the latent-factor SDF model -
