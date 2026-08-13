@@ -69,6 +69,8 @@ def load_backtest_preset(case_study: str) -> dict[str, Any]:
 
 def _infer_data_frequency(cadence: str) -> str:
     token = cadence.lower()
+    if "1_minute" in token or token == "1m":
+        return "1m"
     if "15" in token:
         return "15m"
     if "30" in token:
