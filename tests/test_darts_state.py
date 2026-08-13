@@ -10,6 +10,7 @@ from darts.models import TSMixerModel
 
 from case_studies.utils.darts_forecasting import (
     BASE_TARGET_COL,
+    _attach_base_target,
     _attach_expected_periods,
     _predict_fold,
     _prepare_fold_series,
@@ -277,3 +278,31 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
     assert predictions.filter(pl.col("product") == "ZC")["timestamp"].unique().to_list() == [
         dates[4]
     ]
+
+
+def test_cme_base_target_uses_only_finalized_panel_sessions(monkeypatch) -> None:
+    raw = pl.DataFrame(
+        {
+            "session_date": [
+                pd.Timestamp("2024-01-02").date(),
+                pd.Timestamp("2024-01-03").date(),
+                pd.Timestamp("2024-01-04").date(),
+            ],
+            "product": ["ES"] * 3,
+            "tenor": [0] * 3,
+            "adj_close": [100.0, 110.0, 121.0],
+        }
+    )
+    monkeypatch.setattr("data.load_cme_futures", lambda: raw)
+    finalized = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-04"]),
+            "product": ["ES", "ES"],
+            "position": [0, 0],
+        }
+    )
+
+    attached = _attach_base_target(finalized, "cme_futures", "timestamp")
+
+    assert attached[BASE_TARGET_COL].isna().sum() == 1
+    assert attached.loc[1, BASE_TARGET_COL] == pytest.approx(np.log(121.0 / 100.0))

@@ -556,9 +556,16 @@ def _load_base_target_frame(
     if case_study == "cme_futures":
         from data import load_cme_futures
 
+        join_keys = [date_col, "product", "position"]
+        missing_keys = set(join_keys) - set(dataset_pd.columns)
+        if missing_keys:
+            raise ValueError(f"CME Darts dataset is missing panel keys: {sorted(missing_keys)}")
+        target_df = load_cme_futures().rename({"session_date": "timestamp", "tenor": "position"})
+        eligible_keys = pl.from_pandas(dataset_pd[join_keys].drop_duplicates()).with_columns(
+            *(pl.col(key).cast(target_df.schema[key]) for key in join_keys)
+        )
         target_df = (
-            load_cme_futures()
-            .rename({"session_date": "timestamp", "tenor": "position"})
+            target_df.join(eligible_keys, on=join_keys, how="inner", validate="m:1")
             .sort(["product", "position", "timestamp"])
             .with_columns(
                 (
@@ -570,9 +577,6 @@ def _load_base_target_frame(
             )
             .select(["timestamp", "product", "position", BASE_TARGET_COL])
         )
-        join_keys = [date_col, "product"]
-        if "position" in dataset_pd.columns:
-            join_keys.append("position")
         assert isinstance(target_df, pl.DataFrame)
         return target_df.to_pandas(), join_keys
 
