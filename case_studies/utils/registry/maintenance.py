@@ -51,7 +51,7 @@ def deduplicate_semantic_backtests(
         return duplicates
 
     drops = [item for group in duplicates for item in group.drop_hashes]
-    with closing(sqlite3.connect(str(db_path))) as db:
+    with closing(sqlite3.connect(str(db_path))) as db, db:
         db.execute("PRAGMA foreign_keys = ON")
         placeholders = ",".join("?" for _ in drops)
         references = {

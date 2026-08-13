@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from case_studies.utils.registry.maintenance import deduplicate_semantic_backtests
@@ -26,7 +27,7 @@ def _seed_duplicate_registry(path: Path) -> None:
             }
         }
     }
-    with sqlite3.connect(str(path)) as db:
+    with closing(sqlite3.connect(str(path))) as db, db:
         db.executescript(REGISTRY_SCHEMA_SQL)
         db.execute(
             "INSERT INTO training_runs "
@@ -62,6 +63,6 @@ def test_semantic_backtest_deduplication_is_idempotent(tmp_path: Path) -> None:
     assert applied == dry_run
     assert deduplicate_semantic_backtests(db_path, apply=True) == []
 
-    with sqlite3.connect(str(db_path)) as db:
+    with closing(sqlite3.connect(str(db_path))) as db:
         assert db.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM backtest_metrics").fetchone()[0] == 1

@@ -114,7 +114,11 @@ def _normalize_folds(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]
     )
 
 
-def _select_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _select_splits(
+    mds,
+    request: dict[str, Any],
+    label_timeline: pl.DataFrame,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cv = request.get("cv")
     if cv is None:
         splits = list(mds.splits)
@@ -125,7 +129,7 @@ def _select_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             "identity": value_digest(pl.DataFrame(list(normalized))),
         }
     else:
-        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
+        resolved = cv.resolve(label_timeline, date_col=mds.date_col)
         splits = [dict(fold) for fold in resolved.normalized_folds]
         cv_record = resolved.as_dict()
 
@@ -156,13 +160,17 @@ def _load_preset(config_name: str) -> dict[str, Any]:
     return config
 
 
-def _expected_keys(folds: list[dict[str, Any]], join_cols: list[str]) -> pl.DataFrame:
+def _expected_keys(folds: list[dict[str, Any]], entity_col: str, date_col: str) -> pl.DataFrame:
     frames = []
     for fold in folds:
-        frame = pl.from_pandas(fold["meta"][join_cols]).with_columns(
+        frame = pl.from_pandas(fold["meta"][[entity_col, date_col]]).with_columns(
             pl.lit(int(fold["fold"]), dtype=pl.Int64).alias("fold")
         )
-        frames.append(frame.select("symbol", "timestamp", "fold"))
+        frames.append(
+            frame.rename({entity_col: "symbol", date_col: "timestamp"}).select(
+                "symbol", "timestamp", "fold"
+            )
+        )
     expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
     if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("linear request produced duplicate expected prediction keys")
@@ -171,8 +179,11 @@ def _expected_keys(folds: list[dict[str, Any]], join_cols: list[str]) -> pl.Data
 
 def _effective_params(config: dict[str, Any], overrides: dict[str, Any], folds) -> dict[str, dict]:
     merged = {**dict(config.get("params") or {}), **overrides}
-    candidate = {**config, "params": merged}
     cls = _MODEL_CLASSES[config["model_class"]]
+    supported = cls().get_params(deep=True)
+    if "random_state" in supported and "random_state" not in merged:
+        merged["random_state"] = 42
+    candidate = {**config, "params": merged}
     effective = {}
     for fold in folds:
         resolved = resolve_linear_params(candidate, fold["X_train"], fold["y_train"])
@@ -201,16 +212,20 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     if not 0 < train_sample_frac <= 1:
         raise ValueError("train_sample_frac must be in (0, 1]")
     mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("linear runner requires canonical symbol and timestamp keys")
-    splits, cv_record = _select_splits(mds, request)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("linear runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"linear runner does not support entity key {entity_col!r}")
+    label_timeline = label_ref.load().select(mds.date_col).unique()
+    splits, cv_record = _select_splits(mds, request, label_timeline)
     folds = prepare_cv_folds(
         mds.dataset.to_pandas(),
         splits,
         mds.feature_names,
         mds.label_col,
         mds.date_col,
-        mds.entity_cols[0],
+        entity_col,
         temporal_by_fold=mds.temporal_by_fold,
         temporal_keys=mds.temporal_keys,
         temporal_feature_names=mds.temporal_feature_names,
@@ -222,7 +237,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
 
     config = _load_preset(request["config_name"])
     effective = _effective_params(config, request["overrides"], folds)
-    expected = _expected_keys(folds, mds.join_cols)
+    expected = _expected_keys(folds, entity_col, mds.date_col)
     input_lineage = mds.input_lineage
     spec = {
         "identity_version": 2,
@@ -269,7 +284,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         label_col=mds.label_col,
         eval_label_col=mds.eval_label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         expected_keys=expected,

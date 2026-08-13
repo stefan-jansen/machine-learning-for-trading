@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import numpy as np
 import polars as pl
 import pytest
 
 from case_studies.research import (
+    CVSpec,
     LabelDefinition,
     ModelRun,
     Study,
@@ -162,6 +164,52 @@ def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> Non
     ).resolve()
 
     assert base.identity != changed.identity
+
+
+def test_linear_effective_params_bind_seed_for_stochastic_estimators() -> None:
+    config = {
+        "model_class": "LogisticRegression",
+        "params": {"solver": "liblinear"},
+    }
+    folds = [{"fold": 0, "X_train": np.ones((4, 2)), "y_train": np.array([0, 1, 0, 1])}]
+
+    effective = linear._effective_params(config, {}, folds)
+
+    assert effective["0"]["random_state"] == 42
+
+
+def test_custom_cv_uses_label_timeline_not_feature_availability() -> None:
+    timeline = pl.DataFrame(
+        {"timestamp": pl.date_range(pl.date(2020, 1, 1), pl.date(2020, 3, 31), eager=True)}
+    )
+    request = {
+        "cv": CVSpec.walk_forward(
+            training_window="20D",
+            validation_window="5D",
+            folds=(0,),
+            horizon="0D",
+        ),
+        "preview_reductions": {},
+    }
+    full = SimpleNamespace(splits=[], date_col="timestamp", dataset=timeline)
+    reduced = SimpleNamespace(splits=[], date_col="timestamp", dataset=timeline.tail(12))
+
+    full_splits, full_record = linear._select_splits(full, request, timeline)
+    reduced_splits, reduced_record = linear._select_splits(reduced, request, timeline)
+
+    assert full_splits == reduced_splits
+    assert full_record == reduced_record
+
+
+def test_product_entity_is_normalized_at_prediction_boundary() -> None:
+    meta = pl.DataFrame(
+        {"product": ["ES", "NQ"], "timestamp": ["2024-01-01", "2024-01-01"]}
+    ).to_pandas()
+
+    expected = linear._expected_keys([{"fold": 0, "meta": meta}], "product", "timestamp")
+
+    assert expected.columns == ["symbol", "timestamp", "fold"]
+    assert expected.get_column("symbol").to_list() == ["ES", "NQ"]
 
 
 def test_preview_request_requires_hash_covered_reductions(tmp_path) -> None:
