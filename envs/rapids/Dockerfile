@@ -43,16 +43,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # at the versions shipped by the base image. For example, cuDF 25.4 requires
 # pandas<2.2.4 and pyarrow<20, CuPy requires numpy<2.3, and cudf-polars requires
 # polars<1.26. The root lock is authoritative for packages outside that stack.
-# Capture the base versions as constraints and remove the same names from the
-# root constraints before installing the benchmark additions.
+# Stable ml4t-diagnostic requires scipy>=1.17, while this base image ships
+# scipy 1.15.2. SciPy is the one tracked package that moves to the root lock;
+# every other tracked package remains at the base version. Verify both sets.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock /build/root/
 COPY envs/rapids/base_constraints.py /build/base_constraints.py
-RUN python /build/base_constraints.py > /tmp/rapids-base-constraints.txt && \
+RUN python /build/base_constraints.py > /tmp/rapids-base-versions.txt && \
+    grep -viE '^scipy==' /tmp/rapids-base-versions.txt > /tmp/rapids-base-constraints.txt && \
     test -s /tmp/rapids-base-constraints.txt && \
     cd /build/root && uv export --frozen --no-emit-project --no-hashes --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' \
       > /tmp/root-constraints.txt && \
+    grep -iE '^scipy==' /tmp/root-constraints.txt | head -1 | cut -d';' -f1 \
+      | sed 's/[[:space:]]//g' \
+      > /tmp/scipy-pin.txt && \
+    test -s /tmp/scipy-pin.txt && \
     python -c 'from pathlib import Path; import re; norm=lambda value: re.sub(r"[-_.]+", "-", value.lower()); base={norm(line.split("==", 1)[0]) for line in Path("/tmp/rapids-base-constraints.txt").read_text().splitlines()}; root=Path("/tmp/root-constraints.txt").read_text().splitlines(); Path("/tmp/locked-constraints.txt").write_text("\n".join(line for line in root if norm(line.split("==", 1)[0]) not in base) + "\n")' && \
     test -s /tmp/locked-constraints.txt && \
     grep -iE '^lightgbm==' /tmp/locked-constraints.txt | head -1 | cut -d';' -f1 | tr -d '[:space:]' \
@@ -75,8 +81,11 @@ RUN pip install --no-cache-dir \
     "pytest>=8.0" \
     "pyyaml>=6.0" && \
     python -c "import cudf, cuml; print('cudf', cudf.__version__, 'cuml', cuml.__version__)" && \
-    python /build/base_constraints.py > /tmp/rapids-final-constraints.txt && \
-    diff -u /tmp/rapids-base-constraints.txt /tmp/rapids-final-constraints.txt
+    python /build/base_constraints.py > /tmp/rapids-final-versions.txt && \
+    grep -viE '^scipy==' /tmp/rapids-final-versions.txt > /tmp/rapids-final-constraints.txt && \
+    grep -iE '^scipy==' /tmp/rapids-final-versions.txt > /tmp/scipy-final.txt && \
+    diff -u /tmp/rapids-base-constraints.txt /tmp/rapids-final-constraints.txt && \
+    diff -u /tmp/scipy-pin.txt /tmp/scipy-final.txt
 
 # XGBoost: already included in RAPIDS with GPU support — verify
 RUN python -c "import xgboost; print(f'XGBoost {xgboost.__version__}')"

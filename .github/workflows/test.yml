@@ -807,8 +807,7 @@ jobs:
                 or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
                 or 01_timegan or 07_dp_gan \
                 or 10_shap_nlp_sentiment or 06_conditional_autoencoder \
-                or 06_fed_announcement_bsts \
-                or deep_hedging_pfhedge"
+                or 06_fed_announcement_bsts"
 
   # ---------------------------------------------------------------------------
   # Neo4j Docker service (Ch23 Knowledge Graphs)

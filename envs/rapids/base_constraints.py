@@ -15,6 +15,7 @@ EXACT_NAMES = {
     "pandas",
     "pyarrow",
     "scikit-learn",
+    "scipy",
 }
 PREFIXES = (
     "cuda-",
