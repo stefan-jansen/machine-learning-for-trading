@@ -16,7 +16,7 @@ from case_studies.utils.backtest_loaders import (
     load_contract_specs_from_yaml,
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
-from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.backtest_runner import resolve_cost_feasible_universe, run_backtest
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
     ensure_conformal_calibration_identity,
@@ -170,13 +170,21 @@ class Strategy:
         return self._build_spec(resolved_prices, case_config, contract_specs)
 
     def _build_spec(self, prices, case_config, contract_specs) -> dict[str, Any]:
+        signal = deepcopy(self.signal)
+        if signal.get("universe_filter") == "cost_feasible":
+            split, symbols = resolve_cost_feasible_universe(
+                self.study.case_study,
+                self.prediction.hash,
+            )
+            signal["universe_split"] = split
+            signal["universe_symbols"] = symbols
         spec = build_backtest_spec(
             self.study.case_study,
             case_config,
             prices=prices,
             prediction_hash=self.prediction.hash,
             initial_cash=case_config.initial_cash,
-            signal=self.signal,
+            signal=signal,
             allocation=self._resolved_allocation(),
             risk=self.risk,
             costs=self.costs,
@@ -188,6 +196,15 @@ class Strategy:
         spec["identity_version"] = 2
         spec["execution_tier"] = self.prediction.execution_tier
         spec["input_identity"] = {"prices": value_digest(prices)}
+        if signal.get("universe_filter") == "cost_feasible":
+            spec["input_identity"]["universe"] = compute_hash(
+                canonical_json(
+                    {
+                        "split": signal["universe_split"],
+                        "symbols": signal["universe_symbols"],
+                    }
+                )
+            )
         if contract_specs is not None:
             serialized = {
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()

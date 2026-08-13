@@ -291,6 +291,46 @@ def test_apply_universe_filter_collapses_intraday_to_date_grain(
     assert out["symbol"].to_list() == ["A"]
 
 
+def test_cost_feasible_filter_uses_resolved_roster_from_strategy_identity() -> None:
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [datetime(2024, 1, 2), datetime(2024, 1, 2)],
+            "symbol": ["A", "B"],
+        }
+    )
+    signal = {
+        "universe_filter": "cost_feasible",
+        "universe_split": "validation",
+        "universe_symbols": ["B"],
+    }
+
+    filtered = apply_universe_filter(
+        predictions,
+        pl.DataFrame(),
+        case_study="nasdaq100_microstructure",
+        signal_config=signal,
+        prediction_hash=None,
+    )
+
+    assert filtered["symbol"].to_list() == ["B"]
+
+
+def test_cost_feasible_filter_rejects_incomplete_resolved_identity() -> None:
+    predictions = pl.DataFrame({"timestamp": [datetime(2024, 1, 2)], "symbol": ["A"]})
+
+    with pytest.raises(ValueError, match="universe_split and universe_symbols"):
+        apply_universe_filter(
+            predictions,
+            pl.DataFrame(),
+            case_study="nasdaq100_microstructure",
+            signal_config={
+                "universe_filter": "cost_feasible",
+                "universe_symbols": ["A"],
+            },
+            prediction_hash=None,
+        )
+
+
 def test_substitute_continuous_return_dedupe_assertion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

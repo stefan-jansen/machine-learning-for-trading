@@ -144,6 +144,43 @@ def test_strategy_identity_covers_prices_costs_and_rejects_unknown_fields(tmp_pa
         )
 
 
+def test_strategy_identity_covers_resolved_cost_feasible_roster(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    setup_path = release / "case_studies" / "etfs" / "config" / "setup.yaml"
+    setup_path.write_text(
+        setup_path.read_text()
+        + "universe:\n"
+        + "  cost_feasible:\n"
+        + "    validation: [A]\n"
+        + "    holdout: [B]\n"
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    prediction = _publish_validation_prediction(study)
+    strategy = study.strategy(
+        prediction=prediction,
+        signal={
+            "method": "equal_weight_top_k",
+            "top_k": 1,
+            "universe_filter": "cost_feasible",
+        },
+        execution_mode="vectorized",
+    )
+
+    first = strategy.resolve(prices=_prices())
+    first_identity = strategy.identity(prices=_prices())
+    assert first["strategy"]["signal"]["universe_split"] == "validation"
+    assert first["strategy"]["signal"]["universe_symbols"] == ["A"]
+
+    workspace_setup = study.root / "config" / "setup.yaml"
+    workspace_setup.write_text(
+        workspace_setup.read_text().replace("validation: [A]", "validation: [B]")
+    )
+    second = strategy.resolve(prices=_prices())
+
+    assert first["input_identity"]["universe"] != second["input_identity"]["universe"]
+    assert first_identity != strategy.identity(prices=_prices())
+
+
 def test_strategy_normalizes_conformal_identity_before_hashing(tmp_path: Path) -> None:
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
