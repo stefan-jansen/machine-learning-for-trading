@@ -76,7 +76,6 @@ class LabelCatalog:
         return tuple(self.get(name) for name in sorted(names))
 
     def get(self, name: str) -> LabelRef:
-        self.study.activate()
         path = self._path(name)
         metadata_path = sidecar_path(path)
         if metadata_path.exists():

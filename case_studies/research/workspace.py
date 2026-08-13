@@ -69,6 +69,30 @@ def _clear_root_sensitive_caches() -> None:
     specs._CONFIG_DIR = None
 
 
+def _resolved_directory_symlink(path: Path) -> Path | None:
+    if not path.is_symlink():
+        return None
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def _ensure_input_link(preview_case: Path, source: Path) -> None:
+    resolved = source.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"preview input is not a directory: {source}")
+    link = preview_case / source.name
+    if link.is_symlink():
+        if link.resolve(strict=True) != resolved:
+            raise ValueError(f"preview input link targets the wrong directory: {link}")
+        return
+    if link.exists():
+        raise ValueError(f"preview input path must be a directory symlink: {link}")
+    link.symlink_to(resolved, target_is_directory=True)
+
+
 @dataclass(frozen=True)
 class Study:
     case_study: str
@@ -145,6 +169,41 @@ class Study:
         study.activate()
         return study
 
+    @classmethod
+    def regenerate(
+        cls,
+        case_study: str,
+        *,
+        release_root: str | Path = REPO_ROOT,
+    ) -> Study:
+        """Open the canonical generated-artifact links for maintainer regeneration."""
+        release_root = Path(release_root).expanduser().resolve()
+        case_dir = release_root / "case_studies" / case_study
+        if not case_dir.is_dir():
+            raise FileNotFoundError(f"Unknown released case study: {case_dir}")
+        generated = (case_dir / "features", case_dir / "labels", case_dir / "run_log")
+        invalid = [path for path in generated if _resolved_directory_symlink(path) is None]
+        if invalid:
+            raise PermissionError(
+                f"canonical regeneration requires generated-artifact directory symlinks: {invalid}"
+            )
+        study = cls(
+            case_study=case_study,
+            root=case_dir,
+            release_root=release_root,
+            output_root=case_dir.parent,
+            read_only=False,
+            manifest={
+                "schema_version": 1,
+                "case_study": case_study,
+                "baseline_source_commit": _source_commit(release_root),
+                "baseline_manifest_sha256": _release_manifest_digest(case_dir),
+                "regeneration": True,
+            },
+        )
+        study.activate()
+        return study
+
     def activate(self, execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL) -> Path:
         global _ACTIVE_OUTPUT_ROOT
         tier = ExecutionTier(execution_tier)
@@ -160,12 +219,19 @@ class Study:
         if tier is ExecutionTier.PREVIEW:
             output_root = output_root / ".preview"
             preview_case = output_root / self.case_study
-            if not preview_case.exists():
-                preview_case.mkdir(parents=True)
+            preview_case.mkdir(parents=True, exist_ok=True)
+            if not (preview_case / "config").exists():
                 shutil.copytree(self.root / "config", preview_case / "config")
-                shared_config = base_output_root / "config"
-                if shared_config.exists():
-                    shutil.copytree(shared_config, output_root / "config", dirs_exist_ok=True)
+            shared_config = base_output_root / "config"
+            if shared_config.exists():
+                shutil.copytree(shared_config, output_root / "config", dirs_exist_ok=True)
+            for name in ("labels", "features"):
+                source = self.root / name
+                if source.exists():
+                    _ensure_input_link(preview_case, source)
+            from case_studies.utils.registry.store import _open_registry
+
+            _open_registry(preview_case).close()
         if output_root != _ACTIVE_OUTPUT_ROOT:
             os.environ["ML4T_OUTPUT_DIR"] = str(output_root)
             _ACTIVE_OUTPUT_ROOT = output_root
