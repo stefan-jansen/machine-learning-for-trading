@@ -78,12 +78,14 @@ from case_studies.utils.insight_chapter import (
     collect_grid_per_cs,
     collect_multi_label_per_cs,
     collect_rank1_per_cs,
+    compare_daily_ic_on_shared_dates,
     conformal_coverage_for_selected_prediction,
     plot_cross_cs_forest,
     plot_multi_label_horizon,
     plot_per_fold_violin,
 )
 from case_studies.utils.model_analysis import (
+    load_daily_metrics_series,
     load_metrics_from_registry,
 )
 from utils.reproducibility import set_global_seeds
@@ -673,9 +675,9 @@ if not conformal_df.is_empty():
 #
 # The DL family enters a contested space - for every case study it is
 # compared to the highest-IC tabular configuration across linear, GBM, and
-# TabM. Two descriptive views compare full-coverage daily-IC point estimates.
-# Each family's chronological daily series retains its own HAC interval; the
-# notebook does not infer uncertainty from a small set of fold summaries.
+# TabM. The selected models are rescored over the exact intersection of their
+# daily IC dates. The notebook does not infer uncertainty from a small set of
+# fold summaries.
 
 
 # %%
@@ -729,31 +731,35 @@ def dl_tabular_delta(cs: str) -> dict | None:
         return None
     best_fam = max(family_rows, key=lambda family: family_rows[family][f"{family}_ic"])
     best_row = family_rows[best_fam]
-    best_baseline_ic = best_row[f"{best_fam}_ic"]
+    dl_daily = load_daily_metrics_series(cs, selected_dl["prediction_hash"])
+    baseline_daily = load_daily_metrics_series(cs, best_row["prediction_hash"])
+    if dl_daily.is_empty() or baseline_daily.is_empty():
+        return None
+    matched = compare_daily_ic_on_shared_dates(dl_daily, baseline_daily)
     return {
         "case_study": cs,
         "short_name": SHORT_NAMES[cs],
         "dl_arch": architecture(selected_dl["config_name"]),
-        "dl_ic": selected_dl["ic_mean_daily"],
+        "dl_ic": matched["left_ic"],
         "dl_prediction_hash": selected_dl["prediction_hash"],
-        "dl_days": selected_dl["ic_n_days"],
         "best_baseline_family": best_fam,
-        "best_baseline_ic": best_baseline_ic,
+        "best_baseline_ic": matched["right_ic"],
         "baseline_prediction_hash": best_row["prediction_hash"],
-        "baseline_days": best_row["ic_n_days"],
-        "delta": selected_dl["ic_mean_daily"] - best_baseline_ic,
+        "matched_days": matched["n_days"],
+        "delta": matched["left_ic"] - matched["right_ic"],
     }
 
 
 # %% [markdown]
-# The comparison uses complete-coverage rows from each family and remains a
-# point-estimate diagnostic, not paired-fold inference.
+# The comparison selects complete-coverage rows from each family, then
+# computes both point estimates from the dates they share. It is not
+# paired-fold inference.
 
 # %%
 delta_rows = [entry for cs in CASE_STUDY_IDS if (entry := dl_tabular_delta(cs)) is not None]
 
 delta_df = pl.DataFrame(delta_rows).sort("delta", descending=True)
-print("DL minus highest-IC full-coverage tabular baseline (descriptive, primary label):")
+print("DL minus highest-IC full-coverage tabular baseline on shared dates (primary label):")
 delta_df.select(
     "short_name",
     "dl_arch",
@@ -761,8 +767,7 @@ delta_df.select(
     pl.col("dl_ic").round(4).alias("dl"),
     pl.col("best_baseline_ic").round(4).alias("base"),
     pl.col("delta").round(4),
-    "dl_days",
-    "baseline_days",
+    "matched_days",
     "dl_prediction_hash",
     "baseline_prediction_hash",
 )
@@ -818,9 +823,9 @@ def format_scatter_axes(ax: plt.Axes, xs: np.ndarray, ys: np.ndarray) -> None:
     ax.plot([lo, hi], [lo, hi], color=COLORS["neutral"], linestyle="--")
     ax.axhline(0, color=COLORS["silver_muted"], linewidth=0.5)
     ax.axvline(0, color=COLORS["silver_muted"], linewidth=0.5)
-    ax.set_xlabel("Highest-IC tabular baseline (max of Linear, GBM, TabM)")
-    ax.set_ylabel("Highest-IC DL configuration")
-    ax.set_title("DL vs highest-IC tabular baseline at the primary label")
+    ax.set_xlabel("Selected tabular baseline IC on shared dates")
+    ax.set_ylabel("Selected DL IC on shared dates")
+    ax.set_title("DL vs highest-IC tabular baseline on shared dates")
 
 
 # %% [markdown]
@@ -893,8 +898,7 @@ for r in delta_df.iter_rows(named=True):
             "dl_arch": r["dl_arch"],
             "dl_ic": r["dl_ic"],
             "delta": r["delta"],
-            "dl_days": r["dl_days"],
-            "baseline_days": r["baseline_days"],
+            "matched_days": r["matched_days"],
         }
     )
 
@@ -909,14 +913,13 @@ diagnostic_df.select(
     pl.col("tab_ic").round(4).alias("tab_ic"),
     pl.col("dl_ic").round(4).alias("dl_ic"),
     pl.col("delta").round(4).alias("delta"),
-    "dl_days",
-    "baseline_days",
+    "matched_days",
 )
 
 # %%
 display(
     Markdown(
-        f"**Computed baseline comparison.** DL has the higher full-coverage point estimate "
+        f"**Computed baseline comparison.** DL has the higher shared-date point estimate "
         f"in {n_above} of {delta_df.height} comparable case studies. The conclusion is "
         "descriptive until a daily-series difference estimator is registered and verified."
     )

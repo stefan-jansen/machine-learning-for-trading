@@ -11,6 +11,29 @@ import pytest
 from case_studies.utils import insight_chapter
 
 
+def test_compare_daily_ic_uses_only_shared_dates() -> None:
+    left = pl.DataFrame(
+        {
+            "date": ["2026-01-02", "2026-01-03", "2026-01-04"],
+            "ic": [0.9, 0.2, 0.4],
+        }
+    ).with_columns(pl.col("date").str.to_datetime().cast(pl.Datetime("ms")))
+    right = pl.DataFrame(
+        {
+            "date": ["2026-01-03", "2026-01-04", "2026-01-05"],
+            "ic": [0.1, 0.3, -0.9],
+        }
+    ).with_columns(pl.col("date").str.to_datetime().cast(pl.Datetime("us")))
+
+    result = insight_chapter.compare_daily_ic_on_shared_dates(left, right)
+
+    assert result == {
+        "left_ic": pytest.approx(0.3),
+        "right_ic": pytest.approx(0.2),
+        "n_days": 2,
+    }
+
+
 def test_selected_prediction_conformal_coverage_uses_chronology_and_exact_rank(
     tmp_path, monkeypatch
 ) -> None:
