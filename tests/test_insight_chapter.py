@@ -35,7 +35,7 @@ def test_selected_prediction_conformal_coverage_uses_chronology_and_exact_rank(
             "family": "gbm",
             "config_name": "probe-config",
             "prediction_hash": "prediction-a",
-            "spec_json": json.dumps({"n_folds": 2}),
+            "spec_json": json.dumps({"expected_prediction_keys": {"n_folds": 2}}),
         },
         levels=(0.80,),
     )

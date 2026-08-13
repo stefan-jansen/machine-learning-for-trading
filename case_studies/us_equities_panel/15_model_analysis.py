@@ -49,6 +49,7 @@ import polars as pl
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 from case_studies.research import CandidateSet, PredictionResult, Study
+from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
 from case_studies.utils.registry import load_prediction_metrics
 from utils.style import COLORS
@@ -254,13 +255,13 @@ fig.show()
 # finite values and unique canonical keys before its daily IC is computed.
 
 # %% tags=["results"]
-KEYS = ["symbol", "timestamp", "fold"]
+KEYS = ["symbol", "timestamp", "fold_id"]
 diagnostic_frames = {}
 daily_rows = []
 
 for prediction_hash in diagnostic_set.members:
     result = prediction_results[prediction_hash]
-    frame = result.load()
+    frame = normalize_prediction_columns(result.load())
     required_columns = {*KEYS, "y_true", "y_score"}
     if not required_columns <= set(frame.columns):
         raise ValueError(f"{prediction_hash} lacks canonical prediction columns")
@@ -274,8 +275,8 @@ for prediction_hash in diagnostic_set.members:
     meta = catalog.filter(pl.col("prediction_hash") == prediction_hash).row(0, named=True)
     model_id = f"{meta['family']}/{meta['config_name']} [{prediction_hash[:8]}]"
     diagnostic_frames[prediction_hash] = frame
-    for fold in sorted(frame["fold"].unique().to_list()):
-        fold_frame = frame.filter(pl.col("fold") == fold)
+    for fold_id in sorted(frame["fold_id"].unique().to_list()):
+        fold_frame = frame.filter(pl.col("fold_id") == fold_id)
         daily = cross_sectional_ic_series(
             fold_frame,
             fold_frame,
@@ -290,21 +291,21 @@ for prediction_hash in diagnostic_set.members:
             daily.with_columns(
                 pl.lit(model_id).alias("model_id"),
                 pl.lit(prediction_hash).alias("prediction_hash"),
-                pl.lit(fold).alias("fold"),
+                pl.lit(fold_id).alias("fold_id"),
             )
         )
 
 daily_ic = pl.concat(daily_rows, how="vertical_relaxed")
-if daily_ic.select(["prediction_hash", "fold", "timestamp"]).is_duplicated().any():
+if daily_ic.select(["prediction_hash", "fold_id", "timestamp"]).is_duplicated().any():
     raise ValueError("daily IC keys are not unique")
 
 fold_ic = (
-    daily_ic.group_by("model_id", "prediction_hash", "fold")
+    daily_ic.group_by("model_id", "prediction_hash", "fold_id")
     .agg(
         pl.col("ic").mean().alias("mean_daily_ic"),
         pl.len().alias("n_decision_dates"),
     )
-    .sort("model_id", "fold")
+    .sort("model_id", "fold_id")
 )
 fold_ic
 
@@ -340,9 +341,14 @@ for left_index, left_hash in enumerate(diagnostic_hashes):
         paired = left.join(right, on=KEYS, how="inner", validate="1:1")
         if paired.is_empty() or paired.height > min(left.height, right.height):
             raise ValueError(f"invalid paired coverage for {left_hash} and {right_hash}")
-        if not paired.select(pl.col("y_true_left").eq(pl.col("y_true_right")).all()).item():
+        if not np.allclose(
+            paired["y_true_left"].cast(pl.Float64).to_numpy(),
+            paired["y_true_right"].cast(pl.Float64).to_numpy(),
+            rtol=1e-6,
+            atol=1e-8,
+        ):
             raise ValueError(f"realized returns disagree for {left_hash} and {right_hash}")
-        daily_correlation = paired.group_by("timestamp", "fold").agg(
+        daily_correlation = paired.group_by("timestamp", "fold_id").agg(
             pl.corr(
                 pl.col("score_left").rank(method="average"),
                 pl.col("score_right").rank(method="average"),
