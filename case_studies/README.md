@@ -49,12 +49,19 @@ case_studies/{id}/
 +-- labels/                    # Generated learning targets (gitignored)
 +-- features/                  # Generated financial and temporal features
 +-- evaluation/                # Generated feature diagnostics
++-- benchmark/                 # Tracked equal-weight market return series and metadata
 +-- run_log/                   # Downloaded or generated result state
 |   +-- registry.db            # Result and provenance source of truth
 |   +-- training/{hash}/       # Specs, coefficients, boosters, checkpoints
 |   +-- predictions/{hash}/    # Stored prediction arrays
 |   +-- backtest/{hash}/       # Returns, trades, weights, and configs
 ```
+
+The strategy-analysis notebooks read `benchmark/` as a release input. Each parquet is the daily
+cross-sectional mean of the available symbols' close-to-close returns from the same canonical price
+panel used by the case study. The matching JSON records the validation and holdout windows and their
+annualized summary statistics. The benchmark does not depend on the prediction horizon, so several
+labels can refer to the same return series.
 
 ## Reproducibility
 
