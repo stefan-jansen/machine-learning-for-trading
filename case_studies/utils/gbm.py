@@ -790,6 +790,23 @@ def _checkpoint_metrics_from_predictions(
     return metrics
 
 
+def _learning_curves_from_predictions(
+    config_name: str,
+    predictions: list[dict[str, Any]],
+    checkpoints: list[int] | tuple[int, ...],
+) -> list[dict[str, Any]]:
+    metrics = _checkpoint_metrics_from_predictions(predictions, checkpoints)
+    return [
+        {
+            "config": config_name,
+            "iteration": checkpoint,
+            "ic_mean": metrics[checkpoint]["ic_mean"],
+            "ic_std": metrics[checkpoint]["ic_std"],
+        }
+        for checkpoint in checkpoints
+    ]
+
+
 def load_cached_gbm_config(
     *,
     case_study: str,
@@ -991,6 +1008,15 @@ def train_gbm_config(
     base_params.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
     if max_bin is not None:
         base_params["max_bin"] = max_bin
+    if (
+        base_params.get("objective") == "huber"
+        and "alpha" not in base_params
+        and effective_params_by_fold is None
+    ):
+        raise ValueError(
+            "Huber training requires hash-covered effective_params_by_fold; "
+            "resolve the request through the canonical GBM adapter"
+        )
 
     # Classification: ensure num_class for multiclass
     if is_classification and class_values and len(class_values) > 2:
@@ -1481,12 +1507,16 @@ def _gbm_effective_params_by_fold(
     max_bin: int,
     num_threads: int,
     seed: int,
+    task_type: str = "regression",
+    class_values: list[Any] | tuple[Any, ...] = (),
 ) -> dict[str, dict[str, Any]]:
     base = dict(config["params"])
     base["metric"] = "None"
     base["verbosity"] = base.get("verbosity", -1)
     base["max_bin"] = max_bin
     base.update(lightgbm_runtime_params(device, num_threads=num_threads, seed=seed))
+    if task_type == "classification" and len(class_values) > 2:
+        base["num_class"] = len(class_values)
     scale = config.get("huber_alpha_scale")
     if base.get("objective") == "huber" and "alpha" not in base and scale is None:
         raise ValueError("Huber GBM configs must declare huber_alpha_scale or alpha")
@@ -1600,6 +1630,8 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         max_bin=max_bin,
         num_threads=num_threads,
         seed=RANDOM_SEED,
+        task_type=mds.task_type,
+        class_values=mds.class_values,
     )
     checkpoints = gbm_checkpoint_iterations(config)
     expected = _gbm_expected_keys(folds, entity_col, mds.date_col)
@@ -1777,7 +1809,15 @@ def _predict_from_gbm_models(
                     "n_trees": value,
                 }
             )
-    return {"learning_curves": [], "predictions": predictions}
+    checkpoints = [int(checkpoint["value"]) for checkpoint in spec["checkpoint_schedule"]]
+    return {
+        "learning_curves": _learning_curves_from_predictions(
+            spec["config_name"],
+            predictions,
+            checkpoints,
+        ),
+        "predictions": predictions,
+    }
 
 
 def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext):

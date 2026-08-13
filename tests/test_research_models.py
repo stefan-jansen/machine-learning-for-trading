@@ -335,25 +335,35 @@ def test_gbm_runner_replays_valid_models_after_partial_registration(tmp_path, mo
     with pytest.raises(RuntimeError, match="interrupted registration"):
         request.run()
     monkeypatch.setattr(ResultsCatalog, "publish_predictions", original_publish)
+
+    def replay_models(model_dir, spec, context):
+        del model_dir
+        predictions = [
+            {
+                "dates": fold["dates"],
+                "entities": fold["entities"],
+                "y_true": fold["y_val"],
+                "y_eval": fold.get("y_eval"),
+                "y_pred": fold["X_val"][:, 0] + checkpoint["value"] / 100,
+                "fold": fold["fold"],
+                "n_trees": checkpoint["value"],
+            }
+            for fold in context.folds
+            for checkpoint in spec["checkpoint_schedule"]
+        ]
+        return {
+            "learning_curves": gbm_utils._learning_curves_from_predictions(
+                spec["config_name"],
+                predictions,
+                [item["value"] for item in spec["checkpoint_schedule"]],
+            ),
+            "predictions": predictions,
+        }
+
     monkeypatch.setattr(
         gbm_utils,
         "_predict_from_gbm_models",
-        lambda model_dir, spec, context: {
-            "learning_curves": [],
-            "predictions": [
-                {
-                    "dates": fold["dates"],
-                    "entities": fold["entities"],
-                    "y_true": fold["y_val"],
-                    "y_eval": fold.get("y_eval"),
-                    "y_pred": fold["X_val"][:, 0] + checkpoint["value"] / 100,
-                    "fold": fold["fold"],
-                    "n_trees": checkpoint["value"],
-                }
-                for fold in context.folds
-                for checkpoint in spec["checkpoint_schedule"]
-            ],
-        },
+        replay_models,
     )
     monkeypatch.setattr(
         gbm_utils,
@@ -365,6 +375,14 @@ def test_gbm_runner_replays_valid_models_after_partial_registration(tmp_path, mo
 
     assert len(recovered.predictions) == 2
     assert all(result.complete for result in recovered.predictions)
+    curves = (
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "learning_curves.parquet"
+    )
+    assert pl.read_parquet(curves).get_column("iteration").to_list() == [2, 4]
 
 
 def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
@@ -389,6 +407,42 @@ def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
     assert effective["0"]["alpha"] == pytest.approx(0.5 * np.std(folds[0]["y_train"]))
     assert effective["1"]["alpha"] == pytest.approx(0.5 * np.std(folds[1]["y_train"]))
     assert effective["0"]["alpha"] != effective["1"]["alpha"]
+
+
+def test_huber_legacy_path_cannot_bypass_effective_identity() -> None:
+    config = {
+        "config_name": "huber",
+        "huber_alpha_scale": 0.5,
+        "max_iterations": 2,
+        "params": {"objective": "huber", "seed": 42},
+    }
+
+    with pytest.raises(ValueError, match="hash-covered effective_params_by_fold"):
+        gbm_utils.train_gbm_config(config, [], feature_names=[], device="cpu")
+
+
+def test_multiclass_effective_params_use_resolved_class_count() -> None:
+    folds = [{"fold": 0, "y_train": np.array([0, 1, 2])}]
+    config = {
+        "params": {
+            "num_class": 5,
+            "objective": "multiclass",
+            "seed": 42,
+        }
+    }
+
+    effective = gbm_utils._gbm_effective_params_by_fold(
+        config,
+        folds,
+        device="cpu",
+        max_bin=63,
+        num_threads=1,
+        seed=42,
+        task_type="classification",
+        class_values=[-1, 0, 1],
+    )
+
+    assert effective["0"]["num_class"] == 3
 
 
 def test_cae_fitted_artifact_reconstructs_every_checkpoint(tmp_path) -> None:
