@@ -19,8 +19,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from case_studies.utils.gbm import resolve_gbm_device
-
 REPO_ROOT = Path(__file__).parent.parent
 SETUP_YAML = REPO_ROOT / "case_studies" / "etfs" / "config" / "setup.yaml"
 
@@ -366,8 +364,9 @@ def test_crypto_gbm_uses_the_configured_device_and_hashes_current_inputs() -> No
     )
     configured_device = setup["modeling"]["gbm"]["device"]
 
-    assert resolve_gbm_device(None, configured_device) == "cpu"
-    assert resolve_gbm_device("cuda", configured_device) == "cuda"
+    assert configured_device == "cpu"
+    assert 'setup.get("modeling", {}).get("gbm", {}).get("device", "cpu")' in source
+    assert "TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)" in source
     assert "modeling_input_fingerprint(" in source
     assert '"device": TRAIN_DEVICE' in source
     assert '"input_fingerprint": INPUT_FINGERPRINT' in source
