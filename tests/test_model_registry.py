@@ -65,6 +65,7 @@ _READ_ONLY_DIRS = {"config", "features", "labels"}
 
 # Minimum stage number for model notebooks
 _MODEL_STAGE_MIN = 6
+_MODEL_STAGE_MIN_BY_CASE = {"us_firm_characteristics": 5}
 
 # Suffixes that are NOT model notebooks (backtest, strategy, diagnostics).
 # These depend on upstream predictions and should be tested separately.
@@ -256,7 +257,7 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
             if not match:
                 continue
             stage_num = int(match.group(1))
-            if stage_num < _MODEL_STAGE_MIN:
+            if stage_num < _MODEL_STAGE_MIN_BY_CASE.get(cs, _MODEL_STAGE_MIN):
                 continue
             # Skip non-model notebooks (backtest, strategy, diagnostics)
             suffix = notebook.stem[len(match.group(0)) :]
@@ -267,6 +268,13 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
 
 
 MODEL_TESTS = _collect_model_notebooks()
+
+
+def test_collection_includes_us_firm_linear_stage() -> None:
+    assert any(
+        case_study == "us_firm_characteristics" and stage == "05_linear"
+        for case_study, stage, _ in MODEL_TESTS
+    )
 
 
 # ---------------------------------------------------------------------------
