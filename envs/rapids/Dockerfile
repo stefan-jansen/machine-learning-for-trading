@@ -74,12 +74,11 @@ RUN pip install --no-cache-dir -c /tmp/locked-constraints.txt \
     "catboost>=1.2" \
     "psutil>=5.9" \
     "jupyterlab>=4.1" \
-    "ml4t-data>=0.1.0b15" \
-    "ml4t-diagnostic>=0.1.0b25" \
-    "ml4t-engineer>=0.1.0b2" \
+    "ml4t-data>=0.1.2" \
+    "ml4t-diagnostic>=0.1.1" \
+    "ml4t-engineer>=0.1.3" \
     "pytest>=8.0" \
-    "pyyaml>=6.0" \
-    --pre && \
+    "pyyaml>=6.0" && \
     python -c "import cudf, cuml; print('cudf', cudf.__version__, 'cuml', cuml.__version__)"
 
 # XGBoost: already included in RAPIDS with GPU support — verify

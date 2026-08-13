@@ -16,7 +16,7 @@
 # initial_margin_pct / maintenance_margin_pct:
 #   Per-product percentage-of-notional initial and maintenance margin,
 #   wired through ContractSpec.margin_pct -> Broker.margin_pct_schedule
-#   (ml4t-backtest >= 0.1.0b18). The dollar margin tracks price changes
+#   (ml4t-backtest >= 0.1.3). The dollar margin tracks price changes
 #   naturally while the rate stays constant; only the rate needs to be
 #   re-anchored when CME publishes a new SPAN schedule.
 #

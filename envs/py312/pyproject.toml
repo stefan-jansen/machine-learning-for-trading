@@ -26,7 +26,7 @@ dependencies = [
     "opacus>=1.4",
     # pfhedge is deliberately absent: it is a main dependency of the project and
     # 0.22.0 works on Python 3.14, so Ch21 deep hedging runs in the default image.
-    "ml4t-diagnostic>=0.1.0b25",
+    "ml4t-diagnostic>=0.1.1",
     # Bayesian (arviz/pymc for uncertainty features, pycausalimpact for ARIMA event studies)
     "arviz>=0.18,<1.0",
     "pymc>=5.14",
