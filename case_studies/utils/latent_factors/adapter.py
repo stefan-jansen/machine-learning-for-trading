@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 import torch
 
+from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.latent_factors.cv import (
     _build_prediction_frame,
@@ -241,6 +242,8 @@ def _resolve_model_configuration(
             if reduced_budget not in compatible:
                 compatible.append(reduced_budget)
             model_kwargs["checkpoint_epochs"] = compatible
+    if model_name == "sdf" and model_kwargs.get("expected_return_mapper", "linear") != "linear":
+        raise ValueError("SDF expected_return_mapper currently supports only 'linear'")
     if n_factors < 1 or n_epochs < 0:
         raise ValueError("latent-factor n_factors must be positive and n_epochs non-negative")
 
@@ -396,6 +399,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         request,
         label_ref.load().select(case.date_col).unique(),
     )
+    if (
+        request.get("cv") is not None
+        and case.temporal_by_fold is not None
+        and case.temporal_keys
+        and case.temporal_feature_names
+    ):
+        require_fold_scoped_temporal_compatibility(splits, case.splits)
     case.splits = splits
     (
         model_kwargs,

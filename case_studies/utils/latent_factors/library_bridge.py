@@ -334,6 +334,8 @@ def run_sdf_fold_with_library(
     device: str = "cpu",
     artifact_dir: Path | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    if expected_return_mapper != "linear":
+        raise ValueError("SDF expected_return_mapper currently supports only 'linear'")
     train_batch = _cross_section_batch(
         chars_train,
         returns=returns_train,

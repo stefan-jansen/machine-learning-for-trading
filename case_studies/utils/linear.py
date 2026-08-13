@@ -19,6 +19,7 @@ import polars as pl
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
 
 from case_studies.research.contracts import ExecutionTier
+from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.research.models import ModelRun
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
@@ -219,6 +220,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"linear runner does not support entity key {entity_col!r}")
     label_timeline = label_ref.load().select(mds.date_col).unique()
     splits, cv_record = _select_splits(mds, request, label_timeline)
+    if (
+        request.get("cv") is not None
+        and mds.temporal_by_fold is not None
+        and mds.temporal_keys
+        and mds.temporal_feature_names
+    ):
+        require_fold_scoped_temporal_compatibility(splits, mds.splits)
     folds = prepare_cv_folds(
         mds.dataset.to_pandas(),
         splits,

@@ -215,6 +215,48 @@ def test_custom_cv_uses_label_timeline_not_feature_availability() -> None:
     assert full_record == reduced_record
 
 
+@pytest.mark.parametrize("family", ["linear", "gbm", "latent_factors"])
+def test_model_adapters_reject_custom_cv_for_fold_scoped_temporal_features(
+    family,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cv = CVSpec.walk_forward(
+        training_window="2D",
+        validation_window="1D",
+        folds=(0,),
+    )
+    if family == "linear":
+        study = _linear_study(tmp_path / family, monkeypatch)
+        context = linear.load_modeling_dataset("etfs", "fwd_ret_1d")
+        selector = "case_studies.utils.linear._select_splits"
+        config_name = "ridge"
+    elif family == "gbm":
+        study = _gbm_study(tmp_path / family, monkeypatch)
+        context = modeling.load_modeling_dataset("etfs", "fwd_ret_1d")
+        selector = "case_studies.utils.gbm._gbm_select_splits"
+        config_name = "leaves_7_mse"
+    else:
+        study = _latent_study(tmp_path / family, monkeypatch)
+        context = latent_case_study.load_case_study_context("etfs")
+        selector = "case_studies.utils.latent_factors.adapter._select_splits"
+        config_name = "pca"
+    context.temporal_by_fold = object()
+    context.temporal_keys = ["symbol", "timestamp"]
+    context.temporal_feature_names = ["temporal_value"]
+    changed = [{**context.splits[0], "train_end": "1999-12-31"}]
+    monkeypatch.setattr(selector, lambda *_args, **_kwargs: (changed, {"identity": "changed"}))
+
+    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
+        study.model(
+            family=family,
+            label="fwd_ret_1d",
+            config_name=config_name,
+            cv=cv,
+            overrides={"device": "cpu", "max_bin": 63} if family == "gbm" else {},
+        ).resolve()
+
+
 def test_product_entity_is_normalized_at_prediction_boundary() -> None:
     meta = pl.DataFrame(
         {"product": ["ES", "NQ"], "timestamp": ["2024-01-01", "2024-01-01"]}
@@ -387,6 +429,37 @@ def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
     assert effective["0"]["alpha"] == pytest.approx(0.5 * np.std(folds[0]["y_train"]))
     assert effective["1"]["alpha"] == pytest.approx(0.5 * np.std(folds[1]["y_train"]))
     assert effective["0"]["alpha"] != effective["1"]["alpha"]
+
+
+def test_lightgbm_huber_alpha_is_a_residual_unit_threshold() -> None:
+    import lightgbm as lgb
+
+    rng = np.random.default_rng(7)
+    features = rng.normal(size=(200, 3))
+    labels = 0.02 * features[:, 0] + 0.01 * features[:, 1]
+    labels += rng.normal(scale=0.01, size=200)
+    labels[::20] += 0.15
+    common = {
+        "deterministic": True,
+        "force_col_wise": True,
+        "metric": "None",
+        "min_data_in_leaf": 5,
+        "num_leaves": 7,
+        "num_threads": 1,
+        "seed": 42,
+        "verbosity": -1,
+    }
+    data = lgb.Dataset(features, label=labels)
+    mse = lgb.train({**common, "objective": "regression"}, data, num_boost_round=20)
+    alpha = gbm_utils._scaled_huber_alpha(0.5, labels)
+    huber = lgb.train(
+        {**common, "alpha": alpha, "objective": "huber"},
+        data,
+        num_boost_round=20,
+    )
+
+    assert alpha == pytest.approx(0.5 * np.std(labels))
+    assert np.max(np.abs(mse.predict(features) - huber.predict(features))) > 0.01
 
 
 def test_real_huber_preset_keeps_legacy_training_surface(monkeypatch) -> None:
@@ -616,6 +689,20 @@ def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch
         1,
         2,
     ]
+
+
+def test_sdf_rejects_unimplemented_expected_return_mapper() -> None:
+    case = SimpleNamespace(
+        model_kwargs={
+            "sdf": {
+                "expected_return_mapper": "neural",
+                "output_mode": "expected_returns",
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="supports only 'linear'"):
+        latent_adapter._resolve_model_configuration(case, "sdf", {}, {})
 
 
 def test_cae_fitted_artifact_reconstructs_every_checkpoint(tmp_path) -> None:

@@ -210,3 +210,29 @@ def test_cvspec_resolves_stable_exact_boundaries_and_changes_with_protocol() -> 
     assert first == second == reordered
     assert first.normalized_folds != changed.normalized_folds
     assert first.identity != changed.identity
+
+
+def test_custom_cv_cannot_relabel_fold_scoped_temporal_features() -> None:
+    from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+
+    artifact = [
+        {
+            "fold": 0,
+            "train_start": "2020-01-01",
+            "train_end": "2020-12-31",
+            "val_start": "2021-01-01",
+            "val_end": "2021-03-31",
+        },
+        {
+            "fold": 1,
+            "train_start": "2020-04-01",
+            "train_end": "2021-03-31",
+            "val_start": "2021-04-01",
+            "val_end": "2021-06-30",
+        },
+    ]
+
+    require_fold_scoped_temporal_compatibility([artifact[1]], artifact)
+    changed = [{**artifact[1], "train_end": "2021-05-31"}]
+    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
+        require_fold_scoped_temporal_compatibility(changed, artifact)

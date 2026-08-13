@@ -51,6 +51,7 @@ import torch  # noqa: F401
 import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
+from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.utils.artifact_digest import value_digest
 from utils.modeling import RANDOM_SEED, seed_everything
 
@@ -245,9 +246,9 @@ def lightgbm_runtime_params(
     next to the portable training identity; they do not enter its hash.
     """
     normalized = device.lower()
+    if num_threads < 1:
+        raise ValueError("num_threads must be at least 1")
     if normalized == "cpu":
-        if num_threads < 1:
-            raise ValueError("num_threads must be at least 1")
         return {
             "device_type": "cpu",
             "deterministic": True,
@@ -270,6 +271,7 @@ def lightgbm_runtime_params(
             )
         return {
             "device_type": gpu_device,
+            "num_threads": int(num_threads),
             "seed": int(seed),
             "data_random_seed": int(seed),
             "feature_fraction_seed": int(seed),
@@ -1019,8 +1021,7 @@ def train_gbm_config(
         effective_params_by_fold = {}
         for fold in fold_data:
             params = dict(base_params)
-            std = float(np.nanstd(fold["y_train"]))
-            params["alpha"] = max(float(scale) * std, float(np.finfo(np.float32).eps))
+            params["alpha"] = _scaled_huber_alpha(float(scale), fold["y_train"])
             effective_params_by_fold[str(int(fold["fold"]))] = params
 
     # Classification: ensure num_class for multiclass
@@ -1505,6 +1506,11 @@ def _validate_lightgbm_params(params: dict[str, Any]) -> None:
         raise ValueError(f"unsupported LightGBM parameters: {sorted(unknown)}")
 
 
+def _scaled_huber_alpha(scale: float, labels: np.ndarray) -> float:
+    """Resolve LightGBM's residual-unit Huber delta from one training fold."""
+    return max(scale * float(np.nanstd(labels)), float(np.finfo(np.float32).eps))
+
+
 def _gbm_effective_params_by_fold(
     config: dict[str, Any],
     folds: list[dict[str, Any]],
@@ -1531,8 +1537,7 @@ def _gbm_effective_params_by_fold(
         params = dict(base)
         if params.get("objective") == "huber" and "alpha" not in params:
             assert scale is not None
-            std = float(np.nanstd(fold["y_train"]))
-            params["alpha"] = max(float(scale) * std, float(np.finfo(np.float32).eps))
+            params["alpha"] = _scaled_huber_alpha(float(scale), fold["y_train"])
         _validate_lightgbm_params(params)
         effective[str(int(fold["fold"]))] = params
     return effective
@@ -1592,6 +1597,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         request,
         label_ref.load().select(mds.date_col).unique(),
     )
+    if (
+        request.get("cv") is not None
+        and mds.temporal_by_fold is not None
+        and mds.temporal_keys
+        and mds.temporal_feature_names
+    ):
+        require_fold_scoped_temporal_compatibility(splits, mds.splits)
     folds = prepare_gbm_folds(
         mds.dataset.to_pandas(),
         splits,

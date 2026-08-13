@@ -11,6 +11,32 @@ def _normalize_boundary(value: Any) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
+def require_fold_scoped_temporal_compatibility(
+    requested_folds: list[dict[str, Any]],
+    artifact_folds: list[dict[str, Any]],
+) -> None:
+    """Reject CV geometry that cannot reuse fold-scoped temporal features."""
+    fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+
+    def normalize(split: dict[str, Any]) -> dict[str, Any]:
+        return {
+            field: int(split[field]) if field == "fold" else _normalize_boundary(split[field])
+            for field in fields
+        }
+
+    source = {int(split["fold"]): normalize(split) for split in artifact_folds}
+    incompatible = [
+        normalize(split)
+        for split in requested_folds
+        if source.get(int(split["fold"])) != normalize(split)
+    ]
+    if incompatible:
+        raise ValueError(
+            "custom CV is incompatible with fold-scoped temporal features; "
+            "use the artifact's original fold boundaries"
+        )
+
+
 @dataclass(frozen=True)
 class ResolvedCVSpec:
     request: dict[str, Any]
