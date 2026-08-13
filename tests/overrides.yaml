@@ -1269,7 +1269,6 @@ case_studies/crypto_perps_funding/06_linear:
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
-  gpu: true
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5

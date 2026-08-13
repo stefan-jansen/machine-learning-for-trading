@@ -51,7 +51,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import yaml
-from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style as style
 from case_studies.utils.gbm import (
@@ -70,6 +69,10 @@ from case_studies.utils.registry import (
     training_hash_from_spec,
     training_run_status,
 )
+
+# isort: split
+from ml4t.diagnostic.metrics import cross_sectional_ic
+
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
