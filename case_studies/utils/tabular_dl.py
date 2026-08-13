@@ -16,13 +16,21 @@ Usage:
 from __future__ import annotations
 
 import gc
+import hashlib
+import importlib.metadata
+import json
 import os
+import platform
+import shutil
+import subprocess
 import time
+import uuid
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -36,12 +44,387 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
+
+if TYPE_CHECKING:
+    from case_studies.research.workspace import Study
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
+
+_TABM_PREVIEW_FIELDS = {"folds", "max_symbols"}
+
+
+@dataclass(frozen=True)
+class TabMResearchContext:
+    dataset_pd: pd.DataFrame
+    splits: tuple[dict[str, Any], ...]
+    config: dict[str, Any]
+    feature_names: tuple[str, ...]
+    label_col: str
+    eval_label_col: str | None
+    date_col: str
+    entity_col: str
+    task_type: str
+    class_values: tuple[Any, ...]
+    temporal_by_fold: pd.DataFrame | None
+    temporal_keys: tuple[str, ...]
+    temporal_feature_names: tuple[str, ...]
+    expected_keys: pl.DataFrame
+    runtime_provenance: dict[str, Any]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _tabm_source_identity() -> dict[str, str]:
+    from case_studies.utils import deep_model_state
+
+    return {
+        Path(__file__).name: _sha256(Path(__file__)),
+        Path(deep_model_state.__file__).name: _sha256(Path(deep_model_state.__file__)),
+    }
+
+
+def _tabm_runtime_identity() -> dict[str, str]:
+    return {
+        "numpy": importlib.metadata.version("numpy"),
+        "scikit-learn": importlib.metadata.version("scikit-learn"),
+        "torch": importlib.metadata.version("torch"),
+    }
+
+
+def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    return {
+        "entry_point": "case_studies.utils.tabular_dl",
+        "packages": _tabm_runtime_identity(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "source_commit": commit,
+    }
+
+
+def _normalize_splits(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+    return tuple(
+        {
+            key: int(split[key]) if key == "fold" else str(split[key])
+            for key in fields
+            if split.get(key) is not None
+        }
+        for split in splits
+    )
+
+
+def _tabm_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cv = request.get("cv")
+    if cv is None:
+        splits = [dict(split) for split in mds.splits]
+        normalized = _normalize_splits(splits)
+        cv_record = {
+            "request": {"source": "case_study_default"},
+            "folds": list(normalized),
+            "identity": value_digest(pl.DataFrame(list(normalized))),
+        }
+    else:
+        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
+        splits = [dict(fold) for fold in resolved.normalized_folds]
+        cv_record = resolved.as_dict()
+    requested_folds = request["preview_reductions"].get("folds")
+    if requested_folds is not None:
+        selected = {int(fold) for fold in requested_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        if {int(split["fold"]) for split in splits} != selected:
+            raise ValueError("preview fold reduction refers to an unavailable fold")
+        cv_record = {**cv_record, "preview_folds": sorted(selected)}
+    if not splits:
+        raise ValueError("TabM request resolved no cross-validation folds")
+    return splits, cv_record
+
+
+def _resolve_tabm_config(config: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    resolved = {**config, "params": dict(config.get("params") or {})}
+    top_level = {"batch_size", "checkpoint_interval", "n_epochs"}
+    unknown = set(overrides) - top_level - set(resolved["params"]) - {"device", "num_threads"}
+    if unknown:
+        raise ValueError(f"unsupported TabM overrides: {sorted(unknown)}")
+    for key, value in overrides.items():
+        if key in top_level:
+            resolved[key] = value
+        elif key not in {"device", "num_threads"}:
+            resolved["params"][key] = value
+    if resolved.get("library") != "tabm" or str(resolved["config_name"]).startswith("tabpfn"):
+        raise ValueError("the TabM research adapter requires a persisted TabM configuration")
+    _tabm_checkpoint_epochs(resolved)
+    return resolved
+
+
+def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
+    frames = []
+    for split in splits:
+        date_dtype = mds.dataset.schema[mds.date_col]
+        frame = mds.dataset.filter(
+            pl.col(mds.date_col).is_between(
+                pl.lit(split["val_start"]).cast(date_dtype, strict=False),
+                pl.lit(split["val_end"]).cast(date_dtype, strict=False),
+                closed="both",
+            )
+        ).drop_nulls([mds.label_col, *([mds.eval_label_col] if mds.eval_label_col else [])])
+        frames.append(
+            frame.select(
+                pl.col(mds.entity_cols[0]).alias("symbol"),
+                pl.col(mds.date_col).alias("timestamp"),
+            ).with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
+        )
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("TabM request produced duplicate expected prediction keys")
+    return expected
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    from case_studies.research.contracts import ExecutionTier
+    from utils.modeling import load_configs, load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"])
+    mds = load_modeling_dataset(
+        study.case_study,
+        label_ref.name,
+        max_symbols=int(reductions.get("max_symbols", 0)),
+    )
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
+        raise ValueError("TabM runner requires canonical symbol and timestamp keys")
+    splits, cv_record = _tabm_splits(mds, request)
+    configs = {
+        config["config_name"]: config
+        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+    }
+    try:
+        configured = configs[request["config_name"]]
+    except KeyError as error:
+        raise ValueError(f"unknown TabM configuration {request['config_name']!r}") from error
+    config = _resolve_tabm_config(configured, request["overrides"])
+    device = str(request["overrides"].get("device", "cuda"))
+    num_threads = int(request["overrides"].get("num_threads", 8))
+    runtime = tabm_runtime_spec(device, num_threads=num_threads)
+    expected = _tabm_expected_keys(mds, splits)
+    input_lineage = mds.input_lineage
+    checkpoints = _tabm_checkpoint_epochs(config)
+    spec = {
+        "identity_version": 2,
+        "execution_tier": tier.value,
+        "family": "tabular_dl",
+        "label": label_ref.name,
+        "seed": int(runtime["seed"]),
+        "config_name": config["config_name"],
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "task": {
+            "type": mds.task_type,
+            "class_values": list(mds.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+        "cv": cv_record,
+        "model": {
+            "class": "TabMModel",
+            "implementation": "pytorch",
+            "objective": "classification" if mds.task_type == "classification" else "regression",
+            "params": {
+                **config["params"],
+                "batch_size": int(config["batch_size"]),
+                "checkpoint_interval": int(config["checkpoint_interval"]),
+                "n_epochs": int(config["n_epochs"]),
+            },
+        },
+        "preprocessing": {
+            "imputer": {"class": "SimpleImputer", "strategy": "median"},
+            "scaler": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        },
+        "checkpoint_schedule": [
+            {"kind": "epoch", "value": checkpoint} for checkpoint in checkpoints
+        ],
+        "expected_prediction_keys": {
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+            "n_rows": expected.height,
+            "n_folds": expected["fold"].n_unique(),
+        },
+        "input_data_spec": input_lineage,
+        "sampling": {"max_symbols": int(reductions.get("max_symbols", 0))},
+        "numerics": runtime,
+        "source_identity": _tabm_source_identity(),
+        "runtime_identity": _tabm_runtime_identity(),
+    }
+    if tier is ExecutionTier.PREVIEW:
+        spec["preview_reductions"] = reductions
+    context = TabMResearchContext(
+        dataset_pd=mds.dataset.to_pandas(),
+        splits=tuple(splits),
+        config=config,
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=tuple(mds.temporal_keys),
+        temporal_feature_names=tuple(mds.temporal_feature_names),
+        expected_keys=expected,
+        runtime_provenance=_tabm_runtime_provenance(study),
+    )
+    return spec, context
+
+
+def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResearchContext):
+    from case_studies.research.models import ModelRun
+    from case_studies.research.results import PredictionResult, Result, TrainingResult
+    from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+    from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+
+    training_hash = training_hash_from_spec(spec)
+    checkpoint_values = tuple(item["value"] for item in spec["checkpoint_schedule"])
+    try:
+        training = Result.open(
+            study, training_hash, include_preview=spec["execution_tier"] == "preview"
+        )
+        predictions = tuple(
+            Result.open(
+                study,
+                prediction_hash_from_parts(
+                    training_hash,
+                    checkpoint,
+                    "validation",
+                    checkpoint_kind="epoch",
+                    identity_version=2,
+                ),
+                include_preview=spec["execution_tier"] == "preview",
+            )
+            for checkpoint in checkpoint_values
+        )
+    except KeyError:
+        return None
+    if not isinstance(training, TrainingResult) or any(
+        not isinstance(result, PredictionResult) or not result.complete for result in predictions
+    ):
+        return None
+    model_root = training.root / "run_log" / "training" / training.hash / "models"
+    try:
+        validate_deep_checkpoint_population(
+            model_root,
+            config_name=context.config["config_name"],
+            fold_ids=tuple(int(split["fold"]) for split in context.splits),
+            checkpoints=checkpoint_values,
+            architecture="tabm",
+        )
+    except ValueError:
+        return None
+    return ModelRun(training=training, predictions=predictions)
+
+
+def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
+    from case_studies.research.models import ModelRun
+
+    cached = _cached_research_run(study, spec, context)
+    if cached is not None:
+        return cached
+    training = study.results.register_training(
+        spec,
+        execution_tier=spec["execution_tier"],
+        runtime_provenance=context.runtime_provenance,
+    )
+    train_dir = training.root / "run_log" / "training" / training.hash
+    model_dir = train_dir / "models"
+    if model_dir.exists():
+        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+    try:
+        result = run_tabm_cv(
+            context.dataset_pd,
+            list(context.splits),
+            configs=[context.config],
+            n_features=len(context.feature_names),
+            feature_names=list(context.feature_names),
+            label_col=context.label_col,
+            eval_label_col=context.eval_label_col,
+            task_type=context.task_type,
+            class_values=list(context.class_values) or None,
+            date_col=context.date_col,
+            entity_col=context.entity_col,
+            device=spec["numerics"]["device"],
+            save_dir=train_dir / "diagnostics",
+            register=False,
+            temporal_by_fold=context.temporal_by_fold,
+            temporal_keys=list(context.temporal_keys),
+            temporal_feature_names=list(context.temporal_feature_names),
+            seed=int(spec["seed"]),
+            num_threads=int(spec["numerics"]["num_threads"]),
+            checkpoint_root=staging,
+            strict=True,
+        )
+        os.replace(staging, model_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    prediction_results = []
+    for checkpoint in (item["value"] for item in spec["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+        )
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type=context.task_type,
+                class_values=list(context.class_values) or None,
+                eval_col="eval_actual" if context.eval_label_col else None,
+                label=context.label_col,
+            )
+        )
+    runtime_path = train_dir / "runtime.json"
+    if runtime_path.exists():
+        runtime = json.loads(runtime_path.read_text())
+        runtime["elapsed_s"] = sum(
+            float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
+        )
+        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    return ModelRun(training=training, predictions=tuple(prediction_results))
 
 
 def resolve_torch_device(device: str) -> torch.device:
