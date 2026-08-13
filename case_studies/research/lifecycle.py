@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from case_studies.utils.registry.specs import canonical_json, compute_hash
+from case_studies.utils.registry.specs import (
+    canonical_json,
+    compute_hash,
+    project_training_identity,
+    training_hash_from_spec,
+)
 from case_studies.utils.registry.store import _open_registry, _utc_now
 
 from .comparison import CandidateSet
@@ -22,6 +28,32 @@ class ResearchLock:
     hash: str
     state: str
     record: dict[str, Any]
+
+
+def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[str, Any]) -> dict:
+    projected_validation = project_training_identity(validation_spec)
+    projected_holdout = project_training_identity(holdout_spec)
+    if projected_holdout.get("execution_tier") != "canonical":
+        raise ValueError("holdout retraining must use the canonical execution tier")
+    validation_cv = projected_validation.pop("cv", None)
+    holdout_cv = projected_holdout.pop("cv", None)
+    if holdout_cv is None or holdout_cv == validation_cv:
+        raise ValueError("holdout retraining requires an explicit, distinct CV interval")
+    if projected_holdout != projected_validation:
+        raise ValueError("holdout retraining may differ from selected training only in CV interval")
+    return project_training_identity(holdout_spec)
+
+
+def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    projected.pop("_runtime_backtest_config", None)
+    metadata = projected.get("backtest_config", {}).get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("prediction_hash", None)
+    input_identity = projected.get("input_identity")
+    if isinstance(input_identity, dict):
+        input_identity.pop("prices", None)
+    return projected
 
 
 class Lifecycle:
@@ -48,6 +80,7 @@ class Lifecycle:
         candidate_set_hash: str,
         selected_backtest_hash: str,
         selection_evidence: dict[str, Any],
+        holdout_training_spec: dict[str, Any],
     ) -> ResearchLock:
         self.study.require_writable()
         self.study.activate()
@@ -68,6 +101,8 @@ class Lifecycle:
         training = Result.open(self.study, prediction_record["training_hash"])
         assert isinstance(training, TrainingResult)
         training_record = training.registry_record()
+        locked_holdout_spec = _locked_training_spec(training.spec(), holdout_training_spec)
+        holdout_training_hash = training_hash_from_spec(locked_holdout_spec)
         lock_record = {
             "candidate_set_hash": candidates.hash,
             "selection_evidence": selection_evidence,
@@ -76,6 +111,8 @@ class Lifecycle:
             "feature_artifacts": training.spec().get("feature_artifacts"),
             "cv": training.spec().get("cv"),
             "training_hash": training.hash,
+            "holdout_training_hash": holdout_training_hash,
+            "holdout_training_spec": locked_holdout_spec,
             "prediction_hash": prediction.hash,
             "checkpoint_kind": prediction_record["checkpoint_kind"],
             "checkpoint_value": prediction_record["checkpoint_value"],
@@ -137,16 +174,26 @@ class Lifecycle:
             isinstance(training, TrainingResult)
             and training.complete
             and training.execution_tier == "canonical"
+            and training.hash == lock.record["holdout_training_hash"]
+            and project_training_identity(training.spec()) == lock.record["holdout_training_spec"]
             and isinstance(prediction, PredictionResult)
             and prediction.complete
+            and prediction.execution_tier == "canonical"
             and prediction.registry_record()["split"] == "holdout"
             and prediction.registry_record()["training_hash"] == training.hash
+            and prediction.registry_record()["checkpoint_kind"] == lock.record["checkpoint_kind"]
+            and prediction.registry_record()["checkpoint_value"] == lock.record["checkpoint_value"]
             and isinstance(backtest, BacktestResult)
             and backtest.complete
+            and backtest.execution_tier == "canonical"
             and backtest.registry_record()["prediction_hash"] == prediction.hash
+            and _locked_strategy_projection(backtest.spec())
+            == _locked_strategy_projection(lock.record["strategy_spec"])
         )
         if not valid:
-            raise ValueError("holdout transition requires one complete canonical holdout lineage")
+            raise ValueError(
+                "holdout transition requires the exact complete canonical lineage in the lock"
+            )
 
         db = _open_registry(self.study.root)
         try:

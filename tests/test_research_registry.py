@@ -119,6 +119,61 @@ def test_legacy_result_reopens_without_being_inferred_complete(tmp_path: Path) -
     assert reopened.coverage() is None
 
 
+def test_read_only_legacy_registry_reopens_without_schema_writes(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    db_path = release / "case_studies" / "etfs" / "run_log" / "registry.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE training_runs ("
+            "training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL, "
+            "spec_json TEXT, created_at TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE prediction_sets ("
+            "prediction_hash TEXT PRIMARY KEY, training_hash TEXT NOT NULL, "
+            "split TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO training_runs VALUES (?,?,?,?,?)",
+            ("legacy-training", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets VALUES (?,?,?,?)",
+            ("legacy-prediction", "legacy-training", "validation", "2024-01-01"),
+        )
+        db.commit()
+    before = db_path.read_bytes()
+
+    study = Study.open("etfs", release_root=release)
+    reopened = Result.open(study, "legacy-prediction")
+
+    assert reopened.identity_version is None
+    assert not reopened.complete
+    assert db_path.read_bytes() == before
+
+
+def test_workspace_open_migrates_copied_legacy_registry(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    db_path = release / "case_studies" / "etfs" / "run_log" / "registry.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE training_runs ("
+            "training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL, "
+            "spec_json TEXT, created_at TEXT NOT NULL)"
+        )
+        db.commit()
+
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(training_runs)")}
+        coverage_table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_coverage'"
+        ).fetchone()
+
+    assert {"identity_version", "execution_tier"} <= columns
+    assert coverage_table == (1,)
+
+
 def test_legacy_registry_schema_migrates_additively(tmp_path: Path) -> None:
     case_dir = tmp_path / "legacy" / "etfs"
     db_path = case_dir / "run_log" / "registry.db"
@@ -298,6 +353,35 @@ def test_candidate_sets_are_immutable_and_validate_protocols(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="protocol"):
         CandidateSet.create(study, "invalid", [first, incompatible])
+
+    comparison = {"comparable_fields": ["cv"]}
+    ordered = CandidateSet.create(
+        study,
+        "cv-comparison",
+        [first, incompatible],
+        comparison_contract=comparison,
+    )
+    reversed_set = CandidateSet.create(
+        study,
+        "cv-comparison-reversed",
+        [incompatible, first],
+        comparison_contract=comparison,
+    )
+    third = study.results.publish_predictions(
+        study.results.register_training(
+            _training_spec(cv={"folds": [{"fold": 2, "val_start": "2024-01-07"}]})
+        ),
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    extended_comparison = ordered.extend("cv-comparison-plus", [third])
+
+    assert ordered.hash == reversed_set.hash
+    assert ordered.comparison_contract["protocol"].get("cv") is None
+    assert set(extended_comparison.members) == {first.hash, incompatible.hash, third.hash}
 
 
 def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: Path) -> None:

@@ -138,6 +138,9 @@ class Study:
             read_only=False,
             manifest=manifest,
         )
+        from case_studies.utils.registry.store import _open_registry
+
+        _open_registry(target).close()
         study.activate()
         return study
 

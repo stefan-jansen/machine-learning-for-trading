@@ -452,6 +452,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # Migration 2: add runtime columns to training_runs
     if "training_runs" in tables:
         tr_cols = {row[1] for row in db.execute("PRAGMA table_info(training_runs)").fetchall()}
+        if "config_name" not in tr_cols:
+            db.execute("ALTER TABLE training_runs ADD COLUMN config_name TEXT")
         if "started_at" not in tr_cols:
             db.execute("ALTER TABLE training_runs ADD COLUMN started_at TEXT")
         if "elapsed_s" not in tr_cols:

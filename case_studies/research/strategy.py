@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import polars as pl
 
@@ -14,6 +16,7 @@ from case_studies.utils.backtest_loaders import (
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.conformal import ensure_conformal_calibration_identity
 from case_studies.utils.registry import backtest_hash_from_parts, canonical_json, compute_hash
 
 from .contracts import ExecutionTier
@@ -36,13 +39,42 @@ class Strategy:
     min_weight_change: float | None = None
     min_trade_value: float | None = None
 
+    def _active_lock_record(self) -> dict[str, Any]:
+        db_path = self.study.root / "run_log" / "registry.db"
+        with sqlite3.connect(db_path) as db:
+            row = db.execute(
+                "SELECT lock_json FROM research_locks WHERE state = 'LOCKED' LIMIT 1"
+            ).fetchone()
+        if row is None:
+            raise ValueError("holdout strategy execution requires a LOCKED research lock")
+        return json.loads(row[0])
+
     def __post_init__(self) -> None:
         if self.prediction.study != self.study:
             raise ValueError("prediction belongs to another study")
         if not self.prediction.complete:
             raise ValueError("partial predictions cannot enter strategy execution")
-        if self.prediction.registry_record()["split"] != "validation":
-            raise ValueError("development strategy execution requires validation predictions")
+        prediction_record = self.prediction.registry_record()
+        split = prediction_record["split"]
+        if split == "validation":
+            return
+        if split != "holdout" or self.prediction.execution_tier != "canonical":
+            raise ValueError("strategy execution requires validation or locked holdout predictions")
+        lock_record = self._active_lock_record()
+        matches_lock = (
+            prediction_record["training_hash"] == lock_record.get("holdout_training_hash")
+            and prediction_record["checkpoint_kind"] == lock_record.get("checkpoint_kind")
+            and prediction_record["checkpoint_value"] == lock_record.get("checkpoint_value")
+        )
+        if not matches_lock:
+            raise ValueError("holdout prediction does not match the locked retraining contract")
+
+    @property
+    def split(self) -> Literal["validation", "holdout"]:
+        split = self.prediction.registry_record()["split"]
+        if split not in {"validation", "holdout"}:
+            raise ValueError(f"unsupported prediction split {split!r}")
+        return split
 
     @classmethod
     def from_request(cls, study: Study, request: dict[str, Any]) -> Strategy:
@@ -86,7 +118,7 @@ class Strategy:
         resolved_prices = prices
         if resolved_prices is None:
             resolved_prices = load_backtest_prices_for(
-                self.study.case_study, self.label, split="validation"
+                self.study.case_study, self.label, split=self.split
             )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None
@@ -117,7 +149,14 @@ class Strategy:
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
             }
             spec["input_identity"]["contract_specs"] = compute_hash(canonical_json(serialized))
-        return spec
+        resolved = ensure_conformal_calibration_identity(spec)
+        if self.split == "holdout":
+            from .lifecycle import _locked_strategy_projection
+
+            locked = self._active_lock_record()["strategy_spec"]
+            if _locked_strategy_projection(resolved) != _locked_strategy_projection(locked):
+                raise ValueError("holdout strategy does not match the locked validation strategy")
+        return resolved
 
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)
@@ -130,7 +169,7 @@ class Strategy:
         self.study.activate(ExecutionTier.CANONICAL)
         if resolved_prices is None:
             resolved_prices = load_backtest_prices_for(
-                self.study.case_study, self.label, split="validation"
+                self.study.case_study, self.label, split=self.split
             )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None

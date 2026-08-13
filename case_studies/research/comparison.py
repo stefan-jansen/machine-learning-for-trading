@@ -48,7 +48,8 @@ class CandidateSet:
             raise ValueError("preview results cannot enter a canonical candidate set")
         if any(not member.complete for member in resolved):
             raise ValueError("partial results cannot enter a candidate set")
-        protocols = [member.protocol() for member in resolved]
+        ordered = tuple(sorted(resolved, key=lambda member: member.hash))
+        protocols = [member.protocol() for member in ordered]
         if any(protocol["split"] != "validation" for protocol in protocols):
             raise ValueError("canonical candidate sets require validation results")
 
@@ -62,12 +63,15 @@ class CandidateSet:
                 raise ValueError(
                     f"candidate set contains protocol-incompatible results: {sorted(undeclared)}"
                 )
+        common_protocol = {
+            key: value for key, value in base.items() if key not in comparable_fields
+        }
         supplied_protocol = contract.get("protocol")
-        if supplied_protocol is not None and supplied_protocol != base:
+        if supplied_protocol is not None and supplied_protocol != common_protocol:
             raise ValueError("comparison contract protocol does not match its members")
-        contract["protocol"] = base
-        contract.setdefault("comparable_fields", sorted(comparable_fields))
-        member_hashes = tuple(sorted(member.hash for member in resolved))
+        contract["protocol"] = common_protocol
+        contract["comparable_fields"] = sorted(comparable_fields)
+        member_hashes = tuple(member.hash for member in ordered)
         if len(set(member_hashes)) != len(member_hashes):
             raise ValueError("candidate set members must be unique")
         set_hash = compute_hash(

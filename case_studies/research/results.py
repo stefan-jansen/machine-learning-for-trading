@@ -22,6 +22,26 @@ def _record(db: sqlite3.Connection, query: str, params: tuple) -> dict[str, Any]
     return dict(zip((column[0] for column in cursor.description), row, strict=True))
 
 
+def _columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _training_identity_projection(db: sqlite3.Connection, alias: str = "") -> str:
+    columns = _columns(db, "training_runs")
+    prefix = f"{alias}." if alias else ""
+    identity = (
+        f"{prefix}identity_version AS identity_version"
+        if "identity_version" in columns
+        else "NULL AS identity_version"
+    )
+    tier = (
+        f"{prefix}execution_tier AS execution_tier"
+        if "execution_tier" in columns
+        else "NULL AS execution_tier"
+    )
+    return f"{identity}, {tier}"
+
+
 @dataclass(frozen=True)
 class Result:
     study: Study
@@ -56,10 +76,10 @@ class Result:
                 }
                 if "training_runs" not in tables:
                     continue
+                identity_projection = _training_identity_projection(db)
                 training = _record(
                     db,
-                    "SELECT identity_version, execution_tier FROM training_runs "
-                    "WHERE training_hash = ?",
+                    f"SELECT {identity_projection} FROM training_runs WHERE training_hash = ?",
                     (result_hash,),
                 )
                 if training is not None:
@@ -67,32 +87,38 @@ class Result:
                     return TrainingResult(
                         study, result_hash, "training", tier, training["identity_version"]
                     )
-                prediction = _record(
-                    db,
-                    """
-                    SELECT t.identity_version, t.execution_tier
-                    FROM prediction_sets p
-                    JOIN training_runs t ON t.training_hash = p.training_hash
-                    WHERE p.prediction_hash = ?
-                    """,
-                    (result_hash,),
-                )
+                prediction = None
+                if "prediction_sets" in tables:
+                    identity_projection = _training_identity_projection(db, "t")
+                    prediction = _record(
+                        db,
+                        f"""
+                        SELECT {identity_projection}
+                        FROM prediction_sets p
+                        JOIN training_runs t ON t.training_hash = p.training_hash
+                        WHERE p.prediction_hash = ?
+                        """,
+                        (result_hash,),
+                    )
                 if prediction is not None:
                     tier = prediction["execution_tier"] or namespace
                     return PredictionResult(
                         study, result_hash, "prediction", tier, prediction["identity_version"]
                     )
-                backtest = _record(
-                    db,
-                    """
-                    SELECT t.identity_version, t.execution_tier
-                    FROM backtest_runs b
-                    JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
-                    JOIN training_runs t ON t.training_hash = p.training_hash
-                    WHERE b.backtest_hash = ?
-                    """,
-                    (result_hash,),
-                )
+                backtest = None
+                if {"prediction_sets", "backtest_runs"} <= tables:
+                    identity_projection = _training_identity_projection(db, "t")
+                    backtest = _record(
+                        db,
+                        f"""
+                        SELECT {identity_projection}
+                        FROM backtest_runs b
+                        JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
+                        JOIN training_runs t ON t.training_hash = p.training_hash
+                        WHERE b.backtest_hash = ?
+                        """,
+                        (result_hash,),
+                    )
                 if backtest is not None:
                     tier = backtest["execution_tier"] or namespace
                     return BacktestResult(
@@ -204,6 +230,11 @@ class TrainingResult(Result):
 class PredictionResult(Result):
     def coverage(self) -> dict[str, Any] | None:
         with sqlite3.connect(self.root / "run_log" / "registry.db") as db:
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prediction_coverage'"
+            ).fetchone()
+            if exists is None:
+                return None
             return _record(
                 db,
                 "SELECT * FROM prediction_coverage WHERE prediction_hash = ?",
