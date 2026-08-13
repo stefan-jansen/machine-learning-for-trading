@@ -14,35 +14,41 @@
 # ---
 
 # %% [markdown]
-# # Latent Factor Model Suite for the US Equities Panel
+# # Latent Factor Requests for the US Equities Panel
 #
-# The US equities panel now runs its latent-factor case study in separate
-# notebooks:
+# This index separates the two latent-factor computations while keeping their outputs under the
+# same public result contract. [`13a_pca`](13a_pca.ipynb) estimates statistical factors from the
+# finalized feature panel. [`13b_ipca`](13b_ipca.ipynb) estimates characteristic-conditioned
+# factors. Each notebook constructs its own resolved request, validates fitted state and prediction
+# coverage, and prints the immutable training and prediction hashes it produces.
 #
-# - `13a_pca`
-# - `13b_ipca`
-#
-# Cross-model comparison remains in `15_model_analysis`.
+# Predictive interpretation belongs in [`15_model_analysis`](15_model_analysis.ipynb). This index
+# does not compare metrics or choose between PCA and IPCA.
 
 # %%
-"""Latent factor notebook index for the US equities panel case study."""
+"""Reference index for the latent-factor execution notebooks."""
 
-import warnings
-
-from case_studies.utils.analytics import load_best_ic_per_family
-
-warnings.filterwarnings("ignore")
+from case_studies.research import Study
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
 
-# %%
-best = load_best_ic_per_family(
-    families=["latent_factors"],
-    case_studies=[CASE_STUDY_ID],
-)
+# %% [markdown]
+# ## Result references
+#
+# The released study is read-only here. A hash printed by either execution notebook can be opened
+# with `study.results.open(result_hash)`. The returned result exposes its specification, protocol,
+# lineage, coverage, and artifacts without a registry-wide metric query.
 
-if best.is_empty():
-    print("No latent-factor results are registered yet for this case study.")
-else:
-    print(best)
+# %%
+study = Study.open(CASE_STUDY_ID)
+result_catalog = study.results
+print(f"Result catalog ready for {study.case_study}: {result_catalog.__class__.__name__}")
+
+# %% [markdown]
+# ## Handoff
+#
+# Run the PCA and IPCA execution notebooks to create or reuse their exact result identities. Pass
+# their prediction hashes to the model-analysis notebook as an explicit compatible set. Strategy
+# evaluation later receives every complete configuration and checkpoint; this index makes no
+# predictive or portfolio decision.
