@@ -2,6 +2,7 @@ from .adapters import AdapterBinding, get_adapter, register_adapter, registered_
 from .comparison import CandidateSet
 from .contracts import ExecutionTier, LifecycleState
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
+from .decisions import DecisionArtifact, StateTransitionPolicy
 from .execution import BacktestExecution, ModelExecution, run_backtests, run_models
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
@@ -18,6 +19,7 @@ __all__ = [
     "BacktestExecution",
     "CVSpec",
     "CandidateSet",
+    "DecisionArtifact",
     "ExecutionTier",
     "EligibilityManifest",
     "LabelDefinition",
@@ -35,6 +37,7 @@ __all__ = [
     "Result",
     "Strategy",
     "Study",
+    "StateTransitionPolicy",
     "TrainingResult",
     "get_adapter",
     "register_adapter",

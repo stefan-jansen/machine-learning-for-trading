@@ -308,6 +308,24 @@ CREATE TABLE IF NOT EXISTS overlay_references (
     created_at  TEXT NOT NULL,
     PRIMARY KEY (result_hash, result_kind)
 );
+
+CREATE TABLE IF NOT EXISTS decision_artifacts (
+    decision_hash       TEXT PRIMARY KEY,
+    decision_kind       TEXT NOT NULL,
+    spec_json           TEXT NOT NULL,
+    artifact_digest     TEXT NOT NULL,
+    canonical           INTEGER NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS holdout_staging (
+    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
+    holdout_training_hash   TEXT NOT NULL,
+    holdout_prediction_hash TEXT NOT NULL,
+    holdout_backtest_hash   TEXT NOT NULL,
+    lineage_digest          TEXT NOT NULL,
+    staged_at               TEXT NOT NULL
+);
 """
 
 

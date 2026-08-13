@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import sqlite3
+import uuid
+from dataclasses import asdict, dataclass
+from importlib.util import find_spec
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+import polars as pl
+
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.registry.specs import canonical_json, canonical_value, compute_hash
+from case_studies.utils.registry.store import _open_registry, _utc_now
+
+if TYPE_CHECKING:
+    from .workspace import Study
+
+from .results import PredictionResult, Result
+
+Transition = Literal["continue", "reset", "liquidate"]
+
+
+@dataclass(frozen=True)
+class StateTransitionPolicy:
+    fold_boundary: Transition
+    temporal_gap: Transition
+
+    def __post_init__(self) -> None:
+        allowed = {"continue", "reset", "liquidate"}
+        if self.fold_boundary not in allowed or self.temporal_gap not in allowed:
+            raise ValueError(f"state transitions must be one of {sorted(allowed)}")
+
+
+def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
+    value_column = {
+        "target_weights": "weight",
+        "target_positions": "position",
+        "orders": "quantity",
+    }.get(kind)
+    if value_column is None:
+        raise ValueError("unsupported decision artifact kind")
+    keys = ("symbol", "timestamp")
+    required = {*keys, value_column}
+    missing = required - set(decisions.columns)
+    if missing:
+        raise ValueError(f"decision artifact is missing columns: {sorted(missing)}")
+    selected = decisions.select(*keys, value_column)
+    if selected.null_count().row(0) != (0, 0, 0):
+        raise ValueError("decision artifacts cannot contain null keys or values")
+    if selected.n_unique(list(keys)) != selected.height:
+        raise ValueError("decision artifact keys must be unique")
+    values = selected.get_column(value_column).cast(pl.Float64)
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("decision artifact values must be finite")
+    return keys
+
+
+def _validate_promotion(source_identity: dict[str, Any]) -> None:
+    required = {
+        "module",
+        "source_digest",
+        "declared_inputs",
+        "determinism",
+        "clean_replay_digest",
+    }
+    missing = required - set(source_identity)
+    if missing:
+        raise ValueError(f"canonical decision promotion is missing evidence: {sorted(missing)}")
+    if not source_identity["module"] or not source_identity["source_digest"]:
+        raise ValueError("canonical decision promotion requires stable importable source identity")
+    if find_spec(str(source_identity["module"])) is None:
+        raise ValueError("canonical decision promotion source module is not importable")
+    if not source_identity["declared_inputs"]:
+        raise ValueError("canonical decision promotion requires declared immutable inputs")
+    determinism = source_identity["determinism"]
+    if not isinstance(determinism, dict) or not (
+        determinism.get("deterministic") or determinism.get("seed") is not None
+    ):
+        raise ValueError("canonical decision promotion requires deterministic or seeded execution")
+
+
+@dataclass(frozen=True)
+class DecisionArtifact:
+    study: Study
+    hash: str
+    kind: str
+    spec: dict[str, Any]
+    canonical: bool
+
+    @property
+    def path(self) -> Path:
+        return self.study.root / "run_log" / "decisions" / self.hash / "decisions.parquet"
+
+    @classmethod
+    def publish(
+        cls,
+        study: Study,
+        *,
+        kind: str,
+        decisions: pl.DataFrame,
+        prediction_hashes: tuple[str, ...] | list[str],
+        parameters: dict[str, Any],
+        source_identity: dict[str, Any] | None = None,
+        state_transition_policy: StateTransitionPolicy | None = None,
+        canonical: bool = False,
+    ) -> DecisionArtifact:
+        study.require_writable()
+        if not isinstance(decisions, pl.DataFrame):
+            raise TypeError("decision publication requires a Polars DataFrame")
+        key_columns = _validate_frame(kind, decisions)
+        if kind in {"target_positions", "orders"} and state_transition_policy is None:
+            raise ValueError(f"{kind} decisions require a state transition policy")
+        lineage = tuple(dict.fromkeys(prediction_hashes))
+        if not lineage or len(lineage) != len(prediction_hashes):
+            raise ValueError("decision prediction lineage must be non-empty and unique")
+        for prediction_hash in lineage:
+            result = Result.open(study, prediction_hash, include_preview=not canonical)
+            if not isinstance(result, PredictionResult):
+                raise ValueError(f"decision lineage {prediction_hash!r} is not a prediction")
+            if canonical and not result.complete:
+                raise ValueError("canonical decision lineage requires complete predictions")
+        normalized_source = canonical_value(source_identity or {})
+        if canonical:
+            _validate_promotion(normalized_source)
+        normalized_decisions = decisions.sort(list(key_columns))
+        spec = {
+            "schema_version": 1,
+            "kind": kind,
+            "prediction_hashes": list(lineage),
+            "parameters": canonical_value(parameters),
+            "source_identity": normalized_source,
+            "state_transition_policy": (
+                asdict(state_transition_policy) if state_transition_policy is not None else None
+            ),
+            "decision_keys": list(key_columns),
+            "artifact_digest": value_digest(normalized_decisions),
+            "canonical": canonical,
+        }
+        if canonical and normalized_source["clean_replay_digest"] != spec["artifact_digest"]:
+            raise ValueError("canonical decision clean replay does not match the artifact digest")
+        decision_hash = compute_hash(canonical_json(spec))
+        artifact_dir = study.root / "run_log" / "decisions" / decision_hash
+        artifact = artifact_dir / "decisions.parquet"
+        if artifact.is_file():
+            if value_digest(pl.read_parquet(artifact)) != spec["artifact_digest"]:
+                raise ValueError(f"immutable decision artifact conflict for {decision_hash}")
+            return cls.open(study, decision_hash)
+
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        temporary = artifact_dir / f".decisions.{uuid.uuid4().hex}.tmp"
+        normalized_decisions.write_parquet(temporary)
+        db = _open_registry(study.root)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO decision_artifacts "
+                "(decision_hash, decision_kind, spec_json, artifact_digest, canonical, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    decision_hash,
+                    kind,
+                    canonical_json(spec),
+                    spec["artifact_digest"],
+                    int(canonical),
+                    _utc_now(),
+                ),
+            )
+            os.replace(temporary, artifact)
+            db.commit()
+        except Exception:
+            db.rollback()
+            artifact.unlink(missing_ok=True)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+            db.close()
+        return cls(study, decision_hash, kind, spec, canonical)
+
+    @classmethod
+    def open(cls, study: Study, decision_hash: str) -> DecisionArtifact:
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            row = db.execute(
+                "SELECT decision_kind, spec_json, canonical FROM decision_artifacts "
+                "WHERE decision_hash = ?",
+                (decision_hash,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown decision artifact {decision_hash!r}")
+        return cls(study, decision_hash, row[0], json.loads(row[1]), bool(row[2]))
+
+    def load(self) -> pl.DataFrame:
+        frame = pl.read_parquet(self.path)
+        if value_digest(frame) != self.spec["artifact_digest"]:
+            raise ValueError(f"decision artifact digest mismatch for {self.hash}")
+        return frame
