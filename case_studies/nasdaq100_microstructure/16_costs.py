@@ -60,6 +60,7 @@ import polars as pl
 warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_loaders import (
+    align_predictions_to_decision_grid,
     get_backtest_config,
     get_rebalance_step,
     get_rebalance_step_for_cadence,
@@ -394,8 +395,8 @@ else:
 #
 # Execution always uses the canonical one-minute price grid. For each coarser
 # decision cadence, we take the **last available prediction** at or before its
-# decision timestamp via an asof join. Orders then enter on the next minute bar
-# and close on the minute-grid label horizon.
+# decision timestamp via an asof join within the same trading session. Orders
+# then enter on the next minute bar and close on the minute-grid label horizon.
 
 # %%
 # Alternative cadences for the cadence × cost heatmap, driven by setup.yaml.
@@ -428,26 +429,6 @@ COST_PER_SHARE_GRID = get_cost_grid_half_spread_usd(CASE_STUDY_ID)
 COST_LABELS = [f"{v * 100:g}¢" for v in COST_PER_SHARE_GRID]
 
 cadence_results = []
-
-
-def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) -> pl.DataFrame:
-    """Align minute predictions to target bar timestamps via asof join."""
-    # For each symbol, find the last prediction at or before each bar timestamp
-    bar_df = pl.DataFrame({"timestamp": bar_timestamps}).unique().sort("timestamp")
-    symbols = preds["symbol"].unique().sort().to_list()
-
-    aligned = []
-    for sym in symbols:
-        sym_preds = preds.filter(pl.col("symbol") == sym).sort("timestamp")
-        sym_bars = bar_df.with_columns(pl.lit(sym).alias("symbol"))
-        joined = sym_bars.join_asof(
-            sym_preds.drop("symbol"),
-            on="timestamp",
-            strategy="backward",
-        )
-        aligned.append(joined.drop_nulls("y_score"))
-
-    return pl.concat(aligned) if aligned else pl.DataFrame()
 
 
 # %% [markdown]
@@ -564,7 +545,7 @@ for cadence in CADENCES if best_pred_hash else []:
     aligned_preds = (
         predictions_minute
         if freq == "1m"
-        else align_predictions_to_bars(predictions_minute, bar_ts)
+        else align_predictions_to_decision_grid(predictions_minute, bar_ts)
     )
     if aligned_preds.is_empty():
         raise ValueError(f"{cadence_label}: no predictions align to the cadence price grid")

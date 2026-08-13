@@ -18,6 +18,7 @@ now the full set.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -213,7 +214,7 @@ class TestRegistryReconciliation:
         pct_by_label = sweep.get("percentile_grid") or {}
 
         labels = _labels_for(case_study)
-        with sqlite3.connect(reg_path) as conn:
+        with closing(sqlite3.connect(reg_path)) as conn:
             cur = conn.cursor()
             for label in labels:
                 row = cur.execute(

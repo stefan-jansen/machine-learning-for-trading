@@ -1267,6 +1267,50 @@ def get_rebalance_step_for_cadence(case_study: str, label: str, cadence: str) ->
     return max(1, (horizon_minutes - 1 + cadence_minutes - 1) // cadence_minutes)
 
 
+def align_predictions_to_decision_grid(
+    predictions: pl.DataFrame,
+    decision_timestamps: pl.Series,
+) -> pl.DataFrame:
+    """Align each symbol's latest prediction within the same trading session."""
+    required = {"timestamp", "symbol", "y_score"}
+    missing = sorted(required.difference(predictions.columns))
+    if missing:
+        raise ValueError(f"Predictions are missing required columns: {missing}")
+    if decision_timestamps.is_empty() or predictions.is_empty():
+        return predictions.head(0)
+
+    timestamp_dtype = predictions.schema["timestamp"]
+    if decision_timestamps.dtype != timestamp_dtype:
+        decision_timestamps = decision_timestamps.cast(timestamp_dtype)
+    decision_grid = (
+        pl.DataFrame({"timestamp": decision_timestamps})
+        .unique()
+        .sort("timestamp")
+        .with_columns(pl.col("timestamp").dt.date().alias("_session"))
+    )
+    session_predictions = predictions.with_columns(
+        pl.col("timestamp").dt.date().alias("_session")
+    ).sort("symbol", "_session", "timestamp")
+
+    aligned = []
+    for symbol in predictions.get_column("symbol").unique().sort().to_list():
+        symbol_grid = decision_grid.with_columns(pl.lit(symbol).alias("symbol")).sort(
+            "symbol", "_session", "timestamp"
+        )
+        symbol_predictions = session_predictions.filter(pl.col("symbol") == symbol)
+        joined = symbol_grid.join_asof(
+            symbol_predictions,
+            on="timestamp",
+            by=["symbol", "_session"],
+            strategy="backward",
+            check_sortedness=False,
+        ).drop_nulls("y_score")
+        if not joined.is_empty():
+            aligned.append(joined.drop("_session"))
+
+    return pl.concat(aligned) if aligned else predictions.head(0)
+
+
 def thin_rebalance_schedule(
     schedule: pl.Series,
     *,

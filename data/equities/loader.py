@@ -202,7 +202,7 @@ def load_us_equities(
     return apply_max_symbols(df, max_symbols)
 
 
-# Resampling aggregation specs for group_by_dynamic
+# Resampling aggregation specs
 _TRADE_OHLCV_AGGS = [
     pl.col("open").first().alias("open"),
     pl.col("high").max().alias("high"),
@@ -222,7 +222,7 @@ _QUOTE_OHLCV_AGGS = [
     pl.col("ask_close").last().alias("ask_close"),
 ]
 
-_RESAMPLE_FREQUENCIES = {"5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h"}
+_RESAMPLE_FREQUENCIES = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
 
 # NYSE and NASDAQ keep the same US equity session calendar - identical sessions and
 # identical open and close on every one of them - so either name gives the same bound.
@@ -306,8 +306,8 @@ def load_nasdaq100_bars(
     Args:
         frequency: Bar frequency. ``"1m"`` returns raw minute bars (no
             resampling); ``"5m"``/``"15m"``/``"30m"``/``"1h"``/``"4h"``
-            resample via ``group_by_dynamic``. Ignored when
-            ``include_microstructure=True``.
+            resample into intervals anchored at each exchange session open.
+            Ignored when ``include_microstructure=True``.
         symbols: Optional list of symbols to filter.
         start_date: Optional start date (YYYY-MM-DD).
         end_date: Optional end date (YYYY-MM-DD).
@@ -397,8 +397,8 @@ def load_nasdaq100_bars(
     lf = lf.sort("symbol", "timestamp")
 
     if frequency != "1m":
-        every = _RESAMPLE_FREQUENCIES.get(frequency)
-        if every is None:
+        interval_minutes = _RESAMPLE_FREQUENCIES.get(frequency)
+        if interval_minutes is None:
             msg = (
                 f"Unsupported frequency {frequency!r}. Use: {list(_RESAMPLE_FREQUENCIES)} or '1m'."
             )
@@ -406,13 +406,41 @@ def load_nasdaq100_bars(
         aggs = list(_TRADE_OHLCV_AGGS)
         if include_quotes:
             aggs.extend(_QUOTE_OHLCV_AGGS)
-        lf = (
-            lf.sort("timestamp")
-            .group_by_dynamic("timestamp", every=every, group_by="symbol")
-            .agg(aggs)
-            .filter(pl.col("open").is_not_null())
-            .sort("timestamp", "symbol")
-        )
+        if regular_hours:
+            lf = (
+                lf.with_columns(pl.col("timestamp").dt.date().alias("_session_date"))
+                .join(
+                    _exchange_sessions().lazy(),
+                    left_on="_session_date",
+                    right_on="session_date",
+                    how="inner",
+                )
+                .with_columns(
+                    (
+                        pl.col("session_open")
+                        + (
+                            (pl.col("timestamp") - pl.col("session_open")).dt.total_minutes()
+                            // interval_minutes
+                        )
+                        * pl.duration(minutes=interval_minutes)
+                    ).alias("_bucket")
+                )
+                .sort("symbol", "timestamp")
+                .group_by("symbol", "_session_date", "_bucket")
+                .agg(aggs)
+                .filter(pl.col("open").is_not_null())
+                .drop("_session_date")
+                .rename({"_bucket": "timestamp"})
+                .sort("timestamp", "symbol")
+            )
+        else:
+            lf = (
+                lf.sort("timestamp")
+                .group_by_dynamic("timestamp", every=frequency, group_by="symbol")
+                .agg(aggs)
+                .filter(pl.col("open").is_not_null())
+                .sort("timestamp", "symbol")
+            )
 
     if max_symbols > 0:
         lf = apply_max_symbols(lf, max_symbols)

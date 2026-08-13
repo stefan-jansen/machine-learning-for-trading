@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 from case_studies.utils.registry.registration import register_causal_run
 
@@ -32,7 +33,7 @@ def _register(case_dir, *, effect: float, started_at: str, elapsed_s: float) -> 
 
 
 def _row(case_dir) -> tuple:
-    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(case_dir / "run_log" / "registry.db")) as db:
         return db.execute(
             "SELECT dml_effect, started_at, elapsed_s, git_commit, created_at "
             "FROM causal_runs WHERE causal_hash='causal123'"
