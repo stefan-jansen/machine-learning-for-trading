@@ -79,6 +79,10 @@ def checkpoint_sidecar(path: Path) -> Path:
     return path.with_suffix(f"{path.suffix}.json")
 
 
+def deep_checkpoint_path(root: Path, config_name: str, fold: int, checkpoint: int) -> Path:
+    return Path(root) / config_name / f"fold_{fold:02d}" / f"epoch_{checkpoint:04d}.pt"
+
+
 def write_deep_checkpoint(
     path: Path,
     *,
@@ -164,3 +168,54 @@ def restore_deep_model(
     model.load_state_dict(tensor_state, strict=True)
     model.eval()
     return model, payload["preprocessing"], payload["metadata"]
+
+
+def validate_deep_checkpoint_population(
+    root: Path,
+    *,
+    config_name: str,
+    fold_ids: list[int] | tuple[int, ...],
+    checkpoints: list[int] | tuple[int, ...],
+    architecture: str | None = None,
+) -> tuple[Path, ...]:
+    """Require the exact fitted-state population declared by one request."""
+    expected = tuple(
+        deep_checkpoint_path(root, config_name, fold, checkpoint)
+        for fold in sorted({int(value) for value in fold_ids})
+        for checkpoint in sorted({int(value) for value in checkpoints})
+    )
+    if not expected:
+        raise ValueError("checkpoint validation requires folds and checkpoint values")
+    for path in expected:
+        try:
+            payload = load_deep_checkpoint(path)
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(f"fitted checkpoint population is incomplete: {path}") from error
+        metadata = payload["metadata"]
+        fold = int(path.parent.name.removeprefix("fold_"))
+        checkpoint = int(path.stem.removeprefix("epoch_"))
+        required_metadata = {
+            "config_name": config_name,
+            "fold": fold,
+            "checkpoint_kind": "epoch",
+            "checkpoint_value": checkpoint,
+        }
+        mismatches = {
+            key: (metadata.get(key), value)
+            for key, value in required_metadata.items()
+            if metadata.get(key) != value
+        }
+        if architecture is not None and payload["architecture"] != architecture:
+            mismatches["architecture"] = (payload["architecture"], architecture)
+        if mismatches:
+            raise ValueError(f"fitted checkpoint metadata mismatch at {path}: {mismatches}")
+    actual = {
+        path for path in (Path(root) / config_name).glob("fold_*/epoch_*.pt") if path.is_file()
+    }
+    extras = actual - set(expected)
+    if extras:
+        raise ValueError(
+            f"fitted checkpoint population contains undeclared artifacts: "
+            f"{[str(path) for path in sorted(extras)]}"
+        )
+    return expected

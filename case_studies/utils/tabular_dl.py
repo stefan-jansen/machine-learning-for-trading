@@ -1218,7 +1218,10 @@ def run_tabm_cv(
                 model = TabMModel(**tabm_kwargs)
                 train_kwargs: dict[str, Any] = {}
                 if checkpoint_root is not None:
-                    from case_studies.utils.deep_model_state import write_deep_checkpoint
+                    from case_studies.utils.deep_model_state import (
+                        deep_checkpoint_path,
+                        write_deep_checkpoint,
+                    )
 
                     def persist_state(
                         epoch: int,
@@ -1230,10 +1233,7 @@ def run_tabm_cv(
                         _model_kwargs: dict[str, Any] = tabm_kwargs,
                     ) -> None:
                         write_deep_checkpoint(
-                            checkpoint_root
-                            / _config_name
-                            / f"fold_{_fold:02d}"
-                            / f"epoch_{epoch:04d}.pt",
+                            deep_checkpoint_path(checkpoint_root, _config_name, _fold, epoch),
                             model=fitted_model,
                             architecture="tabm",
                             model_kwargs=_model_kwargs,

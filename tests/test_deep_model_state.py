@@ -9,8 +9,10 @@ from torch import nn
 
 from case_studies.utils.deep_model_state import (
     checkpoint_sidecar,
+    deep_checkpoint_path,
     load_deep_checkpoint,
     restore_deep_model,
+    validate_deep_checkpoint_population,
     write_deep_checkpoint,
 )
 
@@ -74,3 +76,41 @@ def test_checkpoint_is_immutable_and_digest_verified(tmp_path) -> None:
 
     record = json.loads(checkpoint_sidecar(path).read_text())
     assert record["schema_version"] == 1
+
+
+def test_checkpoint_population_requires_exact_folds_epochs_and_metadata(tmp_path) -> None:
+    model = nn.Linear(1, 1)
+    root = tmp_path / "checkpoints"
+    for fold in (0, 1):
+        for epoch in (5, 10):
+            write_deep_checkpoint(
+                deep_checkpoint_path(root, "probe", fold, epoch),
+                model=model,
+                architecture="linear-probe",
+                model_kwargs={"n_features": 1},
+                preprocessing={"mean": np.array([0.0]), "scale": np.array([1.0])},
+                metadata={
+                    "config_name": "probe",
+                    "fold": fold,
+                    "checkpoint_kind": "epoch",
+                    "checkpoint_value": epoch,
+                },
+            )
+
+    paths = validate_deep_checkpoint_population(
+        root,
+        config_name="probe",
+        fold_ids=(0, 1),
+        checkpoints=(5, 10),
+        architecture="linear-probe",
+    )
+    assert len(paths) == 4
+
+    deep_checkpoint_path(root, "probe", 1, 10).unlink()
+    with pytest.raises(ValueError, match="population is incomplete"):
+        validate_deep_checkpoint_population(
+            root,
+            config_name="probe",
+            fold_ids=(0, 1),
+            checkpoints=(5, 10),
+        )

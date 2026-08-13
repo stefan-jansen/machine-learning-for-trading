@@ -863,7 +863,10 @@ def run_dl_cv(
 
             train_kwargs: dict[str, Any] = {}
             if checkpoint_root is not None:
-                from case_studies.utils.deep_model_state import write_deep_checkpoint
+                from case_studies.utils.deep_model_state import (
+                    deep_checkpoint_path,
+                    write_deep_checkpoint,
+                )
 
                 if train_store.feature_mean is None or train_store.feature_scale is None:
                     raise ValueError("sequence fold has no fitted preprocessing state")
@@ -885,10 +888,7 @@ def run_dl_cv(
                     _preprocessing: dict[str, Any] = preprocessing,
                 ) -> None:
                     write_deep_checkpoint(
-                        checkpoint_root
-                        / _config_name
-                        / f"fold_{_fold:02d}"
-                        / f"epoch_{epoch:04d}.pt",
+                        deep_checkpoint_path(checkpoint_root, _config_name, _fold, epoch),
                         model=fitted_model,
                         architecture=_architecture,
                         model_kwargs=_model_kwargs,
