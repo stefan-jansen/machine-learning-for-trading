@@ -774,7 +774,7 @@ def _load_via_canonical(
     if loader_name == "nasdaq100_bars":
         from data.equities.loader import load_nasdaq100_bars
 
-        freq = frequency or "15m"
+        freq = frequency or "1m"
         return load_nasdaq100_bars(
             frequency=freq,
             max_symbols=max_symbols,
@@ -952,7 +952,7 @@ def load_backtest_prices(
             .sort("n", descending=True)
             .head(max_symbols)["symbol"]
         )
-        df = df.filter(pl.col("symbol").is_in(top_symbols))
+        df = df.filter(pl.col("symbol").is_in(top_symbols.implode()))
 
     return df.sort("timestamp", "symbol")
 
@@ -1015,8 +1015,9 @@ _CADENCE_CALENDAR_DAYS_PER_PERIOD: dict[str, float] = {
     "weekly_friday": 7.0,
     # 8-hour funding
     "8_hour_funding_aligned": 1.0 / 3.0,
-    # Intraday equity microstructure: ~26 fifteen-minute bars per RTH
-    # trading day; multiply by 1.4 to account for weekends.
+    # Intraday equity microstructure uses 390 minute bars or 26 fifteen-minute
+    # bars per regular trading day; multiply by 1.4 to account for weekends.
+    "1_minute": (1.0 / 390.0) * 1.4,
     "15_minute": (1.0 / 26.0) * 1.4,
     # Monthly month-end
     "monthly_month_end": 31.0,

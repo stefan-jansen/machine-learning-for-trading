@@ -245,7 +245,7 @@ universe:
       - UAL
 
 decision:
-  bar_frequency: 15_minute
+  bar_frequency: 1_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
@@ -256,7 +256,7 @@ decision:
 features:
   windows:
     fast: 5              # one fast aggregate
-    decision: 15         # one decision bar at the declared bar_frequency
+    decision: 15         # one 15-minute feature window
     slow: 30             # realized-volatility horizon and the Amihud average
     hour: 60             # Kyle's lambda regression and the slow regime average
     ewma_half_life: 30   # half-life of the EWMA volatility, in bars
@@ -403,7 +403,7 @@ features:
 execution:
   initial_cash: 1_000_000        # restores prior validated state
   share_type: integer            # US equities trade in whole shares
-  allocator_lookback: 520        # ~20 trading days of 15-min bars
+  allocator_lookback: 7800       # about 20 trading days of minute bars
 
 mapping:
   class: intraday_rank_and_trade
@@ -575,13 +575,13 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # Vectorized-backtest thinning step per label: number of schedule slots
-  # to advance per trade so holding periods don't overlap.
+  # Decision-minute step between trades. A decision at t fills at t+1, so
+  # the replacement decision is made at t+H-1 and fills at the label exit t+H.
   rebalance_step:
-    fwd_ret_15m: 1
-    fwd_ret_5m: 1
-    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
-    fwd_dir_15m: 1
+    fwd_ret_15m: 14
+    fwd_ret_5m: 4
+    fwd_ret_60m: 59
+    fwd_dir_15m: 14
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_15m: fwd_ret_15m
