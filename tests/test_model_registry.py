@@ -13,8 +13,9 @@ Design:
     4. After each run, query the test registry.db for expected entries
 
 The goal is code-path coverage, not model quality. Params are set to the
-absolute minimum that still exercises the training→register→predict loop:
-MAX_SYMBOLS=3, MAX_FOLDS=2, N_EPOCHS=2, NUM_BOOST_ROUND=20.
+minimum that still exercises the training→register→predict loop and produces
+valid cross-sectional metrics: MAX_SYMBOLS=5, MAX_FOLDS=2, N_EPOCHS=2,
+NUM_BOOST_ROUND=20.
 
 Usage:
     # All model notebooks (~15-20 min)
@@ -110,7 +111,7 @@ _SPARSE_DATA_OVERRIDES = {"MAX_SYMBOLS": 20}
 # override anything from overrides.yaml — we want the absolute minimum
 # that still exercises the full train→register→predict loop.
 _QUICK_PARAMS = {
-    "MAX_SYMBOLS": 3,
+    "MAX_SYMBOLS": 5,
     "MAX_FOLDS": 2,
     "N_EPOCHS": 2,
     "NUM_BOOST_ROUND": 20,
@@ -351,12 +352,13 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             pytest.skip("torch not installed")
 
     # --- Parameters ---
-    # Start with overrides.yaml, then apply ALL quick-test params on top.
-    # Quick params win — we want minimal runtime, not overrides.yaml scale.
+    # Start with quick defaults, then retain notebook-specific reduced settings.
+    # Some notebooks need wider cross-sections or longer windows for their
+    # reduced path to remain scientifically valid.
     # Papermill warns (but doesn't error) about unknown parameters, so it's
     # safe to inject all of them even if the notebook doesn't use them all.
     override_params = overrides.get("parameters", {})
-    parameters = {**override_params, **_QUICK_PARAMS}
+    parameters = {**_QUICK_PARAMS, **override_params}
 
     # Exercise the ETF LSTM's multi-checkpoint registration contract in the
     # reduced E2E run. Epochs 5 and 6 must both become prediction sets.
