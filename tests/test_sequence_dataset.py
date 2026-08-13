@@ -357,6 +357,37 @@ def test_daily_period_numbers_use_the_declared_market_calendar():
     assert np.diff(missing).tolist() == [1, 1, 2, 1]
 
 
+def test_sequence_period_cache_is_recomputed_for_a_declared_calendar():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    dates = pd.to_datetime(["2022-06-30", "2022-07-01", "2022-07-06", "2022-07-07"])
+    df = pd.DataFrame(
+        [
+            {"symbol": symbol, "timestamp": timestamp, "feat0": float(i), "y": float(i)}
+            for symbol in ("S0", "S1")
+            for i, timestamp in enumerate(dates)
+        ]
+    )
+    train_mask = df["timestamp"] <= dates[2]
+    val_mask = df["timestamp"] == dates[3]
+    kwargs = {
+        "train_mask": train_mask,
+        "val_mask": val_mask,
+        "feature_names": ["feat0"],
+        "label_col": "y",
+        "date_col": "timestamp",
+        "entity_col": "symbol",
+        "lookback": 1,
+        "val_start": dates[3],
+    }
+
+    fallback_train, _, _ = prepare_fold_sequence_stores(df, **kwargs)
+    calendar_train, _, _ = prepare_fold_sequence_stores(df, calendar_id="NYSE", **kwargs)
+
+    assert fallback_train.n_sequences == 4
+    assert calendar_train.n_sequences == 2
+
+
 def test_priming_includes_label_buffer_gap_rows():
     from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
 

@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from utils.modeling import RANDOM_SEED
 
 _SEQUENCE_PERIOD_COL = "__sequence_period__"
+_SEQUENCE_PERIOD_CACHE_ATTR = "ml4t_sequence_period_cache"
 
 
 @dataclass(slots=True)
@@ -385,9 +386,7 @@ def _sequence_period_numbers(
         if np.all(positions >= 0):
             return positions.astype(np.int64)
 
-    normalized = values.normalize().to_numpy(dtype="datetime64[D]")
-    epoch = np.datetime64("1970-01-01", "D")
-    return np.busday_count(epoch, normalized).astype(np.int64)
+    return unique.get_indexer(values).astype(np.int64)
 
 
 def _build_val_df_with_priming(
@@ -451,11 +450,22 @@ def prepare_fold_sequence_stores(
     ``val_start`` so the val window aligns with production.
     """
 
-    if _SEQUENCE_PERIOD_COL not in dataset_pd.columns:
+    cache_key = (
+        date_col,
+        calendar_id,
+        len(dataset_pd),
+        dataset_pd[date_col].iloc[0] if len(dataset_pd) else None,
+        dataset_pd[date_col].iloc[-1] if len(dataset_pd) else None,
+    )
+    if (
+        _SEQUENCE_PERIOD_COL not in dataset_pd.columns
+        or dataset_pd.attrs.get(_SEQUENCE_PERIOD_CACHE_ATTR) != cache_key
+    ):
         dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(
             dataset_pd[date_col],
             calendar_id=calendar_id,
         )
+        dataset_pd.attrs[_SEQUENCE_PERIOD_CACHE_ATTR] = cache_key
     use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL, *feature_names]
     val_start_ts: pd.Timestamp | None
     if val_start is None:
