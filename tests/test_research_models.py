@@ -168,6 +168,41 @@ def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) 
     ]
 
 
+def test_linear_runner_replays_valid_models_after_registration_interrupt(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    original_publish = ResultsCatalog.publish_predictions
+
+    def interrupt_registration(*args, **kwargs):
+        raise RuntimeError("interrupted registration")
+
+    monkeypatch.setattr(ResultsCatalog, "publish_predictions", interrupt_registration)
+    with pytest.raises(RuntimeError, match="interrupted registration"):
+        request.run()
+    resolved = request.resolve()
+    training_hash = linear.training_hash_from_spec(resolved.spec)
+    model_dir = study.storage_root() / "run_log" / "training" / training_hash / "models"
+    fitted_digests = {
+        path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
+    }
+    monkeypatch.setattr(ResultsCatalog, "publish_predictions", original_publish)
+    monkeypatch.setattr(
+        linear,
+        "_fit_predictions",
+        lambda *args, **kwargs: pytest.fail("valid fitted state must not retrain"),
+    )
+
+    recovered = request.run()
+
+    assert recovered.predictions[0].complete
+    assert recovered.predictions[0].coverage()["n_expected"] == 12
+    assert fitted_digests == {
+        path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
+    }
+
+
 def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:
     study = _linear_study(tmp_path, monkeypatch)
     base = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").resolve()

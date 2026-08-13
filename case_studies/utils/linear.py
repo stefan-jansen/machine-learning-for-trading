@@ -326,16 +326,67 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
     if not isinstance(training, TrainingResult) or not isinstance(prediction, PredictionResult):
         return None
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
-    manifest = model_dir / "manifest.json"
-    expected_files = {f"fold_{int(fold['fold'])}.joblib" for fold in context.folds}
-    if not prediction.complete or not manifest.is_file():
+    if not prediction.complete:
         return None
-    record = json.loads(manifest.read_text())
-    if set(record.get("files") or {}) != expected_files:
-        return None
-    if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
-        return None
+    _validate_fitted_state(model_dir, context)
     return ModelRun(training=training, predictions=(prediction,))
+
+
+def _validate_fitted_state(model_dir: Path, context: LinearContext) -> None:
+    manifest = model_dir / "manifest.json"
+    if not manifest.is_file():
+        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+    record = json.loads(manifest.read_text())
+    expected_files = {f"fold_{int(fold['fold'])}.joblib" for fold in context.folds}
+    if set(record.get("files") or {}) != expected_files:
+        raise ValueError(f"fitted-state manifest does not match resolved folds: {model_dir}")
+    if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
+        raise ValueError(f"fitted-state digest mismatch: {model_dir}")
+
+
+def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) -> np.ndarray:
+    if context.task_type == "classification":
+        predict_proba = getattr(model, "predict_proba", None)
+        if not callable(predict_proba):
+            raise ValueError("classification linear model must expose predict_proba")
+        probabilities = predict_proba(fold["X_val"])
+        predictions = probabilities @ np.asarray(sorted(context.class_values), dtype=np.float64)
+    else:
+        predictions = np.asarray(model.predict(fold["X_val"]), dtype=np.float64)
+    fold_id = int(fold["fold"])
+    if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
+        raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
+    return predictions
+
+
+def _prediction_frame(
+    fold: dict[str, Any], predictions: np.ndarray, context: LinearContext
+) -> pl.DataFrame:
+    fold_id = int(fold["fold"])
+    frame = pl.from_pandas(fold["meta"][[context.entity_col, context.date_col]]).with_columns(
+        pl.lit(fold_id, dtype=pl.Int64).alias("fold"),
+        pl.Series("prediction", predictions),
+        pl.Series("actual", fold["y_val"]),
+    )
+    if fold.get("y_eval") is not None:
+        frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
+    return frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
+
+
+def _predict_from_fitted_state(model_dir: Path, context: LinearContext) -> pl.DataFrame:
+    _validate_fitted_state(model_dir, context)
+    frames = []
+    for fold in context.folds:
+        fold_id = int(fold["fold"])
+        payload = joblib.load(model_dir / f"fold_{fold_id}.joblib")
+        if tuple(payload.get("feature_names") or ()) != context.feature_names:
+            raise ValueError(f"fitted-state feature surface mismatch in fold {fold_id}")
+        if "model" not in payload or "preprocessor" not in payload:
+            raise ValueError(f"incomplete fitted-state payload in fold {fold_id}")
+        frames.append(
+            _prediction_frame(fold, _fold_predictions(payload["model"], fold, context), context)
+        )
+    return pl.concat(frames).sort("symbol", "timestamp", "fold")
 
 
 def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path) -> pl.DataFrame:
@@ -347,16 +398,7 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
         params = spec["model"]["effective_params_by_fold"][str(fold_id)]
         model = cls(**params)
         model.fit(fold["X_train"], fold["y_train"])
-        if context.task_type == "classification":
-            predict_proba = getattr(model, "predict_proba", None)
-            if not callable(predict_proba):
-                raise ValueError("classification linear model must expose predict_proba")
-            probabilities = predict_proba(fold["X_val"])
-            predictions = probabilities @ np.asarray(sorted(context.class_values), dtype=np.float64)
-        else:
-            predictions = np.asarray(model.predict(fold["X_val"]), dtype=np.float64)
-        if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
-            raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
+        predictions = _fold_predictions(model, fold, context)
 
         artifact = staging / f"fold_{fold_id}.joblib"
         joblib.dump(
@@ -368,16 +410,7 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
             artifact,
         )
         files[artifact.name] = _sha256(artifact)
-        frame = pl.from_pandas(fold["meta"][[context.entity_col, context.date_col]]).with_columns(
-            pl.lit(fold_id, dtype=pl.Int64).alias("fold"),
-            pl.Series("prediction", predictions),
-            pl.Series("actual", fold["y_val"]),
-        )
-        if fold.get("y_eval") is not None:
-            frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
-        prediction_frames.append(
-            frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
-        )
+        prediction_frames.append(_prediction_frame(fold, predictions, context))
     (staging / "manifest.json").write_text(
         json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
     )
@@ -402,15 +435,16 @@ def run_resolved_request(
     train_dir = training.root / "run_log" / "training" / training.hash
     model_dir = train_dir / "models"
     if model_dir.exists():
-        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
-    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-    staging.mkdir(parents=True)
-    try:
-        predictions = _fit_predictions(spec, context, staging)
-        os.replace(staging, model_dir)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        predictions = _predict_from_fitted_state(model_dir, context)
+    else:
+        staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+        staging.mkdir(parents=True)
+        try:
+            predictions = _fit_predictions(spec, context, staging)
+            os.replace(staging, model_dir)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
     prediction = study.results.publish_predictions(
         training,
