@@ -98,6 +98,7 @@ def _linear_study(tmp_path, monkeypatch):
         temporal_by_fold=None,
         temporal_keys=[],
         temporal_feature_names=[],
+        temporal_artifact_splits=[],
         eval_label_col=None,
         input_lineage={
             "artifacts": {
@@ -244,8 +245,12 @@ def test_model_adapters_reject_custom_cv_for_fold_scoped_temporal_features(
     context.temporal_by_fold = object()
     context.temporal_keys = ["symbol", "timestamp"]
     context.temporal_feature_names = ["temporal_value"]
-    changed = [{**context.splits[0], "train_end": "1999-12-31"}]
-    monkeypatch.setattr(selector, lambda *_args, **_kwargs: (changed, {"identity": "changed"}))
+    context.temporal_artifact_splits = [dict(context.splits[0])]
+    variant_splits = [{**context.splits[0], "train_end": "2024-01-01"}]
+    context.splits = variant_splits
+    monkeypatch.setattr(
+        selector, lambda *_args, **_kwargs: (variant_splits, {"identity": "variant-buffer"})
+    )
 
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
         study.model(
@@ -935,6 +940,7 @@ def _latent_study(tmp_path, monkeypatch):
         temporal_by_fold=None,
         temporal_keys=[],
         temporal_feature_names=[],
+        temporal_artifact_splits=[],
         device="cpu",
         num_threads=1,
     )

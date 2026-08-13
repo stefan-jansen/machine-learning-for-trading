@@ -226,7 +226,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         and mds.temporal_keys
         and mds.temporal_feature_names
     ):
-        require_fold_scoped_temporal_compatibility(splits, mds.splits)
+        require_fold_scoped_temporal_compatibility(splits, mds.temporal_artifact_splits)
     folds = prepare_cv_folds(
         mds.dataset.to_pandas(),
         splits,

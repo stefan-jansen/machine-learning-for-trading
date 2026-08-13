@@ -405,7 +405,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         and case.temporal_keys
         and case.temporal_feature_names
     ):
-        require_fold_scoped_temporal_compatibility(splits, case.splits)
+        require_fold_scoped_temporal_compatibility(splits, case.temporal_artifact_splits)
     case.splits = splits
     (
         model_kwargs,

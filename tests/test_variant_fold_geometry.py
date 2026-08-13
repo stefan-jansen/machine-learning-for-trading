@@ -234,10 +234,12 @@ def test_loading_a_variant_whose_validation_opens_inside_the_fit_is_refused(
 def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    modeling = _tiny_case_study(tmp_path, monkeypatch, _WHOLE_YEAR)
+    primary_splits = _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")])
+    variant_splits = _splits([("2020-01-01", "2020-06-24", "2020-06-30", "2020-12-31")])
+    modeling = _tiny_case_study(tmp_path, monkeypatch, variant_splits)
     store = {
-        "primary": _splits([("2020-01-01", "2020-06-20", "2020-06-25", "2020-12-31")]),
-        "variant": _splits([("2020-01-01", "2020-06-24", "2020-06-30", "2020-12-31")]),
+        "primary": primary_splits,
+        "variant": variant_splits,
     }
     monkeypatch.setattr(cv_window, "_derive_modeling_splits", lambda _cs, lab: store.get(lab))
 
@@ -246,6 +248,8 @@ def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
     # The check hangs off the fold-tagged artifact, so a fixture that loaded no
     # artifact would pass this file vacuously.
     assert mds.temporal_by_fold is not None
+    assert mds.splits == variant_splits
+    assert mds.temporal_artifact_splits == cv_window.modeling_fold_boundaries("cs", "primary")
 
 
 def test_loading_the_primary_label_does_not_check_itself(
