@@ -48,6 +48,7 @@ import polars as pl
 
 from case_studies.research import BacktestResult, CandidateSet, LifecycleState, Study
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
+from case_studies.utils.registry.specs import project_training_identity
 from utils.style import COLORS
 
 # %% tags=["parameters"]
@@ -232,7 +233,10 @@ if (
     raise ValueError("holdout checkpoint differs from the lock")
 if holdout_training.hash != research_lock.record["holdout_training_hash"]:
     raise ValueError("holdout training identity differs from the lock")
-if holdout_training.spec() != research_lock.record["holdout_training_spec"]:
+if (
+    project_training_identity(holdout_training.spec())
+    != research_lock.record["holdout_training_spec"]
+):
     raise ValueError("holdout training specification differs from the lock")
 if holdout_backtest.registry_record()["prediction_hash"] != holdout_prediction.hash:
     raise ValueError("holdout backtest and prediction lineage disagree")
