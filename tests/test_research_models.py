@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 
@@ -201,6 +202,10 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
     assert fitted_digests == {
         path.name: linear._sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))
     }
+    runtime = json.loads((model_dir.parent / "runtime.json").read_text())
+    assert runtime["fit_elapsed_s"] > 0
+    assert runtime["recovery_elapsed_s"] > 0
+    assert runtime["elapsed_s"] == runtime["fit_elapsed_s"]
 
 
 def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:

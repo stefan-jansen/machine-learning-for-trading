@@ -389,6 +389,14 @@ def _predict_from_fitted_state(model_dir: Path, context: LinearContext) -> pl.Da
     return pl.concat(frames).sort("symbol", "timestamp", "fold")
 
 
+def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
+    if not runtime_path.exists():
+        return
+    runtime = json.loads(runtime_path.read_text())
+    runtime.update(fields)
+    runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+
+
 def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path) -> pl.DataFrame:
     cls = _MODEL_CLASSES[spec["model"]["class"]]
     prediction_frames = []
@@ -434,7 +442,9 @@ def run_resolved_request(
     )
     train_dir = training.root / "run_log" / "training" / training.hash
     model_dir = train_dir / "models"
-    if model_dir.exists():
+    runtime_path = train_dir / "runtime.json"
+    recovering = model_dir.exists()
+    if recovering:
         predictions = _predict_from_fitted_state(model_dir, context)
     else:
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
@@ -442,6 +452,7 @@ def run_resolved_request(
         try:
             predictions = _fit_predictions(spec, context, staging)
             os.replace(staging, model_dir)
+            _write_runtime_fields(runtime_path, fit_elapsed_s=time.perf_counter() - started)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -458,9 +469,13 @@ def run_resolved_request(
         eval_col="eval_actual" if context.eval_label_col else None,
         label=context.label_col,
     )
-    runtime_path = train_dir / "runtime.json"
-    if runtime_path.exists():
-        runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
-        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    if recovering:
+        runtime = json.loads(runtime_path.read_text()) if runtime_path.exists() else {}
+        _write_runtime_fields(
+            runtime_path,
+            elapsed_s=float(runtime.get("fit_elapsed_s", 0.0)),
+            recovery_elapsed_s=time.perf_counter() - started,
+        )
+    else:
+        _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
     return ModelRun(training=training, predictions=(prediction,))
