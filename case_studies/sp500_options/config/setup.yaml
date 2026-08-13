@@ -355,6 +355,7 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: gpu
+    max_bin: 63
 
 causal:
   treatment: vrp_21d

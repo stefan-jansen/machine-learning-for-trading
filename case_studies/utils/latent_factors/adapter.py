@@ -435,7 +435,6 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         model_name,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
-        include_internal_aliases=True,
     )
     expected = _prepare_expected_keys(case, model_name)
     macro_context = None

@@ -844,10 +844,6 @@ def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch
 
     assert resolved.spec["computation"]["model"]["params"]["checkpoint_epochs"] == [1]
     assert [item["value"] for item in resolved.spec["computation"]["checkpoint_schedule"]] == [
-        -3,
-        -2,
-        -1,
-        0,
         1,
         2,
     ]

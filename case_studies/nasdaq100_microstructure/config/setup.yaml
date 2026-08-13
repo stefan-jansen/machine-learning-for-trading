@@ -591,6 +591,7 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: cpu
+    max_bin: 63
 
 causal:
   treatment: signed_vol_share

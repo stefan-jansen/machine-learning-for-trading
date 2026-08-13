@@ -142,6 +142,28 @@ def test_us_firm_gbm_defaults_use_the_reproducible_reader_backend() -> None:
     )
 
 
+def test_every_case_study_gbm_setup_resolves_the_shared_execution_contract() -> None:
+    resolved = {}
+    for setup_path in sorted((REPO_ROOT / "case_studies").glob("*/config/setup.yaml")):
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        gbm_config = (setup.get("modeling") or {}).get("gbm")
+        if gbm_config is not None:
+            resolved[setup_path.parents[1].name] = gbm.resolve_gbm_execution_config(gbm_config)
+
+    assert set(resolved) == {
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "fx_pairs",
+        "nasdaq100_microstructure",
+        "sp500_equity_option_analytics",
+        "sp500_options",
+        "us_equities_panel",
+        "us_firm_characteristics",
+    }
+    assert {max_bin for _, max_bin, _ in resolved.values()} == {gbm.GBM_DEFAULT_MAX_BIN}
+
+
 def test_prepare_gbm_folds_keeps_continuous_classification_target() -> None:
     frame = pd.DataFrame(
         {

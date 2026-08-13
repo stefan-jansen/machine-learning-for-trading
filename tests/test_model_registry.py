@@ -107,9 +107,8 @@ _LATENT_FACTOR_OVERRIDES = {
 _SPARSE_DATA_CASE_STUDIES = frozenset({"us_firm_characteristics"})
 _SPARSE_DATA_OVERRIDES = {"MAX_SYMBOLS": 20}
 
-# Minimal parameters for code-path coverage. Applied LAST so they
-# override anything from overrides.yaml — we want the absolute minimum
-# that still exercises the full train→register→predict loop.
+# Minimal parameters for code-path coverage. Family and sparse-data defaults
+# refine this base; notebook-specific overrides have final precedence.
 _QUICK_PARAMS = {
     "MAX_SYMBOLS": 5,
     "MAX_FOLDS": 2,
@@ -168,7 +167,42 @@ def _expected_entry_point(stage: str) -> str:
     return stage  # "06_linear" → "06_linear"
 
 
-_STAGE_RE = re.compile(r"^(\d{2})_")
+_STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
+
+
+def _quick_parameters(
+    case_study: str,
+    stage: str,
+    notebook_path: Path,
+    override_params: dict,
+) -> tuple[dict, str]:
+    parameters = dict(_QUICK_PARAMS)
+    if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
+        parameters.update({"MAX_SYMBOLS": 6, "N_EPOCHS": 6})
+    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
+        parameters.update({"MAX_SYMBOLS": 6, "N_EPOCHS": 2})
+
+    stage_match = _STAGE_RE.match(stage)
+    suffix = stage[len(stage_match.group(0)) :] if stage_match else stage
+    if suffix in _LATENT_FACTOR_SUFFIXES:
+        parameters.update(_LATENT_FACTOR_OVERRIDES)
+    if case_study in _SPARSE_DATA_CASE_STUDIES:
+        parameters.update(_SPARSE_DATA_OVERRIDES)
+    parameters.update(override_params)
+    return parameters, suffix
+
+
+def test_notebook_override_parameters_have_final_precedence() -> None:
+    parameters, suffix = _quick_parameters(
+        "sp500_equity_option_analytics",
+        "11b_ipca",
+        Path("case_studies/sp500_equity_option_analytics/11b_ipca.py"),
+        {"MAX_SYMBOLS": 12, "N_FACTORS": 2},
+    )
+
+    assert suffix == "ipca"
+    assert parameters["MAX_SYMBOLS"] == 12
+    assert parameters["N_FACTORS"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +221,7 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
         cs_dir = PROD_CS_DIR / cs
         if not cs_dir.exists():
             continue
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]_*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py")):
             if notebook.name.startswith("_"):
                 continue
             match = _STAGE_RE.match(notebook.name)
@@ -357,27 +391,12 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     # reduced path to remain scientifically valid.
     # Papermill warns (but doesn't error) about unknown parameters, so it's
     # safe to inject all of them even if the notebook doesn't use them all.
-    override_params = overrides.get("parameters", {})
-    parameters = {**_QUICK_PARAMS, **override_params}
-
-    # Exercise the ETF LSTM's multi-checkpoint registration contract in the
-    # reduced E2E run. Epochs 5 and 6 must both become prediction sets.
-    if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
-        parameters["N_EPOCHS"] = 6
-        parameters["MAX_SYMBOLS"] = 6
-    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
-        parameters["N_EPOCHS"] = 2
-        parameters["MAX_SYMBOLS"] = 6
-
-    # Latent factor models need a wider cross-section for factor extraction
-    stage_match_p = _STAGE_RE.match(stage)
-    suffix_p = stage[len(stage_match_p.group(0)) :] if stage_match_p else stage
-    if suffix_p in _LATENT_FACTOR_SUFFIXES:
-        parameters.update(_LATENT_FACTOR_OVERRIDES)
-
-    # Sparse-data case studies (monthly frequency) need more symbols
-    if case_study in _SPARSE_DATA_CASE_STUDIES:
-        parameters.update(_SPARSE_DATA_OVERRIDES)
+    parameters, suffix_p = _quick_parameters(
+        case_study,
+        stage,
+        notebook_path,
+        overrides.get("parameters", {}),
+    )
 
     default_timeout = 600 if suffix_p in _LATENT_FACTOR_SUFFIXES else 300
     timeout = overrides.get("timeout", default_timeout)
