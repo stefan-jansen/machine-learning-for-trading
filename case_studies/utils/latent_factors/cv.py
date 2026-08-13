@@ -644,11 +644,18 @@ def run_latent_factor_cv(
                     include_internal_aliases=checkpoint_surface == "fitted_state",
                 )
             )
-            cached_prediction_checkpoints = set(preds_df.get_column("epoch").unique().to_list())
-            cached_metric_checkpoints = set(metrics_df.get_column("epoch").unique().to_list())
+            expected_cache_surface = {
+                (int(split["fold"]), checkpoint)
+                for split in splits
+                for checkpoint in expected_cache_checkpoints
+            }
+            cached_prediction_surface = set(
+                preds_df.select("fold_id", "epoch").unique().iter_rows()
+            )
+            cached_metric_surface = set(metrics_df.select("fold_id", "epoch").unique().iter_rows())
             if (
-                cached_prediction_checkpoints != expected_cache_checkpoints
-                or cached_metric_checkpoints != expected_cache_checkpoints
+                cached_prediction_surface != expected_cache_surface
+                or cached_metric_surface != expected_cache_surface
             ):
                 log(f"  {model_name}: cache checkpoint surface mismatch, retraining")
             else:
