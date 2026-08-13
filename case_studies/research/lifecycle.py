@@ -19,6 +19,7 @@ from case_studies.utils.registry.store import _open_registry, _utc_now
 from .comparison import CandidateSet
 from .contracts import LifecycleState
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .strategy import strategy_warmup_periods
 
 if TYPE_CHECKING:
     from .workspace import Study
@@ -176,6 +177,7 @@ class Lifecycle:
             self.study.case_study,
             str(lock.record["label"]),
             split="holdout",
+            warmup_periods=strategy_warmup_periods(lock.record["strategy_spec"]),
         )
         canonical_price_digest = value_digest(canonical_holdout_prices)
         valid = (

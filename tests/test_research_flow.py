@@ -37,15 +37,25 @@ def _prices() -> pl.DataFrame:
     ).with_columns(pl.col("timestamp").str.to_date())
 
 
-def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame) -> None:
+def _patch_holdout_prices(monkeypatch: pytest.MonkeyPatch, prices: pl.DataFrame) -> list[int]:
     from case_studies.research import lifecycle, strategy
 
-    def load_prices(case_study: str, label: str, *, split: str):
+    warmups: list[int] = []
+
+    def load_prices(
+        case_study: str,
+        label: str,
+        *,
+        split: str,
+        warmup_periods: int = 0,
+    ):
         assert (case_study, label, split) == ("etfs", "fwd_ret_21d", "holdout")
+        warmups.append(warmup_periods)
         return prices
 
     monkeypatch.setattr(lifecycle, "load_backtest_prices_for", load_prices)
     monkeypatch.setattr(strategy, "load_backtest_prices_for", load_prices)
+    return warmups
 
 
 def test_fake_prediction_to_backtest_flow_survives_restart(tmp_path: Path) -> None:
@@ -241,7 +251,7 @@ def test_lock_transition_failure_is_atomic(tmp_path: Path, monkeypatch: pytest.M
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
 
 
-def test_locked_holdout_lineage_transitions_once(
+def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     release = _seed_release(tmp_path)
@@ -259,6 +269,7 @@ def test_locked_holdout_lineage_transitions_once(
     )
     request = {
         "signal": {"method": "equal_weight_top_k", "top_k": 1},
+        "allocation": {"method": "inverse_vol", "vol_window": 2},
         "execution_mode": "vectorized",
     }
     validation_backtest = study.strategy(
@@ -267,8 +278,16 @@ def test_locked_holdout_lineage_transitions_once(
     ).run(prices=_prices())
     candidates = CandidateSet.create(study, "selection", [validation_backtest])
     holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"})
-    holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
-    _patch_holdout_prices(monkeypatch, holdout_prices)
+    holdout_prices = pl.concat(
+        [
+            _prices().with_columns(
+                pl.lit(date(2024, 1, day)).alias("timestamp"),
+                (pl.col("close") + day / 10).alias("close"),
+            )
+            for day in range(8, 12)
+        ]
+    )
+    warmups = _patch_holdout_prices(monkeypatch, holdout_prices)
     lock = study.lifecycle.lock(
         candidate_set_hash=candidates.hash,
         selected_backtest_hash=validation_backtest.hash,
@@ -308,6 +327,7 @@ def test_locked_holdout_lineage_transitions_once(
         study.strategy(
             prediction=holdout_prediction,
             signal={"method": "equal_weight_top_k", "top_k": 2},
+            allocation={"method": "inverse_vol", "vol_window": 2},
             execution_mode="vectorized",
         ).run()
 
@@ -317,7 +337,7 @@ def test_locked_holdout_lineage_transitions_once(
     monkeypatch.setattr(
         lifecycle,
         "load_backtest_prices_for",
-        lambda case_study, label, *, split: changed_prices,
+        lambda case_study, label, *, split, warmup_periods=0: changed_prices,
     )
     with pytest.raises(ValueError, match="exact complete canonical lineage"):
         study.lifecycle.record_holdout(
@@ -329,7 +349,7 @@ def test_locked_holdout_lineage_transitions_once(
     assert study.lifecycle.open(lock.hash).state == "LOCKED"
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
-    _patch_holdout_prices(monkeypatch, holdout_prices)
+    restored_warmups = _patch_holdout_prices(monkeypatch, holdout_prices)
 
     evaluated = study.lifecycle.record_holdout(
         lock.hash,
@@ -339,6 +359,7 @@ def test_locked_holdout_lineage_transitions_once(
     )
 
     assert evaluated.state == "HOLDOUT_EVALUATED"
+    assert warmups + restored_warmups == [2, 2, 2]
     with pytest.raises(ValueError, match="LOCKED"):
         study.lifecycle.record_holdout(
             lock.hash,

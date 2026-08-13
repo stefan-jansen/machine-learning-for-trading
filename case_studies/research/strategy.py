@@ -13,6 +13,7 @@ from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
     load_contract_specs_from_yaml,
+    warmup_periods_for,
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
@@ -28,6 +29,22 @@ from .results import BacktestResult, PredictionResult, Result
 
 if TYPE_CHECKING:
     from .workspace import Study
+
+
+_MOMENT_ALLOCATORS = {"inverse_vol", "risk_parity", "hrp", "mvo", "mvo_ledoit_wolf"}
+
+
+def strategy_warmup_periods(strategy_spec: dict[str, Any]) -> int:
+    strategy = strategy_spec.get("strategy", strategy_spec)
+    allocation = strategy.get("allocation") or {}
+    method = allocation.get("method")
+    if method not in _MOMENT_ALLOCATORS:
+        return 0
+    key = "lookback" if method in {"mvo", "mvo_ledoit_wolf"} else "vol_window"
+    value = allocation.get(key, allocation.get("lookback"))
+    if value is None:
+        raise ValueError(f"rolling allocator {method!r} has no resolved {key}")
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -116,6 +133,23 @@ class Strategy:
     def label(self) -> str:
         return str(self.prediction.lineage()["training_spec"]["label"])
 
+    def _resolved_allocation(self) -> dict[str, Any] | None:
+        if self.allocation is None:
+            return None
+        allocation = deepcopy(self.allocation)
+        method = allocation.get("method")
+        if method in _MOMENT_ALLOCATORS:
+            lookback = warmup_periods_for(self.study.case_study)
+            if lookback <= 0 and not any(key in allocation for key in ("vol_window", "lookback")):
+                raise ValueError(f"rolling allocator {method!r} has no configured lookback")
+            key = "lookback" if method in {"mvo", "mvo_ledoit_wolf"} else "vol_window"
+            allocation.setdefault(key, lookback)
+        return allocation
+
+    def _warmup_periods(self) -> int:
+        allocation = self._resolved_allocation()
+        return strategy_warmup_periods({"allocation": allocation}) if allocation else 0
+
     def resolve(self, *, prices: pl.DataFrame | None = None) -> dict[str, Any]:
         self.study.activate(ExecutionTier.CANONICAL)
         if self.split == "holdout" and prices is not None:
@@ -124,7 +158,10 @@ class Strategy:
         resolved_prices = prices
         if resolved_prices is None:
             resolved_prices = load_backtest_prices_for(
-                self.study.case_study, self.label, split=self.split
+                self.study.case_study,
+                self.label,
+                split=self.split,
+                warmup_periods=self._warmup_periods(),
             )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None
@@ -139,7 +176,7 @@ class Strategy:
             prediction_hash=self.prediction.hash,
             initial_cash=case_config.initial_cash,
             signal=self.signal,
-            allocation=self.allocation,
+            allocation=self._resolved_allocation(),
             risk=self.risk,
             costs=self.costs,
             chapter=self.chapter,
@@ -177,7 +214,10 @@ class Strategy:
         self.study.activate(ExecutionTier.CANONICAL)
         if resolved_prices is None:
             resolved_prices = load_backtest_prices_for(
-                self.study.case_study, self.label, split=self.split
+                self.study.case_study,
+                self.label,
+                split=self.split,
+                warmup_periods=self._warmup_periods(),
             )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None
