@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # NASDAQ-100 Microstructure — Order Flow: Causal DML Estimation
+# # NASDAQ-100 Microstructure - Order Flow: Causal DML Estimation
 #
 # Does signed volume share *cause* future 15-minute returns, or is the observed
 # price impact already fully captured by spread and volatility? This notebook
@@ -22,15 +22,15 @@
 # NASDAQ-100 stocks on a one-minute observation grid with a 15-minute outcome.
 #
 # **Treatment rationale**: Signed volume share is the primary microstructure signal
-# — the fraction of trades classified as buyer-initiated using the Lee-Ready
+# - the fraction of trades classified as buyer-initiated using the Lee-Ready
 # algorithm. Confounders include relative spread at close (liquidity cost),
 # 5-minute realized volatility (noise level), and 1-month cumulative return
-# (drift). At intraday timescales, these confounders are largely orthogonal to
-# order flow, so the orthogonalized estimate sits close to the naive one.
+# (drift). The DML and naive estimates below measure how strongly these observed
+# confounders change the estimated order-flow effect.
 #
 # **Learning Objectives**:
-# - Observe small confounding bias (+8.1%) — naive ≈ DML up to a modest correction
-# - Understand why HAC significance (p=0.012) coexists with refutation failure (p=0.11)
+# - Measure confounding bias by comparing naive and orthogonalized estimates
+# - Compare HAC significance with block-permutation refutation evidence
 # - See how microstructure effects operate on a fundamentally different scale than daily factors
 #
 # **Book Reference**: Chapter 15, Section 15.6 (Cross-Dataset Causal Evidence)
@@ -231,29 +231,12 @@ results = run_dml_analysis(
 print(format_dml_summary(results))
 
 # %% [markdown]
-# **NASDAQ-100 Order Flow — Interpretation**: The orthogonalized DML effect of
-# signed volume share on fwd_ret_15m is +5.7e-7 per unit (HAC SE 2.1e-7,
-# p=0.012), 8.1% larger than the naive estimate of +5.2e-7 — confounding by
-# spread, 5-minute realized volatility, and 1-month cumulative return depresses
-# the raw association by a small amount. Microstructure features are largely
-# orthogonal to these confounders at intraday timescales, so naive ≈ DML up to a
-# modest correction.
-#
-# Despite HAC credibility at the 1% level, the refutation test fails at 5%
-# (empirical p=0.11): block permutation with 15-observation blocks (15 minutes)
-# reproduces the observed effect in roughly 11% of placebo replications, so
-# the placebo test does not corroborate the parametric significance. The effect is
-# HAC-credible but operates on a fundamentally different scale than daily
-# factors — measuring permanent price impact in fractions of a basis point per
-# unit of signed_vol_share rather than multi-day return predictability.
-#
-# The economic content depends entirely on dispersion of signed_vol_share across
-# stocks: the per-bar magnitude is microscopic in absolute terms, orders of
-# magnitude below the 5+ bps execution cost floor. The mechanism is HAC-credible
-# at the 15-minute horizon; the economics at this rebalance cadence are
-# prohibitive. On fwd_ret_5m the effect is not distinguishable from zero
-# (p=0.624) and confounding bias swings to +93% — signed_vol_share is dominated
-# by its micro-confounders at the 5-minute horizon.
+# **NASDAQ-100 Order Flow - Interpretation**: Compare the orthogonalized DML
+# estimate with the naive estimate to measure confounding by spread, realized
+# volatility, and cumulative return. Interpret HAC significance at the reported
+# threshold, then require the block-permutation result to corroborate it. The
+# official production run will populate the estimates and test statistics after
+# the shared computational interface is frozen.
 
 # %% [markdown]
 # ## 4. Statistical Assessment
@@ -376,35 +359,18 @@ register_causal_run(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Small confounding bias on fwd_ret_15m (+8.1%)**: On the one-minute grid,
-#    relative spread, 5-minute realized volatility, and 1-month cumulative
-#    return are largely orthogonal to signed volume share. The orthogonalized
-#    DML effect (+5.7e-7) is 8.1% larger than the naive estimate (+5.2e-7) —
-#    naive ≈ DML up to a modest correction.
-#
-# 2. **HAC-credible but refutation fails**: HAC p-value of 0.012 on
-#    fwd_ret_15m establishes parametric significance at 5%; the placebo
-#    test fails (empirical p=0.11) - block permutation with 15-observation blocks
-#    reproduces the small observed effect in roughly 11% of replications,
-#    so parametric significance is not confirmed by the placebo gate.
-#    NASDAQ-100 is the only panel in the trial where HAC significance is
-#    not corroborated by the placebo test.
-#
-# 3. **Horizon dependence**: On fwd_ret_5m the effect is not distinguishable
-#    from zero (p=0.624) and confounding bias swings to +93% — signed_vol_share
-#    is dominated by its micro-confounders at the 5-minute horizon. The DML
-#    effect is HAC-credible only at the 15-minute horizon.
-#
-# 4. **Different scale, different question**: Microstructure effects measure
-#    permanent price impact in fractions of a basis point per unit of
-#    signed_vol_share. DML at this frequency asks whether order flow *causes*
-#    short-term returns — a meaningful question for execution quality but not
-#    directly comparable to daily factor effects.
+# 1. Compare naive and orthogonalized estimates on the one-minute observation
+#    grid to quantify confounding.
+# 2. Treat HAC significance and the block-permutation refutation as separate
+#    evidence. A parametric result is not corroborated when the placebo gate fails.
+# 3. Compare horizons only after each run uses the declared observation frequency,
+#    outcome horizon, embargo, and permutation block size.
+# 4. Interpret intraday order-flow effects as an execution-quality question, not
+#    as directly comparable to daily factor effects.
 #
 # **Next**: See `10_case_study_insights` for comparison across all 9 case studies.
 #
-# **Book**: Section 15.6 discusses NASDAQ-100 as the only panel where HAC
-# significance is not confirmed by the block-permutation placebo test.
+# **Book**: Section 15.6 compares causal evidence across datasets.
 
 # %%
 print("\n" + "=" * 60)
