@@ -415,13 +415,16 @@ def test_gbm_runner_persists_every_declared_checkpoint(tmp_path, monkeypatch) ->
     fresh = resolved.run()
     cached = request.run()
 
-    assert [item["value"] for item in resolved.spec["checkpoint_schedule"]] == [2, 4]
+    assert resolved.spec["identity_version"] == 3
+    assert resolved.spec["resolved_spec_schema"] == "ml4t.resolved-spec/v1"
+    assert [item["value"] for item in resolved.spec["computation"]["checkpoint_schedule"]] == [2, 4]
     assert len(fresh.predictions) == len(cached.predictions) == 2
     assert [result.hash for result in fresh.predictions] == [
         result.hash for result in cached.predictions
     ]
     assert all(result.complete for result in fresh.predictions)
     assert all(result.coverage()["n_expected"] == 12 for result in fresh.predictions)
+    assert set(study.predictions.table()["identity_status"]) == {"current"}
     model_dir = fresh.training.root / "run_log" / "training" / fresh.training.hash / "models"
     assert sorted(path.name for path in (model_dir / "boosters").glob("*.txt")) == [
         "fold_0.txt",
@@ -761,7 +764,7 @@ def test_macro_disabled_sdf_request_retains_disabled_identity(tmp_path, monkeypa
         overrides={"device": "cpu", "use_macro": False},
     ).resolve()
 
-    assert resolved.spec["macro_context"] == context.macro_context_spec
+    assert resolved.spec["computation"]["macro_context"] == context.macro_context_spec
 
 
 def test_latent_numerical_runtime_changes_training_identity(tmp_path, monkeypatch) -> None:
@@ -815,8 +818,8 @@ def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch
         },
     ).resolve()
 
-    assert resolved.spec["model"]["params"]["checkpoint_epochs"] == [1]
-    assert [item["value"] for item in resolved.spec["checkpoint_schedule"]] == [
+    assert resolved.spec["computation"]["model"]["params"]["checkpoint_epochs"] == [1]
+    assert [item["value"] for item in resolved.spec["computation"]["checkpoint_schedule"]] == [
         -3,
         -2,
         -1,
@@ -1086,11 +1089,14 @@ def test_latent_runner_persists_and_reconstructs_fitted_state(tmp_path, monkeypa
     fresh = resolved.run()
     cached = request.run()
 
-    assert resolved.spec["checkpoint_schedule"] == [{"kind": "epoch", "value": 0}]
+    assert resolved.spec["identity_version"] == 3
+    assert resolved.spec["resolved_spec_schema"] == "ml4t.resolved-spec/v1"
+    assert resolved.spec["computation"]["checkpoint_schedule"] == [{"kind": "epoch", "value": 0}]
     assert fresh.training.hash == cached.training.hash
     assert fresh.predictions[0].hash == cached.predictions[0].hash
     assert fresh.predictions[0].complete
     assert fresh.predictions[0].coverage()["n_expected"] == 36
+    assert set(study.predictions.table()["identity_status"]) == {"current"}
     model_dir = fresh.training.root / "run_log" / "training" / fresh.training.hash / "models"
     assert sorted(model_dir.glob("pca/artifacts/fold_*/model.ml4t")) == [
         model_dir / "pca" / "artifacts" / "fold_0" / "model.ml4t",

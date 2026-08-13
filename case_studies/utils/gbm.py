@@ -52,6 +52,7 @@ import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.identity import ResolvedSpec
 from case_studies.utils.artifact_digest import value_digest
 from utils.modeling import RANDOM_SEED, seed_everything
 
@@ -1654,13 +1655,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     checkpoints = gbm_checkpoint_iterations(config)
     expected = _gbm_expected_keys(folds, entity_col, mds.date_col)
     input_lineage = mds.input_lineage
-    spec = {
-        "identity_version": 2,
-        "execution_tier": tier.value,
-        "family": "gbm",
-        "label": label_ref.name,
-        "seed": RANDOM_SEED,
-        "config_name": request["config_name"],
+    computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": input_lineage["artifacts"],
         "feature_names": list(mds.feature_names),
@@ -1691,7 +1686,17 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "runtime_identity": _gbm_runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
-        spec["preview_reductions"] = reductions
+        computation["preview_reductions"] = reductions
+    runtime_provenance = _gbm_runtime_provenance(study, device)
+    spec = ResolvedSpec.create(
+        family="gbm",
+        label=label_ref.name,
+        seed=RANDOM_SEED,
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=request["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
     context = GBMContext(
         folds=tuple(folds),
         feature_names=tuple(mds.feature_names),
@@ -1702,7 +1707,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         expected_keys=expected,
-        runtime_provenance=_gbm_runtime_provenance(study, device),
+        runtime_provenance=runtime_provenance,
     )
     return spec, context
 
@@ -1732,7 +1737,9 @@ def _valid_learning_curves(path: Path, spec: dict[str, Any]) -> bool:
     except (OSError, pl.exceptions.PolarsError):
         return False
     required = {"config", "iteration", "ic_mean", "ic_std"}
-    expected = {int(checkpoint["value"]) for checkpoint in spec["checkpoint_schedule"]}
+    expected = {
+        int(checkpoint["value"]) for checkpoint in spec["computation"]["checkpoint_schedule"]
+    }
     return required <= set(curves.columns) and set(curves["iteration"].to_list()) == expected
 
 
@@ -1753,11 +1760,11 @@ def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
                     checkpoint["value"],
                     "validation",
                     checkpoint_kind="iteration",
-                    identity_version=2,
+                    identity_version=spec["identity_version"],
                 ),
                 include_preview=include_preview,
             )
-            for checkpoint in spec["checkpoint_schedule"]
+            for checkpoint in spec["computation"]["checkpoint_schedule"]
         )
     except KeyError:
         return None
@@ -1823,7 +1830,7 @@ def _predict_from_gbm_models(
     is_classification = context.task_type == "classification" and context.class_values
     for fold in context.folds:
         model = lgb.Booster(model_file=str(model_dir / "boosters" / f"fold_{fold['fold']}.txt"))
-        for checkpoint in spec["checkpoint_schedule"]:
+        for checkpoint in spec["computation"]["checkpoint_schedule"]:
             value = int(checkpoint["value"])
             raw = np.asarray(model.predict(fold["X_val"], num_iteration=value))
             score = (
@@ -1842,7 +1849,9 @@ def _predict_from_gbm_models(
                     "n_trees": value,
                 }
             )
-    checkpoints = [int(checkpoint["value"]) for checkpoint in spec["checkpoint_schedule"]]
+    checkpoints = [
+        int(checkpoint["value"]) for checkpoint in spec["computation"]["checkpoint_schedule"]
+    ]
     return {
         "learning_curves": _learning_curves_from_predictions(
             spec["config_name"],
@@ -1869,6 +1878,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     if cached is not None:
         return cached
     started = time.perf_counter()
+    computation = spec["computation"]
     training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
@@ -1887,8 +1897,8 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
             result = train_gbm_config(
                 {
                     "config_name": spec["config_name"],
-                    "max_iterations": spec["model"]["max_iterations"],
-                    "checkpoint_interval": spec["checkpoint_schedule"][0]["value"],
+                    "max_iterations": computation["model"]["max_iterations"],
+                    "checkpoint_interval": computation["checkpoint_schedule"][0]["value"],
                     "params": {},
                 },
                 list(context.folds),
@@ -1899,7 +1909,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
                 task_type=context.task_type,
                 class_values=list(context.class_values) or None,
                 save_dir=staging,
-                effective_params_by_fold=spec["model"]["effective_params_by_fold"],
+                effective_params_by_fold=computation["model"]["effective_params_by_fold"],
             )
             _write_gbm_manifest(staging, context.folds)
             os.replace(staging, model_dir)
@@ -1907,7 +1917,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
             shutil.rmtree(staging, ignore_errors=True)
             raise
     prediction_results = []
-    for checkpoint in spec["checkpoint_schedule"]:
+    for checkpoint in computation["checkpoint_schedule"]:
         value = int(checkpoint["value"])
         frame = _gbm_prediction_frame(result["predictions"], value, context)
         prediction_results.append(

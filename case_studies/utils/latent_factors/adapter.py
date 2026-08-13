@@ -19,6 +19,7 @@ import polars as pl
 import torch
 
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.identity import ResolvedSpec
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.latent_factors.cv import (
     _build_prediction_frame,
@@ -443,13 +444,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         if case.macro_panel is not None:
             macro_context["resolved_fold_digest"] = _resolved_macro_digest(case)
     input_lineage = case.input_data_spec
-    spec = {
-        "identity_version": 2,
-        "execution_tier": tier.value,
-        "family": "latent_factors",
-        "label": label_ref.name,
-        "seed": RANDOM_SEED,
-        "config_name": model_name,
+    computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": input_lineage["files"],
         "feature_names": list(case.feature_names),
@@ -494,7 +489,17 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
-        spec["preview_reductions"] = reductions
+        computation["preview_reductions"] = reductions
+    runtime_provenance = _runtime_provenance(study, device)
+    spec = ResolvedSpec.create(
+        family="latent_factors",
+        label=label_ref.name,
+        seed=RANDOM_SEED,
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=model_name,
+        execution_tier=tier.value,
+    ).as_dict()
     context = LatentFactorContext(
         case=case,
         model_name=model_name,
@@ -503,7 +508,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         n_epochs=n_epochs,
         fold_workers=fold_workers,
         expected_keys=expected,
-        runtime_provenance=_runtime_provenance(study, device),
+        runtime_provenance=runtime_provenance,
     )
     return spec, context
 
@@ -660,11 +665,11 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
                     checkpoint["value"],
                     "validation",
                     checkpoint_kind="epoch",
-                    identity_version=2,
+                    identity_version=spec["identity_version"],
                 ),
                 include_preview=include_preview,
             )
-            for checkpoint in spec["checkpoint_schedule"]
+            for checkpoint in spec["computation"]["checkpoint_schedule"]
         )
     except KeyError:
         return None
@@ -729,6 +734,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
     if cached is not None:
         return cached
     started = time.perf_counter()
+    computation = spec["computation"]
     training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
@@ -769,7 +775,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
                 persistent_entities=context.case.persistent_entities,
                 checkpoint_selection_policy="fixed",
                 reporting_epoch=max(
-                    int(checkpoint["value"]) for checkpoint in spec["checkpoint_schedule"]
+                    int(checkpoint["value"]) for checkpoint in computation["checkpoint_schedule"]
                 ),
                 device=context.case.device,
                 num_threads=context.case.num_threads,
@@ -806,7 +812,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
     _publish_fold_extras(model_dir, train_dir)
 
     prediction_results = []
-    for checkpoint in spec["checkpoint_schedule"]:
+    for checkpoint in computation["checkpoint_schedule"]:
         value = int(checkpoint["value"])
         prediction_results.append(
             study.results.publish_predictions(
