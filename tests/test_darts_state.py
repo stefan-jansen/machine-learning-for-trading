@@ -3,12 +3,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
+import polars as pl
 import pytest
 from darts import TimeSeries
 from darts.models import TSMixerModel
 
 from case_studies.utils.darts_forecasting import (
     BASE_TARGET_COL,
+    _attach_expected_periods,
+    _predict_fold,
+    _prepare_fold_series,
     darts_checkpoint_path,
     darts_validation_keys,
     load_darts_checkpoint,
@@ -121,6 +125,15 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
     )
     missing_date = dates[12]
     dataset = dataset.loc[dataset["timestamp"] != missing_date].reset_index(drop=True)
+    exact_lookback = pd.DataFrame(
+        {
+            "timestamp": dates[-4:],
+            "symbol": "S6",
+            "feature": np.arange(4, dtype=np.float32),
+            "fwd_ret_1d": np.arange(4, dtype=np.float32) / 100,
+        }
+    )
+    dataset = pd.concat([dataset, exact_lookback], ignore_index=True)
 
     def attach_base_target(frame, _case_study, _date_col):
         return frame.assign(**{BASE_TARGET_COL: np.log1p(frame["fwd_ret_1d"] / 10)})
@@ -186,6 +199,9 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
     assert not {date.date() for date in dates[13:16]} & observed_dates
     assert {date.date() for date in dates[16:]} <= observed_dates
     assert (
+        expected.filter((pl.col("symbol") == "S6") & (pl.col("timestamp") == dates[-1])).height == 1
+    )
+    assert (
         len(
             validate_darts_checkpoint_population(
                 model_root,
@@ -197,3 +213,62 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
         )
         == 1
     )
+
+
+def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
+    dates = pd.date_range("2024-01-02", periods=8)
+    dataset = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "product": product,
+                "position": position,
+                "feature": float(day + position),
+                "fwd_ret_1d": float(day) / 100,
+                BASE_TARGET_COL: np.log1p(float(day) / 100),
+            }
+            for product in ("ES", "NQ")
+            for position in range(3)
+            for day, timestamp in enumerate(dates)
+        ]
+    )
+    dataset = _attach_expected_periods(dataset, date_col="timestamp", calendar_id=None)
+    split = {
+        "fold": 0,
+        "train_start": dates[0],
+        "train_end": dates[3],
+        "val_start": dates[4],
+        "val_end": dates[-1],
+    }
+
+    states = _prepare_fold_series(
+        dataset,
+        split,
+        ["feature"],
+        "fwd_ret_1d",
+        "timestamp",
+        "product",
+        4,
+        1,
+    )
+
+    assert len(states) == 6
+    assert {tuple(state.identity.items()) for state in states} == {
+        (("product", product), ("position", position))
+        for product in ("ES", "NQ")
+        for position in range(3)
+    }
+
+    class _OneStepModel:
+        def historical_forecasts(self, series, *, start, **_kwargs):
+            return [
+                TimeSeries.from_times_and_values(
+                    pd.RangeIndex(start, start + 1), np.array([0.01], dtype=np.float32)
+                )
+            ]
+
+    predictions = _predict_fold(
+        _OneStepModel(), states, 0, "timestamp", "product", output_chunk_length=1
+    )
+    assert {"product", "position"} <= set(predictions.columns)
+    assert predictions.select("product", "position").n_unique() == 6

@@ -110,3 +110,32 @@ def test_selected_prediction_conformal_coverage_rejects_all_null_declared_fold(
             },
             levels=(0.80,),
         )
+
+
+def test_selected_prediction_conformal_coverage_rejects_non_finite_rows(
+    tmp_path, monkeypatch
+) -> None:
+    case_dir = tmp_path / "case_studies" / "probe"
+    prediction_dir = case_dir / "run_log" / "predictions" / "prediction-a"
+    prediction_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "timestamp": ["2019-01-02"] * 40 + ["2020-01-02"] * 40,
+            "y_true": [0.1] * 80,
+            "y_score": [0.0] * 79 + [float("inf")],
+            "fold_id": [0] * 40 + [1] * 40,
+        }
+    ).write_parquet(prediction_dir / "predictions.parquet")
+    monkeypatch.setattr(insight_chapter, "get_case_study_dir", lambda _case_study: case_dir)
+
+    with pytest.raises(insight_chapter.RegistrySelectionError, match="non-finite y_score"):
+        insight_chapter.conformal_coverage_for_selected_prediction(
+            {
+                "case_study": "probe",
+                "family": "gbm",
+                "config_name": "probe-config",
+                "prediction_hash": "prediction-a",
+                "spec_json": json.dumps({"n_folds": 2}),
+            },
+            levels=(0.80,),
+        )

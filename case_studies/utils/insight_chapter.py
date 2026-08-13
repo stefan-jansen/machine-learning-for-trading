@@ -362,7 +362,7 @@ def conformal_coverage_for_selected_prediction(
             f"expected fold IDs {list(range(n_folds))}, observed {fold_ids}"
         )
     try:
-        coverage_rows = split_conformal_coverage(usable, levels=levels)
+        coverage_rows = split_conformal_coverage(predictions, levels=levels)
     except ValueError as error:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: {error}"

@@ -199,7 +199,7 @@ def uses_darts_backend(configs: list[dict[str, Any]]) -> bool:
 
 @dataclass
 class _FoldSeries:
-    entity: str
+    identity: dict[str, Any]
     full_target: TimeSeries
     full_covariates: TimeSeries
     train_target: TimeSeries | None
@@ -592,6 +592,13 @@ def _attach_base_target(
     return merged
 
 
+def _panel_identity_columns(dataset_pd: pd.DataFrame, entity_col: str) -> list[str]:
+    identity_cols = [entity_col]
+    if "position" in dataset_pd.columns and entity_col != "position":
+        identity_cols.append("position")
+    return identity_cols
+
+
 def darts_validation_keys(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -618,6 +625,7 @@ def darts_validation_keys(
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
     )
+    identity_cols = _panel_identity_columns(dataset_pd, entity_col)
     frames: list[pl.DataFrame] = []
     has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
     for split in splits:
@@ -645,7 +653,7 @@ def darts_validation_keys(
         )
         rows = [
             {
-                "symbol": state.entity,
+                **state.identity,
                 "timestamp": pd.Timestamp(state.dates[position]),
                 "fold": int(split["fold"]),
             }
@@ -657,11 +665,13 @@ def darts_validation_keys(
         if rows:
             frames.append(pl.from_dicts(rows))
     if not frames:
+        identity_schema = pl.from_pandas(dataset_pd[identity_cols].head(0)).schema
         return pl.DataFrame(
-            schema={"symbol": pl.String, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
+            schema={**identity_schema, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
         )
-    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
-    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+    key_cols = [*identity_cols, "timestamp", "fold"]
+    expected = pl.concat(frames).sort(key_cols)
+    if expected.n_unique(key_cols) != expected.height:
         raise ValueError("Darts request produced duplicate expected prediction keys")
     return expected
 
@@ -682,9 +692,10 @@ def _prepare_fold_series(
     val_end = pd.Timestamp(split["val_end"]).to_datetime64()
     if _DARTS_PERIOD_COL not in dataset_pd.columns:
         raise ValueError("Darts dataset is missing expected-period identity")
+    identity_cols = _panel_identity_columns(dataset_pd, entity_col)
     cols = [
         date_col,
-        entity_col,
+        *identity_cols,
         label_col,
         BASE_TARGET_COL,
         _DARTS_PERIOD_COL,
@@ -705,7 +716,12 @@ def _prepare_fold_series(
     fold_df.loc[:, feature_names] = ((feature_frame - means) / stds).fillna(0.0).astype(np.float32)
 
     series: list[_FoldSeries] = []
-    for entity, entity_df in fold_df.groupby(entity_col, sort=False):
+    identity_grouper: str | list[str] = (
+        identity_cols[0] if len(identity_cols) == 1 else identity_cols
+    )
+    for identity_key, entity_df in fold_df.groupby(identity_grouper, sort=False):
+        identity_values = identity_key if isinstance(identity_key, tuple) else (identity_key,)
+        identity = dict(zip(identity_cols, identity_values, strict=True))
         entity_df = entity_df.sort_values(date_col).reset_index(drop=True)
         segments = entity_df[_DARTS_PERIOD_COL].diff().ne(1).cumsum()
         for _, sym_df in entity_df.groupby(segments, sort=False):
@@ -721,7 +737,7 @@ def _prepare_fold_series(
             can_predict = (
                 val_start_pos >= 0
                 and first_prediction_base <= val_end_pos
-                and prediction_start_pos < len(sym_df)
+                and prediction_start_pos <= len(sym_df)
             )
             if not can_train and not can_predict:
                 continue
@@ -741,7 +757,7 @@ def _prepare_fold_series(
             )
             series.append(
                 _FoldSeries(
-                    entity=str(entity),
+                    identity=identity,
                     full_target=full_target,
                     full_covariates=full_covariates,
                     train_target=full_target[:train_cut] if can_train else None,
@@ -796,19 +812,27 @@ def _predict_fold(
     for state in fold_series:
         if state.val_start_pos < 0:
             continue
-        forecasts = model.historical_forecasts(
-            state.full_target,
-            past_covariates=state.full_covariates,
-            start=state.prediction_start_pos,
-            start_format="position",
-            forecast_horizon=output_chunk_length,
-            stride=1,
-            retrain=False,
-            overlap_end=True,
-            last_points_only=False,
-            verbose=False,
-            show_warnings=False,
-        )
+        if state.prediction_start_pos == len(state.full_target):
+            forecasts = model.predict(
+                output_chunk_length,
+                series=state.full_target,
+                past_covariates=state.full_covariates,
+                verbose=False,
+            )
+        else:
+            forecasts = model.historical_forecasts(
+                state.full_target,
+                past_covariates=state.full_covariates,
+                start=state.prediction_start_pos,
+                start_format="position",
+                forecast_horizon=output_chunk_length,
+                stride=1,
+                retrain=False,
+                overlap_end=True,
+                last_points_only=False,
+                verbose=False,
+                show_warnings=False,
+            )
         if isinstance(forecasts, TimeSeries):
             forecasts = [forecasts]
 
@@ -826,7 +850,7 @@ def _predict_fold(
             rows.append(
                 {
                     date_col: pd.Timestamp(state.dates[base_pos]),
-                    entity_col: state.entity,
+                    **state.identity,
                     "y_true": float(state.y_true[base_pos]),
                     "y_score": float(np.expm1(score_path.sum())),
                     "fold_id": fold_id,
