@@ -135,11 +135,10 @@ RUN sed -i '/"lightgbm/d; /"torch>=/d' /build/pyproject.toml
 # --constraint pins every package to its uv.lock version (reproducible, no drift).
 # --override keeps the preinstalled cu128 torch stack (excluded from the constraint).
 # Force cvxpy>=1.5 for numpy 2.x C API compat (riskfolio-lib pins 1.4).
-# --prerelease=if-necessary-or-explicit allows the explicitly-pinned pre-only builds
-# (e.g. the ml4t libs) while otherwise preferring the stable versions in the lock.
+# Allow prereleases only when no stable release satisfies the constraints.
 RUN echo 'cvxpy>=1.5' >> /tmp/ml4t-constraints.txt && \
     uv pip install --python /opt/ml4t/bin/python --no-cache \
-    --prerelease=if-necessary-or-explicit \
+    --prerelease=if-necessary \
     --constraint /tmp/locked-constraints.txt \
     --override /tmp/ml4t-constraints.txt '/build[live]'
 
