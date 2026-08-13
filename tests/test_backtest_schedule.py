@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 import polars as pl
 import pytest
 
+import utils
+
 # ---------------------------------------------------------------------------
 # resolve_rebalance_timestamps tests
 # ---------------------------------------------------------------------------
@@ -263,6 +265,26 @@ class TestThinToRebalanceDates:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def nasdaq_minute_rebalance_steps(tmp_path, monkeypatch):
+    from case_studies.utils.backtest_loaders import get_rebalance_step
+
+    config_dir = tmp_path / "nasdaq100_microstructure" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "setup.yaml").write_text(
+        "labels:\n"
+        "  rebalance_step:\n"
+        "    fwd_ret_5m: 4\n"
+        "    fwd_ret_15m: 14\n"
+        "    fwd_dir_15m: 14\n"
+        "    fwd_ret_60m: 59\n"
+    )
+    monkeypatch.setattr(utils, "CASE_STUDIES_DIR", tmp_path)
+    get_rebalance_step.cache_clear()
+    yield
+    get_rebalance_step.cache_clear()
+
+
 class TestGetRebalanceStep:
     """Verify that per-label thinning steps are read from setup.yaml.
 
@@ -296,19 +318,25 @@ class TestGetRebalanceStep:
 
         assert get_rebalance_step("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    def test_nasdaq100_fwd_ret_60m_replaces_at_the_minute_before_exit(self):
+    def test_nasdaq100_fwd_ret_60m_replaces_at_the_minute_before_exit(
+        self, nasdaq_minute_rebalance_steps
+    ):
         """A t+1 entry exits at t+60 when the replacement decision is at t+59."""
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
         assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_60m") == 59
 
-    def test_nasdaq100_fwd_ret_5m_replaces_at_the_minute_before_exit(self):
+    def test_nasdaq100_fwd_ret_5m_replaces_at_the_minute_before_exit(
+        self, nasdaq_minute_rebalance_steps
+    ):
         """A t+1 entry exits at t+5 when the replacement decision is at t+4."""
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
         assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") == 4
 
-    def test_nasdaq100_15m_labels_replace_at_the_minute_before_exit(self):
+    def test_nasdaq100_15m_labels_replace_at_the_minute_before_exit(
+        self, nasdaq_minute_rebalance_steps
+    ):
         """Both 15-minute labels exit at t+15 after a replacement decision at t+14."""
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
