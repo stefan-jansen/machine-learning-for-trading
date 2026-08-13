@@ -480,6 +480,9 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             "training_runs",
             f"entry_point = '{expected_entry_point}'",
         )
+        assert runs, (
+            f"{case_study}::{stage} found no training run with entry_point='{expected_entry_point}'"
+        )
 
         if new_training > 0:
             assert new_predictions > 0, (
@@ -527,19 +530,11 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 finally:
                     db.close()
                 assert {1, 2}.issubset(checkpoints), checkpoints
-        elif len(runs) > 0:
+        else:
             print(
                 f"\n  Registry OK: {len(runs)} training_runs with "
                 f"entry_point='{expected_entry_point}' (upserted, no net new rows)"
             )
-        else:
-            # Neither new entries nor matching entry_points — real failure
-            msg = (
-                f"{case_study}::{stage} has register=True but created "
-                f"0 new training_runs and found 0 with "
-                f"entry_point='{expected_entry_point}' (total: {after['training_runs']})"
-            )
-            raise AssertionError(msg)
     else:
         # Non-registering notebook — just report what happened
         new_training = after["training_runs"] - before["training_runs"]
