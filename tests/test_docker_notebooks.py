@@ -9,7 +9,7 @@ The skip flag stays in overrides.yaml so the uv-native runner still skips them.
 This file runs them in Docker where the dependencies are available.
 
 Usage:
-    # Py312 notebooks (signatory, gensim, esig, pfhedge, tfcausalimpact, torch CUDA bug)
+    # Py312 notebooks (signatory, gensim, esig, tfcausalimpact, torch CUDA bug)
     python -m pytest tests/test_docker_notebooks.py -v -k "03_sigcwgan or ..."
 
     # Neo4j notebooks

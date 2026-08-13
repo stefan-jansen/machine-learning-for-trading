@@ -127,7 +127,7 @@ jobs:
             --timeout=600
 
   # ---------------------------------------------------------------------------
-  # Py312 notebooks (signatory, gensim, esig, pfhedge, tfcausalimpact, torch CUDA bug)
+  # Py312 notebooks (signatory, gensim, esig, tfcausalimpact, torch CUDA bug)
   # ---------------------------------------------------------------------------
   py312:
     if: github.event.inputs.scope == 'all'
@@ -159,8 +159,7 @@ jobs:
                 or 01_word2vec or 02_asset_embeddings or 03_sentiment_evolution \
                 or 01_timegan or 07_dp_gan \
                 or 10_shap_nlp_sentiment or 06_conditional_autoencoder \
-                or 06_fed_announcement_bsts \
-                or deep_hedging_pfhedge"
+                or 06_fed_announcement_bsts"
 
   # ---------------------------------------------------------------------------
   # Summary

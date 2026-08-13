@@ -177,7 +177,7 @@ wheels = [
 
 [[package]]
 name = "alpaca-py"
-version = "0.43.4"
+version = "0.43.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgpack" },
@@ -188,9 +188,9 @@ dependencies = [
     { name = "sseclient-py" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/9d/3003f661c15b8003655c447c187aec10f0843647e5c98b391701b04ac3d8/alpaca_py-0.43.4.tar.gz", hash = "sha256:7d529b3654d4e817d9fd7ab461131c4f06a315c736b6a9e4a87d5406bb71114a", size = 97990, upload-time = "2026-04-29T08:41:48.775Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/9c/0d5b0565f31a6a439876cb343282c1b7353f20ff90fefb57d33f94b4e215/alpaca_py-0.43.5.tar.gz", hash = "sha256:7b09ba442cb0c6f957c2c57a30c6035456e2e670e63e383d439c639ffdbf98ba", size = 98289, upload-time = "2026-07-02T07:22:07.016Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/d5/1f57cc03e7b5925a927cb7f8e7ee5f873e22632633778d28d5d23681c871/alpaca_py-0.43.4-py3-none-any.whl", hash = "sha256:dd49ac30e0f2a8f38550ef1f27a58e7fd8f3f3875deaa4e757443cdbd033a1b4", size = 122534, upload-time = "2026-04-29T08:41:50.149Z" },
+    { url = "https://files.pythonhosted.org/packages/02/40/83c7ef8bc3e74e73cda6308f7107fe57815dcfc808dc9cd03bd09aa22dd3/alpaca_py-0.43.5-py3-none-any.whl", hash = "sha256:0b4cac9b743851310f19f6a9aa84f57ddf95ae75b601350395746a893f54a2da", size = 122677, upload-time = "2026-07-02T07:22:08.06Z" },
 ]
 
 [[package]]
@@ -2726,15 +2726,16 @@ wheels = [
 
 [[package]]
 name = "ib-async"
-version = "2.0.1"
+version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aeventkit" },
     { name = "nest-asyncio" },
+    { name = "tzdata" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3b/05/daa22cdd2b452c95d051dc038c2eedd7377d2e3763abbeb414c197f6034c/ib_async-2.0.1.tar.gz", hash = "sha256:331c915645f49b46fdf42c9f06bbd56d264cab0cd24535eca2476f5d212ab113", size = 86669, upload-time = "2025-06-22T16:07:33.31Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/4d/dfc1da8224c3ffcdcd668da7283c4e5f14239a07f83ea66af99700296fc3/ib_async-2.1.0.tar.gz", hash = "sha256:6a03a87d6c06acacb0217a5bea60a8a168ecd5b5a7e86e1c73678d5b48cbc796", size = 87678, upload-time = "2025-12-08T01:42:32.004Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b6/d5/310c3642f6008b43d751811d09302c8abf490f2086ff16f280f030a2bd24/ib_async-2.0.1-py3-none-any.whl", hash = "sha256:4c0794264844a441b4ece468dda8550663eab38009b258e49c748900c6f79822", size = 86800, upload-time = "2025-06-22T16:07:31.39Z" },
+    { url = "https://files.pythonhosted.org/packages/80/e7/8f33801788c66f15e9250957ff7f53a8000843f79af1a3ed7a96def0e96b/ib_async-2.1.0-py3-none-any.whl", hash = "sha256:f6d8b991bdbd6dd38e700c61b3dced06ebe0f14be4e5263e2ef10ba10b88d434", size = 88876, upload-time = "2025-12-08T01:42:30.883Z" },
 ]
 
 [[package]]
@@ -4255,6 +4256,7 @@ dev = [
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-rerunfailures" },
+    { name = "pytest-timeout" },
     { name = "ruff" },
 ]
 live = [
@@ -4330,12 +4332,12 @@ requires-dist = [
     { name = "llama-index-llms-openai", specifier = ">=0.7.7" },
     { name = "llama-index-vector-stores-chroma", specifier = ">=0.5.5" },
     { name = "matplotlib", specifier = ">=3.8" },
-    { name = "ml4t-backtest", specifier = ">=0.1.1" },
+    { name = "ml4t-backtest", specifier = ">=0.1.3" },
     { name = "ml4t-data", specifier = ">=0.1.2" },
-    { name = "ml4t-diagnostic", specifier = ">=0.1.0" },
-    { name = "ml4t-engineer", specifier = ">=0.1.2" },
-    { name = "ml4t-live", specifier = ">=0.1.0b3" },
-    { name = "ml4t-models", specifier = ">=0.1.0" },
+    { name = "ml4t-diagnostic", specifier = ">=0.1.1" },
+    { name = "ml4t-engineer", specifier = ">=0.1.3" },
+    { name = "ml4t-live", specifier = ">=0.1.0" },
+    { name = "ml4t-models", specifier = ">=0.1.2" },
     { name = "mlflow", specifier = ">=3.10.1" },
     { name = "mlflow", marker = "extra == 'mlops'", specifier = ">=2.16" },
     { name = "nbconvert", specifier = ">=7.16" },
@@ -4366,6 +4368,7 @@ requires-dist = [
     { name = "pyportfolioopt", specifier = ">=1.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-rerunfailures", marker = "extra == 'dev'", specifier = ">=15.0" },
+    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-okx", marker = "extra == 'live'", specifier = ">=0.3" },
     { name = "pytorch-lightning", specifier = ">=2.2" },
@@ -4415,7 +4418,7 @@ dev = [{ name = "httpx", specifier = ">=0.28.1" }]
 
 [[package]]
 name = "ml4t-backtest"
-version = "0.1.1"
+version = "0.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ml4t-specs" },
@@ -4425,9 +4428,9 @@ dependencies = [
     { name = "polars" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/e7/e7fd9b2b5655f36f6b030b6f194a6d332cf88ae120a6c064faf12f547a80/ml4t_backtest-0.1.1.tar.gz", hash = "sha256:73774a51caa87db1aa8cb9e77777a13bc2a844460b32754fd40d42e75ba4bf3a", size = 446031, upload-time = "2026-08-10T01:27:59.617Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/c9/c3655ba677c4cbacd0be14379bc3192fe83aa6bac7f99c6e636fa06c4d6c/ml4t_backtest-0.1.3.tar.gz", hash = "sha256:a3439abc6e35695b43ae9788aaa86b1d60091546fc36cbc1dad3cfa5cad70fec", size = 446153, upload-time = "2026-08-12T02:00:54.52Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/34/95defe7e62d72b2e23d7da9cff0813699592a2d6976177814b0ab2059452/ml4t_backtest-0.1.1-py3-none-any.whl", hash = "sha256:94891ea800c93a6ded6c12461cc0ac21187f0e0c403bd4b9062cceda6f5fd1f9", size = 222163, upload-time = "2026-08-10T01:27:57.737Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/5b/7e3067c764d58e442fc5dfdc883ad74ad69f244334dd7cb7af9a509a9437/ml4t_backtest-0.1.3-py3-none-any.whl", hash = "sha256:a6d56f0a4c9f57ff2a9a83ab41e0ac2e523fd98303cdd6e87827e5ac8e666df2", size = 222165, upload-time = "2026-08-12T02:00:52.862Z" },
 ]
 
 [[package]]
@@ -4461,7 +4464,7 @@ wheels = [
 
 [[package]]
 name = "ml4t-diagnostic"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "arch" },
@@ -4479,14 +4482,14 @@ dependencies = [
     { name = "statsmodels" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/4f/d7b8593465f9c7626176966f54214773272e30a3434313c7a5262fcc147e/ml4t_diagnostic-0.1.0.tar.gz", hash = "sha256:4af7a447bdc926164df86a8c41a8175aab5d81bc33f814c7882fa33b97594989", size = 6756389, upload-time = "2026-08-08T09:43:58.732Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/05/7a21cf55d59e324db6fd61cde31c6a90c895ca98017118a79b60dc00c36c/ml4t_diagnostic-0.1.1.tar.gz", hash = "sha256:7d3b19f085bde922f257b1618e65a8164de3a520e517060795bf672e76531520", size = 6764208, upload-time = "2026-08-12T03:07:18.157Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/b0/4576b1daf034dc9ad0fdcbe97d7e4fd8fecd2f2e7a212460766c29d412df/ml4t_diagnostic-0.1.0-py3-none-any.whl", hash = "sha256:640e0eb74a62aca6ba4faaa43b041aa847b1f66f38036f9512180d9045cc642c", size = 942159, upload-time = "2026-08-08T09:43:55.988Z" },
+    { url = "https://files.pythonhosted.org/packages/68/5e/431af33ebd103ccc7cf03627b414cb4ec88d10a855fe46252aff0540f3cf/ml4t_diagnostic-0.1.1-py3-none-any.whl", hash = "sha256:91acd1f435bce1988522a21da4ef2972daa59ae145d0290eda589b40e85261dc", size = 944114, upload-time = "2026-08-12T03:07:16.316Z" },
 ]
 
 [[package]]
 name = "ml4t-engineer"
-version = "0.1.2"
+version = "0.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ml4t-specs" },
@@ -4494,23 +4497,19 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "polars" },
-    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "python-dateutil" },
     { name = "pyyaml" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "statsmodels" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/22/78/0d3eaf446ad6940be19fedaaae54049c398dbfe266306c5546973207e27c/ml4t_engineer-0.1.2.tar.gz", hash = "sha256:8063bcc71377c1e28c9b207a78b493e340b411b8b3e90eea182af663e322d021", size = 608867, upload-time = "2026-08-10T03:05:22.137Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/54/98b4fbf556eee83543babe7e62e1e6de7be23ef8490fdcb156a0dbbb43d6/ml4t_engineer-0.1.3.tar.gz", hash = "sha256:196b0a3cb1535700d3eee0e0722c3128c7db6f0630c7f741fe44229d1083cb86", size = 609060, upload-time = "2026-08-12T03:24:09.731Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6e/02/9c59efb9133338d8d3a1e4b6e89d407a48e15a587af9a592d63651e0dfa8/ml4t_engineer-0.1.2-py3-none-any.whl", hash = "sha256:6e5a30c9552edc7224fb12344169d689081fea3937bad6a9a794c3221fbf70c0", size = 386726, upload-time = "2026-08-10T03:05:20.562Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/bf/31e61dfd615dd10ee70f98fecf9cb684a8c531ea4119b6725bb19f84f6d5/ml4t_engineer-0.1.3-py3-none-any.whl", hash = "sha256:ddad6ae086644b92eab4368c84fa67b38690f28051edc04d1984dd1c37490044", size = 386827, upload-time = "2026-08-12T03:24:07.826Z" },
 ]
 
 [[package]]
 name = "ml4t-live"
-version = "0.1.0b3"
+version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alpaca-py" },
@@ -4518,34 +4517,35 @@ dependencies = [
     { name = "httpx" },
     { name = "ib-async" },
     { name = "ml4t-backtest" },
+    { name = "ml4t-specs" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/97/d7690ee93d779ee9fa607e81039aecfc5ed75c6b31270d55aa000a996c13/ml4t_live-0.1.0b3.tar.gz", hash = "sha256:1bd353c14cf7279c493f52fe8ace427415b3a89c382292e2f02b34fa5e3ed150", size = 4906900, upload-time = "2026-04-27T20:13:58.113Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/b3/a2bfb095294f78bee709dddb261d8cda81cc5584827e4d35af75a88c2b42/ml4t_live-0.1.0.tar.gz", hash = "sha256:3d527dce062441b83668df7e89b127d4db311ea5bd9d6dfaea469a3a0864a3f2", size = 109594, upload-time = "2026-08-10T19:03:37.41Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/91/8c79cd4f1e8d8b64fa99e985b7d76ce97e6b27ab7a6a39526d2d6f8242ca/ml4t_live-0.1.0b3-py3-none-any.whl", hash = "sha256:53cfed9e1d3a92dbc61e7d7cbe2a48a70e1b3f230acfb7ff061f5104caa7139d", size = 66770, upload-time = "2026-04-27T20:13:56.03Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/27/087001b44f9ef821806d120322f20bf46b4d5a8b5d66cdd58a0ab9c9a776/ml4t_live-0.1.0-py3-none-any.whl", hash = "sha256:0eb873aa1068652bdb6d12e08561c543219c4d63366b2005366bfb03ad0fb4b1", size = 127884, upload-time = "2026-08-10T19:03:35.834Z" },
 ]
 
 [[package]]
 name = "ml4t-models"
-version = "0.1.0"
+version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/82/dab69c1ecee14a54dd7f3d9058e31d10c7178031d7d8dc3b4f04ff832354/ml4t_models-0.1.0.tar.gz", hash = "sha256:ea98567cc58a7e1a86872ae088c4ae4096630d330199f9f563529b194f893305", size = 12989592, upload-time = "2026-08-09T13:48:51.584Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/d5/403d9eb80e7bea0b0ea01c2d83049de2be11f7bdbbac2ff712bc01d5f633/ml4t_models-0.1.2.tar.gz", hash = "sha256:f78dfe27ac7e979fa59d355eb2c8db461d9c735bbfdc5acd67d1225cd5a2ca11", size = 12990041, upload-time = "2026-08-12T03:15:48.419Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/f4/55fe5268ad5e8849831e6e111b87f6b5f27ae2fa0590bea00aa37ecc1843/ml4t_models-0.1.0-py3-none-any.whl", hash = "sha256:ad804d0f7430b1ade3f5b78818e671aaba254ba7c8d3274643fcdda213ba05c5", size = 103527, upload-time = "2026-08-09T13:48:49.915Z" },
+    { url = "https://files.pythonhosted.org/packages/09/9c/22f9b9ec3dbdc09a469f28f06882e217fdf5f16d594fbea9292e9843ba67/ml4t_models-0.1.2-py3-none-any.whl", hash = "sha256:6d18ac3106e475ef8be812732a4ba6541fb0fd0b933ac90c879a18dff9e10d63", size = 103543, upload-time = "2026-08-12T03:15:46.318Z" },
 ]
 
 [[package]]
 name = "ml4t-specs"
-version = "0.1.2"
+version = "0.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e5/6b/58aacbc7ccf9239edb5f3b350b418aff543f87698852e1507892c2ce8c26/ml4t_specs-0.1.2.tar.gz", hash = "sha256:72131624220bdded7d01d9c09e4c9e6637e8e977a37be283bc7f38d4fe0b1e1a", size = 50590, upload-time = "2026-08-10T00:53:01.695Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/ca/aba7ea1f4e9a1da0b4f465dea03d3e4320d63db348245a2a9976096407ac/ml4t_specs-0.1.3.tar.gz", hash = "sha256:9578038af96d59cd50317e78f8781772833b308076da13ad24c0b304bb20961d", size = 50758, upload-time = "2026-08-12T02:27:14.366Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/97/1508cd131272885391fe17eb54865d8c2ee0a853d15bdd5cfd838b20ce44/ml4t_specs-0.1.2-py3-none-any.whl", hash = "sha256:c9e6749bc28c087f1a97494690edae94460aeffe2c223494a19c41c4915b9532", size = 33763, upload-time = "2026-08-10T00:53:00.474Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/6c/0a35ee16313441a68a14d811ffa8b79eb63a013d548b6bbb50dfd208c6b1/ml4t_specs-0.1.3-py3-none-any.whl", hash = "sha256:2b9302d27746f5859b62c6748bf217ca4eae76d4842c783575c58f4880d1568f", size = 33860, upload-time = "2026-08-12T02:27:12.929Z" },
 ]
 
 [[package]]
@@ -6695,6 +6695,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -8435,11 +8447,11 @@ wheels = [
 
 [[package]]
 name = "tzdata"
-version = "2026.2"
+version = "2025.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ba/19/1b9b0e29f30c6d35cb345486df41110984ea67ae69dddbc0e8a100999493/tzdata-2026.2.tar.gz", hash = "sha256:9173fde7d80d9018e02a662e168e5a2d04f87c41ea174b139fbef642eda62d10", size = 198254, upload-time = "2026-04-24T15:22:08.651Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/a7/c202b344c5ca7daf398f3b8a477eeb205cf3b6f32e7ec3a6bac0629ca975/tzdata-2025.3.tar.gz", hash = "sha256:de39c2ca5dc7b0344f2eba86f49d614019d29f060fc4ebc8a417896a620b56a7", size = 196772, upload-time = "2025-12-13T17:45:35.667Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/e4/dccd7f47c4b64213ac01ef921a1337ee6e30e8c6466046018326977efd95/tzdata-2026.2-py2.py3-none-any.whl", hash = "sha256:bbe9af844f658da81a5f95019480da3a89415801f6cc966806612cc7169bffe7", size = 349321, upload-time = "2026-04-24T15:22:05.876Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/b0/003792df09decd6849a5e39c28b513c06e84436a54440380862b5aeff25d/tzdata-2025.3-py2.py3-none-any.whl", hash = "sha256:06a47e5700f3081aab02b2e513160914ff0694bce9947d6b76ebd6bf57cfc5d1", size = 348521, upload-time = "2025-12-13T17:45:33.889Z" },
 ]
 
 [[package]]

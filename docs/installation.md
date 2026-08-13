@@ -133,7 +133,7 @@ does not work on Intel Macs or in native Windows Python.
 | Image | What it covers | Platforms |
 |-------|----------------|-----------|
 | **ml4t** | All chapters (Ch01-Ch27) + all 9 case studies | amd64 + arm64 |
-| **ml4t-py312** | Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06, Ch21 deep_hedging (signatory, esig, gensim, pfhedge, tfcausalimpact) | amd64 only |
+| **ml4t-py312** | Ch05 NB01/03/07, Ch09 NB06/12, Ch10 NB01-03, Ch12 NB10, Ch14 NB06, Ch15 NB06 (signatory, esig, gensim, tfcausalimpact) | amd64 only |
 | **benchmark** | Ch02 storage benchmarks (DuckDB, HDF5, database clients) | amd64 + arm64 |
 | **rapids** | Ch12 GBM GPU benchmark (RAPIDS cuML, LightGBM CUDA) | amd64 + NVIDIA GPU |
 
@@ -436,7 +436,6 @@ A small number of notebooks require Python 3.12 libraries not available on Pytho
 | `10_shap_nlp_sentiment` | torch CUDA bug + shap | Ch12 |
 | `06_conditional_autoencoder` | torch CUDA bug + shap | Ch14 |
 | `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS) | Ch15 |
-| `05_deep_hedging_pfhedge` | pfhedge (unmaintained, numpy<2) | Ch21 |
 
 ```bash
 # On x86 (Linux, Windows WSL2, Intel Mac) run these as they stand. On Apple Silicon
@@ -446,7 +445,7 @@ docker compose --profile py312 run --rm py312 python 09_model_based_features/06_
 docker compose --profile py312 run --rm py312 \
   /opt/bsts/bin/python 15_causal_estimation/06_fed_announcement_bsts.py
 
-# The seven GPU-tagged notebooks, on a machine with an NVIDIA GPU:
+# The six GPU-tagged notebooks, on a machine with an NVIDIA GPU:
 docker compose --profile py312-gpu run --rm py312-gpu \
   python 05_synthetic_data/03_sigcwgan_signatures.py
 ```
@@ -454,13 +453,11 @@ docker compose --profile py312-gpu run --rm py312-gpu \
 Chapter 15 notebook 06 uses the isolated `/opt/bsts` interpreter so its NumPy 1 and
 pandas 2.2 constraints do not replace dependencies required by the other py312 notebooks.
 
-The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Seven of the
-twelve are GPU-tagged and run faster with one, whether they train or only do inference: Ch05
-`01_timegan`,
-`03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
-`10_shap_nlp_sentiment`, Ch14 `06_conditional_autoencoder` and Ch21
-`05_deep_hedging_pfhedge`. The `py312-gpu` service is the same image with an NVIDIA GPU
-attached, for those.
+The `py312` service reserves no GPU, so it runs anywhere the amd64 image does. Six of the
+eleven are GPU-tagged and run faster with one, whether they train or only do inference: Ch05
+`01_timegan`, `03_sigcwgan_signatures` and `07_dp_gan`, Ch10 `03_sentiment_evolution`, Ch12
+`10_shap_nlp_sentiment` and Ch14 `06_conditional_autoencoder`. The `py312-gpu` service is the
+same image with an NVIDIA GPU attached, for those.
 
 **Apple Silicon**: these notebooks have no arm64 build and all of them ship pre-executed, so
 reading the `.ipynb` in Jupyter or on GitHub is the intended route, and the local `uv` path
@@ -657,7 +654,6 @@ A few notebooks require Docker because their dependencies have no Python 3.14 wh
 | Ch12 `10_shap_nlp_sentiment` | torch CUDA bug on 3.14 + shap | py312 |
 | Ch14 `06_conditional_autoencoder` | torch CUDA bug on 3.14 + shap | py312 |
 | Ch15 `06_fed_announcement_bsts` | tfcausalimpact requires Python 3.12 | py312 |
-| Ch21 `05_deep_hedging_pfhedge` | pfhedge requires numpy<2 | py312 |
 | Ch02 `21_storage_benchmark_database` | requires database services | benchmark |
 
 For these, use `docker compose` with the appropriate profile even if your main workflow is local.

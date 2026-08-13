@@ -37,7 +37,6 @@ For notebooks requiring libraries without Python 3.14 wheels:
 | Ch09 `06_path_signatures`, `12_wasserstein_regimes` | signatory, esig |
 | Ch10 `01_word2vec`, `02_asset_embeddings`, `03_sentiment_evolution` | gensim |
 | Ch15 `06_fed_announcement_bsts` | tfcausalimpact (TFP BSTS) |
-| Ch21 `05_deep_hedging_pfhedge` | pfhedge |
 
 ```bash
 docker compose --profile py312 pull py312
@@ -123,7 +122,7 @@ docker compose run --rm ml4t python envs/test_all_imports.py --chapter 15 --verb
 | Image | Packages | ML4T Libs | Utils Modules | Chapters |
 |-------|----------|-----------|---------------|----------|
 | **ml4t** | 50 third-party | 6 (data, engineer, models, diagnostic, backtest, live) | 22 (4 repo + 18 case study) | Ch01-Ch26 |
-| **py312** | 5 (signatory, esig, gensim, pfhedge, tfcausalimpact) | 1 (diagnostic) | — | Ch05, Ch09, Ch10, Ch12, Ch14, Ch15, Ch21 |
+| **py312** | 4 (signatory, esig, gensim, tfcausalimpact) | 1 (diagnostic) | — | Ch05, Ch09, Ch10, Ch12, Ch14, Ch15 |
 | **benchmark** | 5 (duckdb, tables, DB clients) | 0 | — | Ch02 |
 
 The test groups packages by chapter, so failures map directly to which notebooks are affected. Exit code is 0 (all pass) or 1 (failures). py312-only packages are shown as informational when running the ml4t test.
