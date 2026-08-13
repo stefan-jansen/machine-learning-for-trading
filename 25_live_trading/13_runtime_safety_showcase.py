@@ -668,6 +668,10 @@ health_timeline
 # orders, and any configured broker probe results out of process. It is the component that
 # lets an operator inspect the engine's runtime trust state when the engine itself is
 # unreachable, hung, or restarting.
+#
+# The subprocess creates its event loop before importing the CLI. Python 3.14 no longer
+# creates one implicitly, while the current IB adapter dependency still expects one during
+# import.
 
 # %%
 cli_state = _temp_state_path("nb13_cli_")
@@ -692,7 +696,18 @@ for key in (
     cli_env.pop(key, None)
 
 result = subprocess.run(
-    [sys.executable, "-m", "ml4t.live.cli.main", "status", "--state-file", str(cli_state)],
+    [
+        sys.executable,
+        "-c",
+        (
+            "import asyncio; "
+            "asyncio.set_event_loop(asyncio.new_event_loop()); "
+            "from ml4t.live.cli.main import app; app()"
+        ),
+        "status",
+        "--state-file",
+        str(cli_state),
+    ],
     capture_output=True,
     text=True,
     timeout=20,
