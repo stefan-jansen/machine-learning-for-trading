@@ -82,6 +82,17 @@ def test_production_nasdaq_cadence_matches_declared_rebalance_steps() -> None:
 
     cadence_minutes = _minutes(setup["decision"]["bar_frequency"])
     assert cadence_minutes == _minutes(backtest["calendar"]["data_frequency"])
+    assert cadence_minutes == 1
+    assert setup["execution"]["allocator_lookback"] == 7_800
+    assert setup["backtest"]["sweep"]["cadence_sweep"][0] == "1_minute"
+
+    position_controls = setup["backtest"]["sweep"]["risk_controls"]["position"]
+    time_exits = {
+        control["name"]: control["bars"]
+        for control in position_controls
+        if control["type"] == "time_exit"
+    }
+    assert time_exits == {"time_exit_10": 150, "time_exit_20": 300, "time_exit_40": 600}
 
     for label, step in setup["labels"]["rebalance_step"].items():
         match = re.search(r"_(\d+)m$", label)
@@ -110,7 +121,7 @@ def test_minute_engine_fills_next_bar_and_replacement_at_label_exit() -> None:
     spec["backtest_config"]["calendar"]["data_frequency"] = "1m"
     spec["backtest_config"]["metadata"]["cadence"] = "1_minute"
     start = prices["timestamp"].min()
-    assert start is not None
+    assert isinstance(start, datetime)
     weights = pl.DataFrame(
         {
             "timestamp": [start, start, start + timedelta(minutes=4), start + timedelta(minutes=4)],

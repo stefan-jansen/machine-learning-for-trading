@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from case_studies.utils.benchmark import (
+    _resolve_decision_cadence,
     build_equal_weight_benchmark,
     generate_benchmark,
     load_benchmark_metrics,
@@ -67,6 +68,54 @@ def test_benchmark_uses_declared_roster_and_restarts_schedule_each_session() -> 
     assert metadata["by_period"]["holdout"]["n_periods"] == 1
     assert metadata["inputs"]["label_digest"] == "label-digest"
     assert metadata["configuration"]["rebalance_step"] == 4
+
+
+def test_benchmark_aligns_minute_labels_to_fifteen_minute_decision_grid() -> None:
+    start = datetime(2021, 6, 30, 9, 30)
+    labels = pl.DataFrame(
+        {
+            "timestamp": [start + timedelta(minutes=offset) for offset in range(61)],
+            "symbol": ["A"] * 61,
+            "label": [0.01] * 61,
+        }
+    )
+
+    returns, _ = build_equal_weight_benchmark(
+        labels,
+        case_study="sample",
+        label="label",
+        symbols=["A"],
+        windows={"validation": (date(2021, 6, 30), date(2021, 6, 30))},
+        cadence="15_minute",
+        rebalance_step=4,
+        calendar="NYSE",
+        periods_per_year=252,
+        label_digest="digest",
+    )
+
+    assert returns.to_dicts() == [
+        {"timestamp": date(2021, 6, 30), "ew_return": pytest.approx(1.01**2 - 1)},
+    ]
+
+
+def test_benchmark_cadence_uses_shared_configuration_precedence() -> None:
+    assert (
+        _resolve_decision_cadence(
+            {
+                "decision": {
+                    "entry_cadence": "weekly_friday",
+                    "cadence": "daily_close",
+                    "bar_frequency": "1_minute",
+                }
+            }
+        )
+        == "weekly_friday"
+    )
+
+
+@pytest.mark.parametrize("key", ["entry_cadence", "cadence", "bar_frequency"])
+def test_benchmark_cadence_accepts_each_configuration_key(key: str) -> None:
+    assert _resolve_decision_cadence({"decision": {key: "1_minute"}}) == "1_minute"
 
 
 @pytest.mark.parametrize(

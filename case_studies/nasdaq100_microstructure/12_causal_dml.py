@@ -19,7 +19,7 @@
 # Does signed volume share *cause* future 15-minute returns, or is the observed
 # price impact already fully captured by spread and volatility? This notebook
 # applies DML to `signed_vol_share` (buyer-initiated volume fraction) across
-# NASDAQ-100 stocks at 15-minute intraday frequency.
+# NASDAQ-100 stocks on a one-minute observation grid with a 15-minute outcome.
 #
 # **Treatment rationale**: Signed volume share is the primary microstructure signal
 # — the fraction of trades classified as buyer-initiated using the Lee-Ready
@@ -89,6 +89,7 @@ CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
+OBSERVATION_FREQUENCY = setup["decision"]["bar_frequency"].replace("_minute", "min")
 
 # Load DML config and apply Papermill overrides
 causal_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "causal_dml")
@@ -180,7 +181,10 @@ merged_clean = (
     .to_pandas()
 )
 
-EMBARGO_PERIODS = embargo_from_buffer(mds.label_buffer)
+EMBARGO_PERIODS = embargo_from_buffer(
+    mds.label_buffer,
+    observation_frequency=OBSERVATION_FREQUENCY,
+)
 
 BLOCK_SIZE = EMBARGO_PERIODS
 
@@ -219,6 +223,9 @@ results = run_dml_analysis(
     n_placebo=N_PLACEBO,
     block_size=BLOCK_SIZE,
     seed=RANDOM_SEED,
+    horizon=EMBARGO_PERIODS,
+    time_col=date_col,
+    entity_col=entity_cols[0] if entity_cols else None,
 )
 
 print(format_dml_summary(results))
@@ -233,7 +240,7 @@ print(format_dml_summary(results))
 # modest correction.
 #
 # Despite HAC credibility at the 1% level, the refutation test fails at 5%
-# (empirical p=0.11): block permutation with 1-bar blocks (15 minutes)
+# (empirical p=0.11): block permutation with 15-observation blocks (15 minutes)
 # reproduces the observed effect in roughly 11% of placebo replications, so
 # the placebo test does not corroborate the parametric significance. The effect is
 # HAC-credible but operates on a fundamentally different scale than daily
@@ -369,7 +376,7 @@ register_causal_run(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Small confounding bias on fwd_ret_15m (+8.1%)**: At 15-minute frequency,
+# 1. **Small confounding bias on fwd_ret_15m (+8.1%)**: On the one-minute grid,
 #    relative spread, 5-minute realized volatility, and 1-month cumulative
 #    return are largely orthogonal to signed volume share. The orthogonalized
 #    DML effect (+5.7e-7) is 8.1% larger than the naive estimate (+5.2e-7) —
@@ -377,7 +384,7 @@ register_causal_run(
 #
 # 2. **HAC-credible but refutation fails**: HAC p-value of 0.012 on
 #    fwd_ret_15m establishes parametric significance at 5%; the placebo
-#    test fails (empirical p=0.11) — block permutation with 1-bar blocks
+#    test fails (empirical p=0.11) - block permutation with 15-observation blocks
 #    reproduces the small observed effect in roughly 11% of replications,
 #    so parametric significance is not confirmed by the placebo gate.
 #    NASDAQ-100 is the only panel in the trial where HAC significance is

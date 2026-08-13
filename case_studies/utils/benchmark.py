@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date as _date
@@ -118,6 +119,45 @@ def _slice_window(frame: pl.DataFrame, window: Window | None) -> pl.DataFrame:
     return frame.filter(pl.col("timestamp").is_between(start, end, closed="both"))
 
 
+def _intraday_cadence_minutes(cadence: str) -> int | None:
+    minute = re.fullmatch(r"(\d+)_minute", cadence)
+    if minute:
+        return int(minute.group(1))
+    hour = re.fullmatch(r"(\d+)_hour(?:_\w+)?", cadence)
+    if hour:
+        return int(hour.group(1)) * 60
+    return None
+
+
+def _align_decision_timestamps(timestamps: pl.Series, cadence: str) -> pl.Series:
+    """Select the declared intraday clock from a finer timestamp grid."""
+    minutes = _intraday_cadence_minutes(cadence)
+    unique = timestamps.unique().sort()
+    if minutes is None or minutes == 1 or unique.is_empty():
+        return unique
+    return (
+        pl.DataFrame({"timestamp": unique})
+        .with_columns(pl.col("timestamp").dt.date().alias("_session"))
+        .with_columns(pl.col("timestamp").min().over("_session").alias("_session_start"))
+        .with_columns(
+            (pl.col("timestamp") - pl.col("_session_start"))
+            .dt.total_minutes()
+            .alias("_elapsed_minutes")
+        )
+        .filter(pl.col("_elapsed_minutes") % minutes == 0)
+        .get_column("timestamp")
+    )
+
+
+def _resolve_decision_cadence(setup: Mapping) -> str:
+    decision = setup.get("decision") or {}
+    for key in ("entry_cadence", "cadence", "bar_frequency"):
+        value = decision.get(key)
+        if value:
+            return str(value)
+    raise KeyError("decision requires entry_cadence, cadence, or bar_frequency")
+
+
 def build_equal_weight_benchmark(
     labels: pl.DataFrame,
     *,
@@ -157,8 +197,9 @@ def build_equal_weight_benchmark(
     if nonfinite.height:
         raise ValueError(f"Label frame contains {nonfinite.height} non-finite {label} values")
 
+    decision_grid = _align_decision_timestamps(scoped.get_column("timestamp"), cadence)
     schedule = thin_to_rebalance_dates(
-        scoped.select("timestamp").unique(),
+        pl.DataFrame({"timestamp": decision_grid}),
         cadence=cadence,
         step=rebalance_step,
         calendar=calendar,
@@ -263,7 +304,7 @@ def generate_benchmark(
         label=label,
         symbols=declared_universe(setup),
         windows=resolved_windows,
-        cadence=str(setup["decision"]["bar_frequency"]),
+        cadence=_resolve_decision_cadence(setup),
         rebalance_step=int(setup["labels"]["rebalance_step"][label]),
         calendar=str(setup["evaluation"]["calendar"]),
         periods_per_year=int(setup["evaluation"]["periods_per_year"]),

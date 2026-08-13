@@ -570,3 +570,71 @@ def test_locked_conformal_holdout_uses_validation_residuals(
     assert widths.get_column("fold_id").unique().to_list() == [-1]
     assert widths.get_column("calibration_n").min() == 2
     assert evaluated.state == "HOLDOUT_EVALUATED"
+
+
+def test_locked_cost_feasible_strategy_uses_each_splits_frozen_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = _seed_release(tmp_path)
+    setup_path = release / "case_studies" / "etfs" / "config" / "setup.yaml"
+    setup_path.write_text(
+        setup_path.read_text()
+        + "universe:\n"
+        + "  cost_feasible:\n"
+        + "    validation: [A]\n"
+        + "    holdout: [B]\n"
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    validation_training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    validation_prediction = study.results.publish_predictions(
+        validation_training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    request = {
+        "signal": {
+            "method": "equal_weight_top_k",
+            "top_k": 1,
+            "universe_filter": "cost_feasible",
+        },
+        "execution_mode": "vectorized",
+    }
+    validation_backtest = study.strategy(prediction=validation_prediction, **request).run(
+        prices=_prices()
+    )
+    candidates = CandidateSet.create(study, "cost-feasible-selection", [validation_backtest])
+    holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"})
+    lock = study.lifecycle.lock(
+        candidate_set_hash=candidates.hash,
+        selected_backtest_hash=validation_backtest.hash,
+        selection_evidence={"metric": "validation_backtest_sharpe"},
+        holdout_training_spec=holdout_spec,
+    )
+    holdout_training = study.results.register_training(holdout_spec)
+    holdout_frame = frame.with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
+    holdout_prediction = study.results.publish_predictions(
+        holdout_training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="holdout",
+        predictions=holdout_frame,
+        expected_keys=holdout_frame.select("symbol", "timestamp", "fold_id"),
+    )
+    holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
+    _patch_holdout_prices(monkeypatch, holdout_prices)
+
+    holdout_backtest = study.strategy(prediction=holdout_prediction, **request).run()
+    evaluated = study.lifecycle.record_holdout(
+        lock.hash,
+        holdout_training_hash=holdout_training.hash,
+        holdout_prediction_hash=holdout_prediction.hash,
+        holdout_backtest_hash=holdout_backtest.hash,
+    )
+
+    assert validation_backtest.spec()["strategy"]["signal"]["universe_symbols"] == ["A"]
+    assert holdout_backtest.spec()["strategy"]["signal"]["universe_symbols"] == ["B"]
+    assert evaluated.state == "HOLDOUT_EVALUATED"

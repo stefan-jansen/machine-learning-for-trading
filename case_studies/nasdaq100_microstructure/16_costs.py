@@ -329,11 +329,12 @@ if not screen_compare.is_empty() and screen_compare.height == 2:
 # %% [markdown]
 # ## 5. Cadence × Per-Share Cost Analysis
 #
-# The bps sweep above fixes the rebalancing cadence at 15 minutes. But the
+# The bps sweep above fixes the rebalancing cadence at one minute. But the
 # cost-to-edge ratio depends on *how often* we trade, not just *how much* each
-# trade costs. At 15-minute cadence the strategy rebalances 26 times per day;
-# at hourly cadence only 6–7 times. Holding longer amortizes the fixed per-trade
-# cost over a larger expected return per period.
+# trade costs. At one-minute cadence the strategy can rebalance 390 times per
+# day, at 15-minute cadence 26 times, and at hourly cadence only 6-7 times.
+# Holding longer amortizes the fixed per-trade cost over a larger expected
+# return per period.
 #
 # This section sweeps **cadence × per-share spread** — the central exhibit
 # for this case study. We use a **per-share cost model** rather than bps,
@@ -416,6 +417,7 @@ else:
 # from the cadence names so they always stay in sync.
 CADENCES = get_cadence_sweep(CASE_STUDY_ID)
 _CADENCE_TO_FREQ = {
+    "1_minute": "1m",
     "15_minute": "15m",
     "30_minute": "30m",
     "1_hour": "1h",
@@ -442,7 +444,7 @@ cadence_results = []
 
 
 def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) -> pl.DataFrame:
-    """Align 15-min predictions to coarser bar timestamps via asof join."""
+    """Align minute predictions to target bar timestamps via asof join."""
     # For each symbol, find the last prediction at or before each bar timestamp
     bar_df = pl.DataFrame({"timestamp": bar_timestamps}).unique().sort("timestamp")
     symbols = preds["symbol"].unique().sort().to_list()
@@ -591,7 +593,7 @@ cadence_df = pl.DataFrame(cadence_results) if cadence_results else pl.DataFrame(
 
 if not cadence_df.is_empty():
     pivot = cadence_df.pivot(on="cost_label", index="cadence", values="sharpe")
-    cadence_order = ["15m", "30m", "1h", "4h"]
+    cadence_order = ["1m", "15m", "30m", "1h", "4h"]
     cadences_present = [c for c in cadence_order if c in pivot["cadence"].to_list()]
     costs_present = [c for c in COST_LABELS if c in pivot.columns]
 
@@ -674,9 +676,9 @@ if not cadence_df.is_empty():
 #    magnitude less (Section 4). Removing the expensive-spread tail removes both
 #    the turnover source and the cost sink — this is the screen the carrier
 #    trades on.
-# 2. **Cadence is the second lever**: at the default 15-minute cadence the
+# 2. **Cadence is the second lever**: at the default one-minute cadence the
 #    full-universe every-bar baseline churns thousands of trades; coarser
-#    cadences (30m–4h) amortize per-trade cost over a longer hold. The summary
+#    cadences (15m to 4h) amortize per-trade cost over a longer hold. The summary
 #    table above gives exact counts per cadence.
 # 3. **Per-share costs at coarser cadences**: The heatmap shows the per-share
 #    cost levels at which Sharpe stays above zero at hourly and 4-hour

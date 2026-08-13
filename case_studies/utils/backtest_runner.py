@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, cast
@@ -40,6 +41,7 @@ from case_studies.utils.backtest_presets import (
     runtime_backtest_config,
     strategy_view,
 )
+from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.signals import build_target_weights_from_config
 
 # ---------------------------------------------------------------------------
@@ -710,28 +712,19 @@ def substitute_continuous_return_for_classification(
     return joined
 
 
-def resolve_cost_feasible_universe(
+def resolve_cost_feasible_universe_for_split(
     case_study: str,
-    prediction_hash: str | None,
+    split: str,
 ) -> tuple[str, list[str]]:
-    """Resolve the frozen cost-feasible roster for a registered prediction set."""
+    """Resolve the frozen cost-feasible roster for an explicit data split."""
     import yaml
 
-    from case_studies.utils.cv_window import lookup_split
     from utils.paths import get_case_study_dir
 
-    if not prediction_hash:
-        raise ValueError(
-            "universe_filter='cost_feasible' requires a prediction_hash to "
-            f"resolve the split for case_study={case_study!r}; got none."
-        )
-    split = lookup_split(case_study, prediction_hash)
     if split not in ("validation", "holdout"):
         raise ValueError(
-            f"universe_filter='cost_feasible' could not resolve split for "
-            f"prediction_hash={prediction_hash!r} (case_study={case_study!r}); "
-            f"lookup_split returned {split!r}. The prediction set must be "
-            f"registered with a 'validation' or 'holdout' split first."
+            "cost-feasible universe split must be 'validation' or 'holdout'; "
+            f"got {split!r} for case_study={case_study!r}"
         )
     setup = yaml.safe_load((get_case_study_dir(case_study) / "config" / "setup.yaml").read_text())
     symbols = (((setup.get("universe") or {}).get("cost_feasible")) or {}).get(split)
@@ -748,6 +741,48 @@ def resolve_cost_feasible_universe(
             f"for case_study={case_study!r}."
         )
     return split, sorted(resolved)
+
+
+def resolve_cost_feasible_universe(
+    case_study: str,
+    prediction_hash: str | None,
+) -> tuple[str, list[str]]:
+    """Resolve the frozen cost-feasible roster for a registered prediction set."""
+    from case_studies.utils.cv_window import lookup_split
+
+    if not prediction_hash:
+        raise ValueError(
+            "universe_filter='cost_feasible' requires a prediction_hash to "
+            f"resolve the split for case_study={case_study!r}; got none."
+        )
+    split = lookup_split(case_study, prediction_hash)
+    if split not in ("validation", "holdout"):
+        raise ValueError(
+            f"universe_filter='cost_feasible' could not resolve split for "
+            f"prediction_hash={prediction_hash!r} (case_study={case_study!r}); "
+            f"lookup_split returned {split!r}. The prediction set must be "
+            f"registered with a 'validation' or 'holdout' split first."
+        )
+    return resolve_cost_feasible_universe_for_split(case_study, split)
+
+
+def bind_cost_feasible_universe(
+    strategy_spec: dict,
+    case_study: str,
+    split: str,
+) -> dict:
+    """Copy a strategy spec and bind its cost-feasible roster to ``split``."""
+    resolved = deepcopy(strategy_spec)
+    signal = strategy_view(resolved).get("signal", {})
+    if signal.get("universe_filter") != "cost_feasible":
+        return resolved
+    resolved_split, symbols = resolve_cost_feasible_universe_for_split(case_study, split)
+    signal["universe_split"] = resolved_split
+    signal["universe_symbols"] = symbols
+    resolved.setdefault("input_identity", {})["universe"] = compute_hash(
+        canonical_json({"split": resolved_split, "symbols": symbols})
+    )
+    return resolved
 
 
 def _apply_cost_feasible_filter(
@@ -771,11 +806,18 @@ def _apply_cost_feasible_filter(
         if len(symbols) != len(set(symbols)):
             raise ValueError("cost-feasible Strategy identity contains duplicate symbols")
         if prediction_hash:
-            registered_split, _ = resolve_cost_feasible_universe(case_study, prediction_hash)
+            registered_split, registered_symbols = resolve_cost_feasible_universe(
+                case_study, prediction_hash
+            )
             if split != registered_split:
                 raise ValueError(
                     f"cost-feasible Strategy split {split!r} does not match prediction split "
                     f"{registered_split!r}"
+                )
+            if symbols != registered_symbols:
+                raise ValueError(
+                    "cost-feasible Strategy symbols do not match the frozen roster for "
+                    f"case_study={case_study!r} split={split!r}"
                 )
     else:
         split, symbols = resolve_cost_feasible_universe(case_study, prediction_hash)

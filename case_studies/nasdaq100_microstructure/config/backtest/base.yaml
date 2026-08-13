@@ -13,7 +13,7 @@ slippage:
 calendar:
   calendar: NYSE
   timezone: UTC
-  data_frequency: 15m
+  data_frequency: 1m
 feed:
   timestamp_col: timestamp
   entity_col: symbol
