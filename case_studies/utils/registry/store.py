@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -857,7 +858,7 @@ def _upsert_wide_metrics(
     db: sqlite3.Connection,
     table: str,
     key_values: dict[str, object],
-    metrics: dict[str, float],
+    metrics: Mapping[str, object],
     computed_at: str | None = None,
 ) -> None:
     """Insert or update metric columns in a wide-format metrics table.

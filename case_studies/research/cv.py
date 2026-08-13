@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
-from case_studies.utils.registry.specs import canonical_json, compute_hash
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.registry.specs import canonical_json, canonical_value, compute_hash
 from utils.cv_splits import generate_cv_splits
 
 
@@ -12,17 +13,93 @@ def _normalize_boundary(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class EligibilityManifest:
+    entity_schema: dict[str, Any]
+    source_identity: dict[str, Any]
+    logic_identity: dict[str, Any]
+    n_eligible: int
+    sorted_key_digest: str
+    folds: tuple[dict[str, Any], ...]
+
+    @classmethod
+    def resolve(
+        cls,
+        keys,
+        *,
+        entity_columns: tuple[str, ...] = ("symbol",),
+        timestamp_column: str = "timestamp",
+        fold_column: str = "fold",
+        source_identity: dict[str, Any],
+        logic_identity: dict[str, Any],
+        diagnostics_by_fold: dict[int, dict[str, Any]] | None = None,
+    ) -> EligibilityManifest:
+        import polars as pl
+
+        frame = keys if isinstance(keys, pl.DataFrame) else pl.from_pandas(keys)
+        key_columns = [*entity_columns, timestamp_column, fold_column]
+        missing = set(key_columns) - set(frame.columns)
+        if missing:
+            raise ValueError(f"eligibility keys are missing columns: {sorted(missing)}")
+        if not entity_columns:
+            raise ValueError("eligibility manifest requires at least one entity column")
+        selected = frame.select(key_columns)
+        if selected.null_count().row(0) != tuple(0 for _ in key_columns):
+            raise ValueError("eligibility keys cannot contain null values")
+        if selected.n_unique(key_columns) != selected.height:
+            raise ValueError("eligibility keys must be unique")
+        selected = selected.sort(key_columns)
+        diagnostics = diagnostics_by_fold or {}
+        fold_records = []
+        for fold_id in sorted(selected.get_column(fold_column).unique().to_list()):
+            fold_keys = selected.filter(pl.col(fold_column) == fold_id)
+            fold_records.append(
+                {
+                    "fold": int(fold_id),
+                    "n_eligible": fold_keys.height,
+                    "sorted_key_digest": value_digest(fold_keys, tuple(key_columns)),
+                    "diagnostics": canonical_value(diagnostics.get(int(fold_id), {})),
+                }
+            )
+        return cls(
+            entity_schema={
+                "entity_columns": list(entity_columns),
+                "timestamp": timestamp_column,
+                "fold": fold_column,
+            },
+            source_identity=canonical_value(source_identity),
+            logic_identity=canonical_value(logic_identity),
+            n_eligible=selected.height,
+            sorted_key_digest=value_digest(selected, tuple(key_columns)),
+            folds=tuple(fold_records),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "entity_schema": self.entity_schema,
+            "source_identity": self.source_identity,
+            "logic_identity": self.logic_identity,
+            "n_eligible": self.n_eligible,
+            "sorted_key_digest": self.sorted_key_digest,
+            "folds": list(self.folds),
+        }
+
+
+@dataclass(frozen=True)
 class ResolvedCVSpec:
     request: dict[str, Any]
     normalized_folds: tuple[dict[str, Any], ...]
     identity: str
+    eligibility: EligibilityManifest | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        resolved = {
             "request": self.request,
             "folds": list(self.normalized_folds),
             "identity": self.identity,
         }
+        if self.eligibility is not None:
+            resolved["eligibility"] = self.eligibility.as_dict()
+        return resolved
 
 
 @dataclass(frozen=True)
@@ -79,7 +156,13 @@ class CVSpec:
     def with_changes(self, **changes) -> CVSpec:
         return replace(self, **changes)
 
-    def resolve(self, timeline, *, date_col: str = "timestamp") -> ResolvedCVSpec:
+    def resolve(
+        self,
+        timeline,
+        *,
+        date_col: str = "timestamp",
+        eligibility: EligibilityManifest | None = None,
+    ) -> ResolvedCVSpec:
         step_size = self.retrain_every
         if isinstance(step_size, str):
             if step_size != self.validation_window:
@@ -131,5 +214,15 @@ class CVSpec:
             "calendar": self.calendar,
             "decision_cadence": self.decision_cadence,
         }
-        identity = compute_hash(canonical_json({"request": request, "folds": normalized}))
-        return ResolvedCVSpec(request=request, normalized_folds=normalized, identity=identity)
+        if eligibility is not None:
+            eligible_folds = {fold["fold"] for fold in eligibility.folds}
+            if eligible_folds != set(self.folds):
+                raise ValueError(
+                    "eligibility manifest folds do not match the resolved CV request: "
+                    f"{sorted(eligible_folds)} != {list(self.folds)}"
+                )
+        identity_input = {"request": request, "folds": normalized}
+        if eligibility is not None:
+            identity_input["eligibility"] = eligibility.as_dict()
+        identity = compute_hash(canonical_json(identity_input))
+        return ResolvedCVSpec(request, normalized, identity, eligibility)

@@ -6,8 +6,12 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
+from collections.abc import Mapping, Sequence
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,9 @@ DEFAULT_SEED = 42
 # two runs with different seeds always produce different hashes.
 _REQUIRED_SPEC_FIELDS = {"family", "label", "seed"}
 
-IDENTITY_VERSION = 2
+IDENTITY_VERSION = 3
+LEGACY_IDENTITY_VERSION = 2
+SUPPORTED_IDENTITY_VERSIONS = {LEGACY_IDENTITY_VERSION, IDENTITY_VERSION}
 _V2_PROVENANCE_FIELDS = {
     "chapter",
     "config_name",
@@ -42,12 +48,60 @@ _V2_PROVENANCE_FIELDS = {
 HASH_LENGTH = 12
 
 
+def _canonical_value(value: Any, *, path: str = "$") -> Any:
+    """Return the supported JSON value for an identity-bearing object."""
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"canonical values must be finite at {path}")
+        return 0.0 if value == 0 else value
+    if isinstance(value, Enum):
+        return _canonical_value(value.value, path=path)
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError(f"canonical mappings require string keys at {path}")
+        return {key: _canonical_value(value[key], path=f"{path}.{key}") for key in sorted(value)}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_canonical_value(item, path=f"{path}[{index}]") for index, item in enumerate(value)]
+    item = getattr(value, "item", None)
+    if callable(item):
+        converted = item()
+        if converted is not value:
+            return _canonical_value(converted, path=path)
+    raise TypeError(f"unsupported canonical value {type(value).__name__} at {path}")
+
+
+def canonical_value(value: Any) -> Any:
+    """Normalize and round-trip-check a supported identity-bearing value."""
+    normalized = _canonical_value(value)
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    decoded = json.loads(encoded)
+    if decoded != normalized:
+        raise ValueError("canonical value failed JSON round-trip validation")
+    return normalized
+
+
 def canonical_json(d: dict) -> str:
     """Deterministic JSON serialization for hashing.
 
     Sorted keys, no whitespace, consistent float/None handling.
     """
-    return json.dumps(d, sort_keys=True, separators=(",", ":"), default=str)
+    if not isinstance(d, dict):
+        raise TypeError("canonical_json requires a dictionary")
+    return json.dumps(
+        canonical_value(d),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def compute_hash(content: str, length: int = HASH_LENGTH) -> str:
@@ -75,19 +129,37 @@ def training_hash_from_spec(spec: dict) -> str:
     Validates that ``seed`` is present (injects default if missing).
     """
     spec = _validate_spec(spec)
-    if spec.get("identity_version") == IDENTITY_VERSION:
+    if spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS:
         return compute_hash(canonical_json(project_training_identity(spec)))
     return compute_hash(canonical_json(spec))
 
 
 def project_training_identity(spec: dict) -> dict:
-    """Return the version-2 semantic training identity projection."""
-    if spec.get("identity_version") != IDENTITY_VERSION:
-        raise ValueError("version-2 identity projection requires identity_version=2")
+    """Return the versioned semantic training identity projection."""
+    version = spec.get("identity_version")
+    if version == IDENTITY_VERSION:
+        if spec.get("resolved_spec_schema") != "ml4t.resolved-spec/v1":
+            raise ValueError("version-3 identity requires ml4t.resolved-spec/v1")
+        computation = canonical_value(spec.get("computation"))
+        if not isinstance(computation, dict):
+            raise TypeError("resolved computation must be a dictionary")
+        return {
+            "identity_version": IDENTITY_VERSION,
+            "resolved_spec_schema": "ml4t.resolved-spec/v1",
+            "family": str(spec["family"]),
+            "label": str(spec["label"]),
+            "seed": int(spec["seed"]),
+            "execution_tier": str(spec["execution_tier"]),
+            "computation": computation,
+        }
+    if version != LEGACY_IDENTITY_VERSION:
+        raise ValueError(
+            f"identity projection requires identity_version in {sorted(SUPPORTED_IDENTITY_VERSIONS)}"
+        )
     projected = {
         key: copy.deepcopy(value) for key, value in spec.items() if key not in _V2_PROVENANCE_FIELDS
     }
-    projected["identity_version"] = IDENTITY_VERSION
+    projected["identity_version"] = LEGACY_IDENTITY_VERSION
     return projected
 
 
@@ -100,15 +172,15 @@ def prediction_hash_from_parts(
     identity_version: int | None = None,
 ) -> str:
     """Compute prediction_hash from its defining components."""
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if not checkpoint_kind:
-            raise ValueError("version-2 prediction identity requires checkpoint_kind")
+            raise ValueError("versioned prediction identity requires checkpoint_kind")
         return compute_hash(
             canonical_json(
                 {
                     "checkpoint_kind": checkpoint_kind,
                     "checkpoint_value": checkpoint_value,
-                    "identity_version": IDENTITY_VERSION,
+                    "identity_version": identity_version,
                     "split": split,
                     "training_hash": training_hash,
                 }
@@ -164,11 +236,11 @@ def backtest_hash_from_parts(
     """
     hashable = _hashable_strategy_spec(strategy_spec)
     resolved_version = identity_version or strategy_spec.get("identity_version")
-    if resolved_version == IDENTITY_VERSION:
+    if resolved_version in SUPPORTED_IDENTITY_VERSIONS:
         return compute_hash(
             canonical_json(
                 {
-                    "identity_version": IDENTITY_VERSION,
+                    "identity_version": resolved_version,
                     "prediction_hash": prediction_hash,
                     "strategy": hashable,
                 }

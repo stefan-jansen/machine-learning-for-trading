@@ -8,9 +8,10 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .specs import (
-    IDENTITY_VERSION,
+    SUPPORTED_IDENTITY_VERSIONS,
     _validate_spec,
     backtest_hash_from_parts,
     build_training_spec,
@@ -261,10 +262,11 @@ def register_training_run(
     t_hash = training_hash_from_spec(spec)
     spec_json_str = canonical_json(spec)
 
-    if spec.get("identity_version") == IDENTITY_VERSION:
+    if spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS:
+        identity_version = int(spec["identity_version"])
         tier = spec.get("execution_tier")
         if tier not in {"canonical", "preview"}:
-            raise ValueError("version-2 training spec requires execution_tier canonical or preview")
+            raise ValueError("versioned training spec requires execution_tier canonical or preview")
         db = _open_registry(case_dir)
         try:
             existing = db.execute(
@@ -276,7 +278,7 @@ def register_training_run(
                 existing_spec = json.loads(existing[0])
                 if project_training_identity(existing_spec) != project_training_identity(
                     spec
-                ) or existing[1:] != (IDENTITY_VERSION, tier):
+                ) or existing[1:] != (identity_version, tier):
                     raise ValueError(f"immutable training identity conflict for {t_hash}")
                 return t_hash
 
@@ -308,7 +310,7 @@ def register_training_run(
                         canonical_json(runtime_provenance)
                         if runtime_provenance is not None
                         else None,
-                        IDENTITY_VERSION,
+                        identity_version,
                         tier,
                     ),
                 )
@@ -640,10 +642,10 @@ def register_prediction_set(
         raise ValueError(f"unknown training_hash {training_hash}")
     identity_version, _execution_tier = parent
     coverage = None
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         if predictions is None or expected_keys is None:
             raise ValueError(
-                "version-2 prediction registration requires predictions and expected_keys"
+                "versioned prediction registration requires predictions and expected_keys"
             )
         from .completeness import evaluate_prediction_coverage
 
@@ -675,7 +677,8 @@ def register_prediction_set(
         identity_version=identity_version,
     )
 
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
+        assert coverage is not None
         pred_dir = _prediction_dir(case_dir, p_hash)
         pred_path = pred_dir / "predictions.parquet"
         temporary = pred_dir / f".predictions.{uuid.uuid4().hex}.tmp"
@@ -699,41 +702,42 @@ def register_prediction_set(
                     if isinstance(predictions, pl.DataFrame)
                     else pl.from_pandas(predictions)
                 )
+                if not isinstance(new_predictions, pl.DataFrame):
+                    raise TypeError("prediction registration requires a tabular frame")
                 if not pred_path.exists() or value_digest(
                     pl.read_parquet(pred_path)
                 ) != value_digest(new_predictions):
                     raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
-                return p_hash
-
-            _save_parquet(temporary, predictions)
-            try:
-                db.execute(
-                    """
-                    INSERT INTO prediction_sets
-                    (prediction_hash, training_hash, checkpoint_value, checkpoint_kind,
-                     split, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (p_hash, *expected_row, _utc_now()),
-                )
-                values = coverage.as_dict()
-                columns = ", ".join(("prediction_hash", *values))
-                placeholders = ", ".join("?" for _ in range(len(values) + 1))
-                db.execute(
-                    f"INSERT INTO prediction_coverage ({columns}) VALUES ({placeholders})",
-                    (p_hash, *values.values()),
-                )
-                if metrics:
-                    _upsert_wide_metrics(
-                        db, "prediction_metrics", {"prediction_hash": p_hash}, metrics
+            else:
+                _save_parquet(temporary, predictions)
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO prediction_sets
+                        (prediction_hash, training_hash, checkpoint_value, checkpoint_kind,
+                         split, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (p_hash, *expected_row, _utc_now()),
                     )
-                pred_dir.mkdir(parents=True, exist_ok=True)
-                os.replace(temporary, pred_path)
-                db.commit()
-            except Exception:
-                db.rollback()
-                pred_path.unlink(missing_ok=True)
-                raise
+                    values = coverage.as_dict()
+                    columns = ", ".join(("prediction_hash", *values))
+                    placeholders = ", ".join("?" for _ in range(len(values) + 1))
+                    db.execute(
+                        f"INSERT INTO prediction_coverage ({columns}) VALUES ({placeholders})",
+                        (p_hash, *values.values()),
+                    )
+                    if metrics:
+                        _upsert_wide_metrics(
+                            db, "prediction_metrics", {"prediction_hash": p_hash}, metrics
+                        )
+                    pred_dir.mkdir(parents=True, exist_ok=True)
+                    os.replace(temporary, pred_path)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    pred_path.unlink(missing_ok=True)
+                    raise
         finally:
             temporary.unlink(missing_ok=True)
             db.close()
@@ -774,6 +778,7 @@ def register_prediction_set(
     if predictions is not None and _has_fold_column(predictions):
         try:
             fold_col = _detect_fold_col(predictions)
+            assert fold_col is not None
             y_true_col, y_score_col = _detect_score_cols(predictions)
             # Resolve label from training_runs if caller didn't supply it.
             resolved_label = label
@@ -805,6 +810,8 @@ def register_prediction_set(
             # Store per-fold metrics
             register_fold_metrics(case_study, p_hash, fold_m, case_dir=case_dir)
         except Exception as exc:
+            if identity_version in SUPPORTED_IDENTITY_VERSIONS:
+                raise
             logger.warning("Could not compute fold metrics for %s: %s", p_hash, exc)
 
     return p_hash
@@ -963,7 +970,7 @@ def register_backtest_run(
         stage = _infer_stage(strategy_spec, case_dir=case_dir, prediction_hash=prediction_hash)
 
     identity_version = strategy_spec.get("identity_version")
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
         try:
             ancestry = db.execute(
@@ -991,7 +998,7 @@ def register_backtest_run(
     )
     spec_json_str = canonical_json(strategy_spec)
 
-    if identity_version == IDENTITY_VERSION:
+    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
         try:
             existing = db.execute(
@@ -1055,6 +1062,7 @@ def register_backtest_run(
     # estimates without the uncertainty pack.
     needs_uncertainty = returns is not None and (metrics is None or "sharpe_se_lo" not in metrics)
     if needs_uncertainty:
+        assert returns is not None
         from case_studies.utils.uncertainty import (
             compute_backtest_uncertainty,
             periods_per_year_from_setup,
@@ -1096,7 +1104,7 @@ def register_backtest_run(
     try:
         db.execute("DELETE FROM backtest_fold_metrics WHERE backtest_hash = ?", (b_hash,))
         db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (b_hash,))
-        if identity_version == IDENTITY_VERSION:
+        if identity_version in SUPPORTED_IDENTITY_VERSIONS:
             existing = db.execute(
                 "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
                 (b_hash,),
@@ -1256,7 +1264,7 @@ def register_paired_metrics(
         except (TypeError, ValueError):
             return None
 
-    def _i(v: object) -> int | None:
+    def _i(v: Any) -> int | None:
         try:
             return int(v) if v is not None else None
         except (TypeError, ValueError):

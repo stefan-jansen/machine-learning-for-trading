@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.registry import register_prediction_set, register_training_run
+from case_studies.utils.registry.specs import (
+    IDENTITY_VERSION,
+    SUPPORTED_IDENTITY_VERSIONS,
+)
 
 from .contracts import ExecutionTier
 
@@ -224,7 +228,7 @@ class Result:
 class TrainingResult(Result):
     @property
     def complete(self) -> bool:
-        return self.identity_version == 2 and bool(self.spec())
+        return self.identity_version in SUPPORTED_IDENTITY_VERSIONS and bool(self.spec())
 
 
 @dataclass(frozen=True)
@@ -289,12 +293,19 @@ class ResultsCatalog:
         self.study.require_writable()
         tier = ExecutionTier(execution_tier)
         resolved = dict(spec)
-        resolved.setdefault("identity_version", 2)
+        resolved.setdefault("identity_version", IDENTITY_VERSION)
         resolved.setdefault("execution_tier", tier.value)
-        if resolved["identity_version"] != 2 or resolved["execution_tier"] != tier.value:
+        if (
+            resolved["identity_version"] not in SUPPORTED_IDENTITY_VERSIONS
+            or resolved["execution_tier"] != tier.value
+        ):
             raise ValueError(
                 "training spec identity version or execution tier conflicts with request"
             )
+        if resolved["identity_version"] == IDENTITY_VERSION:
+            from .identity import ResolvedSpec
+
+            ResolvedSpec.from_dict(resolved)
         if tier is ExecutionTier.PREVIEW and not resolved.get("preview_reductions"):
             raise ValueError("preview training specs must identity-cover every preview reduction")
         if tier is ExecutionTier.CANONICAL and resolved.get("preview_reductions"):

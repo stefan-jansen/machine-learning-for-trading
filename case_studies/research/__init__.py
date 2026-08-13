@@ -1,7 +1,8 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
 from .comparison import CandidateSet
 from .contracts import ExecutionTier, LifecycleState
-from .cv import CVSpec, ResolvedCVSpec
+from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
+from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
 from .lifecycle import ResearchLock
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
@@ -15,6 +16,7 @@ __all__ = [
     "CVSpec",
     "CandidateSet",
     "ExecutionTier",
+    "EligibilityManifest",
     "LabelDefinition",
     "LabelRef",
     "LifecycleState",
@@ -23,6 +25,7 @@ __all__ = [
     "PredictionResult",
     "ResearchLock",
     "ResolvedModelRequest",
+    "ResolvedSpec",
     "ResolvedCVSpec",
     "Result",
     "Strategy",
