@@ -265,8 +265,7 @@ jobs:
              || [[ "${{ steps.filter.outputs.ch08-09 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch10 }}" == "true" ]] \
              || [[ "${{ steps.filter.outputs.ch14-15 }}" == "true" ]] \
-             || [[ "${{ steps.filter.outputs.docker-notebooks }}" == "true" ]] \
-             || [[ "${{ steps.filter.outputs.ch21 }}" == "true" ]]; then
+             || [[ "${{ steps.filter.outputs.docker-notebooks }}" == "true" ]]; then
             run_py312="true"
           fi
           echo "run_py312=$run_py312" >> "$GITHUB_OUTPUT"

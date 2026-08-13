@@ -235,7 +235,6 @@ jobs:
           import torch; print(f'torch {torch.__version__}')
           import kaleido, importlib.metadata; print(f'kaleido {importlib.metadata.version(\"kaleido\")}')
           import causalimpact; print('pycausalimpact OK')
-          import pfhedge; print(f'pfhedge {pfhedge.__version__}')
           print('ALL PY312 IMPORTS OK')
           "
           docker run --rm ${{ env.PY312_IMAGE }}:latest /opt/bsts/bin/python -c "
