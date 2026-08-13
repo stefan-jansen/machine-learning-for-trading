@@ -150,21 +150,27 @@ _REGISTERING_SUFFIXES = frozenset(
         "sdf",
         "cae",
         "sae",
+        "lstm",
+        "patchtst",
+        "conditional_autoencoder",
+        "stochastic_discount_factor",
+        "supervised_autoencoder",
     }
 )
+
 
 # DL notebooks use entry_point = "dl_{model}" (e.g. "dl_lstm") instead of
 # the full filename stem (e.g. "09_dl_lstm"). Map stage stems to actual
 # entry_point values for these notebooks.
-_DL_RE = re.compile(r"^\d{2}_(dl_.+)$")
-
-
 def _expected_entry_point(stage: str) -> str:
     """Return the entry_point value the notebook will use in the registry."""
-    m = _DL_RE.match(stage)
-    if m:
-        return m.group(1)  # "09_dl_lstm" → "dl_lstm"
-    return stage  # "06_linear" → "06_linear"
+    match = _STAGE_RE.match(stage)
+    suffix = stage[len(match.group(0)) :] if match else stage
+    if suffix.startswith("dl_"):
+        return suffix
+    if suffix in {"lstm", "patchtst"}:
+        return f"dl_{suffix}"
+    return stage
 
 
 _STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
@@ -173,14 +179,9 @@ _STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
 def _quick_parameters(
     case_study: str,
     stage: str,
-    notebook_path: Path,
     override_params: dict,
 ) -> tuple[dict, str]:
     parameters = dict(_QUICK_PARAMS)
-    if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
-        parameters.update({"MAX_SYMBOLS": 6, "N_EPOCHS": 6})
-    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
-        parameters.update({"MAX_SYMBOLS": 6, "N_EPOCHS": 2})
 
     stage_match = _STAGE_RE.match(stage)
     suffix = stage[len(stage_match.group(0)) :] if stage_match else stage
@@ -196,13 +197,40 @@ def test_notebook_override_parameters_have_final_precedence() -> None:
     parameters, suffix = _quick_parameters(
         "sp500_equity_option_analytics",
         "11b_ipca",
-        Path("case_studies/sp500_equity_option_analytics/11b_ipca.py"),
         {"MAX_SYMBOLS": 12, "N_FACTORS": 2},
     )
 
     assert suffix == "ipca"
     assert parameters["MAX_SYMBOLS"] == 12
     assert parameters["N_FACTORS"] == 2
+
+
+def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> None:
+    for stage, expected in {
+        "09_dl_lstm": {"MAX_SYMBOLS": 6, "N_EPOCHS": 6},
+        "10_dl_tsmixer": {"MAX_SYMBOLS": 6, "N_EPOCHS": 2},
+    }.items():
+        overrides = get_overrides(f"case_studies/etfs/{stage}")["parameters"]
+        parameters, _ = _quick_parameters("etfs", stage, overrides)
+        assert {key: parameters[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("stage", "entry_point"),
+    [
+        ("09_dl_lstm", "dl_lstm"),
+        ("09a_lstm", "dl_lstm"),
+        ("09b_patchtst", "dl_patchtst"),
+        ("11b_ipca", "11b_ipca"),
+        ("11c_conditional_autoencoder", "11c_conditional_autoencoder"),
+    ],
+)
+def test_registering_stage_maps_to_its_actual_entry_point(stage: str, entry_point: str) -> None:
+    match = _STAGE_RE.match(stage)
+    assert match is not None
+    suffix = stage[len(match.group(0)) :]
+    assert suffix in _REGISTERING_SUFFIXES
+    assert _expected_entry_point(stage) == entry_point
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +422,6 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     parameters, suffix_p = _quick_parameters(
         case_study,
         stage,
-        notebook_path,
         overrides.get("parameters", {}),
     )
 

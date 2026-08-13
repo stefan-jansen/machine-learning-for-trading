@@ -1375,8 +1375,8 @@ case_studies/etfs/09_dl_lstm:
     BATCH_SIZE: 32
     LOOKBACK: 5
     MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    MAX_SYMBOLS: 6
+    N_EPOCHS: 6
   timeout: 180
 case_studies/etfs/10_dl_tsmixer:
   # LOOKBACK becomes the Darts input_chunk_length, which must exceed
@@ -1389,8 +1389,8 @@ case_studies/etfs/10_dl_tsmixer:
     BATCH_SIZE: 32
     LOOKBACK: 22
     MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    MAX_SYMBOLS: 6
+    N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
   # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
