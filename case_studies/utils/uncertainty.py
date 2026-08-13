@@ -123,6 +123,11 @@ def resolve_block_length(
     if rebalance_step and rebalance_step > 0:
         return max(rebalance_step, floor)
 
+    scale = float(np.std(returns))
+    scale_floor = np.finfo(float).eps * max(1.0, abs(float(np.mean(returns))))
+    if returns.size >= 10 and scale <= scale_floor:
+        return max(int(returns.size ** (1 / 3)), floor, 1)
+
     from ml4t.diagnostic.evaluation.stats import _optimal_block_size
 
     optimal = int(round(float(_optimal_block_size(returns))))
@@ -232,16 +237,22 @@ def _sharpe_se_lo(returns: np.ndarray, periods_per_year: int) -> float:
         return float("nan")
     mu = float(np.mean(returns))
     sd = float(np.std(returns, ddof=1))
-    if sd == 0:
+    scale_floor = np.finfo(float).eps * max(1.0, abs(mu))
+    if sd <= scale_floor:
         return float("nan")
     sr = mu / sd  # native frequency
     centered = returns - mu
     m2 = float(np.mean(centered**2))
-    if m2 == 0:
+    if m2 <= scale_floor**2:
         return float("nan")
     skew = float(np.mean(centered**3) / m2**1.5)
     kurt = float(np.mean(centered**4) / m2**2)  # Pearson convention (normal=3)
-    rho = float(np.corrcoef(returns[:-1], returns[1:])[0, 1])
+    previous = returns[:-1]
+    following = returns[1:]
+    if float(np.std(previous)) == 0.0 or float(np.std(following)) == 0.0:
+        rho = 0.0
+    else:
+        rho = float(np.corrcoef(previous, following)[0, 1])
     if not np.isfinite(rho) or abs(rho) >= 0.999:
         rho = 0.0
     var = compute_sharpe_variance(

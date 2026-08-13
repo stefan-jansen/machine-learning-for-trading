@@ -12,6 +12,7 @@ Covers two pieces P2.5 added:
 
 from __future__ import annotations
 
+import warnings
 from math import comb
 
 import numpy as np
@@ -147,3 +148,14 @@ def test_bootstrap_uncertainty_uses_seeded_generator() -> None:
         list(repeated_independent.values()),
         equal_nan=True,
     )
+
+
+def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
+    from case_studies.utils.uncertainty import compute_backtest_uncertainty
+
+    sparse_returns = np.r_[np.zeros(70), np.ones(10) * 0.01]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = compute_backtest_uncertainty(sparse_returns, n_boot=100, seed=0)
+
+    assert result["bootstrap_n"] == 100.0
