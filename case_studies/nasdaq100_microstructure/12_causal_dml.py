@@ -209,8 +209,8 @@ if entity_cols:
 # ## 3. Run DML Analysis
 #
 # Full pipeline: naive OLS baseline, DML with walk-forward CV + embargo,
-# and block permutation refutation test. HAC bandwidth is set automatically
-# using the cube-root rule: $\lfloor n^{1/3} \rfloor$.
+# and block permutation refutation test. HAC bandwidth is the larger of the
+# cube-root rule, $\lfloor n^{1/3} \rfloor$, and the outcome horizon minus one.
 
 # %%
 results = run_dml_analysis(

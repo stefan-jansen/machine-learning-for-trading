@@ -38,7 +38,10 @@ import polars as pl
 
 from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
-from case_studies.utils.benchmark import load_benchmark_returns
+from case_studies.utils.benchmark import (
+    load_benchmark_periods_per_year,
+    load_benchmark_returns,
+)
 from case_studies.utils.registry.registration import register_paired_metrics
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
@@ -55,7 +58,7 @@ _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 _PPY_BY_FREQ = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}
 
 
-def _min_paired_n(ppy: int) -> int:
+def _min_paired_n(ppy: float) -> int:
     """Minimum series length for paired-bootstrap stability, frequency-aware.
 
     The ~21 floor was written for daily cadences (about a month of obs).
@@ -119,20 +122,20 @@ def _apply_carrier_pin(df: pl.DataFrame, predicate: pl.Expr | None) -> pl.DataFr
 
 def _benchmark_returns_from_artifact(
     cs: str, label: str, period: str = "overall"
-) -> tuple[str, pl.DataFrame, str] | None:
+) -> tuple[str, pl.DataFrame, str, float | None] | None:
     """Resolve the side-artifact equal-weight benchmark for ``(cs, label)``.
 
-    The benchmark is the daily-MTM EW reference series persisted by
-    ``scripts/compute_vectorized_ew_benchmark.py`` at
+    The benchmark is the scheduled EW forward-return series persisted by
+    ``scripts/generate_case_study_benchmarks.py`` at
     ``case_studies/{cs}/benchmark/{label}.parquet``. Single, well-defined
     methodology per (cs, label). ``period`` selects the window slice
     (``"overall"`` or ``"holdout"``). Classification-label fallback to the
     matching ``fwd_ret_*`` artifact applies in both periods.
 
-    Returns ``(synthetic_hash, returns_df, resolved_label)`` or ``None`` when
-    the artifact is missing. ``synthetic_hash`` is a deterministic identifier
-    safe as the PK column in ``backtest_paired_metrics`` (no FK on
-    ``benchmark_hash``).
+    Returns ``(synthetic_hash, returns_df, resolved_label, periods_per_year)``
+    or ``None`` when the artifact is missing. ``synthetic_hash`` is a
+    deterministic identifier safe as the PK column in
+    ``backtest_paired_metrics`` (no FK on ``benchmark_hash``).
     """
     df = load_benchmark_returns(cs, label, period=period)
     bench_label = label
@@ -150,6 +153,7 @@ def _benchmark_returns_from_artifact(
         bench_label = fallback
     suffix = "" if period == "overall" else f":{period}"
     bench_hash = f"side_ew:{cs}:{bench_label}{suffix}"
+    benchmark_ppy = load_benchmark_periods_per_year(cs, bench_label)
     return (
         bench_hash,
         df.select(
@@ -157,6 +161,41 @@ def _benchmark_returns_from_artifact(
             pl.col("ew_return").cast(pl.Float64).alias("ret"),
         ),
         bench_label,
+        benchmark_ppy,
+    )
+
+
+def _align_challenger_to_benchmark_periods(
+    challenger: pl.DataFrame,
+    benchmark: pl.DataFrame,
+    *,
+    benchmark_periods_per_year: float,
+    daily_periods_per_year: float,
+) -> pl.DataFrame:
+    """Align daily challenger P&L to the benchmark's retained decision periods."""
+    if benchmark_periods_per_year >= daily_periods_per_year:
+        return challenger.join(benchmark, on="timestamp", how="inner", suffix="_b")
+
+    intervals = (
+        benchmark.sort("timestamp")
+        .with_columns(pl.col("timestamp").shift(-1).alias("_period_end"))
+        .drop_nulls("_period_end")
+        .rename({"timestamp": "_period_start", "ret": "ret_b"})
+    )
+    if intervals.is_empty():
+        return pl.DataFrame(schema={"timestamp": pl.Date, "ret": pl.Float64, "ret_b": pl.Float64})
+    return (
+        challenger.join(intervals, how="cross")
+        .filter(
+            (pl.col("timestamp") > pl.col("_period_start"))
+            & (pl.col("timestamp") <= pl.col("_period_end"))
+        )
+        .group_by("_period_start", maintain_order=True)
+        .agg(
+            ((pl.col("ret") + 1.0).product() - 1.0).alias("ret"),
+            pl.col("ret_b").first(),
+        )
+        .rename({"_period_start": "timestamp"})
     )
 
 
@@ -518,6 +557,7 @@ def _populate_pair(
     label,
     *,
     disjoint_windows: bool = False,
+    comparison_periods_per_year: float | None = None,
     benchmark_label: str | None = None,
     write_case_dir: Path | None = None,
 ):
@@ -527,9 +567,12 @@ def _populate_pair(
     bootstrapped independently over its full window and the difference
     distribution is built from independent draws. Otherwise, the streams are
     inner-joined on timestamp and a paired stationary bootstrap runs on the
-    aligned diff series.
+    aligned diff series. A side benchmark with a lower observation frequency
+    compounds challenger daily P&L between consecutive benchmark decisions
+    before that bootstrap.
     """
-    min_n = _min_paired_n(ppy)
+    effective_ppy = comparison_periods_per_year or ppy
+    min_n = _min_paired_n(effective_ppy)
     if disjoint_windows:
         c_arr = challenger_returns.sort("timestamp")["ret"].to_numpy()
         b_arr = benchmark_returns.sort("timestamp")["ret"].to_numpy()
@@ -548,15 +591,24 @@ def _populate_pair(
         paired = compute_independent_diff_uncertainty(
             c_arr,
             b_arr,
-            periods_per_year=ppy,
+            periods_per_year=effective_ppy,
             case_study=cs,
             label=label,
             n_boot=2000,
             seed=42,
         )
     else:
-        aligned = challenger_returns.join(
-            benchmark_returns, on="timestamp", how="inner", suffix="_b"
+        aligned = (
+            _align_challenger_to_benchmark_periods(
+                challenger_returns,
+                benchmark_returns,
+                benchmark_periods_per_year=effective_ppy,
+                daily_periods_per_year=ppy,
+            )
+            if comparison_periods_per_year is not None
+            else challenger_returns.join(
+                benchmark_returns, on="timestamp", how="inner", suffix="_b"
+            )
         )
         if aligned.height < min_n:
             return {
@@ -581,7 +633,7 @@ def _populate_pair(
         paired = compute_paired_uncertainty(
             c_arr,
             b_arr,
-            periods_per_year=ppy,
+            periods_per_year=effective_ppy,
             case_study=cs,
             label=label,
             n_boot=2000,
@@ -602,7 +654,7 @@ def _populate_pair(
         benchmark_hash,
         paired,
         benchmark_kind=benchmark_kind,
-        periods_per_year=ppy,
+        periods_per_year=effective_ppy,
         case_dir=write_case_dir,
     )
     # disjoint path: paired carries n_c/n_b (post-coerce per-side sizes); use
@@ -696,9 +748,15 @@ def populate_paired_metrics(
             bench_resolution = _benchmark_returns_from_artifact(cs, leader_label)
             chal = _aligned_returns(cs, leader_hash)
             if bench_resolution and chal is not None:
-                benchmark_hash, base, resolved_bench_label = bench_resolution
-                min_n = _min_paired_n(ppy)
-                aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
+                benchmark_hash, base, resolved_bench_label, benchmark_ppy = bench_resolution
+                comparison_ppy = benchmark_ppy or float(ppy)
+                min_n = _min_paired_n(comparison_ppy)
+                aligned = _align_challenger_to_benchmark_periods(
+                    chal,
+                    base,
+                    benchmark_periods_per_year=comparison_ppy,
+                    daily_periods_per_year=ppy,
+                )
                 if aligned.height >= min_n:
                     c_arr, b_arr = _joint_coerce(
                         aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
@@ -707,7 +765,7 @@ def populate_paired_metrics(
                         paired = compute_paired_uncertainty(
                             c_arr,
                             b_arr,
-                            periods_per_year=ppy,
+                            periods_per_year=comparison_ppy,
                             case_study=cs,
                             label=leader_label,
                             n_boot=2000,
@@ -724,7 +782,7 @@ def populate_paired_metrics(
                                 benchmark_hash,
                                 paired,
                                 benchmark_kind=benchmark_kind,
-                                periods_per_year=ppy,
+                                periods_per_year=comparison_ppy,
                                 case_dir=write_case_dir,
                             )
                             rows.append(
@@ -815,7 +873,7 @@ def populate_paired_metrics(
 
     baseline_kind = SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, "equal_weight")
     if bench_ho_resolved is not None and chal_ho is not None:
-        bench_ho_hash, bench_ho_norm, bench_ho_label = bench_ho_resolved
+        bench_ho_hash, bench_ho_norm, bench_ho_label, bench_ho_ppy = bench_ho_resolved
         rows.append(
             _populate_pair(
                 cs,
@@ -826,6 +884,7 @@ def populate_paired_metrics(
                 bench_ho_norm,
                 ppy,
                 ho_label,
+                comparison_periods_per_year=bench_ho_ppy or float(ppy),
                 benchmark_label=bench_ho_label,
                 write_case_dir=write_case_dir,
             )

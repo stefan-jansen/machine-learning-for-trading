@@ -96,11 +96,17 @@ def declared_universe(setup: Mapping) -> list[str]:
     return symbols
 
 
-def _return_metrics(returns: pl.DataFrame, periods_per_year: int) -> dict:
+def _return_metrics(returns: pl.DataFrame, periods_per_year: float) -> dict:
     values = returns["ew_return"].to_numpy()
     n_periods = len(values)
     if n_periods == 0:
-        return {"sharpe": None, "cagr": None, "vol": None, "n_periods": 0}
+        return {
+            "sharpe": None,
+            "cagr": None,
+            "vol": None,
+            "n_periods": 0,
+            "periods_per_year": periods_per_year,
+        }
     mean = float(values.mean())
     std = float(values.std(ddof=1)) if n_periods > 1 else 0.0
     wealth = float((1.0 + values).prod())
@@ -109,6 +115,7 @@ def _return_metrics(returns: pl.DataFrame, periods_per_year: int) -> dict:
         "cagr": wealth ** (periods_per_year / n_periods) - 1.0 if wealth > 0 else None,
         "vol": std * math.sqrt(periods_per_year),
         "n_periods": n_periods,
+        "periods_per_year": periods_per_year,
     }
 
 
@@ -158,6 +165,27 @@ def _resolve_decision_cadence(setup: Mapping) -> str:
     raise KeyError("decision requires entry_cadence, cadence, or bar_frequency")
 
 
+def _decision_periods_per_year(
+    cadence: str,
+    rebalance_step: int,
+    daily_periods_per_year: int,
+) -> float:
+    """Annualization frequency after intraday decisions are compounded by session."""
+    if cadence == "monthly_month_end":
+        schedule_periods = 12.0
+    elif cadence in {"weekly", "weekly_friday", "weekly_friday_close"}:
+        schedule_periods = 52.0
+    elif "funding" in cadence:
+        schedule_periods = 3.0 * daily_periods_per_year
+    else:
+        minutes = _intraday_cadence_minutes(cadence)
+        if minutes is not None:
+            schedule_periods = 390.0 / minutes * daily_periods_per_year
+        else:
+            schedule_periods = float(daily_periods_per_year)
+    return min(float(daily_periods_per_year), schedule_periods / rebalance_step)
+
+
 def build_equal_weight_benchmark(
     labels: pl.DataFrame,
     *,
@@ -171,7 +199,7 @@ def build_equal_weight_benchmark(
     periods_per_year: int,
     label_digest: str,
 ) -> tuple[pl.DataFrame, dict]:
-    """Build daily full-universe returns from canonical forward labels."""
+    """Build scheduled full-universe returns from canonical forward labels."""
     entity_col = "product" if case_study == "cme_futures" else "symbol"
     required = {"timestamp", entity_col, label}
     missing = sorted(required.difference(labels.columns))
@@ -223,12 +251,20 @@ def build_equal_weight_benchmark(
             "No finite benchmark returns remain after roster, window, and schedule filters"
         )
 
+    return_periods_per_year = _decision_periods_per_year(
+        cadence,
+        rebalance_step,
+        periods_per_year,
+    )
+
     validation_window = windows.get("validation")
     holdout_window = windows.get("holdout")
     by_period = {
-        "overall": _return_metrics(daily, periods_per_year),
-        "validation": _return_metrics(_slice_window(daily, validation_window), periods_per_year),
-        "holdout": _return_metrics(_slice_window(daily, holdout_window), periods_per_year),
+        "overall": _return_metrics(daily, return_periods_per_year),
+        "validation": _return_metrics(
+            _slice_window(daily, validation_window), return_periods_per_year
+        ),
+        "holdout": _return_metrics(_slice_window(daily, holdout_window), return_periods_per_year),
         "validation_window": [str(v) for v in validation_window] if validation_window else None,
         "holdout_window": [str(v) for v in holdout_window] if holdout_window else None,
     }
@@ -236,8 +272,8 @@ def build_equal_weight_benchmark(
     metadata = {
         "case_study": case_study,
         "label": label,
-        "method": "daily_compounded_cross_sectional_mean_forward_label",
-        "periods_per_year": periods_per_year,
+        "method": "scheduled_compounded_cross_sectional_mean_forward_label",
+        "periods_per_year": return_periods_per_year,
         "n_symbols_in_universe": len(roster),
         "n_symbols_observed": observed_symbols,
         **by_period["overall"],
@@ -249,6 +285,7 @@ def build_equal_weight_benchmark(
             "rebalance_step": rebalance_step,
             "calendar": calendar,
             "entity_col": entity_col,
+            "daily_periods_per_year": periods_per_year,
         },
         "inputs": {
             "label_digest": label_digest,
@@ -338,12 +375,21 @@ def load_benchmark_metrics(
     return bp.get(period)
 
 
+def load_benchmark_periods_per_year(case_study: str, label: str) -> float | None:
+    """Return the annualization frequency stored with a benchmark artifact."""
+    path = benchmark_dir(case_study) / f"{label}.json"
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text()).get("periods_per_year")
+    return float(value) if value is not None else None
+
+
 def load_benchmark_returns(
     case_study: str,
     label: str,
     period: Period = "overall",
 ) -> pl.DataFrame:
-    """Return the daily ``ew_return`` series sliced to the requested period.
+    """Return the scheduled ``ew_return`` series sliced to the requested period.
 
     Boundary source of truth is the JSON's ``by_period.{validation,holdout}_window``.
     When the JSON is present,
