@@ -274,7 +274,7 @@ def test_regeneration_preview_runs_real_model_without_changing_canonical_registr
     setup_path.write_text(setup_path.read_text().replace("train_size: 4D", "train_size: 3D"))
     after_change = preview_request.resolve()
 
-    assert before_change.spec["cv"] != after_change.spec["cv"]
+    assert before_change.spec["computation"]["cv"] != after_change.spec["computation"]["cv"]
     canonical_preset = canonical_shared_config / "linear" / "ridge.yaml"
     canonical_preset.unlink()
     assert not (preview_shared_config / "linear" / "ridge.yaml").exists()
