@@ -16,12 +16,21 @@ Usage:
 from __future__ import annotations
 
 import gc
+import hashlib
+import importlib.metadata
+import json
 import os
+import platform
+import shutil
+import subprocess
 import time
+import uuid
 import warnings
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -35,12 +44,390 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
+
+if TYPE_CHECKING:
+    from case_studies.research.workspace import Study
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
+
+_TABM_PREVIEW_FIELDS = {"folds", "max_symbols"}
+
+
+@dataclass(frozen=True)
+class TabMResearchContext:
+    dataset_pd: pd.DataFrame
+    splits: tuple[dict[str, Any], ...]
+    config: dict[str, Any]
+    feature_names: tuple[str, ...]
+    label_col: str
+    eval_label_col: str | None
+    date_col: str
+    entity_col: str
+    task_type: str
+    class_values: tuple[Any, ...]
+    temporal_by_fold: pd.DataFrame | None
+    temporal_keys: tuple[str, ...]
+    temporal_feature_names: tuple[str, ...]
+    expected_keys: pl.DataFrame
+    runtime_provenance: dict[str, Any]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _tabm_source_identity() -> dict[str, str]:
+    from case_studies.utils import deep_model_state
+
+    return {
+        Path(__file__).name: _sha256(Path(__file__)),
+        Path(deep_model_state.__file__).name: _sha256(Path(deep_model_state.__file__)),
+    }
+
+
+def _tabm_runtime_identity() -> dict[str, str]:
+    return {
+        "numpy": importlib.metadata.version("numpy"),
+        "scikit-learn": importlib.metadata.version("scikit-learn"),
+        "torch": importlib.metadata.version("torch"),
+    }
+
+
+def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    return {
+        "entry_point": "case_studies.utils.tabular_dl",
+        "packages": _tabm_runtime_identity(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "source_commit": commit,
+    }
+
+
+def _normalize_splits(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+    return tuple(
+        {
+            key: int(split[key]) if key == "fold" else str(split[key])
+            for key in fields
+            if split.get(key) is not None
+        }
+        for split in splits
+    )
+
+
+def _tabm_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cv = request.get("cv")
+    if cv is None:
+        splits = [dict(split) for split in mds.splits]
+        normalized = _normalize_splits(splits)
+        cv_record = {
+            "request": {"source": "case_study_default"},
+            "folds": list(normalized),
+            "identity": value_digest(pl.DataFrame(list(normalized))),
+        }
+    else:
+        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
+        splits = [dict(fold) for fold in resolved.normalized_folds]
+        cv_record = resolved.as_dict()
+    requested_folds = request["preview_reductions"].get("folds")
+    if requested_folds is not None:
+        selected = {int(fold) for fold in requested_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        if {int(split["fold"]) for split in splits} != selected:
+            raise ValueError("preview fold reduction refers to an unavailable fold")
+        cv_record = {**cv_record, "preview_folds": sorted(selected)}
+    if not splits:
+        raise ValueError("TabM request resolved no cross-validation folds")
+    from utils.modeling import validate_temporal_split_geometry
+
+    validate_temporal_split_geometry(splits, mds.splits, mds.temporal_by_fold)
+    return splits, cv_record
+
+
+def _resolve_tabm_config(config: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    resolved = {**config, "params": dict(config.get("params") or {})}
+    top_level = {"batch_size", "checkpoint_interval", "n_epochs"}
+    unknown = set(overrides) - top_level - set(resolved["params"]) - {"device", "num_threads"}
+    if unknown:
+        raise ValueError(f"unsupported TabM overrides: {sorted(unknown)}")
+    for key, value in overrides.items():
+        if key in top_level:
+            resolved[key] = value
+        elif key not in {"device", "num_threads"}:
+            resolved["params"][key] = value
+    if resolved.get("library") != "tabm" or str(resolved["config_name"]).startswith("tabpfn"):
+        raise ValueError("the TabM research adapter requires a persisted TabM configuration")
+    _tabm_checkpoint_epochs(resolved)
+    return resolved
+
+
+def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
+    frames = []
+    for split in splits:
+        date_dtype = mds.dataset.schema[mds.date_col]
+        frame = mds.dataset.filter(
+            pl.col(mds.date_col).is_between(
+                pl.lit(split["val_start"]).cast(date_dtype, strict=False),
+                pl.lit(split["val_end"]).cast(date_dtype, strict=False),
+                closed="both",
+            )
+        ).drop_nulls([mds.label_col, *([mds.eval_label_col] if mds.eval_label_col else [])])
+        frames.append(
+            frame.select(
+                pl.col(mds.entity_cols[0]).alias("symbol"),
+                pl.col(mds.date_col).alias("timestamp"),
+            ).with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
+        )
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("TabM request produced duplicate expected prediction keys")
+    return expected
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    from case_studies.research.contracts import ExecutionTier
+    from utils.modeling import load_configs, load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"])
+    mds = load_modeling_dataset(
+        study.case_study,
+        label_ref.name,
+        max_symbols=int(reductions.get("max_symbols", 0)),
+    )
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
+        raise ValueError("TabM runner requires canonical symbol and timestamp keys")
+    splits, cv_record = _tabm_splits(mds, request)
+    configs = {
+        config["config_name"]: config
+        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+    }
+    try:
+        configured = configs[request["config_name"]]
+    except KeyError as error:
+        raise ValueError(f"unknown TabM configuration {request['config_name']!r}") from error
+    config = _resolve_tabm_config(configured, request["overrides"])
+    device = str(request["overrides"].get("device", "cuda"))
+    num_threads = int(request["overrides"].get("num_threads", 8))
+    runtime = tabm_runtime_spec(device, num_threads=num_threads)
+    expected = _tabm_expected_keys(mds, splits)
+    input_lineage = mds.input_lineage
+    checkpoints = _tabm_checkpoint_epochs(config)
+    spec = {
+        "identity_version": 2,
+        "execution_tier": tier.value,
+        "family": "tabular_dl",
+        "label": label_ref.name,
+        "seed": int(runtime["seed"]),
+        "config_name": config["config_name"],
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "task": {
+            "type": mds.task_type,
+            "class_values": list(mds.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+        "cv": cv_record,
+        "model": {
+            "class": "TabMModel",
+            "implementation": "pytorch",
+            "objective": "classification" if mds.task_type == "classification" else "regression",
+            "params": {
+                **config["params"],
+                "batch_size": int(config["batch_size"]),
+                "checkpoint_interval": int(config["checkpoint_interval"]),
+                "n_epochs": int(config["n_epochs"]),
+            },
+        },
+        "preprocessing": {
+            "imputer": {"class": "SimpleImputer", "strategy": "median"},
+            "scaler": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        },
+        "checkpoint_schedule": [
+            {"kind": "epoch", "value": checkpoint} for checkpoint in checkpoints
+        ],
+        "expected_prediction_keys": {
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+            "n_rows": expected.height,
+            "n_folds": expected["fold"].n_unique(),
+        },
+        "input_data_spec": input_lineage,
+        "sampling": {"max_symbols": int(reductions.get("max_symbols", 0))},
+        "numerics": runtime,
+        "source_identity": _tabm_source_identity(),
+        "runtime_identity": _tabm_runtime_identity(),
+    }
+    if tier is ExecutionTier.PREVIEW:
+        spec["preview_reductions"] = reductions
+    context = TabMResearchContext(
+        dataset_pd=mds.dataset.to_pandas(),
+        splits=tuple(splits),
+        config=config,
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=tuple(mds.temporal_keys),
+        temporal_feature_names=tuple(mds.temporal_feature_names),
+        expected_keys=expected,
+        runtime_provenance=_tabm_runtime_provenance(study),
+    )
+    return spec, context
+
+
+def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResearchContext):
+    from case_studies.research.models import ModelRun
+    from case_studies.research.results import PredictionResult, Result, TrainingResult
+    from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+    from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+
+    training_hash = training_hash_from_spec(spec)
+    checkpoint_values = tuple(item["value"] for item in spec["checkpoint_schedule"])
+    try:
+        training = Result.open(
+            study, training_hash, include_preview=spec["execution_tier"] == "preview"
+        )
+        predictions = tuple(
+            Result.open(
+                study,
+                prediction_hash_from_parts(
+                    training_hash,
+                    checkpoint,
+                    "validation",
+                    checkpoint_kind="epoch",
+                    identity_version=2,
+                ),
+                include_preview=spec["execution_tier"] == "preview",
+            )
+            for checkpoint in checkpoint_values
+        )
+    except KeyError:
+        return None
+    if not isinstance(training, TrainingResult) or any(
+        not isinstance(result, PredictionResult) or not result.complete for result in predictions
+    ):
+        return None
+    model_root = training.root / "run_log" / "training" / training.hash / "models"
+    try:
+        validate_deep_checkpoint_population(
+            model_root,
+            config_name=context.config["config_name"],
+            fold_ids=tuple(int(split["fold"]) for split in context.splits),
+            checkpoints=checkpoint_values,
+            architecture="tabm",
+        )
+    except ValueError:
+        return None
+    return ModelRun(training=training, predictions=predictions)
+
+
+def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
+    from case_studies.research.models import ModelRun
+
+    cached = _cached_research_run(study, spec, context)
+    if cached is not None:
+        return cached
+    training = study.results.register_training(
+        spec,
+        execution_tier=spec["execution_tier"],
+        runtime_provenance=context.runtime_provenance,
+    )
+    train_dir = training.root / "run_log" / "training" / training.hash
+    model_dir = train_dir / "models"
+    if model_dir.exists():
+        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+    try:
+        result = run_tabm_cv(
+            context.dataset_pd,
+            list(context.splits),
+            configs=[context.config],
+            n_features=len(context.feature_names),
+            feature_names=list(context.feature_names),
+            label_col=context.label_col,
+            eval_label_col=context.eval_label_col,
+            task_type=context.task_type,
+            class_values=list(context.class_values) or None,
+            date_col=context.date_col,
+            entity_col=context.entity_col,
+            device=spec["numerics"]["device"],
+            save_dir=train_dir / "diagnostics",
+            register=False,
+            temporal_by_fold=context.temporal_by_fold,
+            temporal_keys=list(context.temporal_keys),
+            temporal_feature_names=list(context.temporal_feature_names),
+            seed=int(spec["seed"]),
+            num_threads=int(spec["numerics"]["num_threads"]),
+            checkpoint_root=staging,
+            strict=True,
+        )
+        os.replace(staging, model_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    prediction_results = []
+    for checkpoint in (item["value"] for item in spec["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+        )
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type=context.task_type,
+                class_values=list(context.class_values) or None,
+                eval_col="eval_actual" if context.eval_label_col else None,
+                label=context.label_col,
+            )
+        )
+    runtime_path = train_dir / "runtime.json"
+    if runtime_path.exists():
+        runtime = json.loads(runtime_path.read_text())
+        runtime["elapsed_s"] = sum(
+            float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
+        )
+        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    return ModelRun(training=training, predictions=tuple(prediction_results))
 
 
 def resolve_torch_device(device: str) -> torch.device:
@@ -80,14 +467,11 @@ def _tabm_checkpoint_epochs(config: dict[str, Any]) -> tuple[int, ...]:
     """Return the exact checkpoint surface implied by one effective config."""
     if str(config["config_name"]).startswith("tabpfn"):
         return (1,)
+    from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
     n_epochs = int(config.get("n_epochs", 200))
     checkpoint_interval = int(config.get("checkpoint_interval", 25))
-    if n_epochs < 1 or checkpoint_interval < 1:
-        raise ValueError("n_epochs and checkpoint_interval must be positive")
-    checkpoints = list(range(checkpoint_interval, n_epochs + 1, checkpoint_interval))
-    if not checkpoints or checkpoints[-1] != n_epochs:
-        checkpoints.append(n_epochs)
-    return tuple(checkpoints)
+    return declared_epoch_checkpoints(n_epochs, checkpoint_interval)
 
 
 def _build_tabm_training_spec(
@@ -255,6 +639,7 @@ def _train_tabm_fold(
     batch_size: int,
     checkpoint_interval: int,
     device: torch.device,
+    state_callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[dict[int, float], dict[int, np.ndarray], dict[int, float]]:
     """Train TabM on one fold, storing predictions at ALL checkpoints.
 
@@ -302,6 +687,8 @@ def _train_tabm_fold(
         # Evaluate and store predictions at checkpoint epochs
         if epoch % checkpoint_interval == 0 or epoch == n_epochs:
             val_preds = _predict_in_chunks(model, X_val, device)
+            if state_callback is not None:
+                state_callback(epoch, model)
             ic_frame = pl.DataFrame(
                 {
                     "timestamp": val_dates,
@@ -367,6 +754,61 @@ def _decision_time_checkpoint_metrics(
         "ic_std": float(stats["ic_std"]),
         "ic_n_days": int(stats["n_periods"]),
     }
+
+
+def _n_invalid_scores(frame: pl.DataFrame) -> int:
+    """Count null, NaN, and infinite checkpoint scores."""
+
+    if frame.is_empty() or "y_score" not in frame.columns:
+        return 0
+    return int(
+        frame.select(
+            (
+                pl.col("y_score").is_null().sum()
+                + pl.col("y_score").is_nan().sum()
+                + pl.col("y_score").is_infinite().sum()
+            ).alias("n_invalid")
+        ).item()
+    )
+
+
+def _checkpoint_prediction_frame(
+    config_name: str,
+    fold: int,
+    checkpoint_preds: dict[int, np.ndarray],
+    val_dates: np.ndarray,
+    val_entities: np.ndarray | None,
+    y_val: np.ndarray,
+    date_col: str,
+    entity_col: str,
+    *,
+    eval_actual: np.ndarray | None = None,
+    eval_col: str = "eval_actual",
+) -> pl.DataFrame:
+    """Build the checkpoint frame used when incremental persistence is disabled."""
+    dates = pl.Series(date_col, val_dates)
+    if dates.dtype == pl.Object:
+        dates = dates.map_elements(str, return_dtype=pl.String).str.to_datetime(strict=False)
+
+    frames = []
+    for epoch, scores in checkpoint_preds.items():
+        n_rows = len(scores)
+        entities = val_entities if val_entities is not None else np.array(["unknown"] * n_rows)
+        frame = pl.DataFrame(
+            {
+                date_col: dates,
+                entity_col: entities,
+                "y_true": y_val.astype(np.float64),
+                "y_score": scores.astype(np.float64),
+                "fold_id": np.full(n_rows, fold, dtype=np.int32),
+                "config": [config_name] * n_rows,
+                "epoch": np.full(n_rows, epoch, dtype=np.int32),
+            }
+        )
+        if eval_actual is not None:
+            frame = frame.with_columns(pl.Series(eval_col, eval_actual.astype(np.float64)))
+        frames.append(frame)
+    return pl.concat(frames) if frames else pl.DataFrame()
 
 
 def _load_incremental_preds_for_config(incr_dir: Path, config_name: str) -> pl.DataFrame:
@@ -470,6 +912,11 @@ def _load_cached_tabm_config(
             method="spearman",
             min_obs=5,
         )
+        n_invalid = _n_invalid_scores(predictions)
+        if n_invalid:
+            raise ValueError(
+                f"Cached {config_name} checkpoint {epoch} has {n_invalid} invalid scores"
+            )
         registry_metrics = load_prediction_metrics(
             case_study, prediction_hash=row["prediction_hash"]
         )
@@ -505,6 +952,8 @@ def _load_cached_tabm_config(
                 "epoch": int(epoch),
                 "ic_mean": float(metric["ic_mean"]),
                 "ic_std": float(metric.get("ic_std", 0.0)),
+                "ic_n_days": int(metric["n_periods"]),
+                "n_invalid": n_invalid,
             }
         )
         frames.append(
@@ -515,11 +964,23 @@ def _load_cached_tabm_config(
         )
     if not curves:
         raise ValueError(f"No cached {prediction_split} checkpoints for {config_name}")
-    best = max(curves, key=lambda row: row["ic_mean"])
+    full_days = max(int(row["ic_n_days"]) for row in curves)
+    eligible = [
+        row
+        for row in curves
+        if np.isfinite(float(row["ic_mean"]))
+        and int(row["n_invalid"]) == 0
+        and int(row["ic_n_days"]) == full_days
+    ]
+    if not eligible:
+        raise ValueError(f"No selectable cached checkpoint for {config_name}")
+    best = max(eligible, key=lambda row: row["ic_mean"])
     result = {
         "config_name": config_name,
         "best_epoch": best["epoch"],
         "best_ic": best["ic_mean"],
+        "ic_n_days": best["ic_n_days"],
+        "n_invalid": best["n_invalid"],
         "elapsed_s": 0.0,
         "started_at": None,
         "cached": True,
@@ -541,9 +1002,44 @@ def _assemble_tabm_results(
     """Select the winner and build the same result for trained or cached configs."""
     if not config_results:
         raise ValueError("No configs completed successfully.")
+
+    enriched_results: list[dict[str, Any]] = []
+    for result in config_results:
+        enriched = dict(result)
+        checkpoint_predictions = all_predictions.filter(
+            (pl.col("config") == enriched["config_name"])
+            & (pl.col("epoch") == enriched["best_epoch"])
+        )
+        if "ic_n_days" not in enriched and checkpoint_predictions.height:
+            actual_col = eval_col or "y_true"
+            enriched["ic_n_days"] = int(
+                _decision_time_checkpoint_metrics(
+                    checkpoint_predictions,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                    ret_col=actual_col,
+                )["ic_n_days"]
+            )
+        enriched.setdefault("ic_n_days", 0)
+        enriched.setdefault("n_invalid", _n_invalid_scores(checkpoint_predictions))
+        enriched_results.append(enriched)
+
+    positive_coverage = [
+        int(row["ic_n_days"]) for row in enriched_results if int(row["ic_n_days"]) > 0
+    ]
+    full_coverage = max(positive_coverage) if positive_coverage else None
+    for row in enriched_results:
+        row["selectable"] = bool(
+            np.isfinite(float(row["best_ic"]))
+            and int(row["n_invalid"]) == 0
+            and (full_coverage is None or int(row["ic_n_days"]) == full_coverage)
+        )
     ranked = sorted(
-        config_results,
-        key=lambda row: row["best_ic"] if not np.isnan(row["best_ic"]) else -999,
+        enriched_results,
+        key=lambda row: (
+            row["selectable"],
+            float(row["best_ic"]) if np.isfinite(float(row["best_ic"])) else -999.0,
+        ),
         reverse=True,
     )
     best = ranked[0]
@@ -681,6 +1177,8 @@ def run_tabm_cv(
     num_threads: int = 8,
     input_data_spec: dict[str, Any] | None = None,
     identity_params: dict[str, Any] | None = None,
+    checkpoint_root: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -832,6 +1330,18 @@ def run_tabm_cv(
                 )
                 split_complete = not split_rows.is_empty()
                 if status.complete and split_complete:
+                    if checkpoint_root is not None:
+                        from case_studies.utils.deep_model_state import (
+                            validate_deep_checkpoint_population,
+                        )
+
+                        validate_deep_checkpoint_population(
+                            checkpoint_root,
+                            config_name=cfg["config_name"],
+                            fold_ids=tuple(int(split["fold"]) for split in splits),
+                            checkpoints=_tabm_checkpoint_epochs(cfg),
+                            architecture="tabm",
+                        )
                     cached_result, cached_predictions, cached_curve_rows = _load_cached_tabm_config(
                         case_study=case_study,
                         training_spec=spec,
@@ -950,6 +1460,12 @@ def run_tabm_cv(
                 "val_entities": val_entities,
                 "n_train": len(X_train),
                 "n_val": len(X_val),
+                "preprocessing": {
+                    "feature_names": list(feature_names),
+                    "imputer_statistics": imputer.statistics_.astype(np.float32),
+                    "scaler_mean": scaler.mean_.astype(np.float32),
+                    "scaler_scale": scaler.scale_.astype(np.float32),
+                },
             }
         )
         print(f"  Fold {split['fold']}: train={len(X_train):,}  val={len(X_val):,}")
@@ -962,6 +1478,7 @@ def run_tabm_cv(
     config_results: list[dict[str, Any]] = list(cached_results)
     all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []
+    in_memory_prediction_frames: list[pl.DataFrame] = []
 
     # Set up incremental save directory
     run_save_dir = save_dir / label_col if save_dir is not None else None
@@ -971,6 +1488,8 @@ def run_tabm_cv(
 
     for cfg in configs:
         config_name = cfg["config_name"]
+        if checkpoint_root is not None and config_name.startswith("tabpfn"):
+            raise ValueError("TabPFN fitted-state persistence is not implemented")
         if register and case_study and force_retrain:
             from case_studies.utils.registry import build_training_spec, training_hash_from_spec
 
@@ -1002,6 +1521,7 @@ def run_tabm_cv(
         print(f"\n  {config_name}:")
 
         fold_checkpoint_ics: dict[int, list[float]] = {}
+        config_prediction_frames: list[pl.DataFrame] = []
         tabpfn_available = True
 
         for fd in fold_data:
@@ -1051,6 +1571,21 @@ def run_tabm_cv(
                             eval_actual=fd["y_eval_val"] if eval_col else None,
                             eval_col=eval_col or "eval_actual",
                         )
+                    else:
+                        config_prediction_frames.append(
+                            _checkpoint_prediction_frame(
+                                config_name,
+                                fd["fold"],
+                                {1: preds},
+                                fd["val_dates"],
+                                fd["val_entities"],
+                                fd["y_val"],
+                                date_col,
+                                entity_col,
+                                eval_actual=fd["y_eval_val"] if eval_col else None,
+                                eval_col=eval_col or "eval_actual",
+                            )
+                        )
 
                     fold_elapsed = time.perf_counter() - fold_t0
                     training_log.append(
@@ -1079,6 +1614,37 @@ def run_tabm_cv(
                 # TabM: train to completion, store ALL checkpoint predictions
                 tabm_kwargs = {"n_features": n_features, **cfg_params}
                 model = TabMModel(**tabm_kwargs)
+                train_kwargs: dict[str, Any] = {}
+                if checkpoint_root is not None:
+                    from case_studies.utils.deep_model_state import (
+                        deep_checkpoint_path,
+                        write_deep_checkpoint,
+                    )
+
+                    def persist_state(
+                        epoch: int,
+                        fitted_model: nn.Module,
+                        *,
+                        _fold: int = int(fd["fold"]),
+                        _preprocessing: dict[str, Any] = fd["preprocessing"],
+                        _config_name: str = config_name,
+                        _model_kwargs: dict[str, Any] = tabm_kwargs,
+                    ) -> None:
+                        write_deep_checkpoint(
+                            deep_checkpoint_path(checkpoint_root, _config_name, _fold, epoch),
+                            model=fitted_model,
+                            architecture="tabm",
+                            model_kwargs=_model_kwargs,
+                            preprocessing=_preprocessing,
+                            metadata={
+                                "config_name": _config_name,
+                                "fold": _fold,
+                                "checkpoint_kind": "epoch",
+                                "checkpoint_value": epoch,
+                            },
+                        )
+
+                    train_kwargs["state_callback"] = persist_state
                 checkpoint_ics, checkpoint_preds, epoch_losses = _train_tabm_fold(
                     model=model,
                     X_train=fd["X_train"],
@@ -1092,6 +1658,7 @@ def run_tabm_cv(
                     batch_size=cfg_batch_size,
                     checkpoint_interval=cfg_checkpoint,
                     device=torch_device,
+                    **train_kwargs,
                 )
 
                 for ep, ic in checkpoint_ics.items():
@@ -1111,6 +1678,21 @@ def run_tabm_cv(
                         entity_col,
                         eval_actual=fd["y_eval_val"] if eval_col else None,
                         eval_col=eval_col or "eval_actual",
+                    )
+                else:
+                    config_prediction_frames.append(
+                        _checkpoint_prediction_frame(
+                            config_name,
+                            fd["fold"],
+                            checkpoint_preds,
+                            fd["val_dates"],
+                            fd["val_entities"],
+                            fd["y_val"],
+                            date_col,
+                            entity_col,
+                            eval_actual=fd["y_eval_val"] if eval_col else None,
+                            eval_col=eval_col or "eval_actual",
+                        )
                     )
 
                 del model, checkpoint_preds
@@ -1148,8 +1730,12 @@ def run_tabm_cv(
         cfg_all_preds = (
             _load_incremental_preds_for_config(incr_dir, config_name)
             if incr_dir is not None
-            else pl.DataFrame()
+            else (
+                pl.concat(config_prediction_frames) if config_prediction_frames else pl.DataFrame()
+            )
         )
+        if incr_dir is None and cfg_all_preds.height:
+            in_memory_prediction_frames.append(cfg_all_preds)
         checkpoint_metrics: dict[int, dict[str, float]] = {}
         if cfg_all_preds.height:
             actual_col = eval_col if eval_col else "y_true"
@@ -1161,23 +1747,46 @@ def run_tabm_cv(
                     entity_col=entity_col,
                     ret_col=actual_col,
                 )
+                checkpoint_metrics[int(epoch)]["n_invalid"] = _n_invalid_scores(epoch_predictions)
         elif fold_checkpoint_ics:
             checkpoint_metrics = {
                 int(epoch): {
                     "ic_mean": float(np.nanmean(values)),
                     "ic_std": float(np.nanstd(values)) if len(values) > 1 else 0.0,
+                    "ic_n_days": 0,
+                    "n_invalid": 0,
                 }
                 for epoch, values in fold_checkpoint_ics.items()
             }
 
         if checkpoint_metrics:
+            positive_days = [
+                int(metric.get("ic_n_days", 0))
+                for metric in checkpoint_metrics.values()
+                if int(metric.get("ic_n_days", 0)) > 0
+            ]
+            full_days = max(positive_days) if positive_days else None
+            eligible_checkpoints = [
+                epoch
+                for epoch, metric in checkpoint_metrics.items()
+                if np.isfinite(float(metric["ic_mean"]))
+                and int(metric.get("n_invalid", 0)) == 0
+                and (full_days is None or int(metric.get("ic_n_days", 0)) == full_days)
+            ]
+            if not eligible_checkpoints:
+                raise ValueError(f"No selectable checkpoint completed for {config_name}")
             best_cp = max(
-                checkpoint_metrics, key=lambda epoch: checkpoint_metrics[epoch]["ic_mean"]
+                eligible_checkpoints,
+                key=lambda epoch: checkpoint_metrics[epoch]["ic_mean"],
             )
             best_ic_val = float(checkpoint_metrics[best_cp]["ic_mean"])
+            best_ic_n_days = int(checkpoint_metrics[best_cp].get("ic_n_days", 0))
+            best_n_invalid = int(checkpoint_metrics[best_cp].get("n_invalid", 0))
         else:
             best_cp = 0
             best_ic_val = float("nan")
+            best_ic_n_days = 0
+            best_n_invalid = 0
 
         elapsed = time.perf_counter() - t0
         config_results.append(
@@ -1185,6 +1794,8 @@ def run_tabm_cv(
                 "config_name": config_name,
                 "best_epoch": best_cp,
                 "best_ic": best_ic_val,
+                "ic_n_days": best_ic_n_days,
+                "n_invalid": best_n_invalid,
                 "elapsed_s": elapsed,
                 "started_at": config_started_at,
             }
@@ -1197,11 +1808,24 @@ def run_tabm_cv(
                 "epoch": ep,
                 "ic_mean": float(metric["ic_mean"]),
                 "ic_std": float(metric.get("ic_std", 0.0)),
+                "ic_n_days": int(metric.get("ic_n_days", 0)),
+                "n_invalid": int(metric.get("n_invalid", 0)),
             }
             all_curves.append(entry)
             cfg_curves_list.append(entry)
 
         print(f"    → best_epoch={best_cp}, IC={best_ic_val:+.4f} ({elapsed:.1f}s)")
+
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+
+            validate_deep_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=tuple(int(fd["fold"]) for fd in fold_data),
+                checkpoints=_tabm_checkpoint_epochs(cfg),
+                architecture="tabm",
+            )
 
         # Incremental registration: persist this config immediately so a later
         # interruption or re-run doesn't lose work. Safe because config-major
@@ -1274,11 +1898,13 @@ def run_tabm_cv(
                         f"    registered {config_name} incrementally ({len(epochs)} per-epoch slices)"
                     )
             except Exception as exc:
+                if strict:
+                    raise
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
         gc.collect()
 
-    prediction_frames = list(cached_prediction_frames)
+    prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
     if incr_dir is not None:
         for config_name in [cfg["config_name"] for cfg in configs]:
             frame = _load_incremental_preds_for_config(incr_dir, config_name)

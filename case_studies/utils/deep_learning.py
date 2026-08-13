@@ -20,12 +20,21 @@ Usage:
 from __future__ import annotations
 
 import gc
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import shutil
+import subprocess
 import time
+import uuid
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -50,12 +59,510 @@ from case_studies.utils.sequence_dataset import (
     collate_with_metadata,
     materialize_store_metadata,
     prepare_fold_sequence_stores,
+    sequence_validation_keys,
 )
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
+
+if TYPE_CHECKING:
+    from case_studies.research.workspace import Study
+
+_SEQUENCE_PREVIEW_FIELDS = {"folds", "max_symbols", "max_train_sequences"}
+
+
+@dataclass(frozen=True)
+class SequenceResearchContext:
+    dataset_pd: pd.DataFrame
+    splits: tuple[dict[str, Any], ...]
+    config: dict[str, Any]
+    feature_names: tuple[str, ...]
+    label_col: str
+    date_col: str
+    entity_col: str
+    task_type: str
+    class_values: tuple[Any, ...]
+    temporal_by_fold: pd.DataFrame | None
+    temporal_keys: tuple[str, ...]
+    temporal_feature_names: tuple[str, ...]
+    expected_keys: pl.DataFrame
+    max_train_sequences: int
+    runtime_provenance: dict[str, Any]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sequence_source_identity(config: dict[str, Any]) -> dict[str, str]:
+    from case_studies.utils import deep_model_state, sequence_dataset
+
+    paths = [Path(__file__), Path(deep_model_state.__file__), Path(sequence_dataset.__file__)]
+    if config.get("library") == "darts":
+        from case_studies.utils import darts_forecasting
+
+        paths.append(Path(darts_forecasting.__file__))
+    else:
+        architecture = str(config["params"]["architecture"])
+        model_class = _get_model_registry()[architecture]
+        module = __import__(model_class.__module__, fromlist=[model_class.__name__])
+        paths.append(Path(module.__file__))
+    return {path.name: _sha256(path) for path in paths}
+
+
+def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
+    packages = {
+        "numpy": importlib.metadata.version("numpy"),
+        "torch": importlib.metadata.version("torch"),
+    }
+    if config.get("library") == "darts":
+        packages.update(
+            {
+                "darts": importlib.metadata.version("darts"),
+                "pytorch-lightning": importlib.metadata.version("pytorch-lightning"),
+            }
+        )
+    return packages
+
+
+def _sequence_runtime_provenance(study: Study, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    return {
+        "entry_point": "case_studies.utils.deep_learning",
+        "packages": _sequence_runtime_identity(config),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "source_commit": commit,
+    }
+
+
+def _normalize_sequence_splits(
+    splits: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    fields = ("fold", "train_start", "train_end", "val_start", "val_end")
+    return tuple(
+        {
+            key: int(split[key]) if key == "fold" else str(split[key])
+            for key in fields
+            if split.get(key) is not None
+        }
+        for split in splits
+    )
+
+
+def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from case_studies.utils.artifact_digest import value_digest
+
+    cv = request.get("cv")
+    if cv is None:
+        splits = [dict(split) for split in mds.splits]
+        normalized = _normalize_sequence_splits(splits)
+        cv_record = {
+            "request": {"source": "case_study_default"},
+            "folds": list(normalized),
+            "identity": value_digest(pl.DataFrame(list(normalized))),
+        }
+    else:
+        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
+        splits = [dict(fold) for fold in resolved.normalized_folds]
+        cv_record = resolved.as_dict()
+    requested_folds = request["preview_reductions"].get("folds")
+    if requested_folds is not None:
+        selected = {int(fold) for fold in requested_folds}
+        splits = [split for split in splits if int(split["fold"]) in selected]
+        if {int(split["fold"]) for split in splits} != selected:
+            raise ValueError("preview fold reduction refers to an unavailable fold")
+        cv_record = {**cv_record, "preview_folds": sorted(selected)}
+    if not splits:
+        raise ValueError("sequence request resolved no cross-validation folds")
+    from utils.modeling import validate_temporal_split_geometry
+
+    validate_temporal_split_geometry(splits, mds.splits, mds.temporal_by_fold)
+    return splits, cv_record
+
+
+def _resolve_sequence_config(config: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    resolved = {**config, "params": dict(config.get("params") or {})}
+    top_level = {"batch_size", "checkpoint_interval", "n_epochs", "seed"}
+    runtime_fields = {"device", "num_threads"}
+    unknown = set(overrides) - top_level - runtime_fields - set(resolved["params"])
+    if unknown:
+        raise ValueError(f"unsupported sequence overrides: {sorted(unknown)}")
+    for key, value in overrides.items():
+        if key in top_level:
+            resolved[key] = value
+        elif key not in runtime_fields:
+            resolved["params"][key] = value
+    architecture = str(resolved["params"].get("architecture", ""))
+    library = resolved.get("library", "pytorch")
+    if library == "darts":
+        from case_studies.utils.darts_forecasting import SUPPORTED_DARTS_ARCHITECTURES
+
+        if architecture not in SUPPORTED_DARTS_ARCHITECTURES:
+            raise ValueError(f"unsupported Darts sequence architecture {architecture!r}")
+    elif library != "pytorch" or architecture not in _get_model_registry():
+        raise ValueError(f"unsupported PyTorch sequence architecture {architecture!r}")
+    from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
+    declared_epoch_checkpoints(
+        int(resolved.get("n_epochs", 100)),
+        int(resolved.get("checkpoint_interval", 5)),
+    )
+    return resolved
+
+
+def _sequence_runtime_spec(
+    device: str,
+    *,
+    seed: int,
+    num_threads: int,
+) -> dict[str, Any]:
+    if num_threads < 1:
+        raise ValueError("num_threads must be at least 1")
+    normalized = device.lower().replace("gpu", "cuda")
+    if normalized == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for sequence training, but CUDA is unavailable")
+    if normalized not in {"cpu", "cuda"}:
+        raise ValueError(f"unsupported sequence device {device!r}")
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    return {
+        "device": normalized,
+        "deterministic_algorithms": True,
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+        "num_threads": num_threads,
+        "seed": seed,
+    }
+
+
+def _configure_sequence_runtime(spec: dict[str, Any]) -> None:
+    torch.set_num_threads(int(spec["num_threads"]))
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    seed_everything(int(spec["seed"]))
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+    from utils.cv_splits import make_walk_forward_config
+    from utils.modeling import load_configs, load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _SEQUENCE_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported sequence preview reductions: {sorted(unknown_reductions)}")
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"])
+    mds = load_modeling_dataset(
+        study.case_study,
+        label_ref.name,
+        max_symbols=int(reductions.get("max_symbols", 0)),
+    )
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
+        raise ValueError("sequence runner requires canonical symbol and timestamp keys")
+    if mds.task_type != "regression":
+        raise ValueError("sequence runner currently supports regression labels only")
+    splits, cv_record = _sequence_splits(mds, request)
+    configs = {
+        config["config_name"]: config
+        for config in load_configs(study.case_study, label_ref.name, "deep_learning")
+    }
+    try:
+        configured = configs[request["config_name"]]
+    except KeyError as error:
+        raise ValueError(f"unknown sequence configuration {request['config_name']!r}") from error
+    config = _resolve_sequence_config(configured, request["overrides"])
+    if config.get("family") != "deep_learning":
+        raise ValueError(f"sequence preset belongs to unsupported family {config.get('family')!r}")
+    seed = int(config.get("seed", RANDOM_SEED))
+    runtime = _sequence_runtime_spec(
+        str(request["overrides"].get("device", "cuda")),
+        seed=seed,
+        num_threads=int(request["overrides"].get("num_threads", 8)),
+    )
+    max_train_sequences = int(reductions.get("max_train_sequences", 0))
+    calendar_id = make_walk_forward_config(study.case_study, date_col=mds.date_col).calendar_id
+    lookback = int(config["params"].get("lookback", 60))
+    dataset_pd = mds.dataset.to_pandas()
+    if config.get("library") == "darts":
+        from case_studies.utils.darts_forecasting import (
+            darts_training_identity,
+            darts_validation_keys,
+        )
+
+        expected = darts_validation_keys(
+            dataset_pd,
+            splits,
+            config=config,
+            feature_names=list(mds.feature_names),
+            label_col=mds.label_col,
+            date_col=mds.date_col,
+            entity_col=mds.entity_cols[0],
+            case_study=study.case_study,
+            temporal_by_fold=mds.temporal_by_fold,
+            temporal_keys=list(mds.temporal_keys),
+            temporal_feature_names=list(mds.temporal_feature_names),
+        )
+        sequence_identity = darts_training_identity(
+            config,
+            mds.label_col,
+            case_study=study.case_study,
+            input_data_spec=mds.input_lineage,
+            max_train_sequences=max_train_sequences,
+        )
+        preprocessing = {
+            "class": "fold_train_standardization",
+            "base_target": "one_period_log_return",
+            "input_chunk_length": sequence_identity["input_chunk_length"],
+            "output_chunk_length": sequence_identity["output_chunk_length"],
+        }
+    else:
+        expected = sequence_validation_keys(
+            dataset_pd,
+            splits,
+            label_col=mds.label_col,
+            date_col=mds.date_col,
+            entity_col=mds.entity_cols[0],
+            lookback=lookback,
+            calendar_id=calendar_id,
+        )
+        sequence_identity = {
+            "input_data_spec": mds.input_lineage,
+            "lookback": lookback,
+            "max_train_sequences": max_train_sequences,
+        }
+        preprocessing = {
+            "class": "fold_train_standardization",
+            "gap_policy": "exclude_windows_crossing_missing_expected_periods",
+            "lookback": lookback,
+        }
+    checkpoints = declared_epoch_checkpoints(
+        int(config.get("n_epochs", 100)), int(config.get("checkpoint_interval", 5))
+    )
+    spec = {
+        "identity_version": 2,
+        "execution_tier": tier.value,
+        "family": "deep_learning",
+        "label": label_ref.name,
+        "seed": seed,
+        "config_name": config["config_name"],
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": mds.input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "task": {"type": "regression", "class_values": []},
+        "cv": cv_record,
+        "model": {
+            "class": config["params"]["architecture"],
+            "implementation": config.get("library", "pytorch"),
+            "objective": "regression",
+            "params": {
+                **config["params"],
+                "batch_size": int(config["batch_size"]),
+                "checkpoint_interval": int(config["checkpoint_interval"]),
+                "n_epochs": int(config["n_epochs"]),
+            },
+        },
+        "preprocessing": preprocessing,
+        "checkpoint_schedule": [
+            {"kind": "epoch", "value": checkpoint} for checkpoint in checkpoints
+        ],
+        "expected_prediction_keys": {
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+            "n_rows": expected.height,
+            "n_folds": expected["fold"].n_unique(),
+        },
+        "input_data_spec": sequence_identity,
+        "sampling": {
+            "max_symbols": int(reductions.get("max_symbols", 0)),
+            "max_train_sequences": max_train_sequences,
+        },
+        "numerics": runtime,
+        "source_identity": _sequence_source_identity(config),
+        "runtime_identity": _sequence_runtime_identity(config),
+    }
+    if tier is ExecutionTier.PREVIEW:
+        spec["preview_reductions"] = reductions
+    context = SequenceResearchContext(
+        dataset_pd=dataset_pd,
+        splits=tuple(splits),
+        config=config,
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        date_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=tuple(mds.temporal_keys),
+        temporal_feature_names=tuple(mds.temporal_feature_names),
+        expected_keys=expected,
+        max_train_sequences=max_train_sequences,
+        runtime_provenance=_sequence_runtime_provenance(study, config),
+    )
+    return spec, context
+
+
+def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceResearchContext):
+    from case_studies.research.models import ModelRun
+    from case_studies.research.results import PredictionResult, Result, TrainingResult
+    from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+
+    training_hash = training_hash_from_spec(spec)
+    checkpoint_values = tuple(item["value"] for item in spec["checkpoint_schedule"])
+    try:
+        training = Result.open(
+            study, training_hash, include_preview=spec["execution_tier"] == "preview"
+        )
+        predictions = tuple(
+            Result.open(
+                study,
+                prediction_hash_from_parts(
+                    training_hash,
+                    checkpoint,
+                    "validation",
+                    checkpoint_kind="epoch",
+                    identity_version=2,
+                ),
+                include_preview=spec["execution_tier"] == "preview",
+            )
+            for checkpoint in checkpoint_values
+        )
+    except KeyError:
+        return None
+    if not isinstance(training, TrainingResult) or any(
+        not isinstance(result, PredictionResult) or not result.complete for result in predictions
+    ):
+        return None
+    model_root = training.root / "run_log" / "training" / training.hash / "models"
+    fold_ids = tuple(int(split["fold"]) for split in context.splits)
+    try:
+        if context.config.get("library") == "darts":
+            from case_studies.utils.darts_forecasting import (
+                validate_darts_checkpoint_population,
+            )
+
+            validate_darts_checkpoint_population(
+                model_root,
+                config_name=context.config["config_name"],
+                fold_ids=fold_ids,
+                checkpoints=checkpoint_values,
+                architecture=context.config["params"]["architecture"],
+            )
+        else:
+            from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+
+            validate_deep_checkpoint_population(
+                model_root,
+                config_name=context.config["config_name"],
+                fold_ids=fold_ids,
+                checkpoints=checkpoint_values,
+                architecture=context.config["params"]["architecture"],
+            )
+    except ValueError:
+        return None
+    return ModelRun(training=training, predictions=predictions)
+
+
+def run_resolved_request(
+    study: Study,
+    spec: dict[str, Any],
+    context: SequenceResearchContext,
+):
+    from case_studies.research.models import ModelRun
+
+    cached = _cached_sequence_run(study, spec, context)
+    if cached is not None:
+        return cached
+    training = study.results.register_training(
+        spec,
+        execution_tier=spec["execution_tier"],
+        runtime_provenance=context.runtime_provenance,
+    )
+    train_dir = training.root / "run_log" / "training" / training.hash
+    model_dir = train_dir / "models"
+    if model_dir.exists():
+        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+    _configure_sequence_runtime(spec["numerics"])
+    try:
+        result = run_dl_cv(
+            context.dataset_pd,
+            list(context.splits),
+            configs=[context.config],
+            n_features=len(context.feature_names),
+            feature_names=list(context.feature_names),
+            label_col=context.label_col,
+            date_col=context.date_col,
+            entity_col=context.entity_col,
+            device=spec["numerics"]["device"],
+            save_dir=train_dir / "diagnostics",
+            max_train_sequences=context.max_train_sequences,
+            register=False,
+            case_study=study.case_study,
+            temporal_by_fold=context.temporal_by_fold,
+            temporal_keys=list(context.temporal_keys),
+            temporal_feature_names=list(context.temporal_feature_names),
+            checkpoint_root=staging,
+            strict=True,
+            seed=int(spec["seed"]),
+            num_threads=int(spec["numerics"]["num_threads"]),
+        )
+        os.replace(staging, model_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    prediction_results = []
+    for checkpoint in (item["value"] for item in spec["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+        )
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type="regression",
+                class_values=None,
+                label=context.label_col,
+            )
+        )
+    runtime_path = train_dir / "runtime.json"
+    if runtime_path.exists():
+        runtime = json.loads(runtime_path.read_text())
+        runtime["elapsed_s"] = sum(
+            float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
+        )
+        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    return ModelRun(training=training, predictions=tuple(prediction_results))
+
 
 # ---------------------------------------------------------------------------
 # Model Factory (lazy imports — models package may not be deployed)
@@ -203,6 +710,7 @@ def _train_one_config(
     checkpoint_callback: Callable[[dict[int, np.ndarray], np.ndarray, np.ndarray, np.ndarray], None]
     | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
+    state_callback: Callable[[int, nn.Module], None] | None = None,
 ) -> tuple[dict[int, float], dict[int, np.ndarray], dict[int, float]]:
     """Train a single model config, storing predictions at ALL checkpoints.
 
@@ -295,6 +803,8 @@ def _train_one_config(
             )["ic_mean"]
             checkpoint_ics[epoch] = ic
             checkpoint_preds[epoch] = val_preds.copy()
+            if state_callback is not None:
+                state_callback(epoch, model)
             if checkpoint_callback is not None:
                 checkpoint_callback(checkpoint_preds, y_val, val_dates, val_entities)
             if epoch_callback is not None:
@@ -460,6 +970,10 @@ def run_dl_cv(
     prediction_split: str = "validation",
     identity_params: dict[str, Any] | None = None,
     input_data_spec: dict[str, Any] | None = None,
+    checkpoint_root: Path | None = None,
+    strict: bool = False,
+    seed: int = RANDOM_SEED,
+    num_threads: int = 8,
 ) -> dict[str, Any]:
     """Walk-forward DL CV with epoch-checkpoint IC evaluation.
 
@@ -508,6 +1022,10 @@ def run_dl_cv(
         darts_training_identity,
         run_darts_cv,
         uses_darts_backend,
+    )
+
+    _configure_sequence_runtime(
+        _sequence_runtime_spec(device, seed=int(seed), num_threads=int(num_threads))
     )
 
     if register and save_dir is None:
@@ -581,6 +1099,38 @@ def run_dl_cv(
                 )
                 split_complete = not split_rows.is_empty()
                 if status.complete and split_complete:
+                    if checkpoint_root is not None:
+                        from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
+                        checkpoint_values = declared_epoch_checkpoints(
+                            int(cfg.get("n_epochs", 100)),
+                            int(cfg.get("checkpoint_interval", 5)),
+                        )
+                        fold_ids = tuple(int(split["fold"]) for split in splits)
+                        if uses_darts_backend([cfg]):
+                            from case_studies.utils.darts_forecasting import (
+                                validate_darts_checkpoint_population,
+                            )
+
+                            validate_darts_checkpoint_population(
+                                checkpoint_root,
+                                config_name=cfg["config_name"],
+                                fold_ids=fold_ids,
+                                checkpoints=checkpoint_values,
+                                architecture=cfg["params"]["architecture"],
+                            )
+                        else:
+                            from case_studies.utils.deep_model_state import (
+                                validate_deep_checkpoint_population,
+                            )
+
+                            validate_deep_checkpoint_population(
+                                checkpoint_root,
+                                config_name=cfg["config_name"],
+                                fold_ids=fold_ids,
+                                checkpoints=checkpoint_values,
+                                architecture=resolve_arch_name(cfg["config_name"]),
+                            )
                     print(
                         f"  SKIP {cfg['config_name']:25s}  ({status.summary()}, split={prediction_split})"
                     )
@@ -660,6 +1210,8 @@ def run_dl_cv(
             temporal_by_fold=temporal_by_fold,
             temporal_keys=temporal_keys,
             temporal_feature_names=temporal_feature_names,
+            checkpoint_root=checkpoint_root,
+            strict=strict,
         )
         if cached_result is not None:
             return combine_cv_results(
@@ -679,10 +1231,15 @@ def run_dl_cv(
         if not splits:
             raise ValueError(f"No splits matched selected_folds={selected_folds}")
 
-    seed_everything(RANDOM_SEED)
+    seed_everything(seed)
 
     # Extract lookback from configs (must be uniform for fold-major sequencing)
     lookback = configs[0].get("params", {}).get("lookback", 60)
+    calendar_id = None
+    if case_study:
+        from utils.cv_splits import make_walk_forward_config
+
+        calendar_id = make_walk_forward_config(case_study, date_col=date_col).calendar_id
 
     dates_series = dataset_pd[date_col]
 
@@ -708,7 +1265,7 @@ def run_dl_cv(
     _has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
 
     for split in splits:
-        seed_everything(RANDOM_SEED + split["fold"])
+        seed_everything(seed + split["fold"])
 
         train_mask = (dates_series >= split["train_start"]) & (dates_series <= split["train_end"])
         val_mask = (dates_series >= split["val_start"]) & (dates_series <= split["val_end"])
@@ -729,9 +1286,15 @@ def run_dl_cv(
             temporal_feature_names=temporal_feature_names,
             fold_id=split["fold"],
             val_start=split["val_start"],
+            calendar_id=calendar_id,
         )
 
         if fold_info["train_sequences"] < 100 or fold_info["val_sequences"] < 50:
+            if strict:
+                raise ValueError(
+                    f"Fold {split['fold']} is too small: "
+                    f"train={fold_info['train_sequences']}, val={fold_info['val_sequences']}"
+                )
             print(
                 "    Skipped "
                 f"(train={fold_info['train_sequences']}, val={fold_info['val_sequences']})"
@@ -851,6 +1414,48 @@ def run_dl_cv(
                 if _log_dir is not None:
                     flush_fold_training_log(_log_dir, _config_name, _fold, _epoch_rows)
 
+            train_kwargs: dict[str, Any] = {}
+            if checkpoint_root is not None:
+                from case_studies.utils.deep_model_state import (
+                    deep_checkpoint_path,
+                    write_deep_checkpoint,
+                )
+
+                if train_store.feature_mean is None or train_store.feature_scale is None:
+                    raise ValueError("sequence fold has no fitted preprocessing state")
+                preprocessing = {
+                    "feature_names": list(feature_names),
+                    "mean": train_store.feature_mean.copy(),
+                    "scale": train_store.feature_scale.copy(),
+                    "lookback": int(lookback),
+                }
+
+                def persist_state(
+                    epoch: int,
+                    fitted_model: nn.Module,
+                    *,
+                    _fold: int = int(split["fold"]),
+                    _config_name: str = config_name,
+                    _architecture: str = arch_name,
+                    _model_kwargs: dict[str, Any] = arch_kwargs,
+                    _preprocessing: dict[str, Any] = preprocessing,
+                ) -> None:
+                    write_deep_checkpoint(
+                        deep_checkpoint_path(checkpoint_root, _config_name, _fold, epoch),
+                        model=fitted_model,
+                        architecture=_architecture,
+                        model_kwargs=_model_kwargs,
+                        preprocessing=_preprocessing,
+                        metadata={
+                            "config_name": _config_name,
+                            "fold": _fold,
+                            "checkpoint_kind": "epoch",
+                            "checkpoint_value": epoch,
+                        },
+                    )
+
+                train_kwargs["state_callback"] = persist_state
+
             checkpoint_ics, checkpoint_preds, epoch_losses = _train_one_config(
                 model=model,
                 train_loader=train_loader,
@@ -860,6 +1465,7 @@ def run_dl_cv(
                 device=torch_device,
                 checkpoint_callback=_on_checkpoint,
                 epoch_callback=_on_epoch,
+                **train_kwargs,
             )
 
             elapsed = time.perf_counter() - t0
@@ -996,6 +1602,23 @@ def run_dl_cv(
             f"  {config_name}: best_epoch={best_cp}, IC={best_ic_val:+.4f} ({acc['elapsed_s']:.1f}s)"
         )
 
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import (
+                declared_epoch_checkpoints,
+                validate_deep_checkpoint_population,
+            )
+
+            validate_deep_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=tuple(expected_fold_ids),
+                checkpoints=declared_epoch_checkpoints(
+                    int(cfg.get("n_epochs", 100)),
+                    int(cfg.get("checkpoint_interval", 5)),
+                ),
+                architecture=resolve_arch_name(config_name),
+            )
+
         # Incremental registration: persist every complete checkpoint as soon as
         # aggregation finishes. Registering only the raw-IC peak would prevent a
         # reader from applying the checkpoint-level coverage guard when that peak
@@ -1046,6 +1669,8 @@ def run_dl_cv(
                     f"({len(epoch_scores)} per-epoch slices)"
                 )
             except Exception as exc:
+                if strict:
+                    raise
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
 
     del config_acc

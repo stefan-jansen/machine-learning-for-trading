@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import shutil
+import uuid
 from pathlib import Path
 
 from .specs import (
+    IDENTITY_VERSION,
     _validate_spec,
     backtest_hash_from_parts,
     build_training_spec,
     canonical_json,
     prediction_hash_from_parts,
+    project_training_identity,
     training_hash_from_spec,
 )
 from .store import (
@@ -31,6 +36,92 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
+MAX_PREDICTION_STD_RATIO = 100.0
+
+
+def _atomic_save_json(path: Path, data: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _save_json(temporary, data)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_prediction_dispersion(predictions) -> None:
+    """Reject a prediction set with an implausible score scale on any fold.
+
+    The bound is deliberately wide. Across 8,090 finite folds in the nine
+    production registries, the largest fold below the failure population was
+    72.72. The known divergent folds started at 187.41 and extended to
+    9.22e39. Rank correlation cannot detect this failure because it is invariant
+    to score scale.
+    """
+    import math
+
+    import polars as pl
+
+    if not isinstance(predictions, pl.DataFrame):
+        predictions = pl.from_pandas(predictions)
+
+    fold_col = _detect_fold_col(predictions)
+    y_true_col, y_score_col = _detect_score_cols(predictions)
+    if fold_col is None or not {y_true_col, y_score_col}.issubset(predictions.columns):
+        return
+
+    typed = predictions.lazy().select(
+        pl.col(fold_col).alias("fold"),
+        pl.col(y_true_col).cast(pl.Float64, strict=False).alias("actual"),
+        pl.col(y_score_col).cast(pl.Float64, strict=False).alias("score"),
+    )
+    fold_health = (
+        typed.group_by("fold")
+        .agg(
+            pl.len().alias("n_total"),
+            pl.col("score").is_finite().sum().alias("n_finite"),
+        )
+        .collect()
+    )
+    invalid_folds = []
+    for row in fold_health.iter_rows(named=True):
+        n_invalid = row["n_total"] - row["n_finite"]
+        if n_invalid:
+            invalid_folds.append(f"fold {row['fold']}: {n_invalid} non-finite score(s)")
+    if invalid_folds:
+        raise ValueError(
+            "Refusing to register predictions with a non-finite fold: " + "; ".join(invalid_folds)
+        )
+
+    dispersion = (
+        typed.filter(pl.col("actual").is_finite() & pl.col("score").is_finite())
+        .group_by("fold")
+        .agg(
+            pl.len().alias("n"),
+            pl.col("actual").std().alias("actual_std"),
+            pl.col("score").std().alias("score_std"),
+        )
+        .collect()
+    )
+
+    violations = []
+    for row in dispersion.iter_rows(named=True):
+        actual_std = row["actual_std"]
+        score_std = row["score_std"]
+        if row["n"] < 2 or actual_std is None or actual_std <= 0 or score_std is None:
+            continue
+        ratio = float(score_std / actual_std)
+        if not math.isfinite(ratio) or ratio > MAX_PREDICTION_STD_RATIO:
+            violations.append(
+                f"fold {row['fold']}: prediction dispersion ratio {ratio:.6g} "
+                f"(score std {score_std:.6g} / target std {actual_std:.6g})"
+            )
+
+    if violations:
+        raise ValueError(
+            "Refusing to register predictions with a diverged fold; "
+            f"the maximum allowed per-fold dispersion ratio is "
+            f"{MAX_PREDICTION_STD_RATIO:g}: " + "; ".join(violations)
+        )
 
 
 def clear_prediction_sets(
@@ -105,6 +196,10 @@ def clear_prediction_sets(
             prediction_hashes,
         )
         db.execute(
+            f"DELETE FROM prediction_coverage WHERE prediction_hash IN ({placeholders})",
+            prediction_hashes,
+        )
+        db.execute(
             f"DELETE FROM prediction_sets WHERE prediction_hash IN ({placeholders})",
             prediction_hashes,
         )
@@ -165,6 +260,66 @@ def register_training_run(
     spec = _validate_spec(spec)
     t_hash = training_hash_from_spec(spec)
     spec_json_str = canonical_json(spec)
+
+    if spec.get("identity_version") == IDENTITY_VERSION:
+        tier = spec.get("execution_tier")
+        if tier not in {"canonical", "preview"}:
+            raise ValueError("version-2 training spec requires execution_tier canonical or preview")
+        db = _open_registry(case_dir)
+        try:
+            existing = db.execute(
+                "SELECT spec_json, identity_version, execution_tier FROM training_runs "
+                "WHERE training_hash = ?",
+                (t_hash,),
+            ).fetchone()
+            if existing is not None:
+                existing_spec = json.loads(existing[0])
+                if project_training_identity(existing_spec) != project_training_identity(
+                    spec
+                ) or existing[1:] != (IDENTITY_VERSION, tier):
+                    raise ValueError(f"immutable training identity conflict for {t_hash}")
+                return t_hash
+
+            train_dir = _training_dir(case_dir, t_hash)
+            spec_path = train_dir / "spec.json"
+            _atomic_save_json(spec_path, spec)
+            if runtime_provenance is not None:
+                _atomic_save_json(train_dir / "runtime.json", runtime_provenance)
+            try:
+                db.execute(
+                    """
+                    INSERT INTO training_runs
+                    (training_hash, family, label, config_name, spec_json, created_at,
+                     git_commit, entry_point, started_at, elapsed_s, runtime_json,
+                     identity_version, execution_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        t_hash,
+                        spec["family"],
+                        spec["label"],
+                        spec.get("config_name"),
+                        spec_json_str,
+                        _utc_now(),
+                        _git_hash(),
+                        entry_point,
+                        started_at,
+                        elapsed_s,
+                        canonical_json(runtime_provenance)
+                        if runtime_provenance is not None
+                        else None,
+                        IDENTITY_VERSION,
+                        tier,
+                    ),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                spec_path.unlink(missing_ok=True)
+                raise
+        finally:
+            db.close()
+        return t_hash
 
     # Write spec.json (authoritative identity artifact)
     train_dir = _training_dir(case_dir, t_hash)
@@ -423,6 +578,8 @@ def register_prediction_set(
     eval_col: str | None = None,
     label: str | None = None,
     case_dir: Path | None = None,
+    expected_keys=None,
+    allow_partial: bool = False,
 ) -> str:
     """Register a prediction set. Returns prediction_hash.
 
@@ -468,39 +625,150 @@ def register_prediction_set(
     if case_dir is None:
         case_dir = _case_dir(case_study)
 
-    p_hash = prediction_hash_from_parts(training_hash, checkpoint_value, split)
-
-    # Save predictions
     if predictions is not None:
-        pred_dir = _prediction_dir(case_dir, p_hash)
-        _save_parquet(pred_dir / "predictions.parquet", predictions)
+        _validate_prediction_dispersion(predictions)
 
-    # Insert into DB
     db = _open_registry(case_dir)
     try:
-        db.execute(
-            """
-            INSERT OR REPLACE INTO prediction_sets
-            (prediction_hash, training_hash, checkpoint_value, checkpoint_kind,
-             split, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                p_hash,
-                training_hash,
-                checkpoint_value,
-                checkpoint_kind,
-                split,
-                _utc_now(),
-            ),
-        )
-
-        if metrics:
-            _upsert_wide_metrics(db, "prediction_metrics", {"prediction_hash": p_hash}, metrics)
-
-        db.commit()
+        parent = db.execute(
+            "SELECT identity_version, execution_tier FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
     finally:
         db.close()
+    if parent is None:
+        raise ValueError(f"unknown training_hash {training_hash}")
+    identity_version, _execution_tier = parent
+    coverage = None
+    if identity_version == IDENTITY_VERSION:
+        if predictions is None or expected_keys is None:
+            raise ValueError(
+                "version-2 prediction registration requires predictions and expected_keys"
+            )
+        from .completeness import evaluate_prediction_coverage
+
+        coverage = evaluate_prediction_coverage(expected_keys, predictions)
+        if not coverage.complete and not allow_partial:
+            raise ValueError(f"prediction coverage is partial: {coverage.as_dict()}")
+        db = _open_registry(case_dir)
+        try:
+            existing_schema = db.execute(
+                """
+                SELECT c.schema_json
+                FROM prediction_coverage c
+                JOIN prediction_sets p ON p.prediction_hash = c.prediction_hash
+                WHERE p.training_hash = ? AND p.split = ?
+                LIMIT 1
+                """,
+                (training_hash, split),
+            ).fetchone()
+        finally:
+            db.close()
+        if existing_schema is not None and existing_schema[0] != coverage.schema_json:
+            raise ValueError("prediction schema differs from an existing checkpoint")
+
+    p_hash = prediction_hash_from_parts(
+        training_hash,
+        checkpoint_value,
+        split,
+        checkpoint_kind=checkpoint_kind,
+        identity_version=identity_version,
+    )
+
+    if identity_version == IDENTITY_VERSION:
+        pred_dir = _prediction_dir(case_dir, p_hash)
+        pred_path = pred_dir / "predictions.parquet"
+        temporary = pred_dir / f".predictions.{uuid.uuid4().hex}.tmp"
+        db = _open_registry(case_dir)
+        try:
+            existing = db.execute(
+                "SELECT training_hash, checkpoint_value, checkpoint_kind, split "
+                "FROM prediction_sets WHERE prediction_hash = ?",
+                (p_hash,),
+            ).fetchone()
+            expected_row = (training_hash, checkpoint_value, checkpoint_kind, split)
+            if existing is not None:
+                if existing != expected_row:
+                    raise ValueError(f"immutable prediction identity conflict for {p_hash}")
+                import polars as pl
+
+                from case_studies.utils.artifact_digest import value_digest
+
+                new_predictions = (
+                    predictions
+                    if isinstance(predictions, pl.DataFrame)
+                    else pl.from_pandas(predictions)
+                )
+                if not pred_path.exists() or value_digest(
+                    pl.read_parquet(pred_path)
+                ) != value_digest(new_predictions):
+                    raise ValueError(f"immutable prediction artifact conflict for {p_hash}")
+                return p_hash
+
+            _save_parquet(temporary, predictions)
+            try:
+                db.execute(
+                    """
+                    INSERT INTO prediction_sets
+                    (prediction_hash, training_hash, checkpoint_value, checkpoint_kind,
+                     split, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (p_hash, *expected_row, _utc_now()),
+                )
+                values = coverage.as_dict()
+                columns = ", ".join(("prediction_hash", *values))
+                placeholders = ", ".join("?" for _ in range(len(values) + 1))
+                db.execute(
+                    f"INSERT INTO prediction_coverage ({columns}) VALUES ({placeholders})",
+                    (p_hash, *values.values()),
+                )
+                if metrics:
+                    _upsert_wide_metrics(
+                        db, "prediction_metrics", {"prediction_hash": p_hash}, metrics
+                    )
+                pred_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(temporary, pred_path)
+                db.commit()
+            except Exception:
+                db.rollback()
+                pred_path.unlink(missing_ok=True)
+                raise
+        finally:
+            temporary.unlink(missing_ok=True)
+            db.close()
+    else:
+        # Save predictions
+        if predictions is not None:
+            pred_dir = _prediction_dir(case_dir, p_hash)
+            _save_parquet(pred_dir / "predictions.parquet", predictions)
+
+        # Insert into DB
+        db = _open_registry(case_dir)
+        try:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO prediction_sets
+                (prediction_hash, training_hash, checkpoint_value, checkpoint_kind,
+                 split, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    p_hash,
+                    training_hash,
+                    checkpoint_value,
+                    checkpoint_kind,
+                    split,
+                    _utc_now(),
+                ),
+            )
+
+            if metrics:
+                _upsert_wide_metrics(db, "prediction_metrics", {"prediction_hash": p_hash}, metrics)
+
+            db.commit()
+        finally:
+            db.close()
 
     # Auto-compute fold metrics when predictions are provided
     if predictions is not None and _has_fold_column(predictions):
@@ -694,8 +962,61 @@ def register_backtest_run(
     if stage is None:
         stage = _infer_stage(strategy_spec, case_dir=case_dir, prediction_hash=prediction_hash)
 
-    b_hash = backtest_hash_from_parts(prediction_hash, strategy_spec)
+    identity_version = strategy_spec.get("identity_version")
+    if identity_version == IDENTITY_VERSION:
+        db = _open_registry(case_dir)
+        try:
+            ancestry = db.execute(
+                """
+                SELECT t.execution_tier, c.status
+                FROM prediction_sets p
+                JOIN training_runs t ON t.training_hash = p.training_hash
+                LEFT JOIN prediction_coverage c ON c.prediction_hash = p.prediction_hash
+                WHERE p.prediction_hash = ?
+                """,
+                (prediction_hash,),
+            ).fetchone()
+        finally:
+            db.close()
+        if ancestry is None or ancestry[1] != "complete":
+            raise ValueError("backtest requires complete prediction coverage")
+        requested_tier = strategy_spec.get("execution_tier", "canonical")
+        if requested_tier not in {"canonical", "preview"}:
+            raise ValueError("backtest execution_tier must be canonical or preview")
+        if ancestry[0] != requested_tier:
+            raise ValueError("backtest execution tier conflicts with prediction ancestry")
+
+    b_hash = backtest_hash_from_parts(
+        prediction_hash, strategy_spec, identity_version=identity_version
+    )
     spec_json_str = canonical_json(strategy_spec)
+
+    if identity_version == IDENTITY_VERSION:
+        db = _open_registry(case_dir)
+        try:
+            existing = db.execute(
+                "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
+                (b_hash,),
+            ).fetchone()
+        finally:
+            db.close()
+        if existing is not None:
+            if existing != (prediction_hash, spec_json_str):
+                raise ValueError(f"immutable backtest identity conflict for {b_hash}")
+            import polars as pl
+
+            from case_studies.utils.artifact_digest import value_digest
+
+            existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
+            if returns is not None:
+                new_returns = (
+                    returns if isinstance(returns, pl.DataFrame) else pl.from_pandas(returns)
+                )
+                if not existing_returns.exists() or value_digest(
+                    pl.read_parquet(existing_returns)
+                ) != value_digest(new_returns):
+                    raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
+            return b_hash
 
     # Write spec.json
     bt_dir = _backtest_dir(case_dir, b_hash)
@@ -775,24 +1096,50 @@ def register_backtest_run(
     try:
         db.execute("DELETE FROM backtest_fold_metrics WHERE backtest_hash = ?", (b_hash,))
         db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (b_hash,))
-        db.execute(
-            """
-            INSERT OR REPLACE INTO backtest_runs
-            (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
-             started_at, elapsed_s)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                b_hash,
-                prediction_hash,
-                spec_json_str,
-                stage,
-                _utc_now(),
-                _git_hash(),
-                started_at,
-                elapsed_s,
-            ),
-        )
+        if identity_version == IDENTITY_VERSION:
+            existing = db.execute(
+                "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
+                (b_hash,),
+            ).fetchone()
+            if existing is not None and existing != (prediction_hash, spec_json_str):
+                raise ValueError(f"immutable backtest identity conflict for {b_hash}")
+            db.execute(
+                """
+                INSERT OR IGNORE INTO backtest_runs
+                (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
+                 started_at, elapsed_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    b_hash,
+                    prediction_hash,
+                    spec_json_str,
+                    stage,
+                    _utc_now(),
+                    _git_hash(),
+                    started_at,
+                    elapsed_s,
+                ),
+            )
+        else:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO backtest_runs
+                (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
+                 started_at, elapsed_s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    b_hash,
+                    prediction_hash,
+                    spec_json_str,
+                    stage,
+                    _utc_now(),
+                    _git_hash(),
+                    started_at,
+                    elapsed_s,
+                ),
+            )
 
         if metrics:
             _upsert_wide_metrics(db, "backtest_metrics", {"backtest_hash": b_hash}, metrics)

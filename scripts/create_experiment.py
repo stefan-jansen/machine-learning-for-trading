@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import stat
 import uuid
@@ -23,6 +24,7 @@ def create_experiment(
     output_root: Path,
     *,
     repo_root: Path = REPO_ROOT,
+    manifest: dict | None = None,
 ) -> Path:
     """Copy available generated state into a new ML4T_OUTPUT_DIR."""
     source = repo_root / "case_studies" / case_study
@@ -60,6 +62,11 @@ def create_experiment(
         # config reads to ML4T_OUTPUT_DIR, so the experiment must carry its own copy
         # (else notebooks crash on config/setup.yaml before any reader edit is reached).
         shutil.copytree(source_config, staging / "config")
+
+        if manifest is not None:
+            (staging / ".study.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
 
         _make_writable(staging)
         release_metadata = staging / "run_log/.release"

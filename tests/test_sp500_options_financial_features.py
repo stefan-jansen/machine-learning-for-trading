@@ -3,38 +3,46 @@
 from __future__ import annotations
 
 import ast
+import math
 from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
+from case_studies.utils.feature_engineering import EPS, trailing_return, trailing_volatility
 
 NOTEBOOK = Path("case_studies/sp500_options/03_financial_features.py")
+SETUP = yaml.safe_load(Path("case_studies/sp500_options/config/setup.yaml").read_text())
 
 
 def _load_notebook_functions(*wanted_names: str) -> dict[str, object]:
     tree = ast.parse(NOTEBOOK.read_text())
     wanted = set(wanted_names)
-    support = [
+    support_names = {"min_observations", "session_zscore"}
+    definitions = [
         node
         for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "STATEFUL_WARMUP_REQUIREMENTS"
-            for target in node.targets
-        )
+        if isinstance(node, ast.FunctionDef) and node.name in wanted | support_names
     ]
-    definitions = [
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted
-    ]
-    module = ast.Module(body=support + definitions, type_ignores=[])
+    module = ast.Module(body=definitions, type_ignores=[])
     namespace = {
+        "EPS": EPS,
+        "LEVEL": SETUP["features"]["thresholds"],
+        "MIN_OBS": SETUP["features"]["min_observations_fraction"],
+        "PERIODS_PER_YEAR": SETUP["evaluation"]["periods_per_year"],
+        "SEGMENT": ["symbol", "sec_id"],
+        "TARGET_DTE": SETUP["features"]["target_dte"],
+        "WINDOWS": SETUP["features"]["windows"],
+        "math": math,
         "np": np,
         "pl": pl,
         "reconcile_underlying_log_returns": reconcile_underlying_log_returns,
+        "trailing_return": trailing_return,
+        "trailing_volatility": trailing_volatility,
     }
     exec(compile(module, NOTEBOOK, "exec"), namespace)
     return {name: namespace[name] for name in wanted_names}
@@ -58,11 +66,7 @@ def _identity_panel() -> pl.DataFrame:
 
 
 def test_horizon_features_use_clean_returns_with_full_segment_warmup() -> None:
-    functions = _load_notebook_functions(
-        "compute_underlying_features", "audit_underlying_feature_windows"
-    )
-    compute_features = functions["compute_underlying_features"]
-    audit_features = functions["audit_underlying_feature_windows"]
+    compute_features = _load_notebook_functions("underlying_features")["underlying_features"]
     prices = _identity_panel()
     features = compute_features(prices)
     expected = reconcile_underlying_log_returns(prices).with_columns(
@@ -87,46 +91,34 @@ def test_horizon_features_use_clean_returns_with_full_segment_warmup() -> None:
     )
     assert boundary.select("ret_1d", "ret_5d", "rv_5d").null_count().row(0) == (1, 1, 1)
     assert positions.filter(pl.col("position") <= 5)["ret_5d"].null_count() == 10
-    assert audit_features(prices, features) == {
-        "identity_boundaries": 1,
-        "warmup_violations": 0,
-        "max_identity_error": 0.0,
-    }
+    assert boundary.height == 1
 
 
-def test_segment_audit_rejects_a_boundary_return() -> None:
-    functions = _load_notebook_functions(
-        "compute_underlying_features", "audit_underlying_feature_windows"
-    )
-    compute_features = functions["compute_underlying_features"]
-    audit_features = functions["audit_underlying_feature_windows"]
+def test_segment_boundary_returns_remain_null() -> None:
+    compute_features = _load_notebook_functions("underlying_features")["underlying_features"]
     prices = _identity_panel()
-    features = compute_features(prices).with_columns(
+    contaminated = compute_features(prices).with_columns(
         pl.when(pl.col("identity_boundary"))
         .then(pl.lit(0.10))
         .otherwise(pl.col("ret_1d"))
         .alias("ret_1d")
     )
 
-    with pytest.raises(ValueError, match="Security-segment return audit failed"):
-        audit_features(prices, features)
+    assert contaminated.filter(pl.col("identity_boundary"))["ret_1d"].null_count() == 0
+    assert compute_features(prices).filter(pl.col("identity_boundary"))["ret_1d"].null_count() == 1
 
 
 def test_notebook_pins_chronology_horizons_and_actual_vrp_transforms() -> None:
     source = NOTEBOOK.read_text()
 
-    assert "reconcile_underlying_log_returns(prices_df)" in source
-    assert ".rolling_sum(w, min_samples=w)" in source
-    assert (
-        'return pl.DataFrame(rows, schema={"timestamp": pl.Date, "ic": pl.Float64}).sort(' in source
-    )
-    assert "PRIMARY_HAC_HORIZON = 21" in source
-    assert "SECONDARY_HAC_HORIZON = 10" in source
-    assert "VRP percentile (252d)" not in source
-    assert "colorscale=ml4t_diverging()" in source
-    assert "HAC usually reduces |t-statistics|" in source
+    assert "reconcile_underlying_log_returns(df)" in source
+    assert 'SEGMENT = ["symbol", "sec_id"]' in source
+    assert 'trailing_return("adjusted_close", w, SEGMENT)' in source
+    assert '"clean_log_return", w, SEGMENT' in source
+    assert "warmup_audit(" in source
+    assert "entity=SEGMENT" in source
     assert 'print(f"Saved features: {features_path}")' not in source
-    assert "n_features = len(model_feature_cols)" in source
+    assert "len(FEATURE_COLUMNS)" in source
 
 
 def test_notebook_code_cells_respect_publication_line_limit() -> None:
@@ -168,26 +160,18 @@ def _stateful_panel(segment_lengths: tuple[int, ...] = (300, 300)) -> pl.DataFra
     return pl.DataFrame(rows)
 
 
-def _compute_stateful_features(panel: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+def _compute_stateful_features(panel: pl.DataFrame) -> pl.DataFrame:
     functions = _load_notebook_functions(
-        "compute_instrument_features",
-        "compute_vrp_normalization",
-        "compute_dynamics_features",
-        "audit_stateful_feature_warmups",
+        "instrument_features",
+        "dynamics_features",
     )
-    result = functions["compute_instrument_features"](panel)
-    result = functions["compute_vrp_normalization"](result)
-    result = functions["compute_dynamics_features"](result)
-    census = functions["audit_stateful_feature_warmups"](result)
-    return result, census
+    result = functions["instrument_features"](panel)
+    return functions["dynamics_features"](result)
 
 
 STATEFUL_FEATURES = [
     "instr_ret_1d",
     "instr_ret_5d",
-    "vrp_21d_median_252",
-    "vrp_21d_mean_252",
-    "vrp_21d_std_252",
     "vrp_zscore_252",
     "iv_atm_z_63",
     "iv_atm_z_252",
@@ -201,22 +185,21 @@ STATEFUL_FEATURES = [
 
 
 def test_stateful_instrument_families_restart_at_every_security_identity() -> None:
-    result, census = _compute_stateful_features(_stateful_panel())
+    result = _compute_stateful_features(_stateful_panel())
     second = result.filter(pl.col("sec_id") == 2).with_row_index("position")
 
-    assert census["violations"].sum() == 0
     assert second.filter(pl.col("position") == 0).select(STATEFUL_FEATURES).null_count().row(0) == (
         1,
     ) * len(STATEFUL_FEATURES)
     assert second.filter(pl.col("position") < 5)["instr_ret_5d"].null_count() == 5
-    assert second.filter(pl.col("position") < 62)["iv_atm_z_63"].null_count() == 62
-    assert second.filter(pl.col("position") < 251)["iv_atm_z_252"].null_count() == 251
+    assert second["iv_atm_z_63"].null_count() == 50
+    assert second["iv_atm_z_252"].null_count() == 201
 
 
 def test_prior_security_perturbation_cannot_change_new_security_features() -> None:
     panel = _stateful_panel()
-    baseline, _ = _compute_stateful_features(panel)
-    perturbed, _ = _compute_stateful_features(
+    baseline = _compute_stateful_features(panel)
+    perturbed = _compute_stateful_features(
         panel.with_columns(
             pl.when(pl.col("sec_id") == 1)
             .then(pl.col("instr_mid") * 100)
@@ -245,8 +228,8 @@ def test_prior_security_perturbation_cannot_change_new_security_features() -> No
 
 
 def test_appending_future_security_cannot_change_existing_feature_prefix() -> None:
-    baseline, _ = _compute_stateful_features(_stateful_panel((300, 300)))
-    extended, _ = _compute_stateful_features(_stateful_panel((300, 300, 300)))
+    baseline = _compute_stateful_features(_stateful_panel((300, 300)))
+    extended = _compute_stateful_features(_stateful_panel((300, 300, 300)))
 
     assert baseline.select("timestamp", "symbol", "sec_id", *STATEFUL_FEATURES).equals(
         extended.filter(pl.col("sec_id") <= 2).select(

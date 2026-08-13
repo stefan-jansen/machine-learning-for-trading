@@ -70,11 +70,12 @@ def _map_calendar_id(calendar: str | None) -> str | None:
 def _normalize_duration(s: str) -> str:
     """Strip ISO 8601 prefix (P, PT) and normalize unit aliases.
 
-    Examples: P5Y → 5Y, P1Y → 1Y, PT8H → 8h, 21D → 21D (unchanged).
+    Examples: P5Y → 5YE, P1Y → 1YE, PT8H → 8h, 21D → 21D (unchanged).
     """
     s = re.sub(r"^P?T?", "", s)
     s = re.sub(r"(\d+)H$", r"\1h", s)
     s = re.sub(r"(\d+)T$", r"\1min", s)
+    s = re.sub(r"(\d+)Y$", r"\1YE", s)
     return s
 
 
@@ -312,6 +313,8 @@ def generate_cv_splits(
             "holdout_start": cv_config.get(holdout_start_key),
             "holdout_end": cv_config.get(holdout_end_key),
             "calendar": cv_config.get("calendar"),
+            "step_size": cv_config.get("step_size"),
+            "expanding": bool(cv_config.get("expanding", False)),
         }
     elif setup_path is not None:
         with open(setup_path) as f:
@@ -345,6 +348,7 @@ def generate_cv_splits(
         label_horizon=label_horizon,
         calendar_id=calendar_id,
         fold_direction="backward",
+        step_size=eval_config.get("step_size"),
     )
 
     # Extract sorted unique timestamps from the dataset
@@ -366,9 +370,9 @@ def generate_cv_splits(
         index=ts_index,
     )
 
-    # Create WalkForwardCV with rolling window (expanding=False)
+    # Create WalkForwardCV with the resolved rolling or expanding behavior.
     cv = WalkForwardCV(config=config)
-    cv.expanding = False
+    cv.expanding = bool(eval_config.get("expanding", False))
 
     # Generate splits and extract date boundaries.
     # Match tz-awareness to the input data so comparisons work.

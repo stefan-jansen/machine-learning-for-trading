@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +20,7 @@ class DuplicateBacktest:
 
 def find_semantic_backtest_duplicates(db_path: Path) -> list[DuplicateBacktest]:
     """Find rows differing only by normalized, identity-neutral spec defaults."""
-    with sqlite3.connect(str(db_path)) as db:
+    with closing(sqlite3.connect(str(db_path))) as db:
         rows = db.execute(
             "SELECT backtest_hash, prediction_hash, stage, spec_json FROM backtest_runs"
         ).fetchall()
@@ -50,7 +51,7 @@ def deduplicate_semantic_backtests(
         return duplicates
 
     drops = [item for group in duplicates for item in group.drop_hashes]
-    with sqlite3.connect(str(db_path)) as db:
+    with closing(sqlite3.connect(str(db_path))) as db, db:
         db.execute("PRAGMA foreign_keys = ON")
         placeholders = ",".join("?" for _ in drops)
         references = {

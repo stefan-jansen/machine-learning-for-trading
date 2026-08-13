@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import asyncio
 import importlib
 import os
 import sys
@@ -99,7 +100,10 @@ def _first_party_names(root: Path) -> set[str]:
     names: set[str] = set()
     for path in root.rglob("*.py"):
         parts = path.relative_to(root).parts
-        if any(p in SKIP_DIRS for p in parts):
+        # Repository scripts remain first-party even when their directory is
+        # excluded from dependency scanning. Tests import these modules after
+        # adding .github/scripts to sys.path.
+        if any(p in SKIP_DIRS - {".github"} for p in parts):
             continue
         names.add(path.stem)
         if (path.parent / "__init__.py").exists():
@@ -171,7 +175,11 @@ def try_import(module_name: str) -> tuple[bool, str]:
     when a package imports OK but its configured data directory doesn't
     exist locally, which is not an environment setup failure.
     """
+    loop: asyncio.AbstractEventLoop | None = None
     try:
+        if module_name == "ib_async":
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         importlib.import_module(module_name)
         return True, ""
     except (FileNotFoundError, NotADirectoryError):
@@ -180,6 +188,10 @@ def try_import(module_name: str) -> tuple[bool, str]:
         return False, f"ImportError: {e}"
     except Exception as e:  # noqa: BLE001 — report anything that broke the import
         return False, f"{type(e).__name__}: {e}"
+    finally:
+        if loop is not None:
+            loop.close()
+            asyncio.set_event_loop(None)
 
 
 def main() -> int:

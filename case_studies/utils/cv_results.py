@@ -52,6 +52,8 @@ def assemble_cv_result(
     curve_df = _as_frame(curves)
     if curve_df.is_empty():
         raise ValueError("Cannot assemble CV results without checkpoint metrics.")
+    if all_predictions.is_empty():
+        raise ValueError("Cannot assemble CV results without prediction rows.")
 
     required = {"config", "epoch", "ic_mean"}
     missing = required.difference(curve_df.columns)
@@ -62,15 +64,45 @@ def assemble_cv_result(
         curve_df = curve_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("ic_std"))
     if "ic_n_days" not in curve_df.columns:
         curve_df = curve_df.with_columns(pl.lit(None, dtype=pl.Float64).alias("ic_n_days"))
+    curve_df = curve_df.with_columns(pl.col("epoch").cast(pl.Int64))
+
+    prediction_coverage = pl.DataFrame()
+    prediction_keys = {"config", "epoch", "y_score"}
+    if all_predictions.height > 0 and prediction_keys.issubset(all_predictions.columns):
+        prediction_coverage = (
+            all_predictions.with_columns(pl.col("epoch").cast(pl.Int64))
+            .group_by(["config", "epoch"])
+            .agg(
+                (
+                    pl.col("y_score").is_null().sum()
+                    + pl.col("y_score").is_nan().sum()
+                    + pl.col("y_score").is_infinite().sum()
+                ).alias("_prediction_n_invalid"),
+                pl.lit(True).alias("_has_prediction_rows"),
+            )
+        )
+
+    if "n_invalid" not in curve_df.columns:
+        curve_df = curve_df.with_columns(pl.lit(0, dtype=pl.Int64).alias("n_invalid"))
+    if prediction_coverage.height > 0:
+        curve_df = curve_df.join(prediction_coverage, on=["config", "epoch"], how="left")
+        curve_df = curve_df.with_columns(
+            pl.col("_prediction_n_invalid").fill_null(pl.col("n_invalid")).alias("n_invalid"),
+            pl.col("_has_prediction_rows").fill_null(False),
+        ).drop("_prediction_n_invalid")
 
     curve_df = curve_df.with_columns(
         pl.col("epoch").cast(pl.Int64),
         pl.col("ic_mean").cast(pl.Float64),
         pl.col("ic_std").cast(pl.Float64),
         pl.col("ic_n_days").cast(pl.Float64),
+        pl.col("n_invalid").cast(pl.Int64),
     ).sort(["config", "epoch"])
 
-    eligible = curve_df.filter(pl.col("ic_mean").is_finite())
+    eligibility = pl.col("ic_mean").is_finite() & (pl.col("n_invalid") == 0)
+    if "_has_prediction_rows" in curve_df.columns:
+        eligibility &= pl.col("_has_prediction_rows")
+    eligible = curve_df.filter(eligibility)
     full_coverage_days: float | None = None
     if require_full_coverage and not eligible.is_empty():
         finite_days = eligible.filter(pl.col("ic_n_days").is_finite())
@@ -101,6 +133,15 @@ def assemble_cv_result(
         )
         best = config_rows.row(0, named=True)
         config_meta = metadata.get(config_name, {})
+        selected_predictions = pl.DataFrame()
+        if all_predictions.height > 0 and {"config", "epoch"}.issubset(all_predictions.columns):
+            selected_predictions = all_predictions.filter(
+                (pl.col("config") == config_name) & (pl.col("epoch") == int(best["epoch"]))
+            )
+        if "fold_id" in selected_predictions.columns:
+            n_folds = int(selected_predictions["fold_id"].n_unique())
+        else:
+            n_folds = int(config_meta.get("n_folds") or 0)
         grid_row = dict(config_meta)
         grid_row.update(
             {
@@ -110,6 +151,9 @@ def assemble_cv_result(
                 "ic_n_days": (
                     float(best["ic_n_days"]) if best["ic_n_days"] is not None else float("nan")
                 ),
+                "n_invalid": int(best["n_invalid"]),
+                "n_folds": n_folds,
+                "selectable": True,
                 "elapsed_s": float(config_meta.get("elapsed_s") or 0.0),
                 "started_at": config_meta.get("started_at"),
             }
@@ -143,7 +187,7 @@ def assemble_cv_result(
             date_col=date_col,
             entity_col=entity_col,
         ),
-        "all_learning_curves": curve_df,
+        "all_learning_curves": curve_df.drop("_has_prediction_rows", strict=False),
         "training_log": _as_frame(training_log),
         "full_coverage_days": full_coverage_days,
     }

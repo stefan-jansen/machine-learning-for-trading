@@ -19,9 +19,11 @@ normalization), regardless of whether the source predictions.parquet uses
 from __future__ import annotations
 
 import copy
+import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from utils.paths import get_case_study_dir
@@ -40,6 +42,109 @@ DEFAULT_ALPHA: float = 0.20
 DEFAULT_MIN_CALIBRATION_N: int = 30
 CALIBRATION_VERSION: str = "walk_forward_v2"
 POOLED_FALLBACK: str = "pooled_prior_oos"
+
+HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
+    "etfs/fwd_ret_21d": 21,
+    "cme_futures/fwd_ret_5d": 5,
+    "cme_futures/fwd_ret_21d": 21,
+    "fx_pairs/fwd_ret_1d": 1,
+    "fx_pairs/fwd_ret_5d": 5,
+    "fx_pairs/fwd_ret_21d": 21,
+    "crypto_perps_funding/fwd_ret_24h": 3,
+    "crypto_perps_funding/fwd_ret_8h": 1,
+    "nasdaq100_microstructure/fwd_ret_15m": 1,
+    "nasdaq100_microstructure/fwd_ret_60m": 4,
+    "nasdaq100_microstructure/fwd_ret_5m": 1,
+    "sp500_equity_option_analytics/fwd_ret_5d": 5,
+    "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
+    "us_equities_panel/fwd_ret_5d": 5,
+    "us_equities_panel/fwd_ret_1d": 1,
+    "us_equities_panel/fwd_ret_21d": 21,
+    "us_firm_characteristics/fwd_ret_1m_win": 1,
+    "us_firm_characteristics/fwd_ret_1m": 1,
+    "us_firm_characteristics/fwd_class_1m": 1,
+}
+
+
+def split_conformal_coverage(
+    predictions: pl.DataFrame,
+    *,
+    levels: tuple[float, ...] = (0.80, 0.90, 0.95),
+    min_rows: int = 30,
+) -> list[dict[str, float | int]]:
+    """Measure split-conformal coverage with chronological calibration.
+
+    The earliest validation fold supplies both the absolute-residual quantile
+    and the target scale. Later folds are evaluation data only. Quantiles use
+    the exact finite-sample order statistic rather than interpolation.
+    """
+    renames = {
+        legacy: canonical
+        for legacy, canonical in _LEGACY_RENAME.items()
+        if legacy in predictions.columns and canonical not in predictions.columns
+    }
+    if renames:
+        predictions = predictions.rename(renames)
+
+    required = {"timestamp", "fold_id", "y_true", "y_score"}
+    missing = required - set(predictions.columns)
+    if missing:
+        raise ValueError(f"prediction artifact missing {sorted(missing)}")
+    predictions = predictions.drop_nulls(required).with_columns(
+        (pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid")
+    )
+    if predictions.is_empty():
+        raise ValueError("prediction artifact has no finite predictions")
+    for column in ("y_true", "y_score", "abs_resid"):
+        if not np.isfinite(predictions[column].to_numpy()).all():
+            raise ValueError(f"prediction artifact has non-finite {column} values")
+
+    fold_windows = (
+        predictions.group_by("fold_id")
+        .agg(pl.col("timestamp").min().alias("validation_start"))
+        .sort("validation_start")
+    )
+    if fold_windows.height < 2:
+        raise ValueError("conformal coverage requires at least two validation folds")
+    calibration_fold = fold_windows["fold_id"][0]
+    calibration = predictions.filter(pl.col("fold_id") == calibration_fold)
+    test = predictions.filter(pl.col("fold_id") != calibration_fold)
+    if calibration.height < min_rows or test.height < min_rows:
+        raise ValueError(f"conformal calibration or test panel has fewer than {min_rows} rows")
+
+    scale = float(calibration["y_true"].std() or 0.0)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("conformal calibration target scale is invalid")
+    calibration_residuals = np.sort(calibration["abs_resid"].to_numpy())
+    test_residuals = test["abs_resid"].to_numpy()
+    n_calibration = len(calibration_residuals)
+
+    rows: list[dict[str, float | int]] = []
+    for level in levels:
+        if not 0 < level < 1:
+            raise ValueError(f"invalid conformal level: {level}")
+        rank = math.ceil((n_calibration + 1) * level)
+        quantile = float("inf") if rank > n_calibration else float(calibration_residuals[rank - 1])
+        rows.append(
+            {
+                "nominal_level": float(level),
+                "empirical_coverage": float((test_residuals <= quantile).mean()),
+                "mean_interval_width_frac_std": float((2.0 * quantile) / scale),
+                "n_test": int(len(test_residuals)),
+            }
+        )
+    return rows
+
+
+def holdout_conformal_embargo_steps(case_study: str, label: str) -> int:
+    """Return the reviewed label horizon in prediction data steps."""
+    key = f"{case_study}/{label}"
+    try:
+        return HOLDOUT_CONFORMAL_EMBARGO_STEPS[key]
+    except KeyError as error:
+        raise KeyError(
+            f"No conformal holdout embargo is defined for {key}; add a reviewed data-step value"
+        ) from error
 
 
 def ensure_conformal_calibration_identity(strategy_spec: dict[str, Any]) -> dict[str, Any]:

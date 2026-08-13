@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import closing
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.registry.specs import (
+    canonical_json,
+    compute_hash,
+    project_training_identity,
+    training_hash_from_spec,
+)
+from case_studies.utils.registry.store import _open_registry, _utc_now
+
+from .comparison import CandidateSet
+from .contracts import LifecycleState
+from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .strategy import strategy_warmup_periods
+
+if TYPE_CHECKING:
+    from .workspace import Study
+
+
+@dataclass(frozen=True)
+class ResearchLock:
+    study: Study
+    hash: str
+    state: str
+    record: dict[str, Any]
+
+
+def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[str, Any]) -> dict:
+    projected_validation = project_training_identity(validation_spec)
+    projected_holdout = project_training_identity(holdout_spec)
+    if projected_holdout.get("execution_tier") != "canonical":
+        raise ValueError("holdout retraining must use the canonical execution tier")
+    validation_cv = projected_validation.pop("cv", None)
+    holdout_cv = projected_holdout.pop("cv", None)
+    if holdout_cv is None or holdout_cv == validation_cv:
+        raise ValueError("holdout retraining requires an explicit, distinct CV interval")
+    if projected_holdout != projected_validation:
+        raise ValueError("holdout retraining may differ from selected training only in CV interval")
+    return project_training_identity(holdout_spec)
+
+
+def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    projected.pop("_runtime_backtest_config", None)
+    metadata = projected.get("backtest_config", {}).get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("prediction_hash", None)
+    input_identity = projected.get("input_identity")
+    if isinstance(input_identity, dict):
+        input_identity.pop("prices", None)
+    return projected
+
+
+class Lifecycle:
+    def __init__(self, study: Study) -> None:
+        self.study = study
+
+    @property
+    def state(self) -> str:
+        db_path = self.study.root / "run_log" / "registry.db"
+        if not db_path.exists():
+            return LifecycleState.DEVELOPMENT.value
+        with closing(sqlite3.connect(db_path)) as db:
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'research_locks'"
+            ).fetchone()
+            if exists is None:
+                return LifecycleState.DEVELOPMENT.value
+            row = db.execute("SELECT state FROM research_locks LIMIT 1").fetchone()
+        return row[0] if row else LifecycleState.DEVELOPMENT.value
+
+    def lock(
+        self,
+        *,
+        candidate_set_hash: str,
+        selected_backtest_hash: str,
+        selection_evidence: dict[str, Any],
+        holdout_training_spec: dict[str, Any],
+    ) -> ResearchLock:
+        self.study.require_writable()
+        self.study.activate()
+        candidates = CandidateSet.open(self.study, candidate_set_hash)
+        if candidates.member_kind != "backtest" or selected_backtest_hash not in candidates.members:
+            raise ValueError("selected backtest must be an exact member of the candidate set")
+        if candidates.best_validation_sharpe().hash != selected_backtest_hash:
+            raise ValueError("research lock must select highest validation backtest Sharpe")
+        selected = Result.open(self.study, selected_backtest_hash)
+        if not isinstance(selected, BacktestResult) or not selected.complete:
+            raise ValueError("lock requires a complete backtest")
+        if selected.execution_tier != "canonical":
+            raise ValueError("preview ancestry cannot enter a lock")
+        backtest_record = selected.registry_record()
+        prediction = Result.open(self.study, backtest_record["prediction_hash"])
+        assert isinstance(prediction, PredictionResult)
+        prediction_record = prediction.registry_record()
+        training = Result.open(self.study, prediction_record["training_hash"])
+        assert isinstance(training, TrainingResult)
+        training_record = training.registry_record()
+        locked_holdout_spec = _locked_training_spec(training.spec(), holdout_training_spec)
+        holdout_training_hash = training_hash_from_spec(locked_holdout_spec)
+        lock_record = {
+            "candidate_set_hash": candidates.hash,
+            "selection_evidence": selection_evidence,
+            "label": training.spec().get("label"),
+            "label_artifact": training.spec().get("label_artifact"),
+            "feature_artifacts": training.spec().get("feature_artifacts"),
+            "cv": training.spec().get("cv"),
+            "training_hash": training.hash,
+            "holdout_training_hash": holdout_training_hash,
+            "holdout_training_spec": locked_holdout_spec,
+            "prediction_hash": prediction.hash,
+            "checkpoint_kind": prediction_record["checkpoint_kind"],
+            "checkpoint_value": prediction_record["checkpoint_value"],
+            "validation_backtest_hash": selected.hash,
+            "strategy_spec": selected.spec(),
+            "source_identity": training_record.get("git_commit"),
+            "runtime_provenance": json.loads(training_record.get("runtime_json") or "{}"),
+        }
+        lock_hash = compute_hash(canonical_json(lock_record))
+        db = _open_registry(self.study.root)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM research_locks LIMIT 1").fetchone() is not None:
+                raise ValueError("lifecycle can lock only from DEVELOPMENT")
+            db.execute(
+                "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    lock_hash,
+                    canonical_json(lock_record),
+                    LifecycleState.LOCKED.value,
+                    _utc_now(),
+                ),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return ResearchLock(self.study, lock_hash, LifecycleState.LOCKED.value, lock_record)
+
+    def open(self, lock_hash: str) -> ResearchLock:
+        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
+            row = db.execute(
+                "SELECT lock_json, state FROM research_locks WHERE lock_hash = ?", (lock_hash,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown research lock {lock_hash!r}")
+        return ResearchLock(self.study, lock_hash, row[1], json.loads(row[0]))
+
+    def record_holdout(
+        self,
+        lock_hash: str,
+        *,
+        holdout_training_hash: str,
+        holdout_prediction_hash: str,
+        holdout_backtest_hash: str,
+    ) -> ResearchLock:
+        self.study.require_writable()
+        self.study.activate()
+        lock = self.open(lock_hash)
+        if lock.state != LifecycleState.LOCKED.value:
+            raise ValueError("holdout evaluation requires a LOCKED research lock")
+        training = Result.open(self.study, holdout_training_hash)
+        prediction = Result.open(self.study, holdout_prediction_hash)
+        backtest = Result.open(self.study, holdout_backtest_hash)
+        canonical_holdout_prices = load_backtest_prices_for(
+            self.study.case_study,
+            str(lock.record["label"]),
+            split="holdout",
+            warmup_periods=strategy_warmup_periods(lock.record["strategy_spec"]),
+        )
+        canonical_price_digest = value_digest(canonical_holdout_prices)
+        valid = (
+            isinstance(training, TrainingResult)
+            and training.complete
+            and training.execution_tier == "canonical"
+            and training.hash == lock.record["holdout_training_hash"]
+            and project_training_identity(training.spec()) == lock.record["holdout_training_spec"]
+            and isinstance(prediction, PredictionResult)
+            and prediction.complete
+            and prediction.execution_tier == "canonical"
+            and prediction.registry_record()["split"] == "holdout"
+            and prediction.registry_record()["training_hash"] == training.hash
+            and prediction.registry_record()["checkpoint_kind"] == lock.record["checkpoint_kind"]
+            and prediction.registry_record()["checkpoint_value"] == lock.record["checkpoint_value"]
+            and isinstance(backtest, BacktestResult)
+            and backtest.complete
+            and backtest.execution_tier == "canonical"
+            and backtest.registry_record()["prediction_hash"] == prediction.hash
+            and backtest.spec().get("input_identity", {}).get("prices") == canonical_price_digest
+            and _locked_strategy_projection(backtest.spec())
+            == _locked_strategy_projection(lock.record["strategy_spec"])
+        )
+        if not valid:
+            raise ValueError(
+                "holdout transition requires the exact complete canonical lineage in the lock"
+            )
+
+        db = _open_registry(self.study.root)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            state = db.execute(
+                "SELECT state FROM research_locks WHERE lock_hash = ?", (lock_hash,)
+            ).fetchone()
+            if state != (LifecycleState.LOCKED.value,):
+                raise ValueError("research lock is not available for holdout evaluation")
+            db.execute(
+                "INSERT INTO holdout_evaluations "
+                "(lock_hash, holdout_training_hash, holdout_prediction_hash, "
+                "holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
+                (
+                    lock_hash,
+                    training.hash,
+                    prediction.hash,
+                    backtest.hash,
+                    _utc_now(),
+                ),
+            )
+            updated = db.execute(
+                "UPDATE research_locks SET state = ? WHERE lock_hash = ? AND state = ?",
+                (
+                    LifecycleState.HOLDOUT_EVALUATED.value,
+                    lock_hash,
+                    LifecycleState.LOCKED.value,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("research lock transition lost an atomicity race")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return self.open(lock_hash)

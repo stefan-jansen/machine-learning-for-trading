@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -291,7 +292,13 @@ def compute_portfolio_metrics(
         }
 
     analysis = PortfolioAnalysis(returns=returns, periods_per_year=periods_per_year)
-    pm = analysis.compute_summary_stats()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation",
+            category=RuntimeWarning,
+        )
+        pm = analysis.compute_summary_stats()
 
     def _safe(v: float) -> float:
         """Sanitize metric value: handle complex, inf, nan."""
@@ -334,8 +341,6 @@ def compute_portfolio_metrics(
             )
             out.update(unc)
         except Exception as exc:  # pragma: no cover - never block point estimates
-            import warnings
-
             warnings.warn(
                 f"compute_backtest_uncertainty failed: {exc}; point metrics returned without CIs",
                 stacklevel=2,
@@ -2205,9 +2210,10 @@ def run_plumbing_test(
     This validates the backtest pipeline produces no spurious alpha
     from random inputs.
     """
+    backtest_config = get_backtest_config(case_study)
     strategy_spec = ensure_backtest_spec(
         case_study,
-        get_backtest_config(case_study),
+        backtest_config,
         strategy_spec,
         prices=prices,
         prediction_hash="plumbing_test",
@@ -2217,8 +2223,23 @@ def run_plumbing_test(
     rebal_spec = strategy.get("rebalance", {})
 
     if rebal_spec["mode"] == "vectorized":
-        if predictions is None or label is None:
-            raise ValueError("Vectorized plumbing tests require predictions and label")
+        prediction_hash = "plumbing_test"
+        label = label or backtest_config.primary_label
+        if predictions is None:
+            from case_studies.utils.registry import load_prediction_index, read_predictions
+
+            prediction_index = load_prediction_index(
+                case_study,
+                label=label,
+                split="validation",
+            )
+            if prediction_index.is_empty():
+                raise ValueError(
+                    f"Vectorized plumbing test found no validation predictions for "
+                    f"{case_study}/{label}"
+                )
+            prediction_hash = prediction_index.row(0, named=True)["prediction_hash"]
+            predictions = read_predictions(case_study, prediction_hash)
 
         random_predictions = normalize_prediction_columns(predictions)
         rng = np.random.default_rng(seed)
@@ -2227,7 +2248,7 @@ def run_plumbing_test(
         )
         result = run_backtest(
             case_study,
-            "plumbing_test",
+            prediction_hash,
             strategy_spec,
             prices=prices,
             predictions=random_predictions,

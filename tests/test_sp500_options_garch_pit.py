@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 
 from case_studies.sp500_options._underlying_returns import reconcile_underlying_log_returns
@@ -112,7 +113,11 @@ def _load_seed_and_particle_filter():
         if isinstance(node, ast.FunctionDef)
         and node.name in {"stable_segment_seed", "particle_filter_sv"}
     ]
-    namespace = {"hashlib": __import__("hashlib"), "np": np}
+    namespace = {
+        "PERIODS_PER_YEAR": 252,
+        "hashlib": __import__("hashlib"),
+        "np": np,
+    }
     exec(
         compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK_SOURCE), "exec"),
         namespace,
@@ -315,9 +320,27 @@ def test_sv_pool_uses_training_option_coverage_not_generic_return_history() -> N
 def test_temporal_ic_screen_controls_false_discovery_rate() -> None:
     summarize = _load_temporal_ic_summarizer()
     temporal_ic = {
-        "strong": {"mean_ic": 0.03, "t_stat": 3.2, "p_value": 0.001},
-        "nominal_only": {"mean_ic": 0.02, "t_stat": 2.1, "p_value": 0.04},
-        "null": {"mean_ic": -0.01, "t_stat": -1.0, "p_value": 0.20},
+        "strong": {
+            "mean_ic": 0.03,
+            "naive_se": 0.008,
+            "hac_se": 0.009,
+            "t_stat": 3.2,
+            "p_value": 0.001,
+        },
+        "nominal_only": {
+            "mean_ic": 0.02,
+            "naive_se": 0.008,
+            "hac_se": 0.010,
+            "t_stat": 2.1,
+            "p_value": 0.04,
+        },
+        "null": {
+            "mean_ic": -0.01,
+            "naive_se": 0.009,
+            "hac_se": 0.010,
+            "t_stat": -1.0,
+            "p_value": 0.20,
+        },
     }
 
     summary, n_discoveries = summarize(temporal_ic)
@@ -333,14 +356,7 @@ def test_temporal_ic_screen_controls_false_discovery_rate() -> None:
 
 def test_temporal_hac_uses_hold_to_expiry_trading_horizon() -> None:
     tree = ast.parse(NOTEBOOK_SOURCE.read_text())
-    assignments = {
-        target.id: node.value.value
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance((target := node.targets[0]), ast.Name)
-        and isinstance(node.value, ast.Constant)
-    }
+    source = NOTEBOOK_SOURCE.read_text()
     hac_calls = [
         node
         for node in ast.walk(tree)
@@ -349,7 +365,9 @@ def test_temporal_hac_uses_hold_to_expiry_trading_horizon() -> None:
         and node.func.id == "compute_ic_hac_stats"
     ]
 
-    assert assignments["LABEL_HORIZON_TRADING_DAYS"] == 21
+    assert 'LABEL_HORIZON_TRADING_DAYS = int(_setup["features"]["hold_sessions"])' in source
+    setup = yaml.safe_load(Path("case_studies/sp500_options/config/setup.yaml").read_text())
+    assert setup["features"]["hold_sessions"] == 21
     assert len(hac_calls) == 1
     horizon = next(
         keyword.value for keyword in hac_calls[0].keywords if keyword.arg == "label_horizon"

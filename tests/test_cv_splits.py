@@ -38,7 +38,7 @@ from utils.cv_splits import (
     make_wf_config,
     most_recent_split,
 )
-from utils.modeling import validate_temporal_fold_coverage
+from utils.modeling import validate_temporal_fold_coverage, validate_temporal_split_geometry
 
 # -----------------------------------------------------------------------------
 # Pure: _map_calendar_id
@@ -68,9 +68,9 @@ def test_map_calendar_id(setup_name, expected) -> None:
 @pytest.mark.parametrize(
     "raw, normalized",
     [
-        ("P5Y", "5Y"),
-        ("P1Y", "1Y"),
-        ("1Y", "1Y"),
+        ("P5Y", "5YE"),
+        ("P1Y", "1YE"),
+        ("1Y", "1YE"),
         ("PT8H", "8h"),
         ("8H", "8h"),  # H → h for pd.Timedelta compatibility
         ("21D", "21D"),
@@ -417,6 +417,41 @@ def test_temporal_fold_metadata_remap_restores_coverage(backward_temporal_fixtur
     assert remapped["value"].sort().to_list() == values_before
 
 
+def test_custom_cv_cannot_reuse_temporal_features_from_different_geometry() -> None:
+    canonical = [
+        {
+            "fold": 0,
+            "train_start": "2018-01-01",
+            "train_end": "2019-12-31",
+            "val_start": "2020-01-01",
+            "val_end": "2020-12-31",
+        }
+    ]
+    requested = [{**canonical[0], "val_start": "2019-07-01"}]
+    temporal = pl.DataFrame({"fold": [0], "timestamp": [pd.Timestamp("2020-01-01")]})
+
+    with pytest.raises(ValueError, match=r"fold 0 differs in \['val_start'\]"):
+        validate_temporal_split_geometry(requested, canonical, temporal)
+
+
+def test_custom_cv_can_select_exact_fitted_temporal_fold_geometry() -> None:
+    canonical = [
+        {
+            "fold": fold,
+            "train_start": f"{2018 + fold}-01-01",
+            "train_end": f"{2019 + fold}-12-31",
+            "val_start": f"{2020 + fold}-01-01",
+            "val_end": f"{2020 + fold}-12-31",
+        }
+        for fold in (0, 1)
+    ]
+    temporal = pl.DataFrame(
+        {"fold": [0, 1], "timestamp": [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]}
+    )
+
+    validate_temporal_split_geometry([canonical[1]], canonical, temporal)
+
+
 @pytest.fixture
 def warmup_temporal_fixture() -> tuple[pl.DataFrame, list[dict]]:
     """One fold whose artifact can be trimmed to simulate a burn-in prefix."""
@@ -505,8 +540,8 @@ def test_make_walk_forward_config_nyse_label_horizon_is_int_trading_days() -> No
     assert cfg.label_horizon == 21
     assert cfg.calendar_id == "NYSE"
     assert cfg.n_splits == 8
-    assert cfg.train_size == "10Y"
-    assert cfg.test_size == "1Y"  # val_size → test_size alias
+    assert cfg.train_size == "10YE"
+    assert cfg.test_size == "1YE"  # val_size → test_size alias
     assert cfg.fold_direction == "backward"
 
 
@@ -598,6 +633,51 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
         "splits": [{**split, "fold": i} for i, split in enumerate(reversed(ascending["splits"]))]
     }
     assert [s["fold"] for s in generate_cv_splits(df, cv_config=renumbered)] == [0, 1]
+
+
+def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:
+    import json
+
+    from utils import CASE_STUDIES_DIR
+    from utils.artifact_specs import load_label_spec, resolve_storage_path
+    from utils.modeling import resolve_label_buffer, resolve_label_horizon
+
+    case_study = "fx_pairs"
+    label = "fwd_ret_1d"
+    source_case_dir = CASE_STUDIES_DIR / case_study
+    setup = yaml.safe_load((source_case_dir / "config" / "setup.yaml").read_text())
+    label_path = resolve_storage_path(
+        case_study,
+        load_label_spec(case_study, label),
+        f"labels/{label}.parquet",
+    )
+    if not label_path.exists():
+        pytest.skip("Production FX label artifact is not available")
+    labels = pl.read_parquet(label_path)
+    canonical = generate_cv_splits(
+        labels,
+        case_study_id=case_study,
+        label_buffer=resolve_label_buffer(case_study, label, setup),
+        outcome_horizon=resolve_label_horizon(case_study, label, setup),
+    )
+    materialized = generate_cv_splits(
+        labels,
+        cv_config=json.loads((source_case_dir / "config" / "cv_config.json").read_text()),
+        label_buffer=resolve_label_buffer(case_study, label, setup),
+    )
+
+    boundary_keys = ("fold", "train_start", "train_end", "val_start", "val_end")
+
+    def normalized(splits):
+        return [
+            {
+                key: split[key] if key == "fold" else pd.Timestamp(split[key])
+                for key in boundary_keys
+            }
+            for split in splits
+        ]
+
+    assert normalized(materialized) == normalized(canonical)
 
 
 def test_the_order_check_reads_a_stored_config_spelling() -> None:

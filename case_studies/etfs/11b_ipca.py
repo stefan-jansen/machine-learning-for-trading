@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -12,13 +13,13 @@
 #     name: python3
 # ---
 
-# %% [markdown] papermill={"duration": 0.003667, "end_time": "2026-04-28T02:25:47.448243+00:00", "exception": false, "start_time": "2026-04-28T02:25:47.444576+00:00", "status": "completed"}
+# %% [markdown]
 # # IPCA for ETF Rotation
 #
 # IPCA uses the ETF characteristic panel directly and forecasts the training
 # sample factor premia through the shared latent-factor pipeline.
 
-# %% papermill={"duration": 2.79495, "end_time": "2026-04-28T02:25:50.246752+00:00", "exception": false, "start_time": "2026-04-28T02:25:47.451802+00:00", "status": "completed"}
+# %%
 """ETF IPCA case-study run via the shared latent-factor library path."""
 
 import warnings
@@ -32,7 +33,7 @@ from case_studies.utils.latent_factors.case_study import (
 
 warnings.filterwarnings("ignore")
 
-# %% papermill={"duration": 0.004137, "end_time": "2026-04-28T02:25:50.251631+00:00", "exception": false, "start_time": "2026-04-28T02:25:50.247494+00:00", "status": "completed"} tags=["parameters"]
+# %% tags=["parameters"]
 CASE_STUDY_ID = "etfs"
 PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
@@ -46,13 +47,13 @@ RUN_VARIANTS = True
 USE_MACRO = False
 MODEL_NAME = "ipca"
 
-# %% papermill={"duration": 0.002856, "end_time": "2026-04-28T02:25:50.255004+00:00", "exception": false, "start_time": "2026-04-28T02:25:50.252148+00:00", "status": "completed"} tags=["injected-parameters"]
+# %% tags=["injected-parameters"]
 # Parameters
 USE_CACHE = False
 FORCE_RETRAIN = True
 
 
-# %% papermill={"duration": 0.558196, "end_time": "2026-04-28T02:25:50.813714+00:00", "exception": false, "start_time": "2026-04-28T02:25:50.255518+00:00", "status": "completed"}
+# %%
 context = load_case_study_context(
     CASE_STUDY_ID,
     primary_label=PRIMARY_LABEL,
@@ -73,10 +74,10 @@ print(f"Dataset rows: {len(context.dataset):,}")
 print(f"Features: {len(context.feature_names)}")
 print(f"Splits: {len(context.splits)}")
 
-# %% [markdown] papermill={"duration": 0.001567, "end_time": "2026-04-28T02:25:50.816548+00:00", "exception": false, "start_time": "2026-04-28T02:25:50.814981+00:00", "status": "completed"}
+# %% [markdown]
 # ## Run Walk-Forward CV
 
-# %% papermill={"duration": 165.593686, "end_time": "2026-04-28T02:28:36.411098+00:00", "exception": false, "start_time": "2026-04-28T02:25:50.817412+00:00", "status": "completed"}
+# %%
 result = run_case_study_model(
     context,
     model_name=MODEL_NAME,
@@ -90,10 +91,10 @@ result = run_case_study_model(
 print(result["model_results"])
 print(result["fold_metrics"][MODEL_NAME])
 
-# %% [markdown] papermill={"duration": 0.001585, "end_time": "2026-04-28T02:28:36.413700+00:00", "exception": false, "start_time": "2026-04-28T02:28:36.412115+00:00", "status": "completed"}
+# %% [markdown]
 # ## Variant Labels
 
-# %% papermill={"duration": 167.290035, "end_time": "2026-04-28T02:31:23.704487+00:00", "exception": false, "start_time": "2026-04-28T02:28:36.414452+00:00", "status": "completed"}
+# %%
 variant_results = {}
 if RUN_VARIANTS and context.variant_labels:
     variant_results = run_case_study_variants(
