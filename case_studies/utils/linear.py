@@ -5,7 +5,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -20,6 +19,7 @@ from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRe
 
 from case_studies.research.contracts import ExecutionTier
 from case_studies.research.models import ModelRun
+from case_studies.research.recovery import ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
@@ -327,16 +327,48 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
         return None
     if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
         return None
-    return ModelRun(training=training, predictions=(prediction,))
+    return ModelRun(
+        training=training,
+        predictions=(prediction,),
+        diagnostics={
+            "cache_hit": True,
+            "reused_folds": sorted(int(fold["fold"]) for fold in context.folds),
+            "fitted_folds": [],
+        },
+    )
 
 
-def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path) -> pl.DataFrame:
+def _fit_or_reuse_predictions(
+    spec: dict[str, Any],
+    context: LinearContext,
+    training: TrainingResult,
+    ledger: ExecutionLedger,
+) -> tuple[pl.DataFrame, list[int], list[int]]:
     cls = _MODEL_CLASSES[spec["model"]["class"]]
     prediction_frames = []
-    files = {}
+    model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    shard_dir = training.root / "run_log" / "training" / training.hash / "prediction_folds"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    reused_folds = []
+    fitted_folds = []
     for fold in context.folds:
         fold_id = int(fold["fold"])
         params = spec["model"]["effective_params_by_fold"][str(fold_id)]
+        artifact = model_dir / f"fold_{fold_id}.joblib"
+        shard = shard_dir / f"fold_{fold_id}.parquet"
+        if ledger.reusable_fold(
+            training_hash=training.hash,
+            candidate_identity=training.hash,
+            fold_id=fold_id,
+            fitted_state=artifact,
+            prediction_shard=shard,
+            resolved_settings=params,
+        ):
+            prediction_frames.append(pl.read_parquet(shard))
+            reused_folds.append(fold_id)
+            continue
+
         model = cls(**params)
         model.fit(fold["X_train"], fold["y_train"])
         if context.task_type == "classification":
@@ -350,16 +382,6 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
         if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
             raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
 
-        artifact = staging / f"fold_{fold_id}.joblib"
-        joblib.dump(
-            {
-                "feature_names": context.feature_names,
-                "model": model,
-                "preprocessor": fold["preprocessor"],
-            },
-            artifact,
-        )
-        files[artifact.name] = _sha256(artifact)
         frame = pl.from_pandas(fold["meta"][[context.entity_col, context.date_col]]).with_columns(
             pl.lit(fold_id, dtype=pl.Int64).alias("fold"),
             pl.Series("prediction", predictions),
@@ -367,13 +389,44 @@ def _fit_predictions(spec: dict[str, Any], context: LinearContext, staging: Path
         )
         if fold.get("y_eval") is not None:
             frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
-        prediction_frames.append(
-            frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
-        )
-    (staging / "manifest.json").write_text(
+        frame = frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
+        artifact_temp = model_dir / f".{artifact.name}.{uuid.uuid4().hex}.tmp"
+        shard_temp = shard_dir / f".{shard.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            joblib.dump(
+                {
+                    "feature_names": context.feature_names,
+                    "model": model,
+                    "preprocessor": fold["preprocessor"],
+                },
+                artifact_temp,
+            )
+            frame.write_parquet(shard_temp)
+            os.replace(artifact_temp, artifact)
+            os.replace(shard_temp, shard)
+            ledger.complete_fold(
+                training_hash=training.hash,
+                candidate_identity=training.hash,
+                fold_id=fold_id,
+                fitted_state=artifact,
+                prediction_shard=shard,
+                resolved_settings=params,
+            )
+        finally:
+            artifact_temp.unlink(missing_ok=True)
+            shard_temp.unlink(missing_ok=True)
+        prediction_frames.append(frame)
+        fitted_folds.append(fold_id)
+
+    files = {path.name: _sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))}
+    manifest = model_dir / "manifest.json"
+    manifest_temp = model_dir / f".manifest.{uuid.uuid4().hex}.tmp"
+    manifest_temp.write_text(
         json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
     )
-    return pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    os.replace(manifest_temp, manifest)
+    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    return predictions, reused_folds, fitted_folds
 
 
 def run_resolved_request(
@@ -392,33 +445,36 @@ def run_resolved_request(
         runtime_provenance=context.runtime_provenance,
     )
     train_dir = training.root / "run_log" / "training" / training.hash
-    model_dir = train_dir / "models"
-    if model_dir.exists():
-        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
-    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-    staging.mkdir(parents=True)
+    ledger = ExecutionLedger(study, training.root)
+    attempt = ledger.start(training.hash)
     try:
-        predictions = _fit_predictions(spec, context, staging)
-        os.replace(staging, model_dir)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        predictions, reused_folds, fitted_folds = _fit_or_reuse_predictions(
+            spec, context, training, ledger
+        )
+        prediction = study.results.publish_predictions(
+            training,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            split="validation",
+            predictions=predictions,
+            expected_keys=context.expected_keys,
+            task_type=context.task_type,
+            class_values=list(context.class_values) or None,
+            eval_col="eval_actual" if context.eval_label_col else None,
+            label=context.label_col,
+        )
+        diagnostics = {
+            "cache_hit": False,
+            "reused_folds": reused_folds,
+            "fitted_folds": fitted_folds,
+        }
+        attempt.finish("completed", diagnostics)
+    except Exception as exc:
+        attempt.finish("failed", {"error_type": type(exc).__name__, "error": str(exc)})
         raise
-
-    prediction = study.results.publish_predictions(
-        training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=predictions,
-        expected_keys=context.expected_keys,
-        task_type=context.task_type,
-        class_values=list(context.class_values) or None,
-        eval_col="eval_actual" if context.eval_label_col else None,
-        label=context.label_col,
-    )
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
         runtime["elapsed_s"] = time.perf_counter() - started
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=(prediction,))
+    return ModelRun(training=training, predictions=(prediction,), diagnostics=diagnostics)

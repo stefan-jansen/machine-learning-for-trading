@@ -137,6 +137,17 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
         )
         columns = [description[0] for description in cursor.description]
         records = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+        overlay_roots = (
+            {
+                row[0]: Path(row[1])
+                for row in db.execute(
+                    "SELECT result_hash, source_root FROM overlay_references "
+                    "WHERE result_kind = 'prediction'"
+                ).fetchall()
+            }
+            if "overlay_references" in tables
+            else {}
+        )
 
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -159,12 +170,18 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             if identity_version == IDENTITY_VERSION
             else ("legacy-v2" if identity_version == 2 else "legacy")
         )
+        artifact_root = overlay_roots.get(record["p_prediction_hash"], root)
+        row_origin = "released" if record["p_prediction_hash"] in overlay_roots else origin
         artifact = (
-            root / "run_log" / "predictions" / record["p_prediction_hash"] / "predictions.parquet"
+            artifact_root
+            / "run_log"
+            / "predictions"
+            / record["p_prediction_hash"]
+            / "predictions.parquet"
         )
         row: dict[str, Any] = {
             "catalog_version": CATALOG_VERSION,
-            "origin": origin,
+            "origin": row_origin,
             "identity_status": identity_status,
             "family": record["t_family"],
             "config_name": record["t_config_name"],

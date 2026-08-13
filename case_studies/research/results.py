@@ -47,6 +47,25 @@ def _training_identity_projection(db: sqlite3.Connection, alias: str = "") -> st
     return f"{identity}, {tier}"
 
 
+def _stored_origin(
+    db: sqlite3.Connection,
+    result_hash: str,
+    result_kind: str,
+    default: str,
+) -> str:
+    tables = {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "overlay_references" not in tables:
+        return default
+    row = db.execute(
+        "SELECT 1 FROM overlay_references WHERE result_hash = ? AND result_kind = ?",
+        (result_hash, result_kind),
+    ).fetchone()
+    return "released" if row is not None else default
+
+
 @dataclass(frozen=True)
 class Result:
     study: Study
@@ -54,6 +73,7 @@ class Result:
     kind: str
     execution_tier: str
     identity_version: int | None
+    origin: str = "workspace"
 
     @classmethod
     def open(
@@ -63,12 +83,19 @@ class Result:
         *,
         include_preview: bool = False,
     ) -> Result:
-        roots = [(study.root, ExecutionTier.CANONICAL.value)]
+        roots = []
+        if not study.read_only:
+            roots.append((study.root, ExecutionTier.CANONICAL.value, "workspace"))
+        roots.append((study.release_case_root, ExecutionTier.CANONICAL.value, "released"))
         if include_preview and not study.read_only and study.output_root is not None:
             roots.append(
-                (study.output_root / ".preview" / study.case_study, ExecutionTier.PREVIEW.value)
+                (
+                    study.output_root / ".preview" / study.case_study,
+                    ExecutionTier.PREVIEW.value,
+                    "workspace",
+                )
             )
-        for root, namespace in roots:
+        for root, namespace, origin in roots:
             db_path = root / "run_log" / "registry.db"
             if not db_path.exists():
                 continue
@@ -89,8 +116,14 @@ class Result:
                 )
                 if training is not None:
                     tier = training["execution_tier"] or namespace
+                    result_origin = _stored_origin(db, result_hash, "training", origin)
                     return TrainingResult(
-                        study, result_hash, "training", tier, training["identity_version"]
+                        study,
+                        result_hash,
+                        "training",
+                        tier,
+                        training["identity_version"],
+                        result_origin,
                     )
                 prediction = None
                 if "prediction_sets" in tables:
@@ -107,8 +140,14 @@ class Result:
                     )
                 if prediction is not None:
                     tier = prediction["execution_tier"] or namespace
+                    result_origin = _stored_origin(db, result_hash, "prediction", origin)
                     return PredictionResult(
-                        study, result_hash, "prediction", tier, prediction["identity_version"]
+                        study,
+                        result_hash,
+                        "prediction",
+                        tier,
+                        prediction["identity_version"],
+                        result_origin,
                     )
                 backtest = None
                 if {"prediction_sets", "backtest_runs"} <= tables:
@@ -127,12 +166,19 @@ class Result:
                 if backtest is not None:
                     tier = backtest["execution_tier"] or namespace
                     return BacktestResult(
-                        study, result_hash, "backtest", tier, backtest["identity_version"]
+                        study,
+                        result_hash,
+                        "backtest",
+                        tier,
+                        backtest["identity_version"],
+                        origin,
                     )
         raise KeyError(f"Unknown result hash {result_hash!r}")
 
     @property
     def root(self) -> Path:
+        if self.origin == "released":
+            return self.study.release_case_root
         return self.study.storage_root(self.execution_tier)
 
     @property
@@ -250,7 +296,21 @@ class PredictionResult(Result):
     def complete(self) -> bool:
         coverage = self.coverage()
         prediction_file = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
-        return bool(coverage and coverage["status"] == "complete" and prediction_file.is_file())
+        if (
+            self.identity_version not in SUPPORTED_IDENTITY_VERSIONS
+            or not coverage
+            or coverage["status"] != "complete"
+            or not prediction_file.is_file()
+        ):
+            return False
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
+            headline = db.execute(
+                "SELECT 1 FROM prediction_metrics WHERE prediction_hash = ?", (self.hash,)
+            ).fetchone()
+            fold_count = db.execute(
+                "SELECT COUNT(*) FROM fold_metrics WHERE prediction_hash = ?", (self.hash,)
+            ).fetchone()[0]
+        return headline is not None and fold_count == coverage["n_folds_expected"]
 
     def load(self):
         import polars as pl
@@ -346,6 +406,10 @@ class ResultsCatalog:
             raise ValueError("training result belongs to another study")
         tier = ExecutionTier(training.execution_tier)
         case_dir = self.study.activate(tier)
+        from .cv import EligibilityManifest
+
+        if isinstance(expected_keys, EligibilityManifest):
+            expected_keys = expected_keys.eligible_keys
         prediction_hash = register_prediction_set(
             self.study.case_study,
             training.hash,

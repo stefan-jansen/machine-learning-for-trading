@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.registry.specs import training_hash_from_spec
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 class ModelRun:
     training: TrainingResult
     predictions: tuple[PredictionResult, ...]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.predictions:

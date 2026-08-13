@@ -996,7 +996,9 @@ def register_backtest_run(
     b_hash = backtest_hash_from_parts(
         prediction_hash, strategy_spec, identity_version=identity_version
     )
-    spec_json_str = canonical_json(strategy_spec)
+    stored_strategy_spec = dict(strategy_spec)
+    stored_strategy_spec.pop("_runtime_backtest_config", None)
+    spec_json_str = canonical_json(stored_strategy_spec)
 
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)

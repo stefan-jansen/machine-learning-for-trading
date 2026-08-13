@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from case_studies.utils.artifact_digest import value_digest
@@ -20,6 +20,7 @@ class EligibilityManifest:
     n_eligible: int
     sorted_key_digest: str
     folds: tuple[dict[str, Any], ...]
+    eligible_keys: Any = field(repr=False, compare=False)
 
     @classmethod
     def resolve(
@@ -71,6 +72,7 @@ class EligibilityManifest:
             n_eligible=selected.height,
             sorted_key_digest=value_digest(selected, tuple(key_columns)),
             folds=tuple(fold_records),
+            eligible_keys=selected,
         )
 
     def as_dict(self) -> dict[str, Any]:

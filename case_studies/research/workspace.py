@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
     from .models import ModelRequest
+    from .recovery import ExecutionLedger
     from .results import ResultsCatalog
     from .strategy import Strategy
 
@@ -214,6 +215,12 @@ class Study:
         from .lifecycle import Lifecycle
 
         return Lifecycle(self)
+
+    @property
+    def executions(self) -> ExecutionLedger:
+        from .recovery import ExecutionLedger
+
+        return ExecutionLedger(self)
 
     def strategy(self, **request) -> Strategy:
         from .strategy import Strategy
