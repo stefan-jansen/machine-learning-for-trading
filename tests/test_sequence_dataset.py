@@ -277,6 +277,53 @@ def test_fixed_cadence_windows_do_not_span_missing_panel_periods():
         assert np.all(np.diff(window) == cadence)
 
 
+def test_weekday_intraday_windows_reject_a_panel_wide_missing_bar():
+    from case_studies.utils.sequence_dataset import prepare_fold_sequence_stores
+
+    session_days = pd.date_range("2021-01-04", periods=4, freq="B")
+    dates = pd.DatetimeIndex(
+        [
+            day + pd.Timedelta(hours=9, minutes=30) + pd.Timedelta(minutes=15 * slot)
+            for day in session_days
+            for slot in range(8)
+        ]
+    )
+    missing_date = session_days[1] + pd.Timedelta(hours=10)
+    rows = [
+        {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "feat0": float(i),
+            "y": float(i),
+        }
+        for symbol in ("S0", "S1")
+        for i, timestamp in enumerate(dates)
+        if timestamp != missing_date
+    ]
+    df = pd.DataFrame(rows)
+    train_mask = df["timestamp"].dt.normalize() < session_days[3]
+    val_mask = df["timestamp"].dt.normalize() == session_days[3]
+    lookback = 2
+
+    train_store, _, _ = prepare_fold_sequence_stores(
+        df,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        feature_names=["feat0"],
+        label_col="y",
+        date_col="timestamp",
+        entity_col="symbol",
+        lookback=lookback,
+        val_start=session_days[3] + pd.Timedelta(hours=9, minutes=30),
+    )
+
+    cadence = np.timedelta64(15, "m")
+    for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
+        timestamps = train_store.timestamps[int(symbol_id)]
+        window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
+        assert np.all(np.diff(window) == cadence)
+
+
 def test_monthly_period_numbers_preserve_gaps_at_millisecond_resolution():
     from case_studies.utils.sequence_dataset import _sequence_period_numbers
 
@@ -287,6 +334,23 @@ def test_monthly_period_numbers_preserve_gaps_at_millisecond_resolution():
     periods = _sequence_period_numbers(timestamps)
 
     assert np.diff(periods).tolist() == [1, 2]
+
+
+def test_daily_period_numbers_use_the_declared_market_calendar():
+    from case_studies.utils.sequence_dataset import _sequence_period_numbers
+
+    around_holiday = pd.Series(
+        pd.to_datetime(["2022-06-29", "2022-06-30", "2022-07-01", "2022-07-05", "2022-07-06"])
+    )
+    missing_session = pd.Series(
+        pd.to_datetime(["2022-06-29", "2022-06-30", "2022-07-01", "2022-07-06", "2022-07-07"])
+    )
+
+    observed = _sequence_period_numbers(around_holiday, calendar_id="NYSE")
+    missing = _sequence_period_numbers(missing_session, calendar_id="NYSE")
+
+    assert np.diff(observed).tolist() == [1, 1, 1, 1]
+    assert np.diff(missing).tolist() == [1, 1, 2, 1]
 
 
 def test_priming_includes_label_buffer_gap_rows():

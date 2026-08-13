@@ -302,7 +302,11 @@ def _build_sequence_index(
     return symbol_idx, end_idx
 
 
-def _sequence_period_numbers(timestamps: pd.Series) -> np.ndarray:
+def _sequence_period_numbers(
+    timestamps: pd.Series,
+    *,
+    calendar_id: str | None = None,
+) -> np.ndarray:
     """Map timestamps to consecutive expected observation periods."""
 
     values = pd.DatetimeIndex(pd.to_datetime(timestamps)).as_unit("ns")
@@ -315,15 +319,38 @@ def _sequence_period_numbers(timestamps: pd.Series) -> np.ndarray:
     intraday = unique.normalize().nunique() < len(unique)
     trades_on_weekends = bool(np.any(unique.dayofweek >= 5))
 
-    if intraday and trades_on_weekends:
+    if intraday:
         positive_diffs = diffs[diffs > 0]
         cadence_ns = int(pd.Series(positive_diffs).mode().iloc[0])
-        return ((values.asi8 - unique[0].value) // cadence_ns).astype(np.int64)
+        if trades_on_weekends:
+            return ((values.asi8 - unique[0].value) // cadence_ns).astype(np.int64)
+
+        normalized = values.normalize()
+        session_number = normalized.asi8 // pd.Timedelta(days=1).value
+        slot = (values.asi8 - normalized.asi8) // cadence_ns
+        return (session_number * 1_000_000 + slot).astype(np.int64)
 
     if median_days >= 20:
         return (values.year * 12 + values.month).astype(np.int64)
 
-    return unique.get_indexer(values).astype(np.int64)
+    if median_days >= 4:
+        return (values.to_period("W").asi8 - values.to_period("W").asi8.min()).astype(np.int64)
+
+    if calendar_id:
+        import pandas_market_calendars as mcal
+
+        calendar = mcal.get_calendar(calendar_id)
+        sessions = calendar.valid_days(
+            start_date=unique.min().normalize(),
+            end_date=unique.max().normalize(),
+        ).tz_localize(None)
+        positions = sessions.get_indexer(values.normalize().tz_localize(None))
+        if np.all(positions >= 0):
+            return positions.astype(np.int64)
+
+    normalized = values.normalize().to_numpy(dtype="datetime64[D]")
+    epoch = np.datetime64("1970-01-01", "D")
+    return np.busday_count(epoch, normalized).astype(np.int64)
 
 
 def _build_val_df_with_priming(
@@ -372,6 +399,7 @@ def prepare_fold_sequence_stores(
     temporal_feature_names: list[str] | None = None,
     fold_id: int | None = None,
     val_start: pd.Timestamp | str | None = None,
+    calendar_id: str | None = None,
 ) -> tuple[SequenceStore, SequenceStore, dict[str, int]]:
     """Build normalized train/validation sequence stores for a fold.
 
@@ -387,7 +415,10 @@ def prepare_fold_sequence_stores(
     """
 
     if _SEQUENCE_PERIOD_COL not in dataset_pd.columns:
-        dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(dataset_pd[date_col])
+        dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(
+            dataset_pd[date_col],
+            calendar_id=calendar_id,
+        )
     use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL, *feature_names]
     val_start_ts: pd.Timestamp | None
     if val_start is None:
