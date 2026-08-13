@@ -18,8 +18,15 @@ import os
 # is bit-reproducible across runs at the same seed/spec/data.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+import hashlib
+import importlib.metadata
+import json
+import platform
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -29,6 +36,31 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from statsmodels.regression.linear_model import OLS
 
 from utils.modeling import RANDOM_SEED, seed_everything
+
+if TYPE_CHECKING:
+    from case_studies.research.workspace import Study
+
+
+_DML_PREVIEW_FIELDS = {"max_samples", "max_symbols", "n_folds", "n_placebo"}
+
+
+@dataclass(frozen=True)
+class DMLResearchContext:
+    analysis: pd.DataFrame
+    treatment_col: str
+    outcome_col: str
+    confounder_cols: tuple[str, ...]
+    time_col: str
+    entity_col: str
+    n_folds: int
+    embargo: int
+    n_placebo: int
+    block_size: int
+    seed: int
+    horizon: int
+    expected_step: pd.Timedelta
+    nuisance_params: dict[str, Any]
+    runtime_provenance: dict[str, Any]
 
 
 def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = None) -> int:
@@ -69,6 +101,7 @@ def block_permute(
     rng: np.random.Generator | None = None,
     groups: np.ndarray | None = None,
     units: np.ndarray | None = None,
+    expected_step: str | pd.Timedelta | None = None,
 ) -> np.ndarray:
     """Permute array in blocks to preserve autocorrelation structure.
 
@@ -114,7 +147,13 @@ def block_permute(
             unit_groups = group_arr[idx]
             if len(unit_groups) > 1 and np.any(unit_groups[1:] <= unit_groups[:-1]):
                 raise ValueError("groups must be strictly increasing within each unit")
-            result[idx] = block_permute(arr[idx], block_size, rng=rng)
+            result[idx] = block_permute(
+                arr[idx],
+                block_size,
+                rng=rng,
+                groups=unit_groups,
+                expected_step=expected_step,
+            )
         return result
 
     if groups is not None:
@@ -125,6 +164,21 @@ def block_permute(
             raise ValueError("units are required when decision times contain multiple rows")
         if n > 1 and np.any(group_arr[1:] <= group_arr[:-1]):
             raise ValueError("groups must be strictly increasing")
+        if expected_step is not None and n > 1:
+            cadence = pd.Timedelta(expected_step)
+            timestamps = pd.to_datetime(group_arr, utc=True)
+            boundaries = np.flatnonzero(np.asarray(timestamps[1:] - timestamps[:-1]) != cadence) + 1
+            if boundaries.size:
+                result = np.empty_like(arr)
+                starts = np.r_[0, boundaries]
+                stops = np.r_[boundaries, n]
+                for start, stop in zip(starts, stops, strict=True):
+                    result[start:stop] = block_permute(
+                        arr[start:stop],
+                        block_size,
+                        rng=rng,
+                    )
+                return result
 
     n_blocks = n // block_size
     if n_blocks < 2:
@@ -422,6 +476,9 @@ def run_dml_analysis(
     horizon: int | None = None,
     time_col: str | None = None,
     entity_col: str | None = None,
+    model_y=None,
+    model_t=None,
+    expected_step: str | pd.Timedelta | None = None,
 ) -> dict:
     """Full DML analysis pipeline: naive OLS, DML, and refutation tests.
 
@@ -518,6 +575,8 @@ def run_dml_analysis(
         hac_maxlags=hac_maxlags,
         horizon=horizon,
         groups=groups,
+        model_y=model_y,
+        model_t=model_t,
     )
 
     # Compare the adjusted estimate with naive OLS on the exact second-stage
@@ -538,7 +597,14 @@ def run_dml_analysis(
     placebo_effects = []
     placebo_n_obs = []
     for _ in range(n_placebo):
-        T_perm = block_permute(T, block_size, rng=rng, groups=groups, units=units)
+        T_perm = block_permute(
+            T,
+            block_size,
+            rng=rng,
+            groups=groups,
+            units=units,
+            expected_step=expected_step,
+        )
         perm_result = manual_dml_timeseries(
             Y,
             T_perm,
@@ -548,6 +614,8 @@ def run_dml_analysis(
             hac_maxlags=hac_maxlags,
             horizon=horizon,
             groups=groups,
+            model_y=model_y,
+            model_t=model_t,
         )
         if not np.isnan(perm_result["theta"]):
             if perm_result["n_obs"] != dml["n_obs"]:
@@ -563,7 +631,7 @@ def run_dml_analysis(
         p_mean = np.mean(placebo_arr)
         p_std = np.std(placebo_arr)
         z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
-        emp_p = np.mean(np.abs(placebo_arr) >= np.abs(dml_effect))
+        emp_p = float(np.mean(np.abs(placebo_arr) >= np.abs(dml_effect)))
         ref_class = classify_refutation(emp_p)
         refutation = {
             "z_score": z,
@@ -632,6 +700,307 @@ def format_dml_summary(results: dict) -> str:
 
     lines.append("=" * 60)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Reader-facing causal request adapter
+# ---------------------------------------------------------------------------
+
+
+def _causal_source_identity() -> dict[str, str]:
+    path = Path(__file__)
+    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def _causal_runtime_identity() -> dict[str, str]:
+    return {
+        "numpy": importlib.metadata.version("numpy"),
+        "scikit-learn": importlib.metadata.version("scikit-learn"),
+        "statsmodels": importlib.metadata.version("statsmodels"),
+    }
+
+
+def _causal_runtime_provenance(study: Study) -> dict[str, Any]:
+    return {
+        "entry_point": "case_studies.utils.causal",
+        "packages": _causal_runtime_identity(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "source_commit": study.manifest.get("baseline_source_commit", "unknown"),
+    }
+
+
+def _whole_timestamp_tail(
+    frame,
+    *,
+    timestamp: str,
+    entity: str,
+    max_rows: int,
+):
+    import polars as pl
+
+    ordered = frame.sort([timestamp, entity])
+    if max_rows <= 0 or ordered.height <= max_rows:
+        return ordered
+    counts = ordered.group_by(timestamp).len().sort(timestamp)
+    counts = counts.with_columns(pl.col("len").reverse().cum_sum().reverse().alias("suffix_n"))
+    keep = counts.filter(pl.col("suffix_n") <= max_rows).select(timestamp)
+    if keep.is_empty():
+        raise ValueError("max_samples is smaller than the final timestamp panel")
+    return ordered.join(keep, on=timestamp, how="semi").sort([timestamp, entity])
+
+
+def _observed_cadence(frame, timestamp: str) -> pd.Timedelta:
+    values = pd.DatetimeIndex(frame.get_column(timestamp).unique().sort().to_list())
+    if len(values) < 2:
+        raise ValueError("causal analysis needs at least two decision timestamps")
+    differences = pd.Series(values[1:] - values[:-1])
+    cadence = differences.mode().iloc[0]
+    if cadence <= pd.Timedelta(0):
+        raise ValueError("causal observation cadence must be positive")
+    return pd.Timedelta(cadence)
+
+
+def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], seed: int):
+    configured = dict(config.get("params") or {})
+    supplied = dict(overrides.get("nuisance_params") or {})
+    estimator = HistGradientBoostingRegressor(random_state=seed)
+    unknown = (set(configured) | set(supplied)) - set(estimator.get_params(deep=True))
+    if unknown:
+        raise ValueError(f"unsupported DML nuisance parameters: {sorted(unknown)}")
+    estimator.set_params(**configured, **supplied)
+    return estimator.get_params(deep=True)
+
+
+def resolve_causal_request(study: Study, request: dict[str, Any]):
+    import polars as pl
+    import yaml
+
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.identity import ResolvedSpec
+    from case_studies.utils.artifact_digest import value_digest
+    from utils.modeling import load_configs, load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _DML_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported DML preview reductions: {sorted(unknown_reductions)}")
+    allowed_overrides = {"nuisance_params"}
+    unknown_overrides = set(request["overrides"]) - allowed_overrides
+    if unknown_overrides:
+        raise ValueError(f"unsupported DML overrides: {sorted(unknown_overrides)}")
+
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
+    mds = load_modeling_dataset(
+        study.case_study,
+        label_ref.name,
+        max_symbols=int(reductions.get("max_symbols", 0)),
+    )
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
+        raise ValueError("DML runner requires canonical symbol and timestamp keys")
+    configs = {
+        config["config_name"]: config
+        for config in load_configs(study.case_study, label_ref.name, "causal_dml")
+    }
+    try:
+        config = configs[request["config_name"]]
+    except KeyError as error:
+        raise ValueError(f"unknown DML configuration {request['config_name']!r}") from error
+
+    setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
+    causal = setup.get("causal") or {}
+    treatment = str(causal["treatment"])
+    confounders = tuple(str(value) for value in causal["confounders"])
+    seed = int(config.get("seed", RANDOM_SEED))
+    n_folds = int(reductions.get("n_folds", config.get("n_folds", 5)))
+    n_placebo = int(reductions.get("n_placebo", config.get("n_placebo", 100)))
+    max_samples = int(reductions.get("max_samples", config.get("max_samples", 0)))
+    if n_folds < 2 or n_placebo < 0 or max_samples < 0:
+        raise ValueError("DML folds, placebos, and sample cap are invalid")
+
+    columns = [mds.date_col, mds.entity_cols[0], treatment, mds.label_col, *confounders]
+    missing = sorted(set(columns) - set(mds.dataset.columns))
+    if missing:
+        raise ValueError(f"DML analysis columns are missing: {missing}")
+    holdout = pd.Timestamp(setup["evaluation"]["holdout_start"], tz="UTC")
+    horizon_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
+    date_dtype = mds.dataset.schema[mds.date_col]
+    endpoint_cutoff = holdout - horizon_delta
+    analysis = (
+        mds.dataset.select(columns)
+        .drop_nulls()
+        .filter(
+            pl.col(mds.date_col)
+            < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
+        )
+    )
+    analysis = _whole_timestamp_tail(
+        analysis,
+        timestamp=mds.date_col,
+        entity=mds.entity_cols[0],
+        max_rows=max_samples,
+    )
+    if analysis.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    cadence = _observed_cadence(analysis, mds.date_col)
+    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
+    embargo = embargo_from_buffer(mds.label_buffer)
+    nuisance_params = _resolve_nuisance_params(config, request["overrides"], seed)
+    key_frame = analysis.select(mds.entity_cols[0], mds.date_col)
+    if key_frame.n_unique([mds.entity_cols[0], mds.date_col]) != key_frame.height:
+        raise ValueError("DML analysis keys are not unique")
+
+    computation = {
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": mds.input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "estimand": {
+            "method": "walk_forward_dml",
+            "outcome": mds.label_col,
+            "treatment": treatment,
+            "confounders": list(confounders),
+            "treatment_observed_at": "decision_timestamp",
+            "outcome_horizon": str(horizon_delta),
+            "holdout_endpoint_cutoff": endpoint_cutoff.isoformat(),
+        },
+        "cv": {
+            "n_folds": n_folds,
+            "embargo_periods": embargo,
+            "fold_unit": "complete_timestamp_panel",
+        },
+        "model": {
+            "class": "sklearn.ensemble.HistGradientBoostingRegressor",
+            "implementation": "scikit-learn",
+            "nuisance_params": nuisance_params,
+        },
+        "refutation": {
+            "method": "within_symbol_contiguous_block_permutation",
+            "n_placebo": n_placebo,
+            "block_size": embargo,
+            "seed": seed,
+            "temporal_gap_policy": "reset",
+            "observation_cadence": str(cadence),
+        },
+        "analysis_population": {
+            "key_digest": value_digest(key_frame, (mds.entity_cols[0], mds.date_col)),
+            "n_rows": analysis.height,
+            "n_timestamps": analysis.get_column(mds.date_col).n_unique(),
+            "max_samples": max_samples,
+        },
+        "input_data_spec": mds.input_lineage,
+        "source_identity": _causal_source_identity(),
+        "runtime_identity": _causal_runtime_identity(),
+    }
+    if tier is ExecutionTier.PREVIEW:
+        computation["preview_reductions"] = reductions
+    provenance = _causal_runtime_provenance(study)
+    spec = ResolvedSpec.create(
+        family="causal_dml",
+        label=label_ref.name,
+        seed=seed,
+        computation=computation,
+        provenance=provenance,
+        config_name=config["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
+    context = DMLResearchContext(
+        analysis=analysis.to_pandas(),
+        treatment_col=treatment,
+        outcome_col=mds.label_col,
+        confounder_cols=confounders,
+        time_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        n_folds=n_folds,
+        embargo=embargo,
+        n_placebo=n_placebo,
+        block_size=embargo,
+        seed=seed,
+        horizon=horizon_steps,
+        expected_step=cadence,
+        nuisance_params=nuisance_params,
+        runtime_provenance=provenance,
+    )
+    return spec, context
+
+
+def run_resolved_causal_request(
+    study: Study,
+    spec: dict[str, Any],
+    context: DMLResearchContext,
+):
+    import math
+
+    from case_studies.research.causal import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run as register_record
+    from case_studies.utils.registry.specs import canonical_json, training_hash_from_spec
+
+    causal_hash = training_hash_from_spec(spec)
+    try:
+        cached = CausalResult.open(
+            study,
+            causal_hash,
+            include_preview=spec["execution_tier"] == "preview",
+        )
+    except KeyError:
+        cached = None
+    if cached is not None:
+        if cached.spec != spec or not cached.complete:
+            raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
+        return cached
+
+    nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)
+    nuisance_t = HistGradientBoostingRegressor(**context.nuisance_params)
+    results = run_dml_analysis(
+        context.analysis,
+        context.treatment_col,
+        context.outcome_col,
+        list(context.confounder_cols),
+        n_folds=context.n_folds,
+        embargo=context.embargo,
+        n_placebo=context.n_placebo,
+        block_size=context.block_size,
+        seed=context.seed,
+        horizon=context.horizon,
+        time_col=context.time_col,
+        entity_col=context.entity_col,
+        model_y=nuisance_y,
+        model_t=nuisance_t,
+        expected_step=context.expected_step,
+    )
+    dml = results["dml_result"]
+    if not all(math.isfinite(float(dml[name])) for name in ("theta", "se_hac")):
+        raise ValueError("DML fit did not produce a finite effect and HAC standard error")
+    refutation_p = results.get("refutation", {}).get("empirical_p")
+    case_dir = study.storage_root(spec["execution_tier"])
+    register_record(
+        study.case_study,
+        causal_hash,
+        label=context.outcome_col,
+        treatment=context.treatment_col,
+        confounders_json=json.dumps(list(context.confounder_cols)),
+        embargo=context.embargo,
+        n_folds=context.n_folds,
+        n_obs=int(dml["n_obs"]),
+        dml_effect=float(dml["theta"]),
+        dml_se_hac=float(dml["se_hac"]),
+        p_value_hac=float(results["p_value_hac"]),
+        naive_effect=float(results["naive_effect"]),
+        confounding_bias_pct=float(results["confounding_bias_pct"]),
+        refutation_p=float(refutation_p) if refutation_p is not None else None,
+        spec_json=canonical_json(spec),
+        notebook="case_studies.utils.causal",
+        started_at=results.get("started_at"),
+        elapsed_s=results.get("elapsed_s"),
+        case_dir=case_dir,
+    )
+    return CausalResult.open(
+        study,
+        causal_hash,
+        include_preview=spec["execution_tier"] == "preview",
+    )
 
 
 # ---------------------------------------------------------------------------

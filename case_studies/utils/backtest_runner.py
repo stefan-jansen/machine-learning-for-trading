@@ -862,6 +862,7 @@ def run_backtest(
     initial_cash: float = 1_000_000.0,
     calendar: str = "NYSE",
     precomputed_weights: pl.DataFrame | None = None,
+    funding_rates: pl.DataFrame | None = None,
     force_rebacktest: bool = False,
     contract_specs: dict | None = None,
 ) -> BacktestRunResult:
@@ -900,6 +901,8 @@ def run_backtest(
     contract_specs : dict, optional
         Per-asset contract specifications (futures multipliers, tick sizes).
         Pass for futures case studies to get correct P&L scaling.
+    funding_rates : pl.DataFrame, optional
+        Official position-signed perpetual-futures funding settlements.
 
     Returns
     -------
@@ -1118,6 +1121,7 @@ def run_backtest(
             contract_specs=contract_specs,
             case_study=case_study,
             label=label,
+            funding_rates=funding_rates,
         )
 
     # Build metrics dict
@@ -1209,6 +1213,7 @@ def _run_engine(
     *,
     case_study: str | None = None,
     label: str | None = None,
+    funding_rates: pl.DataFrame | None = None,
 ) -> dict:
     """Run backtest via ml4t-backtest Engine."""
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor
@@ -1386,6 +1391,19 @@ def _run_engine(
     engine = Engine.from_config(feed, strategy, config, contract_specs=contract_specs)
     engine_result = engine.run()
 
+    funding_metrics = {}
+    if funding_rates is not None:
+        from case_studies.crypto_perps_funding.funding_backtest import (
+            apply_funding_settlements,
+        )
+
+        funding_metrics = apply_funding_settlements(
+            engine_result,
+            prices=prices,
+            funding_rates=funding_rates,
+            initial_cash=initial_cash,
+        )
+
     # Extract daily returns
     session_aligned = infer_session_alignment(calendar)
     daily_df = extract_daily_returns_frame(
@@ -1408,6 +1426,7 @@ def _run_engine(
 
     ppy = overall_periods_per_year(case_study, calendar, daily_df)
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=ppy, trim_leading_zeros=False)
+    metrics.update(funding_metrics)
 
     # Engine-specific metrics (execution details not derivable from returns)
     m = engine_result.metrics

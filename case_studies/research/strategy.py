@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import polars as pl
@@ -29,10 +30,19 @@ from .contracts import ExecutionTier
 from .results import BacktestResult, PredictionResult, Result
 
 if TYPE_CHECKING:
+    from .decisions import DecisionArtifact
     from .workspace import Study
 
 
 _MOMENT_ALLOCATORS = {"inverse_vol", "risk_parity", "hrp", "mvo", "mvo_ledoit_wolf"}
+
+
+def _date_string(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"expected a date-like timestamp, got {type(value).__name__}")
 
 
 def strategy_warmup_periods(strategy_spec: dict[str, Any]) -> int:
@@ -53,6 +63,7 @@ class Strategy:
     study: Study
     prediction: PredictionResult
     signal: dict[str, Any]
+    decision: DecisionArtifact | None = None
     allocation: dict[str, Any] | None = None
     risk: dict[str, Any] | None = None
     costs: dict[str, Any] | None = None
@@ -76,6 +87,11 @@ class Strategy:
             raise ValueError("prediction belongs to another study")
         if not self.prediction.complete:
             raise ValueError("partial predictions cannot enter strategy execution")
+        if self.decision is not None:
+            if self.decision.study != self.study:
+                raise ValueError("decision artifact belongs to another study")
+            if tuple(self.decision.spec["prediction_hashes"]) != (self.prediction.hash,):
+                raise ValueError("decision artifact must declare exactly the selected prediction")
         prediction_record = self.prediction.registry_record()
         split = prediction_record["split"]
         if split == "validation":
@@ -103,6 +119,7 @@ class Strategy:
         supported = {
             "prediction",
             "signal",
+            "decision",
             "allocation",
             "risk",
             "costs",
@@ -117,10 +134,17 @@ class Strategy:
         prediction = request.get("prediction")
         if not isinstance(prediction, PredictionResult):
             raise TypeError("strategy request requires one PredictionResult")
+        decision = request.get("decision")
+        if decision is not None:
+            from .decisions import DecisionArtifact
+
+            if not isinstance(decision, DecisionArtifact):
+                raise TypeError("strategy request decision must be a DecisionArtifact")
         return cls(
             study=study,
             prediction=prediction,
             signal=deepcopy(request.get("signal") or {}),
+            decision=decision,
             allocation=deepcopy(request.get("allocation")),
             risk=deepcopy(request.get("risk")),
             costs=deepcopy(request.get("costs")),
@@ -152,7 +176,7 @@ class Strategy:
         return strategy_warmup_periods({"allocation": allocation}) if allocation else 0
 
     def resolve(self, *, prices: pl.DataFrame | None = None) -> dict[str, Any]:
-        self.study.activate(ExecutionTier.CANONICAL)
+        self.study.activate(ExecutionTier(self.prediction.execution_tier))
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
         case_config = get_backtest_config(self.study.case_study)
@@ -188,6 +212,20 @@ class Strategy:
         spec["identity_version"] = 2
         spec["execution_tier"] = self.prediction.execution_tier
         spec["input_identity"] = {"prices": value_digest(prices)}
+        if self.study.case_study == "crypto_perps_funding":
+            funding_rates = self._funding_rates(prices)
+            assert funding_rates is not None
+            spec["input_identity"]["funding_rates"] = value_digest(funding_rates)
+            spec["economic_cashflows"] = {"funding": "position_signed_before_same_timestamp_fills"}
+        if self.decision is not None:
+            spec["decision_artifact"] = {
+                "hash": self.decision.hash,
+                "kind": self.decision.kind,
+                "artifact_digest": self.decision.spec["artifact_digest"],
+                "canonical": self.decision.canonical,
+                "source_identity": self.decision.spec["source_identity"],
+                "state_transition_policy": self.decision.spec["state_transition_policy"],
+            }
         if contract_specs is not None:
             serialized = {
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
@@ -202,6 +240,47 @@ class Strategy:
                 raise ValueError("holdout strategy does not match the locked validation strategy")
         return resolved
 
+    def _funding_rates(self, prices: pl.DataFrame) -> pl.DataFrame | None:
+        if self.study.case_study != "crypto_perps_funding":
+            return None
+        from case_studies.crypto_perps_funding.funding_data import load_funding_rates
+
+        symbols = prices.get_column("symbol").unique().to_list()
+        start = _date_string(prices.get_column("timestamp").min())
+        end = _date_string(prices.get_column("timestamp").max())
+        funding = load_funding_rates(symbols=symbols, start_date=start, end_date=end)
+        if funding.is_empty():
+            raise ValueError("crypto backtest resolved no official funding settlements")
+        return funding
+
+    def _decision_weights(self, prices: pl.DataFrame) -> pl.DataFrame | None:
+        if self.decision is None:
+            return None
+        decisions = self.decision.load()
+        if self.decision.kind == "target_weights":
+            weights = decisions.select("symbol", "timestamp", "weight")
+        elif self.decision.kind == "target_positions":
+            weights = decisions.select("symbol", "timestamp", "position").with_columns(
+                pl.col("position").abs().sum().over("timestamp").alias("gross")
+            )
+            weights = weights.with_columns(
+                pl.when(pl.col("gross") > 0)
+                .then(pl.col("position") / pl.col("gross"))
+                .otherwise(0.0)
+                .alias("weight")
+            ).select("symbol", "timestamp", "weight")
+        else:
+            raise ValueError("canonical backtesting does not support order decision artifacts")
+        price_keys = prices.select("symbol", "timestamp").unique()
+        weights = weights.with_columns(
+            pl.col("symbol").cast(price_keys.schema["symbol"]),
+            pl.col("timestamp").cast(price_keys.schema["timestamp"]),
+        )
+        missing = weights.join(price_keys, on=["symbol", "timestamp"], how="anti")
+        if not missing.is_empty():
+            raise ValueError("decision artifact contains keys outside the backtest price grid")
+        return weights
+
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
@@ -212,7 +291,7 @@ class Strategy:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
         predictions = self.prediction.load()
         resolved_prices = prices
-        self.study.activate(ExecutionTier.CANONICAL)
+        self.study.activate(ExecutionTier(self.prediction.execution_tier))
         if resolved_prices is None:
             resolved_prices = load_backtest_prices_for(
                 self.study.case_study,
@@ -245,6 +324,8 @@ class Strategy:
             spec,
             prices=resolved_prices,
             predictions=predictions,
+            precomputed_weights=self._decision_weights(resolved_prices),
+            funding_rates=self._funding_rates(resolved_prices),
             label=self.label,
             initial_cash=float(spec["backtest_config"]["cash"]["initial"]),
             calendar=case_config.calendar,

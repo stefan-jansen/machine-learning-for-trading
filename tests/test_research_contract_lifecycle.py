@@ -173,6 +173,24 @@ def test_canonical_decision_promotion_requires_replay_evidence(tmp_path: Path) -
             canonical=True,
         )
 
+    with pytest.raises(ValueError, match="exact prediction_hashes"):
+        DecisionArtifact.publish(
+            study,
+            kind="target_positions",
+            decisions=_decisions(),
+            prediction_hashes=[prediction_hash],
+            parameters={},
+            source_identity={
+                "module": "case_studies.research.decisions",
+                "source_digest": "source-a",
+                "declared_inputs": {"prediction_hashes": ["undisclosed-other-input"]},
+                "determinism": {"seed": 42},
+                "clean_replay_digest": "not-reached",
+            },
+            state_transition_policy=policy,
+            canonical=True,
+        )
+
     exploratory = DecisionArtifact.publish(
         study,
         kind="target_positions",
@@ -184,7 +202,7 @@ def test_canonical_decision_promotion_requires_replay_evidence(tmp_path: Path) -
     evidence = {
         "module": "case_studies.research.decisions",
         "source_digest": "source-a",
-        "declared_inputs": {"prediction": prediction_hash},
+        "declared_inputs": {"prediction_hashes": [prediction_hash]},
         "determinism": {"seed": 42},
         "clean_replay_digest": exploratory.spec["artifact_digest"],
     }
@@ -240,6 +258,15 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
         selected_backtest_hash=validation_backtest.hash,
         selection_evidence={"metric": "validation_backtest_sharpe"},
         holdout_training_spec=holdout_spec,
+    )
+    assert (
+        study.lifecycle.lock(
+            candidate_set_hash=candidates.hash,
+            selected_backtest_hash=validation_backtest.hash,
+            selection_evidence={"metric": "validation_backtest_sharpe"},
+            holdout_training_spec=holdout_spec,
+        ).hash
+        == lock.hash
     )
     holdout_training = study.results.register_training(holdout_spec)
     holdout_frame = frame.with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))

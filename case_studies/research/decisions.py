@@ -64,7 +64,10 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     return keys
 
 
-def _validate_promotion(source_identity: dict[str, Any]) -> None:
+def _validate_promotion(
+    source_identity: dict[str, Any],
+    prediction_hashes: tuple[str, ...],
+) -> None:
     required = {
         "module",
         "source_digest",
@@ -81,6 +84,13 @@ def _validate_promotion(source_identity: dict[str, Any]) -> None:
         raise ValueError("canonical decision promotion source module is not importable")
     if not source_identity["declared_inputs"]:
         raise ValueError("canonical decision promotion requires declared immutable inputs")
+    declared = source_identity["declared_inputs"]
+    if not isinstance(declared, dict) or declared.get("prediction_hashes") != list(
+        prediction_hashes
+    ):
+        raise ValueError(
+            "canonical decision promotion must disclose the exact prediction_hashes input"
+        )
     determinism = source_identity["determinism"]
     if not isinstance(determinism, dict) or not (
         determinism.get("deterministic") or determinism.get("seed") is not None
@@ -123,15 +133,25 @@ class DecisionArtifact:
         lineage = tuple(dict.fromkeys(prediction_hashes))
         if not lineage or len(lineage) != len(prediction_hashes):
             raise ValueError("decision prediction lineage must be non-empty and unique")
+        prediction_results = []
         for prediction_hash in lineage:
             result = Result.open(study, prediction_hash, include_preview=not canonical)
             if not isinstance(result, PredictionResult):
                 raise ValueError(f"decision lineage {prediction_hash!r} is not a prediction")
-            if canonical and (result.identity_version != IDENTITY_VERSION or not result.complete):
+            if canonical and (
+                result.identity_version != IDENTITY_VERSION
+                or not result.complete
+                or result.execution_tier != "canonical"
+            ):
                 raise ValueError("canonical decision lineage requires current complete predictions")
+            prediction_results.append(result)
+        tiers = {result.execution_tier for result in prediction_results}
+        if len(tiers) != 1:
+            raise ValueError("decision lineage cannot mix canonical and preview predictions")
+        execution_tier = tiers.pop()
         normalized_source = canonical_value(source_identity or {})
         if canonical:
-            _validate_promotion(normalized_source)
+            _validate_promotion(normalized_source, lineage)
         normalized_decisions = decisions.sort(list(key_columns))
         spec = {
             "schema_version": 1,
@@ -145,16 +165,18 @@ class DecisionArtifact:
             "decision_keys": list(key_columns),
             "artifact_digest": value_digest(normalized_decisions),
             "canonical": canonical,
+            "execution_tier": execution_tier,
         }
         if canonical and normalized_source["clean_replay_digest"] != spec["artifact_digest"]:
             raise ValueError("canonical decision clean replay does not match the artifact digest")
         decision_hash = compute_hash(canonical_json(spec))
-        artifact_dir = study.root / "run_log" / "decisions" / decision_hash
+        storage_root = study.storage_root(execution_tier)
+        artifact_dir = storage_root / "run_log" / "decisions" / decision_hash
         artifact = artifact_dir / "decisions.parquet"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         temporary = artifact_dir / f".decisions.{uuid.uuid4().hex}.tmp"
         normalized_decisions.write_parquet(temporary)
-        db = _open_registry(study.root)
+        db = _open_registry(storage_root)
         created_artifact = False
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -190,13 +212,15 @@ class DecisionArtifact:
         finally:
             temporary.unlink(missing_ok=True)
             db.close()
-        return cls(study, decision_hash, kind, spec, canonical, study.root)
+        return cls(study, decision_hash, kind, spec, canonical, storage_root)
 
     @classmethod
     def open(cls, study: Study, decision_hash: str) -> DecisionArtifact:
         roots = [study.root]
         if study.release_case_root != study.root:
             roots.append(study.release_case_root)
+        if study.output_root is not None:
+            roots.append(study.output_root / ".preview" / study.case_study)
         for root in roots:
             db_path = root / "run_log" / "registry.db"
             if not db_path.is_file():

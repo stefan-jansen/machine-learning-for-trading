@@ -174,11 +174,14 @@ def run_backtests(
     costs: dict[str, Any] | None = None,
     chapter: str | None = None,
     execution_mode: str | None = None,
+    decision=None,
 ) -> BacktestExecution:
     study.require_writable()
     if not isinstance(predictions, pl.DataFrame):
         raise TypeError("run_backtests requires a Polars prediction catalog selection")
     resolved = _validate_selection(study, predictions)
+    if decision is not None and len(resolved) != 1:
+        raise ValueError("one decision artifact requires exactly one selected prediction")
     for prediction in resolved:
         _import_released_prediction(study, prediction)
 
@@ -188,6 +191,7 @@ def run_backtests(
         result = study.strategy(
             prediction=prediction,
             signal=signal,
+            decision=decision,
             allocation=allocation,
             risk=risk,
             costs=costs,

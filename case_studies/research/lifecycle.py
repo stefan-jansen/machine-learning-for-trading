@@ -132,9 +132,14 @@ class Lifecycle:
         lock_hash = compute_hash(canonical_json(lock_record))
         db = _open_registry(self.study.root)
         try:
+            existing_lock = db.execute(
+                "SELECT lock_hash, state FROM research_locks LIMIT 1"
+            ).fetchone()
+            if existing_lock is not None:
+                if existing_lock[0] != lock_hash:
+                    raise ValueError("lifecycle already contains a different research lock")
+                return ResearchLock(self.study, lock_hash, existing_lock[1], lock_record)
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM research_locks LIMIT 1").fetchone() is not None:
-                raise ValueError("lifecycle can lock only from DEVELOPMENT")
             db.execute(
                 "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) "
                 "VALUES (?,?,?,?)",
