@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -106,6 +107,23 @@ class Result:
                     return PredictionResult(
                         study, result_hash, "prediction", tier, prediction["identity_version"]
                     )
+                causal = None
+                if "causal_runs" in tables:
+                    causal = _record(
+                        db,
+                        "SELECT spec_json FROM causal_runs WHERE causal_hash = ?",
+                        (result_hash,),
+                    )
+                if causal is not None:
+                    spec = json.loads(causal.get("spec_json") or "{}")
+                    tier = spec.get("execution_tier") or namespace
+                    return CausalResult(
+                        study,
+                        result_hash,
+                        "causal",
+                        tier,
+                        spec.get("identity_version"),
+                    )
                 backtest = None
                 if {"prediction_sets", "backtest_runs"} <= tables:
                     identity_projection = _training_identity_projection(db, "t")
@@ -140,6 +158,7 @@ class Result:
             "training": ("training_runs", "training_hash"),
             "prediction": ("prediction_sets", "prediction_hash"),
             "backtest": ("backtest_runs", "backtest_hash"),
+            "causal": ("causal_runs", "causal_hash"),
         }[self.kind]
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             record = _record(db, f"SELECT * FROM {table} WHERE {key} = ?", (self.hash,))
@@ -148,6 +167,8 @@ class Result:
 
     def spec(self) -> dict[str, Any]:
         record = self.registry_record()
+        if self.kind == "causal":
+            return json.loads(record.get("spec_json") or "{}")
         if self.kind == "prediction":
             return {
                 "training_hash": record["training_hash"],
@@ -158,6 +179,8 @@ class Result:
         return json.loads(record.get("spec_json") or "{}")
 
     def artifacts(self) -> tuple[Path, ...]:
+        if self.kind == "causal":
+            return ()
         directory = (
             self.root
             / "run_log"
@@ -173,6 +196,8 @@ class Result:
         return tuple(sorted(path for path in directory.rglob("*") if path.is_file()))
 
     def lineage(self) -> dict[str, Any]:
+        if self.kind == "causal":
+            return {"causal_hash": self.hash, "causal_spec": self.spec()}
         if self.kind == "training":
             return {"training_hash": self.hash, "training_spec": self.spec()}
         record = self.registry_record()
@@ -200,6 +225,13 @@ class Result:
 
     def protocol(self) -> dict[str, Any]:
         lineage = self.lineage()
+        if self.kind == "causal":
+            spec = lineage["causal_spec"]
+            return {
+                "input_identity": spec.get("input_identity"),
+                "cv": spec.get("cv"),
+                "execution_tier": self.execution_tier,
+            }
         training = lineage["training_spec"]
         split = None
         if self.kind == "prediction":
@@ -253,6 +285,20 @@ class PredictionResult(Result):
 
         path = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
         return pl.read_parquet(path)
+
+
+@dataclass(frozen=True)
+class CausalResult(Result):
+    @property
+    def complete(self) -> bool:
+        record = self.registry_record()
+        values = (record.get("dml_effect"), record.get("dml_se_hac"), record.get("n_obs"))
+        return (
+            self.identity_version == 2
+            and bool(self.spec())
+            and all(value is not None and math.isfinite(value) for value in values)
+            and int(record["n_obs"]) > 0
+        )
 
 
 @dataclass(frozen=True)

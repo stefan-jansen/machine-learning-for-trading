@@ -107,7 +107,7 @@ def test_causal_preview_stays_out_of_canonical_registry(tmp_path: Path) -> None:
 def test_causal_failure_does_not_register_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from case_studies.research import causal
+    from case_studies.utils import causal as causal_adapter
 
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -128,7 +128,7 @@ def test_causal_failure_does_not_register_result(
             "refutation": {"empirical_p": 0.01},
         }
 
-    monkeypatch.setattr(causal, "run_dml_analysis", fallback_result)
+    monkeypatch.setattr(causal_adapter, "run_dml_analysis", fallback_result)
     with pytest.raises(RuntimeError, match="required robust covariance"):
         _request(study).run(_panel())
 
@@ -157,7 +157,7 @@ def test_causal_resolver_pins_fold_boundaries_and_analysis_values(tmp_path: Path
 def test_identical_complete_causal_result_is_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from case_studies.research import causal
+    from case_studies.utils import causal as causal_adapter
 
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -168,7 +168,7 @@ def test_identical_complete_causal_result_is_reused(
     def unexpected_recompute(*_args, **_kwargs):
         raise AssertionError("an exact complete causal result must be reused")
 
-    monkeypatch.setattr(causal, "run_dml_analysis", unexpected_recompute)
+    monkeypatch.setattr(causal_adapter, "run_dml_analysis", unexpected_recompute)
     second = request.run(_panel())
 
     assert second.hash == first.hash
@@ -196,6 +196,41 @@ def test_causal_runtime_identity_records_numerical_packages() -> None:
         "scikit-learn",
         "statsmodels",
     }
+
+
+def test_study_causal_request_resolves_through_registered_adapter(tmp_path: Path) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    direct = _request(study)
+    public = study.causal(
+        label="fwd_ret_21d",
+        treatment="treatment",
+        confounders=["confounder"],
+        n_folds=2,
+        embargo=1,
+        observation_frequency="1D",
+        horizon=1,
+        block_size=2,
+        n_placebo=10,
+        seed=7,
+        time_col="timestamp",
+        entity_col="symbol",
+        development_end="2020-06-01",
+        source_identity={
+            "label_artifact": "label-a",
+            "feature_artifacts": {"financial": "features-a"},
+        },
+        runtime_identity={"python": "test", "sklearn": "test"},
+        notebook="12_causal_dml",
+        adapter="dml",
+    )
+
+    direct_spec, _ = direct.resolve(_panel())
+    public_spec, _ = public.resolve(_panel())
+    assert public_spec == direct_spec
+    assert public_spec["causal"]["adapter"] == "dml"
+    assert public_spec["causal"]["adapter_module"] == "case_studies.utils.causal"
 
 
 def test_causal_resolver_rejects_duplicate_panel_keys(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from utils.paths import REPO_ROOT
 from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
+    from .causal import CausalRequest
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
     from .models import ModelRequest
@@ -212,3 +213,8 @@ class Study:
         from .models import ModelRequest
 
         return ModelRequest.from_request(self, request)
+
+    def causal(self, **request) -> CausalRequest:
+        from .causal import CausalRequest
+
+        return CausalRequest(study=self, **request)

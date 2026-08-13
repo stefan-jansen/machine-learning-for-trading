@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import platform
-import sqlite3
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -18,14 +15,15 @@ import pandas as pd
 import polars as pl
 
 from case_studies.utils.artifact_digest import value_digest
-from case_studies.utils.causal import _walk_forward_indices, run_dml_analysis
 from case_studies.utils.registry.registration import register_causal_run
 from case_studies.utils.registry.specs import (
     canonical_json,
     training_hash_from_spec,
 )
 
+from .adapters import get_adapter
 from .contracts import ExecutionTier
+from .results import CausalResult
 
 if TYPE_CHECKING:
     from .workspace import Study
@@ -56,88 +54,6 @@ def causal_runtime_identity() -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class CausalResult:
-    study: Study
-    hash: str
-    execution_tier: str
-    identity_version: int | None
-
-    @classmethod
-    def open(
-        cls,
-        study: Study,
-        causal_hash: str,
-        *,
-        include_preview: bool = False,
-    ) -> CausalResult:
-        roots = [(study.root, ExecutionTier.CANONICAL.value)]
-        if include_preview and not study.read_only and study.output_root is not None:
-            roots.append(
-                (study.output_root / ".preview" / study.case_study, ExecutionTier.PREVIEW.value)
-            )
-        for root, namespace in roots:
-            db_path = root / "run_log" / "registry.db"
-            if not db_path.exists():
-                continue
-            with sqlite3.connect(db_path) as db:
-                table = db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'causal_runs'"
-                ).fetchone()
-                if table is None:
-                    continue
-                row = db.execute(
-                    "SELECT spec_json FROM causal_runs WHERE causal_hash = ?",
-                    (causal_hash,),
-                ).fetchone()
-            if row is not None:
-                spec = json.loads(row[0] or "{}")
-                return cls(
-                    study=study,
-                    hash=causal_hash,
-                    execution_tier=spec.get("execution_tier") or namespace,
-                    identity_version=spec.get("identity_version"),
-                )
-        raise KeyError(f"Unknown causal result hash {causal_hash!r}")
-
-    @property
-    def root(self) -> Path:
-        return self.study.storage_root(self.execution_tier)
-
-    def registry_record(self) -> dict[str, Any]:
-        with sqlite3.connect(self.root / "run_log" / "registry.db") as db:
-            cursor = db.execute(
-                "SELECT * FROM causal_runs WHERE causal_hash = ?",
-                (self.hash,),
-            )
-            row = cursor.fetchone()
-            if row is None:
-                raise KeyError(f"Unknown causal result hash {self.hash!r}")
-            return dict(zip((column[0] for column in cursor.description), row, strict=True))
-
-    def spec(self) -> dict[str, Any]:
-        return json.loads(self.registry_record().get("spec_json") or "{}")
-
-    @property
-    def complete(self) -> bool:
-        record = self.registry_record()
-        values = (record.get("dml_effect"), record.get("dml_se_hac"), record.get("n_obs"))
-        return (
-            self.identity_version == 2
-            and bool(self.spec())
-            and all(value is not None and math.isfinite(value) for value in values)
-            and int(record["n_obs"]) > 0
-        )
-
-    def protocol(self) -> dict[str, Any]:
-        spec = self.spec()
-        return {
-            "input_identity": spec.get("input_identity"),
-            "cv": spec.get("cv"),
-            "execution_tier": self.execution_tier,
-        }
-
-
-@dataclass(frozen=True)
 class CausalRequest:
     study: Study
     label: str
@@ -156,6 +72,7 @@ class CausalRequest:
     source_identity: dict[str, Any]
     runtime_identity: dict[str, Any]
     notebook: str
+    adapter: str = "dml"
     hac_maxlags: int | None = None
     execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL
     preview_reductions: dict[str, Any] | None = None
@@ -171,6 +88,7 @@ class CausalRequest:
         )
         tier = ExecutionTier(self.execution_tier)
         object.__setattr__(self, "execution_tier", tier)
+        get_adapter("causal", self.adapter)
         if not self.confounders:
             raise ValueError("causal request requires at least one confounder")
         if min(self.n_folds, self.embargo, self.horizon, self.block_size) < 1:
@@ -243,7 +161,11 @@ class CausalRequest:
 
     def _resolve_folds(self, analysis: pd.DataFrame) -> tuple[list[dict[str, Any]], int]:
         groups = analysis[self.time_col].to_numpy()
-        folds = _walk_forward_indices(
+        adapter = get_adapter("causal", self.adapter)
+        walk_forward = getattr(adapter, "_walk_forward_indices", None)
+        if walk_forward is None:
+            raise TypeError(f"causal adapter {self.adapter!r} has no fold resolver")
+        folds = walk_forward(
             len(analysis),
             self.n_folds,
             self.embargo,
@@ -306,6 +228,8 @@ class CausalRequest:
                 "folds": folds,
             },
             "causal": {
+                "adapter": self.adapter,
+                "adapter_module": get_adapter("causal", self.adapter).__name__,
                 "treatment": self.treatment,
                 "confounders": list(self.confounders),
                 "time_col": self.time_col,
@@ -340,11 +264,16 @@ class CausalRequest:
             pass
         else:
             if cached.complete:
+                assert isinstance(cached, CausalResult)
                 return cached
         case_dir = self.study.storage_root(execution_tier)
         started_at = datetime.now(UTC).isoformat()
         started = time.perf_counter()
-        computed = run_dml_analysis(
+        adapter = get_adapter("causal", self.adapter)
+        runner = getattr(adapter, "run_dml_analysis", None)
+        if runner is None:
+            raise TypeError(f"causal adapter {self.adapter!r} has no shared runner")
+        computed = runner(
             analysis,
             treatment_col=self.treatment,
             outcome_col=self.label,
@@ -403,4 +332,5 @@ class CausalRequest:
             causal_hash,
             include_preview=execution_tier is ExecutionTier.PREVIEW,
         )
+        assert isinstance(result, CausalResult)
         return result
