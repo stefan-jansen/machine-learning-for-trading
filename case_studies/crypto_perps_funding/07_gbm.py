@@ -42,9 +42,8 @@
 import warnings
 from datetime import UTC, datetime
 
-# Load PyTorch first so its bundled CUDA runtime wins symbol resolution before
-# ml4t.diagnostic loads optional CUDA packages.
-import torch
+# Load PyTorch before ml4t.diagnostic so its bundled CUDA runtime wins symbol resolution.
+import torch  # noqa: F401
 
 # isort: split
 import numpy as np
@@ -58,6 +57,7 @@ import utils.style as style
 from case_studies.utils.gbm import (
     prepare_gbm_folds,
     register_gbm_result,
+    resolve_gbm_device,
     train_gbm_config,
 )
 from case_studies.utils.registry import (
@@ -83,8 +83,8 @@ MAX_SYMBOLS = 0
 MAX_FOLDS = 0
 FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
 PREDICTION_SPLIT = "validation"
-TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows per fold (val is never sampled). Use for memory-constrained runs on large datasets.
-TRAIN_DEVICE = "cuda"
+TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows; validation is never sampled
+TRAIN_DEVICE = ""  # Blank uses setup.yaml; CUDA requires a CUDA-enabled LightGBM build
 MAX_BIN = 63
 
 # %%
@@ -94,15 +94,8 @@ setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
 
-# Crypto publication training is explicitly GPU-only. The shared trainer raises
-# before fitting if the active LightGBM build cannot use CUDA.
-_configured_device = str(setup.get("modeling", {}).get("gbm", {}).get("device", "cuda"))
-if TRAIN_DEVICE != "cuda":
-    raise ValueError("Crypto publication GBM training requires TRAIN_DEVICE='cuda'")
-if _configured_device not in {"cuda", "gpu"}:
-    raise ValueError(f"setup.yaml must request CUDA for Crypto GBM, got {_configured_device!r}")
-if not torch.cuda.is_available():
-    raise RuntimeError("Crypto GBM requires CUDA, but PyTorch cannot see a CUDA device")
+_configured_device = str(setup.get("modeling", {}).get("gbm", {}).get("device", "cpu"))
+TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)
 print(f"Case study: {CASE_STUDY_ID} | Device: {TRAIN_DEVICE} | max_bin: {MAX_BIN}")
 
 # %% [markdown]

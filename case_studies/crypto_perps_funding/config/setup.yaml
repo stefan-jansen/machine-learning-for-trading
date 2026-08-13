@@ -295,7 +295,7 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    device: cpu
 
 causal:
   treatment: premium_zscore_14d

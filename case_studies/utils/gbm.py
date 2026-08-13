@@ -226,13 +226,19 @@ def lightgbm_runtime_params(
     raise ValueError(f"Unsupported LightGBM device: {device!r}")
 
 
-def resolve_gbm_execution_config(config: dict[str, Any]) -> tuple[str, int, int]:
-    """Resolve a declared GBM backend without deriving model parameters from hardware."""
-    device = str(config.get("device", "cpu")).lower()
+def resolve_gbm_device(requested: str | None, configured: str = "cpu") -> str:
+    """Use an explicit runtime override when supplied, otherwise use the configured backend."""
+    device = str(requested or configured).lower()
     if device == "gpu":
         device = "cuda"
     if device not in {"cpu", "cuda"}:
         raise ValueError(f"Unsupported LightGBM device: {device!r}")
+    return device
+
+
+def resolve_gbm_execution_config(config: dict[str, Any]) -> tuple[str, int, int]:
+    """Resolve a declared GBM backend without deriving model parameters from hardware."""
+    device = resolve_gbm_device(None, str(config.get("device", "cpu")))
 
     if "max_bin" not in config:
         raise ValueError("modeling.gbm.max_bin must be declared explicitly")
