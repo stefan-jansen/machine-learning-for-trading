@@ -599,28 +599,33 @@ engine = LiveEngine(
 
 # %%
 async def observe_engine() -> list[tuple[float, str]]:
-    """Run the engine briefly and record `health` at fixed intervals."""
-    transitions: list[tuple[float, str]] = []
+    """Run the engine until each expected health transition occurs."""
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    deadline = started_at + HEALTH_OBSERVATION_SECONDS
+    transitions = [(0.0, engine.runtime_status()["health"])]
 
-    def record(now_label: float) -> None:
-        transitions.append((now_label, engine.runtime_status()["health"]))
+    async def wait_for_health(expected: str) -> None:
+        while loop.time() < deadline:
+            health = engine.runtime_status()["health"]
+            if health == expected:
+                transitions.append((round(loop.time() - started_at, 2), health))
+                return
+            await asyncio.sleep(0.01)
+        observed = [health for _, health in transitions]
+        raise AssertionError(f"expected health {expected!r}; observed {observed}")
 
-    record(0.0)
     await engine.connect()
     run_task = asyncio.create_task(engine.run())
-    await asyncio.sleep(0.05)
-    record(0.05)
-    deadline = asyncio.get_event_loop().time() + HEALTH_OBSERVATION_SECONDS
-    while asyncio.get_event_loop().time() < deadline:
-        record(round(asyncio.get_event_loop().time() - (deadline - HEALTH_OBSERVATION_SECONDS), 2))
-        await asyncio.sleep(0.5)
+    for expected in ("waiting_for_data", "ok", "feed_silent"):
+        await wait_for_health(expected)
     await engine.stop()
     run_task.cancel()
     try:
         await run_task
     except asyncio.CancelledError:
         pass
-    record(HEALTH_OBSERVATION_SECONDS + 0.1)
+    transitions.append((round(loop.time() - started_at, 2), engine.runtime_status()["health"]))
     return transitions
 
 
