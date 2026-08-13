@@ -603,14 +603,14 @@ def test_a_precomputed_split_set_is_held_to_the_same_order() -> None:
 def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:
     import json
 
+    from utils import CASE_STUDIES_DIR
     from utils.artifact_specs import load_label_spec, resolve_storage_path
     from utils.modeling import resolve_label_buffer, resolve_label_horizon
-    from utils.paths import get_case_study_dir
 
     case_study = "fx_pairs"
     label = "fwd_ret_1d"
-    case_dir = get_case_study_dir(case_study)
-    setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+    source_case_dir = CASE_STUDIES_DIR / case_study
+    setup = yaml.safe_load((source_case_dir / "config" / "setup.yaml").read_text())
     label_path = resolve_storage_path(
         case_study,
         load_label_spec(case_study, label),
@@ -627,7 +627,7 @@ def test_fx_materialized_folds_match_the_canonical_label_clock() -> None:
     )
     materialized = generate_cv_splits(
         labels,
-        cv_config=json.loads((case_dir / "config" / "cv_config.json").read_text()),
+        cv_config=json.loads((source_case_dir / "config" / "cv_config.json").read_text()),
         label_buffer=resolve_label_buffer(case_study, label, setup),
     )
 
