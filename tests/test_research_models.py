@@ -17,6 +17,7 @@ from case_studies.research import (
     registered_adapters,
 )
 from case_studies.utils import linear
+from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 
 
@@ -244,9 +245,20 @@ def test_version_3_linear_preview_registers_identity_covered_reductions(
         resolved.spec,
         execution_tier="preview",
     )
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
 
     assert resolved.spec["computation"]["preview_reductions"] == {"folds": [0]}
     assert training.execution_tier == "preview"
+    assert prediction.complete
+    assert training.complete
 
 
 def test_model_and_causal_adapters_have_one_extension_seam() -> None:

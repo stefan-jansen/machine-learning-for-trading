@@ -314,7 +314,14 @@ class TrainingResult(Result):
         if completed_attempt is not None:
             return True
         return any(
-            isinstance(result := Result.open(self.study, prediction_hash), PredictionResult)
+            isinstance(
+                result := Result.open(
+                    self.study,
+                    prediction_hash,
+                    include_preview=self.execution_tier == ExecutionTier.PREVIEW.value,
+                ),
+                PredictionResult,
+            )
             and result.complete
             for prediction_hash in prediction_hashes
         )
