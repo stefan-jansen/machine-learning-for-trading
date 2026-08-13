@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 from torch.utils.data import Dataset
 
@@ -26,6 +27,8 @@ class SequenceStore:
     symbol_idx: np.ndarray
     end_idx: np.ndarray
     lookback: int
+    feature_mean: np.ndarray | None = None
+    feature_scale: np.ndarray | None = None
 
     @property
     def n_sequences(self) -> int:
@@ -419,6 +422,95 @@ def _build_val_df_with_priming(
     return pd.concat(pieces, ignore_index=True)
 
 
+def _ensure_sequence_periods(
+    dataset_pd: pd.DataFrame,
+    *,
+    date_col: str,
+    calendar_id: str | None,
+) -> None:
+    cache_key = (
+        date_col,
+        calendar_id,
+        len(dataset_pd),
+        dataset_pd[date_col].iloc[0] if len(dataset_pd) else None,
+        dataset_pd[date_col].iloc[-1] if len(dataset_pd) else None,
+    )
+    if (
+        _SEQUENCE_PERIOD_COL not in dataset_pd.columns
+        or dataset_pd.attrs.get(_SEQUENCE_PERIOD_CACHE_ATTR) != cache_key
+    ):
+        dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(
+            dataset_pd[date_col],
+            calendar_id=calendar_id,
+        )
+        dataset_pd.attrs[_SEQUENCE_PERIOD_CACHE_ATTR] = cache_key
+
+
+def _coerce_boundary(value: pd.Timestamp | str, series: pd.Series) -> pd.Timestamp:
+    boundary = pd.Timestamp(value)
+    col_tz = getattr(series.dtype, "tz", None)
+    if col_tz is not None and boundary.tz is None:
+        return boundary.tz_localize(col_tz)
+    if col_tz is None and boundary.tz is not None:
+        return boundary.tz_localize(None)
+    return boundary
+
+
+def sequence_validation_keys(
+    dataset_pd: pd.DataFrame,
+    splits: list[dict],
+    *,
+    label_col: str,
+    date_col: str,
+    entity_col: str,
+    lookback: int,
+    calendar_id: str | None = None,
+) -> pl.DataFrame:
+    """Return exact validation keys eligible for gap-free sequence prediction."""
+    _ensure_sequence_periods(dataset_pd, date_col=date_col, calendar_id=calendar_id)
+    use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL]
+    frames: list[pl.DataFrame] = []
+    for split in splits:
+        val_start = _coerce_boundary(split["val_start"], dataset_pd[date_col])
+        val_end = _coerce_boundary(split["val_end"], dataset_pd[date_col])
+        val_mask = dataset_pd[date_col].between(val_start, val_end, inclusive="both")
+        source = dataset_pd.loc[(dataset_pd[date_col] < val_start) | val_mask, use_cols]
+        val_df = _build_val_df_with_priming(
+            source,
+            entity_col=entity_col,
+            date_col=date_col,
+            val_start=val_start,
+            lookback=lookback,
+        )
+        _, _, timestamps, entities, valid_positions = _build_symbol_arrays(
+            val_df,
+            feature_names=[],
+            label_col=label_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            lookback=lookback,
+        )
+        rows = [
+            {
+                "symbol": entities[symbol_id],
+                "timestamp": pd.Timestamp(timestamps[symbol_id][position]),
+                "fold": int(split["fold"]),
+            }
+            for symbol_id, positions in enumerate(valid_positions)
+            for position in positions
+        ]
+        if rows:
+            frames.append(pl.from_dicts(rows))
+    if not frames:
+        return pl.DataFrame(
+            schema={"symbol": pl.String, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
+        )
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("sequence request produced duplicate expected prediction keys")
+    return expected
+
+
 def prepare_fold_sequence_stores(
     dataset_pd: pd.DataFrame,
     *,
@@ -450,36 +542,13 @@ def prepare_fold_sequence_stores(
     ``val_start`` so the val window aligns with production.
     """
 
-    cache_key = (
-        date_col,
-        calendar_id,
-        len(dataset_pd),
-        dataset_pd[date_col].iloc[0] if len(dataset_pd) else None,
-        dataset_pd[date_col].iloc[-1] if len(dataset_pd) else None,
-    )
-    if (
-        _SEQUENCE_PERIOD_COL not in dataset_pd.columns
-        or dataset_pd.attrs.get(_SEQUENCE_PERIOD_CACHE_ATTR) != cache_key
-    ):
-        dataset_pd[_SEQUENCE_PERIOD_COL] = _sequence_period_numbers(
-            dataset_pd[date_col],
-            calendar_id=calendar_id,
-        )
-        dataset_pd.attrs[_SEQUENCE_PERIOD_CACHE_ATTR] = cache_key
+    _ensure_sequence_periods(dataset_pd, date_col=date_col, calendar_id=calendar_id)
     use_cols = [date_col, entity_col, label_col, _SEQUENCE_PERIOD_COL, *feature_names]
     val_start_ts: pd.Timestamp | None
     if val_start is None:
         val_start_ts = None
     else:
-        val_start_ts = pd.Timestamp(val_start)
-        # Match the date column's timezone — crypto's timestamps are
-        # tz-aware (datetime64[ms, UTC]); a tz-naive literal raises
-        # `Invalid comparison between dtype=datetime64[ms, UTC] and Timestamp`.
-        col_tz = getattr(dataset_pd[date_col].dtype, "tz", None)
-        if col_tz is not None and val_start_ts.tz is None:
-            val_start_ts = val_start_ts.tz_localize(col_tz)
-        elif col_tz is None and val_start_ts.tz is not None:
-            val_start_ts = val_start_ts.tz_localize(None)
+        val_start_ts = _coerce_boundary(val_start, dataset_pd[date_col])
 
     if (
         temporal_by_fold is not None
@@ -591,6 +660,8 @@ def prepare_fold_sequence_stores(
         symbol_idx=train_symbol_idx,
         end_idx=train_end_idx,
         lookback=lookback,
+        feature_mean=means.copy(),
+        feature_scale=stds.copy(),
     )
     val_store = SequenceStore(
         features=val_features,
@@ -600,6 +671,8 @@ def prepare_fold_sequence_stores(
         symbol_idx=val_symbol_idx,
         end_idx=val_end_idx,
         lookback=lookback,
+        feature_mean=means.copy(),
+        feature_scale=stds.copy(),
     )
 
     return (

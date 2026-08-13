@@ -34,6 +34,7 @@ from case_studies.utils.analytics import (
     _query,
     registry_path,
 )
+from case_studies.utils.conformal import split_conformal_coverage
 from case_studies.utils.notebook_contracts import (
     degenerate_prediction_sql,
     full_coverage_prediction_sql,
@@ -721,78 +722,11 @@ def conformal_coverage_diagnostic(
         pq = pred_dir / p_hash / "predictions.parquet"
         if not pq.exists():
             continue
-        df = pl.read_parquet(pq)
-        ren = {}
-        if "actual" in df.columns and "y_true" not in df.columns:
-            ren["actual"] = "y_true"
-        if "prediction" in df.columns and "y_score" not in df.columns:
-            ren["prediction"] = "y_score"
-        if "fold" in df.columns and "fold_id" not in df.columns:
-            ren["fold"] = "fold_id"
-        if ren:
-            df = df.rename(ren)
-        if "y_true" not in df.columns or "y_score" not in df.columns:
+        try:
+            coverage_rows = split_conformal_coverage(pl.read_parquet(pq), levels=levels)
+        except ValueError:
             continue
-        df = df.drop_nulls(["y_true", "y_score"])
-        if df.height == 0 or "fold_id" not in df.columns or "timestamp" not in df.columns:
-            continue
-
-        df = df.with_columns((pl.col("y_true") - pl.col("y_score")).abs().alias("abs_resid"))
-
-        fold_windows = (
-            df.group_by("fold_id")
-            .agg(pl.col("timestamp").min().alias("validation_start"))
-            .sort("validation_start")
-        )
-        if fold_windows.height < 2:
-            continue
-
-        calibration_fold = fold_windows["fold_id"][0]
-        test_folds = fold_windows["fold_id"][1:].to_list()
-        cal = df.filter(pl.col("fold_id") == calibration_fold)
-        tst = df.filter(pl.col("fold_id").is_in(test_folds))
-        if cal.height < 30 or tst.height < 30:
-            continue
-
-        # The width is normalized by the calibration window's own return scale,
-        # not the whole panel's: everything the procedure reports has to be a
-        # property of the data it was allowed to see when it calibrated. Using
-        # every fold's std here let the evaluation windows set the divisor.
-        scale = float(cal["y_true"].std() or 0.0)
-        if not np.isfinite(scale) or scale == 0:
-            continue
-
-        cal_res = np.sort(cal["abs_resid"].to_numpy())
-        tst_res = tst["abs_resid"].to_numpy()
-        n_cal = len(cal_res)
-        for level in levels:
-            # Split conformal calls for the ceil((n+1)*level)-th smallest
-            # calibration residual. Index that rank directly rather than asking
-            # for a quantile at k/n: every np.quantile method maps a probability
-            # onto p*(n-1), so k/n lands a rank high, and the default linear
-            # method additionally interpolates to a value no residual attains.
-            rank = int(np.ceil((n_cal + 1) * level))
-            if rank > n_cal:
-                # The calibration set is too small to certify this level at all:
-                # the conformal interval is genuinely unbounded, so coverage is
-                # trivially 1 and the width infinite. Reported rather than
-                # clamped to the largest residual, which would under-cover while
-                # still claiming the nominal level.
-                q_hat = float(np.inf)
-            else:
-                q_hat = float(cal_res[rank - 1])
-            cov = float((tst_res <= q_hat).mean())
-            width_std = (2.0 * q_hat) / scale
-            out_rows.append(
-                {
-                    "family": fam,
-                    "config_name": cfg,
-                    "nominal_level": float(level),
-                    "empirical_coverage": cov,
-                    "mean_interval_width_frac_std": float(width_std),
-                    "n_test": int(len(tst_res)),
-                }
-            )
+        out_rows.extend({"family": fam, "config_name": cfg, **row} for row in coverage_rows)
 
     if not out_rows:
         return pl.DataFrame()
