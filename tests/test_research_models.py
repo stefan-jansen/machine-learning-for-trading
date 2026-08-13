@@ -20,6 +20,7 @@ from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
 from case_studies.utils import linear
 from case_studies.utils.latent_factors import adapter as latent_adapter
+from case_studies.utils.latent_factors import case_study as latent_case_study
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
 from case_studies.utils.latent_factors.cv import _expected_latent_checkpoints
@@ -336,35 +337,14 @@ def test_gbm_runner_replays_valid_models_after_partial_registration(tmp_path, mo
         request.run()
     monkeypatch.setattr(ResultsCatalog, "publish_predictions", original_publish)
 
-    def replay_models(model_dir, spec, context):
-        del model_dir
-        predictions = [
-            {
-                "dates": fold["dates"],
-                "entities": fold["entities"],
-                "y_true": fold["y_val"],
-                "y_eval": fold.get("y_eval"),
-                "y_pred": fold["X_val"][:, 0] + checkpoint["value"] / 100,
-                "fold": fold["fold"],
-                "n_trees": checkpoint["value"],
-            }
-            for fold in context.folds
-            for checkpoint in spec["checkpoint_schedule"]
-        ]
-        return {
-            "learning_curves": gbm_utils._learning_curves_from_predictions(
-                spec["config_name"],
-                predictions,
-                [item["value"] for item in spec["checkpoint_schedule"]],
-            ),
-            "predictions": predictions,
-        }
+    class ReplayBooster:
+        def __init__(self, *, model_file):
+            self.model_file = model_file
 
-    monkeypatch.setattr(
-        gbm_utils,
-        "_predict_from_gbm_models",
-        replay_models,
-    )
+        def predict(self, values, *, num_iteration):
+            return values[:, 0] + num_iteration / 100
+
+    monkeypatch.setattr("lightgbm.Booster", ReplayBooster)
     monkeypatch.setattr(
         gbm_utils,
         "train_gbm_config",
@@ -409,16 +389,62 @@ def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
     assert effective["0"]["alpha"] != effective["1"]["alpha"]
 
 
-def test_huber_legacy_path_cannot_bypass_effective_identity() -> None:
-    config = {
-        "config_name": "huber",
-        "huber_alpha_scale": 0.5,
-        "max_iterations": 2,
-        "params": {"objective": "huber", "seed": 42},
-    }
+def test_real_huber_preset_keeps_legacy_training_surface(monkeypatch) -> None:
+    config = next(
+        config
+        for config in modeling.load_configs("etfs", "fwd_ret_21d", "gbm")
+        if config["config_name"] == "default_huber"
+    )
+    captured = []
 
-    with pytest.raises(ValueError, match="hash-covered effective_params_by_fold"):
-        gbm_utils.train_gbm_config(config, [], feature_names=[], device="cpu")
+    class Booster:
+        def predict(self, values, *, num_iteration):
+            del num_iteration
+            return values[:, 0]
+
+        def feature_importance(self, *, importance_type):
+            del importance_type
+            return np.array([1.0])
+
+    def fake_train(params, *_args, **_kwargs):
+        captured.append(dict(params))
+        return Booster()
+
+    monkeypatch.setattr("lightgbm.train", fake_train)
+    folds = []
+    for fold, scale in enumerate((0.01, 0.10)):
+        values = np.arange(6, dtype=float) * scale
+        folds.append(
+            {
+                "fold": fold,
+                "X_train": values[:, None],
+                "X_val": values[:, None],
+                "y_train": values,
+                "y_train_lgb": values,
+                "y_val": values,
+                "y_eval": None,
+                "dates": np.array([f"2024-01-0{fold + 1}"] * 6, dtype="datetime64[D]"),
+                "entities": np.array([f"S{index}" for index in range(6)]),
+                "n_train": 6,
+                "n_val": 6,
+            }
+        )
+
+    result = gbm_utils.train_gbm_config(
+        config,
+        folds,
+        feature_names=["value"],
+        device="cpu",
+        max_bin=63,
+        num_threads=1,
+    )
+
+    effective = result["effective_params_by_fold"]
+    assert [params["alpha"] for params in captured] == [
+        effective["0"]["alpha"],
+        effective["1"]["alpha"],
+    ]
+    assert effective["0"]["alpha"] != effective["1"]["alpha"]
 
 
 def test_multiclass_effective_params_use_resolved_class_count() -> None:
@@ -443,6 +469,60 @@ def test_multiclass_effective_params_use_resolved_class_count() -> None:
     )
 
     assert effective["0"]["num_class"] == 3
+
+
+@pytest.mark.parametrize("model_name", ["pca", "ipca"])
+def test_real_pca_presets_resolve_checkpoint_metadata(model_name) -> None:
+    presets = latent_case_study._load_preset_model_kwargs("etfs", "fwd_ret_21d")
+    case = SimpleNamespace(model_kwargs=presets)
+
+    model_kwargs, _, _, _, checkpoint_metadata = latent_adapter._resolve_model_configuration(
+        case,
+        model_name,
+        {},
+        {},
+    )
+
+    assert checkpoint_metadata == {"checkpoint_interval": 0}
+    assert "checkpoint_interval" not in model_kwargs
+
+
+def test_legacy_latent_surface_excludes_internal_checkpoint_aliases() -> None:
+    presets = latent_case_study._load_preset_model_kwargs(
+        "us_firm_characteristics",
+        "fwd_ret_1m",
+    )
+
+    assert len(_expected_latent_checkpoints("cae", n_epochs=50, model_kwargs=presets["cae"])) == 10
+    assert len(_expected_latent_checkpoints("sdf", n_epochs=0, model_kwargs=presets["sdf"])) == 5
+    assert 0 in _expected_latent_checkpoints(
+        "cae",
+        n_epochs=50,
+        model_kwargs=presets["cae"],
+        include_internal_aliases=True,
+    )
+
+
+def test_sdf_identity_hashes_resolved_fallback_macro_values(tmp_path, monkeypatch) -> None:
+    _latent_study(tmp_path, monkeypatch)
+    context = latent_case_study.load_case_study_context("etfs")
+    dates = context.dataset.get_column("timestamp").unique().sort()
+    context.macro_panel = pl.DataFrame(
+        {
+            "timestamp": dates,
+            "market_state": np.linspace(0.0, 1.0, len(dates)),
+        }
+    )
+    context.macro_context_spec = {
+        "policy": "load_macro_fallback",
+        "version": "v1",
+    }
+
+    first = latent_adapter._resolved_macro_digest(context)
+    context.macro_panel = context.macro_panel.with_columns(pl.col("market_state") + 0.01)
+    second = latent_adapter._resolved_macro_digest(context)
+
+    assert first != second
 
 
 def test_cae_fitted_artifact_reconstructs_every_checkpoint(tmp_path) -> None:
@@ -533,7 +613,12 @@ def test_sdf_fitted_heads_reconstruct_every_checkpoint(tmp_path) -> None:
         device="cpu",
     )
 
-    expected = _expected_latent_checkpoints("sdf", n_epochs=0, model_kwargs=kwargs)
+    expected = _expected_latent_checkpoints(
+        "sdf",
+        n_epochs=0,
+        model_kwargs=kwargs,
+        include_internal_aliases=True,
+    )
     assert sorted(fresh) == sorted(loaded) == list(expected) == [-3, -2, -1, 0, 1, 2]
     assert all(np.array_equal(fresh[checkpoint], loaded[checkpoint]) for checkpoint in fresh)
 

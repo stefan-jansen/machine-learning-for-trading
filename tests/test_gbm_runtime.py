@@ -496,6 +496,47 @@ def test_training_registration_records_runtime_without_changing_hash(tmp_path) -
     assert json.loads(runtime_json) == runtime
 
 
+def test_legacy_huber_registration_hashes_declared_fold_scale(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    captured = {}
+
+    def capture_training(_case_study, *, spec, **_kwargs):
+        captured["spec"] = spec
+        return registry.training_hash_from_spec(spec)
+
+    monkeypatch.setattr(registry, "register_training_run", capture_training)
+    monkeypatch.setattr(registry, "get_training_dir", lambda *_args: tmp_path)
+    monkeypatch.setattr(registry, "register_prediction_set", lambda *_args, **_kwargs: "unused")
+    result = {
+        "best_iter": 50,
+        "best_ic": 0.0,
+        "best_ic_std": 0.0,
+        "config_name": "default_huber",
+        "elapsed_s": 0.1,
+        "fold_metrics": [],
+        "learning_curves": [],
+        "predictions": [],
+    }
+    config = {
+        "checkpoint_interval": 50,
+        "config_name": "default_huber",
+        "family": "gbm",
+    }
+
+    gbm.register_gbm_result(
+        "probe",
+        result,
+        config,
+        "fwd_ret_1m",
+        n_folds=2,
+        max_bin=63,
+    )
+
+    assert captured["spec"]["params"]["huber_alpha_scale"] == 0.5
+
+
 def test_runtime_provenance_migrates_a_training_only_registry(tmp_path) -> None:
     run_log = tmp_path / "run_log"
     run_log.mkdir()

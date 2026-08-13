@@ -107,8 +107,9 @@ def _expected_latent_checkpoints(
     *,
     n_epochs: int,
     model_kwargs: dict[str, Any],
+    include_internal_aliases: bool = False,
 ) -> tuple[int, ...]:
-    """Resolve the complete physical and library-defined checkpoint surface."""
+    """Resolve physical checkpoints and, when requested, fitted-state aliases."""
     from case_studies.utils.latent_factors.common import resolve_checkpoint_epochs
 
     if model_name in {"pca", "ipca"}:
@@ -119,7 +120,7 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval", 5),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
-        if model_name == "cae":
+        if model_name == "cae" and include_internal_aliases:
             return tuple(sorted({0, *physical}))
         return tuple(physical)
     if model_name == "sdf":
@@ -130,7 +131,7 @@ def _expected_latent_checkpoints(
             checkpoint_interval=model_kwargs.get("checkpoint_interval"),
             checkpoint_epochs=model_kwargs.get("checkpoint_epochs"),
         )
-        labels: set[int] = {-3, -2, -1, 0}
+        labels: set[int] = {-3, -2, -1, 0} if include_internal_aliases else set()
         labels.update(epoch for epoch in physical if epoch <= n_epochs_unc)
         labels.update(n_epochs_unc + epoch for epoch in physical if epoch <= n_epochs_cond)
         return tuple(sorted(labels))

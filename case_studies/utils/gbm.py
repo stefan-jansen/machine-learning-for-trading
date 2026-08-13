@@ -1013,10 +1013,15 @@ def train_gbm_config(
         and "alpha" not in base_params
         and effective_params_by_fold is None
     ):
-        raise ValueError(
-            "Huber training requires hash-covered effective_params_by_fold; "
-            "resolve the request through the canonical GBM adapter"
-        )
+        scale = config.get("huber_alpha_scale")
+        if scale is None:
+            raise ValueError("Huber GBM configs must declare huber_alpha_scale or alpha")
+        effective_params_by_fold = {}
+        for fold in fold_data:
+            params = dict(base_params)
+            std = float(np.nanstd(fold["y_train"]))
+            params["alpha"] = max(float(scale) * std, float(np.finfo(np.float32).eps))
+            effective_params_by_fold[str(int(fold["fold"]))] = params
 
     # Classification: ensure num_class for multiclass
     if is_classification and class_values and len(class_values) > 2:
@@ -1186,6 +1191,7 @@ def train_gbm_config(
         "predictions": all_preds,
         "fold_metrics": fold_metrics,
         "top_features": top_features,
+        "effective_params_by_fold": effective_params_by_fold,
     }
 
 

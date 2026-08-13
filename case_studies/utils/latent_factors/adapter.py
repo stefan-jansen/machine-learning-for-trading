@@ -88,19 +88,24 @@ def _package_version(name: str) -> str | None:
 
 def _source_identity() -> dict[str, str]:
     root = Path(__file__).parent
+    release_root = root.parents[2]
     files = [
         root / "adapter.py",
         root / "cae.py",
+        root / "case_study.py",
         root / "common.py",
         root / "cv.py",
         root / "ipca.py",
         root / "library_bridge.py",
+        root / "macro_context.py",
         root / "panel.py",
         root / "pca.py",
         root / "sae.py",
         root / "sdf.py",
+        release_root / "utils" / "artifact_specs.py",
+        release_root / "utils" / "modeling.py",
     ]
-    return {path.name: _sha256(path) for path in files}
+    return {path.relative_to(release_root).as_posix(): _sha256(path) for path in files}
 
 
 def _runtime_identity() -> dict[str, str | None]:
@@ -201,7 +206,7 @@ def _resolve_model_configuration(
     model_name: str,
     overrides: dict[str, Any],
     reductions: dict[str, Any],
-) -> tuple[dict[str, Any], int, int, int]:
+) -> tuple[dict[str, Any], int, int, int, dict[str, int]]:
     interface = {key: value for key, value in overrides.items() if key in _INTERFACE_FIELDS}
     model_kwargs = dict(case.model_kwargs.get(model_name) or {})
     model_kwargs.update(
@@ -210,6 +215,12 @@ def _resolve_model_configuration(
 
     n_factors = int(interface.get("n_factors", model_kwargs.pop("n_factors", 5)))
     n_epochs = int(interface.get("n_epochs", model_kwargs.pop("n_epochs", 0)))
+    checkpoint_metadata: dict[str, int] = {}
+    if model_name in {"pca", "ipca"}:
+        checkpoint_interval = int(model_kwargs.pop("checkpoint_interval", 0))
+        if checkpoint_interval != 0:
+            raise ValueError(f"{model_name} checkpoint_interval must be 0")
+        checkpoint_metadata["checkpoint_interval"] = checkpoint_interval
     if "n_factors" in reductions:
         n_factors = int(reductions["n_factors"])
     if "n_epochs" in reductions:
@@ -238,7 +249,52 @@ def _resolve_model_configuration(
     fold_workers = int(interface.get("fold_workers", 1))
     if fold_workers < 1 or (fold_workers > 1 and model_name != "ipca"):
         raise ValueError("parallel latent folds are supported only for IPCA")
-    return model_kwargs, n_factors, n_epochs, fold_workers
+    return model_kwargs, n_factors, n_epochs, fold_workers, checkpoint_metadata
+
+
+def _resolved_macro_digest(case: LatentFactorCaseStudyContext) -> str:
+    digest = hashlib.sha256()
+    resolved = 0
+    for split in case.splits:
+        fold_inputs = _prepare_fold_inputs(
+            dataset=case.dataset,
+            split=split,
+            feature_names=case.feature_names,
+            label_col=case.primary_label,
+            date_col=case.date_col,
+            entity_col=case.entity_col,
+            eval_label_col=case.eval_label_col,
+            macro_panel=case.macro_panel,
+            need_pca_inputs=False,
+            need_ragged_inputs=True,
+            temporal_by_fold=case.temporal_by_fold,
+            temporal_keys=case.temporal_keys,
+            temporal_feature_names=case.temporal_feature_names,
+        )
+        if fold_inputs is None:
+            raise ValueError(f"latent fold {split['fold']} has insufficient eligible periods")
+        model_input = fold_inputs["ragged"]
+        for segment in ("macro_train", "macro_val"):
+            values = model_input[segment]
+            if values is None:
+                raise ValueError("SDF request resolved no macro values")
+            array = np.ascontiguousarray(values)
+            metadata = json.dumps(
+                {
+                    "dtype": array.dtype.str,
+                    "fold": int(split["fold"]),
+                    "segment": segment,
+                    "shape": array.shape,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            digest.update(metadata.encode())
+            digest.update(array.tobytes())
+            resolved += array.size
+    if resolved == 0:
+        raise ValueError("SDF request resolved an empty macro surface")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _prepare_expected_keys(
@@ -328,7 +384,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         label_ref.load().select(case.date_col).unique(),
     )
     case.splits = splits
-    model_kwargs, n_factors, n_epochs, fold_workers = _resolve_model_configuration(
+    (
+        model_kwargs,
+        n_factors,
+        n_epochs,
+        fold_workers,
+        checkpoint_metadata,
+    ) = _resolve_model_configuration(
         case,
         model_name,
         request["overrides"],
@@ -349,8 +411,15 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         model_name,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
+        include_internal_aliases=True,
     )
     expected = _prepare_expected_keys(case, model_name)
+    macro_context = None
+    if model_name == "sdf":
+        macro_context = {
+            **(case.macro_context_spec or {"policy": "unspecified", "version": "v1"}),
+            "resolved_fold_digest": _resolved_macro_digest(case),
+        }
     input_lineage = case.input_data_spec
     spec = {
         "identity_version": 2,
@@ -374,6 +443,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "n_epochs": n_epochs,
             "n_factors": n_factors,
             "params": model_kwargs,
+            **checkpoint_metadata,
         },
         "checkpoint_schedule": [
             {"kind": "epoch", "value": checkpoint} for checkpoint in checkpoints
@@ -384,7 +454,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "n_folds": expected.get_column("fold").n_unique(),
         },
         "input_data_spec": input_lineage,
-        "macro_context": case.macro_context_spec if model_name == "sdf" else None,
+        "macro_context": macro_context,
         "runtime": {
             "deterministic_algorithms": deterministic,
             "device": device,
@@ -461,6 +531,7 @@ def _reconstruct_predictions(
             context.model_name,
             n_epochs=context.n_epochs,
             model_kwargs=context.model_kwargs,
+            include_internal_aliases=True,
         )
     }
     for split in case.splits:
