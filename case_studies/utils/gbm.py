@@ -1641,13 +1641,15 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
                 config[field] = int(reductions[field])
     setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
     setup_gbm = (setup.get("modeling") or {}).get("gbm") or {}
-    device = str(request_fields.get("device", setup_gbm.get("device", "cpu"))).lower()
-    if device == "gpu":
-        device = "cuda"
-    max_bin = int(request_fields.get("max_bin", 63 if device == "cuda" else 255))
-    num_threads = int(request_fields.get("num_threads", DEFAULT_GBM_CPU_THREADS))
-    if device not in {"cpu", "cuda"} or max_bin < 2 or num_threads < 1:
-        raise ValueError("invalid GBM execution configuration")
+    execution_config = {
+        **setup_gbm,
+        **{
+            key: request_fields[key]
+            for key in ("device", "max_bin", "num_threads")
+            if key in request_fields
+        },
+    }
+    device, max_bin, num_threads = resolve_gbm_execution_config(execution_config)
     effective = _gbm_effective_params_by_fold(
         config,
         folds,

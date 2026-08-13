@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import (
     CVSpec,
@@ -430,6 +431,29 @@ def test_gbm_runner_persists_every_declared_checkpoint(tmp_path, monkeypatch) ->
         "fold_0.txt",
         "fold_1.txt",
     ]
+
+
+def test_gbm_request_uses_setup_execution_config_then_request_overrides(
+    tmp_path, monkeypatch
+) -> None:
+    study = _gbm_study(tmp_path, monkeypatch)
+    setup_path = study.root / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    setup["modeling"] = {"gbm": {"device": "cpu", "max_bin": 127, "num_threads": 3}}
+    setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
+
+    configured = study.model(family="gbm", label="fwd_ret_1d", config_name="leaves_7_mse").resolve()
+    overridden = study.model(
+        family="gbm",
+        label="fwd_ret_1d",
+        config_name="leaves_7_mse",
+        overrides={"max_bin": 63, "num_threads": 1},
+    ).resolve()
+
+    configured_params = configured.spec["computation"]["model"]["effective_params_by_fold"]["0"]
+    overridden_params = overridden.spec["computation"]["model"]["effective_params_by_fold"]["0"]
+    assert (configured_params["max_bin"], configured_params["num_threads"]) == (127, 3)
+    assert (overridden_params["max_bin"], overridden_params["num_threads"]) == (63, 1)
 
 
 def test_gbm_runner_replays_valid_models_after_partial_registration(tmp_path, monkeypatch) -> None:
