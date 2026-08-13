@@ -13,6 +13,8 @@ import polars as pl
 from case_studies.utils.artifact_digest import digest_sidecar, sidecar_path, value_digest
 from utils.artifact_specs import load_label_spec, resolve_label_horizon, resolve_storage_path
 
+from .contracts import ExecutionTier
+
 if TYPE_CHECKING:
     from .workspace import Study
 
@@ -75,7 +77,13 @@ class LabelCatalog:
             names.update(path.stem for path in label_dir.glob("*.parquet"))
         return tuple(self.get(name) for name in sorted(names))
 
-    def get(self, name: str) -> LabelRef:
+    def get(
+        self,
+        name: str,
+        *,
+        execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
+    ) -> LabelRef:
+        self.study.activate(execution_tier)
         path = self._path(name)
         metadata_path = sidecar_path(path)
         if metadata_path.exists():

@@ -237,6 +237,12 @@ def test_regeneration_preview_runs_real_model_without_changing_canonical_registr
 
     preview_case = release / "case_studies" / ".preview" / "etfs"
     assert loaded_from == preview_case
+    assert (preview_case / "config").is_symlink()
+    assert (preview_case / "config").resolve(strict=True) == study.root / "config"
+    preview_shared_config = release / "case_studies" / ".preview" / "config"
+    canonical_shared_config = release / "case_studies" / "config"
+    assert preview_shared_config.is_symlink()
+    assert preview_shared_config.resolve(strict=True) == canonical_shared_config
     assert (preview_case / "features").is_symlink()
     assert (preview_case / "features").resolve(strict=True) == targets["features"]
     assert (preview_case / "labels").is_symlink()
@@ -255,6 +261,23 @@ def test_regeneration_preview_runs_real_model_without_changing_canonical_registr
     assert not (targets["run_log"] / "training").exists()
     assert not (targets["run_log"] / "predictions").exists()
     assert not (targets["run_log"] / "backtest").exists()
+
+    preview_request = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        execution_tier=ExecutionTier.PREVIEW,
+        preview_reductions={"folds": [0], "max_symbols": 3, "train_sample_frac": 1.0},
+    )
+    before_change = preview_request.resolve()
+    setup_path = study.root / "config" / "setup.yaml"
+    setup_path.write_text(setup_path.read_text().replace("train_size: 4D", "train_size: 3D"))
+    after_change = preview_request.resolve()
+
+    assert before_change.spec["cv"] != after_change.spec["cv"]
+    canonical_preset = canonical_shared_config / "linear" / "ridge.yaml"
+    canonical_preset.unlink()
+    assert not (preview_shared_config / "linear" / "ridge.yaml").exists()
 
 
 def test_release_study_is_read_only(tmp_path: Path) -> None:
@@ -290,6 +313,21 @@ def test_switching_workspaces_invalidates_root_sensitive_config_cache(tmp_path: 
     )
 
     assert load_setup_config("etfs")["marker"] == "second"
+
+
+def test_label_lookup_reactivates_its_owning_workspace(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    first = Study.open("etfs", workspace=tmp_path / "first", release_root=release)
+    frame = pl.DataFrame(
+        {"symbol": ["A"], "timestamp": ["2024-01-01"], "custom": [0.1]}
+    ).with_columns(pl.col("timestamp").str.to_date())
+    published = first.labels.publish(LabelDefinition("custom", "regression", "1D"), frame)
+    Study.open("etfs", workspace=tmp_path / "second", release_root=release)
+
+    resolved = first.labels.get("custom")
+
+    assert resolved.path == published.path
+    assert get_case_study_dir("etfs") == first.root
 
 
 def test_custom_classification_label_resolves_continuous_target(tmp_path: Path) -> None:

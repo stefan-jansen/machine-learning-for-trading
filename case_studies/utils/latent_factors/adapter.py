@@ -376,7 +376,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unknown latent-factor config {model_name!r}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     max_symbols = int(reductions.get("max_symbols", 0))
     interface = {
         key: value for key, value in request["overrides"].items() if key in _INTERFACE_FIELDS

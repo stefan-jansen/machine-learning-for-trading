@@ -1581,7 +1581,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported GBM preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     max_symbols = int(reductions.get("max_symbols", 0))
     train_sample_frac = float(reductions.get("train_sample_frac", 1.0))
     if not 0 < train_sample_frac <= 1:

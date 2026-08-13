@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -90,6 +91,29 @@ def _ensure_input_link(preview_case: Path, source: Path) -> None:
         return
     if link.exists():
         raise ValueError(f"preview input path must be a directory symlink: {link}")
+    link.symlink_to(resolved, target_is_directory=True)
+
+
+def _ensure_config_link(link: Path, source: Path) -> None:
+    resolved = source.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"preview config is not a directory: {source}")
+    if _resolved_directory_symlink(link) == resolved:
+        return
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
+        if not link.is_dir():
+            raise ValueError(f"preview config path is not a directory: {link}")
+        backup = link.with_name(f".{link.name}.{uuid.uuid4().hex}.stale")
+        link.rename(backup)
+        try:
+            link.symlink_to(resolved, target_is_directory=True)
+        except Exception:
+            backup.rename(link)
+            raise
+        shutil.rmtree(backup)
+        return
     link.symlink_to(resolved, target_is_directory=True)
 
 
@@ -220,11 +244,10 @@ class Study:
             output_root = output_root / ".preview"
             preview_case = output_root / self.case_study
             preview_case.mkdir(parents=True, exist_ok=True)
-            if not (preview_case / "config").exists():
-                shutil.copytree(self.root / "config", preview_case / "config")
+            _ensure_config_link(preview_case / "config", self.root / "config")
             shared_config = base_output_root / "config"
             if shared_config.exists():
-                shutil.copytree(shared_config, output_root / "config", dirs_exist_ok=True)
+                _ensure_config_link(output_root / "config", shared_config)
             for name in ("labels", "features"):
                 source = self.root / name
                 if source.exists():
@@ -235,7 +258,7 @@ class Study:
         if output_root != _ACTIVE_OUTPUT_ROOT:
             os.environ["ML4T_OUTPUT_DIR"] = str(output_root)
             _ACTIVE_OUTPUT_ROOT = output_root
-            _clear_root_sensitive_caches()
+        _clear_root_sensitive_caches()
         return output_root / self.case_study
 
     def storage_root(self, execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL) -> Path:
