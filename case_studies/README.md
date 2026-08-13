@@ -57,11 +57,12 @@ case_studies/{id}/
 |   +-- backtest/{hash}/       # Returns, trades, weights, and configs
 ```
 
-The strategy-analysis notebooks read `benchmark/` as a release input. Each parquet is the daily
-cross-sectional mean of the available symbols' close-to-close returns from the same canonical price
-panel used by the case study. The matching JSON records the validation and holdout windows and their
-annualized summary statistics. The benchmark does not depend on the prediction horizon, so several
-labels can refer to the same return series.
+The strategy-analysis notebooks read `benchmark/` as a release input. Each parquet contains an
+equal-weight reference return series for one label. Most use the cross-sectional mean of
+close-to-close returns; the US firm-characteristics benchmarks use the cross-sectional mean of the
+label. The matching JSON states the method, frequency, coverage, validation and holdout windows, and
+annualized summary statistics. Files remain label-specific because coverage can differ by label,
+even when two labels use the same underlying reference series.
 
 ## Reproducibility
 
