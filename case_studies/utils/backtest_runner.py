@@ -458,26 +458,19 @@ def _add_intraday_session_exit_targets(
                 valid_decisions.append(decision)
 
     valid_schedule = pl.Series(timestamp, valid_decisions, dtype=schedule.dtype)
-    entry_schedule = pl.Series(
-        timestamp,
-        [decision for decision in valid_decisions if targets.get(decision)],
-        dtype=schedule.dtype,
-    )
-    if entry_schedule.is_empty():
+    entry_decisions = [decision for decision in valid_decisions if targets.get(decision)]
+    if not entry_decisions:
         return valid_schedule
-    schedule_by_session = (
-        pl.DataFrame({timestamp: entry_schedule})
-        .with_columns(pl.col(timestamp).dt.date().alias("_session"))
-        .group_by("_session", maintain_order=True)
-        .agg(pl.col(timestamp).max().alias("last_decision"))
-    )
-    for row in schedule_by_session.iter_rows(named=True):
-        session_prices = price_times.filter(price_times.dt.date() == row["_session"]).to_list()
-        decision_index = session_prices.index(row["last_decision"])
-        flat_index = decision_index + step
-        flat_decision = session_prices[flat_index]
-        targets[flat_decision] = {}
-        flat_decisions.append(flat_decision)
+    entry_series = pl.Series(timestamp, entry_decisions, dtype=schedule.dtype)
+    for session in entry_series.dt.date().unique(maintain_order=True).to_list():
+        session_prices = price_times.filter(price_times.dt.date() == session).to_list()
+        session_entries = entry_series.filter(entry_series.dt.date() == session).to_list()
+        for index, decision in enumerate(session_entries):
+            flat_decision = session_prices[session_prices.index(decision) + step]
+            next_decision = session_entries[index + 1] if index + 1 < len(session_entries) else None
+            if next_decision is None or next_decision > flat_decision:
+                targets[flat_decision] = {}
+                flat_decisions.append(flat_decision)
 
     return (
         pl.concat(
@@ -1643,7 +1636,9 @@ def _run_engine(
             available_price_times = prices.get_column("timestamp").unique().sort()
             following_prices = available_price_times.filter(available_price_times > final_decision)
             if not following_prices.is_empty():
-                upper_bound = following_prices.min()
+                following_price = following_prices.min()
+                if upper_bound is None or following_price > upper_bound:
+                    upper_bound = following_price
         prices = prices.filter(
             (pl.col("timestamp") >= pred_ts.min()) & (pl.col("timestamp") <= upper_bound)
         )

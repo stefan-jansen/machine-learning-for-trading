@@ -263,9 +263,16 @@ def test_minute_engine_closes_each_session_before_the_next_session() -> None:
     )
     assert first_session_close["open_positions"].item() == 0
     assert first_session_close["gross_exposure"].item() == pytest.approx(0.0)
+    assert portfolio_state["timestamp"].max() == session_starts[1] + timedelta(minutes=44)
 
 
-def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None:
+@pytest.mark.parametrize(
+    ("cadence", "decision_gap"),
+    [("30_minute", 30), ("1_hour", 60), ("4_hour", 240)],
+)
+def test_coarse_decisions_each_exit_on_the_minute_price_grid(
+    cadence: str, decision_gap: int
+) -> None:
     start = datetime(2020, 7, 6, 9, 30)
     timestamps = [start + timedelta(minutes=offset) for offset in range(390)]
     prices = pl.DataFrame(
@@ -281,7 +288,7 @@ def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None
             "ask_open": [100.01] * len(timestamps),
         }
     )
-    decision_times = [start, start + timedelta(hours=4)]
+    decision_times = [start, start + timedelta(minutes=decision_gap)]
     predictions = pl.DataFrame(
         {
             "timestamp": decision_times,
@@ -299,7 +306,7 @@ def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None
         CASE_STUDY,
         case_config,
         prices=prices,
-        prediction_hash="four-hour-timing-test",
+        prediction_hash=f"{cadence}-timing-test",
         initial_cash=1_000_000,
         signal={"method": "equal_weight_top_k", "top_k": 1},
         execution_mode="engine",
@@ -307,12 +314,12 @@ def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None
         min_trade_value=0.0,
     )
     spec["strategy"]["rebalance"].update(
-        cadence="4_hour",
+        cadence=cadence,
         step=1,
         exit_step=14,
     )
     spec["backtest_config"]["calendar"]["data_frequency"] = "1m"
-    spec["backtest_config"]["metadata"]["cadence"] = "4_hour"
+    spec["backtest_config"]["metadata"]["cadence"] = cadence
 
     result = _run_engine(
         weights=weights,
@@ -332,6 +339,8 @@ def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None
     assert fills is not None
     assert fills.select("timestamp", "side").to_dicts() == [
         {"timestamp": start + timedelta(minutes=1), "side": "buy"},
-        {"timestamp": start + timedelta(hours=4, minutes=15), "side": "sell"},
+        {"timestamp": start + timedelta(minutes=15), "side": "sell"},
+        {"timestamp": start + timedelta(minutes=decision_gap + 1), "side": "buy"},
+        {"timestamp": start + timedelta(minutes=decision_gap + 15), "side": "sell"},
     ]
     assert result["metrics"]["num_trades"] > 0
