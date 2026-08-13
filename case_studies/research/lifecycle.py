@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -68,7 +69,7 @@ class Lifecycle:
         db_path = self.study.root / "run_log" / "registry.db"
         if not db_path.exists():
             return LifecycleState.DEVELOPMENT.value
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             exists = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'research_locks'"
             ).fetchone()
@@ -149,7 +150,7 @@ class Lifecycle:
         return ResearchLock(self.study, lock_hash, LifecycleState.LOCKED.value, lock_record)
 
     def open(self, lock_hash: str) -> ResearchLock:
-        with sqlite3.connect(self.study.root / "run_log" / "registry.db") as db:
+        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
             row = db.execute(
                 "SELECT lock_json, state FROM research_locks WHERE lock_hash = ?", (lock_hash,)
             ).fetchone()

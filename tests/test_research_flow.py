@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
@@ -254,7 +255,7 @@ def test_preview_prediction_to_backtest_flow_stays_isolated(tmp_path: Path) -> N
     ).run(prices=_prices())
 
     canonical_db = study.root / "run_log" / "registry.db"
-    with sqlite3.connect(canonical_db) as db:
+    with closing(sqlite3.connect(canonical_db)) as db:
         assert db.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0] == 0
     assert preview_backtest.execution_tier == "preview"
     assert Result.open(study, preview_backtest.hash, include_preview=True).complete
@@ -297,7 +298,7 @@ def test_lock_transition_failure_is_atomic(tmp_path: Path, monkeypatch: pytest.M
             selection_evidence={"metric": "validation_backtest_sharpe"},
             holdout_training_spec=invalid_holdout_spec,
         )
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
         assert db.execute("SELECT COUNT(*) FROM research_locks").fetchone()[0] == 0
 
     lock = study.lifecycle.lock(
@@ -316,7 +317,7 @@ def test_lock_transition_failure_is_atomic(tmp_path: Path, monkeypatch: pytest.M
         )
 
     assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
 
 
@@ -416,7 +417,7 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
             holdout_backtest_hash=holdout_backtest.hash,
         )
     assert study.lifecycle.open(lock.hash).state == "LOCKED"
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 0
     restored_warmups = _patch_holdout_prices(monkeypatch, holdout_prices)
 

@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -291,7 +292,13 @@ def compute_portfolio_metrics(
         }
 
     analysis = PortfolioAnalysis(returns=returns, periods_per_year=periods_per_year)
-    pm = analysis.compute_summary_stats()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation",
+            category=RuntimeWarning,
+        )
+        pm = analysis.compute_summary_stats()
 
     def _safe(v: float) -> float:
         """Sanitize metric value: handle complex, inf, nan."""
@@ -334,8 +341,6 @@ def compute_portfolio_metrics(
             )
             out.update(unc)
         except Exception as exc:  # pragma: no cover - never block point estimates
-            import warnings
-
             warnings.warn(
                 f"compute_backtest_uncertainty failed: {exc}; point metrics returned without CIs",
                 stacklevel=2,

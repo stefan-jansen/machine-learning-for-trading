@@ -18,6 +18,7 @@ from .contracts import ExecutionTier
 if TYPE_CHECKING:
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
+    from .models import ModelRequest
     from .results import ResultsCatalog
     from .strategy import Strategy
 
@@ -206,3 +207,8 @@ class Study:
         from .strategy import Strategy
 
         return Strategy.from_request(self, request)
+
+    def model(self, **request) -> ModelRequest:
+        from .models import ModelRequest
+
+        return ModelRequest.from_request(self, request)
