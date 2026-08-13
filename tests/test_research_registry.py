@@ -8,12 +8,13 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CandidateSet, Result, Study
+from case_studies.research import CandidateSet, PredictionResult, Result, Study
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     prediction_hash_from_parts,
     training_hash_from_spec,
 )
+from case_studies.utils.registry import metrics as registry_metrics
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
 
@@ -114,6 +115,7 @@ def test_legacy_result_reopens_without_being_inferred_complete(tmp_path: Path) -
 
     reopened = Result.open(study, "legacy-prediction")
 
+    assert isinstance(reopened, PredictionResult)
     assert reopened.hash == "legacy-prediction"
     assert reopened.identity_version is None
     assert not reopened.complete
@@ -294,6 +296,64 @@ def test_version_2_registration_is_immutable(tmp_path: Path) -> None:
     assert prediction.load().get_column("y_score").to_list() == [0.02, -0.01]
 
 
+def test_prediction_retry_backfills_metrics_after_coverage_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    original_compute = registry_metrics.compute_prediction_fold_metrics
+
+    def interrupt_metrics(*args, **kwargs):
+        raise RuntimeError("interrupted metric finalization")
+
+    monkeypatch.setattr(registry_metrics, "compute_prediction_fold_metrics", interrupt_metrics)
+    with pytest.raises(RuntimeError, match="interrupted metric finalization"):
+        study.results.publish_predictions(
+            training,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            split="validation",
+            predictions=frame,
+            expected_keys=expected,
+        )
+    prediction_hash = prediction_hash_from_parts(
+        training.hash,
+        None,
+        "validation",
+        checkpoint_kind="final",
+        identity_version=2,
+    )
+    interrupted = Result.open(study, prediction_hash)
+
+    assert isinstance(interrupted, PredictionResult)
+    interrupted_coverage = interrupted.coverage()
+    assert interrupted_coverage is not None
+    assert interrupted_coverage["status"] == "complete"
+    assert not interrupted.complete
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        assert db.execute("SELECT COUNT(*) FROM prediction_coverage").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM prediction_metrics").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM fold_metrics").fetchone()[0] == 0
+
+    monkeypatch.setattr(registry_metrics, "compute_prediction_fold_metrics", original_compute)
+    finalized = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+
+    assert finalized.hash == interrupted.hash
+    assert finalized.complete
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        assert db.execute("SELECT COUNT(*) FROM prediction_metrics").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM fold_metrics").fetchone()[0] == 1
+
+
 def test_checkpoint_prediction_schema_must_match(tmp_path: Path) -> None:
     study = _study(tmp_path)
     training = study.results.register_training(_training_spec())
@@ -321,6 +381,7 @@ def test_checkpoint_prediction_schema_must_match(tmp_path: Path) -> None:
 
 def test_preview_requires_identity_covered_reductions(tmp_path: Path) -> None:
     study = _study(tmp_path)
+    assert study.output_root is not None
 
     with pytest.raises(ValueError, match="identity-cover"):
         study.results.register_training(

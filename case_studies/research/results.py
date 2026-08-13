@@ -246,7 +246,21 @@ class PredictionResult(Result):
     def complete(self) -> bool:
         coverage = self.coverage()
         prediction_file = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
-        return bool(coverage and coverage["status"] == "complete" and prediction_file.is_file())
+        if (
+            self.identity_version != 2
+            or not coverage
+            or coverage["status"] != "complete"
+            or not prediction_file.is_file()
+        ):
+            return False
+        with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
+            headline = db.execute(
+                "SELECT 1 FROM prediction_metrics WHERE prediction_hash = ?", (self.hash,)
+            ).fetchone()
+            fold_count = db.execute(
+                "SELECT COUNT(*) FROM fold_metrics WHERE prediction_hash = ?", (self.hash,)
+            ).fetchone()[0]
+        return headline is not None and fold_count == coverage["n_folds_expected"]
 
     def load(self):
         import polars as pl
