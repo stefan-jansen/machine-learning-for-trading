@@ -436,7 +436,8 @@ for column, period in enumerate(("validation", "holdout")):
     returns = return_frames[period]
     values = returns["daily_return"].to_numpy()
     wealth = np.cumprod(1.0 + values)
-    drawdown = wealth / np.maximum.accumulate(wealth) - 1.0
+    running_peak = np.maximum.accumulate(np.concatenate(([1.0], wealth)))[1:]
+    drawdown = wealth / running_peak - 1.0
     axes[0, column].plot(returns["timestamp"], wealth - 1.0, color=COLORS["blue"])
     axes[0, column].axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
     axes[0, column].set_title(f"{period.title()} Cumulative Return")
