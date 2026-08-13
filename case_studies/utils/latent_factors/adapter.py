@@ -50,6 +50,13 @@ _PREVIEW_FIELDS = {
     "n_epochs_unc",
     "n_factors",
 }
+_MODEL_PREVIEW_FIELDS = {
+    "cae": {"folds", "max_symbols", "n_epochs", "n_factors"},
+    "ipca": {"folds", "max_iter", "max_symbols", "n_factors"},
+    "pca": {"folds", "max_symbols", "n_factors"},
+    "sae": {"folds", "max_symbols", "n_epochs"},
+    "sdf": {"folds", "max_symbols", "n_epochs_cond", "n_epochs_moment", "n_epochs_unc"},
+}
 _INTERFACE_FIELDS = {
     "deterministic_algorithms",
     "device",
@@ -209,6 +216,11 @@ def _resolve_model_configuration(
     overrides: dict[str, Any],
     reductions: dict[str, Any],
 ) -> tuple[dict[str, Any], int, int, int, dict[str, int]]:
+    unsupported_reductions = set(reductions) - _MODEL_PREVIEW_FIELDS[model_name]
+    if unsupported_reductions:
+        raise ValueError(
+            f"unsupported {model_name} preview reductions: {sorted(unsupported_reductions)}"
+        )
     interface = {key: value for key, value in overrides.items() if key in _INTERFACE_FIELDS}
     model_kwargs = dict(case.model_kwargs.get(model_name) or {})
     model_kwargs.update(

@@ -849,6 +849,31 @@ def test_real_sdf_preset_resolves_reduced_preview_schedule(tmp_path, monkeypatch
     ]
 
 
+@pytest.mark.parametrize(
+    ("model_name", "reduction"),
+    [
+        ("pca", {"n_epochs": 1}),
+        ("sae", {"n_factors": 2}),
+        ("sdf", {"n_epochs": 1}),
+        ("sdf", {"n_factors": 2}),
+    ],
+)
+def test_latent_preview_rejects_model_specific_noop_reductions(
+    tmp_path, monkeypatch, model_name, reduction
+) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match=f"unsupported {model_name} preview reductions"):
+        study.model(
+            family="latent_factors",
+            label="fwd_ret_1d",
+            config_name=model_name,
+            overrides={"device": "cpu", "use_macro": False},
+            execution_tier="preview",
+            preview_reductions={"folds": [0], **reduction},
+        ).resolve()
+
+
 def test_sdf_rejects_unimplemented_expected_return_mapper() -> None:
     case = cast(
         LatentFactorCaseStudyContext,

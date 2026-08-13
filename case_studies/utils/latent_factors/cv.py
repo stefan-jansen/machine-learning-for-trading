@@ -636,28 +636,44 @@ def run_latent_factor_cv(
         ):
             preds_df = pl.read_parquet(model_dir / "predictions.parquet")
             metrics_df = pl.read_parquet(model_dir / "fold_metrics.parquet")
-            best_epoch, mean_ic = _select_reporting_epoch(
-                metrics_df,
-                checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
-                reporting_epoch=metric_policy["reporting_epoch"],
+            expected_cache_checkpoints = set(
+                _expected_latent_checkpoints(
+                    model_name,
+                    n_epochs=n_epochs,
+                    model_kwargs=model_kwargs.get(model_name, {}),
+                    include_internal_aliases=checkpoint_surface == "fitted_state",
+                )
             )
-            model_results.append(
-                {
-                    "model_name": model_name,
-                    "mean_ic": round(mean_ic, 4),
-                    "best_epoch": best_epoch,
-                    "n_folds": int(metrics_df["fold_id"].n_unique())
-                    if metrics_df.height > 0
-                    else 0,
-                    "elapsed_s": 0.0,
-                    "started_at": None,
-                }
-            )
-            all_predictions[model_name] = preds_df
-            fold_metrics[model_name] = metrics_df
-            all_extras[model_name] = []
-            log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
-            continue
+            cached_prediction_checkpoints = set(preds_df.get_column("epoch").unique().to_list())
+            cached_metric_checkpoints = set(metrics_df.get_column("epoch").unique().to_list())
+            if (
+                cached_prediction_checkpoints != expected_cache_checkpoints
+                or cached_metric_checkpoints != expected_cache_checkpoints
+            ):
+                log(f"  {model_name}: cache checkpoint surface mismatch, retraining")
+            else:
+                best_epoch, mean_ic = _select_reporting_epoch(
+                    metrics_df,
+                    checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
+                    reporting_epoch=metric_policy["reporting_epoch"],
+                )
+                model_results.append(
+                    {
+                        "model_name": model_name,
+                        "mean_ic": round(mean_ic, 4),
+                        "best_epoch": best_epoch,
+                        "n_folds": int(metrics_df["fold_id"].n_unique())
+                        if metrics_df.height > 0
+                        else 0,
+                        "elapsed_s": 0.0,
+                        "started_at": None,
+                    }
+                )
+                all_predictions[model_name] = preds_df
+                fold_metrics[model_name] = metrics_df
+                all_extras[model_name] = []
+                log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
+                continue
 
         active_models.append(model_name)
         started_at[model_name] = datetime.now(UTC).isoformat()

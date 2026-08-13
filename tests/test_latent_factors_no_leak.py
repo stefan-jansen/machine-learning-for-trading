@@ -762,7 +762,12 @@ def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
         "num_threads": 1,
     }
 
-    fresh = cv.run_latent_factor_cv(**kwargs, use_cache=False)
+    fitted_state = cv.run_latent_factor_cv(
+        **kwargs,
+        use_cache=False,
+        checkpoint_surface="fitted_state",
+    )
+    fresh = cv.run_latent_factor_cv(**kwargs, use_cache=True)
     cached = cv.run_latent_factor_cv(**kwargs, use_cache=True)
 
     fresh_predictions = fresh["all_predictions"]["cae"].sort(
@@ -774,6 +779,10 @@ def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
     fresh_metrics = fresh["fold_metrics"]["cae"].sort("epoch", "fold_id")
     cached_metrics = cached["fold_metrics"]["cae"].sort("epoch", "fold_id")
 
+    assert fitted_state["all_predictions"]["cae"].get_column("epoch").unique().sort().to_list() == [
+        0,
+        5,
+    ]
     assert fresh_predictions.get_column("epoch").unique().to_list() == [5]
     assert fresh_metrics.get_column("epoch").unique().to_list() == [5]
     assert fresh_predictions.equals(cached_predictions)
