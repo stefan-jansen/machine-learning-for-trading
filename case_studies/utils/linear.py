@@ -18,6 +18,7 @@ import polars as pl
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
 
 from case_studies.research.contracts import ExecutionTier
+from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionLedger
@@ -207,7 +208,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     study.require_writable()
     study.activate(tier)
 
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     max_symbols = int(reductions.get("max_symbols", 0))
     train_sample_frac = float(reductions.get("train_sample_frac", 1.0))
     if not 0 < train_sample_frac <= 1:
@@ -220,6 +221,13 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"linear runner does not support entity key {entity_col!r}")
     label_timeline = label_ref.load().select(mds.date_col).unique()
     splits, cv_record = _select_splits(mds, request, label_timeline)
+    if (
+        request.get("cv") is not None
+        and mds.temporal_by_fold is not None
+        and mds.temporal_keys
+        and mds.temporal_feature_names
+    ):
+        require_fold_scoped_temporal_compatibility(splits, mds.temporal_artifact_splits)
     folds = prepare_cv_folds(
         mds.dataset.to_pandas(),
         splits,
@@ -323,9 +331,11 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
     if not isinstance(training, TrainingResult) or not isinstance(prediction, PredictionResult):
         return None
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    if not prediction.complete:
+        return None
     manifest = model_dir / "manifest.json"
     expected_files = {f"fold_{int(fold['fold'])}.joblib" for fold in context.folds}
-    if not prediction.complete or not manifest.is_file():
+    if not manifest.is_file():
         return None
     record = json.loads(manifest.read_text())
     if set(record.get("files") or {}) != expected_files:
@@ -341,6 +351,48 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
             "fitted_folds": [],
         },
     )
+
+
+def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) -> np.ndarray:
+    if context.task_type == "classification":
+        predict_proba = getattr(model, "predict_proba", None)
+        if not callable(predict_proba):
+            raise ValueError("classification linear model must expose predict_proba")
+        probabilities = predict_proba(fold["X_val"])
+        predictions = probabilities @ np.asarray(sorted(context.class_values), dtype=np.float64)
+    else:
+        predictions = np.asarray(model.predict(fold["X_val"]), dtype=np.float64)
+    fold_id = int(fold["fold"])
+    if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
+        raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
+    return predictions
+
+
+def _prediction_frame(
+    fold: dict[str, Any], predictions: np.ndarray, context: LinearContext
+) -> pl.DataFrame:
+    fold_id = int(fold["fold"])
+    frame = pl.from_pandas(fold["meta"][[context.entity_col, context.date_col]]).with_columns(
+        pl.lit(fold_id, dtype=pl.Int64).alias("fold"),
+        pl.Series("prediction", predictions),
+        pl.Series("actual", fold["y_val"]),
+    )
+    if fold.get("y_eval") is not None:
+        frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
+    return frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
+
+
+def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
+    if not runtime_path.exists():
+        return
+    runtime = json.loads(runtime_path.read_text())
+    runtime.update(fields)
+    temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, runtime_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _fit_or_reuse_predictions(
@@ -377,25 +429,8 @@ def _fit_or_reuse_predictions(
 
         model = cls(**params)
         model.fit(fold["X_train"], fold["y_train"])
-        if context.task_type == "classification":
-            predict_proba = getattr(model, "predict_proba", None)
-            if not callable(predict_proba):
-                raise ValueError("classification linear model must expose predict_proba")
-            probabilities = predict_proba(fold["X_val"])
-            predictions = probabilities @ np.asarray(sorted(context.class_values), dtype=np.float64)
-        else:
-            predictions = np.asarray(model.predict(fold["X_val"]), dtype=np.float64)
-        if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
-            raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
-
-        frame = pl.from_pandas(fold["meta"][[context.entity_col, context.date_col]]).with_columns(
-            pl.lit(fold_id, dtype=pl.Int64).alias("fold"),
-            pl.Series("prediction", predictions),
-            pl.Series("actual", fold["y_val"]),
-        )
-        if fold.get("y_eval") is not None:
-            frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
-        frame = frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"})
+        predictions = _fold_predictions(model, fold, context)
+        frame = _prediction_frame(fold, predictions, context)
         artifact_temp = model_dir / f".{artifact.name}.{uuid.uuid4().hex}.tmp"
         shard_temp = shard_dir / f".{shard.name}.{uuid.uuid4().hex}.tmp"
         try:
@@ -479,8 +514,5 @@ def run_resolved_request(
         attempt.finish("failed", {"error_type": type(exc).__name__, "error": str(exc)})
         raise
     runtime_path = train_dir / "runtime.json"
-    if runtime_path.exists():
-        runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
-        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
     return ModelRun(training=training, predictions=(prediction,), diagnostics=diagnostics)

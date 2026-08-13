@@ -279,6 +279,7 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: gpu
+    max_bin: 63
 
 causal:
   treatment: mom_skip_recent

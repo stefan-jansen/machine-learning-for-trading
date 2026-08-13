@@ -335,6 +335,7 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: gpu
+    max_bin: 63
   latent_factors:
     persistent_entities: true
     model_kwargs:

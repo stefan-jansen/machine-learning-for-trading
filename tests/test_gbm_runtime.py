@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 import numpy as np
 import pandas as pd
@@ -74,6 +75,8 @@ def test_cpu_runtime_params_are_explicit_and_deterministic() -> None:
 def test_cpu_runtime_params_reject_invalid_thread_count() -> None:
     with pytest.raises(ValueError, match="num_threads must be at least 1"):
         gbm.lightgbm_runtime_params("cpu", num_threads=0)
+    with pytest.raises(ValueError, match="num_threads must be at least 1"):
+        gbm.lightgbm_runtime_params("cuda", num_threads=0)
 
 
 def test_gpu_runtime_params_fail_when_cuda_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,7 +89,21 @@ def test_gpu_runtime_params_fail_when_cuda_is_unavailable(monkeypatch: pytest.Mo
 def test_gpu_runtime_params_record_cuda_device(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gbm, "_best_gpu_device", lambda _library: "cuda")
 
-    assert gbm.lightgbm_runtime_params("cuda") == {"device_type": "cuda"}
+    params = gbm.lightgbm_runtime_params("cuda", num_threads=3)
+    assert params["device_type"] == "cuda"
+    assert params["num_threads"] == 3
+    assert {
+        params[key]
+        for key in (
+            "bagging_seed",
+            "data_random_seed",
+            "drop_seed",
+            "extra_seed",
+            "feature_fraction_seed",
+            "objective_seed",
+            "seed",
+        )
+    } == {42}
 
 
 def test_runtime_params_reject_unknown_device() -> None:
@@ -123,6 +140,28 @@ def test_us_firm_gbm_defaults_use_the_reproducible_reader_backend() -> None:
         gbm.GBM_DEFAULT_MAX_BIN,
         gbm.DEFAULT_GBM_CPU_THREADS,
     )
+
+
+def test_every_case_study_gbm_setup_resolves_the_shared_execution_contract() -> None:
+    resolved = {}
+    for setup_path in sorted((REPO_ROOT / "case_studies").glob("*/config/setup.yaml")):
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        gbm_config = (setup.get("modeling") or {}).get("gbm")
+        if gbm_config is not None:
+            resolved[setup_path.parents[1].name] = gbm.resolve_gbm_execution_config(gbm_config)
+
+    assert set(resolved) == {
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "fx_pairs",
+        "nasdaq100_microstructure",
+        "sp500_equity_option_analytics",
+        "sp500_options",
+        "us_equities_panel",
+        "us_firm_characteristics",
+    }
+    assert {max_bin for _, max_bin, _ in resolved.values()} == {gbm.GBM_DEFAULT_MAX_BIN}
 
 
 def test_prepare_gbm_folds_keeps_continuous_classification_target() -> None:
@@ -481,17 +520,58 @@ def test_training_registration_records_runtime_without_changing_hash(tmp_path) -
         json.loads((tmp_path / "run_log" / "training" / training_hash / "runtime.json").read_text())
         == runtime
     )
-    with sqlite3.connect(tmp_path / "run_log" / "registry.db") as db:
+    with closing(sqlite3.connect(tmp_path / "run_log" / "registry.db")) as db:
         [runtime_json] = db.execute(
             "SELECT runtime_json FROM training_runs WHERE training_hash = ?", (training_hash,)
         ).fetchone()
     assert json.loads(runtime_json) == runtime
 
 
+def test_legacy_huber_registration_hashes_declared_fold_scale(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    captured = {}
+
+    def capture_training(_case_study, *, spec, **_kwargs):
+        captured["spec"] = spec
+        return registry.training_hash_from_spec(spec)
+
+    monkeypatch.setattr(registry, "register_training_run", capture_training)
+    monkeypatch.setattr(registry, "get_training_dir", lambda *_args: tmp_path)
+    monkeypatch.setattr(registry, "register_prediction_set", lambda *_args, **_kwargs: "unused")
+    result = {
+        "best_iter": 50,
+        "best_ic": 0.0,
+        "best_ic_std": 0.0,
+        "config_name": "default_huber",
+        "elapsed_s": 0.1,
+        "fold_metrics": [],
+        "learning_curves": [],
+        "predictions": [],
+    }
+    config = {
+        "checkpoint_interval": 50,
+        "config_name": "default_huber",
+        "family": "gbm",
+    }
+
+    gbm.register_gbm_result(
+        "probe",
+        result,
+        config,
+        "fwd_ret_1m",
+        n_folds=2,
+        max_bin=63,
+    )
+
+    assert captured["spec"]["params"]["huber_alpha_scale"] == 0.5
+
+
 def test_runtime_provenance_migrates_a_training_only_registry(tmp_path) -> None:
     run_log = tmp_path / "run_log"
     run_log.mkdir()
-    with sqlite3.connect(run_log / "registry.db") as db:
+    with closing(sqlite3.connect(run_log / "registry.db")) as db:
         db.execute(
             """
             CREATE TABLE training_runs (

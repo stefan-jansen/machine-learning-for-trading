@@ -375,6 +375,8 @@ def build_training_spec(
     if family == "gbm":
         spec["max_iterations"] = preset.get("max_iterations", 500)
         spec["checkpoint_interval"] = checkpoint_interval or preset.get("checkpoint_interval", 50)
+        if preset.get("huber_alpha_scale") is not None:
+            params["huber_alpha_scale"] = preset["huber_alpha_scale"]
         if max_bin is not None:
             params["max_bin"] = max_bin
         if num_class is not None and num_class > 2:

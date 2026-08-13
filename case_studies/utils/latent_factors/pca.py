@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -15,6 +16,8 @@ def run_pca_fold(
     chars_val: np.ndarray,
     returns_val: np.ndarray,
     n_factors: int,
+    *,
+    artifact_dir: Path | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Fit PCA on the training return panel and emit expected-return forecasts."""
     del chars_train, chars_val
@@ -22,4 +25,5 @@ def run_pca_fold(
         returns_train,
         returns_val,
         n_factors=n_factors,
+        artifact_dir=artifact_dir,
     )

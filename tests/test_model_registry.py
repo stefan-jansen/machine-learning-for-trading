@@ -13,8 +13,9 @@ Design:
     4. After each run, query the test registry.db for expected entries
 
 The goal is code-path coverage, not model quality. Params are set to the
-absolute minimum that still exercises the training→register→predict loop:
-MAX_SYMBOLS=3, MAX_FOLDS=2, N_EPOCHS=2, NUM_BOOST_ROUND=20.
+minimum that still exercises the training→register→predict loop and produces
+valid cross-sectional metrics: MAX_SYMBOLS=5, MAX_FOLDS=2, N_EPOCHS=2,
+NUM_BOOST_ROUND=20.
 
 Usage:
     # All model notebooks (~15-20 min)
@@ -64,6 +65,7 @@ _READ_ONLY_DIRS = {"config", "features", "labels"}
 
 # Minimum stage number for model notebooks
 _MODEL_STAGE_MIN = 6
+_MODEL_STAGE_MIN_BY_CASE = {"us_firm_characteristics": 5}
 
 # Suffixes that are NOT model notebooks (backtest, strategy, diagnostics).
 # These depend on upstream predictions and should be tested separately.
@@ -106,11 +108,10 @@ _LATENT_FACTOR_OVERRIDES = {
 _SPARSE_DATA_CASE_STUDIES = frozenset({"us_firm_characteristics"})
 _SPARSE_DATA_OVERRIDES = {"MAX_SYMBOLS": 20}
 
-# Minimal parameters for code-path coverage. Applied LAST so they
-# override anything from overrides.yaml — we want the absolute minimum
-# that still exercises the full train→register→predict loop.
+# Minimal parameters for code-path coverage. Family and sparse-data defaults
+# refine this base; notebook-specific overrides have final precedence.
 _QUICK_PARAMS = {
-    "MAX_SYMBOLS": 3,
+    "MAX_SYMBOLS": 5,
     "MAX_FOLDS": 2,
     "N_EPOCHS": 2,
     "NUM_BOOST_ROUND": 20,
@@ -138,6 +139,7 @@ _REGISTERING_SUFFIXES = frozenset(
         "dl_tsmixer",
         "dl_nlinear",
         "dl_tcn",
+        "dl_weekly",
         # NOTE: causal_dml notebooks register to ``causal_runs`` (DML effect
         # estimates), not ``training_runs`` — so they are intentionally NOT in
         # this set. Likewise ``NN_latent_factors`` is a thin index notebook that
@@ -150,24 +152,91 @@ _REGISTERING_SUFFIXES = frozenset(
         "sdf",
         "cae",
         "sae",
+        "lstm",
+        "patchtst",
+        "conditional_autoencoder",
+        "stochastic_discount_factor",
+        "supervised_autoencoder",
     }
 )
 
-# DL notebooks use entry_point = "dl_{model}" (e.g. "dl_lstm") instead of
-# the full filename stem (e.g. "09_dl_lstm"). Map stage stems to actual
-# entry_point values for these notebooks.
-_DL_RE = re.compile(r"^\d{2}_(dl_.+)$")
+
+_DL_FAMILY_ENTRY_POINTS = {
+    ("cme_futures", "09_dl_lstm"): "dl_lstm",
+    ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
+    ("sp500_equity_option_analytics", "09_dl_lstm"): "dl_lstm",
+    ("sp500_equity_option_analytics", "10_dl_patchtst"): "dl_patchtst",
+    ("sp500_options", "09a_lstm"): "dl_lstm",
+    ("sp500_options", "09b_patchtst"): "dl_patchtst",
+}
 
 
-def _expected_entry_point(stage: str) -> str:
-    """Return the entry_point value the notebook will use in the registry."""
-    m = _DL_RE.match(stage)
-    if m:
-        return m.group(1)  # "09_dl_lstm" → "dl_lstm"
-    return stage  # "06_linear" → "06_linear"
+def _expected_entry_point(case_study: str, stage: str) -> str:
+    """Return the exact entry point declared by one model notebook."""
+    return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
 
 
-_STAGE_RE = re.compile(r"^(\d{2})_")
+_STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
+
+
+def _quick_parameters(
+    case_study: str,
+    stage: str,
+    override_params: dict,
+) -> tuple[dict, str]:
+    parameters = dict(_QUICK_PARAMS)
+
+    stage_match = _STAGE_RE.match(stage)
+    suffix = stage[len(stage_match.group(0)) :] if stage_match else stage
+    if suffix in _LATENT_FACTOR_SUFFIXES:
+        parameters.update(_LATENT_FACTOR_OVERRIDES)
+    if case_study in _SPARSE_DATA_CASE_STUDIES:
+        parameters.update(_SPARSE_DATA_OVERRIDES)
+    parameters.update(override_params)
+    return parameters, suffix
+
+
+def test_notebook_override_parameters_have_final_precedence() -> None:
+    parameters, suffix = _quick_parameters(
+        "sp500_equity_option_analytics",
+        "11b_ipca",
+        {"MAX_SYMBOLS": 12, "N_FACTORS": 2},
+    )
+
+    assert suffix == "ipca"
+    assert parameters["MAX_SYMBOLS"] == 12
+    assert parameters["N_FACTORS"] == 2
+
+
+def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> None:
+    for stage, expected in {
+        "09_dl_lstm": {"MAX_SYMBOLS": 6, "N_EPOCHS": 6},
+        "10_dl_tsmixer": {"MAX_SYMBOLS": 6, "N_EPOCHS": 2},
+    }.items():
+        overrides = get_overrides(f"case_studies/etfs/{stage}")["parameters"]
+        parameters, _ = _quick_parameters("etfs", stage, overrides)
+        assert {key: parameters[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize(
+    ("case_study", "stage", "entry_point"),
+    [
+        ("etfs", "09_dl_lstm", "09_dl_lstm"),
+        ("etfs", "10_dl_tsmixer", "dl_tsmixer"),
+        ("sp500_options", "09a_lstm", "dl_lstm"),
+        ("sp500_options", "09b_patchtst", "dl_patchtst"),
+        ("etfs", "11b_ipca", "11b_ipca"),
+        ("etfs", "11c_conditional_autoencoder", "11c_conditional_autoencoder"),
+    ],
+)
+def test_registering_stage_maps_to_its_actual_entry_point(
+    case_study: str, stage: str, entry_point: str
+) -> None:
+    match = _STAGE_RE.match(stage)
+    assert match is not None
+    suffix = stage[len(match.group(0)) :]
+    assert suffix in _REGISTERING_SUFFIXES
+    assert _expected_entry_point(case_study, stage) == entry_point
 
 
 # ---------------------------------------------------------------------------
@@ -186,14 +255,14 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
         cs_dir = PROD_CS_DIR / cs
         if not cs_dir.exists():
             continue
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]_*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py")):
             if notebook.name.startswith("_"):
                 continue
             match = _STAGE_RE.match(notebook.name)
             if not match:
                 continue
             stage_num = int(match.group(1))
-            if stage_num < _MODEL_STAGE_MIN:
+            if stage_num < _MODEL_STAGE_MIN_BY_CASE.get(cs, _MODEL_STAGE_MIN):
                 continue
             # Skip non-model notebooks (backtest, strategy, diagnostics)
             suffix = notebook.stem[len(match.group(0)) :]
@@ -204,6 +273,13 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
 
 
 MODEL_TESTS = _collect_model_notebooks()
+
+
+def test_collection_includes_us_firm_linear_stage() -> None:
+    assert any(
+        case_study == "us_firm_characteristics" and stage == "05_linear"
+        for case_study, stage, _ in MODEL_TESTS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -351,31 +427,16 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
             pytest.skip("torch not installed")
 
     # --- Parameters ---
-    # Start with overrides.yaml, then apply ALL quick-test params on top.
-    # Quick params win — we want minimal runtime, not overrides.yaml scale.
+    # Start with quick defaults, then retain notebook-specific reduced settings.
+    # Some notebooks need wider cross-sections or longer windows for their
+    # reduced path to remain scientifically valid.
     # Papermill warns (but doesn't error) about unknown parameters, so it's
     # safe to inject all of them even if the notebook doesn't use them all.
-    override_params = overrides.get("parameters", {})
-    parameters = {**override_params, **_QUICK_PARAMS}
-
-    # Exercise the ETF LSTM's multi-checkpoint registration contract in the
-    # reduced E2E run. Epochs 5 and 6 must both become prediction sets.
-    if case_study == "etfs" and notebook_path.stem == "09_dl_lstm":
-        parameters["N_EPOCHS"] = 6
-        parameters["MAX_SYMBOLS"] = 6
-    if case_study == "etfs" and notebook_path.stem == "10_dl_tsmixer":
-        parameters["N_EPOCHS"] = 2
-        parameters["MAX_SYMBOLS"] = 6
-
-    # Latent factor models need a wider cross-section for factor extraction
-    stage_match_p = _STAGE_RE.match(stage)
-    suffix_p = stage[len(stage_match_p.group(0)) :] if stage_match_p else stage
-    if suffix_p in _LATENT_FACTOR_SUFFIXES:
-        parameters.update(_LATENT_FACTOR_OVERRIDES)
-
-    # Sparse-data case studies (monthly frequency) need more symbols
-    if case_study in _SPARSE_DATA_CASE_STUDIES:
-        parameters.update(_SPARSE_DATA_OVERRIDES)
+    parameters, suffix_p = _quick_parameters(
+        case_study,
+        stage,
+        overrides.get("parameters", {}),
+    )
 
     default_timeout = 600 if suffix_p in _LATENT_FACTOR_SUFFIXES else 300
     timeout = overrides.get("timeout", default_timeout)
@@ -413,11 +474,14 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         # Some notebooks (e.g. 12_pca) re-register configs that were
         # already created by an earlier notebook (11_latent_factors),
         # resulting in upserts with 0 net new rows but updated entry_points.
-        expected_ep = _expected_entry_point(stage)
+        expected_entry_point = _expected_entry_point(case_study, stage)
         runs = _query_registry(
             registry_db,
             "training_runs",
-            f"entry_point = '{expected_ep}'",
+            f"entry_point = '{expected_entry_point}'",
+        )
+        assert runs, (
+            f"{case_study}::{stage} found no training run with entry_point='{expected_entry_point}'"
         )
 
         if new_training > 0:
@@ -466,19 +530,11 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 finally:
                     db.close()
                 assert {1, 2}.issubset(checkpoints), checkpoints
-        elif len(runs) > 0:
+        else:
             print(
                 f"\n  Registry OK: {len(runs)} training_runs with "
-                f"entry_point='{expected_ep}' (upserted, no net new rows)"
+                f"entry_point='{expected_entry_point}' (upserted, no net new rows)"
             )
-        else:
-            # Neither new entries nor matching entry_points — real failure
-            msg = (
-                f"{case_study}::{stage} has register=True but created "
-                f"0 new training_runs and found 0 with "
-                f"entry_point='{expected_ep}' (total: {after['training_runs']})"
-            )
-            raise AssertionError(msg)
     else:
         # Non-registering notebook — just report what happened
         new_training = after["training_runs"] - before["training_runs"]

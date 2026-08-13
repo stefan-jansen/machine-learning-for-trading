@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import polars as pl
@@ -11,6 +12,7 @@ from case_studies.research import (
     CandidateSet,
     EligibilityManifest,
     OfficialPopulation,
+    PredictionResult,
     Result,
     Study,
     run_backtests,
@@ -74,6 +76,38 @@ def test_run_models_returns_catalog_rows_and_diagnostics(tmp_path: Path, monkeyp
     assert execution.catalog_rows.item(0, "complete") is True
     assert execution.diagnostics[0]["status"] == "completed"
     assert execution.diagnostics[0]["fitted_folds"] == [0, 1]
+
+
+def test_individual_and_batch_linear_execution_are_equivalent(tmp_path: Path, monkeypatch) -> None:
+    individual_study = _linear_study(tmp_path / "individual", monkeypatch)
+    individual_runs = []
+    for alpha in (1.0, 2.0):
+        request = individual_study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        individual_runs.append(run_models(individual_study, requests=[request]).runs[0])
+
+    batch_study = _linear_study(tmp_path / "batch", monkeypatch)
+    batch_requests = [
+        batch_study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        for alpha in (1.0, 2.0)
+    ]
+    batch_runs = run_models(batch_study, requests=batch_requests).runs
+
+    assert [run.training.hash for run in individual_runs] == [
+        run.training.hash for run in batch_runs
+    ]
+    for individual, batch in zip(individual_runs, batch_runs, strict=True):
+        assert individual.predictions[0].hash == batch.predictions[0].hash
+        assert individual.predictions[0].load().equals(batch.predictions[0].load())
 
 
 def test_backtest_selection_validation_fails_before_any_write(tmp_path: Path) -> None:
@@ -164,6 +198,72 @@ def test_n_catalog_rows_fan_out_to_n_independent_backtests(tmp_path: Path) -> No
     assert _backtest_count(study) == 2
 
 
+def test_strategy_change_creates_a_backtest_without_retraining(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    selected = study.predictions.table().filter(pl.col("prediction_hash") == prediction_hash)
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        before = {
+            table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("training_runs", "prediction_sets")
+        }
+
+    first = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+    second = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 2},
+        prices=_prices(),
+    )
+
+    assert first.results[0].hash != second.results[0].hash
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        after = {
+            table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("training_runs", "prediction_sets")
+        }
+    assert after == before
+
+
+def test_preview_prediction_is_excluded_from_official_population(
+    tmp_path: Path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    preview = (
+        run_models(
+            study,
+            requests=[
+                study.model(
+                    family="linear",
+                    label="fwd_ret_1d",
+                    config_name="ridge",
+                    execution_tier="preview",
+                    preview_reductions={"folds": [0]},
+                )
+            ],
+        )
+        .runs[0]
+        .predictions[0]
+    )
+
+    assert study.predictions.table().is_empty()
+    assert study.predictions.table(include_preview=True).height == 1
+    with pytest.raises(ValueError, match="preview.*cannot enter"):
+        OfficialPopulation.create(
+            study,
+            name="preview-must-not-enter-official",
+            member_kind="prediction",
+            members=[preview.hash],
+        )
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM official_populations").fetchone() == (0,)
+
+
 def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
     tmp_path: Path,
 ) -> None:
@@ -237,8 +337,37 @@ def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Pat
     alternate_release = _seed_release(tmp_path / "alternate", marker="alternate")
     relocated = Study.open("etfs", workspace=tmp_path / "workspace", release_root=alternate_release)
     relocated_prediction = Result.open(relocated, prediction_hash)
+    assert isinstance(relocated_prediction, PredictionResult)
     assert relocated_prediction.root == release_case
     assert relocated_prediction.load().height == _predictions().height
+
+
+def test_quick_start_uses_human_fields_and_exposes_lineage_within_budget(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    release_case = release / "case_studies" / "etfs"
+    _publish(release_case, spec=_resolved_spec())
+    started = time.perf_counter()
+
+    study = Study.open("etfs", workspace=tmp_path / "reader-workspace", release_root=release)
+    selected = study.predictions.table().filter(
+        (pl.col("label") == "fwd_ret_21d")
+        & (pl.col("family") == "linear")
+        & (pl.col("config_name") == "ridge")
+        & (pl.col("split") == "validation")
+        & pl.col("complete")
+    )
+    backtest = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    ).results[0]
+    lineage = backtest.lineage()
+
+    assert selected.height == 1
+    assert lineage["prediction_hash"] == selected.item(0, "prediction_hash")
+    assert lineage["training_spec"]["config_name"] == "ridge"
+    assert time.perf_counter() - started < 15 * 60
 
 
 def test_unfinished_training_cannot_satisfy_an_official_population(tmp_path: Path) -> None:
