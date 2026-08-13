@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import os
+from types import SimpleNamespace
+
+import polars as pl
+import pytest
+
+from case_studies.research import LabelDefinition, Study
+from case_studies.utils import deep_learning
+from tests.test_research_workspace import _seed_release
+
+
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    yield
+    os.environ.pop("ML4T_OUTPUT_DIR", None)
+    from case_studies.research import workspace
+
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
+
+
+def test_sequence_resolver_builds_complete_v2_request(tmp_path, monkeypatch) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    dates = [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+        "2024-01-08",
+        "2024-01-09",
+        "2024-01-10",
+        "2024-01-11",
+    ]
+    frame = pl.DataFrame(
+        {
+            "symbol": [f"S{symbol}" for symbol in range(3) for _ in dates],
+            "timestamp": dates * 3,
+            "feature": [float(index) for index in range(24)],
+            "fwd_ret_1d": [float(index % 3) / 100 for index in range(24)],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        frame.select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": "2024-01-02",
+            "train_end": "2024-01-05",
+            "val_start": "2024-01-08",
+            "val_end": "2024-01-11",
+        }
+    ]
+    mds = SimpleNamespace(
+        dataset=frame,
+        feature_names=["feature"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        splits=splits,
+        task_type="regression",
+        class_values=[],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *args, **kwargs: mds)
+    monkeypatch.setattr(
+        "utils.modeling.load_configs",
+        lambda *args, **kwargs: [
+            {
+                "batch_size": 64,
+                "checkpoint_interval": 2,
+                "n_epochs": 4,
+                "params": {"architecture": "nlinear", "dropout": 0.0, "lookback": 2},
+                "config_name": "nlinear_probe",
+                "family": "deep_learning",
+                "library": "pytorch",
+            }
+        ],
+    )
+
+    spec, context = deep_learning.resolve_model_request(
+        study,
+        {
+            "family": "deep_learning",
+            "label": label.name,
+            "config_name": "nlinear_probe",
+            "overrides": {"device": "cpu", "n_epochs": 3},
+            "cv": None,
+            "execution_tier": "canonical",
+            "preview_reductions": {},
+        },
+    )
+
+    assert spec["identity_version"] == 2
+    assert spec["label_artifact"]["digest"] == label.digest
+    assert spec["model"]["params"]["n_epochs"] == 3
+    assert [row["value"] for row in spec["checkpoint_schedule"]] == [2, 3]
+    assert spec["expected_prediction_keys"]["n_rows"] == 12
+    assert spec["sampling"] == {"max_symbols": 0, "max_train_sequences": 0}
+    assert context.expected_keys.height == 12
+    assert context.config["n_epochs"] == 3

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +27,162 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
 BASE_TARGET_COL = "_darts_target_1d"
+
+
+def darts_checkpoint_path(root: Path, config_name: str, fold: int, checkpoint: int) -> Path:
+    return Path(root) / config_name / f"fold_{fold:02d}" / f"epoch_{checkpoint:04d}.pt"
+
+
+def _darts_checkpoint_files(path: Path) -> tuple[Path, Path, Path]:
+    path = Path(path)
+    return path, Path(f"{path}.ckpt"), Path(f"{path}.json")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_darts_checkpoint(
+    path: Path,
+    *,
+    model: Any,
+    architecture: str,
+    metadata: dict[str, Any],
+) -> Path:
+    """Persist an immutable Darts model, Lightning weights, and digest record."""
+    path = Path(path)
+    model_path, weights_path, sidecar_path = _darts_checkpoint_files(path)
+    existing = [item for item in (model_path, weights_path, sidecar_path) if item.exists()]
+    if existing:
+        raise FileExistsError(f"immutable Darts checkpoint conflict: {existing[0]}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    temporary_model = path.with_name(f".{path.name}.{token}.tmp")
+    temporary_weights = Path(f"{temporary_model}.ckpt")
+    temporary_sidecar = path.with_name(f".{path.name}.{token}.json.tmp")
+    published: list[Path] = []
+    try:
+        model.save(str(temporary_model), clean=True)
+        if not temporary_model.is_file() or not temporary_weights.is_file():
+            raise RuntimeError(f"Darts did not persist both checkpoint files for {path}")
+        record = {
+            "schema_version": 1,
+            "architecture": architecture,
+            "metadata": metadata,
+            "model_sha256": _file_sha256(temporary_model),
+            "model_size": temporary_model.stat().st_size,
+            "weights_sha256": _file_sha256(temporary_weights),
+            "weights_size": temporary_weights.stat().st_size,
+        }
+        temporary_sidecar.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        for source, target in (
+            (temporary_model, model_path),
+            (temporary_weights, weights_path),
+            (temporary_sidecar, sidecar_path),
+        ):
+            os.replace(source, target)
+            published.append(target)
+    except Exception:
+        for item in published:
+            item.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary_model.unlink(missing_ok=True)
+        temporary_weights.unlink(missing_ok=True)
+        temporary_sidecar.unlink(missing_ok=True)
+    return path
+
+
+def load_darts_checkpoint(path: Path):
+    """Load a Darts checkpoint after both persisted files pass their digests."""
+    model_path, weights_path, sidecar_path = _darts_checkpoint_files(Path(path))
+    if not all(item.is_file() for item in (model_path, weights_path, sidecar_path)):
+        raise FileNotFoundError(f"Darts checkpoint population is incomplete: {model_path}")
+    record = json.loads(sidecar_path.read_text())
+    if record.get("schema_version") != 1:
+        raise ValueError(f"unsupported Darts checkpoint schema at {model_path}")
+    if record.get("model_sha256") != _file_sha256(model_path) or record.get(
+        "weights_sha256"
+    ) != _file_sha256(weights_path):
+        raise ValueError(f"Darts checkpoint digest does not match its sidecar: {model_path}")
+    model_cls = {
+        "nbeats": NBEATSModel,
+        "tsmixer": TSMixerModel,
+    }.get(record.get("architecture"))
+    if model_cls is None:
+        raise ValueError(f"unsupported Darts architecture at {model_path}")
+    model = model_cls.load(
+        str(model_path),
+        pl_trainer_kwargs=_trainer_kwargs("cpu"),
+        weights_only=False,
+    )
+    return model, record["metadata"]
+
+
+def validate_darts_checkpoint_population(
+    root: Path,
+    *,
+    config_name: str,
+    fold_ids: list[int] | tuple[int, ...],
+    checkpoints: list[int] | tuple[int, ...],
+    architecture: str,
+) -> tuple[Path, ...]:
+    """Require the exact Darts fitted-state population declared by one request."""
+    expected = tuple(
+        darts_checkpoint_path(root, config_name, fold, checkpoint)
+        for fold in sorted({int(value) for value in fold_ids})
+        for checkpoint in sorted({int(value) for value in checkpoints})
+    )
+    if not expected:
+        raise ValueError("Darts checkpoint validation requires folds and checkpoint values")
+    expected_files: set[Path] = set()
+    for path in expected:
+        expected_files.update(_darts_checkpoint_files(path))
+        try:
+            _model_path, _weights_path, sidecar_path = _darts_checkpoint_files(path)
+            if not all(item.is_file() for item in _darts_checkpoint_files(path)):
+                raise FileNotFoundError(path)
+            record = json.loads(sidecar_path.read_text())
+            if (
+                record.get("schema_version") != 1
+                or record.get("model_sha256") != _file_sha256(path)
+                or record.get("weights_sha256") != _file_sha256(Path(f"{path}.ckpt"))
+            ):
+                raise ValueError(path)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as error:
+            raise ValueError(f"Darts fitted checkpoint population is incomplete: {path}") from error
+        fold = int(path.parent.name.removeprefix("fold_"))
+        checkpoint = int(path.stem.removeprefix("epoch_"))
+        required_metadata = {
+            "config_name": config_name,
+            "fold": fold,
+            "checkpoint_kind": "epoch",
+            "checkpoint_value": checkpoint,
+        }
+        mismatches = {
+            key: (record.get("metadata", {}).get(key), value)
+            for key, value in required_metadata.items()
+            if record.get("metadata", {}).get(key) != value
+        }
+        if record.get("architecture") != architecture:
+            mismatches["architecture"] = (record.get("architecture"), architecture)
+        if mismatches:
+            raise ValueError(f"Darts fitted checkpoint metadata mismatch at {path}: {mismatches}")
+
+    config_root = Path(root) / config_name
+    actual_files = {path for path in config_root.glob("fold_*/epoch_*.pt*") if path.is_file()}
+    extras = actual_files - expected_files
+    if extras:
+        raise ValueError(
+            "Darts fitted checkpoint population contains undeclared artifacts: "
+            f"{[str(path) for path in sorted(extras)]}"
+        )
+    return expected
 
 
 def uses_darts_backend(configs: list[dict[str, Any]]) -> bool:
@@ -416,6 +575,72 @@ def _attach_base_target(
     return merged
 
 
+def darts_validation_keys(
+    dataset_pd: pd.DataFrame,
+    splits: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    feature_names: list[str],
+    label_col: str,
+    date_col: str,
+    entity_col: str,
+    case_study: str,
+    temporal_by_fold=None,
+    temporal_keys: list[str] | None = None,
+    temporal_feature_names: list[str] | None = None,
+) -> pl.DataFrame:
+    """Return exact finite validation keys eligible for Darts forecasting."""
+    input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
+        config, _parse_label_horizon(label_col)
+    )
+    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+    frames: list[pl.DataFrame] = []
+    has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    for split in splits:
+        fold_dataset = (
+            _overlay_fold_temporal_features(
+                dataset_pd,
+                split,
+                date_col,
+                temporal_by_fold,
+                temporal_keys,
+                temporal_feature_names,
+            )
+            if has_fold_temporal
+            else dataset_pd
+        )
+        states = _prepare_fold_series(
+            fold_dataset,
+            split,
+            feature_names,
+            label_col,
+            date_col,
+            entity_col,
+            input_chunk_length,
+            output_chunk_length,
+        )
+        rows = [
+            {
+                "symbol": state.entity,
+                "timestamp": pd.Timestamp(state.dates[position]),
+                "fold": int(split["fold"]),
+            }
+            for state in states
+            for position in range(state.val_start_pos, state.val_end_pos + 1)
+            if np.isfinite(state.y_true[position])
+        ]
+        if rows:
+            frames.append(pl.from_dicts(rows))
+    if not frames:
+        return pl.DataFrame(
+            schema={"symbol": pl.String, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
+        )
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("Darts request produced duplicate expected prediction keys")
+    return expected
+
+
 def _prepare_fold_series(
     dataset_pd: pd.DataFrame,
     split: dict[str, Any],
@@ -552,6 +777,8 @@ def _predict_fold(
                 continue
             if base_pos < 0 or base_pos >= len(state.dates):
                 continue
+            if not np.isfinite(state.y_true[base_pos]):
+                continue
             score_path = forecast.values(copy=False).reshape(-1).astype(np.float64, copy=False)
             rows.append(
                 {
@@ -590,6 +817,8 @@ def run_darts_cv(
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
+    checkpoint_root: Path | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Run Darts-backed global forecasting models and emit standard DL artifacts."""
     if case_study is None:
@@ -635,6 +864,7 @@ def run_darts_cv(
         started_at = datetime.now(UTC).isoformat()
         elapsed_total = 0.0
         cfg_prediction_frames: list[pl.DataFrame] = []
+        expected_fold_ids: list[int] = []
 
         print(
             f"Darts CV: {config_name} ({params['architecture']}) "
@@ -668,8 +898,13 @@ def run_darts_cv(
                 output_chunk_length,
             )
             if not fold_series:
+                if strict:
+                    raise ValueError(
+                        f"Darts fold {split['fold']} has no series after eligibility filtering"
+                    )
                 print(f"  Fold {split['fold']}: skipped (insufficient series after filtering)")
                 continue
+            expected_fold_ids.append(int(split["fold"]))
 
             stride, max_samples_per_ts = _resolve_sampling(
                 fold_series,
@@ -728,6 +963,23 @@ def run_darts_cv(
                     max_samples_per_ts=max_samples_per_ts,
                 )
                 epochs_trained += epochs_to_train
+                if checkpoint_root is not None:
+                    write_darts_checkpoint(
+                        darts_checkpoint_path(
+                            checkpoint_root,
+                            config_name,
+                            int(split["fold"]),
+                            epochs_trained,
+                        ),
+                        model=model,
+                        architecture=str(params["architecture"]),
+                        metadata={
+                            "config_name": config_name,
+                            "fold": int(split["fold"]),
+                            "checkpoint_kind": "epoch",
+                            "checkpoint_value": epochs_trained,
+                        },
+                    )
 
                 checkpoint_preds = _predict_fold(
                     model,
@@ -739,6 +991,11 @@ def run_darts_cv(
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:
+                    if strict:
+                        raise ValueError(
+                            f"Darts fold {split['fold']} checkpoint {epochs_trained} "
+                            "produced no validation predictions"
+                        )
                     print(
                         f"        checkpoint {epochs_trained:3d}/{n_epochs}: "
                         f"no validation predictions ({elapsed:.1f}s elapsed)",
@@ -894,6 +1151,16 @@ def run_darts_cv(
             f"  {config_name}: epoch={best_epoch}, IC={best_ic:+.4f} "
             f"(std={best_ic_std:.4f}, {elapsed_total:.1f}s)"
         )
+        if checkpoint_root is not None:
+            from case_studies.utils.deep_model_state import declared_epoch_checkpoints
+
+            validate_darts_checkpoint_population(
+                checkpoint_root,
+                config_name=config_name,
+                fold_ids=expected_fold_ids,
+                checkpoints=declared_epoch_checkpoints(n_epochs, checkpoint_interval),
+                architecture=str(params["architecture"]),
+            )
 
     if not config_results:
         raise RuntimeError("Darts run produced no config results.")
