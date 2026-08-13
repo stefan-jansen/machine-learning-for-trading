@@ -325,10 +325,47 @@ def _sequence_period_numbers(
         if trades_on_weekends:
             return ((values.asi8 - unique[0].value) // cadence_ns).astype(np.int64)
 
+        if calendar_id:
+            import pandas_market_calendars as mcal
+
+            calendar = mcal.get_calendar(calendar_id)
+            schedule = calendar.schedule(
+                start_date=(unique.min() - pd.Timedelta(days=7)).date(),
+                end_date=(unique.max() + pd.Timedelta(days=7)).date(),
+            )
+            cadence = pd.Timedelta(cadence_ns, unit="ns")
+            if values.tz is None:
+                instant_candidates = (
+                    values.tz_localize(calendar.tz).tz_convert("UTC"),
+                    values.tz_localize("UTC"),
+                )
+            else:
+                instant_candidates = (values.tz_convert("UTC"),)
+
+            best_positions = np.full(len(values), -1, dtype=np.int64)
+            for instants in instant_candidates:
+                for closed, force_close in (("left", False), ("right", True)):
+                    expected = mcal.date_range(
+                        schedule,
+                        frequency=cadence,
+                        closed=closed,
+                        force_close=force_close,
+                    )
+                    positions = expected.get_indexer(instants)
+                    if np.count_nonzero(positions >= 0) > np.count_nonzero(best_positions >= 0):
+                        best_positions = positions
+            if np.all(best_positions >= 0):
+                return best_positions.astype(np.int64)
+
         normalized = values.normalize()
-        session_number = normalized.asi8 // pd.Timedelta(days=1).value
         slot = (values.asi8 - normalized.asi8) // cadence_ns
-        return (session_number * 1_000_000 + slot).astype(np.int64)
+        first_slot = int(slot.min())
+        slots_per_session = int(slot.max() - first_slot + 1)
+        session_number = np.busday_count(
+            np.datetime64("1970-01-01", "D"),
+            normalized.to_numpy(dtype="datetime64[D]"),
+        )
+        return (session_number * slots_per_session + slot - first_slot).astype(np.int64)
 
     if median_days >= 20:
         return (values.year * 12 + values.month).astype(np.int64)

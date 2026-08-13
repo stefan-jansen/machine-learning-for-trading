@@ -285,7 +285,7 @@ def test_weekday_intraday_windows_reject_a_panel_wide_missing_bar():
         [
             day + pd.Timedelta(hours=9, minutes=30) + pd.Timedelta(minutes=15 * slot)
             for day in session_days
-            for slot in range(8)
+            for slot in range(26)
         ]
     )
     missing_date = session_days[1] + pd.Timedelta(hours=10)
@@ -315,13 +315,17 @@ def test_weekday_intraday_windows_reject_a_panel_wide_missing_bar():
         entity_col="symbol",
         lookback=lookback,
         val_start=session_days[3] + pd.Timedelta(hours=9, minutes=30),
+        calendar_id="NYSE",
     )
 
-    cadence = np.timedelta64(15, "m")
+    complete_positions = dates.get_indexer
+    crossed_session = False
     for symbol_id, end_idx in zip(train_store.symbol_idx, train_store.end_idx, strict=True):
         timestamps = train_store.timestamps[int(symbol_id)]
         window = timestamps[int(end_idx) - lookback : int(end_idx) + 1]
-        assert np.all(np.diff(window) == cadence)
+        assert np.all(np.diff(complete_positions(window)) == 1)
+        crossed_session |= len(pd.DatetimeIndex(window).normalize().unique()) > 1
+    assert crossed_session
 
 
 def test_monthly_period_numbers_preserve_gaps_at_millisecond_resolution():
