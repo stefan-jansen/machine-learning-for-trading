@@ -7,7 +7,6 @@ import polars as pl
 import pytest
 
 from case_studies.research import LabelDefinition, Study
-from case_studies.utils import tabular_dl
 from tests.test_research_workspace import _seed_release
 
 
@@ -84,18 +83,14 @@ def test_tabm_resolver_builds_complete_v2_request(tmp_path, monkeypatch) -> None
         ],
     )
 
-    spec, context = tabular_dl.resolve_model_request(
-        study,
-        {
-            "family": "tabular_dl",
-            "label": label.name,
-            "config_name": "tabm_probe",
-            "overrides": {"device": "cpu", "n_epochs": 11},
-            "cv": None,
-            "execution_tier": "canonical",
-            "preview_reductions": {},
-        },
-    )
+    resolved = study.model(
+        family="tabular_dl",
+        label=label.name,
+        config_name="tabm_probe",
+        overrides={"device": "cpu", "n_epochs": 11},
+    ).resolve()
+    spec = resolved.spec
+    context = resolved._context
 
     assert spec["identity_version"] == 2
     assert spec["label_artifact"]["digest"] == label.digest

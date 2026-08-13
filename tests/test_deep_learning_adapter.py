@@ -7,7 +7,6 @@ import polars as pl
 import pytest
 
 from case_studies.research import LabelDefinition, Study
-from case_studies.utils import deep_learning
 from tests.test_research_workspace import _seed_release
 
 
@@ -89,18 +88,14 @@ def test_sequence_resolver_builds_complete_v2_request(tmp_path, monkeypatch) -> 
         ],
     )
 
-    spec, context = deep_learning.resolve_model_request(
-        study,
-        {
-            "family": "deep_learning",
-            "label": label.name,
-            "config_name": "nlinear_probe",
-            "overrides": {"device": "cpu", "n_epochs": 3},
-            "cv": None,
-            "execution_tier": "canonical",
-            "preview_reductions": {},
-        },
-    )
+    resolved = study.model(
+        family="deep_learning",
+        label=label.name,
+        config_name="nlinear_probe",
+        overrides={"device": "cpu", "n_epochs": 3},
+    ).resolve()
+    spec = resolved.spec
+    context = resolved._context
 
     assert spec["identity_version"] == 2
     assert spec["label_artifact"]["digest"] == label.digest
