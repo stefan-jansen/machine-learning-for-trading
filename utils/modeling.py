@@ -737,16 +737,16 @@ def load_modeling_dataset(
         from case_studies.utils.cv_window import (
             assert_variant_folds_are_out_of_sample,
             configured_labels,
-            modeling_fold_boundaries,
+            temporal_artifact_fold_boundaries,
         )
 
         configured = configured_labels(case_study_id)
         artifact_label = configured[0] if configured else primary_label
-        temporal_artifact_splits = modeling_fold_boundaries(case_study_id, artifact_label) or []
-        if not temporal_artifact_splits:
-            raise ValueError(
-                "fold-scoped temporal features require primary-label artifact boundaries"
-            )
+        temporal_artifact_splits = temporal_artifact_fold_boundaries(
+            case_study_id,
+            artifact_label,
+            temporal_path,
+        )
         if configured and primary_label != configured[0]:
             assert_variant_folds_are_out_of_sample(
                 case_study_id, configured[0], variants=[primary_label]

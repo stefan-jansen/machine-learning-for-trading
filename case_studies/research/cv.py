@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from case_studies.utils.registry.specs import canonical_json, compute_hash
@@ -8,7 +9,14 @@ from utils.cv_splits import generate_cv_splits
 
 
 def _normalize_boundary(value: Any) -> str:
-    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+    raw = value.isoformat() if hasattr(value, "isoformat") else str(value)
+    try:
+        boundary = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if boundary.tzinfo is not None:
+        boundary = boundary.astimezone(UTC).replace(tzinfo=None)
+    return boundary.isoformat()
 
 
 def require_fold_scoped_temporal_compatibility(
