@@ -262,6 +262,23 @@ def test_catalog_schema_and_open_parameter_types_are_stable(tmp_path: Path) -> N
     assert first.schema["ic_mean"] == pl.Float64
 
 
+def test_catalog_one_matches_null_checkpoint_and_projects_resolved_fold_parameters(
+    tmp_path: Path,
+) -> None:
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    spec = _resolved_spec()
+    spec["computation"]["model"] = {
+        "class": "Ridge",
+        "effective_params_by_fold": {"0": {"alpha": 1.5, "fit_intercept": True}},
+    }
+    prediction_hash = _publish(study.root, spec=spec)
+
+    row = study.predictions.one(prediction_hash=prediction_hash, checkpoint_value=None)
+
+    assert row["model__effective_params_by_fold__0__alpha"] == 1.5
+
+
 def test_catalog_reads_complete_v2_artifacts_without_granting_current_completeness(
     tmp_path: Path,
 ) -> None:

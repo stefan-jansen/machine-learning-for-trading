@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 from case_studies.research import (
+    CandidateSet,
     EligibilityManifest,
     OfficialPopulation,
     Result,
@@ -17,7 +18,7 @@ from case_studies.research import (
 )
 from case_studies.utils import linear
 from case_studies.utils.registry import metrics as registry_metrics
-from case_studies.utils.registry import prediction_hash_from_parts
+from case_studies.utils.registry import prediction_hash_from_parts, register_backtest_run
 from tests.test_research_contract_catalog import _publish, _resolved_spec, _tree_digest
 from tests.test_research_flow import _prices
 from tests.test_research_models import _linear_study
@@ -131,6 +132,19 @@ def test_catalog_one_reports_fields_that_disambiguate_matches(tmp_path: Path) ->
         study.predictions.one(config_name="ridge")
 
 
+def test_version_3_candidate_protocol_uses_computation_cv_identity(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    first_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    changed = _resolved_spec(alpha=2.0)
+    changed["computation"]["cv"]["identity"] = "cv-b"
+    second_hash = _publish(study.root, spec=changed, score_shift=0.1)
+    first = Result.open(study, first_hash)
+    second = Result.open(study, second_hash)
+
+    with pytest.raises(ValueError, match="protocol-incompatible.*cv"):
+        CandidateSet.create(study, "incompatible-cv", [first, second])
+
+
 def test_n_catalog_rows_fan_out_to_n_independent_backtests(tmp_path: Path) -> None:
     study = _study(tmp_path)
     first = _publish_prediction(study, alpha=1.0, checkpoint=1)
@@ -148,6 +162,55 @@ def test_n_catalog_rows_fan_out_to_n_independent_backtests(tmp_path: Path) -> No
     assert len({result.hash for result in execution.results}) == 2
     assert {item["prediction_hash"] for item in execution.diagnostics} == {first, second}
     assert _backtest_count(study) == 2
+
+
+def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    first = {
+        "identity_version": 3,
+        "execution_tier": "canonical",
+        "strategy": {
+            "signal": {
+                "method": "equal_weight_top_k",
+                "top_k": 1,
+                "direction": "long_only",
+            }
+        },
+        "backtest_config": {"metadata": {"preset_path": "/first/preset.yaml"}},
+    }
+    equivalent = {
+        "identity_version": 3,
+        "execution_tier": "canonical",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        "backtest_config": {"metadata": {"preset_path": "/other/preset.yaml"}},
+    }
+
+    first_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        first,
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 1.0},
+        case_dir=study.root,
+    )
+    second_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        equivalent,
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 1.0},
+        case_dir=study.root,
+    )
+
+    assert first_hash == second_hash
 
 
 def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Path) -> None:
@@ -170,6 +233,32 @@ def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Pat
     assert _backtest_count(reopened) == 1
     assert reopened.predictions.table().item(0, "origin") == "released"
     assert _tree_digest(release_case) == before
+
+    alternate_release = _seed_release(tmp_path / "alternate", marker="alternate")
+    relocated = Study.open("etfs", workspace=tmp_path / "workspace", release_root=alternate_release)
+    relocated_prediction = Result.open(relocated, prediction_hash)
+    assert relocated_prediction.root == release_case
+    assert relocated_prediction.load().height == _predictions().height
+
+
+def test_unfinished_training_cannot_satisfy_an_official_population(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    training = study.results.register_training(_resolved_spec())
+    population = OfficialPopulation.create(
+        study,
+        name="training-population",
+        member_kind="training",
+        members=[training.hash],
+    )
+
+    assert training.complete is False
+    with pytest.raises(ValueError, match="partial"):
+        population.require_complete()
+
+    attempt = study.executions.start(training.hash)
+    attempt.finish("completed", {"fitted_folds": [0]})
+    assert Result.open(study, training.hash).complete is True
+    assert population.require_complete() == (training.hash,)
 
 
 def test_official_population_cannot_silently_omit_failed_member(tmp_path: Path) -> None:

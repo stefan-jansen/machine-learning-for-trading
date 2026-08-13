@@ -95,10 +95,11 @@ class DecisionArtifact:
     kind: str
     spec: dict[str, Any]
     canonical: bool
+    root: Path
 
     @property
     def path(self) -> Path:
-        return self.study.root / "run_log" / "decisions" / self.hash / "decisions.parquet"
+        return self.root / "run_log" / "decisions" / self.hash / "decisions.parquet"
 
     @classmethod
     def publish(
@@ -150,52 +151,78 @@ class DecisionArtifact:
         decision_hash = compute_hash(canonical_json(spec))
         artifact_dir = study.root / "run_log" / "decisions" / decision_hash
         artifact = artifact_dir / "decisions.parquet"
-        if artifact.is_file():
-            if value_digest(pl.read_parquet(artifact)) != spec["artifact_digest"]:
-                raise ValueError(f"immutable decision artifact conflict for {decision_hash}")
-            return cls.open(study, decision_hash)
-
         artifact_dir.mkdir(parents=True, exist_ok=True)
         temporary = artifact_dir / f".decisions.{uuid.uuid4().hex}.tmp"
         normalized_decisions.write_parquet(temporary)
         db = _open_registry(study.root)
+        created_artifact = False
         try:
             db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                "INSERT INTO decision_artifacts "
-                "(decision_hash, decision_kind, spec_json, artifact_digest, canonical, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (
-                    decision_hash,
-                    kind,
-                    canonical_json(spec),
-                    spec["artifact_digest"],
-                    int(canonical),
-                    _utc_now(),
-                ),
-            )
-            os.replace(temporary, artifact)
+            existing = db.execute(
+                "SELECT decision_kind, spec_json, artifact_digest, canonical "
+                "FROM decision_artifacts WHERE decision_hash = ?",
+                (decision_hash,),
+            ).fetchone()
+            expected = (kind, canonical_json(spec), spec["artifact_digest"], int(canonical))
+            if existing is not None and existing != expected:
+                raise ValueError(f"immutable decision identity conflict for {decision_hash}")
+            if (
+                artifact.is_file()
+                and value_digest(pl.read_parquet(artifact)) != spec["artifact_digest"]
+            ):
+                raise ValueError(f"immutable decision artifact conflict for {decision_hash}")
+            if existing is None:
+                db.execute(
+                    "INSERT INTO decision_artifacts "
+                    "(decision_hash, decision_kind, spec_json, artifact_digest, canonical, "
+                    "created_at) VALUES (?,?,?,?,?,?)",
+                    (decision_hash, *expected, _utc_now()),
+                )
+            if not artifact.is_file():
+                os.replace(temporary, artifact)
+                created_artifact = True
             db.commit()
         except Exception:
             db.rollback()
-            artifact.unlink(missing_ok=True)
+            if created_artifact:
+                artifact.unlink(missing_ok=True)
             raise
         finally:
             temporary.unlink(missing_ok=True)
             db.close()
-        return cls(study, decision_hash, kind, spec, canonical)
+        return cls(study, decision_hash, kind, spec, canonical, study.root)
 
     @classmethod
     def open(cls, study: Study, decision_hash: str) -> DecisionArtifact:
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-            row = db.execute(
-                "SELECT decision_kind, spec_json, canonical FROM decision_artifacts "
-                "WHERE decision_hash = ?",
-                (decision_hash,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(f"unknown decision artifact {decision_hash!r}")
-        return cls(study, decision_hash, row[0], json.loads(row[1]), bool(row[2]))
+        roots = [study.root]
+        if study.release_case_root != study.root:
+            roots.append(study.release_case_root)
+        for root in roots:
+            db_path = root / "run_log" / "registry.db"
+            if not db_path.is_file():
+                continue
+            with sqlite3.connect(db_path) as db:
+                table = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'decision_artifacts'"
+                ).fetchone()
+                if table is None:
+                    continue
+                row = db.execute(
+                    "SELECT decision_kind, spec_json, canonical FROM decision_artifacts "
+                    "WHERE decision_hash = ?",
+                    (decision_hash,),
+                ).fetchone()
+            if row is not None:
+                return cls(
+                    study,
+                    decision_hash,
+                    row[0],
+                    json.loads(row[1]),
+                    bool(row[2]),
+                    root,
+                )
+        raise KeyError(f"unknown decision artifact {decision_hash!r}")
 
     def load(self) -> pl.DataFrame:
         frame = pl.read_parquet(self.path)

@@ -271,7 +271,7 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "spec_json": canonical_json(spec),
         }
         open_fields: dict[str, Any] = {}
-        _flatten("model__params", model.get("params", {}), open_fields)
+        _flatten("model", model, open_fields)
         _flatten("preprocessing", computation.get("preprocessing", {}), open_fields)
         _flatten("cv", cv.get("request", {}), open_fields)
         row.update({key: _open_value(value) for key, value in open_fields.items()})
@@ -348,7 +348,8 @@ class PredictionCatalog:
         for field, value in filters.items():
             if field not in table.columns:
                 raise ValueError(f"unknown prediction catalog field {field!r}")
-            table = table.filter(pl.col(field) == value)
+            predicate = pl.col(field).is_null() if value is None else pl.col(field) == value
+            table = table.filter(predicate)
         if table.height != 1:
             varying = [
                 column

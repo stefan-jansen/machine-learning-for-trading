@@ -12,6 +12,7 @@ from typing import Any
 
 from .specs import (
     SUPPORTED_IDENTITY_VERSIONS,
+    _hashable_strategy_spec,
     _validate_spec,
     backtest_hash_from_parts,
     build_training_spec,
@@ -1010,7 +1011,11 @@ def register_backtest_run(
         finally:
             db.close()
         if existing is not None:
-            if existing != (prediction_hash, spec_json_str):
+            existing_spec = json.loads(existing[1] or "{}")
+            same_identity = canonical_json(
+                _hashable_strategy_spec(existing_spec)
+            ) == canonical_json(_hashable_strategy_spec(strategy_spec))
+            if existing[0] != prediction_hash or not same_identity:
                 raise ValueError(f"immutable backtest identity conflict for {b_hash}")
             import polars as pl
 

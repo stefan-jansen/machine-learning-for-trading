@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
 )
-from tests.test_research_contract_catalog import _resolved_spec
+from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
@@ -98,6 +99,60 @@ def test_typed_decision_artifact_survives_restart_with_state_policy(tmp_path: Pa
         "fold_boundary": "liquidate",
         "temporal_gap": "reset",
     }
+    assert reopened.load().equals(_decisions())
+
+
+def test_identical_decision_publishers_and_orphan_recovery_preserve_artifact(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _prediction(study)
+    policy = StateTransitionPolicy(fold_boundary="reset", temporal_gap="reset")
+
+    def publish() -> DecisionArtifact:
+        return DecisionArtifact.publish(
+            study,
+            kind="target_positions",
+            decisions=_decisions(),
+            prediction_hashes=[prediction_hash],
+            parameters={"threshold": 0.5},
+            state_transition_policy=policy,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        published = list(pool.map(lambda _: publish(), range(2)))
+
+    assert published[0].hash == published[1].hash
+    assert published[0].path.is_file()
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "DELETE FROM decision_artifacts WHERE decision_hash = ?",
+            (published[0].hash,),
+        )
+        db.commit()
+
+    recovered = publish()
+    assert recovered.load().equals(_decisions())
+
+
+def test_released_decision_artifact_opens_without_workspace_copy(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    release_case = release / "case_studies" / "etfs"
+    prediction_hash = _publish(release_case, spec=_resolved_spec())
+    writable_release = Study("etfs", release_case, release, release.parent, False, {})
+    published = DecisionArtifact.publish(
+        writable_release,
+        kind="target_positions",
+        decisions=_decisions(),
+        prediction_hashes=[prediction_hash],
+        parameters={},
+        state_transition_policy=StateTransitionPolicy("reset", "reset"),
+    )
+    workspace = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    reopened = DecisionArtifact.open(workspace, published.hash)
+
+    assert reopened.root == release_case
     assert reopened.load().equals(_decisions())
 
 
@@ -208,6 +263,24 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_staging").fetchone() == (1,)
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone() == (0,)
+
+    from case_studies.research import lifecycle
+
+    monkeypatch.setattr(
+        lifecycle,
+        "load_backtest_prices_for",
+        lambda *args, **kwargs: holdout_prices.with_columns((pl.col("close") + 1).alias("close")),
+    )
+    with pytest.raises(ValueError, match="exact complete canonical lineage"):
+        study.lifecycle.finalize_holdout(lock.hash)
+    assert study.lifecycle.open(lock.hash).state == "LOCKED"
+    monkeypatch.setattr(
+        lifecycle,
+        "load_backtest_prices_for",
+        lambda *args, **kwargs: holdout_prices,
+    )
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         db.execute(
             "CREATE TRIGGER force_holdout_failure BEFORE UPDATE OF state ON research_locks "
             "WHEN NEW.state = 'HOLDOUT_EVALUATED' BEGIN "

@@ -272,27 +272,11 @@ class Lifecycle:
             ).fetchone()
         if staged is None:
             raise ValueError("holdout artifacts must be staged before finalization")
-        training = Result.open(self.study, staged[0])
-        prediction = Result.open(self.study, staged[1])
-        backtest = Result.open(self.study, staged[2])
-        if not (
-            isinstance(training, TrainingResult)
-            and training.complete
-            and isinstance(prediction, PredictionResult)
-            and prediction.complete
-            and isinstance(backtest, BacktestResult)
-            and backtest.complete
-        ):
-            raise ValueError("staged holdout artifacts no longer validate")
-        lineage_digest = compute_hash(
-            canonical_json(
-                {
-                    "lock_hash": lock_hash,
-                    "holdout_training_hash": training.hash,
-                    "holdout_prediction_hash": prediction.hash,
-                    "holdout_backtest_hash": backtest.hash,
-                }
-            )
+        _, training, prediction, backtest, lineage_digest = self._validated_holdout_lineage(
+            lock_hash,
+            holdout_training_hash=staged[0],
+            holdout_prediction_hash=staged[1],
+            holdout_backtest_hash=staged[2],
         )
         if lineage_digest != staged[3]:
             raise ValueError("staged holdout lineage digest does not validate")

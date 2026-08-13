@@ -228,6 +228,27 @@ def test_preview_request_requires_hash_covered_reductions(tmp_path) -> None:
         )
 
 
+def test_version_3_linear_preview_registers_identity_covered_reductions(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    resolved = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        execution_tier="preview",
+        preview_reductions={"folds": [0]},
+    ).resolve()
+
+    training = study.results.register_training(
+        resolved.spec,
+        execution_tier="preview",
+    )
+
+    assert resolved.spec["computation"]["preview_reductions"] == {"folds": [0]}
+    assert training.execution_tier == "preview"
+
+
 def test_model_and_causal_adapters_have_one_extension_seam() -> None:
     register_adapter("model", "fixture_family", "case_studies.utils.linear")
     register_adapter("causal", "fixture_causal", "case_studies.utils.causal")
