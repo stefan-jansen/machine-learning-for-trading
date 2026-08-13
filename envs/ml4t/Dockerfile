@@ -110,7 +110,7 @@ COPY pyproject.toml uv.lock /build/
 # device-links the CUDA-13-built libnccl_static.a, which nvcc 12.6's nvlink cannot read
 # ("nvlink error: Uncompress failed (target: sm_80)"). Reading the version from the lock
 # means the image cannot drift off the version readers get from `uv sync`.
-RUN cd /build && uv export --frozen --extra live --no-emit-project --no-hashes \
+RUN cd /build && uv export --frozen --extra live --extra dev --no-emit-project --no-hashes \
       --format requirements-txt \
       | grep -iE '^[a-z0-9._-]+==' > /tmp/locked-all.txt && \
     grep -viE '^(torch|torchvision|torchaudio|lightgbm|triton|setuptools)==|^nvidia-' \
@@ -209,7 +209,7 @@ RUN mkdir -p /etc/jupyter/labconfig && \
     echo '{"disabledExtensions": {"catboost-widget": true}}' > /etc/jupyter/labconfig/page_config.json
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
-RUN /opt/ml4t/bin/pip install --no-cache-dir \
+RUN /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
     "pytest>=8.0" "pytest-rerunfailures>=16.0" "pytest-timeout>=2.3"
 
 # Copy import test script
