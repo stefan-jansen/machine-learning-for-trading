@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.dummy import DummyRegressor
 
 from case_studies.utils.causal import (
@@ -54,6 +55,15 @@ def test_monthly_label_buffer_is_one_monthly_decision_group() -> None:
     assert embargo_from_buffer("1M", periods_per_year=12) == 1
 
 
+def test_minute_label_buffer_uses_the_observation_grid() -> None:
+    assert embargo_from_buffer("15min", observation_frequency="1min") == 15
+    assert embargo_from_buffer("60min", observation_frequency="15min") == 4
+
+
+def test_duration_embargo_rounds_up_to_cover_the_label_window() -> None:
+    assert embargo_from_buffer("16min", observation_frequency="5min") == 4
+
+
 def test_panel_walk_forward_rejects_unsorted_groups() -> None:
     dates = np.array([0, 0, 2, 2, 1, 1])
 
@@ -92,6 +102,36 @@ def test_panel_cross_fitting_residualizes_complete_dates() -> None:
     assert result["n_periods"] == len(np.unique(dates[valid]))
     assert result["covariance_type"] == "driscoll_kraay"
     assert result["hac_maxlags"] < int(valid.sum() ** (1 / 3))
+
+
+def test_panel_cross_fitting_records_covariance_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from statsmodels.regression.linear_model import RegressionResults
+
+    dates = np.repeat(np.arange(100), 2)
+    rng = np.random.default_rng(8)
+    treatment = rng.normal(size=len(dates))
+    confounders = rng.normal(size=(len(dates), 2))
+    outcome = treatment + rng.normal(size=len(dates))
+
+    def fail_covariance(*_args, **_kwargs):
+        raise np.linalg.LinAlgError("singular covariance")
+
+    monkeypatch.setattr(RegressionResults, "get_robustcov_results", fail_covariance)
+    result = manual_dml_timeseries(
+        outcome,
+        treatment,
+        confounders,
+        n_folds=2,
+        embargo=1,
+        model_y=DummyRegressor(),
+        model_t=DummyRegressor(),
+        groups=dates,
+    )
+
+    assert result["covariance_type"] == "hc0_fallback"
+    assert result["covariance_error"] == "singular covariance"
 
 
 def test_panel_block_permutation_preserves_each_entity_history() -> None:

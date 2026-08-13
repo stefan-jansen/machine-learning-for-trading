@@ -20,6 +20,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import time
 from datetime import UTC, datetime
+from math import ceil
 
 import numpy as np
 import pandas as pd
@@ -31,11 +32,20 @@ from statsmodels.regression.linear_model import OLS
 from utils.modeling import RANDOM_SEED, seed_everything
 
 
-def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = None) -> int:
+def embargo_from_buffer(
+    label_buffer: str,
+    *,
+    periods_per_year: int | None = None,
+    observation_frequency: str | None = None,
+) -> int:
     """Convert a label buffer string to an integer embargo period count.
 
-    Supports all pandas duration units (D, H/h, M, T/min).
+    Supports pandas duration units (D, H/h, M, T/min).
     Returns the number of observation periods to skip between train and test.
+
+    When ``observation_frequency`` is supplied, fixed-duration buffers are
+    divided by that observation duration and rounded up. This makes the
+    conversion explicit for data whose label horizon differs from its grid.
 
     Bar-frequency assumptions baked into the conversion:
     - D: one period per `value` days (e.g. "5D" → 5)
@@ -49,10 +59,20 @@ def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = Non
     """
     import re
 
-    match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
+    match = re.fullmatch(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
     if not match:
         raise ValueError(f"Cannot parse label_buffer: {label_buffer}")
     value, unit = int(match.group(1)), match.group(2)
+    if observation_frequency is not None:
+        if unit == "M":
+            if periods_per_year == 12:
+                return value
+            raise ValueError("monthly buffers require a monthly observation grid")
+        buffer_duration = pd.Timedelta(label_buffer)
+        observation_duration = pd.Timedelta(observation_frequency)
+        if observation_duration <= pd.Timedelta(0):
+            raise ValueError("observation_frequency must be positive")
+        return max(1, ceil(buffer_duration / observation_duration))
     return {
         "D": value,
         "H": max(1, 24 // value),
@@ -329,6 +349,8 @@ def manual_dml_timeseries(
     # Driscoll-Kraay aggregates the score by decision time and remains robust to
     # general cross-sectional dependence.
     se_hac = se_iid
+    covariance_type = "driscoll_kraay" if groups is not None else "newey_west"
+    covariance_error = None
     try:
         if valid_groups is not None:
             time_codes = pd.factorize(valid_groups, sort=False)[0]
@@ -347,8 +369,9 @@ def manual_dml_timeseries(
             )
         cov = robust.cov_params()
         se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
-    except Exception:
-        pass  # Fall back to HC0 standard errors on numerical failure
+    except Exception as error:
+        covariance_type = "hc0_fallback"
+        covariance_error = str(error)
 
     t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
     p_value_hac = (
@@ -367,8 +390,10 @@ def manual_dml_timeseries(
         "n_obs": n_valid,
         "n_periods": n_periods,
         "hac_maxlags": hac_maxlags,
-        "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
+        "covariance_type": covariance_type,
     }
+    if covariance_error is not None:
+        result["covariance_error"] = covariance_error
 
     if return_residuals:
         result["Y_res"] = Y_res
