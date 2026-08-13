@@ -61,6 +61,7 @@ warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
+    get_rebalance_step,
     get_rebalance_step_for_cadence,
     load_backtest_prices_for,
     warmup_periods_for,
@@ -383,24 +384,18 @@ else:
 
 if best_pred_hash is not None:
     predictions_raw = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, best_pred_hash))
-
-    # Thin minute-level predictions to 15m for default cadence
-    predictions_15m = predictions_raw.filter(
-        (pl.col("timestamp").dt.minute() % 15 == 0) & (pl.col("timestamp").dt.second() == 0)
-    )
-    # Keep minute-level for asof alignment to coarser cadences
     predictions_minute = predictions_raw
-    print(f"  Predictions: {len(predictions_raw):,} (minute), {len(predictions_15m):,} (15m)")
+    print(f"  Predictions: {len(predictions_raw):,} minute rows")
 else:
-    predictions_raw = predictions_15m = predictions_minute = None
+    predictions_raw = predictions_minute = None
 
 # %% [markdown]
 # ### Aligning predictions to target bar frequency
 #
-# The predictions are at 15-minute resolution. When rebalancing at hourly
-# cadence, we take the **last available prediction** at or before each price
-# bar timestamp via an asof join. This is realistic: the portfolio manager
-# uses the most recent signal when the rebalance fires.
+# Execution always uses the canonical one-minute price grid. For each coarser
+# decision cadence, we take the **last available prediction** at or before its
+# decision timestamp via an asof join. Orders then enter on the next minute bar
+# and close on the minute-grid label horizon.
 
 # %%
 # Alternative cadences for the cadence × cost heatmap, driven by setup.yaml.
@@ -464,7 +459,7 @@ def align_predictions_to_bars(preds: pl.DataFrame, bar_timestamps: pl.Series) ->
 
 # %%
 def run_cadence_cost_backtest(
-    cadence, cadence_label, cost_ps, cadence_prices, aligned_preds, state
+    cadence, cadence_label, cost_ps, execution_prices, aligned_preds, state
 ):
     """Run one cadence × cost backtest and record results."""
     state["n_done"] += 1
@@ -473,7 +468,7 @@ def run_cadence_cost_backtest(
     spec = build_backtest_spec(
         CASE_STUDY_ID,
         bt_config,
-        prices=cadence_prices,
+        prices=execution_prices,
         prediction_hash=best_pred_hash,
         initial_cash=bt_config.initial_cash,
         chapter="ch18",
@@ -483,6 +478,7 @@ def run_cadence_cost_backtest(
     spec["strategy"]["rebalance"]["step"] = get_rebalance_step_for_cadence(
         CASE_STUDY_ID, LABEL, cadence
     )
+    spec["strategy"]["rebalance"]["exit_step"] = get_rebalance_step(CASE_STUDY_ID, LABEL)
     spec["backtest_config"]["metadata"]["cadence"] = cadence
 
     if cost_ps > 0:
@@ -501,7 +497,7 @@ def run_cadence_cost_backtest(
         CASE_STUDY_ID,
         best_pred_hash,
         spec,
-        prices=cadence_prices,
+        prices=execution_prices,
         predictions=aligned_preds,
         label=LABEL,
         register=True,
@@ -510,6 +506,8 @@ def run_cadence_cost_backtest(
     )
     sharpe = result.metrics.get("sharpe", 0)
     n_trades = result.metrics.get("num_trades", 0)
+    if n_trades <= 0:
+        raise RuntimeError(f"{cadence_label} @ {cost_ps:g}/share produced no trades")
 
     cadence_results.append(
         {
@@ -534,22 +532,39 @@ sweep_state = {
     "n_done": 0,
 }
 t0 = time.time()
+execution_prices = (
+    load_backtest_prices_for(
+        CASE_STUDY_ID,
+        LABEL,
+        split="validation",
+        frequency="1m",
+        max_symbols=MAX_SYMBOLS,
+    )
+    if best_pred_hash
+    else None
+)
 
 for cadence in CADENCES if best_pred_hash else []:
     freq = FREQ_MAP[cadence]
     cadence_label = CADENCE_LABELS[cadence]
 
-    cadence_prices = load_backtest_prices_for(
-        CASE_STUDY_ID,
-        LABEL,
-        split="validation",
-        frequency=freq,
-        max_symbols=MAX_SYMBOLS,
+    decision_prices = (
+        execution_prices
+        if freq == "1m"
+        else load_backtest_prices_for(
+            CASE_STUDY_ID,
+            LABEL,
+            split="validation",
+            frequency=freq,
+            max_symbols=MAX_SYMBOLS,
+        )
     )
-    bar_ts = cadence_prices["timestamp"].unique().sort()
+    bar_ts = decision_prices["timestamp"].unique().sort()
 
     aligned_preds = (
-        predictions_15m if freq == "15m" else align_predictions_to_bars(predictions_minute, bar_ts)
+        predictions_minute
+        if freq == "1m"
+        else align_predictions_to_bars(predictions_minute, bar_ts)
     )
     if aligned_preds.is_empty():
         raise ValueError(f"{cadence_label}: no predictions align to the cadence price grid")
@@ -559,7 +574,7 @@ for cadence in CADENCES if best_pred_hash else []:
     )
     for cost_ps in COST_PER_SHARE_GRID:
         run_cadence_cost_backtest(
-            cadence, cadence_label, cost_ps, cadence_prices, aligned_preds, sweep_state
+            cadence, cadence_label, cost_ps, execution_prices, aligned_preds, sweep_state
         )
 
 # %%

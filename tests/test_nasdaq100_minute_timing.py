@@ -263,3 +263,75 @@ def test_minute_engine_closes_each_session_before_the_next_session() -> None:
     )
     assert first_session_close["open_positions"].item() == 0
     assert first_session_close["gross_exposure"].item() == pytest.approx(0.0)
+
+
+def test_four_hour_decisions_execute_and_exit_on_the_minute_price_grid() -> None:
+    start = datetime(2020, 7, 6, 9, 30)
+    timestamps = [start + timedelta(minutes=offset) for offset in range(390)]
+    prices = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["AAPL"] * len(timestamps),
+            "open": [100.0] * len(timestamps),
+            "high": [100.0] * len(timestamps),
+            "low": [100.0] * len(timestamps),
+            "close": [100.0] * len(timestamps),
+            "volume": [1_000_000] * len(timestamps),
+            "bid_open": [99.99] * len(timestamps),
+            "ask_open": [100.01] * len(timestamps),
+        }
+    )
+    decision_times = [start, start + timedelta(hours=4)]
+    predictions = pl.DataFrame(
+        {
+            "timestamp": decision_times,
+            "symbol": ["AAPL"] * 2,
+            "y_score": [1.0] * 2,
+            "y_true": [0.0] * 2,
+            "fold_id": [0] * 2,
+            "model_id": ["timing"] * 2,
+            "source": ["timing"] * 2,
+        }
+    )
+    weights = predictions.select("timestamp", "symbol").with_columns(weight=pl.lit(1.0))
+    case_config = get_backtest_config(CASE_STUDY)
+    spec = build_backtest_spec(
+        CASE_STUDY,
+        case_config,
+        prices=prices,
+        prediction_hash="four-hour-timing-test",
+        initial_cash=1_000_000,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        execution_mode="engine",
+        min_weight_change=0.0,
+        min_trade_value=0.0,
+    )
+    spec["strategy"]["rebalance"].update(
+        cadence="4_hour",
+        step=1,
+        exit_step=14,
+    )
+    spec["backtest_config"]["calendar"]["data_frequency"] = "1m"
+    spec["backtest_config"]["metadata"]["cadence"] = "4_hour"
+
+    result = _run_engine(
+        weights=weights,
+        prices=prices,
+        predictions=predictions,
+        strategy_spec=spec,
+        rebalance_spec=spec["strategy"]["rebalance"],
+        risk_spec={},
+        allow_short=False,
+        initial_cash=1_000_000,
+        calendar="NYSE",
+        case_study=CASE_STUDY,
+        label="fwd_ret_15m",
+    )
+
+    fills = result["fills_df"]
+    assert fills is not None
+    assert fills.select("timestamp", "side").to_dicts() == [
+        {"timestamp": start + timedelta(minutes=1), "side": "buy"},
+        {"timestamp": start + timedelta(hours=4, minutes=15), "side": "sell"},
+    ]
+    assert result["metrics"]["num_trades"] > 0

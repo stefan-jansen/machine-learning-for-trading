@@ -1459,6 +1459,7 @@ def _run_engine(
     schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
     if case_study and label:
         step = int(rebalance_spec.get("step", get_rebalance_step(case_study, label)))
+        exit_step = int(rebalance_spec.get("exit_step", step))
         schedule_dates = thin_rebalance_schedule(
             schedule_dates,
             cadence=cadence,
@@ -1471,7 +1472,7 @@ def _run_engine(
             prices,
             cadence=cadence,
             calendar=calendar,
-            step=step,
+            step=exit_step,
         )
     weight_dict = {
         _engine_timestamp(
@@ -1630,14 +1631,21 @@ def _run_engine(
                 f"or call load_backtest_prices_for(cs, label, split=split)."
             )
     elif predictions.height > 0:
-        # Fallback when canonical window unavailable: still slice to the
-        # predictions' span so demo notebooks with sentinel prediction_hash
-        # don't process pre-history.
+        # Fallback when the canonical window is unavailable: exclude pre-history,
+        # but retain the bar after the final scheduled decision so NEXT_BAR can
+        # execute a terminal flat target beyond the prediction timeline.
         pred_ts = predictions["timestamp"]
         if pred_ts.dtype != prices_ts_dtype:
             pred_ts = pred_ts.cast(prices_ts_dtype)
+        upper_bound = pred_ts.max()
+        if rebalance_schedule:
+            final_decision = max(rebalance_schedule)
+            available_price_times = prices.get_column("timestamp").unique().sort()
+            following_prices = available_price_times.filter(available_price_times > final_decision)
+            if not following_prices.is_empty():
+                upper_bound = following_prices.min()
         prices = prices.filter(
-            (pl.col("timestamp") >= pred_ts.min()) & (pl.col("timestamp") <= pred_ts.max())
+            (pl.col("timestamp") >= pred_ts.min()) & (pl.col("timestamp") <= upper_bound)
         )
 
     # signals_df is intentionally omitted: _PrecomputedStrategy reads
