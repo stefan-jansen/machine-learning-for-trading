@@ -209,7 +209,7 @@ RUN mkdir -p /etc/jupyter/labconfig && \
     echo '{"disabledExtensions": {"catboost-widget": true}}' > /etc/jupyter/labconfig/page_config.json
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
-RUN /opt/ml4t/bin/pip install --no-cache-dir \
+RUN /opt/ml4t/bin/pip install --no-cache-dir -c /tmp/locked-constraints.txt \
     "pytest>=8.0" "pytest-rerunfailures>=16.0" "pytest-timeout>=2.3"
 
 # Copy import test script
