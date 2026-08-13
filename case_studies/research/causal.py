@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import platform
 import sqlite3
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +41,18 @@ _NUISANCE_MODEL_SPEC = {
         "params": {"max_depth": 3, "max_iter": 50, "random_state": 42},
     },
 }
+
+
+def causal_runtime_identity() -> dict[str, Any]:
+    """Return the installed numerical runtime used by the causal runner."""
+    return {
+        "python": platform.python_version(),
+        "packages": {
+            package: version(package)
+            for package in ("numpy", "pandas", "polars", "scikit-learn", "statsmodels")
+        },
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
+    }
 
 
 @dataclass(frozen=True)
@@ -257,18 +272,29 @@ class CausalRequest:
                 }
             )
         n_periods = len(np.unique(np.asarray(test_periods)))
+        minimum_hac = self.horizon - 1
+        if n_periods <= minimum_hac:
+            raise ValueError(
+                f"causal folds expose {n_periods} test periods, fewer than the "
+                f"{self.horizon} periods required by the outcome horizon"
+            )
         resolved_hac = self.hac_maxlags
         if resolved_hac is None:
-            resolved_hac = max(self.horizon - 1, max(1, int(n_periods ** (1 / 3))))
-            resolved_hac = min(resolved_hac, max(1, n_periods // 2))
+            resolved_hac = max(minimum_hac, max(1, int(n_periods ** (1 / 3))))
+        if resolved_hac >= n_periods:
+            raise ValueError(
+                f"causal HAC bandwidth {resolved_hac} requires more than "
+                f"the {n_periods} resolved test periods"
+            )
         return resolved, resolved_hac
 
     def resolve(self, data: pd.DataFrame | pl.DataFrame) -> tuple[dict[str, Any], pd.DataFrame]:
         analysis, input_identity = self._prepare(data)
         folds, resolved_hac = self._resolve_folds(analysis)
+        execution_tier = ExecutionTier(self.execution_tier)
         spec = {
             "identity_version": 2,
-            "execution_tier": self.execution_tier.value,
+            "execution_tier": execution_tier.value,
             "family": "causal_dml",
             "label": self.label,
             "input_identity": input_identity,
@@ -301,7 +327,21 @@ class CausalRequest:
     def run(self, data: pd.DataFrame | pl.DataFrame) -> CausalResult:
         self.study.require_writable()
         spec, analysis = self.resolve(data)
-        case_dir = self.study.activate(self.execution_tier)
+        causal_hash = training_hash_from_spec(spec)
+        execution_tier = ExecutionTier(self.execution_tier)
+        self.study.activate(execution_tier)
+        try:
+            cached = CausalResult.open(
+                self.study,
+                causal_hash,
+                include_preview=execution_tier is ExecutionTier.PREVIEW,
+            )
+        except KeyError:
+            pass
+        else:
+            if cached.complete:
+                return cached
+        case_dir = self.study.storage_root(execution_tier)
         started_at = datetime.now(UTC).isoformat()
         started = time.perf_counter()
         computed = run_dml_analysis(
@@ -337,13 +377,12 @@ class CausalRequest:
         ]
         if not all(value is not None and np.isfinite(value) for value in required_values):
             raise RuntimeError("causal run produced incomplete or non-finite core results")
-        causal_hash = training_hash_from_spec(spec)
         register_causal_run(
             self.study.case_study,
             causal_hash,
             label=self.label,
             treatment=self.treatment,
-            confounders_json=canonical_json(list(self.confounders)),
+            confounders_json=json.dumps(list(self.confounders), separators=(",", ":")),
             embargo=self.embargo,
             n_folds=self.n_folds,
             n_obs=int(dml["n_obs"]),
@@ -362,6 +401,6 @@ class CausalRequest:
         result = CausalResult.open(
             self.study,
             causal_hash,
-            include_preview=self.execution_tier is ExecutionTier.PREVIEW,
+            include_preview=execution_tier is ExecutionTier.PREVIEW,
         )
         return result

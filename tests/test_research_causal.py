@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from case_studies.research.causal import CausalRequest, CausalResult
+from case_studies.research.causal import CausalRequest, CausalResult, causal_runtime_identity
 from case_studies.research.workspace import Study
 from case_studies.utils.registry import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
@@ -41,8 +42,8 @@ def _panel() -> pd.DataFrame:
     )
 
 
-def _request(study: Study, **changes):
-    request = {
+def _request(study: Study, **changes: Any) -> CausalRequest:
+    request: dict[str, Any] = {
         "label": "fwd_ret_21d",
         "treatment": "treatment",
         "confounders": ["confounder"],
@@ -151,6 +152,50 @@ def test_causal_resolver_pins_fold_boundaries_and_analysis_values(tmp_path: Path
     assert first["cv"]["folds"][0]["test_start"] < first["cv"]["folds"][1]["test_start"]
     assert first["causal"]["hac_maxlags"] >= first["causal"]["horizon"] - 1
     assert training_hash_from_spec(first) != training_hash_from_spec(second)
+
+
+def test_identical_complete_causal_result_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from case_studies.research import causal
+
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    request = _request(study)
+    first = request.run(_panel())
+
+    def unexpected_recompute(*_args, **_kwargs):
+        raise AssertionError("an exact complete causal result must be reused")
+
+    monkeypatch.setattr(causal, "run_dml_analysis", unexpected_recompute)
+    second = request.run(_panel())
+
+    assert second.hash == first.hash
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM causal_runs").fetchone()[0] == 1
+
+
+def test_causal_resolver_rejects_hac_bandwidth_beyond_resolved_periods(tmp_path: Path) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+
+    with pytest.raises(ValueError, match="requires more than"):
+        _request(study, hac_maxlags=100).resolve(_panel())
+
+
+def test_causal_runtime_identity_records_numerical_packages() -> None:
+    runtime = causal_runtime_identity()
+
+    assert runtime["python"]
+    assert set(runtime["packages"]) == {
+        "numpy",
+        "pandas",
+        "polars",
+        "scikit-learn",
+        "statsmodels",
+    }
 
 
 def test_causal_resolver_rejects_duplicate_panel_keys(tmp_path: Path) -> None:
