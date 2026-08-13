@@ -457,9 +457,21 @@ def test_lightgbm_huber_alpha_is_a_residual_unit_threshold() -> None:
         data,
         num_boost_round=20,
     )
+    label_scale = 10.0
+    scaled_huber = lgb.train(
+        {**common, "alpha": label_scale * alpha, "objective": "huber"},
+        lgb.Dataset(features, label=label_scale * labels),
+        num_boost_round=20,
+    )
 
     assert alpha == pytest.approx(0.5 * np.std(labels))
     assert np.max(np.abs(mse.predict(features) - huber.predict(features))) > 0.01
+    np.testing.assert_allclose(
+        scaled_huber.predict(features),
+        label_scale * huber.predict(features),
+        rtol=1e-5,
+        atol=1e-7,
+    )
 
 
 def test_real_huber_preset_keeps_legacy_training_surface(monkeypatch) -> None:
