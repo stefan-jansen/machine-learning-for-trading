@@ -28,7 +28,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -499,7 +499,10 @@ def verify_artifact_sidecars(
             if rows is None:
                 continue
             try:
-                actual_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+                actual_rows = cast(
+                    pl.DataFrame,
+                    pl.scan_parquet(path).select(pl.len()).collect(),
+                ).item()
             except (OSError, pl.exceptions.PolarsError) as exc:
                 problems.append(f"{name}: {path.name} unreadable ({exc})")
                 continue
@@ -719,6 +722,7 @@ def load_modeling_dataset(
     )
     temporal_artifact_splits: list[dict[str, Any]] = []
     if temporal_by_fold_pd is not None:
+        assert temporal is not None
         validate_temporal_fold_coverage(
             dataset,
             temporal,
@@ -1357,6 +1361,9 @@ def prepare_cv_folds(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             train_rows = replace_temporal_columns(
                 dataset_pd,
                 train_mask,
@@ -1517,6 +1524,9 @@ def prepare_single_fold(
 
         # Replace temporal columns with fold-specific values if available
         if _has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             fold_temp_pd = temporal_by_fold[temporal_by_fold["fold"] == fold_id].drop(
                 columns=["fold"]
             )
@@ -1560,6 +1570,9 @@ def prepare_single_fold(
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if _has_fold_temporal:
+            assert temporal_by_fold is not None
+            assert temporal_keys is not None
+            assert temporal_feature_names is not None
             train_rows = replace_temporal_columns(
                 dataset,
                 train_mask,
