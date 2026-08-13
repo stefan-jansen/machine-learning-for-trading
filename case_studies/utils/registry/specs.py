@@ -20,6 +20,21 @@ DEFAULT_SEED = 42
 # two runs with different seeds always produce different hashes.
 _REQUIRED_SPEC_FIELDS = {"family", "label", "seed"}
 
+IDENTITY_VERSION = 2
+_V2_PROVENANCE_FIELDS = {
+    "chapter",
+    "config_name",
+    "created_at",
+    "display_name",
+    "entry_point",
+    "friendly_name",
+    "git_commit",
+    "notebook_path",
+    "preset_path",
+    "runtime",
+    "runtime_provenance",
+}
+
 # ---------------------------------------------------------------------------
 # Hashing
 # ---------------------------------------------------------------------------
@@ -60,15 +75,45 @@ def training_hash_from_spec(spec: dict) -> str:
     Validates that ``seed`` is present (injects default if missing).
     """
     spec = _validate_spec(spec)
+    if spec.get("identity_version") == IDENTITY_VERSION:
+        return compute_hash(canonical_json(project_training_identity(spec)))
     return compute_hash(canonical_json(spec))
+
+
+def project_training_identity(spec: dict) -> dict:
+    """Return the version-2 semantic training identity projection."""
+    if spec.get("identity_version") != IDENTITY_VERSION:
+        raise ValueError("version-2 identity projection requires identity_version=2")
+    projected = {
+        key: copy.deepcopy(value) for key, value in spec.items() if key not in _V2_PROVENANCE_FIELDS
+    }
+    projected["identity_version"] = IDENTITY_VERSION
+    return projected
 
 
 def prediction_hash_from_parts(
     training_hash: str,
     checkpoint_value: int | None,
     split: str,
+    *,
+    checkpoint_kind: str | None = None,
+    identity_version: int | None = None,
 ) -> str:
     """Compute prediction_hash from its defining components."""
+    if identity_version == IDENTITY_VERSION:
+        if not checkpoint_kind:
+            raise ValueError("version-2 prediction identity requires checkpoint_kind")
+        return compute_hash(
+            canonical_json(
+                {
+                    "checkpoint_kind": checkpoint_kind,
+                    "checkpoint_value": checkpoint_value,
+                    "identity_version": IDENTITY_VERSION,
+                    "split": split,
+                    "training_hash": training_hash,
+                }
+            )
+        )
     cp = str(checkpoint_value) if checkpoint_value is not None else "final"
     return compute_hash(f"{training_hash}|{cp}|{split}")
 
@@ -109,15 +154,27 @@ def _hashable_strategy_spec(strategy_spec: dict) -> dict:
 def backtest_hash_from_parts(
     prediction_hash: str,
     strategy_spec: dict,
+    *,
+    identity_version: int | None = None,
 ) -> str:
     """Compute backtest_hash from prediction_hash + strategy spec.
 
     Non-portable provenance (see ``_HASH_EXCLUDED_METADATA``) is stripped before
     hashing so the same strategy hashes identically regardless of where it runs.
     """
-    return compute_hash(
-        f"{prediction_hash}|{canonical_json(_hashable_strategy_spec(strategy_spec))}"
-    )
+    hashable = _hashable_strategy_spec(strategy_spec)
+    resolved_version = identity_version or strategy_spec.get("identity_version")
+    if resolved_version == IDENTITY_VERSION:
+        return compute_hash(
+            canonical_json(
+                {
+                    "identity_version": IDENTITY_VERSION,
+                    "prediction_hash": prediction_hash,
+                    "strategy": hashable,
+                }
+            )
+        )
+    return compute_hash(f"{prediction_hash}|{canonical_json(hashable)}")
 
 
 # ---------------------------------------------------------------------------

@@ -433,6 +433,7 @@ def build_backtest_spec(
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
     risk: dict[str, Any] | None = None,
+    costs: dict[str, Any] | None = None,
     chapter: str | None = None,
     execution_mode: str | None = None,
     min_weight_change: float | None = None,
@@ -466,7 +467,9 @@ def build_backtest_spec(
                 else getattr(case_config, "min_trade_value", 100.0)
             ),
         },
-        "costs": _costs_block_from_case_config(case_config),
+        "costs": (
+            deepcopy(costs) if costs is not None else _costs_block_from_case_config(case_config)
+        ),
     }
     if chapter is not None:
         strategy_spec["chapter"] = chapter

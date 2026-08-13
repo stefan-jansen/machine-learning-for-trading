@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS training_runs (
     entry_point       TEXT,
     started_at        TEXT,
     elapsed_s         REAL,
-    runtime_json      TEXT
+    runtime_json      TEXT,
+    identity_version  INTEGER,
+    execution_tier    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_training_family_label ON training_runs(family, label);
@@ -51,6 +53,23 @@ CREATE TABLE IF NOT EXISTS prediction_sets (
 
 CREATE INDEX IF NOT EXISTS idx_pred_training ON prediction_sets(training_hash);
 CREATE INDEX IF NOT EXISTS idx_pred_split ON prediction_sets(split);
+
+CREATE TABLE IF NOT EXISTS prediction_coverage (
+    prediction_hash     TEXT PRIMARY KEY REFERENCES prediction_sets(prediction_hash),
+    expected_key_digest TEXT NOT NULL,
+    actual_key_digest   TEXT NOT NULL,
+    n_expected          INTEGER NOT NULL,
+    n_actual            INTEGER NOT NULL,
+    n_duplicates        INTEGER NOT NULL,
+    n_missing           INTEGER NOT NULL,
+    n_extra             INTEGER NOT NULL,
+    n_null              INTEGER NOT NULL,
+    n_non_finite        INTEGER NOT NULL,
+    n_folds_expected    INTEGER NOT NULL,
+    n_folds_actual      INTEGER NOT NULL,
+    schema_json          TEXT NOT NULL,
+    status              TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS prediction_metrics (
     prediction_hash  TEXT PRIMARY KEY REFERENCES prediction_sets(prediction_hash),
@@ -201,6 +220,40 @@ CREATE TABLE IF NOT EXISTS cohort_metrics (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cohort_unique
     ON cohort_metrics(cohort_type, COALESCE(stage, ''), label, COALESCE(family, ''));
 CREATE INDEX IF NOT EXISTS idx_cohort_leader ON cohort_metrics(leader_hash);
+
+CREATE TABLE IF NOT EXISTS candidate_sets (
+    set_hash                 TEXT PRIMARY KEY,
+    name                     TEXT NOT NULL,
+    member_kind              TEXT NOT NULL,
+    comparison_contract_json TEXT NOT NULL,
+    created_at               TEXT NOT NULL,
+    git_commit               TEXT
+);
+
+CREATE TABLE IF NOT EXISTS candidate_set_members (
+    set_hash    TEXT NOT NULL REFERENCES candidate_sets(set_hash),
+    member_hash TEXT NOT NULL,
+    ordinal     INTEGER NOT NULL,
+    PRIMARY KEY (set_hash, ordinal),
+    UNIQUE (set_hash, member_hash)
+);
+
+CREATE TABLE IF NOT EXISTS research_locks (
+    lock_hash  TEXT PRIMARY KEY,
+    lock_json  TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_research_singleton ON research_locks((1));
+
+CREATE TABLE IF NOT EXISTS holdout_evaluations (
+    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
+    holdout_training_hash   TEXT NOT NULL,
+    holdout_prediction_hash TEXT NOT NULL,
+    holdout_backtest_hash   TEXT NOT NULL,
+    evaluated_at            TEXT NOT NULL
+);
 """
 
 
@@ -405,6 +458,17 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             db.execute("ALTER TABLE training_runs ADD COLUMN elapsed_s REAL")
         if "runtime_json" not in tr_cols:
             db.execute("ALTER TABLE training_runs ADD COLUMN runtime_json TEXT")
+        if "identity_version" not in tr_cols:
+            db.execute("ALTER TABLE training_runs ADD COLUMN identity_version INTEGER")
+        if "execution_tier" not in tr_cols:
+            db.execute("ALTER TABLE training_runs ADD COLUMN execution_tier TEXT")
+
+    if "prediction_coverage" in tables:
+        coverage_cols = {
+            row[1] for row in db.execute("PRAGMA table_info(prediction_coverage)").fetchall()
+        }
+        if "schema_json" not in coverage_cols:
+            db.execute("ALTER TABLE prediction_coverage ADD COLUMN schema_json TEXT")
 
     # Migration 2b: add runtime columns to backtest_runs
     if "backtest_runs" in tables:
