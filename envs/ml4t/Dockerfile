@@ -210,7 +210,7 @@ RUN mkdir -p /etc/jupyter/labconfig && \
 
 # Test infrastructure — pytest + helpers so CI doesn't need runtime pip install
 RUN /opt/ml4t/bin/pip install --no-cache-dir \
-    "pytest>=8.0" "pytest-timeout>=2.3"
+    "pytest>=8.0" "pytest-rerunfailures>=16.0" "pytest-timeout>=2.3"
 
 # Copy import test script
 COPY envs/test_all_imports.py /opt/ml4t/bin/test_imports.py
