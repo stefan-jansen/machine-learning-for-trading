@@ -94,6 +94,12 @@ def test_runtime_params_reject_unknown_device() -> None:
         gbm.lightgbm_runtime_params("tpu")
 
 
+def test_runtime_override_is_optional_and_normalizes_gpu_alias() -> None:
+    assert gbm.resolve_gbm_device("", "cpu") == "cpu"
+    assert gbm.resolve_gbm_device("cuda", "cpu") == "cuda"
+    assert gbm.resolve_gbm_device(None, "gpu") == "cuda"
+
+
 def test_execution_config_keeps_numerical_parameters_independent_of_device() -> None:
     cpu = gbm.resolve_gbm_execution_config({"device": "cpu", "max_bin": 63, "num_threads": 8})
     cuda = gbm.resolve_gbm_execution_config({"device": "cuda", "max_bin": 63, "num_threads": 8})

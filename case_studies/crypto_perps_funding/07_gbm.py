@@ -42,9 +42,8 @@
 import warnings
 from datetime import UTC, datetime
 
-# Load PyTorch first so its bundled CUDA runtime wins symbol resolution before
-# ml4t.diagnostic loads optional CUDA packages.
-import torch
+# Load PyTorch before ml4t.diagnostic so its bundled CUDA runtime wins symbol resolution.
+import torch  # noqa: F401
 
 # isort: split
 import numpy as np
@@ -52,12 +51,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import yaml
-from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style as style
 from case_studies.utils.gbm import (
     prepare_gbm_folds,
     register_gbm_result,
+    resolve_gbm_device,
     train_gbm_config,
 )
 from case_studies.utils.registry import (
@@ -70,6 +69,10 @@ from case_studies.utils.registry import (
     training_hash_from_spec,
     training_run_status,
 )
+
+# isort: split
+from ml4t.diagnostic.metrics import cross_sectional_ic
+
 from utils.cv_splits import load_evaluation_config
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -83,8 +86,8 @@ MAX_SYMBOLS = 0
 MAX_FOLDS = 0
 FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
 PREDICTION_SPLIT = "validation"
-TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows per fold (val is never sampled). Use for memory-constrained runs on large datasets.
-TRAIN_DEVICE = "cuda"
+TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows; validation is never sampled
+TRAIN_DEVICE = ""  # Blank uses setup.yaml; CUDA requires a CUDA-enabled LightGBM build
 MAX_BIN = 63
 
 # %%
@@ -94,15 +97,8 @@ setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
 
-# Crypto publication training is explicitly GPU-only. The shared trainer raises
-# before fitting if the active LightGBM build cannot use CUDA.
-_configured_device = str(setup.get("modeling", {}).get("gbm", {}).get("device", "cuda"))
-if TRAIN_DEVICE != "cuda":
-    raise ValueError("Crypto publication GBM training requires TRAIN_DEVICE='cuda'")
-if _configured_device not in {"cuda", "gpu"}:
-    raise ValueError(f"setup.yaml must request CUDA for Crypto GBM, got {_configured_device!r}")
-if not torch.cuda.is_available():
-    raise RuntimeError("Crypto GBM requires CUDA, but PyTorch cannot see a CUDA device")
+_configured_device = str(setup.get("modeling", {}).get("gbm", {}).get("device", "cpu"))
+TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)
 print(f"Case study: {CASE_STUDY_ID} | Device: {TRAIN_DEVICE} | max_bin: {MAX_BIN}")
 
 # %% [markdown]
@@ -297,8 +293,8 @@ def _canonicalize_result(result: dict) -> dict:
 # Cross-sectional IC is evaluated at checkpoints (every 50 iterations). On a
 # complete content-matched registry, this section reads the registered physical
 # prediction sets and performs no training or registry writes. Boosters are not
-# replayed on the cached path. A fresh registry trains on fail-closed CUDA and
-# registers the canonically scored result.
+# replayed on the cached path. A fresh registry trains on the resolved backend
+# and registers the canonically scored result.
 
 # %%
 results = []
@@ -327,7 +323,7 @@ for cfg in configs:
     _split_complete = not _split_rows.is_empty()
     if _status.complete and _split_complete and not FORCE_RETRAIN:
         # The registered prediction set is the read-only cache artifact. Its
-        # training hash already binds the current feature lineage and CUDA device.
+        # training hash already binds the current feature lineage and resolved device.
         _pred_hash = _split_rows["prediction_hash"][0]
         _metrics = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=_pred_hash)
         _cached_ic = (
@@ -417,7 +413,7 @@ for cfg in configs:
 #
 # Configs are ranked only among prediction sets with complete validation coverage.
 # On the cached path, the ranking reproduces the content-matched registry from
-# physical predictions. On a fresh training path, the same table ranks newly fitted CUDA
+# physical predictions. On a fresh training path, the same table ranks newly fitted
 # models using the canonical decision-time statistic.
 
 # %%
@@ -470,7 +466,7 @@ if best:
 # ### Content-matched results define the current non-linear benchmark
 #
 # The chart ranks only predictions whose hash binds the corrected current feature
-# lineage and CUDA execution contract. A cached replay reads those physical
+# lineage and execution contract. A cached replay reads those physical
 # predictions without loading boosters, fitting models, or writing the registry.
 
 # %%
@@ -577,7 +573,7 @@ if all_curves.height > 0:
 # %% [markdown]
 # ## 6. Registry Disposition
 #
-# The default cached path is read-only. On a fresh output root, each CUDA-trained
+# The default cached path is read-only. On a fresh output root, each trained
 # configuration is registered immediately after canonical checkpoint scoring so
 # an interrupted sweep retains completed work.
 
@@ -598,14 +594,13 @@ else:
 #
 # This grid compares loss and leaf-budget choices on the corrected 44-feature
 # lineage. The displayed leader comes from complete physical validation predictions
-# across both folds and all 2,183 decision timestamps.
+# across both folds and every decision timestamp reported above.
 #
-# A fail-closed CUDA retrain in a fresh output root measures the corrected
-# 44-feature lineage. GPU floating-point scheduling can move the last decimals,
-# so the registry binds the build, device, and current input fingerprint rather
-# than claiming CPU/GPU bit parity. The separate `fwd_ret_24h` carrier used by
-# the shipped strategy is assessed at the case-study level, not inferred from
-# this primary 8-hour grid.
+# A fresh output root uses the configured CPU backend unless `TRAIN_DEVICE`
+# explicitly requests CUDA from a compatible LightGBM build. The registry binds
+# the build, device, and current input fingerprint. The separate `fwd_ret_24h`
+# carrier used by the shipped strategy is assessed at the case-study level, not
+# inferred from this primary 8-hour grid.
 #
 # **Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) tests whether a tabular neural
 # model improves on the same validation folds.

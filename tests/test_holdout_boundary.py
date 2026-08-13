@@ -356,11 +356,17 @@ def test_crypto_dml_seals_the_label_endpoint_and_hashes_current_inputs() -> None
     assert "max() + LABEL_HORIZON >= HOLDOUT_CUTOFF" in source
 
 
-def test_crypto_gbm_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected GBM grid must be GPU-only and content-addressed."""
+def test_crypto_gbm_uses_the_configured_device_and_hashes_current_inputs() -> None:
+    """The GBM grid must honor its setup default and remain content-addressed."""
     source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "07_gbm.py").read_text()
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
+    )
+    configured_device = setup["modeling"]["gbm"]["device"]
 
-    assert 'TRAIN_DEVICE = "cuda"' in source
+    assert configured_device == "cpu"
+    assert 'setup.get("modeling", {}).get("gbm", {}).get("device", "cpu")' in source
+    assert "TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)" in source
     assert "modeling_input_fingerprint(" in source
     assert '"device": TRAIN_DEVICE' in source
     assert '"input_fingerprint": INPUT_FINGERPRINT' in source

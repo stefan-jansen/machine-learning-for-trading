@@ -1142,18 +1142,50 @@ def load_daily_metrics_series(
     case_study_id: str,
     prediction_hash: str,
 ) -> pl.DataFrame:
-    """Load the per-fold daily IC (and AUC if present) parquet for one prediction set.
+    """Load or compute the per-fold daily IC series for one prediction set.
 
-    Returns the frame at `run_log/predictions/{hash}/daily_metrics.parquet`
-    (shipped with the downloaded case-study artifacts). Use this for
-    rolling-IC plots and re-running the bootstrap on the daily series
-    without re-touching raw predictions. Empty DataFrame if missing.
+    Prefer `daily_metrics.parquet` when present. Older registered predictions
+    may lack that derived artifact, so compute the same series from their raw
+    validation predictions without writing into the registry. Returns an empty
+    frame only when neither artifact is available.
     """
     case_dir = get_case_study_dir(case_study_id)
     path = case_dir / "run_log" / "predictions" / prediction_hash / "daily_metrics.parquet"
-    if not path.exists():
+    if path.exists():
+        return pl.read_parquet(path)
+
+    predictions = load_predictions(
+        case_study_id,
+        prediction_hash=prediction_hash,
+        split="validation",
+    )
+    if predictions.is_empty():
         return pl.DataFrame()
-    return pl.read_parquet(path)
+
+    from ml4t.diagnostic.metrics import cross_sectional_ic_series
+
+    entity_col = next(
+        (column for column in ("symbol", "product") if column in predictions.columns),
+        None,
+    )
+    join_columns = ["timestamp", *([entity_col] if entity_col else [])]
+    fold_series = []
+    for fold_id in predictions["fold_id"].unique().drop_nulls().sort().to_list():
+        fold = predictions.filter(pl.col("fold_id") == fold_id)
+        series = cross_sectional_ic_series(
+            fold.select(*join_columns, "y_score"),
+            fold.select(*join_columns, "y_true"),
+            pred_col="y_score",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col=entity_col,
+            method="spearman",
+            min_obs=5,
+        )
+        fold_series.append(
+            series.rename({"timestamp": "date"}).with_columns(fold_id=pl.lit(fold_id))
+        )
+    return pl.concat(fold_series) if fold_series else pl.DataFrame()
 
 
 def indistinguishable_groups(

@@ -2,10 +2,10 @@
 
 The benchmark parquets in ``case_studies/{cs}/benchmark/`` cover both validation
 and holdout periods. **Consumers must pull the period-specific block** when
-comparing strategy holdout to benchmark holdout, etc. — using the overall
+comparing strategy holdout to benchmark holdout, etc. Using the overall
 metrics for a period-specific comparison would mix windows.
 
-Part of the downloaded case-study artifacts. JSON schema:
+Tracked with the repository as a release input. JSON schema:
 
     {
       "case_study": "etfs",
@@ -47,7 +47,7 @@ def benchmark_dir(case_study: str) -> Path:
 def _to_date(v) -> _date:
     """Parse a YYYY-MM-DD-prefixed string/date to a Python ``date``.
 
-    Comparing on ``dt.date()`` is tz-agnostic — it sidesteps the
+    Comparing on ``dt.date()`` is tz-agnostic. It sidesteps the
     naive-vs-tz-aware-Datetime cast hazard entirely (Polars silently treats
     naive sources as UTC under cast, which would shift boundaries on a
     non-UTC tz-aware parquet).
@@ -73,7 +73,7 @@ def load_benchmark_metrics(
     meta = json.loads(p.read_text())
     bp = meta.get("by_period")
     if bp is None:
-        # Legacy file without stratification — only overall is meaningful
+        # Legacy file without stratification. Only overall is meaningful.
         if period == "overall":
             return {k: meta[k] for k in ("sharpe", "cagr", "vol", "n_periods") if k in meta}
         return None
@@ -89,7 +89,7 @@ def load_benchmark_returns(
 
     Boundary source of truth is the JSON's ``by_period.{validation,holdout}_window``.
     When the JSON is present,
-    its ``by_period`` is authoritative — a missing window means the period was
+    its ``by_period`` is authoritative. A missing window means the period was
     not populated by the writer (e.g. ``ho_df.height < 2``), and the consumer
     gets an empty frame rather than silently re-deriving from ``setup.yaml``.
     Falls back to ``setup.yaml.evaluation.{holdout_start, holdout_end}`` only
