@@ -24,7 +24,7 @@ from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.latent_factors import case_study as latent_case_study
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
-from case_studies.utils.latent_factors.cv import _expected_latent_checkpoints
+from case_studies.utils.latent_factors.cv import _expected_latent_checkpoints, load_fold_extras
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.library_bridge import (
     predict_latent_fold_from_artifact,
@@ -494,6 +494,53 @@ def test_gbm_runner_replays_valid_models_after_partial_registration(tmp_path, mo
         / "learning_curves.parquet"
     )
     assert pl.read_parquet(curves).get_column("iteration").to_list() == [2, 4]
+
+
+def test_gbm_runner_finalizes_curves_after_prediction_registration_interrupt(
+    tmp_path, monkeypatch
+) -> None:
+    study = _gbm_study(tmp_path, monkeypatch)
+    request = study.model(
+        family="gbm",
+        label="fwd_ret_1d",
+        config_name="leaves_7_mse",
+        overrides={"device": "cpu", "max_bin": 63},
+    )
+    original_write = gbm_utils._write_learning_curves
+
+    def interrupt_curve_write(*args, **kwargs):
+        raise RuntimeError("interrupted curve finalization")
+
+    monkeypatch.setattr(gbm_utils, "_write_learning_curves", interrupt_curve_write)
+    with pytest.raises(RuntimeError, match="interrupted curve finalization"):
+        request.run()
+    monkeypatch.setattr(gbm_utils, "_write_learning_curves", original_write)
+
+    class ReplayBooster:
+        def __init__(self, *, model_file):
+            self.model_file = model_file
+
+        def predict(self, values, *, num_iteration):
+            return values[:, 0] + num_iteration / 100
+
+    monkeypatch.setattr("lightgbm.Booster", ReplayBooster)
+    monkeypatch.setattr(
+        gbm_utils,
+        "train_gbm_config",
+        lambda *args, **kwargs: pytest.fail("valid fitted state must not retrain"),
+    )
+
+    recovered = request.run()
+    curves_path = (
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "learning_curves.parquet"
+    )
+
+    assert [result.complete for result in recovered.predictions] == [True, True]
+    assert gbm_utils._valid_learning_curves(curves_path, request.resolve().spec)
 
 
 def test_huber_threshold_is_fold_scaled_and_hash_covered() -> None:
@@ -1059,6 +1106,9 @@ def test_latent_runner_persists_and_reconstructs_fitted_state(tmp_path, monkeypa
         model_dir / "pca" / "artifacts" / "fold_0" / "model.ml4t",
         model_dir / "pca" / "artifacts" / "fold_1" / "model.ml4t",
     ]
+    extras = load_fold_extras("etfs", fresh.training.hash)
+    assert extras is not None
+    assert [int(row["fold_id"]) for row in extras] == [0, 1]
 
 
 def test_latent_runner_reuses_fitted_state_after_registration_interrupt(
@@ -1089,6 +1139,39 @@ def test_latent_runner_reuses_fitted_state_after_registration_interrupt(
     recovered = request.run()
 
     assert len(recovered.predictions) == 1
+    assert recovered.predictions[0].complete
+
+
+def test_latent_runner_recovers_interrupted_fold_diagnostics_publication(
+    tmp_path, monkeypatch
+) -> None:
+    study = _latent_study(tmp_path, monkeypatch)
+    request = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="pca",
+        overrides={"device": "cpu", "n_factors": 1},
+    )
+    original_publish = latent_adapter._publish_fold_extras
+
+    def interrupt_publication(*args, **kwargs):
+        raise RuntimeError("interrupted diagnostics publication")
+
+    monkeypatch.setattr(latent_adapter, "_publish_fold_extras", interrupt_publication)
+    with pytest.raises(RuntimeError, match="interrupted diagnostics publication"):
+        request.run()
+    monkeypatch.setattr(latent_adapter, "_publish_fold_extras", original_publish)
+    monkeypatch.setattr(
+        latent_adapter,
+        "run_latent_factor_cv",
+        lambda *args, **kwargs: pytest.fail("valid fitted state must not retrain"),
+    )
+
+    recovered = request.run()
+
+    extras = load_fold_extras("etfs", recovered.training.hash)
+    assert extras is not None
+    assert [int(row["fold_id"]) for row in extras] == [0, 1]
     assert recovered.predictions[0].complete
 
 

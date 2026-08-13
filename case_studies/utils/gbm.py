@@ -1724,6 +1724,18 @@ def _valid_gbm_model_dir(model_dir: Path, context: GBMContext) -> bool:
     )
 
 
+def _valid_learning_curves(path: Path, spec: dict[str, Any]) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        curves = pl.read_parquet(path)
+    except (OSError, pl.exceptions.PolarsError):
+        return False
+    required = {"config", "iteration", "ic_mean", "ic_std"}
+    expected = {int(checkpoint["value"]) for checkpoint in spec["checkpoint_schedule"]}
+    return required <= set(curves.columns) and set(curves["iteration"].to_list()) == expected
+
+
 def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
     from case_studies.research.models import ModelRun
     from case_studies.research.results import PredictionResult, Result, TrainingResult
@@ -1757,7 +1769,10 @@ def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
         result for result in predictions if isinstance(result, PredictionResult)
     )
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
-    if not _valid_gbm_model_dir(model_dir, context):
+    curves_path = training.root / "run_log" / "training" / training.hash / "learning_curves.parquet"
+    if not _valid_gbm_model_dir(model_dir, context) or not _valid_learning_curves(
+        curves_path, spec
+    ):
         return None
     return ModelRun(training=training, predictions=prediction_results)
 
@@ -1838,6 +1853,15 @@ def _predict_from_gbm_models(
     }
 
 
+def _write_learning_curves(path: Path, rows: list[dict[str, Any]]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        pl.DataFrame(rows).write_parquet(temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext):
     from case_studies.research.models import ModelRun
 
@@ -1902,7 +1926,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
         )
     curves_path = train_dir / "learning_curves.parquet"
     if not curves_path.exists() and result["learning_curves"]:
-        pl.DataFrame(result["learning_curves"]).write_parquet(curves_path)
+        _write_learning_curves(curves_path, result["learning_curves"])
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())

@@ -675,6 +675,14 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
     if not _valid_model_dir(model_dir, context):
         return None
+    model_extras = model_dir / "fold_extras.json"
+    public_extras = model_dir.parent / "fold_extras.json"
+    if (
+        not model_extras.is_file()
+        or not public_extras.is_file()
+        or json.loads(public_extras.read_text()) != json.loads(model_extras.read_text())
+    ):
+        return None
     reconstructed = _reconstruct_predictions(model_dir, context)
     prediction_results = tuple(
         result for result in predictions if isinstance(result, PredictionResult)
@@ -697,6 +705,21 @@ def _write_manifest(staging: Path) -> None:
     (staging / "manifest.json").write_text(
         json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
     )
+
+
+def _publish_fold_extras(model_dir: Path, train_dir: Path) -> None:
+    source = model_dir / "fold_extras.json"
+    serialized = source.read_text()
+    extras = json.loads(serialized)
+    if not isinstance(extras, list):
+        raise ValueError(f"invalid latent fold diagnostics: {source}")
+    target = train_dir / "fold_extras.json"
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(serialized)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFactorContext):
@@ -757,11 +780,11 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
                 fold_workers=context.fold_workers,
                 checkpoint_surface="fitted_state",
             )
-            model_stage = staging / context.model_name
             _save_fold_extras(
-                model_stage / "fold_extras.json",
+                staging / "fold_extras.json",
                 result["fold_extras"][context.model_name],
             )
+            model_stage = staging / context.model_name
             shutil.rmtree(model_stage / "_incremental", ignore_errors=True)
             fresh_frames = {
                 int(key[0]): _normalize_prediction_frame(frame)
@@ -780,6 +803,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+    _publish_fold_extras(model_dir, train_dir)
 
     prediction_results = []
     for checkpoint in spec["checkpoint_schedule"]:
