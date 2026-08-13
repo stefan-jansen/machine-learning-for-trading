@@ -449,7 +449,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.0"
+            "ml4t-diagnostic>=0.1.0" "ml4t-backtest>=0.1.1"
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}

@@ -260,6 +260,25 @@ class TestThinToRebalanceDates:
             assert len(later) == 0, f"{dt} is not the last trading day of {year}-{month:02d}"
 
 
+@pytest.mark.parametrize(
+    ("cadence", "expected"),
+    [
+        ("1_minute", 14),
+        ("15_minute", 1),
+        ("30_minute", 1),
+        ("1_hour", 1),
+        ("4_hour", 1),
+    ],
+)
+def test_nasdaq_label_step_resolves_on_each_sweep_cadence(cadence: str, expected: int) -> None:
+    from case_studies.utils.backtest_loaders import get_rebalance_step_for_cadence
+
+    assert (
+        get_rebalance_step_for_cadence("nasdaq100_microstructure", "fwd_ret_15m", cadence)
+        == expected
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rebalance-step lookup (declared in each case study's setup.yaml)
 # ---------------------------------------------------------------------------

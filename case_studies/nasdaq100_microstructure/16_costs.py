@@ -19,31 +19,29 @@
 # **Chapter 18 — Transaction Costs and Execution**
 #
 # This is the primary cost-analysis notebook for the NASDAQ-100 case study.
-# Transaction costs at 15-minute cadence eliminate the signal on the full
-# universe: ~7 bps per bar × 26 rebalances per day produces massive annual drag.
-# Two levers recover a tradeable strategy, and this notebook quantifies both:
+# This notebook measures how transaction costs, the tradable universe, and
+# rebalance cadence affect the NASDAQ-100 microstructure strategy.
 #
 # 1. **Screen the universe for cost feasibility.** Restricting to the
 #    cheapest-to-trade names (the cost-feasible universe from the feasibility
-#    analysis) raises the same slot design from deeply negative to positive and
-#    cuts turnover several-fold — the screen the case study trades on.
+#    analysis) tests whether excluding expensive names changes returns and turnover.
 # 2. **Slow the cadence.** Cost dominance is **cadence-dependent**: dropping
 #    rebalance frequency to hourly or 4-hourly amortizes the per-trade cost so
-#    the signal becomes viable at institutional execution levels.
+#    the signal changes the number of trades and the cost paid.
 #
 # The notebook has three parts:
 # - **Sections 1–3**: Standard bps cost grid on full-universe allocation combos,
 #   tracing the Sharpe-vs-cost decay curve.
-# - **Section 4**: Full universe vs the cost-feasible screen — the first lever,
+# - **Section 4**: Full universe vs the cost-feasible screen,
 #   read off existing registry rows for the featured slot design.
-# - **Section 5**: Cadence × per-share cost sweep — the second lever and the
-#   publication finding. Uses a per-share cost model ($/share, not bps), more
+# - **Section 5**: Cadence × per-share cost sweep. Uses a per-share cost model
+#   ($/share, not bps), more
 #   realistic for equities, swept across rebalance frequencies.
 #
 # **Learning Objectives:**
 # 1. Run a cost grid sweep on full-universe combos to find breakeven
-# 2. Quantify how the cost-feasibility screen recovers Sharpe and cuts turnover
-# 3. Sweep cadence × per-share cost to find the viable implementation regime
+# 2. Quantify how the cost-feasibility screen changes Sharpe and turnover
+# 3. Sweep cadence × per-share cost to measure implementation sensitivity
 #
 # **Book Reference:** Chapter 18, Sections 18.2–18.5
 #
@@ -63,6 +61,7 @@ warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
+    get_rebalance_step_for_cadence,
     load_backtest_prices_for,
     warmup_periods_for,
 )
@@ -159,12 +158,8 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # (commission + slippage combined). The grid spans from near-zero to levels
 # that exceed the signal entirely, tracing the full decay curve.
 #
-# At 15-minute cadence with ~26 bars per trading day, even 1 bps per leg
-# compounds to significant annual drag. The breakeven cost level for this
-# case study is expected to be very low — in the range of 1–3 bps total —
-# making it viable only for market-makers or prop desks with institutional
-# execution quality, or for strategies that extend the hold period to 4–8 bars
-# to amortize the per-trade cost.
+# The sweep measures the breakeven cost level directly. It does not assume that
+# a cadence or execution tier is viable before the official run completes.
 
 # %%
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
@@ -222,11 +217,8 @@ print(f"Cost sweep complete: {n_done} backtests in {elapsed:.0f}s")
 # This section is **read-only** — queries the registry for cost-sensitivity
 # results and computes breakeven levels.
 #
-# The Sharpe-versus-cost curve for intraday strategies typically falls steeply
-# from the near-zero-cost benchmark. For NASDAQ-100 15-minute, the expected
-# pattern is: positive Sharpe at 0–2 bps, break-even around 3–5 bps, negative
-# at any cost level resembling realistic retail execution. The flat portion of
-# the curve (if it exists) defines the practical cost budget.
+# The Sharpe-versus-cost curve and its zero crossing define the practical cost
+# budget. The registry query below reports that relationship from the official run.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -488,6 +480,9 @@ def run_cadence_cost_backtest(
         signal={"method": "equal_weight_top_k", "top_k": 20, "long_short": bt_config.long_short},
     )
     spec["strategy"]["rebalance"]["cadence"] = cadence
+    spec["strategy"]["rebalance"]["step"] = get_rebalance_step_for_cadence(
+        CASE_STUDY_ID, LABEL, cadence
+    )
     spec["backtest_config"]["metadata"]["cadence"] = cadence
 
     if cost_ps > 0:
@@ -580,10 +575,9 @@ print(f"Cadence sweep: {sweep_state['n_done']} backtests in {elapsed_cadence:.0f
 # %% [markdown]
 # ### Cadence × Cost Heatmap
 #
-# This is the central finding: the same signal that is worthless at 15-minute
-# cadence becomes viable at hourly cadence with institutional-quality execution
-# ($\leq$ 2¢/share effective spread). The table shows Sharpe ratio at each
-# cadence × cost combination.
+# The heatmap compares Sharpe across the declared cadence and per-share cost
+# grid. Each row carries a cadence-specific non-overlap step in its strategy
+# identity, so the comparison reflects the requested decision frequency.
 
 # %%
 import matplotlib.pyplot as plt
@@ -638,12 +632,9 @@ if not cadence_df.is_empty():
 # %% [markdown]
 # ### Trade Count by Cadence
 #
-# Reducing the rebalancing cadence cuts trade counts dramatically, which is
-# the mechanism behind the Sharpe improvement: fewer trades means less
-# cumulative cost drag. The trade-off is signal decay — the 15-minute
-# prediction becomes stale at longer horizons. The sweet spot for this
-# dataset is hourly cadence where the signal retains enough edge to cover
-# 1–2¢/share execution costs.
+# Compare trade counts with gross Sharpe to separate lower transaction counts
+# from signal decay at slower cadences. The official production run determines
+# whether any cadence retains enough predictive value to cover execution costs.
 
 # %%
 if not cadence_df.is_empty():
@@ -670,33 +661,16 @@ if not cadence_df.is_empty():
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The cost-feasibility screen is the upstream lever**: the same featured
-#    slot design averages a negative Sharpe on the full 114-name universe and a
-#    positive one on the cost-feasible subset, while trading roughly an order of
-#    magnitude less (Section 4). Removing the expensive-spread tail removes both
-#    the turnover source and the cost sink — this is the screen the carrier
-#    trades on.
-# 2. **Cadence is the second lever**: at the default one-minute cadence the
-#    full-universe every-bar baseline churns thousands of trades; coarser
-#    cadences (15m to 4h) amortize per-trade cost over a longer hold. The summary
-#    table above gives exact counts per cadence.
-# 3. **Per-share costs at coarser cadences**: The heatmap shows the per-share
-#    cost levels at which Sharpe stays above zero at hourly and 4-hour
-#    cadences. Institutional execution quality (sub-2¢/share) sits in that
-#    band; retail-quality execution does not.
-# 4. **4-hour cadence is the most cost-tolerant of the four cadences tested**.
-#    The tradeoff is fewer rebalances per day, discarding some intraday signal.
-# 5. **30-minute cadence is the cost-sensitive boundary**: Sharpe degrades
-#    sharply at higher per-share costs.
-# 6. **The cadence-cost interaction is the teaching surface**: Intraday signal
-#    presence does not imply intraday execution viability. Strategy design must
-#    jointly optimize rebalance frequency and execution infrastructure. The
-#    Ch20 strategy-analysis notebook re-runs this sensitivity in bps units on
-#    the top-Sharpe prediction surface and finds CI lower bound below zero across
-#    the entire grid for all three labels — point-estimate viability, not
-#    credibility-resolved positive edge.
-# 7. **Benchmark reality check**: This dollar-neutral strategy does not capture
-#    market direction. The strategy's value is uncorrelated returns, not
-#    absolute performance — but that case must be made explicitly, not assumed.
+# 1. Compare the full and cost-feasible universes before attributing a result to
+#    execution quality alone.
+# 2. Use the cadence-specific trade counts to measure how slower decisions change
+#    turnover and cost exposure.
+# 3. Use the per-share heatmap to locate any cost level where net Sharpe remains
+#    above zero. Do not infer viability from the gross result.
+# 4. Compare cadence rows for signal decay as well as cost reduction.
+# 5. Treat the confidence interval reported by strategy analysis as the test of
+#    whether a positive point estimate is distinguishable from zero.
+# 6. Compare a dollar-neutral strategy with the benchmark as a diversification
+#    question, not as a claim that it captures market direction.
 #
 # **Next**: The risk management notebook (Ch19) tests risk overlays on the top combos.

@@ -529,10 +529,10 @@ backtest:
       long_q: [0.90, 0.95, 0.99]
       direction: [long_only, long_short]
       max_slots: [5, 10, 20]
-      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
+      hold_bars: [120, 240, 480]          # 2h, 4h, 8h at the production 1m grid
       exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
       pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
-      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
+      bars_per_day_grid: [210]            # preserves the prior 14 x 15m daily window
       top_k_grid: [5, 10, 20]
       lookback_days: 21
     # Ch19 risk overlays.

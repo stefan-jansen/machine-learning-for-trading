@@ -1238,6 +1238,35 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
+def get_rebalance_step_for_cadence(case_study: str, label: str, cadence: str) -> int:
+    """Resolve a non-overlapping decision step for an explicit intraday cadence."""
+    from utils import CASE_STUDIES_DIR
+
+    setup_path = CASE_STUDIES_DIR / case_study / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    labels = setup.get("labels") or {}
+    primary = labels.get("primary")
+    buffer_token = (
+        labels.get("buffer")
+        if label == primary
+        else (labels.get("variant_buffers") or {}).get(label)
+    )
+    if not buffer_token:
+        raise KeyError(f"No label buffer is declared for {case_study}/{label}")
+
+    def duration_minutes(token: str) -> int:
+        normalized = str(token).strip().lower().replace("_", "")
+        match = re.fullmatch(r"(\d+)(minute|minutes|min|m|hour|hours|h)", normalized)
+        if match is None:
+            raise ValueError(f"Unsupported intraday duration token: {token!r}")
+        value = int(match.group(1))
+        return value * 60 if match.group(2) in {"hour", "hours", "h"} else value
+
+    horizon_minutes = duration_minutes(str(buffer_token))
+    cadence_minutes = duration_minutes(cadence)
+    return max(1, (horizon_minutes - 1 + cadence_minutes - 1) // cadence_minutes)
+
+
 def thin_rebalance_schedule(
     schedule: pl.Series,
     *,

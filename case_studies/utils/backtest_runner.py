@@ -421,6 +421,64 @@ def _engine_timestamp(
     return timestamp
 
 
+def _add_intraday_session_exit_targets(
+    targets: dict[date | datetime, dict[str, float]],
+    schedule: pl.Series,
+    prices: pl.DataFrame,
+    *,
+    cadence: str,
+    calendar: str,
+    step: int,
+) -> pl.Series:
+    """Add flat decisions whose next-bar fills close each intraday session."""
+    intraday_equity = cadence in {
+        "1_minute",
+        "15_minute",
+        "30_minute",
+        "1_hour",
+        "2_hour",
+        "4_hour",
+    } and calendar.upper() in {"NYSE", "NASDAQ"}
+    if not intraday_equity or schedule.is_empty():
+        return schedule
+
+    timestamp = schedule.name or "timestamp"
+    price_times = prices.get_column("timestamp").unique().sort()
+    entry_schedule = pl.Series(
+        timestamp,
+        [decision for decision in schedule.to_list() if targets.get(decision)],
+    )
+    if entry_schedule.is_empty():
+        return schedule
+    schedule_by_session = (
+        pl.DataFrame({timestamp: entry_schedule})
+        .with_columns(pl.col(timestamp).dt.date().alias("_session"))
+        .group_by("_session", maintain_order=True)
+        .agg(pl.col(timestamp).max().alias("last_decision"))
+    )
+    flat_decisions: list[datetime] = []
+    for row in schedule_by_session.iter_rows(named=True):
+        session_prices = price_times.filter(price_times.dt.date() == row["_session"]).to_list()
+        try:
+            decision_index = session_prices.index(row["last_decision"])
+        except ValueError as exc:
+            raise ValueError(
+                f"Rebalance decision {row['last_decision']!s} is absent from the price grid"
+            ) from exc
+        flat_index = decision_index + step
+        if flat_index + 1 >= len(session_prices):
+            raise ValueError(
+                "Intraday schedule cannot close before the session ends: "
+                f"decision={row['last_decision']!s}, step={step}, "
+                f"remaining_bars={len(session_prices) - decision_index - 1}"
+            )
+        flat_decision = session_prices[flat_index]
+        targets[flat_decision] = {}
+        flat_decisions.append(flat_decision)
+
+    return pl.concat([schedule, pl.Series(timestamp, flat_decisions)]).unique().sort()
+
+
 # ---------------------------------------------------------------------------
 # Weight precomputation (for risk sweep reuse)
 # ---------------------------------------------------------------------------
@@ -467,6 +525,7 @@ def precompute_weights(
             case_study=case_study,
             prediction_hash=prediction_hash,
             conformal_widths=conformal_widths,
+            rebalance_step=rebal_spec.get("step"),
         )
     return weights
 
@@ -1168,6 +1227,7 @@ def run_backtest(
                 label=label,
                 case_study=case_study,
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
 
     # 2. Dispatch to engine or vectorized
@@ -1229,6 +1289,7 @@ def run_backtest(
                 initial_cash=initial_cash,
                 risk_spec=strategy.get("risk", {}),
                 prediction_hash=prediction_hash,
+                rebalance_step=rebal_spec.get("step"),
             )
     else:
         result = _run_engine(
@@ -1362,18 +1423,9 @@ def _run_engine(
         price_timestamp_dtype.time_zone if isinstance(price_timestamp_dtype, pl.Datetime) else None
     )
     raw_weight_dict = _target_weights_by_timestamp(weights)
-    weight_dict = {
-        _engine_timestamp(
-            timestamp,
-            feed_is_date=feed_is_date,
-            feed_timezone=feed_timezone,
-            configured_timezone=config.resolved_timezone,
-        ): targets
-        for timestamp, targets in raw_weight_dict.items()
-    }
 
-    # Resolve calendar-aware rebalance schedule, then thin by the label's
-    # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
+    # Resolve calendar-aware rebalance schedule, then thin by the request's
+    # identity-covered step or the label's configured default. Mirrors
     # the same two-step thinning that thin_to_rebalance_dates() applies on
     # the vectorized path (see backtest_loaders.thin_to_rebalance_dates).
     # Without this, multi-step labels (e.g. fwd_ret_60m on a 15m cadence
@@ -1397,13 +1449,30 @@ def _run_engine(
     all_pred_ts = pl.Series("ts", predictions["timestamp"].unique().sort().to_list())
     schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
     if case_study and label:
-        step = get_rebalance_step(case_study, label)
+        step = int(rebalance_spec.get("step", get_rebalance_step(case_study, label)))
         schedule_dates = thin_rebalance_schedule(
             schedule_dates,
             cadence=cadence,
             step=step,
             calendar=calendar,
         )
+        schedule_dates = _add_intraday_session_exit_targets(
+            raw_weight_dict,
+            schedule_dates,
+            prices,
+            cadence=cadence,
+            calendar=calendar,
+            step=step,
+        )
+    weight_dict = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        ): targets
+        for timestamp, targets in raw_weight_dict.items()
+    }
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
@@ -1498,8 +1567,7 @@ def _run_engine(
 
             if timestamp in weight_dict:
                 targets = {a: w for a, w in weight_dict[timestamp].items() if a in data}
-                if targets:
-                    self.executor.execute(targets, data, broker)
+                self.executor.execute(targets, data, broker)
 
     # Resolve the canonical (cs, label, split) window — same window for every
     # strategy on the same (cs, label, split). Callers pre-window `prices` via
@@ -1892,6 +1960,7 @@ def _run_vectorized(
     initial_cash: float,
     risk_spec: dict | None = None,
     prediction_hash: str | None = None,
+    rebalance_step: int | None = None,
 ) -> dict:
     """Run vectorized backtest (weight × forward return - costs).
 
@@ -1916,7 +1985,7 @@ def _run_vectorized(
 
     # Thin predictions to non-overlapping periods. Step is declared per-label
     # in the case study's setup.yaml under labels.rebalance_step.
-    step = get_rebalance_step(case_study, label)
+    step = rebalance_step or get_rebalance_step(case_study, label)
     thinned = thin_to_rebalance_dates(predictions, cadence=cadence, step=step)
 
     # Re-compute weights on thinned predictions
@@ -2164,6 +2233,7 @@ def _apply_allocation(
     case_study: str = "",
     prediction_hash: str | None = None,
     conformal_widths: pl.DataFrame | None = None,
+    rebalance_step: int | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -2228,7 +2298,7 @@ def _apply_allocation(
             "_apply_allocation requires both case_study and label to look up "
             "labels.rebalance_step from setup.yaml. Pass them from the caller."
         )
-    step = get_rebalance_step(case_study, label)
+    step = rebalance_step or get_rebalance_step(case_study, label)
     rebal_preds = thin_to_rebalance_dates(filtered_preds, cadence=cadence, step=step)
 
     # Max weight cap — applied after all covariance-based allocators

@@ -98,6 +98,27 @@ def test_benchmark_aligns_minute_labels_to_fifteen_minute_decision_grid() -> Non
     ]
 
 
+def test_cme_benchmark_uses_product_as_the_panel_key() -> None:
+    labels = _minute_labels().rename({"symbol": "product"})
+
+    returns, metadata = build_equal_weight_benchmark(
+        labels,
+        case_study="cme_futures",
+        label="label",
+        symbols=["A", "B"],
+        windows={"validation": (date(2021, 6, 30), date(2021, 7, 1))},
+        cadence="1_minute",
+        rebalance_step=4,
+        calendar="CME",
+        periods_per_year=252,
+        label_digest="digest",
+    )
+
+    assert returns.height == 2
+    assert metadata["configuration"]["entity_col"] == "product"
+    assert metadata["n_symbols_observed"] == 2
+
+
 def test_benchmark_cadence_uses_shared_configuration_precedence() -> None:
     assert (
         _resolve_decision_cadence(

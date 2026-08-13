@@ -172,7 +172,8 @@ def build_equal_weight_benchmark(
     label_digest: str,
 ) -> tuple[pl.DataFrame, dict]:
     """Build daily full-universe returns from canonical forward labels."""
-    required = {"timestamp", "symbol", label}
+    entity_col = "product" if case_study == "cme_futures" else "symbol"
+    required = {"timestamp", entity_col, label}
     missing = sorted(required.difference(labels.columns))
     if missing:
         raise ValueError(f"Label frame is missing required columns: {missing}")
@@ -188,11 +189,11 @@ def build_equal_weight_benchmark(
     end = max(window[1] for window in active_windows)
     scoped = labels.filter(
         pl.col("timestamp").cast(pl.Date).is_between(start, end, closed="both")
-        & pl.col("symbol").is_in(roster)
+        & pl.col(entity_col).cast(pl.String).is_in(roster)
     )
-    duplicates = scoped.group_by("timestamp", "symbol").len().filter(pl.col("len") > 1)
+    duplicates = scoped.group_by("timestamp", entity_col).len().filter(pl.col("len") > 1)
     if duplicates.height:
-        raise ValueError("Label frame contains duplicate (timestamp, symbol) rows")
+        raise ValueError(f"Label frame contains duplicate (timestamp, {entity_col}) rows")
     nonfinite = scoped.filter(pl.col(label).is_not_null() & ~pl.col(label).is_finite())
     if nonfinite.height:
         raise ValueError(f"Label frame contains {nonfinite.height} non-finite {label} values")
@@ -231,7 +232,7 @@ def build_equal_weight_benchmark(
         "validation_window": [str(v) for v in validation_window] if validation_window else None,
         "holdout_window": [str(v) for v in holdout_window] if holdout_window else None,
     }
-    observed_symbols = scoped.filter(pl.col(label).is_not_null())["symbol"].n_unique()
+    observed_symbols = scoped.filter(pl.col(label).is_not_null())[entity_col].n_unique()
     metadata = {
         "case_study": case_study,
         "label": label,
@@ -247,6 +248,7 @@ def build_equal_weight_benchmark(
             "cadence": cadence,
             "rebalance_step": rebalance_step,
             "calendar": calendar,
+            "entity_col": entity_col,
         },
         "inputs": {
             "label_digest": label_digest,
