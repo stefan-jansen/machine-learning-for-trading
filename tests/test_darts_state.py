@@ -227,12 +227,14 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
                 "fwd_ret_1d": float(day) / 100,
                 BASE_TARGET_COL: np.log1p(float(day) / 100),
             }
-            for product in ("ES", "NQ")
+            for product in ("ES", "ZC")
             for position in range(3)
-            for day, timestamp in enumerate(dates)
+            for day, timestamp in enumerate(dates if product == "ES" else dates.delete(2))
         ]
     )
-    dataset = _attach_expected_periods(dataset, date_col="timestamp", calendar_id=None)
+    dataset = _attach_expected_periods(
+        dataset, date_col="timestamp", calendar_id="CME_Equity", case_study="cme_futures"
+    )
     split = {
         "fold": 0,
         "train_start": dates[0],
@@ -255,7 +257,7 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
     assert len(states) == 6
     assert {tuple(state.identity.items()) for state in states} == {
         (("product", product), ("position", position))
-        for product in ("ES", "NQ")
+        for product in ("ES", "ZC")
         for position in range(3)
     }
 
@@ -272,3 +274,6 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
     )
     assert {"product", "position"} <= set(predictions.columns)
     assert predictions.select("product", "position").n_unique() == 6
+    assert predictions.filter(pl.col("product") == "ZC")["timestamp"].unique().to_list() == [
+        dates[4]
+    ]

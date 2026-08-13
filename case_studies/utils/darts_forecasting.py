@@ -28,6 +28,7 @@ from utils.modeling import RANDOM_SEED, seed_everything
 SUPPORTED_DARTS_ARCHITECTURES = {"nbeats", "tsmixer"}
 BASE_TARGET_COL = "_darts_target_1d"
 _DARTS_PERIOD_COL = "_darts_expected_period"
+_CME_MAX_SESSION_GAP_DAYS = 5
 
 
 def darts_checkpoint_path(root: Path, config_name: str, fold: int, checkpoint: int) -> Path:
@@ -501,10 +502,30 @@ def _attach_expected_periods(
     *,
     date_col: str,
     calendar_id: str | None,
+    case_study: str | None = None,
 ) -> pd.DataFrame:
     from case_studies.utils.sequence_dataset import _sequence_period_numbers
 
     result = dataset_pd.copy()
+    if case_study == "cme_futures":
+        product_dates = (
+            result[["product", date_col]]
+            .drop_duplicates()
+            .sort_values(["product", date_col], kind="mergesort")
+        )
+        within_product = product_dates.groupby("product", sort=False)
+        sequence = within_product.cumcount()
+        breaks = within_product[date_col].diff().dt.days.gt(_CME_MAX_SESSION_GAP_DAYS)
+        product_dates[_DARTS_PERIOD_COL] = (
+            sequence + breaks.groupby(product_dates["product"], sort=False).cumsum()
+        )
+        return result.merge(
+            product_dates,
+            on=["product", date_col],
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        )
     result[_DARTS_PERIOD_COL] = _sequence_period_numbers(
         result[date_col],
         calendar_id=calendar_id,
@@ -624,6 +645,7 @@ def darts_validation_keys(
         dataset_pd,
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        case_study=case_study,
     )
     identity_cols = _panel_identity_columns(dataset_pd, entity_col)
     frames: list[pl.DataFrame] = []
@@ -920,6 +942,7 @@ def run_darts_cv(
         dataset_pd,
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        case_study=case_study,
     )
 
     config_results: list[dict[str, Any]] = []
