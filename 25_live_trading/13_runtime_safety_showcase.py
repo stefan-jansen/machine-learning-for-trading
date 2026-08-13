@@ -592,9 +592,8 @@ engine = LiveEngine(
 
 
 # %% [markdown]
-# `observe_engine` runs the engine for a short bounded window and
-# records the `health` field from `runtime_status()` at fixed intervals.
-# The transitions are returned for downstream deduping and display.
+# `observe_engine` polls `runtime_status()` within a bounded window and records
+# each expected health transition when it occurs.
 
 
 # %%
