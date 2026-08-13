@@ -429,7 +429,7 @@ def test_locked_rolling_allocator_holdout_preserves_warmup_and_transitions_once(
     )
 
     assert evaluated.state == "HOLDOUT_EVALUATED"
-    assert warmups + restored_warmups == [2, 2, 2]
+    assert warmups + restored_warmups == [2, 2, 2, 2]
     with pytest.raises(ValueError, match="LOCKED"):
         study.lifecycle.record_holdout(
             lock.hash,

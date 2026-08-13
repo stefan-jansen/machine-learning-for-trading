@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from case_studies.utils.registry.specs import training_hash_from_spec
+from case_studies.utils.registry.specs import (
+    IDENTITY_VERSION,
+    SUPPORTED_IDENTITY_VERSIONS,
+    training_hash_from_spec,
+)
 
 from .adapters import get_adapter, registered_adapters
 from .contracts import ExecutionTier
@@ -18,6 +22,7 @@ if TYPE_CHECKING:
 class ModelRun:
     training: TrainingResult
     predictions: tuple[PredictionResult, ...]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.predictions:
@@ -124,8 +129,16 @@ class ModelRequest:
         if resolver is None:
             raise NotImplementedError(f"{self.family!r} has no shared model resolver")
         spec, context = resolver(self.study, self.as_dict())
-        if spec.get("identity_version") != 2:
-            raise ValueError("family resolver did not produce a version-2 request")
+        identity_version = spec.get("identity_version")
+        if identity_version not in SUPPORTED_IDENTITY_VERSIONS:
+            raise ValueError(
+                "family resolver did not produce a supported versioned identity request"
+            )
+        if (
+            identity_version == IDENTITY_VERSION
+            and spec.get("resolved_spec_schema") != "ml4t.resolved-spec/v1"
+        ):
+            raise ValueError("family resolver did not produce the current resolved-spec schema")
         if spec.get("family") != self.family or spec.get("label") != self.label:
             raise ValueError("family resolver changed the requested family or label")
         if spec.get("execution_tier") != self.execution_tier.value:

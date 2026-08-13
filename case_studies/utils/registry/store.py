@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import subprocess
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -253,6 +254,77 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
     holdout_prediction_hash TEXT NOT NULL,
     holdout_backtest_hash   TEXT NOT NULL,
     evaluated_at            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_attempts (
+    attempt_id          TEXT PRIMARY KEY,
+    scientific_identity TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    diagnostics_json    TEXT NOT NULL,
+    started_at          TEXT NOT NULL,
+    completed_at        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_attempt_identity
+    ON execution_attempts(scientific_identity, started_at);
+
+CREATE TABLE IF NOT EXISTS candidate_fold_completions (
+    training_hash           TEXT NOT NULL REFERENCES training_runs(training_hash),
+    candidate_identity      TEXT NOT NULL,
+    fold_id                 INTEGER NOT NULL,
+    fitted_state_path       TEXT NOT NULL,
+    fitted_state_digest     TEXT NOT NULL,
+    prediction_shard_path   TEXT NOT NULL,
+    prediction_shard_digest TEXT NOT NULL,
+    resolved_settings_json  TEXT NOT NULL,
+    completed_at            TEXT NOT NULL,
+    PRIMARY KEY (training_hash, candidate_identity, fold_id)
+);
+
+CREATE TABLE IF NOT EXISTS official_populations (
+    population_hash  TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    member_kind      TEXT NOT NULL,
+    snapshot_json    TEXT NOT NULL,
+    supersedes_hash  TEXT REFERENCES official_populations(population_hash),
+    created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_population_name
+    ON official_populations(name, created_at);
+
+CREATE TABLE IF NOT EXISTS official_population_members (
+    population_hash TEXT NOT NULL REFERENCES official_populations(population_hash),
+    member_hash     TEXT NOT NULL,
+    ordinal         INTEGER NOT NULL,
+    PRIMARY KEY (population_hash, ordinal),
+    UNIQUE (population_hash, member_hash)
+);
+
+CREATE TABLE IF NOT EXISTS overlay_references (
+    result_hash TEXT NOT NULL,
+    result_kind TEXT NOT NULL,
+    source_root TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (result_hash, result_kind)
+);
+
+CREATE TABLE IF NOT EXISTS decision_artifacts (
+    decision_hash       TEXT PRIMARY KEY,
+    decision_kind       TEXT NOT NULL,
+    spec_json           TEXT NOT NULL,
+    artifact_digest     TEXT NOT NULL,
+    canonical           INTEGER NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS holdout_staging (
+    lock_hash               TEXT PRIMARY KEY REFERENCES research_locks(lock_hash),
+    holdout_training_hash   TEXT NOT NULL,
+    holdout_prediction_hash TEXT NOT NULL,
+    holdout_backtest_hash   TEXT NOT NULL,
+    lineage_digest          TEXT NOT NULL,
+    staged_at               TEXT NOT NULL
 );
 """
 
@@ -857,7 +929,7 @@ def _upsert_wide_metrics(
     db: sqlite3.Connection,
     table: str,
     key_values: dict[str, object],
-    metrics: dict[str, float],
+    metrics: Mapping[str, object],
     computed_at: str | None = None,
 ) -> None:
     """Insert or update metric columns in a wide-format metrics table.

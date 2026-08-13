@@ -39,8 +39,10 @@ def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[st
     projected_holdout = project_training_identity(holdout_spec)
     if projected_holdout.get("execution_tier") != "canonical":
         raise ValueError("holdout retraining must use the canonical execution tier")
-    validation_cv = projected_validation.pop("cv", None)
-    holdout_cv = projected_holdout.pop("cv", None)
+    validation_computation = projected_validation.get("computation", projected_validation)
+    holdout_computation = projected_holdout.get("computation", projected_holdout)
+    validation_cv = validation_computation.pop("cv", None)
+    holdout_cv = holdout_computation.pop("cv", None)
     if holdout_cv is None or holdout_cv == validation_cv:
         raise ValueError("holdout retraining requires an explicit, distinct CV interval")
     if projected_holdout != projected_validation:
@@ -105,15 +107,17 @@ class Lifecycle:
         training = Result.open(self.study, prediction_record["training_hash"])
         assert isinstance(training, TrainingResult)
         training_record = training.registry_record()
-        locked_holdout_spec = _locked_training_spec(training.spec(), holdout_training_spec)
+        training_spec = training.spec()
+        training_computation = training_spec.get("computation", training_spec)
+        locked_holdout_spec = _locked_training_spec(training_spec, holdout_training_spec)
         holdout_training_hash = training_hash_from_spec(locked_holdout_spec)
         lock_record = {
             "candidate_set_hash": candidates.hash,
             "selection_evidence": selection_evidence,
-            "label": training.spec().get("label"),
-            "label_artifact": training.spec().get("label_artifact"),
-            "feature_artifacts": training.spec().get("feature_artifacts"),
-            "cv": training.spec().get("cv"),
+            "label": training_spec.get("label"),
+            "label_artifact": training_computation.get("label_artifact"),
+            "feature_artifacts": training_computation.get("feature_artifacts"),
+            "cv": training_computation.get("cv"),
             "training_hash": training.hash,
             "holdout_training_hash": holdout_training_hash,
             "holdout_training_spec": locked_holdout_spec,
@@ -158,16 +162,14 @@ class Lifecycle:
             raise KeyError(f"Unknown research lock {lock_hash!r}")
         return ResearchLock(self.study, lock_hash, row[1], json.loads(row[0]))
 
-    def record_holdout(
+    def _validated_holdout_lineage(
         self,
         lock_hash: str,
         *,
         holdout_training_hash: str,
         holdout_prediction_hash: str,
         holdout_backtest_hash: str,
-    ) -> ResearchLock:
-        self.study.require_writable()
-        self.study.activate()
+    ) -> tuple[ResearchLock, TrainingResult, PredictionResult, BacktestResult, str]:
         lock = self.open(lock_hash)
         if lock.state != LifecycleState.LOCKED.value:
             raise ValueError("holdout evaluation requires a LOCKED research lock")
@@ -206,10 +208,89 @@ class Lifecycle:
             raise ValueError(
                 "holdout transition requires the exact complete canonical lineage in the lock"
             )
+        assert isinstance(training, TrainingResult)
+        assert isinstance(prediction, PredictionResult)
+        assert isinstance(backtest, BacktestResult)
+        lineage = {
+            "lock_hash": lock_hash,
+            "holdout_training_hash": training.hash,
+            "holdout_prediction_hash": prediction.hash,
+            "holdout_backtest_hash": backtest.hash,
+        }
+        return lock, training, prediction, backtest, compute_hash(canonical_json(lineage))
+
+    def stage_holdout(
+        self,
+        lock_hash: str,
+        *,
+        holdout_training_hash: str,
+        holdout_prediction_hash: str,
+        holdout_backtest_hash: str,
+    ) -> ResearchLock:
+        self.study.require_writable()
+        self.study.activate()
+        lock, training, prediction, backtest, lineage_digest = self._validated_holdout_lineage(
+            lock_hash,
+            holdout_training_hash=holdout_training_hash,
+            holdout_prediction_hash=holdout_prediction_hash,
+            holdout_backtest_hash=holdout_backtest_hash,
+        )
+        db = _open_registry(self.study.root)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT holdout_training_hash, holdout_prediction_hash, "
+                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                (lock_hash,),
+            ).fetchone()
+            expected = (training.hash, prediction.hash, backtest.hash, lineage_digest)
+            if existing is not None and existing != expected:
+                raise ValueError("immutable staged holdout lineage conflict")
+            if existing is None:
+                db.execute(
+                    "INSERT INTO holdout_staging "
+                    "(lock_hash, holdout_training_hash, holdout_prediction_hash, "
+                    "holdout_backtest_hash, lineage_digest, staged_at) VALUES (?,?,?,?,?,?)",
+                    (lock_hash, *expected[:3], lineage_digest, _utc_now()),
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        return lock
+
+    def finalize_holdout(self, lock_hash: str) -> ResearchLock:
+        self.study.require_writable()
+        self.study.activate()
+        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
+            staged = db.execute(
+                "SELECT holdout_training_hash, holdout_prediction_hash, "
+                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                (lock_hash,),
+            ).fetchone()
+        if staged is None:
+            raise ValueError("holdout artifacts must be staged before finalization")
+        _, training, prediction, backtest, lineage_digest = self._validated_holdout_lineage(
+            lock_hash,
+            holdout_training_hash=staged[0],
+            holdout_prediction_hash=staged[1],
+            holdout_backtest_hash=staged[2],
+        )
+        if lineage_digest != staged[3]:
+            raise ValueError("staged holdout lineage digest does not validate")
 
         db = _open_registry(self.study.root)
         try:
             db.execute("BEGIN IMMEDIATE")
+            current_staged = db.execute(
+                "SELECT holdout_training_hash, holdout_prediction_hash, "
+                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                (lock_hash,),
+            ).fetchone()
+            if current_staged != staged:
+                raise ValueError("staged holdout lineage changed before finalization")
             state = db.execute(
                 "SELECT state FROM research_locks WHERE lock_hash = ?", (lock_hash,)
             ).fetchone()
@@ -244,3 +325,19 @@ class Lifecycle:
         finally:
             db.close()
         return self.open(lock_hash)
+
+    def record_holdout(
+        self,
+        lock_hash: str,
+        *,
+        holdout_training_hash: str,
+        holdout_prediction_hash: str,
+        holdout_backtest_hash: str,
+    ) -> ResearchLock:
+        self.stage_holdout(
+            lock_hash,
+            holdout_training_hash=holdout_training_hash,
+            holdout_prediction_hash=holdout_prediction_hash,
+            holdout_backtest_hash=holdout_backtest_hash,
+        )
+        return self.finalize_holdout(lock_hash)
