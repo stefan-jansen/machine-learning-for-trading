@@ -15,6 +15,19 @@ if TYPE_CHECKING:
 
 
 CATALOG_VERSION = 1
+_METRIC_COLUMNS = (
+    "ic_mean",
+    "ic_std",
+    "ic_t",
+    "n_folds",
+    "pct_positive",
+    "accuracy",
+    "balanced_accuracy",
+    "auc_roc",
+    "auc_pr",
+    "log_loss",
+    "brier_score",
+)
 RESERVED_COLUMNS: dict[str, Any] = {
     "catalog_version": pl.Int64,
     "origin": pl.String,
@@ -32,7 +45,11 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "approval": pl.String,
     "complete": pl.Boolean,
     "created_at": pl.String,
+    "metrics_computed_at": pl.String,
     "artifact_available": pl.Boolean,
+    **{metric: pl.Float64 for metric in _METRIC_COLUMNS},
+    "diagnostic_metrics_json": pl.String,
+    "provenance_json": pl.String,
     "training_hash": pl.String,
     "prediction_hash": pl.String,
     "spec_json": pl.String,
@@ -112,14 +129,30 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             _select("spec_json", training_columns, "t", "'{}'"),
             _select("identity_version", training_columns, "t"),
             _select("execution_tier", training_columns, "t"),
+            _select("git_commit", training_columns, "t"),
+            _select("entry_point", training_columns, "t"),
+            _select("started_at", training_columns, "t"),
+            _select("elapsed_s", training_columns, "t"),
+            _select("runtime_json", training_columns, "t", "'{}'"),
             _select("prediction_hash", prediction_columns, "p"),
             _select("checkpoint_kind", prediction_columns, "p"),
             _select("checkpoint_value", prediction_columns, "p"),
             _select("split", prediction_columns, "p"),
             _select("created_at", prediction_columns, "p"),
             _select("status", coverage_columns, "c"),
+            _select("n_folds_expected", coverage_columns, "c"),
+            _select("prediction_hash", metric_columns, "m"),
+            _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
+            *[_select(metric, metric_columns, "m") for metric in _METRIC_COLUMNS],
         ]
+        fold_metric_count = (
+            "(SELECT COUNT(*) FROM fold_metrics fm "
+            "WHERE fm.prediction_hash = p.prediction_hash) AS fold_metric_count"
+            if "fold_metrics" in tables
+            else "0 AS fold_metric_count"
+        )
+        expressions.append(fold_metric_count)
         coverage_join = (
             "LEFT JOIN prediction_coverage c ON c.prediction_hash = p.prediction_hash"
             if coverage_columns
@@ -179,6 +212,33 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             / record["p_prediction_hash"]
             / "predictions.parquet"
         )
+        metrics = {
+            metric: record[f"m_{metric}"]
+            for metric in _METRIC_COLUMNS
+            if record[f"m_{metric}"] is not None
+        }
+        spec_provenance = spec.get("provenance")
+        provenance = dict(spec_provenance) if isinstance(spec_provenance, dict) else {}
+        provenance.update(
+            {
+                key: value
+                for key, value in {
+                    "git_commit": record["t_git_commit"],
+                    "entry_point": record["t_entry_point"],
+                    "started_at": record["t_started_at"],
+                    "elapsed_s": record["t_elapsed_s"],
+                    "runtime": json.loads(record["t_runtime_json"] or "{}"),
+                }.items()
+                if value not in (None, {}, "")
+            }
+        )
+        complete = (
+            identity_status == "current"
+            and record["c_status"] == "complete"
+            and record["m_prediction_hash"] is not None
+            and record["fold_metric_count"] == record["c_n_folds_expected"]
+            and artifact.is_file()
+        )
         row: dict[str, Any] = {
             "catalog_version": CATALOG_VERSION,
             "origin": row_origin,
@@ -199,9 +259,13 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "cv_identity": cv.get("identity"),
             "execution_tier": record["t_execution_tier"] or "canonical",
             "approval": "unapproved",
-            "complete": record["c_status"] == "complete" and artifact.is_file(),
+            "complete": complete,
             "created_at": record["p_created_at"],
+            "metrics_computed_at": record["m_computed_at"],
             "artifact_available": artifact.is_file(),
+            **{metric: record[f"m_{metric}"] for metric in _METRIC_COLUMNS},
+            "diagnostic_metrics_json": canonical_json(metrics),
+            "provenance_json": canonical_json(provenance),
             "training_hash": record["t_training_hash"],
             "prediction_hash": record["p_prediction_hash"],
             "spec_json": canonical_json(spec),

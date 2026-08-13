@@ -66,6 +66,7 @@ class EligibilityManifest:
                 "entity_columns": list(entity_columns),
                 "timestamp": timestamp_column,
                 "fold": fold_column,
+                "dtypes": {column: str(selected.schema[column]) for column in key_columns},
             },
             source_identity=canonical_value(source_identity),
             logic_identity=canonical_value(logic_identity),

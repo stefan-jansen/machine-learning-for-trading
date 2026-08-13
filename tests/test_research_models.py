@@ -130,7 +130,10 @@ def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkey
 
     assert notebook_resolved.identity == api_resolved.identity
     assert notebook_resolved.spec == api_resolved.spec
-    assert notebook_resolved.spec["model"]["effective_params_by_fold"]["0"]["alpha"] == 2.5
+    assert (
+        notebook_resolved.spec["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]
+        == 2.5
+    )
 
 
 def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) -> None:

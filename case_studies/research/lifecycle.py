@@ -39,8 +39,10 @@ def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[st
     projected_holdout = project_training_identity(holdout_spec)
     if projected_holdout.get("execution_tier") != "canonical":
         raise ValueError("holdout retraining must use the canonical execution tier")
-    validation_cv = projected_validation.pop("cv", None)
-    holdout_cv = projected_holdout.pop("cv", None)
+    validation_computation = projected_validation.get("computation", projected_validation)
+    holdout_computation = projected_holdout.get("computation", projected_holdout)
+    validation_cv = validation_computation.pop("cv", None)
+    holdout_cv = holdout_computation.pop("cv", None)
     if holdout_cv is None or holdout_cv == validation_cv:
         raise ValueError("holdout retraining requires an explicit, distinct CV interval")
     if projected_holdout != projected_validation:
@@ -105,15 +107,17 @@ class Lifecycle:
         training = Result.open(self.study, prediction_record["training_hash"])
         assert isinstance(training, TrainingResult)
         training_record = training.registry_record()
-        locked_holdout_spec = _locked_training_spec(training.spec(), holdout_training_spec)
+        training_spec = training.spec()
+        training_computation = training_spec.get("computation", training_spec)
+        locked_holdout_spec = _locked_training_spec(training_spec, holdout_training_spec)
         holdout_training_hash = training_hash_from_spec(locked_holdout_spec)
         lock_record = {
             "candidate_set_hash": candidates.hash,
             "selection_evidence": selection_evidence,
-            "label": training.spec().get("label"),
-            "label_artifact": training.spec().get("label_artifact"),
-            "feature_artifacts": training.spec().get("feature_artifacts"),
-            "cv": training.spec().get("cv"),
+            "label": training_spec.get("label"),
+            "label_artifact": training_computation.get("label_artifact"),
+            "feature_artifacts": training_computation.get("feature_artifacts"),
+            "cv": training_computation.get("cv"),
             "training_hash": training.hash,
             "holdout_training_hash": holdout_training_hash,
             "holdout_training_spec": locked_holdout_spec,

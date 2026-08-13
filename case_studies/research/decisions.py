@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import polars as pl
 
 from case_studies.utils.artifact_digest import value_digest
-from case_studies.utils.registry.specs import canonical_json, canonical_value, compute_hash
+from case_studies.utils.registry.specs import (
+    IDENTITY_VERSION,
+    canonical_json,
+    canonical_value,
+    compute_hash,
+)
 from case_studies.utils.registry.store import _open_registry, _utc_now
 
 if TYPE_CHECKING:
@@ -121,8 +126,8 @@ class DecisionArtifact:
             result = Result.open(study, prediction_hash, include_preview=not canonical)
             if not isinstance(result, PredictionResult):
                 raise ValueError(f"decision lineage {prediction_hash!r} is not a prediction")
-            if canonical and not result.complete:
-                raise ValueError("canonical decision lineage requires complete predictions")
+            if canonical and (result.identity_version != IDENTITY_VERSION or not result.complete):
+                raise ValueError("canonical decision lineage requires current complete predictions")
         normalized_source = canonical_value(source_identity or {})
         if canonical:
             _validate_promotion(normalized_source)

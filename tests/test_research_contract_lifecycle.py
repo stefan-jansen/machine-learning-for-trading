@@ -14,8 +14,9 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
 )
+from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
-from tests.test_research_registry import _predictions, _training_spec
+from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
 
 
@@ -46,7 +47,7 @@ def _decisions() -> pl.DataFrame:
 
 
 def _prediction(study: Study) -> str:
-    training = study.results.register_training(_training_spec())
+    training = study.results.register_training(_resolved_spec())
     frame = _predictions()
     return study.results.publish_predictions(
         training,
@@ -154,7 +155,8 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
     study = _study(tmp_path)
     frame = _predictions()
     expected = frame.select("symbol", "timestamp", "fold_id")
-    validation_training = study.results.register_training(_training_spec())
+    validation_spec = _resolved_spec()
+    validation_training = study.results.register_training(validation_spec)
     validation_prediction = study.results.publish_predictions(
         validation_training,
         checkpoint_kind="final",
@@ -171,7 +173,11 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
         prices=_prices()
     )
     candidates = CandidateSet.create(study, "selection", [validation_backtest])
-    holdout_spec = _training_spec(cv={"phase": "holdout", "train_end": "2024-01-04"})
+    holdout_spec = _resolved_spec()
+    holdout_spec["computation"]["cv"] = {
+        "identity": "holdout-cv",
+        "request": {"phase": "holdout", "train_end": "2024-01-04"},
+    }
     holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
     _patch_holdout_prices(monkeypatch, holdout_prices)
     lock = study.lifecycle.lock(

@@ -42,12 +42,7 @@ def _study(tmp_path: Path) -> Study:
 
 
 def _publish_prediction(study: Study, *, alpha: float, checkpoint: int) -> str:
-    training = study.results.register_training(
-        _training_spec(
-            config_name="ridge",
-            model={"class": "Ridge", "params": {"alpha": alpha}},
-        )
-    )
+    training = study.results.register_training(_resolved_spec(alpha=alpha))
     frame = _predictions().with_columns((pl.col("y_score") * alpha).alias("y_score"))
     return study.results.publish_predictions(
         training,
@@ -74,6 +69,8 @@ def test_run_models_returns_catalog_rows_and_diagnostics(tmp_path: Path, monkeyp
     assert (
         execution.catalog_rows.item(0, "prediction_hash") == execution.runs[0].predictions[0].hash
     )
+    assert execution.catalog_rows.item(0, "identity_status") == "current"
+    assert execution.catalog_rows.item(0, "complete") is True
     assert execution.diagnostics[0]["status"] == "completed"
     assert execution.diagnostics[0]["fitted_folds"] == [0, 1]
 

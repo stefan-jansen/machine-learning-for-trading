@@ -18,6 +18,7 @@ import polars as pl
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
 
 from case_studies.research.contracts import ExecutionTier
+from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
@@ -239,13 +240,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     effective = _effective_params(config, request["overrides"], folds)
     expected = _expected_keys(folds, entity_col, mds.date_col)
     input_lineage = mds.input_lineage
-    spec = {
-        "identity_version": 2,
-        "execution_tier": tier.value,
-        "family": "linear",
-        "label": label_ref.name,
-        "seed": 42,
-        "config_name": request["config_name"],
+    computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": input_lineage["artifacts"],
         "feature_names": list(mds.feature_names),
@@ -277,7 +272,17 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
-        spec["preview_reductions"] = reductions
+        computation["preview_reductions"] = reductions
+    runtime_provenance = _runtime_provenance(study)
+    spec = ResolvedSpec.create(
+        family="linear",
+        label=label_ref.name,
+        seed=42,
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=request["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
     context = LinearContext(
         folds=tuple(folds),
         feature_names=tuple(mds.feature_names),
@@ -288,7 +293,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         expected_keys=expected,
-        runtime_provenance=_runtime_provenance(study),
+        runtime_provenance=runtime_provenance,
     )
     return spec, context
 
@@ -300,7 +305,7 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
         None,
         "validation",
         checkpoint_kind="final",
-        identity_version=2,
+        identity_version=spec["identity_version"],
     )
     try:
         training = Result.open(
@@ -344,7 +349,8 @@ def _fit_or_reuse_predictions(
     training: TrainingResult,
     ledger: ExecutionLedger,
 ) -> tuple[pl.DataFrame, list[int], list[int]]:
-    cls = _MODEL_CLASSES[spec["model"]["class"]]
+    computation = spec["computation"]
+    cls = _MODEL_CLASSES[computation["model"]["class"]]
     prediction_frames = []
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
     shard_dir = training.root / "run_log" / "training" / training.hash / "prediction_folds"
@@ -354,7 +360,7 @@ def _fit_or_reuse_predictions(
     fitted_folds = []
     for fold in context.folds:
         fold_id = int(fold["fold"])
-        params = spec["model"]["effective_params_by_fold"][str(fold_id)]
+        params = computation["model"]["effective_params_by_fold"][str(fold_id)]
         artifact = model_dir / f"fold_{fold_id}.joblib"
         shard = shard_dir / f"fold_{fold_id}.parquet"
         if ledger.reusable_fold(

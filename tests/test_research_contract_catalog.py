@@ -216,6 +216,7 @@ def test_eligibility_manifest_records_schema_sources_diagnostics_and_sorted_dige
         "entity_columns": ["symbol"],
         "timestamp": "timestamp",
         "fold": "fold",
+        "dtypes": {"symbol": "String", "timestamp": "Date", "fold": "Int64"},
     }
     assert first.n_eligible == 3
     assert [fold["n_eligible"] for fold in first.folds] == [1, 2]
@@ -247,6 +248,9 @@ def test_catalog_schema_and_open_parameter_types_are_stable(tmp_path: Path) -> N
         "approval",
         "complete",
         "artifact_available",
+        "ic_mean",
+        "diagnostic_metrics_json",
+        "provenance_json",
         "training_hash",
         "prediction_hash",
         "spec_json",
@@ -255,6 +259,34 @@ def test_catalog_schema_and_open_parameter_types_are_stable(tmp_path: Path) -> N
     assert required <= set(first.columns)
     assert first.schema == second.schema
     assert first.schema["model__params__alpha"] == pl.Float64
+    assert first.schema["ic_mean"] == pl.Float64
+
+
+def test_catalog_reads_complete_v2_artifacts_without_granting_current_completeness(
+    tmp_path: Path,
+) -> None:
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    legacy_spec = {
+        "identity_version": 2,
+        "execution_tier": "canonical",
+        "family": "linear",
+        "label": "fwd_ret_21d",
+        "seed": 42,
+        "config_name": "ridge",
+        "model": {"class": "Ridge", "params": {"alpha": 1.0}},
+    }
+    prediction_hash = _publish(study.root, spec=legacy_spec)
+
+    row = (
+        study.predictions.table()
+        .filter(pl.col("prediction_hash") == prediction_hash)
+        .row(0, named=True)
+    )
+
+    assert row["artifact_available"] is True
+    assert row["identity_status"] == "legacy-v2"
+    assert row["complete"] is False
 
 
 def test_catalog_reads_legacy_rows_without_claiming_current_contract(tmp_path: Path) -> None:
