@@ -139,6 +139,7 @@ _REGISTERING_SUFFIXES = frozenset(
         "dl_tsmixer",
         "dl_nlinear",
         "dl_tcn",
+        "dl_weekly",
         # NOTE: causal_dml notebooks register to ``causal_runs`` (DML effect
         # estimates), not ``training_runs`` — so they are intentionally NOT in
         # this set. Likewise ``NN_latent_factors`` is a thin index notebook that
@@ -160,18 +161,16 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
-# DL notebooks use entry_point = "dl_{model}" (e.g. "dl_lstm") instead of
-# the full filename stem (e.g. "09_dl_lstm"). Map stage stems to actual
-# entry_point values for these notebooks.
-def _expected_entry_point(stage: str) -> str:
-    """Return the entry_point value the notebook will use in the registry."""
+# DL notebooks register either their full stage name or ``dl_{model}``.
+def _expected_entry_points(stage: str) -> tuple[str, ...]:
+    """Return the allowed entry-point values for one model notebook."""
     match = _STAGE_RE.match(stage)
     suffix = stage[len(match.group(0)) :] if match else stage
     if suffix.startswith("dl_"):
-        return suffix
+        return tuple(sorted({stage, suffix}))
     if suffix in {"lstm", "patchtst"}:
-        return f"dl_{suffix}"
-    return stage
+        return tuple(sorted({stage, f"dl_{suffix}"}))
+    return (stage,)
 
 
 _STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
@@ -217,21 +216,23 @@ def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> No
 
 
 @pytest.mark.parametrize(
-    ("stage", "entry_point"),
+    ("stage", "entry_points"),
     [
-        ("09_dl_lstm", "dl_lstm"),
-        ("09a_lstm", "dl_lstm"),
-        ("09b_patchtst", "dl_patchtst"),
-        ("11b_ipca", "11b_ipca"),
-        ("11c_conditional_autoencoder", "11c_conditional_autoencoder"),
+        ("09_dl_lstm", ("09_dl_lstm", "dl_lstm")),
+        ("09a_lstm", ("09a_lstm", "dl_lstm")),
+        ("09b_patchtst", ("09b_patchtst", "dl_patchtst")),
+        ("11b_ipca", ("11b_ipca",)),
+        ("11c_conditional_autoencoder", ("11c_conditional_autoencoder",)),
     ],
 )
-def test_registering_stage_maps_to_its_actual_entry_point(stage: str, entry_point: str) -> None:
+def test_registering_stage_maps_to_its_actual_entry_points(
+    stage: str, entry_points: tuple[str, ...]
+) -> None:
     match = _STAGE_RE.match(stage)
     assert match is not None
     suffix = stage[len(match.group(0)) :]
     assert suffix in _REGISTERING_SUFFIXES
-    assert _expected_entry_point(stage) == entry_point
+    assert _expected_entry_points(stage) == entry_points
 
 
 # ---------------------------------------------------------------------------
@@ -469,11 +470,12 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         # Some notebooks (e.g. 12_pca) re-register configs that were
         # already created by an earlier notebook (11_latent_factors),
         # resulting in upserts with 0 net new rows but updated entry_points.
-        expected_ep = _expected_entry_point(stage)
+        expected_entry_points = _expected_entry_points(stage)
+        entry_point_filter = ", ".join(f"'{entry}'" for entry in expected_entry_points)
         runs = _query_registry(
             registry_db,
             "training_runs",
-            f"entry_point = '{expected_ep}'",
+            f"entry_point IN ({entry_point_filter})",
         )
 
         if new_training > 0:
@@ -525,14 +527,14 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         elif len(runs) > 0:
             print(
                 f"\n  Registry OK: {len(runs)} training_runs with "
-                f"entry_point='{expected_ep}' (upserted, no net new rows)"
+                f"entry_point in {expected_entry_points} (upserted, no net new rows)"
             )
         else:
             # Neither new entries nor matching entry_points — real failure
             msg = (
                 f"{case_study}::{stage} has register=True but created "
                 f"0 new training_runs and found 0 with "
-                f"entry_point='{expected_ep}' (total: {after['training_runs']})"
+                f"entry_point in {expected_entry_points} (total: {after['training_runs']})"
             )
             raise AssertionError(msg)
     else:
