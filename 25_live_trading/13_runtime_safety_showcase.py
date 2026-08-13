@@ -64,18 +64,19 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
-from async_utils import run_async
 from ml4t.backtest.strategy import Strategy
-from ml4t.backtest.types import Order, OrderSide, OrderType, Position
+from ml4t.backtest.types import Order, OrderSide, OrderStatus, OrderType, Position
 from ml4t.live import LiveRiskConfig, RiskLimitError, RiskState, SafeBroker
 from ml4t.live.engine import LiveEngine
 
@@ -89,10 +90,9 @@ logger = logging.getLogger(__name__)
 
 
 def run_demo(awaitable):
-    """Run an async demo while suppressing only nest_asyncio's Python 3.14 deprecation."""
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"nest_asyncio")
-        return run_async(awaitable)
+    """Run an async demo outside the notebook kernel's active event loop."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(awaitable)).result()
 
 
 # %% tags=["parameters"]
@@ -122,6 +122,13 @@ class DemoBrokerQueries:
 
     async def is_connected_async(self) -> bool:
         return self._connected
+
+    @property
+    def execution_capabilities(self):
+        return frozenset()
+
+    def assert_paper_trading(self) -> None:
+        return None
 
     def get_position(self, asset: str) -> Position | None:
         return self.positions.get(asset)
@@ -159,6 +166,7 @@ class DemoBroker(DemoBrokerQueries):
         self.positions = dict(positions or {})
         self.pending_orders = list(pending_orders or [])
         self.account_value = float(account_value)
+        self._order_counter = 0
 
     async def submit_order_async(
         self,
@@ -173,6 +181,7 @@ class DemoBroker(DemoBrokerQueries):
         if side is None:
             side = OrderSide.BUY if quantity > 0 else OrderSide.SELL
             quantity = abs(quantity)
+        self._order_counter += 1
         order = Order(
             asset=asset,
             side=side,
@@ -180,6 +189,8 @@ class DemoBroker(DemoBrokerQueries):
             order_type=order_type,
             limit_price=limit_price,
             stop_price=stop_price,
+            order_id=f"DEMO-{self._order_counter:04d}",
+            status=OrderStatus.PENDING,
             created_at=datetime.now(UTC),
         )
         self.pending_orders.append(order)
@@ -219,8 +230,15 @@ def _temp_state_path(prefix: str) -> Path:
 
 def _cleanup_state_path(path: Path) -> None:
     """Remove a temporary risk-state file and its default sibling journal."""
-    path.unlink(missing_ok=True)
-    path.with_name(f"{path.stem}-journal{path.suffix or '.json'}l").unlink(missing_ok=True)
+    journal = path.with_name(f"{path.stem}-journal{path.suffix or '.json'}l")
+    for candidate in (
+        path,
+        path.with_name(f"{path.name}.lock"),
+        journal,
+        journal.with_name(f"{journal.name}.lock"),
+        journal.with_name(f"{journal.name}.head"),
+    ):
+        candidate.unlink(missing_ok=True)
 
 
 stale_state = _temp_state_path("nb13_stale_")
@@ -228,7 +246,7 @@ stale_broker = DemoBroker()
 stale_safe = SafeBroker(
     stale_broker,
     LiveRiskConfig(
-        shadow_mode=False,
+        execution_mode="paper",
         max_order_value=10_000.0,
         max_data_staleness_seconds=1.0,
         state_file=str(stale_state),
@@ -284,7 +302,7 @@ killswitch_broker = DemoBroker(account_value=100_000.0)
 killswitch_safe = SafeBroker(
     killswitch_broker,
     LiveRiskConfig(
-        shadow_mode=False,
+        execution_mode="paper",
         max_order_value=10_000.0,
         max_daily_loss=KILL_SWITCH_LOSS_USD,
         max_data_staleness_seconds=60.0,
@@ -328,7 +346,7 @@ run_demo(killswitch_safe.disconnect())
 killswitch_safe2 = SafeBroker(
     DemoBroker(account_value=100_000.0),
     LiveRiskConfig(
-        shadow_mode=False,
+        execution_mode="paper",
         max_order_value=10_000.0,
         max_daily_loss=KILL_SWITCH_LOSS_USD,
         max_data_staleness_seconds=60.0,
@@ -392,6 +410,7 @@ divergent = RiskState(
     ],
 )
 recon_state.write_text(json.dumps(divergent.to_dict(), indent=2))
+recon_state.chmod(0o600)
 
 recon_broker = DemoBroker(
     positions={
@@ -403,7 +422,10 @@ recon_broker = DemoBroker(
         )
     }
 )
-recon_safe = SafeBroker(recon_broker, LiveRiskConfig(state_file=str(recon_state)))
+recon_safe = SafeBroker(
+    recon_broker,
+    LiveRiskConfig(execution_mode="paper", state_file=str(recon_state)),
+)
 run_demo(recon_safe.connect())
 
 report = recon_safe.reconciliation_report
@@ -443,6 +465,7 @@ matched_state = RiskState(
     persisted_pending_orders=[],
 )
 clean_state.write_text(json.dumps(matched_state.to_dict(), indent=2))
+clean_state.chmod(0o600)
 
 recon_broker_clean = DemoBroker(
     positions={
@@ -454,7 +477,10 @@ recon_broker_clean = DemoBroker(
         )
     }
 )
-recon_safe_clean = SafeBroker(recon_broker_clean, LiveRiskConfig(state_file=str(clean_state)))
+recon_safe_clean = SafeBroker(
+    recon_broker_clean,
+    LiveRiskConfig(execution_mode="paper", state_file=str(clean_state)),
+)
 run_demo(recon_safe_clean.connect())
 clean_report = recon_safe_clean.reconciliation_report
 print(f"after_reset clean: {clean_report['clean']}")
@@ -610,7 +636,13 @@ for t, health in timeline:
         last = health
 health_timeline = pl.DataFrame(transitions)
 observed_health = health_timeline["health"].to_list()
-assert observed_health == ["stopped", "waiting_for_data", "ok", "feed_silent", "stopped"]
+assert observed_health == [
+    "stopped",
+    "waiting_for_data",
+    "ok",
+    "feed_silent",
+    "stopped",
+], observed_health
 health_timeline
 
 # %% [markdown]
@@ -643,6 +675,7 @@ demo_state = RiskState(
     persisted_positions={"DEMO": 10.0},
 )
 cli_state.write_text(json.dumps(demo_state.to_dict(), indent=2))
+cli_state.chmod(0o600)
 
 cli_env = os.environ.copy()
 for key in (
@@ -655,7 +688,7 @@ for key in (
     cli_env.pop(key, None)
 
 result = subprocess.run(
-    ["ml4t-live", "status", "--state-file", str(cli_state)],
+    [str(Path(sys.executable).with_name("ml4t-live")), "status", "--state-file", str(cli_state)],
     capture_output=True,
     text=True,
     timeout=20,

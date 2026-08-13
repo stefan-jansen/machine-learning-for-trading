@@ -523,6 +523,10 @@ class LiveBroker(BacktestBroker):
         super().__init__()
         self._connected = False
 
+    @property
+    def execution_capabilities(self):
+        return frozenset()
+
     async def connect(self):
         self._connected = True
 
