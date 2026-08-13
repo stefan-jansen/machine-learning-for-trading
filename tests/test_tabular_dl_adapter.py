@@ -228,3 +228,20 @@ def test_tabm_classification_resolves_targets_imbalance_and_preview_checkpoints(
         {"kind": "epoch", "value": 2},
     ]
     assert resolved._context.class_weights_by_fold == {0: (0.6, 3.0)}
+
+    mds.dataset = frame.with_columns(pl.Series("direction", [0, 1, 2, 0, 1, 2] * 4))
+    mds.class_values = [0, 1, 2]
+    multiclass = study.model(
+        family="tabular_dl",
+        label=label.name,
+        config_name="tabm_probe",
+        overrides={"device": "cpu", "class_weight": "balanced"},
+        execution_tier="preview",
+        preview_reductions={"folds": [0], "n_epochs": 2, "checkpoint_interval": 1},
+    ).resolve()
+
+    assert multiclass.spec["computation"]["task"]["metrics"] == [
+        "ic",
+        "accuracy",
+        "balanced_accuracy",
+    ]

@@ -4,46 +4,16 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
-from case_studies.crypto_perps_funding.funding_backtest import apply_funding_settlements
+from case_studies.crypto_perps_funding.funding_backtest import FundingSettlementLedger
+from case_studies.utils import backtest_runner
 
 
-def test_funding_is_position_signed_before_same_timestamp_fills() -> None:
+def test_funding_changes_broker_cash_before_same_timestamp_sizing() -> None:
     first = datetime(2024, 1, 1, tzinfo=UTC)
     settlement = datetime(2024, 1, 1, 8, tzinfo=UTC)
     last = datetime(2024, 1, 1, 16, tzinfo=UTC)
-    buy = SimpleNamespace(
-        timestamp=first,
-        quantity=1.0,
-        side=SimpleNamespace(value="buy"),
-        price=100.0,
-        commission=0.0,
-        asset="BTCUSDT",
-    )
-    sell = SimpleNamespace(
-        timestamp=settlement,
-        quantity=1.0,
-        side=SimpleNamespace(value="sell"),
-        price=100.0,
-        commission=0.0,
-        asset="BTCUSDT",
-    )
-    engine = SimpleNamespace(
-        fills=[buy, sell],
-        equity_curve=[(first, 1_000.0), (settlement, 1_000.0), (last, 1_000.0)],
-        portfolio_state=[
-            (first, 1_000.0, 900.0, 100.0, 100.0, 1),
-            (settlement, 1_000.0, 1_000.0, 0.0, 0.0, 0),
-            (last, 1_000.0, 1_000.0, 0.0, 0.0, 0),
-        ],
-    )
-    prices = pl.DataFrame(
-        {
-            "timestamp": [first, settlement, last],
-            "symbol": ["BTCUSDT"] * 3,
-            "close": [100.0] * 3,
-        }
-    )
     funding = pl.DataFrame(
         {
             "timestamp": [settlement],
@@ -52,21 +22,58 @@ def test_funding_is_position_signed_before_same_timestamp_fills() -> None:
         }
     )
 
-    metrics = apply_funding_settlements(
-        engine,
-        prices=prices,
-        funding_rates=funding,
-        initial_cash=1_000.0,
-    )
+    position = SimpleNamespace(quantity=1.0, current_price=100.0, multiplier=1.0)
+    broker = SimpleNamespace(cash=1_000.0, positions={"BTCUSDT": position})
 
-    assert metrics == {
+    def update_time(timestamp, prices, *_args, **_kwargs):
+        position.current_price = prices["BTCUSDT"]
+
+    broker._update_time = update_time
+    ledger = FundingSettlementLedger(funding)
+    ledger.install(broker)
+
+    broker._update_time(settlement, {"BTCUSDT": 100.0})
+    target_quantity = broker.cash / 100.0
+
+    assert broker.cash == 999.0
+    assert target_quantity == 9.99
+    assert ledger.metrics() == {
         "funding_pnl": -1.0,
         "funding_events": 1.0,
         "funding_settlements": 1.0,
-        "funding_reconstruction_error": 0.0,
     }
-    assert engine.equity_curve == [(first, 1_000.0), (settlement, 999.0), (last, 999.0)]
-    assert engine.portfolio_state[1][1:3] == (999.0, 999.0)
+
+    broker._update_time(settlement, {"BTCUSDT": 100.0})
+    assert broker.cash == 999.0
+
+    broker._update_time(last, {"BTCUSDT": 100.0})
+    assert ledger.metrics()["funding_pnl"] == -1.0
+
+
+def test_longs_pay_and_shorts_receive_the_same_funding_rate() -> None:
+    timestamp = datetime(2024, 1, 1, 8, tzinfo=UTC)
+    funding = pl.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp],
+            "symbol": ["LONG", "SHORT"],
+            "funding_rate": [0.01, 0.01],
+        }
+    )
+    positions = {
+        "LONG": SimpleNamespace(quantity=2.0, current_price=100.0, multiplier=1.0),
+        "SHORT": SimpleNamespace(quantity=-1.0, current_price=100.0, multiplier=1.0),
+    }
+    broker = SimpleNamespace(cash=1_000.0, positions=positions)
+    ledger = FundingSettlementLedger(funding)
+
+    ledger.settle(timestamp, broker)
+
+    assert broker.cash == 999.0
+    assert ledger.metrics() == {
+        "funding_pnl": -1.0,
+        "funding_events": 1.0,
+        "funding_settlements": 2.0,
+    }
 
 
 def test_funding_rejects_duplicate_settlement_keys() -> None:
@@ -78,18 +85,234 @@ def test_funding_rejects_duplicate_settlement_keys() -> None:
             "funding_rate": [0.01, 0.01],
         }
     )
-    engine = SimpleNamespace(fills=[], equity_curve=[], portfolio_state=[])
-
     try:
-        apply_funding_settlements(
-            engine,
-            prices=pl.DataFrame(
-                {"timestamp": [timestamp], "symbol": ["BTCUSDT"], "close": [100.0]}
-            ),
-            funding_rates=funding,
-            initial_cash=1_000.0,
-        )
+        FundingSettlementLedger(funding)
     except ValueError as error:
         assert "unique" in str(error)
     else:
         raise AssertionError("duplicate funding settlements were accepted")
+
+
+def test_funding_rejects_incomplete_engine_timeline_coverage() -> None:
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    ledger = FundingSettlementLedger(
+        pl.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "symbol": ["BTCUSDT"],
+                "funding_rate": [0.01],
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="0/1"):
+        ledger.metrics()
+
+
+def _backtest_frames(timestamp: datetime) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    prices = pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "symbol": ["BTCUSDT"],
+            "open": [100.0],
+            "high": [100.0],
+            "low": [100.0],
+            "close": [100.0],
+            "volume": [1_000.0],
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "symbol": ["BTCUSDT"],
+            "y_score": [0.1],
+            "y_true": [0.01],
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "symbol": ["BTCUSDT"],
+            "weight": [-1.0],
+        }
+    )
+    return prices, predictions, weights
+
+
+def _strategy_spec(mode: str) -> dict:
+    return {
+        "signal": {"method": "precomputed_positions"},
+        "execution": {
+            "mode": mode,
+            "cadence": "8_hour_funding",
+            "fill_timing": "AT_FUNDING_TIMESTAMP",
+            "min_weight_change": 0.0,
+            "min_trade_value": 0.0,
+        },
+        "costs": {"model": "percentage", "commission_bps": 0.0, "slippage_bps": 0.0},
+    }
+
+
+def test_negative_precomputed_weights_enable_shorting_in_resolved_engine_config(
+    monkeypatch,
+) -> None:
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    prices, predictions, weights = _backtest_frames(timestamp)
+    prices = prices.with_columns(pl.lit("A").alias("symbol"))
+    predictions = predictions.with_columns(pl.lit("A").alias("symbol"))
+    weights = weights.with_columns(pl.lit("A").alias("symbol"))
+    captured = {}
+
+    def fake_engine(**kwargs):
+        captured.update(kwargs)
+        return {
+            "metrics": {},
+            "daily_returns": pl.DataFrame({"timestamp": [timestamp], "daily_return": [0.0]}),
+        }
+
+    monkeypatch.setattr(backtest_runner, "_run_engine", fake_engine)
+
+    backtest_runner.run_backtest(
+        "etfs",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+
+    assert captured["allow_short"] is True
+    assert captured["strategy_spec"]["backtest_config"]["account"]["allow_short_selling"] is True
+
+
+def test_vectorized_backtest_rejects_funding_cashflows(monkeypatch) -> None:
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    prices, predictions, weights = _backtest_frames(timestamp)
+    funding = pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "symbol": ["BTCUSDT"],
+            "funding_rate": [0.01],
+        }
+    )
+    monkeypatch.setattr(
+        backtest_runner,
+        "_run_vectorized",
+        lambda **kwargs: pytest.fail("vectorized path ran with funding rates"),
+    )
+
+    with pytest.raises(ValueError, match="vectorized.*funding"):
+        backtest_runner.run_backtest(
+            "crypto_perps_funding",
+            "prediction-a",
+            _strategy_spec("vectorized"),
+            prices=prices,
+            predictions=predictions,
+            precomputed_weights=weights,
+            funding_rates=funding,
+            register=False,
+        )
+
+
+def test_live_funding_changes_the_next_engine_target_order() -> None:
+    timestamps = [datetime(2024, 1, 1, hour=hour, tzinfo=UTC) for hour in (0, 8, 16)]
+    prices = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 3,
+            "open": [100.0] * 3,
+            "high": [100.0] * 3,
+            "low": [100.0] * 3,
+            "close": [100.0] * 3,
+            "volume": [1_000_000.0] * 3,
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 3,
+            "y_score": [0.1] * 3,
+            "y_true": [0.0] * 3,
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 3,
+            "weight": [0.5] * 3,
+        }
+    )
+    funding = pl.DataFrame(
+        {
+            "timestamp": [timestamps[1]],
+            "symbol": ["BTCUSDT"],
+            "funding_rate": [0.1],
+        }
+    )
+
+    unfunded = backtest_runner.run_backtest(
+        "crypto_perps_funding",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+    funded = backtest_runner.run_backtest(
+        "crypto_perps_funding",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        funding_rates=funding,
+        register=False,
+    )
+
+    assert funded.metrics["funding_pnl"] < 0
+    assert len(funded.engine_result.fills) > len(unfunded.engine_result.fills)
+    assert any(fill.timestamp == timestamps[1] for fill in funded.engine_result.fills)
+
+
+def test_timezone_naive_engine_targets_match_timezone_naive_feed() -> None:
+    timestamps = [datetime(2024, 1, 1, hour=hour) for hour in (0, 8)]
+    prices = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "open": [100.0] * 2,
+            "high": [100.0] * 2,
+            "low": [100.0] * 2,
+            "close": [100.0] * 2,
+            "volume": [1_000_000.0] * 2,
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "y_score": [0.1] * 2,
+            "y_true": [0.0] * 2,
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "weight": [0.5] * 2,
+        }
+    )
+
+    result = backtest_runner.run_backtest(
+        "crypto_perps_funding",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+
+    assert result.engine_result.fills

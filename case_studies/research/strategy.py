@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 import polars as pl
@@ -35,6 +36,71 @@ if TYPE_CHECKING:
 
 
 _MOMENT_ALLOCATORS = {"inverse_vol", "risk_parity", "hrp", "mvo", "mvo_ledoit_wolf"}
+
+
+def _cadence_delta(value: str) -> timedelta:
+    match = re.fullmatch(r"([1-9][0-9]*)(us|ms|s|m|h|d|w)", value.strip().lower())
+    if match is None:
+        raise ValueError(f"decision cadence must be a compact duration such as '8h', got {value!r}")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    keyword = {
+        "us": "microseconds",
+        "ms": "milliseconds",
+        "s": "seconds",
+        "m": "minutes",
+        "h": "hours",
+        "d": "days",
+        "w": "weeks",
+    }[unit]
+    return timedelta(**{keyword: amount})
+
+
+def apply_state_transition_policy(
+    weights: pl.DataFrame,
+    *,
+    policy: dict[str, str],
+    cadence: str | None,
+) -> pl.DataFrame:
+    """Insert explicit flat targets before fold boundaries and temporal gaps."""
+    required = {"symbol", "timestamp", "weight"}
+    missing = required - set(weights.columns)
+    if missing:
+        raise ValueError(f"decision weights are missing columns: {sorted(missing)}")
+    if weights.is_empty():
+        return weights
+    fold_column = "fold" if "fold" in weights.columns else None
+    timeline_columns = ["timestamp", *([fold_column] if fold_column else [])]
+    timeline = weights.select(*timeline_columns).unique().sort("timestamp")
+    if fold_column and timeline.n_unique("timestamp") != timeline.height:
+        raise ValueError("each decision timestamp must belong to exactly one fold")
+
+    temporal_action = policy.get("temporal_gap", "continue")
+    expected = None
+    if temporal_action != "continue":
+        if cadence is None:
+            raise ValueError("non-continuing temporal-gap policy requires decision cadence")
+        expected = _cadence_delta(cadence)
+
+    flatten_at: set[object] = set()
+    rows = timeline.iter_rows(named=True)
+    previous = next(rows, None)
+    for current in rows:
+        assert previous is not None
+        fold_changed = fold_column is not None and current[fold_column] != previous[fold_column]
+        if fold_changed and policy.get("fold_boundary", "continue") != "continue":
+            flatten_at.add(previous["timestamp"])
+        if expected is not None and current["timestamp"] - previous["timestamp"] > expected:
+            flatten_at.add(previous["timestamp"])
+        previous = current
+    if not flatten_at:
+        return weights.sort("timestamp", "symbol")
+    return weights.with_columns(
+        pl.when(pl.col("timestamp").is_in(list(flatten_at)))
+        .then(0.0)
+        .otherwise(pl.col("weight"))
+        .alias("weight")
+    ).sort("timestamp", "symbol")
 
 
 def _date_string(value: object) -> str:
@@ -226,6 +292,11 @@ class Strategy:
                 "source_identity": self.decision.spec["source_identity"],
                 "state_transition_policy": self.decision.spec["state_transition_policy"],
             }
+            decision_weights = self._decision_weights(prices)
+            assert decision_weights is not None
+            spec["backtest_config"]["account"]["allow_short_selling"] = bool(
+                decision_weights.filter(pl.col("weight") < 0).height
+            )
         if contract_specs is not None:
             serialized = {
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
@@ -245,32 +316,67 @@ class Strategy:
             return None
         from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 
-        symbols = prices.get_column("symbol").unique().to_list()
-        start = _date_string(prices.get_column("timestamp").min())
-        end = _date_string(prices.get_column("timestamp").max())
+        prediction_timestamps = self.prediction.load().get_column("timestamp")
+        prediction_start = prediction_timestamps.min()
+        prediction_end = prediction_timestamps.max()
+        if prediction_start is None or prediction_end is None:
+            raise ValueError("crypto backtest prediction set has no timestamps")
+        timestamp_dtype = prices.schema["timestamp"]
+        price_keys = (
+            prices.filter(
+                pl.col("timestamp").is_between(
+                    pl.lit(prediction_start).cast(timestamp_dtype, strict=False),
+                    pl.lit(prediction_end).cast(timestamp_dtype, strict=False),
+                    closed="both",
+                )
+            )
+            .select("symbol", "timestamp")
+            .unique()
+        )
+        symbols = price_keys.get_column("symbol").unique().to_list()
+        start = _date_string(prediction_start)
+        end = _date_string(prediction_end)
         funding = load_funding_rates(symbols=symbols, start_date=start, end_date=end)
+        funding = funding.with_columns(
+            pl.col("symbol").cast(price_keys.schema["symbol"]),
+            pl.col("timestamp").cast(timestamp_dtype),
+        ).join(price_keys, on=["symbol", "timestamp"], how="semi")
         if funding.is_empty():
             raise ValueError("crypto backtest resolved no official funding settlements")
-        return funding
+        return funding.sort("timestamp", "symbol")
 
     def _decision_weights(self, prices: pl.DataFrame) -> pl.DataFrame | None:
         if self.decision is None:
             return None
         decisions = self.decision.load()
+        fold_columns = [column for column in ("fold", "fold_id") if column in decisions.columns]
+        if len(fold_columns) > 1:
+            raise ValueError("decision artifact cannot contain both fold and fold_id")
+        fold_column = fold_columns[0] if fold_columns else None
+        selected_fold = [fold_column] if fold_column else []
         if self.decision.kind == "target_weights":
-            weights = decisions.select("symbol", "timestamp", "weight")
+            weights = decisions.select("symbol", "timestamp", "weight", *selected_fold)
         elif self.decision.kind == "target_positions":
-            weights = decisions.select("symbol", "timestamp", "position").with_columns(
-                pl.col("position").abs().sum().over("timestamp").alias("gross")
-            )
+            weights = decisions.select(
+                "symbol", "timestamp", "position", *selected_fold
+            ).with_columns(pl.col("position").abs().sum().over("timestamp").alias("gross"))
             weights = weights.with_columns(
                 pl.when(pl.col("gross") > 0)
                 .then(pl.col("position") / pl.col("gross"))
                 .otherwise(0.0)
                 .alias("weight")
-            ).select("symbol", "timestamp", "weight")
+            ).select("symbol", "timestamp", "weight", *selected_fold)
         else:
             raise ValueError("canonical backtesting does not support order decision artifacts")
+        if fold_column == "fold_id":
+            weights = weights.rename({"fold_id": "fold"})
+        policy = self.decision.spec.get("state_transition_policy")
+        if policy is not None:
+            weights = apply_state_transition_policy(
+                weights,
+                policy=policy,
+                cadence=self.decision.spec.get("parameters", {}).get("cadence"),
+            )
         price_keys = prices.select("symbol", "timestamp").unique()
         weights = weights.with_columns(
             pl.col("symbol").cast(price_keys.schema["symbol"]),
@@ -279,7 +385,7 @@ class Strategy:
         missing = weights.join(price_keys, on=["symbol", "timestamp"], how="anti")
         if not missing.is_empty():
             raise ValueError("decision artifact contains keys outside the backtest price grid")
-        return weights
+        return weights.select("symbol", "timestamp", "weight")
 
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)

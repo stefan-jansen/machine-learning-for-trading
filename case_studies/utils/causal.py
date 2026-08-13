@@ -947,7 +947,7 @@ def run_resolved_causal_request(
     except KeyError:
         cached = None
     if cached is not None:
-        if cached.spec != spec or not cached.complete:
+        if training_hash_from_spec(cached.spec) != causal_hash or not cached.complete:
             raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
         return cached
 

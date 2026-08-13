@@ -177,7 +177,11 @@ def target_positions(
         .over("timestamp")
         .alias("descending_rank"),
     )
-    return (
+    fold_columns = [column for column in ("fold", "fold_id") if column in ranked.columns]
+    if len(fold_columns) > 1:
+        raise ValueError("predictions cannot contain both fold and fold_id")
+    selected_fold = fold_columns[:1]
+    result = (
         ranked.with_columns(
             pl.when(pl.col("descending_rank") <= long_count)
             .then(1.0)
@@ -186,9 +190,10 @@ def target_positions(
             .otherwise(0.0)
             .alias("position")
         )
-        .select("symbol", "timestamp", "position")
+        .select("symbol", "timestamp", "position", *selected_fold)
         .sort("timestamp", "symbol")
     )
+    return result.rename({"fold_id": "fold"}) if selected_fold == ["fold_id"] else result
 
 
 def publish_exploratory_positions(
@@ -198,6 +203,7 @@ def publish_exploratory_positions(
     *,
     long_count: int = 1,
     short_count: int = 1,
+    cadence: str = "8h",
 ) -> DecisionArtifact:
     """Publish an immediately backtestable, non-canonical Python decision."""
     return DecisionArtifact.publish(
@@ -209,7 +215,7 @@ def publish_exploratory_positions(
             short_count=short_count,
         ),
         prediction_hashes=[prediction_hash],
-        parameters={"long_count": long_count, "short_count": short_count},
+        parameters={"long_count": long_count, "short_count": short_count, "cadence": cadence},
         state_transition_policy=StateTransitionPolicy(
             fold_boundary="liquidate",
             temporal_gap="reset",

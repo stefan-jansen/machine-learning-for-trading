@@ -315,15 +315,12 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "continuous_eval_label": label_ref.definition.continuous_eval_label,
     }
     if mds.task_type == "classification":
+        metrics = ["ic", "accuracy", "balanced_accuracy"]
+        if len(mds.class_values) == 2:
+            metrics[1:1] = ["auc_roc", "log_loss"]
         task.update(
             {
-                "metrics": [
-                    "ic",
-                    "auc_roc",
-                    "log_loss",
-                    "accuracy",
-                    "balanced_accuracy",
-                ],
+                "metrics": metrics,
                 "imbalance": {
                     "method": class_weight_method,
                     "effective_class_weights_by_fold": {

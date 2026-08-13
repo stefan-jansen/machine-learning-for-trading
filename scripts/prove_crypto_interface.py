@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -136,6 +137,7 @@ def prove(workspace: Path) -> dict[str, object]:
     positions = target_positions(prediction_frame)
     state_policy = StateTransitionPolicy(fold_boundary="liquidate", temporal_gap="reset")
     decision = publish_exploratory_positions(study, final_prediction.hash, prediction_frame)
+    assert decision.load().sort("timestamp", "symbol").equals(positions)
     prices = load_backtest_prices_for(
         CASE_STUDY,
         label="fwd_dir_8h",
@@ -154,6 +156,23 @@ def prove(workspace: Path) -> dict[str, object]:
         "fold_boundary": "liquidate",
         "temporal_gap": "reset",
     }
+    backtest_dir = backtest.root / "run_log" / "backtest" / backtest.hash
+    fills = pl.read_parquet(backtest_dir / "fills.parquet")
+    portfolio_state = pl.read_parquet(backtest_dir / "portfolio_state.parquet")
+    with sqlite3.connect(backtest.root / "run_log" / "registry.db") as db:
+        metrics = db.execute(
+            "SELECT num_trades, funding_pnl, funding_events, funding_settlements "
+            "FROM backtest_metrics WHERE backtest_hash = ?",
+            (backtest.hash,),
+        ).fetchone()
+    assert metrics is not None
+    num_trades, funding_pnl, funding_events, funding_settlements = metrics
+    assert fills.height > 0
+    assert portfolio_state.filter(pl.col("gross_exposure") > 0).height > 0
+    assert num_trades > 0
+    assert funding_pnl != 0
+    assert funding_events > 0
+    assert funding_settlements > 0
     try:
         CandidateSet.create(study, "exploratory-must-not-be-canonical", [backtest])
     except ValueError as error:
@@ -199,6 +218,11 @@ def prove(workspace: Path) -> dict[str, object]:
         "causal_hash": causal_result.hash,
         "checkpoint_prediction_hashes": [item.hash for item in run.predictions],
         "eligible_rows": expected.height,
+        "funding_events": int(funding_events),
+        "funding_pnl": float(funding_pnl),
+        "funding_settlements": int(funding_settlements),
+        "num_fills": fills.height,
+        "num_trades": int(num_trades),
         "training_hash": run.training.hash,
         "workspace": str(study.storage_root("preview")),
     }

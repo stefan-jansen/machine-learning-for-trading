@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
@@ -381,9 +382,32 @@ def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[s
         timestamp = row["timestamp"]
         if timestamp not in targets:
             targets[timestamp] = {}
-        if row["weight"] != 0:
-            targets[timestamp][row["symbol"]] = row["weight"]
+        targets[timestamp][row["symbol"]] = row["weight"]
     return targets
+
+
+def _engine_timestamp(
+    value: object,
+    *,
+    feed_timezone: str | None,
+    configured_timezone: str,
+) -> datetime:
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, date):
+        timestamp = datetime.combine(value, time.min)
+    else:
+        raise TypeError(f"engine target timestamp must be date-like, got {type(value).__name__}")
+    if feed_timezone is not None:
+        zone = ZoneInfo(feed_timezone)
+        return (
+            timestamp.replace(tzinfo=zone)
+            if timestamp.tzinfo is None
+            else timestamp.astimezone(zone)
+        )
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(ZoneInfo(configured_timezone)).replace(tzinfo=None)
+    return timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +966,16 @@ def run_backtest(
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     strategy = strategy_view(strategy_spec)
+    signal_config = strategy["signal"]
+    allow_short = bool(
+        strategy_spec["backtest_config"]["account"].get("allow_short_selling", False)
+    ) or bool(signal_config.get("long_short", False))
+    allow_short = allow_short or (
+        str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
+    )
+    if precomputed_weights is not None:
+        allow_short = allow_short or bool(precomputed_weights.filter(pl.col("weight") < 0).height)
+    strategy_spec["backtest_config"]["account"]["allow_short_selling"] = allow_short
 
     # Apply spec-declared universe restriction (e.g., sp500_options rung-3
     # 'liquid' subset). Driven purely by strategy.signal.universe_filter so
@@ -997,7 +1031,6 @@ def run_backtest(
                     execution_mode=strategy.get("rebalance", {}).get("mode", "unknown"),
                 )
 
-    signal_config = strategy["signal"]
     rebal_spec = strategy.get("rebalance", {})
 
     if precomputed_weights is not None:
@@ -1075,6 +1108,8 @@ def run_backtest(
         }
 
     if rebal_spec["mode"] == "vectorized":
+        if funding_rates is not None:
+            raise ValueError("vectorized backtests cannot execute funding cashflows")
         # sp500_options HTM short-straddle uses a dedicated multi-cohort daily-MTM
         # backtest path: overlapping 5-cohort book, per-cohort daily premium + hedge
         # P&L, entry-spread + hedge-rebalance transaction costs. The simple
@@ -1105,9 +1140,6 @@ def run_backtest(
                 prediction_hash=prediction_hash,
             )
     else:
-        allow_short = signal_config.get("long_short", False) or (
-            str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
-        )
         result = _run_engine(
             weights=weights,
             prices=prices,
@@ -1233,7 +1265,19 @@ def _run_engine(
     apply_calendar_session_enforcement(config, calendar)
 
     # Pre-compute weight dict from DataFrame
-    weight_dict = _target_weights_by_timestamp(weights)
+    price_timestamp_dtype = prices.schema["timestamp"]
+    feed_timezone = (
+        price_timestamp_dtype.time_zone if isinstance(price_timestamp_dtype, pl.Datetime) else None
+    )
+    raw_weight_dict = _target_weights_by_timestamp(weights)
+    weight_dict = {
+        _engine_timestamp(
+            timestamp,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        ): targets
+        for timestamp, targets in raw_weight_dict.items()
+    }
 
     # Resolve calendar-aware rebalance schedule, then thin by the label's
     # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
@@ -1262,7 +1306,14 @@ def _run_engine(
         step = get_rebalance_step(case_study, label)
         if step > 1:
             schedule_dates = schedule_dates.gather_every(step)
-    rebalance_schedule = set(schedule_dates.to_list())
+    rebalance_schedule = {
+        _engine_timestamp(
+            timestamp,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        )
+        for timestamp in schedule_dates.to_list()
+    }
 
     # Build risk components from spec (Ch19)
     position_rules = _build_position_rules(risk_spec)
@@ -1273,6 +1324,12 @@ def _run_engine(
     # ensure_backtest_spec()).
     min_weight_change = float(rebalance_spec["min_weight_change"])
     min_trade_value = float(rebalance_spec["min_trade_value"])
+
+    funding_ledger = None
+    if funding_rates is not None:
+        from case_studies.crypto_perps_funding.funding_backtest import FundingSettlementLedger
+
+        funding_ledger = FundingSettlementLedger(funding_rates)
 
     # Build strategy
     class _PrecomputedStrategy(Strategy):
@@ -1287,6 +1344,10 @@ def _run_engine(
                     rebalance_mode=profile_rebalance_mode,
                 )
             )
+
+        def on_start(self, broker):
+            if funding_ledger is not None:
+                funding_ledger.install(broker)
 
         def on_data(self, timestamp, data, context, broker):
             # Set position rules on broker (once, first bar)
@@ -1391,18 +1452,7 @@ def _run_engine(
     engine = Engine.from_config(feed, strategy, config, contract_specs=contract_specs)
     engine_result = engine.run()
 
-    funding_metrics = {}
-    if funding_rates is not None:
-        from case_studies.crypto_perps_funding.funding_backtest import (
-            apply_funding_settlements,
-        )
-
-        funding_metrics = apply_funding_settlements(
-            engine_result,
-            prices=prices,
-            funding_rates=funding_rates,
-            initial_cash=initial_cash,
-        )
+    funding_metrics = funding_ledger.metrics() if funding_ledger is not None else {}
 
     # Extract daily returns
     session_aligned = infer_session_alignment(calendar)

@@ -15,6 +15,7 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
 )
+from case_studies.research.strategy import apply_state_transition_policy
 from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
@@ -45,6 +46,52 @@ def _decisions() -> pl.DataFrame:
             "position": [1.0, 0.0],
         }
     )
+
+
+def test_fold_boundary_liquidates_unchanged_positions_before_next_fold() -> None:
+    decisions = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "timestamp": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+            ],
+            "fold": [0, 0, 1],
+            "weight": [1.0, 1.0, 1.0],
+        }
+    )
+
+    transitioned = apply_state_transition_policy(
+        decisions,
+        policy={"fold_boundary": "liquidate", "temporal_gap": "continue"},
+        cadence="1d",
+    )
+
+    assert transitioned.get_column("weight").to_list() == [1.0, 0.0, 1.0]
+
+
+def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
+    decisions = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "timestamp": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 5),
+            ],
+            "fold": [0, 0, 0],
+            "weight": [1.0, 1.0, 1.0],
+        }
+    )
+
+    transitioned = apply_state_transition_policy(
+        decisions,
+        policy={"fold_boundary": "continue", "temporal_gap": "reset"},
+        cadence="1d",
+    )
+
+    assert transitioned.get_column("weight").to_list() == [1.0, 0.0, 1.0]
 
 
 def _prediction(study: Study) -> str:

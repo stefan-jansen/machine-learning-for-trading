@@ -61,6 +61,11 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     values = selected.get_column(value_column).cast(pl.Float64)
     if any(not math.isfinite(value) for value in values):
         raise ValueError("decision artifact values must be finite")
+    fold_columns = [column for column in ("fold", "fold_id") if column in decisions.columns]
+    if len(fold_columns) > 1:
+        raise ValueError("decision artifacts cannot contain both fold and fold_id")
+    if fold_columns and decisions.get_column(fold_columns[0]).null_count():
+        raise ValueError("decision artifact fold values cannot be null")
     return keys
 
 

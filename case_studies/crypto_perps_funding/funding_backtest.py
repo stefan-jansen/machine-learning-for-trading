@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+import math
 from datetime import UTC, datetime
+from functools import wraps
 from typing import Any
 
 import polars as pl
@@ -13,91 +14,88 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def apply_funding_settlements(
-    engine_result: Any,
-    *,
-    prices: pl.DataFrame,
-    funding_rates: pl.DataFrame,
-    initial_cash: float,
-) -> dict[str, float]:
-    """Add position-signed funding cash before same-timestamp fills and update engine state."""
-    required = {"symbol", "timestamp", "funding_rate"}
-    missing = required - set(funding_rates.columns)
-    if missing:
-        raise ValueError(f"funding rates are missing columns: {sorted(missing)}")
-    if funding_rates.n_unique(["symbol", "timestamp"]) != funding_rates.height:
-        raise ValueError("funding settlement keys must be unique")
+class FundingSettlementLedger:
+    """Apply position-signed funding during the engine's bar-time update."""
 
-    fills = defaultdict(list)
-    for fill in engine_result.fills:
-        fills[_as_utc(fill.timestamp)].append(fill)
-    rates = defaultdict(dict)
-    for row in funding_rates.select(*sorted(required)).iter_rows(named=True):
-        rates[_as_utc(row["timestamp"])][row["symbol"]] = float(row["funding_rate"])
-    marks = defaultdict(dict)
-    for row in prices.select("timestamp", "symbol", "close").iter_rows(named=True):
-        marks[_as_utc(row["timestamp"])][row["symbol"]] = float(row["close"])
-    engine_equity = {_as_utc(ts): float(value) for ts, value in engine_result.equity_curve}
+    def __init__(self, funding_rates: pl.DataFrame) -> None:
+        required = {"symbol", "timestamp", "funding_rate"}
+        missing = required - set(funding_rates.columns)
+        if missing:
+            raise ValueError(f"funding rates are missing columns: {sorted(missing)}")
+        selected = funding_rates.select("symbol", "timestamp", "funding_rate")
+        if selected.null_count().row(0) != (0, 0, 0):
+            raise ValueError("funding settlements cannot contain null keys or rates")
+        if selected.n_unique(["symbol", "timestamp"]) != selected.height:
+            raise ValueError("funding settlement keys must be unique")
 
-    cash = float(initial_cash)
-    positions = defaultdict(float)
-    last_marks: dict[str, float] = {}
-    cumulative_funding = 0.0
-    events = 0
-    adjusted = []
-    reconstructed = []
-    funding_by_equity_time: dict[datetime, float] = {}
-    for timestamp in sorted(set(engine_equity) | set(rates)):
-        last_marks.update(marks[timestamp])
-        event_cash = sum(
-            -(positions.get(symbol, 0.0) * last_marks[symbol]) * rate
-            for symbol, rate in rates.get(timestamp, {}).items()
-            if positions.get(symbol, 0.0) != 0 and symbol in last_marks
-        )
+        self._rates: dict[datetime, dict[str, float]] = {}
+        for row in selected.sort("timestamp", "symbol").iter_rows(named=True):
+            rate = float(row["funding_rate"])
+            if not math.isfinite(rate):
+                raise ValueError("funding rates must be finite")
+            self._rates.setdefault(_as_utc(row["timestamp"]), {})[str(row["symbol"])] = rate
+        self._rate_count = selected.height
+        self._settled_timestamps: set[datetime] = set()
+        self._funding_pnl = 0.0
+        self._funding_events = 0
+        self._funding_settlements = 0
+        self._installed = False
+
+    def settle(self, timestamp: datetime, broker: Any) -> float:
+        """Settle one timestamp exactly once against positions marked on that bar."""
+        normalized = _as_utc(timestamp)
+        if normalized in self._settled_timestamps:
+            return 0.0
+        rates = self._rates.get(normalized)
+        if rates is None:
+            return 0.0
+        self._settled_timestamps.add(normalized)
+        self._funding_settlements += len(rates)
+
+        event_cash = 0.0
+        for symbol, rate in rates.items():
+            position = broker.positions.get(symbol)
+            if position is None or float(position.quantity) == 0.0:
+                continue
+            mark = position.current_price
+            if mark is None:
+                raise RuntimeError(f"funding settlement has no current mark for {symbol!r}")
+            event_cash -= (
+                float(position.quantity)
+                * float(mark)
+                * float(getattr(position, "multiplier", 1.0))
+                * rate
+            )
         if event_cash:
-            cash += event_cash
-            cumulative_funding += event_cash
-            events += 1
-        for fill in fills.get(timestamp, []):
-            quantity = float(fill.quantity) if fill.side.value == "buy" else -float(fill.quantity)
-            cash -= quantity * float(fill.price) + float(fill.commission)
-            last_marks.setdefault(fill.asset, float(fill.price))
-            positions[fill.asset] += quantity
-            if abs(positions[fill.asset]) < 1e-12:
-                del positions[fill.asset]
-        if timestamp in engine_equity:
-            marked = sum(quantity * last_marks[symbol] for symbol, quantity in positions.items())
-            adjusted.append((timestamp, cash + marked))
-            reconstructed.append((timestamp, cash - cumulative_funding + marked))
-            funding_by_equity_time[timestamp] = cumulative_funding
+            broker.cash = float(broker.cash) + event_cash
+            self._funding_pnl += event_cash
+            self._funding_events += 1
+        return event_cash
 
-    reconstruction_error = max(
-        (abs(value - engine_equity[timestamp]) for timestamp, value in reconstructed),
-        default=0.0,
-    )
-    tolerance = max(1e-6, abs(initial_cash) * 1e-10)
-    if reconstruction_error > tolerance:
-        raise RuntimeError(
-            f"funding ledger cannot reconstruct engine equity: {reconstruction_error:.12g}"
-        )
-    if len(rates) and not adjusted:
-        raise RuntimeError("funding settlements did not overlap the engine equity timeline")
+    def install(self, broker: Any) -> None:
+        """Install settlement immediately after each engine mark update."""
+        if self._installed:
+            raise RuntimeError("funding settlement ledger is already installed")
+        original_update_time = broker._update_time
 
-    engine_result.equity_curve = adjusted
-    engine_result.portfolio_state = [
-        (
-            timestamp,
-            equity + funding_by_equity_time[_as_utc(timestamp)],
-            cash_value + funding_by_equity_time[_as_utc(timestamp)],
-            gross,
-            net,
-            count,
-        )
-        for timestamp, equity, cash_value, gross, net, count in engine_result.portfolio_state
-    ]
-    return {
-        "funding_pnl": cumulative_funding,
-        "funding_events": float(events),
-        "funding_settlements": float(funding_rates.height),
-        "funding_reconstruction_error": reconstruction_error,
-    }
+        @wraps(original_update_time)
+        def update_time_with_funding(timestamp, *args, **kwargs):
+            result = original_update_time(timestamp, *args, **kwargs)
+            self.settle(timestamp, broker)
+            return result
+
+        broker._update_time = update_time_with_funding
+        self._installed = True
+
+    def metrics(self) -> dict[str, float]:
+        """Return cashflows actually presented to the engine timeline."""
+        if self._funding_settlements != self._rate_count:
+            raise RuntimeError(
+                "funding settlement coverage is incomplete: "
+                f"{self._funding_settlements}/{self._rate_count} keys reached the engine timeline"
+            )
+        return {
+            "funding_pnl": self._funding_pnl,
+            "funding_events": float(self._funding_events),
+            "funding_settlements": float(self._funding_settlements),
+        }

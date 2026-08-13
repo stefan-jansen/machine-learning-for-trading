@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +11,7 @@ import pytest
 
 from case_studies.research import CausalResult, LabelDefinition, Study
 from case_studies.utils import causal
+from case_studies.utils.registry.specs import training_hash_from_spec
 from tests.test_research_workspace import _seed_release
 
 
@@ -151,6 +153,44 @@ def test_causal_run_registers_once_and_reopens_after_restart(tmp_path, monkeypat
     assert CausalResult.one(study, label=label.name, execution_tier="preview").hash == first.hash
     assert reopened.metrics["dml_effect"] == 0.02
     assert json.loads(json.dumps(reopened.spec)) == reopened.spec
+
+
+def test_causal_cache_accepts_provenance_only_drift(tmp_path, monkeypatch) -> None:
+    study, label = _causal_fixture(tmp_path, monkeypatch)
+    calls = 0
+
+    def run_analysis(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {
+            "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+            "p_value_hac": 0.04,
+            "naive_effect": 0.03,
+            "confounding_bias_pct": 50.0,
+            "refutation": {"empirical_p": 0.1},
+        }
+
+    monkeypatch.setattr(causal, "run_dml_analysis", run_analysis)
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={
+            "max_samples": 240,
+            "max_symbols": 6,
+            "n_folds": 2,
+            "n_placebo": 10,
+        },
+    ).resolve()
+    first = resolved.run()
+    provenance_only = deepcopy(resolved.spec)
+    provenance_only["provenance"]["baseline_commit"] = "new-provenance-only-commit"
+
+    assert training_hash_from_spec(provenance_only) == first.hash
+    second = causal.run_resolved_causal_request(study, provenance_only, resolved._context)
+
+    assert second.hash == first.hash
+    assert calls == 1
 
 
 def test_block_permutation_resets_at_temporal_gap() -> None:
