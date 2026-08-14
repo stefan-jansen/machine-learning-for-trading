@@ -857,7 +857,7 @@ def _run_batch_group(
     base: dict[str, Any],
     *,
     report_batch: bool,
-) -> tuple[list[_BatchCandidate], float, int]:
+) -> list[_BatchCandidate]:
     fold_ids = tuple(int(split["fold"]) for split in base["splits"])
     candidates = []
     dependent = []
@@ -975,7 +975,7 @@ def _run_batch_group(
                 "disk_fold_cache": False,
             }
         )
-    return candidates, preparation_elapsed_s, preparation_count
+    return candidates
 
 
 def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[ModelRun, ...]:
@@ -996,7 +996,7 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
             inputs=input_cache.get(input_key),
         )
         input_cache.setdefault(input_key, (base["label_ref"], base["mds"]))
-        candidates, _, _ = _run_batch_group(
+        candidates = _run_batch_group(
             study,
             indexed_requests,
             key,

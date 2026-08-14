@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from collections import OrderedDict
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
@@ -46,7 +45,7 @@ def run_models(
             raise ValueError("model request belongs to another study")
 
     ordered_runs: list[ModelRun | None] = [None] * len(submitted)
-    unresolved: OrderedDict[str, list[tuple[int, ModelRequest]]] = OrderedDict()
+    unresolved: dict[str, list[tuple[int, ModelRequest]]] = {}
     for index, request in enumerate(submitted):
         if isinstance(request, ModelRequest):
             unresolved.setdefault(request.family, []).append((index, request))
