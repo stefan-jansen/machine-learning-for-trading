@@ -2050,26 +2050,51 @@ def _write_learning_curves(path: Path, rows: list[dict[str, Any]]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _gbm_fixed_effective_params(
+def _gbm_sampled_training_labels(base: dict[str, Any], split: dict[str, Any]) -> np.ndarray:
+    mds = base["mds"]
+    dataset = base["dataset_pd"]
+    dates = dataset[mds.date_col]
+    mask = (dates >= split["train_start"]) & (dates <= split["train_end"])
+    labels = dataset.loc[mask, mds.label_col].values.astype(np.float32)
+    labels = labels[~np.isnan(labels)]
+    train_sample_frac = base["train_sample_frac"]
+    if 0.0 < train_sample_frac < 1.0 and len(labels) > 0:
+        n_keep = max(1, int(len(labels) * train_sample_frac))
+        rng = np.random.default_rng(RANDOM_SEED + int(split["fold"]))
+        keep_idx = rng.choice(len(labels), size=n_keep, replace=False)
+        keep_idx.sort()
+        labels = labels[keep_idx]
+    if not len(labels):
+        raise ValueError(f"GBM request has no training labels for fold {split['fold']}")
+    return labels
+
+
+def _gbm_effective_params_for_splits(
     config: dict[str, Any],
-    fold_ids: tuple[int, ...],
+    base: dict[str, Any],
     *,
     device: str,
     max_bin: int,
     num_threads: int,
     task_type: str,
     class_values: tuple[Any, ...],
-) -> dict[str, dict[str, Any]] | None:
+) -> dict[str, dict[str, Any]]:
     params = config["params"]
-    if (
+    fold_dependent = (
         params.get("objective") == "huber"
         and "alpha" not in params
         and config.get("huber_alpha_scale") is not None
-    ):
-        return None
+    )
+    folds = [
+        {
+            "fold": int(split["fold"]),
+            **({"y_train": _gbm_sampled_training_labels(base, split)} if fold_dependent else {}),
+        }
+        for split in base["splits"]
+    ]
     return _gbm_effective_params_by_fold(
         config,
-        [{"fold": fold_id} for fold_id in fold_ids],
+        folds,
         device=device,
         max_bin=max_bin,
         num_threads=num_threads,
@@ -2428,9 +2453,7 @@ def _run_gbm_batch_group(
     report_batch: bool,
 ) -> list[_GBMBatchCandidate]:
     mds = base["mds"]
-    fold_ids = tuple(int(split["fold"]) for split in base["splits"])
     candidates = []
-    dependent = []
     for index, request in indexed_requests:
         config, request_fields = _load_gbm_request_config(
             study,
@@ -2440,9 +2463,9 @@ def _run_gbm_batch_group(
         )
         _apply_gbm_preview_reductions(config, request)
         device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
-        effective = _gbm_fixed_effective_params(
+        effective = _gbm_effective_params_for_splits(
             config,
-            fold_ids,
+            base,
             device=device,
             max_bin=max_bin,
             num_threads=num_threads,
@@ -2453,33 +2476,28 @@ def _run_gbm_batch_group(
             index=index,
             request=request,
             config=config,
-            effective_params=effective or {},
+            effective_params=effective,
             device=device,
             max_bin=max_bin,
             num_threads=num_threads,
         )
         candidates.append(candidate)
-        if effective is None:
-            dependent.append(candidate)
-        else:
-            _resolve_gbm_batch_candidate(study, candidate, base)
-    dependent_indices = {candidate.index for candidate in dependent}
+        _resolve_gbm_batch_candidate(study, candidate, base)
 
     preparation_elapsed_s = 0.0
     preparation_count = 0
-    first_pass_needed = bool(dependent) or any(
+    execution_needed = any(
         candidate.result is None and candidate.error is None for candidate in candidates
     )
-    if first_pass_needed:
+    if execution_needed:
         for split in base["splits"]:
             fold_id = int(split["fold"])
-            fixed_pending = [
+            pending = [
                 candidate
                 for candidate in candidates
-                if candidate.index not in dependent_indices
-                and not _reuse_gbm_batch_fold(candidate, fold_id)
+                if not _reuse_gbm_batch_fold(candidate, fold_id)
             ]
-            if not dependent and not fixed_pending:
+            if not pending:
                 continue
             started = time.perf_counter()
             try:
@@ -2490,76 +2508,13 @@ def _run_gbm_batch_group(
                 break
             preparation_elapsed_s += time.perf_counter() - started
             preparation_count += 1
-            for candidate in dependent:
-                if candidate.error is not None:
-                    continue
-                try:
-                    candidate.effective_params.update(
-                        _gbm_effective_params_by_fold(
-                            candidate.config,
-                            [fold],
-                            device=candidate.device,
-                            max_bin=candidate.max_bin,
-                            num_threads=candidate.num_threads,
-                            seed=RANDOM_SEED,
-                            task_type=mds.task_type,
-                            class_values=tuple(mds.class_values),
-                        )
-                    )
-                except Exception as exc:
-                    _fail_gbm_batch_candidate(candidate, exc)
-            for candidate in fixed_pending:
+            for candidate in pending:
                 _run_gbm_batch_fold(candidate, fold)
             del fold
             gc.collect()
 
     for candidate in candidates:
-        if candidate.index not in dependent_indices:
-            _finish_gbm_batch_candidate(study, candidate)
-
-    active_dependent = []
-    for candidate in dependent:
-        if candidate.error is not None:
-            continue
-        if set(candidate.effective_params) != {str(fold_id) for fold_id in fold_ids}:
-            _fail_gbm_batch_candidate(
-                candidate,
-                RuntimeError("GBM candidate did not resolve parameters for every fold"),
-            )
-            continue
-        try:
-            _resolve_gbm_batch_candidate(study, candidate, base)
-        except Exception as exc:
-            _fail_gbm_batch_candidate(candidate, exc)
-            continue
-        if candidate.result is None:
-            active_dependent.append(candidate)
-
-    if active_dependent:
-        for split in base["splits"]:
-            fold_id = int(split["fold"])
-            pending = [
-                candidate
-                for candidate in active_dependent
-                if not _reuse_gbm_batch_fold(candidate, fold_id)
-            ]
-            if not pending:
-                continue
-            started = time.perf_counter()
-            try:
-                fold = _prepare_gbm_batch_fold(base, split)
-            except Exception as exc:
-                for candidate in active_dependent:
-                    _fail_gbm_batch_candidate(candidate, exc)
-                break
-            preparation_elapsed_s += time.perf_counter() - started
-            preparation_count += 1
-            for candidate in pending:
-                _run_gbm_batch_fold(candidate, fold)
-            del fold
-            gc.collect()
-        for candidate in active_dependent:
-            _finish_gbm_batch_candidate(study, candidate)
+        _finish_gbm_batch_candidate(study, candidate)
 
     group_digest = hashlib.sha256(compatibility_key.encode()).hexdigest()[:12]
     fit_elapsed_s = sum(candidate.fit_elapsed_s for candidate in candidates)

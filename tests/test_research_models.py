@@ -806,6 +806,7 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
     study = _gbm_study(tmp_path, monkeypatch)
     original_prepare = gbm_utils.prepare_gbm_folds
     prepared: list[int] = []
+    prepared_label_std: dict[str, float] = {}
 
     def configs(*_args, **_kwargs):
         common = {
@@ -831,6 +832,9 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
     def observed_prepare(*args, **kwargs):
         folds = original_prepare(*args, **kwargs)
         prepared.extend(int(fold["fold"]) for fold in folds)
+        prepared_label_std.update(
+            {str(int(fold["fold"])): float(np.std(fold["y_train"])) for fold in folds}
+        )
         return folds
 
     monkeypatch.setattr(modeling, "load_configs", configs)
@@ -849,11 +853,11 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
         ],
     )
 
-    assert prepared == [0, 1, 0, 1]
+    assert prepared == [0, 1]
     params = batch.runs[1].training.spec()["computation"]["model"]["effective_params_by_fold"]
-    assert params["0"]["alpha"] > 0
-    assert params["1"]["alpha"] > 0
-    assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
+    assert params["0"]["alpha"] == pytest.approx(0.5 * prepared_label_std["0"])
+    assert params["1"]["alpha"] == pytest.approx(0.5 * prepared_label_std["1"])
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in batch.runs)
 
 
 def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypatch) -> None:

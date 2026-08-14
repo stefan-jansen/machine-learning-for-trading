@@ -41,6 +41,7 @@ def _seed_worktree_workspace(workspace: Path) -> None:
 def _requests(
     study: Study,
     *,
+    family: str,
     folds: list[int],
     max_symbols: int,
     train_sample_frac: float,
@@ -50,56 +51,69 @@ def _requests(
         "max_symbols": max_symbols,
         "train_sample_frac": train_sample_frac,
     }
+    if family == "gbm":
+        common_reductions.update({"checkpoint_interval": 2, "max_iterations": 4})
     incompatible_reductions = {
         **common_reductions,
         "train_sample_frac": train_sample_frac / 2,
     }
+    config_names = (
+        ("ridge_a1.0", "ridge_a10.0", "ridge_a100.0")
+        if family == "linear"
+        else ("default_mse", "default_huber", "leaves_15_mse")
+    )
     return [
         study.model(
-            family="linear",
+            family=family,
             label=LABEL,
             config_name=config_name,
             execution_tier="preview",
             preview_reductions=(
-                common_reductions if config_name != "ridge_a100.0" else incompatible_reductions
+                common_reductions if config_name != config_names[-1] else incompatible_reductions
             ),
         )
-        for config_name in ("ridge_a1.0", "ridge_a10.0", "ridge_a100.0")
+        for config_name in config_names
     ]
 
 
-def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, Any]]:
+def _assert_results(execution, family: str, folds: list[int]) -> dict[str, dict[str, Any]]:
     assert len(execution.runs) == 3
-    assert execution.catalog_rows.height == 3
+    expected_predictions = 3 if family == "linear" else 6
+    assert execution.catalog_rows.height == expected_predictions
     assert set(execution.catalog_rows["execution_tier"]) == {"preview"}
     diagnostics = {}
     for run in execution.runs:
         spec = run.training.spec()
         config_name = spec["config_name"]
-        prediction = run.predictions[0]
-        frame = prediction.load()
-        coverage = prediction.coverage()
-        keys = frame.select("symbol", "timestamp", "fold")
-        assert prediction.complete
-        assert coverage["status"] == "complete"
-        assert coverage["n_expected"] == coverage["n_actual"] == frame.height
-        assert keys.n_unique(["symbol", "timestamp", "fold"]) == keys.height
-        assert sorted(keys["fold"].unique().to_list()) == folds
-        assert frame["prediction"].is_finite().all()
+        assert len(run.predictions) == (1 if family == "linear" else 2)
+        for prediction in run.predictions:
+            frame = prediction.load()
+            coverage = prediction.coverage()
+            keys = frame.select("symbol", "timestamp", "fold")
+            assert prediction.complete
+            assert coverage["status"] == "complete"
+            assert coverage["n_expected"] == coverage["n_actual"] == frame.height
+            assert keys.n_unique(["symbol", "timestamp", "fold"]) == keys.height
+            assert sorted(keys["fold"].unique().to_list()) == folds
+            assert frame["prediction"].is_finite().all()
         model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
-        assert {path.stem for path in model_dir.glob("fold_*.joblib")} == {
-            f"fold_{fold}" for fold in folds
-        }
+        fitted = (
+            model_dir.glob("fold_*.joblib")
+            if family == "linear"
+            else (model_dir / "boosters").glob("fold_*.txt")
+        )
+        assert {path.stem for path in fitted} == {f"fold_{fold}" for fold in folds}
         diagnostics[config_name] = dict(run.diagnostics)
+    config_names = list(diagnostics)
     assert (
-        diagnostics["ridge_a1.0"]["compatibility_group"]
-        == diagnostics["ridge_a10.0"]["compatibility_group"]
+        diagnostics[config_names[0]]["compatibility_group"]
+        == diagnostics[config_names[1]]["compatibility_group"]
     )
-    assert diagnostics["ridge_a1.0"]["compatibility_group_size"] == 2
-    assert diagnostics["ridge_a100.0"]["compatibility_group_size"] == 1
+    assert diagnostics[config_names[0]]["compatibility_group_size"] == 2
+    assert diagnostics[config_names[2]]["compatibility_group_size"] == 1
     assert (
-        diagnostics["ridge_a1.0"]["compatibility_group"]
-        != diagnostics["ridge_a100.0"]["compatibility_group"]
+        diagnostics[config_names[0]]["compatibility_group"]
+        != diagnostics[config_names[2]]["compatibility_group"]
     )
     groups: dict[str, list[dict[str, Any]]] = {}
     for item in diagnostics.values():
@@ -115,6 +129,7 @@ def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, Any]]:
 def prove(
     workspace: Path,
     *,
+    family: str,
     folds: list[int],
     max_symbols: int,
     train_sample_frac: float,
@@ -125,16 +140,17 @@ def prove(
         study,
         requests=_requests(
             study,
+            family=family,
             folds=folds,
             max_symbols=max_symbols,
             train_sample_frac=train_sample_frac,
         ),
     )
-    diagnostics = _assert_results(execution, folds)
+    diagnostics = _assert_results(execution, family, folds)
     first_hashes = {
         run.training.spec()["config_name"]: {
             "training": run.training.hash,
-            "prediction": run.predictions[0].hash,
+            "predictions": [prediction.hash for prediction in run.predictions],
         }
         for run in execution.runs
     }
@@ -144,6 +160,7 @@ def prove(
         restarted_study,
         requests=_requests(
             restarted_study,
+            family=family,
             folds=folds,
             max_symbols=max_symbols,
             train_sample_frac=train_sample_frac,
@@ -152,18 +169,22 @@ def prove(
     restarted_hashes = {
         run.training.spec()["config_name"]: {
             "training": run.training.hash,
-            "prediction": run.predictions[0].hash,
+            "predictions": [prediction.hash for prediction in run.predictions],
         }
         for run in restarted.runs
     }
     assert restarted_hashes == first_hashes
     assert all(run.diagnostics["cache_hit"] is True for run in restarted.runs)
     assert all(run.diagnostics["base_fold_preparations"] == 0 for run in restarted.runs)
-    prediction_hashes = [record["prediction"] for record in first_hashes.values()]
+    prediction_hashes = [
+        prediction_hash
+        for record in first_hashes.values()
+        for prediction_hash in record["predictions"]
+    ]
     selected = restarted_study.predictions.table(include_preview=True).filter(
         pl.col("prediction_hash").is_in(prediction_hashes)
     )
-    assert selected.height == 3
+    assert selected.height == len(prediction_hashes)
     assert set(selected["prediction_hash"]) == set(prediction_hashes)
 
     group_measurements = {}
@@ -183,6 +204,7 @@ def prove(
         ]
 
     return {
+        "family": family,
         "folds": folds,
         "groups": group_measurements,
         "hashes": first_hashes,
@@ -196,6 +218,7 @@ def prove(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("workspace", type=Path)
+    parser.add_argument("--family", choices=("gbm", "linear"), default="linear")
     parser.add_argument("--folds", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--max-symbols", type=int, default=50)
     parser.add_argument("--train-sample-frac", type=float, default=0.05)
@@ -204,6 +227,7 @@ def main() -> None:
         json.dumps(
             prove(
                 args.workspace,
+                family=args.family,
                 folds=sorted(set(args.folds)),
                 max_symbols=args.max_symbols,
                 train_sample_frac=args.train_sample_frac,
