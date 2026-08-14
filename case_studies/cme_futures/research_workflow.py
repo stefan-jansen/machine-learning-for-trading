@@ -19,6 +19,7 @@ from case_studies.research import (
     DecisionArtifact,
     OfficialPopulation,
     PredictionResult,
+    ResolvedModelRequest,
     Result,
     StateTransitionPolicy,
     Study,
@@ -134,7 +135,7 @@ def resolve_model_requests(
     execution_tier: str,
     overrides: dict[str, Any] | None = None,
     preview_reductions: dict[str, Any] | None = None,
-):
+) -> tuple[ResolvedModelRequest, ...]:
     """Resolve visible catalog rows through the shared family boundary."""
     required = {"family", "label", "config_name"}
     missing = required - set(request_catalog.columns)
@@ -167,6 +168,17 @@ def run_model_catalog(
         overrides=overrides,
         preview_reductions=preview_reductions,
     )
+    return run_resolved_model_requests(study, resolved)
+
+
+def run_resolved_model_requests(
+    study: Study,
+    resolved_requests: Iterable[ResolvedModelRequest],
+) -> ModelExecution:
+    """Execute already-resolved requests without loading their input artifacts again."""
+    resolved = tuple(resolved_requests)
+    if not resolved:
+        raise ValueError("resolved model requests cannot be empty")
     execution = run_models(study, requests=resolved)
     expected_rows = sum(len(run.predictions) for run in execution.runs)
     if execution.catalog_rows.height != expected_rows:
@@ -181,9 +193,14 @@ def run_official_model_catalog(
     request_catalog: pl.DataFrame,
     *,
     population_name: str,
+    resolved_requests: Iterable[ResolvedModelRequest] | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
     """Snapshot and execute one complete canonical model population."""
-    resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
+    resolved = tuple(resolved_requests or ())
+    if not resolved:
+        resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
+    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+        raise ValueError("official model populations require canonical requests")
     expected = expected_prediction_hashes(resolved)
     population = OfficialPopulation.create(
         study,
@@ -191,7 +208,7 @@ def run_official_model_catalog(
         member_kind="prediction",
         members=expected,
     )
-    execution = run_models(study, requests=resolved)
+    execution = run_resolved_model_requests(study, resolved)
     actual = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
     if set(actual) != set(expected) or len(actual) != len(expected):
         missing = sorted(set(expected) - set(actual))
@@ -199,6 +216,58 @@ def run_official_model_catalog(
         raise RuntimeError(f"model population mismatch: missing={missing}, extra={extra}")
     population.require_complete()
     return execution, population
+
+
+def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl.DataFrame:
+    """Show the data, folds, checkpoints, and eligibility each request will use."""
+    rows = []
+    for request in resolved_requests:
+        computation = request.spec["computation"]
+        expected = request._context.expected_keys
+        entity = next(
+            (column for column in ("product", "symbol") if column in expected.columns),
+            None,
+        )
+        fold = next((column for column in ("fold", "fold_id") if column in expected.columns), None)
+        if entity is None or fold is None:
+            raise ValueError("resolved model eligibility has no entity or fold key")
+        timestamps = expected.get_column("timestamp")
+        rows.append(
+            {
+                "family": request.family,
+                "label": request.spec["label"],
+                "config_name": request.spec.get("config_name"),
+                "task": (computation.get("task") or {}).get("type", "regression"),
+                "feature_count": len(computation.get("feature_names") or []),
+                "eligible_entities": expected.get_column(entity).n_unique(),
+                "eligible_rows": expected.height,
+                "folds": expected.get_column(fold).n_unique(),
+                "validation_start": timestamps.min(),
+                "validation_end": timestamps.max(),
+                "checkpoints": len(computation["checkpoint_schedule"]),
+                "execution_tier": request.spec["execution_tier"],
+                "training_hash": request.identity,
+            }
+        )
+    return pl.DataFrame(rows).sort("label", "family", "config_name")
+
+
+def product_universe_table() -> pl.DataFrame:
+    """Return the configured CME product groups with expiry references."""
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
+    )
+    rows = [
+        {"sector": sector, "product": product}
+        for sector, products in setup["universe"]["product_groups"].items()
+        for product in products
+    ]
+    universe = pl.DataFrame(rows)
+    return universe.join(
+        _expiry_rules(universe.get_column("product").to_list()),
+        on="product",
+        how="left",
+    ).sort("sector", "product")
 
 
 def official_prediction_catalog(

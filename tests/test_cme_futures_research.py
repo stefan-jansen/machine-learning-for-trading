@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -9,11 +11,18 @@ import pytest
 from case_studies.cme_futures.research_workflow import (
     FuturesPricePath,
     _expiry_rules,
+    product_universe_table,
     publish_product_weights,
+    resolved_model_plan,
     run_official_backtest_requests,
     strategy_request_frame,
 )
-from case_studies.research import DecisionArtifact, StateTransitionPolicy, Study
+from case_studies.research import (
+    DecisionArtifact,
+    ResolvedModelRequest,
+    StateTransitionPolicy,
+    Study,
+)
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_registry import _training_spec
@@ -194,6 +203,73 @@ def test_expiry_rules_are_complete_for_requested_products() -> None:
     assert rules.get_column("product").to_list() == ["CL", "ES"]
     assert all(rules.get_column("expiry_rule").str.len_chars() > 0)
     assert all(rules.get_column("contract_months").str.len_chars() > 0)
+
+
+def test_reader_plan_exposes_resolved_population_and_product_contract(tmp_path: Path) -> None:
+    expected = pl.DataFrame(
+        {
+            "symbol": ["ES", "NQ", "ES", "NQ"],
+            "timestamp": [
+                datetime(2024, 1, 2),
+                datetime(2024, 1, 2),
+                datetime(2024, 2, 2),
+                datetime(2024, 2, 2),
+            ],
+            "fold": [0, 0, 1, 1],
+        }
+    )
+    spec = _resolved_spec()
+    spec["label"] = "fwd_ret_5d"
+    spec["execution_tier"] = "preview"
+    spec["computation"].update(
+        {
+            "task": {"type": "regression"},
+            "feature_names": ["carry", "momentum"],
+            "checkpoint_schedule": [
+                {"kind": "final", "value": None},
+                {"kind": "epoch", "value": 10},
+            ],
+        }
+    )
+    request = ResolvedModelRequest(
+        study=_study(tmp_path),
+        family="linear",
+        spec=spec,
+        _context=SimpleNamespace(expected_keys=expected),
+    )
+
+    plan = resolved_model_plan([request])
+    universe = product_universe_table()
+
+    assert plan.select(
+        "family",
+        "label",
+        "config_name",
+        "task",
+        "feature_count",
+        "eligible_entities",
+        "eligible_rows",
+        "folds",
+        "checkpoints",
+        "execution_tier",
+        "training_hash",
+    ).row(0) == (
+        "linear",
+        "fwd_ret_5d",
+        "ridge",
+        "regression",
+        2,
+        2,
+        4,
+        2,
+        2,
+        "preview",
+        request.identity,
+    )
+    assert universe.height == 30
+    assert universe.get_column("product").n_unique() == 30
+    assert universe.select(pl.col("expiry_rule").is_null().any()).item() is False
+    assert universe.select(pl.col("contract_months").is_null().any()).item() is False
 
 
 def test_visible_requests_snapshot_complete_canonical_backtests(
