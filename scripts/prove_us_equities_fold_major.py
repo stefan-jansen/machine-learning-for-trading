@@ -4,14 +4,37 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import polars as pl
 
 from case_studies.research import Study, run_models
+from utils.paths import REPO_ROOT
 
 CASE_STUDY = "us_equities_panel"
 LABEL = "fwd_ret_1d"
+
+
+def _seed_worktree_workspace(workspace: Path) -> None:
+    target = workspace.resolve() / CASE_STUDY
+    if target.exists():
+        return
+    release_case = REPO_ROOT / "case_studies" / CASE_STUDY
+    if not (release_case / "run_log").is_symlink():
+        return
+    workspace.mkdir(parents=True, exist_ok=True)
+    target.mkdir()
+    (target / "run_log").mkdir()
+    shutil.copytree(release_case / "config", target / "config")
+    if not (workspace / "config").exists():
+        shutil.copytree(REPO_ROOT / "case_studies" / "config", workspace / "config")
+    for name in ("features", "labels"):
+        source = (release_case / name).resolve(strict=True)
+        (target / name).symlink_to(source, target_is_directory=True)
+    (target / ".study.json").write_text(
+        json.dumps({"schema_version": 1, "case_study": CASE_STUDY}, sort_keys=True) + "\n"
+    )
 
 
 def _requests(
@@ -77,8 +100,9 @@ def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, object]]
         diagnostics["ridge_a1.0"]["compatibility_group"]
         != diagnostics["ridge_a100.0"]["compatibility_group"]
     )
-    assert diagnostics["ridge_a1.0"]["base_fold_preparations"] == len(folds)
-    assert diagnostics["ridge_a100.0"]["base_fold_preparations"] == len(folds)
+    for item in diagnostics.values():
+        expected_preparations = 0 if item["cache_hit"] else len(folds)
+        assert item["base_fold_preparations"] == expected_preparations
     assert all(item["disk_fold_cache"] is False for item in diagnostics.values())
     return diagnostics
 
@@ -90,6 +114,7 @@ def prove(
     max_symbols: int,
     train_sample_frac: float,
 ) -> dict[str, object]:
+    _seed_worktree_workspace(workspace)
     study = Study.open(CASE_STUDY, workspace=workspace)
     execution = run_models(
         study,
@@ -128,6 +153,7 @@ def prove(
     }
     assert restarted_hashes == first_hashes
     assert all(run.diagnostics["cache_hit"] is True for run in restarted.runs)
+    assert all(run.diagnostics["base_fold_preparations"] == 0 for run in restarted.runs)
     selected = restarted_study.predictions.table(include_preview=True).filter(
         (pl.col("label") == LABEL)
         & (pl.col("family") == "linear")
