@@ -262,33 +262,29 @@ def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
     return expected
 
 
-def resolve_model_request(study: Study, request: dict[str, Any]):
+def _resolve_model_request_from_materialized(
+    study: Study,
+    request: dict[str, Any],
+    *,
+    label_ref,
+    mds,
+    dataset_pd: pd.DataFrame | None,
+    configured_by_name: dict[str, dict[str, Any]],
+    runtime_provenance: dict[str, Any],
+):
     from case_studies.research.contracts import ExecutionTier
     from case_studies.research.identity import ResolvedSpec
-    from utils.modeling import load_configs, load_modeling_dataset
 
     tier = ExecutionTier(request["execution_tier"])
     reductions = dict(request["preview_reductions"])
     unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
     if unknown_reductions:
         raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
-    study.require_writable()
-    study.activate(tier)
-    label_ref = study.labels.get(request["label"], execution_tier=tier)
-    mds = load_modeling_dataset(
-        study.case_study,
-        label_ref.name,
-        max_symbols=int(reductions.get("max_symbols", 0)),
-    )
     if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
         raise ValueError("TabM runner requires canonical symbol and timestamp keys")
     splits, cv_record = _tabm_splits(mds, request)
-    configs = {
-        config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
-    }
     try:
-        configured = configs[request["config_name"]]
+        configured = configured_by_name[request["config_name"]]
     except KeyError as error:
         raise ValueError(f"unknown TabM configuration {request['config_name']!r}") from error
     config = _resolve_tabm_config(configured, request["overrides"])
@@ -365,7 +361,6 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "source_identity": _tabm_source_identity(),
         "runtime_identity": _tabm_runtime_identity(),
     }
-    runtime_provenance = _tabm_runtime_provenance(study)
     if mds.task_type == "classification":
         if tier is ExecutionTier.PREVIEW:
             computation["preview_reductions"] = reductions
@@ -391,7 +386,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         if tier is ExecutionTier.PREVIEW:
             spec["preview_reductions"] = reductions
     context = TabMResearchContext(
-        dataset_pd=mds.dataset.to_pandas(),
+        dataset_pd=mds.dataset.to_pandas() if dataset_pd is None else dataset_pd,
         splits=tuple(splits),
         config=config,
         feature_names=tuple(mds.feature_names),
@@ -409,6 +404,48 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         runtime_provenance=runtime_provenance,
     )
     return spec, context
+
+
+def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
+    from case_studies.research.contracts import ExecutionTier
+    from utils.modeling import load_configs, load_modeling_dataset
+
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
+    if unknown_reductions:
+        raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
+    study.require_writable()
+    study.activate(tier)
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
+    mds = load_modeling_dataset(
+        study.case_study,
+        label_ref.name,
+        max_symbols=int(reductions.get("max_symbols", 0)),
+    )
+    configured_by_name = {
+        config["config_name"]: config
+        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+    }
+    return (
+        label_ref,
+        mds,
+        configured_by_name,
+        _tabm_runtime_provenance(study),
+    )
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    materialized = _materialize_tabm_request_group(study, request)
+    return _resolve_model_request_from_materialized(
+        study,
+        request,
+        label_ref=materialized[0],
+        mds=materialized[1],
+        dataset_pd=None,
+        configured_by_name=materialized[2],
+        runtime_provenance=materialized[3],
+    )
 
 
 def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResearchContext):
@@ -461,6 +498,60 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
     return ModelRun(training=training, predictions=complete_predictions)
 
 
+def _publish_tabm_predictions(
+    study: Study,
+    spec: dict[str, Any],
+    context: TabMResearchContext,
+    training,
+    result: dict[str, Any],
+):
+    computation = spec.get("computation", spec)
+    prediction_results = []
+    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+            .with_columns(
+                pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
+                pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
+                pl.col("fold").cast(context.expected_keys.schema["fold"]),
+            )
+        )
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type=context.task_type,
+                class_values=list(context.class_values) or None,
+                eval_col="eval_actual" if context.eval_label_col else None,
+                label=context.label_col,
+            )
+        )
+    return tuple(prediction_results)
+
+
+def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: str) -> None:
+    runtime_path = train_dir / "runtime.json"
+    if not runtime_path.exists():
+        return
+    runtime = json.loads(runtime_path.read_text())
+    runtime["elapsed_s"] = sum(
+        float(row.get("elapsed_s", 0.0))
+        for row in result["grid_results"]
+        if row["config_name"] == config_name
+    )
+    runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+
+
 def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
     from case_studies.research.models import ModelRun
 
@@ -508,44 +599,190 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResear
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    prediction_results = []
-    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
-        predictions = (
-            result["all_predictions"]
-            .filter(
-                (pl.col("config") == context.config["config_name"])
-                & (pl.col("epoch") == checkpoint)
-            )
-            .drop("config", "epoch")
-            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-            .with_columns(
-                pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
-                pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
-                pl.col("fold").cast(context.expected_keys.schema["fold"]),
-            )
+    prediction_results = _publish_tabm_predictions(study, spec, context, training, result)
+    _record_tabm_runtime(train_dir, result, context.config["config_name"])
+    return ModelRun(training=training, predictions=prediction_results)
+
+
+def _tabm_materialization_key(request: dict[str, Any]) -> tuple[str, str, int]:
+    reductions = dict(request["preview_reductions"])
+    return (
+        str(request["label"]),
+        str(request["execution_tier"]),
+        int(reductions.get("max_symbols", 0)),
+    )
+
+
+def _tabm_execution_key(spec: dict[str, Any]) -> str:
+    from case_studies.utils.registry.specs import canonical_json
+
+    computation = spec.get("computation", spec)
+    shared = {
+        "execution_tier": spec["execution_tier"],
+        "cv": computation["cv"],
+        "feature_artifacts": computation["feature_artifacts"],
+        "feature_names": computation["feature_names"],
+        "input_data_spec": computation["input_data_spec"],
+        "label_artifact": computation["label_artifact"],
+        "numerics": computation["numerics"],
+        "preprocessing": computation["preprocessing"],
+        "sampling": computation["sampling"],
+        "task": computation["task"],
+    }
+    return canonical_json(shared)
+
+
+def _tabm_unique_name_batches(items):
+    batches: list[list[Any]] = []
+    for item in items:
+        config_name = item[2].config["config_name"]
+        target = next(
+            (
+                batch
+                for batch in batches
+                if config_name not in {member[2].config["config_name"] for member in batch}
+            ),
+            None,
         )
-        prediction_results.append(
-            study.results.publish_predictions(
-                training,
-                checkpoint_kind="epoch",
-                checkpoint_value=int(checkpoint),
-                split="validation",
+        if target is None:
+            target = []
+            batches.append(target)
+        target.append(item)
+    return batches
+
+
+def _run_tabm_compatible_group(study: Study, items):
+    from case_studies.research.models import ModelRun
+
+    completed: dict[int, ModelRun] = {}
+    pending = []
+    for index, spec, context in items:
+        cached = _cached_research_run(study, spec, context)
+        if cached is not None:
+            completed[index] = ModelRun(
+                training=cached.training,
+                predictions=cached.predictions,
+                diagnostics={
+                    "execution_order": "candidate_major_shared_preparation",
+                    "group_size": len(items),
+                    "reused": True,
+                },
+            )
+        else:
+            pending.append((index, spec, context))
+    if not pending:
+        return completed
+
+    registered = []
+    for index, spec, context in pending:
+        training = study.results.register_training(
+            spec,
+            execution_tier=spec["execution_tier"],
+            runtime_provenance=context.runtime_provenance,
+        )
+        train_dir = training.root / "run_log" / "training" / training.hash
+        model_dir = train_dir / "models"
+        if model_dir.exists():
+            raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
+        registered.append((index, spec, context, training, train_dir, model_dir))
+
+    first_context = pending[0][2]
+    first_computation = pending[0][1].get("computation", pending[0][1])
+    batch_root = registered[0][4].parent / f".tabm-batch.{uuid.uuid4().hex}.tmp"
+    checkpoint_root = batch_root / "models"
+    try:
+        result = run_tabm_cv(
+            first_context.dataset_pd,
+            list(first_context.splits),
+            configs=[context.config for _, _, context in pending],
+            n_features=len(first_context.feature_names),
+            feature_names=list(first_context.feature_names),
+            label_col=first_context.label_col,
+            eval_label_col=first_context.eval_label_col,
+            task_type=first_context.task_type,
+            class_values=list(first_context.class_values) or None,
+            date_col=first_context.date_col,
+            entity_col=first_context.entity_col,
+            device=str(first_computation["numerics"]["device"]),
+            save_dir=batch_root / "diagnostics",
+            register=False,
+            temporal_by_fold=first_context.temporal_by_fold,
+            temporal_keys=list(first_context.temporal_keys),
+            temporal_feature_names=list(first_context.temporal_feature_names),
+            class_weights_by_fold=first_context.class_weights_by_fold,
+            seed=int(pending[0][1]["seed"]),
+            num_threads=int(first_computation["numerics"]["num_threads"]),
+            checkpoint_root=checkpoint_root,
+            strict=True,
+        )
+        for index, spec, context, training, train_dir, model_dir in registered:
+            predictions = _publish_tabm_predictions(study, spec, context, training, result)
+            source = checkpoint_root / context.config["config_name"]
+            if not source.is_dir():
+                raise ValueError(
+                    f"TabM batch did not persist fitted state for {context.config['config_name']}"
+                )
+            staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
+            staging.mkdir()
+            try:
+                os.replace(source, staging / context.config["config_name"])
+                os.replace(staging, model_dir)
+            except Exception:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            _record_tabm_runtime(train_dir, result, context.config["config_name"])
+            verified = _cached_research_run(study, spec, context)
+            if verified is None:
+                raise ValueError(
+                    f"TabM batch result failed fitted-state validation for {context.config['config_name']}"
+                )
+            completed[index] = ModelRun(
+                training=verified.training,
                 predictions=predictions,
-                expected_keys=context.expected_keys,
-                task_type=context.task_type,
-                class_values=list(context.class_values) or None,
-                eval_col="eval_actual" if context.eval_label_col else None,
-                label=context.label_col,
+                diagnostics={
+                    "execution_order": "candidate_major_shared_preparation",
+                    "group_size": len(pending),
+                    "reused": False,
+                },
             )
+    finally:
+        shutil.rmtree(batch_root, ignore_errors=True)
+    return completed
+
+
+def run_model_requests(study: Study, requests: list[dict[str, Any]]):
+    if not requests:
+        return ()
+    resolved_by_index = []
+    materialization_groups: dict[tuple[str, str, int], list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        materialization_groups.setdefault(_tabm_materialization_key(request), []).append(
+            (index, request)
         )
-    runtime_path = train_dir / "runtime.json"
-    if runtime_path.exists():
-        runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = sum(
-            float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
-        )
-        runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=tuple(prediction_results))
+    for group in materialization_groups.values():
+        materialized = _materialize_tabm_request_group(study, group[0][1])
+        dataset_pd = None
+        for index, request in group:
+            spec, context = _resolve_model_request_from_materialized(
+                study,
+                request,
+                label_ref=materialized[0],
+                mds=materialized[1],
+                dataset_pd=dataset_pd,
+                configured_by_name=materialized[2],
+                runtime_provenance=materialized[3],
+            )
+            dataset_pd = context.dataset_pd
+            resolved_by_index.append((index, spec, context))
+
+    execution_groups: dict[str, list[Any]] = {}
+    for item in resolved_by_index:
+        execution_groups.setdefault(_tabm_execution_key(item[1]), []).append(item)
+    completed = {}
+    for compatible in execution_groups.values():
+        for batch in _tabm_unique_name_batches(compatible):
+            completed.update(_run_tabm_compatible_group(study, batch))
+    return tuple(completed[index] for index in range(len(requests)))
 
 
 def resolve_torch_device(device: str) -> torch.device:

@@ -24,7 +24,7 @@ from case_studies.research import (
 )
 from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
-from case_studies.utils import linear
+from case_studies.utils import linear, tabular_dl
 from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.latent_factors import case_study as latent_case_study
 from case_studies.utils.latent_factors.cae import run_cae_fold
@@ -51,12 +51,12 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _linear_study(tmp_path, monkeypatch):
+def _linear_study(tmp_path, monkeypatch, *, n_symbols: int = 6):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
-    symbols = [f"S{index}" for index in range(6)]
+    symbols = [f"S{index}" for index in range(n_symbols)]
     rows = []
     for date_index, date in enumerate(dates):
         for symbol_index, symbol in enumerate(symbols):
@@ -130,6 +130,122 @@ def _linear_study(tmp_path, monkeypatch):
         },
     )
     return study
+
+
+def _tabm_study(tmp_path, monkeypatch):
+    study = _linear_study(tmp_path, monkeypatch, n_symbols=60)
+    modeling_dataset = linear.load_modeling_dataset("etfs", "fwd_ret_1d")
+    loads: list[tuple[str, str, int]] = []
+
+    def load_dataset(case_study, label, *, max_symbols=0):
+        loads.append((case_study, label, max_symbols))
+        return modeling_dataset
+
+    configs = [
+        {
+            "batch_size": 64,
+            "checkpoint_interval": 1,
+            "config_name": name,
+            "family": "tabular_dl",
+            "library": "tabm",
+            "n_epochs": 1,
+            "params": {"dropout": 0.0, "hidden_dim": hidden, "n_members": 2},
+        }
+        for name, hidden in (("tabm_s", 4), ("tabm_m", 8))
+    ]
+    monkeypatch.setattr(modeling, "load_modeling_dataset", load_dataset)
+    monkeypatch.setattr(modeling, "load_configs", lambda *args, **kwargs: configs)
+    return study, modeling_dataset, loads
+
+
+def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, modeling_dataset, loads = _tabm_study(tmp_path, monkeypatch)
+    conversions = 0
+    executions: list[tuple[str, ...]] = []
+    original_to_pandas = pl.DataFrame.to_pandas
+
+    def counted_to_pandas(frame, *args, **kwargs):
+        nonlocal conversions
+        if frame is modeling_dataset.dataset:
+            conversions += 1
+        return original_to_pandas(frame, *args, **kwargs)
+
+    def fake_run_tabm_cv(dataset_pd, splits, *, configs, checkpoint_root, **kwargs):
+        executions.append(tuple(config["config_name"] for config in configs))
+        prediction_frames = []
+        for config_index, config in enumerate(configs):
+            config_name = config["config_name"]
+            for split in splits:
+                fold = int(split["fold"])
+                checkpoint = checkpoint_root / config_name / f"fold_{fold:02d}" / "epoch_0001.pt"
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint.write_text("fixture\n")
+                valid = dataset_pd["timestamp"].between(
+                    split["val_start"], split["val_end"], inclusive="both"
+                )
+                frame = dataset_pd.loc[valid]
+                prediction_frames.append(
+                    pl.DataFrame(
+                        {
+                            "timestamp": frame["timestamp"],
+                            "symbol": frame["symbol"],
+                            "y_true": frame["fwd_ret_1d"],
+                            "y_score": frame["x1"] + config_index / 100,
+                            "fold_id": [fold] * len(frame),
+                            "config": [config_name] * len(frame),
+                            "epoch": [1] * len(frame),
+                        }
+                    )
+                )
+        all_predictions = pl.concat(prediction_frames)
+        return {
+            "all_learning_curves": pl.DataFrame(),
+            "all_predictions": all_predictions,
+            "fold_metrics": pl.DataFrame(),
+            "grid_results": [
+                {
+                    "best_epoch": 1,
+                    "best_ic": 0.0,
+                    "config_name": config["config_name"],
+                    "elapsed_s": 0.0,
+                }
+                for config in configs
+            ],
+            "predictions": all_predictions,
+            "training_log": pl.DataFrame(),
+        }
+
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", counted_to_pandas)
+    monkeypatch.setattr(tabular_dl, "run_tabm_cv", fake_run_tabm_cv)
+    monkeypatch.setattr(
+        "case_studies.utils.deep_model_state.validate_deep_checkpoint_population",
+        lambda *args, **kwargs: (),
+    )
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=config_name,
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        for config_name in ("tabm_s", "tabm_m")
+    ]
+
+    result = run_models(study, requests=requests)
+
+    assert loads == [("etfs", "fwd_ret_1d", 0)]
+    assert conversions == 1
+    assert executions == [("tabm_s", "tabm_m")]
+    assert len(result.runs) == 2
+    assert len({run.training.hash for run in result.runs}) == 2
+    assert all(run.predictions[0].complete for run in result.runs)
+    assert all(
+        run.diagnostics["execution_order"] == "candidate_major_shared_preparation"
+        for run in result.runs
+    )
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
