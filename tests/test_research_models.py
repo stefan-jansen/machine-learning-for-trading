@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
+import weakref
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,6 +20,7 @@ from case_studies.research import (
     get_adapter,
     register_adapter,
     registered_adapters,
+    run_models,
 )
 from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
@@ -173,6 +176,251 @@ def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) 
         "fold_0.joblib",
         "fold_1.joblib",
     ]
+
+
+def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path / "batch", monkeypatch)
+    individual_study = _linear_study(tmp_path / "individual", monkeypatch)
+    original_prepare = modeling.prepare_single_fold
+    prepared_folds: list[int] = []
+    released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
+
+    def observed_prepare(*args, **kwargs):
+        gc.collect()
+        if released_arrays:
+            assert released_arrays[-1]() is None
+        fold = original_prepare(*args, **kwargs)
+        assert fold is not None
+        prepared_folds.append(int(fold["fold"]))
+        released_arrays.append(weakref.ref(fold["X_train"]))
+        return fold
+
+    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    requests = [
+        study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        for alpha in (1.0, 2.0)
+    ]
+
+    batch = run_models(study, requests=requests)
+    batch_prepared_folds = list(prepared_folds)
+    monkeypatch.setattr(linear, "prepare_single_fold", original_prepare)
+    individual = individual_study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        overrides={"alpha": 1.0},
+    ).run()
+    gc.collect()
+
+    assert batch_prepared_folds == [0, 1]
+    assert released_arrays[-1]() is None
+    assert batch.runs[0].training.hash == individual.training.hash
+    batch_predictions = batch.runs[0].predictions[0].load()
+    individual_predictions = individual.predictions[0].load()
+    assert batch_predictions.select("symbol", "timestamp", "fold", "actual").equals(
+        individual_predictions.select("symbol", "timestamp", "fold", "actual")
+    )
+    np.testing.assert_allclose(
+        batch_predictions["prediction"],
+        individual_predictions["prediction"],
+        rtol=1e-12,
+        atol=1e-15,
+    )
+    assert all(run.diagnostics["execution_order"] == "fold_major" for run in batch.runs)
+    assert all(run.diagnostics["compatibility_group_size"] == 2 for run in batch.runs)
+    assert all(run.diagnostics["disk_fold_cache"] is False for run in batch.runs)
+
+
+def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
+    tmp_path, monkeypatch
+) -> None:
+    first = _linear_study(tmp_path / "first", monkeypatch)
+    second = _linear_study(tmp_path / "second", monkeypatch)
+    original_prepare = modeling.prepare_single_fold
+    original_load = linear.load_modeling_dataset
+    preparation: list[tuple[int, float]] = []
+    load_count = 0
+
+    def observed_load(*args, **kwargs):
+        nonlocal load_count
+        load_count += 1
+        return original_load(*args, **kwargs)
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        assert fold is not None
+        preparation.append((int(fold["fold"]), float(kwargs["train_sample_frac"])))
+        return fold
+
+    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    monkeypatch.setattr(linear, "load_modeling_dataset", observed_load)
+
+    def requests(study, order):
+        return [
+            study.model(
+                family="linear",
+                label="fwd_ret_1d",
+                config_name="ridge",
+                overrides={"alpha": alpha},
+                execution_tier="preview",
+                preview_reductions={
+                    "folds": [0, 1],
+                    "train_sample_frac": sample,
+                },
+            )
+            for alpha, sample in order
+        ]
+
+    forward = run_models(
+        first,
+        requests=requests(first, [(1.0, 0.75), (2.0, 0.75), (3.0, 0.5)]),
+    )
+    forward_preparation = list(preparation)
+    forward_load_count = load_count
+    preparation.clear()
+    load_count = 0
+    reverse = run_models(
+        second,
+        requests=requests(second, [(3.0, 0.5), (2.0, 0.75), (1.0, 0.75)]),
+    )
+
+    assert forward_preparation == [(0, 0.75), (1, 0.75), (0, 0.5), (1, 0.5)]
+    assert forward_load_count == 1
+    assert preparation == [(0, 0.5), (1, 0.5), (0, 0.75), (1, 0.75)]
+    assert load_count == 1
+    forward_by_alpha = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]: run
+        for run in forward.runs
+    }
+    reverse_by_alpha = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]: run
+        for run in reverse.runs
+    }
+    assert set(forward_by_alpha) == set(reverse_by_alpha) == {1.0, 2.0, 3.0}
+    for alpha in forward_by_alpha:
+        assert forward_by_alpha[alpha].training.hash == reverse_by_alpha[alpha].training.hash
+        assert (
+            forward_by_alpha[alpha]
+            .predictions[0]
+            .load()
+            .equals(reverse_by_alpha[alpha].predictions[0].load())
+        )
+
+
+def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_fit = linear.Ridge.fit
+    alpha_two_fits = 0
+
+    def interrupted_fit(model, *args, **kwargs):
+        nonlocal alpha_two_fits
+        if model.alpha == 2.0:
+            alpha_two_fits += 1
+            if alpha_two_fits == 2:
+                raise RuntimeError("injected candidate failure")
+        return original_fit(model, *args, **kwargs)
+
+    monkeypatch.setattr(linear.Ridge, "fit", interrupted_fit)
+    requests = [
+        study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        for alpha in (1.0, 2.0, 3.0)
+    ]
+
+    with pytest.raises(RuntimeError, match="injected candidate failure"):
+        run_models(study, requests=requests)
+
+    completed = study.predictions.table().filter(pl.col("complete"))
+    assert completed.height == 2
+    monkeypatch.setattr(linear.Ridge, "fit", original_fit)
+    recovered = run_models(study, requests=requests)
+    recovered_by_alpha = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]: run
+        for run in recovered.runs
+    }
+
+    assert recovered_by_alpha[1.0].diagnostics["cache_hit"] is True
+    assert recovered_by_alpha[3.0].diagnostics["cache_hit"] is True
+    assert recovered_by_alpha[2.0].diagnostics["reused_folds"] == [0]
+    assert recovered_by_alpha[2.0].diagnostics["fitted_folds"] == [1]
+    assert study.predictions.table().filter(pl.col("complete")).height == 3
+
+
+def test_linear_batch_rejects_a_modified_fitted_preprocessor(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    requests = [
+        study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": alpha},
+        )
+        for alpha in (1.0, 2.0)
+    ]
+    first = run_models(study, requests=requests)
+    artifact = (
+        first.runs[0].training.root
+        / "run_log"
+        / "training"
+        / first.runs[0].training.hash
+        / "models"
+        / "fold_0.joblib"
+    )
+    payload = linear.joblib.load(artifact)
+    payload["preprocessor"][-1].mean_[0] += 1.0
+    linear.joblib.dump(payload, artifact)
+
+    recovered = run_models(study, requests=requests)
+
+    assert recovered.runs[0].diagnostics["reused_folds"] == [1]
+    assert recovered.runs[0].diagnostics["fitted_folds"] == [0]
+    assert recovered.runs[1].diagnostics["cache_hit"] is True
+
+
+def test_linear_feature_order_and_random_state_are_identity_bearing(tmp_path, monkeypatch) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_load = linear.load_modeling_dataset
+    base = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+    ).resolve()
+    changed_seed = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+        overrides={"random_state": 7},
+    ).resolve()
+    modeling_dataset = original_load("etfs", "fwd_ret_1d")
+    reversed_lineage = dict(modeling_dataset.input_lineage)
+    reversed_lineage["feature_names"] = ["x2", "x1"]
+    reversed_features = SimpleNamespace(
+        **{
+            **vars(modeling_dataset),
+            "feature_names": ["x2", "x1"],
+            "input_lineage": reversed_lineage,
+        }
+    )
+    monkeypatch.setattr(linear, "load_modeling_dataset", lambda *args, **kwargs: reversed_features)
+    changed_order = study.model(
+        family="linear",
+        label="fwd_ret_1d",
+        config_name="ridge",
+    ).resolve()
+
+    assert base.identity != changed_seed.identity
+    assert base.identity != changed_order.identity
 
 
 def test_linear_runner_replays_valid_models_after_registration_interrupt(

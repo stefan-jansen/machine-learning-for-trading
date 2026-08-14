@@ -146,7 +146,9 @@ class ModelRequest:
         return ResolvedModelRequest(self.study, self.family, spec, context)
 
     def run(self) -> ModelRun:
-        return self.resolve().run()
+        from .execution import run_models
+
+        return run_models(self.study, requests=[self]).runs[0]
 
 
 def _family_module(family: str):
