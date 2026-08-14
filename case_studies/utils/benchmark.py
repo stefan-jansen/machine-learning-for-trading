@@ -207,6 +207,29 @@ def _period_end_map(timestamps: pl.Series, outcome_horizon: str) -> pl.DataFrame
     return timeline.with_columns(pl.col("timestamp").shift(-value).alias("period_end"))
 
 
+def _attach_period_ends(
+    labels: pl.DataFrame,
+    *,
+    label: str,
+    outcome_horizon: str,
+) -> pl.DataFrame:
+    """Attach fixed endpoints or the row-level expiry endpoint declared by a label."""
+    if label != "ret_to_expiry":
+        return labels.join(
+            _period_end_map(labels.get_column("timestamp"), outcome_horizon),
+            on="timestamp",
+            how="inner",
+        )
+    if "dte_calendar" not in labels.columns:
+        raise ValueError("ret_to_expiry benchmark labels require dte_calendar")
+    invalid_dte = labels.filter(pl.col("dte_calendar").is_null() | (pl.col("dte_calendar") < 0))
+    if invalid_dte.height:
+        raise ValueError("ret_to_expiry benchmark labels require finite non-negative dte_calendar")
+    return labels.with_columns(
+        (pl.col("timestamp") + pl.duration(days=pl.col("dte_calendar"))).alias("period_end")
+    )
+
+
 def build_equal_weight_benchmark(
     labels: pl.DataFrame,
     *,
@@ -237,10 +260,12 @@ def build_equal_weight_benchmark(
         raise ValueError("At least one benchmark window is required")
     start = min(window[0] for window in active_windows)
     end = max(window[1] for window in active_windows)
-    period_ends = _period_end_map(labels.get_column("timestamp"), outcome_horizon).drop_nulls(
-        "period_end"
+    labels_with_ends = _attach_period_ends(
+        labels,
+        label=label,
+        outcome_horizon=outcome_horizon,
     )
-    scoped = labels.filter(
+    scoped = labels_with_ends.filter(
         pl.col("timestamp").cast(pl.Date).is_between(start, end, closed="both")
         & pl.col(entity_col).cast(pl.String).is_in(roster)
     )
@@ -262,8 +287,11 @@ def build_equal_weight_benchmark(
         scoped.join(schedule, on="timestamp", how="semi")
         .drop_nulls(label)
         .group_by("timestamp")
-        .agg(pl.col(label).mean().alias("decision_return"))
-        .join(period_ends, on="timestamp", how="inner")
+        .agg(
+            pl.col(label).mean().alias("decision_return"),
+            pl.col("period_end").max(),
+        )
+        .drop_nulls("period_end")
         .sort("timestamp")
     )
     daily = (
@@ -313,6 +341,7 @@ def build_equal_weight_benchmark(
             "cadence": cadence,
             "rebalance_step": rebalance_step,
             "outcome_horizon": outcome_horizon,
+            "outcome_endpoint_column": ("dte_calendar" if label == "ret_to_expiry" else None),
             "calendar": calendar,
             "entity_col": entity_col,
             "daily_periods_per_year": periods_per_year,
@@ -439,6 +468,8 @@ def load_benchmark_returns(
     if not p.exists():
         return pl.DataFrame()
     df = pl.read_parquet(p)
+    if "period_end" not in df.columns:
+        df = df.with_columns(pl.col("timestamp").alias("period_end"))
     if period == "overall":
         return df
     if period not in ("validation", "holdout"):

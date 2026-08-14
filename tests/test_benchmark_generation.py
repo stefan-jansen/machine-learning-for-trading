@@ -20,6 +20,7 @@ from case_studies.utils.benchmark import (
 )
 from case_studies.utils.paired_metrics import (
     _align_challenger_to_benchmark_periods,
+    _benchmark_returns_from_artifact,
     populate_paired_metrics_for_studies,
     validation_strategy_sql_filter,
 )
@@ -211,6 +212,67 @@ def test_monthly_five_day_label_persists_its_five_observation_period_end() -> No
         {"timestamp": date(2021, 2, 28), "period_end": date(2021, 3, 5)},
     ]
     assert metadata["periods_per_year"] == 12.0
+
+
+def test_return_to_expiry_uses_the_latest_row_level_settlement() -> None:
+    labels = pl.DataFrame(
+        {
+            "timestamp": [date(2021, 1, 1), date(2021, 1, 1)],
+            "symbol": ["A", "B"],
+            "ret_to_expiry": [0.01, 0.03],
+            "dte_calendar": [24, 35],
+        }
+    )
+
+    returns, metadata = build_equal_weight_benchmark(
+        labels,
+        case_study="sp500_options",
+        label="ret_to_expiry",
+        symbols=["A", "B"],
+        windows={"validation": (date(2021, 1, 1), date(2021, 1, 1))},
+        cadence="daily_close",
+        rebalance_step=1,
+        outcome_horizon="35D",
+        calendar="NYSE",
+        periods_per_year=252,
+        label_digest="digest",
+    )
+
+    assert returns.to_dicts() == [
+        {
+            "timestamp": date(2021, 1, 1),
+            "period_end": date(2021, 2, 5),
+            "ew_return": pytest.approx(0.02),
+        }
+    ]
+    assert metadata["configuration"]["outcome_endpoint_column"] == "dte_calendar"
+
+
+@pytest.mark.parametrize("dte_calendar", [None, -1])
+def test_return_to_expiry_rejects_invalid_settlement_offsets(dte_calendar: int | None) -> None:
+    labels = pl.DataFrame(
+        {
+            "timestamp": [date(2021, 1, 1)],
+            "symbol": ["A"],
+            "ret_to_expiry": [0.01],
+            "dte_calendar": [dte_calendar],
+        }
+    )
+
+    with pytest.raises(ValueError, match="finite non-negative dte_calendar"):
+        build_equal_weight_benchmark(
+            labels,
+            case_study="sp500_options",
+            label="ret_to_expiry",
+            symbols=["A"],
+            windows={"validation": (date(2021, 1, 1), date(2021, 1, 1))},
+            cadence="daily_close",
+            rebalance_step=1,
+            outcome_horizon="35D",
+            calendar="NYSE",
+            periods_per_year=252,
+            label_digest="digest",
+        )
 
 
 @pytest.mark.parametrize(
@@ -482,6 +544,20 @@ def test_validation_strategy_filter_routes_resolution_through_one_public_contrac
         "carrier_pin_predicate": carrier_pin,
         "strategy_spec": strategy_spec,
     }
+
+
+def test_shipped_benchmarks_load_through_the_paired_metrics_contract() -> None:
+    shipped = sorted(Path("case_studies").glob("*/benchmark/*.parquet"))
+    assert shipped
+    for parquet_path in shipped:
+        case_study = parquet_path.parents[1].name
+        resolution = _benchmark_returns_from_artifact(case_study, parquet_path.stem)
+        assert resolution is not None, parquet_path
+        _, returns, resolved_label, periods_per_year = resolution
+        assert resolved_label == parquet_path.stem
+        assert periods_per_year is not None
+        assert returns.columns == ["timestamp", "period_end", "ret"]
+        assert returns.height > 0
 
 
 def test_cme_benchmark_uses_product_as_the_panel_key() -> None:
