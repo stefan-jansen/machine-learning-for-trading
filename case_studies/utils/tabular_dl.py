@@ -747,6 +747,7 @@ def _run_tabm_compatible_group(study: Study, items):
     from case_studies.research.models import ModelRun
     from case_studies.research.recovery import ExecutionLedger
 
+    compatibility_group = hashlib.sha256(_tabm_execution_key(items[0][1]).encode()).hexdigest()[:12]
     completed: dict[int, ModelRun] = {}
     pending = []
     for index, spec, context in items:
@@ -757,8 +758,15 @@ def _run_tabm_compatible_group(study: Study, items):
                 predictions=cached.predictions,
                 diagnostics={
                     "execution_order": "fold_major",
+                    "compatibility_group": compatibility_group,
+                    "compatibility_group_size": len(items),
                     "group_size": len(items),
                     "reused": True,
+                    "base_fold_preparations": 0,
+                    "base_fold_preparation_s": 0.0,
+                    "candidate_fit_s": 0.0,
+                    "preparation_fraction": 0.0,
+                    "disk_fold_cache": False,
                 },
             )
         else:
@@ -827,6 +835,12 @@ def _run_tabm_compatible_group(study: Study, items):
             strict=True,
             _recovery=recovery,
         )
+        execution_diagnostics = result["execution_diagnostics"]
+        preparation_elapsed_s = float(execution_diagnostics["base_fold_preparation_s"])
+        fit_elapsed_by_candidate = execution_diagnostics["candidate_fit_s"]
+        measured_s = preparation_elapsed_s + sum(
+            float(value) for value in fit_elapsed_by_candidate.values()
+        )
         for index, spec, context, training, train_dir, candidate_key, candidate in registered:
             failure = result.get("failures", {}).get(candidate_key)
             if failure is not None:
@@ -857,10 +871,17 @@ def _run_tabm_compatible_group(study: Study, items):
                 )
             diagnostics = {
                 "execution_order": "fold_major",
+                "compatibility_group": compatibility_group,
+                "compatibility_group_size": len(items),
                 "fitted_folds": candidate.fitted_folds,
                 "group_size": len(pending),
                 "reused": False,
                 "reused_folds": candidate.reused_folds,
+                "base_fold_preparations": int(execution_diagnostics["base_fold_preparations"]),
+                "base_fold_preparation_s": preparation_elapsed_s,
+                "candidate_fit_s": float(fit_elapsed_by_candidate[candidate_key]),
+                "preparation_fraction": (preparation_elapsed_s / measured_s if measured_s else 0.0),
+                "disk_fold_cache": False,
             }
             candidate.attempt.finish("completed", diagnostics)
             candidate.attempt = None
@@ -2059,8 +2080,25 @@ def run_tabm_cv(
             "started_at": datetime.now(UTC).isoformat(),
         }
 
+    preparation_elapsed_s = 0.0
+    preparation_count = 0
     print("Preparing and releasing folds...")
     for split in splits:
+        fold_id = int(split["fold"])
+        pending_states = []
+        for candidate_key, state in states.items():
+            if not state["available"]:
+                continue
+            if _recovery is not None:
+                reused = _recovery.reuse(candidate_key, fold_id)
+                if reused is not None:
+                    state["prediction_frames"].append(reused)
+                    print(f"  Fold {fold_id}: reused completed fitted state")
+                    continue
+            pending_states.append((candidate_key, state))
+        if not pending_states:
+            continue
+        preparation_started = time.perf_counter()
         fd = _prepare_tabm_fold(
             dataset_pd,
             split,
@@ -2073,10 +2111,10 @@ def run_tabm_cv(
             temporal_keys=temporal_keys,
             temporal_feature_names=temporal_feature_names,
         )
+        preparation_elapsed_s += time.perf_counter() - preparation_started
+        preparation_count += 1
         print(f"  Fold {fd['fold']}: train={fd['n_train']:,}  val={fd['n_val']:,}")
-        for candidate_key, state in states.items():
-            if not state["available"]:
-                continue
+        for candidate_key, state in pending_states:
             cfg = state["config"]
             artifact_name = cfg["config_name"]
             cfg_params = dict(cfg.get("params", {}))
@@ -2087,12 +2125,6 @@ def run_tabm_cv(
             fold_t0 = time.perf_counter()
             seed_everything(seed + fd["fold"])
             fold_prediction_frame = None
-            if _recovery is not None:
-                reused = _recovery.reuse(candidate_key, int(fd["fold"]))
-                if reused is not None:
-                    state["prediction_frames"].append(reused)
-                    print(f"    Fold {fd['fold']}: reused completed fitted state")
-                    continue
             if is_tabpfn:
                 try:
                     preds = _run_tabpfn_fold(
@@ -2509,6 +2541,13 @@ def run_tabm_cv(
             if frame.height:
                 prediction_frames.append(frame)
     all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
+    execution_diagnostics = {
+        "base_fold_preparation_s": preparation_elapsed_s,
+        "base_fold_preparations": preparation_count,
+        "candidate_fit_s": {
+            candidate_key: float(state["elapsed_s"]) for candidate_key, state in states.items()
+        },
+    }
     if not config_results:
         return {
             "all_learning_curves": pl.DataFrame(all_curves),
@@ -2518,6 +2557,7 @@ def run_tabm_cv(
             "grid_results": [],
             "predictions": pl.DataFrame(),
             "training_log": pl.DataFrame(training_log),
+            "execution_diagnostics": execution_diagnostics,
         }
     assembled = _assemble_tabm_results(
         config_results=config_results,
@@ -2530,4 +2570,5 @@ def run_tabm_cv(
         eval_col=eval_col,
     )
     assembled["failures"] = failures
+    assembled["execution_diagnostics"] = execution_diagnostics
     return assembled

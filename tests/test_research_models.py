@@ -215,6 +215,13 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
         return {
             "all_learning_curves": pl.DataFrame(),
             "all_predictions": all_predictions,
+            "execution_diagnostics": {
+                "base_fold_preparation_s": 0.2,
+                "base_fold_preparations": len(splits),
+                "candidate_fit_s": {
+                    config.get("_execution_key", config["config_name"]): 0.1 for config in configs
+                },
+            },
             "fold_metrics": pl.DataFrame(),
             "grid_results": [
                 {
@@ -254,6 +261,9 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
     assert len({run.training.hash for run in result.runs}) == 2
     assert all(run.predictions[0].complete for run in result.runs)
     assert all(run.diagnostics["execution_order"] == "fold_major" for run in result.runs)
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in result.runs)
+    assert all(run.diagnostics["compatibility_group_size"] == 2 for run in result.runs)
+    assert all(run.diagnostics["disk_fold_cache"] is False for run in result.runs)
 
 
 def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
@@ -308,6 +318,7 @@ def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
         ("2024-01-04", 8),
     ]
     assert result["all_predictions"].height == 240
+    assert result["execution_diagnostics"]["base_fold_preparations"] == 2
 
 
 def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypatch) -> None:
@@ -342,6 +353,7 @@ def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypat
     assert calls == ["2024-01-03", "2024-01-04", "2024-01-04"]
     assert recovered.diagnostics["reused_folds"] == [0]
     assert recovered.diagnostics["fitted_folds"] == [1]
+    assert recovered.diagnostics["base_fold_preparations"] == 1
     assert recovered.predictions[0].complete
     assert recovered.predictions[0].coverage()["n_expected"] == 120
 
@@ -464,6 +476,7 @@ def test_tabm_batch_rejects_corrupt_checkpoint_and_refits_only_its_fold(
     assert recovered.training.hash == original.training.hash
     assert recovered.diagnostics["fitted_folds"] == [0]
     assert recovered.diagnostics["reused_folds"] == [1]
+    assert recovered.diagnostics["base_fold_preparations"] == 1
     invalid = (
         original.training.root / "run_log" / "training" / original.training.hash / "invalid_folds"
     )
@@ -600,6 +613,7 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
     assert len({run.training.hash for run in result.runs}) == 2
     assert len({run.predictions[0].hash for run in result.runs}) == 2
     assert prepared_folds == [0, 1]
+    assert {run.diagnostics["base_fold_preparations"] for run in result.runs} == {2}
     assert {run.training.spec()["identity_version"] for run in result.runs} == {3}
     assert {run.training.spec()["resolved_spec_schema"] for run in result.runs} == {
         "ml4t.resolved-spec/v1"
@@ -640,6 +654,7 @@ def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> N
     assert result.runs[0].training.hash == result.runs[1].training.hash
     assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
     assert prepared_folds == [0, 1]
+    assert {run.diagnostics["base_fold_preparations"] for run in result.runs} == {2}
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
