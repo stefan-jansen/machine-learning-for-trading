@@ -162,6 +162,44 @@ def test_study_create_and_reopen_do_not_change_release_bytes(tmp_path: Path) -> 
     assert _tree_digest(release) == before
 
 
+def test_seeded_output_root_becomes_the_explicit_isolated_preview_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    release = _seed_release(tmp_path)
+    release_before = _tree_digest(release)
+    isolated = tmp_path / "isolated"
+    seeded_case = isolated / "etfs"
+    (seeded_case / "config").mkdir(parents=True)
+    (seeded_case / "config" / "setup.yaml").write_text("marker: seeded\n")
+    _open_registry(seeded_case).close()
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(isolated))
+
+    study = Study.open("etfs", workspace=isolated, release_root=release)
+    training = study.results.register_training(
+        {
+            "identity_version": 2,
+            "execution_tier": "preview",
+            "family": "linear",
+            "label": "fwd_ret_21d",
+            "config_name": "ridge",
+            "seed": 42,
+            "preview_reductions": {"folds": [0]},
+        },
+        execution_tier="preview",
+    )
+
+    preview_case = isolated / ".preview" / "etfs"
+    assert study.root == seeded_case
+    assert study.manifest["adopted_output_root"] is True
+    assert training.root == preview_case
+    assert (seeded_case / ".study.json").is_file()
+    assert (seeded_case / "run_log" / "registry.db").is_file()
+    assert (preview_case / "run_log" / "registry.db").is_file()
+    assert (preview_case / "run_log" / "training" / training.hash / "spec.json").is_file()
+    assert _tree_digest(release) == release_before
+    assert not (tmp_path / "experiments").exists()
+
+
 @pytest.mark.parametrize("regular_directory", ["features", "labels", "run_log"])
 def test_regeneration_rejects_regular_generated_artifact_directories(
     tmp_path: Path, regular_directory: str

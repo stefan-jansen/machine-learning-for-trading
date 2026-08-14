@@ -21,6 +21,7 @@ from tests.pm_helpers import (
     get_reruns,
     get_tier,
     missing_required_env,
+    research_preview_parameters,
     unusable_parameters,
 )
 
@@ -962,6 +963,70 @@ def test_run_notebook_caps_the_kernel_thread_pools(tmp_path: Path, monkeypatch) 
     assert seen == dict.fromkeys(pm_helpers.KERNEL_THREAD_CAPS, pm_helpers.KERNEL_THREAD_CAP)
     # ...and restored afterwards, so the caps do not leak into the pytest process.
     assert os.environ["OMP_NUM_THREADS"] == "24"
+
+
+def test_reduced_harness_injects_only_migrated_study_preview_parameters(
+    tmp_path: Path,
+) -> None:
+    migrated = tmp_path / "06_model.py"
+    migrated.write_text(
+        '# %% tags=["parameters"]\n'
+        'EXECUTION_TIER = "canonical"\n'
+        'WORKSPACE = "experiments/unrelated"\n'
+        "MAX_FOLDS = 8\n"
+        "# %%\n"
+        "print(EXECUTION_TIER, WORKSPACE, MAX_FOLDS)\n",
+        encoding="utf-8",
+    )
+    legacy = tmp_path / "05_legacy.py"
+    legacy.write_text(
+        '# %% tags=["parameters"]\nMAX_FOLDS = 8\n# %%\nprint(MAX_FOLDS)\n',
+        encoding="utf-8",
+    )
+    isolated = tmp_path / "isolated"
+
+    migrated_parameters = research_preview_parameters(
+        migrated,
+        {"MAX_FOLDS": 1, "WORKSPACE": "experiments/unrelated"},
+        isolated,
+    )
+    legacy_parameters = research_preview_parameters(legacy, {"MAX_FOLDS": 1}, isolated)
+
+    assert migrated_parameters == {
+        "EXECUTION_TIER": "preview",
+        "MAX_FOLDS": 1,
+        "WORKSPACE": str(isolated.resolve()),
+    }
+    assert legacy_parameters == {"MAX_FOLDS": 1}
+
+
+def test_run_notebook_requires_explicit_research_preview_opt_in(
+    tmp_path: Path, monkeypatch
+) -> None:
+    py = tmp_path / "06_model.py"
+    py.write_text(
+        '# %% tags=["parameters"]\nEXECUTION_TIER = "canonical"\nWORKSPACE = None\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pm_helpers, "sync_notebook", lambda path: path.with_suffix(".ipynb"))
+    _fake_papermill(monkeypatch)
+    calls: list[Path] = []
+
+    def inject(py_path: Path, parameters: dict | None, output_dir: Path | None) -> dict:
+        calls.append(py_path)
+        return dict(parameters or {})
+
+    monkeypatch.setattr(pm_helpers, "research_preview_parameters", inject)
+
+    pm_helpers.run_notebook(py, output_dir=tmp_path / "canonical")
+    assert calls == []
+
+    pm_helpers.run_notebook(
+        py,
+        output_dir=tmp_path / "preview",
+        research_preview=True,
+    )
+    assert calls == [py]
 
 
 def test_notebook_worker_caps_the_same_pools(tmp_path: Path, monkeypatch) -> None:

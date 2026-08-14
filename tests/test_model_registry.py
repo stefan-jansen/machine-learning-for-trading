@@ -452,6 +452,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         timeout=timeout,
         output_dir=isolated_model_output,
         log_path=LOG_PATH,
+        research_preview=True,
     )
 
     assert result["status"] == "ok", (

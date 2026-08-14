@@ -17,7 +17,7 @@ from utils.paths import REPO_ROOT
 from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
-    from .catalog import PredictionCatalog
+    from .catalog import BacktestCatalog, PredictionCatalog
     from .causal import CausalRequest
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
@@ -164,8 +164,26 @@ class Study:
         manifest_path = target / ".study.json"
         if target.exists():
             if not manifest_path.is_file():
-                raise ValueError(f"Existing workspace has no .study.json manifest: {target}")
-            manifest = json.loads(manifest_path.read_text())
+                isolated_root = os.environ.get("ML4T_OUTPUT_DIR")
+                may_adopt = (
+                    isolated_root is not None
+                    and Path(isolated_root).expanduser().resolve() == output_root
+                    and not target.is_symlink()
+                    and (target / "config").is_dir()
+                )
+                if not may_adopt:
+                    raise ValueError(f"Existing workspace has no .study.json manifest: {target}")
+                manifest = {
+                    "schema_version": 1,
+                    "case_study": case_study,
+                    "baseline_source_commit": _source_commit(release_root),
+                    "baseline_manifest_sha256": _release_manifest_digest(release_case_dir),
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "adopted_output_root": True,
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            else:
+                manifest = json.loads(manifest_path.read_text())
             if manifest.get("schema_version") != 1 or manifest.get("case_study") != case_study:
                 raise ValueError(f"Invalid workspace manifest: {manifest_path}")
         else:
@@ -295,6 +313,12 @@ class Study:
         from .catalog import PredictionCatalog
 
         return PredictionCatalog(self)
+
+    @property
+    def backtests(self) -> BacktestCatalog:
+        from .catalog import BacktestCatalog
+
+        return BacktestCatalog(self)
 
     @property
     def release_case_root(self) -> Path:

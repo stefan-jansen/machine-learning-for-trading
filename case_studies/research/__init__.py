@@ -1,10 +1,19 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
+from .catalog import BacktestCatalog, PredictionCatalog
 from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
 from .comparison import CandidateSet
 from .contracts import ExecutionTier, LifecycleState
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
 from .decisions import DecisionArtifact, StateTransitionPolicy
-from .execution import BacktestExecution, ModelExecution, run_backtests, run_models
+from .execution import (
+    BacktestExecution,
+    BacktestPlan,
+    ModelExecution,
+    PlannedBacktest,
+    plan_backtests,
+    run_backtests,
+    run_models,
+)
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
 from .lifecycle import ResearchLock
@@ -17,7 +26,9 @@ from .workspace import Study
 __all__ = [
     "AdapterBinding",
     "BacktestResult",
+    "BacktestCatalog",
     "BacktestExecution",
+    "BacktestPlan",
     "CVSpec",
     "CandidateSet",
     "CausalRequest",
@@ -32,6 +43,8 @@ __all__ = [
     "ModelExecution",
     "ModelRun",
     "PredictionResult",
+    "PredictionCatalog",
+    "PlannedBacktest",
     "OfficialPopulation",
     "ResearchLock",
     "ResolvedModelRequest",
@@ -46,6 +59,7 @@ __all__ = [
     "get_adapter",
     "register_adapter",
     "registered_adapters",
+    "plan_backtests",
     "run_backtests",
     "run_models",
 ]

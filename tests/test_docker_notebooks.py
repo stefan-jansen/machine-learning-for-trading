@@ -96,6 +96,7 @@ def test_docker_notebook(notebook_path, populated_data_dir, seeded_output_dir):
         data_dir=populated_data_dir,
         kernel_python=routing.python,
         kernel_launcher=routing.launcher,
+        research_preview=True,
     )
 
     if result["status"] == "error":

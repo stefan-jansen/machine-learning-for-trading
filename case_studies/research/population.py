@@ -44,6 +44,11 @@ class OfficialPopulation:
                 result = Result.open(study, member_hash, include_preview=True)
             except KeyError:
                 continue
+            if result.kind != member_kind:
+                raise ValueError(
+                    f"official population member {member_hash} has kind {result.kind}, "
+                    f"not {member_kind}"
+                )
             if result.execution_tier == "preview":
                 raise ValueError(
                     f"preview result {member_hash} cannot enter an official population"
