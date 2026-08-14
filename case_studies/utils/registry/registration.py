@@ -1045,7 +1045,11 @@ def register_backtest_run(
             ) != value_digest(new_frame):
                 raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
         existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
-        if existing_returns.exists() and existing[2]:
+        if (
+            identity_version in SUPPORTED_IDENTITY_VERSIONS
+            and existing_returns.exists()
+            and existing[2]
+        ):
             return b_hash
 
     # Write spec.json

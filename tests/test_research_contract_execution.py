@@ -731,6 +731,61 @@ def test_backtest_retry_rejects_changed_existing_execution_artifacts(
     assert stored_trades.equals(original_trades)
 
 
+@pytest.mark.parametrize("existing_sharpe", [1.0, None], ids=["stale", "partial"])
+def test_unversioned_backtest_retry_updates_metrics_without_rewriting_artifacts(
+    tmp_path: Path, existing_sharpe: float | None
+) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    trades = pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]})
+    strategy = {
+        "execution_tier": "canonical",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+    }
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        strategy,
+        stage="signal",
+        returns=returns,
+        trades=trades,
+        metrics={"sharpe": 1.0},
+        case_dir=study.root,
+    )
+    if existing_sharpe is None:
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            db.execute(
+                "UPDATE backtest_metrics SET sharpe = NULL WHERE backtest_hash = ?",
+                (backtest_hash,),
+            )
+            db.commit()
+
+    retried_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        strategy,
+        stage="signal",
+        returns=returns,
+        trades=trades,
+        metrics={"sharpe": 2.0},
+        case_dir=study.root,
+    )
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        stored_sharpe = db.execute(
+            "SELECT sharpe FROM backtest_metrics WHERE backtest_hash = ?",
+            (backtest_hash,),
+        ).fetchone()[0]
+    assert retried_hash == backtest_hash
+    assert stored_sharpe == 2.0
+    assert pl.read_parquet(
+        study.root / "run_log" / "backtest" / backtest_hash / "trades.parquet"
+    ).equals(trades)
+
+
 def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Path) -> None:
     release = _seed_release(tmp_path)
     release_case = release / "case_studies" / "etfs"
