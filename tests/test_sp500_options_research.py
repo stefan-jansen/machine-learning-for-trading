@@ -19,6 +19,7 @@ from case_studies.sp500_options.research_workflow import (
     strategy_request_frame,
 )
 from case_studies.utils.registry.store import _open_registry
+from scripts.prove_sp500_options_interface import _seed_real_preview_prediction
 from tests.test_research_contract_catalog import _resolved_spec
 from utils.paths import REPO_ROOT
 
@@ -152,6 +153,59 @@ def test_hold_to_expiry_selection_does_not_require_a_ten_day_exit_quote() -> Non
         100.0,
         date(2024, 1, 10),
     )
+
+
+def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    source_hash = "released-source"
+    source_path = (
+        study.release_root
+        / "case_studies"
+        / "sp500_options"
+        / "run_log"
+        / "predictions"
+        / source_hash
+        / "predictions.parquet"
+    )
+    source_path.parent.mkdir(parents=True)
+    timestamps = [datetime(2024, 1, day) for day in range(2, 7)]
+    pl.DataFrame(
+        {
+            "symbol": [symbol for timestamp in timestamps for symbol in ("A", "B", "C")],
+            "timestamp": [timestamp for timestamp in timestamps for _ in range(3)],
+            "fold": [0] * 15,
+            "prediction": [float(index) / 100 for index in range(15)],
+            "actual": [float(index) / 200 for index in range(15)],
+        }
+    ).write_parquet(source_path)
+
+    prediction = _seed_real_preview_prediction(
+        study,
+        source_prediction_hash=source_hash,
+        max_symbols=2,
+        max_sessions=5,
+    )
+    computation = prediction.lineage()["training_spec"]["computation"]
+
+    assert prediction.complete
+    assert prediction.execution_tier == "preview"
+    assert prediction.load().shape == (10, 5)
+    assert computation["input_data_spec"]["source_prediction_hash"] == source_hash
+    assert computation["preview_reductions"] == {
+        "source_prediction_hash": source_hash,
+        "folds": [0],
+        "max_symbols": 2,
+        "max_sessions": 5,
+        "date_start": "2024-01-02 00:00:00",
+        "date_end": "2024-01-06 00:00:00",
+    }
+    with pytest.raises(ValueError, match="preview.*cannot enter"):
+        OfficialPopulation.create(
+            study,
+            name="real-preview-fixture-must-not-enter",
+            member_kind="prediction",
+            members=[prediction.hash],
+        )
 
 
 def test_cash_settlement_and_stateful_delta_hedge(tmp_path: Path) -> None:
