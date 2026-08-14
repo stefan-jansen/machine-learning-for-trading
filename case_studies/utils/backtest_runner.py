@@ -1540,13 +1540,15 @@ def _run_engine(
                 pl.col("weight") - pl.col("weight").shift(1).over("symbol").fill_null(0.0)
             ).abs(),
         )
-        turnover_by_ts = weights_sorted.group_by("timestamp").agg(
-            turnover=pl.col("abs_change").sum()
+        turnover_by_ts = (
+            weights_sorted.with_columns(pl.col("timestamp").cast(daily_df.schema["timestamp"]))
+            .group_by("timestamp")
+            .agg(turnover=pl.col("abs_change").sum())
         )
         # Align to daily timeline so non-rebalance days contribute 0 to the mean
         # (matches port_ret.join(turnover) in the vectorized path).
         turnover_aligned = daily_df.join(
-            turnover_by_ts.with_columns(pl.col("timestamp").cast(daily_df.schema["timestamp"])),
+            turnover_by_ts,
             on="timestamp",
             how="left",
         ).with_columns(pl.col("turnover").fill_null(0.0))
