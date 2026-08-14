@@ -209,12 +209,16 @@ def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, m
     batch = run_models(study, requests=requests)
     batch_prepared_folds = list(prepared_folds)
     monkeypatch.setattr(linear, "prepare_single_fold", original_prepare)
-    individual = individual_study.model(
-        family="linear",
-        label="fwd_ret_1d",
-        config_name="ridge",
-        overrides={"alpha": 1.0},
-    ).run()
+    individual = (
+        individual_study.model(
+            family="linear",
+            label="fwd_ret_1d",
+            config_name="ridge",
+            overrides={"alpha": 1.0},
+        )
+        .resolve()
+        .run()
+    )
     gc.collect()
 
     assert batch_prepared_folds == [0, 1]
