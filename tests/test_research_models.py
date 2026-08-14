@@ -242,10 +242,61 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
     assert len(result.runs) == 2
     assert len({run.training.hash for run in result.runs}) == 2
     assert all(run.predictions[0].complete for run in result.runs)
-    assert all(
-        run.diagnostics["execution_order"] == "candidate_major_shared_preparation"
-        for run in result.runs
+    assert all(run.diagnostics["execution_order"] == "fold_major" for run in result.runs)
+
+
+def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+    configs = modeling.load_configs("etfs", "fwd_ret_1d", "tabular_dl")
+    original_prepare = tabular_dl._prepare_tabm_fold
+    released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
+    prepared_folds: list[int] = []
+    training_order: list[tuple[str, int]] = []
+
+    def observed_prepare(*args, **kwargs):
+        gc.collect()
+        if released_arrays:
+            assert released_arrays[-1]() is None
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        released_arrays.append(weakref.ref(fold["X_train"]))
+        return fold
+
+    def fake_train_tabm_fold(*, model, X_val, val_dates, **kwargs):
+        hidden_dim = int(model.backbone[0].out_features)
+        training_order.append((str(val_dates[0])[:10], hidden_dim))
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", fake_train_tabm_fold)
+
+    result = tabular_dl.run_tabm_cv(
+        modeling_dataset.dataset.to_pandas(),
+        modeling_dataset.splits,
+        configs=configs,
+        n_features=len(modeling_dataset.feature_names),
+        feature_names=modeling_dataset.feature_names,
+        label_col=modeling_dataset.label_col,
+        date_col=modeling_dataset.date_col,
+        entity_col=modeling_dataset.entity_cols[0],
+        device="cpu",
+        seed=42,
+        num_threads=1,
+        strict=True,
     )
+
+    assert prepared_folds == [0, 1]
+    assert training_order == [
+        ("2024-01-03", 4),
+        ("2024-01-03", 8),
+        ("2024-01-04", 4),
+        ("2024-01-04", 8),
+    ]
+    assert result["all_predictions"].height == 240
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:

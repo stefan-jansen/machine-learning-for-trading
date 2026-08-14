@@ -663,7 +663,7 @@ def _run_tabm_compatible_group(study: Study, items):
                 training=cached.training,
                 predictions=cached.predictions,
                 diagnostics={
-                    "execution_order": "candidate_major_shared_preparation",
+                    "execution_order": "fold_major",
                     "group_size": len(items),
                     "reused": True,
                 },
@@ -740,7 +740,7 @@ def _run_tabm_compatible_group(study: Study, items):
                 training=verified.training,
                 predictions=predictions,
                 diagnostics={
-                    "execution_order": "candidate_major_shared_preparation",
+                    "execution_order": "fold_major",
                     "group_size": len(pending),
                     "reused": False,
                 },
@@ -1544,6 +1544,90 @@ def _register_tabm_config(
 # ---------------------------------------------------------------------------
 
 
+def _prepare_tabm_fold(
+    dataset_pd: pd.DataFrame,
+    split: dict[str, Any],
+    *,
+    feature_names: list[str],
+    label_col: str,
+    eval_label_col: str | None,
+    date_col: str,
+    entity_col: str,
+    temporal_by_fold,
+    temporal_keys: list[str] | None,
+    temporal_feature_names: list[str] | None,
+) -> dict[str, Any]:
+    dates = dataset_pd[date_col]
+    train_mask = (dates >= split["train_start"]) & (dates <= split["train_end"])
+    val_mask = (dates >= split["val_start"]) & (dates <= split["val_end"])
+    if temporal_by_fold is not None and temporal_keys and temporal_feature_names:
+        from utils.modeling import replace_temporal_columns
+
+        train_df = replace_temporal_columns(
+            dataset_pd,
+            train_mask,
+            temporal_by_fold,
+            temporal_keys,
+            temporal_feature_names,
+            split["fold"],
+        )
+        val_df = replace_temporal_columns(
+            dataset_pd,
+            val_mask,
+            temporal_by_fold,
+            temporal_keys,
+            temporal_feature_names,
+            split["fold"],
+        )
+    else:
+        train_df = dataset_pd.loc[train_mask]
+        val_df = dataset_pd.loc[val_mask]
+
+    train_valid = train_df[label_col].notna()
+    val_valid = val_df[label_col].notna()
+    if eval_label_col:
+        train_valid &= train_df[eval_label_col].notna()
+        val_valid &= val_df[eval_label_col].notna()
+    train_df = train_df.loc[train_valid]
+    val_df = val_df.loc[val_valid]
+    if len(train_df) < 100 or len(val_df) < 50:
+        raise ValueError(
+            f"Fold {split['fold']} is too small: train={len(train_df)}, val={len(val_df)}"
+        )
+
+    X_train = train_df[feature_names].values.astype(np.float32)
+    y_train = train_df[label_col].values.astype(np.float32)
+    X_val = val_df[feature_names].values.astype(np.float32)
+    y_val = val_df[label_col].values.astype(np.float32)
+    y_eval_val = (
+        val_df[eval_label_col].values.astype(np.float32) if eval_label_col else y_val.copy()
+    )
+    imputer = SimpleImputer(strategy="median", keep_empty_features=True)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(imputer.fit_transform(X_train))
+    X_val = scaler.transform(imputer.transform(X_val))
+    if scaler.mean_ is None or scaler.scale_ is None:
+        raise RuntimeError("fitted standard scaler did not expose its state")
+    return {
+        "fold": split["fold"],
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_val": X_val,
+        "y_val": y_val,
+        "y_eval_val": y_eval_val,
+        "val_dates": val_df[date_col].values,
+        "val_entities": val_df[entity_col].values,
+        "n_train": len(X_train),
+        "n_val": len(X_val),
+        "preprocessing": {
+            "feature_names": list(feature_names),
+            "imputer_statistics": imputer.statistics_.astype(np.float32),
+            "scaler_mean": np.asarray(scaler.mean_, dtype=np.float32),
+            "scaler_scale": np.asarray(scaler.scale_, dtype=np.float32),
+        },
+    }
+
+
 def run_tabm_cv(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -1782,116 +1866,21 @@ def run_tabm_cv(
             )
         configs = pending_configs
 
-    dates_series = dataset_pd[date_col]
-
-    # Pre-build per-fold data: mask dates → extract numpy → impute + scale
-    print("Preparing fold data...")
-    fold_data = []
-    for split in splits:
-        train_mask = (dates_series >= split["train_start"]) & (dates_series <= split["train_end"])
-        val_mask = (dates_series >= split["val_start"]) & (dates_series <= split["val_end"])
-
-        if (
-            temporal_by_fold is not None
-            and temporal_keys is not None
-            and temporal_feature_names is not None
-            and temporal_keys
-            and temporal_feature_names
-        ):
-            from utils.modeling import replace_temporal_columns
-
-            train_df = replace_temporal_columns(
-                dataset_pd,
-                train_mask,
-                temporal_by_fold,
-                temporal_keys,
-                temporal_feature_names,
-                split["fold"],
-            )
-            val_df = replace_temporal_columns(
-                dataset_pd,
-                val_mask,
-                temporal_by_fold,
-                temporal_keys,
-                temporal_feature_names,
-                split["fold"],
-            )
-        else:
-            train_df = dataset_pd.loc[train_mask]
-            val_df = dataset_pd.loc[val_mask]
-
-        # Drop rows without a fit target or declared evaluation target.
-        train_valid = train_df[label_col].notna()
-        val_valid = val_df[label_col].notna()
-        if eval_label_col:
-            train_valid &= train_df[eval_label_col].notna()
-            val_valid &= val_df[eval_label_col].notna()
-        train_df = train_df.loc[train_valid]
-        val_df = val_df.loc[val_valid]
-
-        if len(train_df) < 100 or len(val_df) < 50:
-            raise ValueError(
-                f"Fold {split['fold']} is too small: train={len(train_df)}, val={len(val_df)}"
-            )
-
-        X_train = train_df[feature_names].values.astype(np.float32)
-        y_train = train_df[label_col].values.astype(np.float32)
-        X_val = val_df[feature_names].values.astype(np.float32)
-        y_val = val_df[label_col].values.astype(np.float32)
-        y_eval_val = (
-            val_df[eval_label_col].values.astype(np.float32) if eval_label_col else y_val.copy()
-        )
-        val_dates = val_df[date_col].values
-        val_entities = val_df[entity_col].values
-
-        # Impute + scale per fold
-        imputer = SimpleImputer(strategy="median", keep_empty_features=True)
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(imputer.fit_transform(X_train))
-        X_val = scaler.transform(imputer.transform(X_val))
-        if scaler.mean_ is None or scaler.scale_ is None:
-            raise RuntimeError("fitted standard scaler did not expose its state")
-
-        fold_data.append(
-            {
-                "fold": split["fold"],
-                "X_train": X_train,
-                "y_train": y_train,
-                "X_val": X_val,
-                "y_val": y_val,
-                "y_eval_val": y_eval_val,
-                "val_dates": val_dates,
-                "val_entities": val_entities,
-                "n_train": len(X_train),
-                "n_val": len(X_val),
-                "preprocessing": {
-                    "feature_names": list(feature_names),
-                    "imputer_statistics": imputer.statistics_.astype(np.float32),
-                    "scaler_mean": np.asarray(scaler.mean_, dtype=np.float32),
-                    "scaler_scale": np.asarray(scaler.scale_, dtype=np.float32),
-                },
-            }
-        )
-        print(f"  Fold {split['fold']}: train={len(X_train):,}  val={len(X_val):,}")
-
-    if not fold_data:
-        raise ValueError("No valid folds created. Check data size.")
-
-    # Grid search — train each config, evaluate at checkpoints, store ALL predictions.
-    # Incremental save: flush predictions to disk after each fold × config.
+    # Train every compatible candidate while one prepared fold is resident.
     config_results: list[dict[str, Any]] = list(cached_results)
     all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []
     in_memory_prediction_frames: list[pl.DataFrame] = []
-
-    # Set up incremental save directory
     run_save_dir = save_dir / label_col if save_dir is not None else None
     incr_dir = run_save_dir / "_incremental" if run_save_dir is not None else None
     if incr_dir is not None:
         incr_dir.mkdir(parents=True, exist_ok=True)
 
+    states: dict[str, dict[str, Any]] = {}
     for cfg in configs:
         config_name = cfg["config_name"]
+        if config_name in states:
+            raise ValueError(f"TabM configuration names must be unique: {config_name}")
         if checkpoint_root is not None and config_name.startswith("tabpfn"):
             raise ValueError("TabPFN fitted-state persistence is not implemented")
         if register and case_study and force_retrain:
@@ -1914,24 +1903,41 @@ def run_tabm_cv(
                     f"  cleared {removed['prediction_sets']} prior {prediction_split} "
                     f"checkpoint(s) for {config_name}"
                 )
-        cfg_params = dict(cfg.get("params", {}))
-        cfg_n_epochs = cfg.get("n_epochs", 200)
-        cfg_batch_size = cfg.get("batch_size", 4096)
-        cfg_checkpoint = cfg.get("checkpoint_interval", 25)
-        is_tabpfn = config_name.startswith("tabpfn")
+        states[config_name] = {
+            "available": True,
+            "config": cfg,
+            "elapsed_s": 0.0,
+            "fold_checkpoint_ics": {},
+            "prediction_frames": [],
+            "started_at": datetime.now(UTC).isoformat(),
+        }
 
-        config_started_at = datetime.now(UTC).isoformat()
-        t0 = time.perf_counter()
-        print(f"\n  {config_name}:")
-
-        fold_checkpoint_ics: dict[int, list[float]] = {}
-        config_prediction_frames: list[pl.DataFrame] = []
-        tabpfn_available = True
-
-        for fd in fold_data:
+    print("Preparing and releasing folds...")
+    for split in splits:
+        fd = _prepare_tabm_fold(
+            dataset_pd,
+            split,
+            feature_names=feature_names,
+            label_col=label_col,
+            eval_label_col=eval_label_col,
+            date_col=date_col,
+            entity_col=entity_col,
+            temporal_by_fold=temporal_by_fold,
+            temporal_keys=temporal_keys,
+            temporal_feature_names=temporal_feature_names,
+        )
+        print(f"  Fold {fd['fold']}: train={fd['n_train']:,}  val={fd['n_val']:,}")
+        for config_name, state in states.items():
+            if not state["available"]:
+                continue
+            cfg = state["config"]
+            cfg_params = dict(cfg.get("params", {}))
+            cfg_n_epochs = cfg.get("n_epochs", 200)
+            cfg_batch_size = cfg.get("batch_size", 4096)
+            cfg_checkpoint = cfg.get("checkpoint_interval", 25)
+            is_tabpfn = config_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
             seed_everything(seed + fd["fold"])
-
             if is_tabpfn:
                 try:
                     preds = _run_tabpfn_fold(
@@ -1958,9 +1964,7 @@ def run_tabm_cv(
                         entity_col="symbol",
                         min_obs=5,
                     )["ic_mean"]
-                    fold_checkpoint_ics.setdefault(1, []).append(ic)
-
-                    # Incremental save: flush this fold's predictions to disk
+                    state["fold_checkpoint_ics"].setdefault(1, []).append(ic)
                     if incr_dir is not None:
                         flush_fold_predictions(
                             incr_dir,
@@ -1976,7 +1980,7 @@ def run_tabm_cv(
                             eval_col=eval_col or "eval_actual",
                         )
                     else:
-                        config_prediction_frames.append(
+                        state["prediction_frames"].append(
                             _checkpoint_prediction_frame(
                                 config_name,
                                 fd["fold"],
@@ -2005,17 +2009,14 @@ def run_tabm_cv(
                     )
                     print(f"    Fold {fd['fold']}: IC={ic:+.4f} ({fold_elapsed:.1f}s)")
                 except ImportError:
-                    if fd == fold_data[0]:
+                    if int(fd["fold"]) == int(splits[0]["fold"]):
                         print("    TabPFN not installed — skipping")
-                    tabpfn_available = False
-                    break
+                    state["available"] = False
                 except (RuntimeError, ValueError) as e:
-                    if fd == fold_data[0]:
+                    if int(fd["fold"]) == int(splits[0]["fold"]):
                         print(f"    TabPFN failed: {e}")
-                    tabpfn_available = False
-                    break
+                    state["available"] = False
             else:
-                # TabM: train to completion, store ALL checkpoint predictions
                 output_dim = len(class_values or []) if task_type == "classification" else 1
                 tabm_kwargs = {"n_features": n_features, "output_dim": output_dim, **cfg_params}
                 model = TabMModel(**tabm_kwargs)
@@ -2068,11 +2069,8 @@ def run_tabm_cv(
                     class_weights=(class_weights_by_fold or {}).get(int(fd["fold"]), ()),
                     **train_kwargs,
                 )
-
                 for ep, ic in checkpoint_ics.items():
-                    fold_checkpoint_ics.setdefault(ep, []).append(ic)
-
-                # Incremental save: flush ALL checkpoint predictions for this fold
+                    state["fold_checkpoint_ics"].setdefault(ep, []).append(ic)
                 if incr_dir is not None:
                     flush_fold_predictions(
                         incr_dir,
@@ -2088,7 +2086,7 @@ def run_tabm_cv(
                         eval_col=eval_col or "eval_actual",
                     )
                 else:
-                    config_prediction_frames.append(
+                    state["prediction_frames"].append(
                         _checkpoint_prediction_frame(
                             config_name,
                             fd["fold"],
@@ -2106,10 +2104,8 @@ def run_tabm_cv(
                 del model, checkpoint_preds
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-
                 best_ep = max(checkpoint_ics, key=lambda e: checkpoint_ics[e])
                 fold_elapsed = time.perf_counter() - fold_t0
-                # Sample losses at checkpoint epochs for the log
                 loss_at_checkpoints = {
                     str(k): round(epoch_losses.get(k, 0.0), 6)
                     for k in sorted(checkpoint_ics.keys())
@@ -2131,10 +2127,20 @@ def run_tabm_cv(
                     f"    Fold {fd['fold']}: best_ep={best_ep}, "
                     f"IC={checkpoint_ics[best_ep]:+.4f} ({fold_elapsed:.1f}s)"
                 )
+            state["elapsed_s"] += time.perf_counter() - fold_t0
+        del fd
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
-        if is_tabpfn and not tabpfn_available:
+    completed_config_names: list[str] = []
+    for config_name, state in states.items():
+        if not state["available"]:
             continue
-
+        cfg = state["config"]
+        completed_config_names.append(config_name)
+        fold_checkpoint_ics = state["fold_checkpoint_ics"]
+        config_prediction_frames = state["prediction_frames"]
         cfg_all_preds = (
             _load_incremental_preds_for_config(incr_dir, config_name)
             if incr_dir is not None
@@ -2195,8 +2201,8 @@ def run_tabm_cv(
             best_ic_val = float("nan")
             best_ic_n_days = 0
             best_n_invalid = 0
-
-        elapsed = time.perf_counter() - t0
+        elapsed = float(state["elapsed_s"])
+        config_started_at = state["started_at"]
         config_results.append(
             {
                 "config_name": config_name,
@@ -2208,7 +2214,6 @@ def run_tabm_cv(
                 "started_at": config_started_at,
             }
         )
-
         cfg_curves_list = []
         for ep, metric in sorted(checkpoint_metrics.items()):
             entry = {
@@ -2221,28 +2226,17 @@ def run_tabm_cv(
             }
             all_curves.append(entry)
             cfg_curves_list.append(entry)
-
         print(f"    → best_epoch={best_cp}, IC={best_ic_val:+.4f} ({elapsed:.1f}s)")
-
         if checkpoint_root is not None:
             from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
 
             validate_deep_checkpoint_population(
                 checkpoint_root,
                 config_name=config_name,
-                fold_ids=tuple(int(fd["fold"]) for fd in fold_data),
+                fold_ids=tuple(int(split["fold"]) for split in splits),
                 checkpoints=_tabm_checkpoint_epochs(cfg),
                 architecture="tabm",
             )
-
-        # Incremental registration: persist this config immediately so a later
-        # interruption or re-run doesn't lose work. Safe because config-major
-        # loop: this config's folds are all complete at this point.
-        # Registers ONE prediction_set per epoch checkpoint (each parquet contains
-        # exactly one epoch's predictions). The training_run is registered once on
-        # the first epoch slice via _register_tabm_config; subsequent epochs go
-        # through register_prediction_set directly so we don't re-register the
-        # training_run each time.
         if register and case_study and incr_dir is not None:
             try:
                 if cfg_all_preds.height > 0:
@@ -2266,7 +2260,7 @@ def run_tabm_cv(
                         config_name=config_name,
                         n_epochs=cfg.get("n_epochs"),
                         best_epoch=int(first_ep),
-                        n_folds=len(fold_data),
+                        n_folds=len(splits),
                         ic_mean=epoch_ics.get(first_ep, best_ic_val),
                         predictions=first_slice,
                         notebook=notebook,
@@ -2309,12 +2303,11 @@ def run_tabm_cv(
                 if strict:
                     raise
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
-
         gc.collect()
 
     prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
     if incr_dir is not None:
-        for config_name in [cfg["config_name"] for cfg in configs]:
+        for config_name in completed_config_names:
             frame = _load_incremental_preds_for_config(incr_dir, config_name)
             if frame.height:
                 prediction_frames.append(frame)
