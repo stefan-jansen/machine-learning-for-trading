@@ -1133,12 +1133,10 @@ def register_backtest_run(
                 n = returns.height if hasattr(returns, "height") else len(returns)
                 metrics["n_periods"] = float(n)
 
-    # Insert into DB — clean child tables first to avoid FK violations
-    # on INSERT OR REPLACE (which is DELETE + INSERT under the hood)
+    # Insert into DB without replacing an existing parent row. Metric UPSERTs
+    # below update only supplied columns and preserve prior headline and fold data.
     db = _open_registry(case_dir)
     try:
-        db.execute("DELETE FROM backtest_fold_metrics WHERE backtest_hash = ?", (b_hash,))
-        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (b_hash,))
         if identity_version in SUPPORTED_IDENTITY_VERSIONS:
             existing = db.execute(
                 "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
@@ -1151,43 +1149,24 @@ def register_backtest_run(
                 ) == canonical_json(_hashable_strategy_spec(strategy_spec))
                 if existing[0] != prediction_hash or not same_identity:
                     raise ValueError(f"immutable backtest identity conflict for {b_hash}")
-            db.execute(
-                """
-                INSERT OR IGNORE INTO backtest_runs
-                (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
-                 started_at, elapsed_s)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    b_hash,
-                    prediction_hash,
-                    spec_json_str,
-                    stage,
-                    _utc_now(),
-                    _git_hash(),
-                    started_at,
-                    elapsed_s,
-                ),
-            )
-        else:
-            db.execute(
-                """
-                INSERT OR REPLACE INTO backtest_runs
-                (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
-                 started_at, elapsed_s)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    b_hash,
-                    prediction_hash,
-                    spec_json_str,
-                    stage,
-                    _utc_now(),
-                    _git_hash(),
-                    started_at,
-                    elapsed_s,
-                ),
-            )
+        db.execute(
+            """
+            INSERT OR IGNORE INTO backtest_runs
+            (backtest_hash, prediction_hash, spec_json, stage, created_at, git_commit,
+             started_at, elapsed_s)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                b_hash,
+                prediction_hash,
+                spec_json_str,
+                stage,
+                _utc_now(),
+                _git_hash(),
+                started_at,
+                elapsed_s,
+            ),
+        )
 
         if metrics:
             _upsert_wide_metrics(db, "backtest_metrics", {"backtest_hash": b_hash}, metrics)

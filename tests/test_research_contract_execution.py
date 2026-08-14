@@ -23,7 +23,11 @@ from case_studies.research import (
 )
 from case_studies.utils import linear
 from case_studies.utils.registry import metrics as registry_metrics
-from case_studies.utils.registry import prediction_hash_from_parts, register_backtest_run
+from case_studies.utils.registry import (
+    prediction_hash_from_parts,
+    register_backtest_fold_metrics,
+    register_backtest_run,
+)
 from tests.test_research_contract_catalog import _publish, _resolved_spec, _tree_digest
 from tests.test_research_flow import _prices
 from tests.test_research_models import _linear_study
@@ -784,6 +788,56 @@ def test_unversioned_backtest_retry_updates_metrics_without_rewriting_artifacts(
     assert pl.read_parquet(
         study.root / "run_log" / "backtest" / backtest_hash / "trades.parquet"
     ).equals(trades)
+
+
+def test_unversioned_metric_retry_preserves_unsupplied_and_fold_metrics(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    strategy = {
+        "execution_tier": "canonical",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+    }
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        strategy,
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 1.0, "max_drawdown": -0.1},
+        case_dir=study.root,
+    )
+    register_backtest_fold_metrics(
+        "etfs",
+        backtest_hash,
+        {0: {"sharpe": 0.5, "max_drawdown": -0.2}},
+        case_dir=study.root,
+    )
+
+    register_backtest_run(
+        "etfs",
+        prediction_hash,
+        strategy,
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 2.0},
+        case_dir=study.root,
+    )
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        headline = db.execute(
+            "SELECT sharpe, max_drawdown FROM backtest_metrics WHERE backtest_hash = ?",
+            (backtest_hash,),
+        ).fetchone()
+        fold = db.execute(
+            "SELECT sharpe, max_drawdown FROM backtest_fold_metrics "
+            "WHERE backtest_hash = ? AND fold_id = 0",
+            (backtest_hash,),
+        ).fetchone()
+    assert headline == (2.0, -0.1)
+    assert fold == (0.5, -0.2)
 
 
 def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Path) -> None:
