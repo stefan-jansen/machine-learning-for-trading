@@ -18,6 +18,7 @@ from case_studies.sp500_options.research_workflow import (
     run_official_backtest_requests,
     strategy_request_frame,
 )
+from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry.store import _open_registry
 from scripts.prove_sp500_options_interface import _seed_real_preview_prediction
 from tests.test_research_contract_catalog import _resolved_spec
@@ -403,6 +404,16 @@ def test_reader_boundary_publishes_contracts_consumed_by_strategy(
             signal=signal,
             canonical=True,
         )
+    canonical = publish_short_straddle_decisions(
+        prediction,
+        prices=prices,
+        signal=signal,
+        canonical=True,
+        clean_replay_digest=value_digest(decision.load()),
+    )
+    declared_inputs = canonical.spec["source_identity"]["declared_inputs"]
+    assert declared_inputs["option_contract_returns"]
+    assert "option_sources" not in declared_inputs
 
 
 def test_typed_decision_runs_through_registered_option_backtest_path(

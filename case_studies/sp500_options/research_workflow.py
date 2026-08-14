@@ -28,8 +28,8 @@ from case_studies.sp500_options._htm_backtest import (
     _apply_cohort_allocator,
     _load_option_lifecycle,
     _select_cohorts,
+    option_contract_source_identity,
     option_data_paths,
-    option_source_identity,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -193,8 +193,8 @@ def _publish_resolved_short_straddle_decisions(
 ) -> DecisionArtifact:
     if canonical and clean_replay_digest is None:
         raise ValueError("canonical option decisions require a clean-process replay digest")
-    labels_dir, raw_options_dir = option_data_paths()
-    inputs = option_source_identity(labels_dir, raw_options_dir)
+    labels_dir, _ = option_data_paths()
+    contract_identity = option_contract_source_identity(labels_dir)
     source_identity: dict[str, Any] | None = None
     if canonical:
         source_identity = {
@@ -205,7 +205,7 @@ def _publish_resolved_short_straddle_decisions(
             "declared_inputs": {
                 "prediction_hashes": [prediction.hash],
                 "prices": value_digest(prices),
-                "option_sources": inputs,
+                "option_contract_returns": contract_identity,
                 "signal": signal,
                 "allocation": allocation,
             },

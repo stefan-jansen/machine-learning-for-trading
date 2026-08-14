@@ -146,14 +146,21 @@ def _digest_file(path: Path) -> str:
     return _file_sha256(str(path.resolve()), stat.st_size, stat.st_mtime_ns)
 
 
+def option_contract_source_identity(labels_dir: Path) -> str:
+    """Return the exact contract-selection artifact identity."""
+    contract_returns = labels_dir / "contract_returns.parquet"
+    if not contract_returns.is_file():
+        raise FileNotFoundError(f"option contract artifact is missing: {contract_returns}")
+    return _digest_file(contract_returns)
+
+
 def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str, Any]:
     """Bind the specialized engine to exact contract and lifecycle files."""
-    contract_returns = labels_dir / "contract_returns.parquet"
     raw_files = sorted(raw_options_dir.glob("year=*.parquet"))
     if not raw_files:
         raise FileNotFoundError(f"raw option lifecycle directory is empty: {raw_options_dir}")
     return {
-        "contract_returns": _digest_file(contract_returns),
+        "contract_returns": option_contract_source_identity(labels_dir),
         "raw_lifecycle": {path.name: _digest_file(path) for path in raw_files},
     }
 
