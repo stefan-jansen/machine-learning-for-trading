@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -296,6 +297,24 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
         expiry_rules=_expiry_rules(["ES", "NQ"]),
     )
     monkeypatch.setattr(research_workflow, "load_futures_price_path", lambda *args, **kwargs: path)
+    original_run_backtests = research_workflow.run_backtests
+    backtest_calls = 0
+
+    def run_after_population_snapshot(*args, **kwargs):
+        nonlocal backtest_calls
+        population = research_workflow.OfficialPopulation.one(
+            study,
+            name="test-cme-signal",
+        )
+        assert len(population.members) == 2
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            completed = db.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0]
+        assert completed == backtest_calls
+        result = original_run_backtests(*args, **kwargs)
+        backtest_calls += 1
+        return result
+
+    monkeypatch.setattr(research_workflow, "run_backtests", run_after_population_snapshot)
     requests = strategy_request_frame(
         [
             {
@@ -328,6 +347,7 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     )
 
     assert execution.catalog_rows.get_column("complete").to_list() == [True, True]
+    assert backtest_calls == 2
     assert execution.population.require_complete() == tuple(
         execution.catalog_rows.get_column("backtest_hash")
     )

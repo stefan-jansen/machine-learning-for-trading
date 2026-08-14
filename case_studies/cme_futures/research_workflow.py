@@ -23,6 +23,7 @@ from case_studies.research import (
     Result,
     StateTransitionPolicy,
     Study,
+    plan_backtests,
     run_backtests,
     run_models,
 )
@@ -619,16 +620,20 @@ def run_official_backtest_requests(
             costs=costs,
             canonical=True,
         )
-        strategy = study.strategy(
-            prediction=prediction,
+        plan = plan_backtests(
+            study,
+            predictions=selected,
             signal=row["signal"],
             decision=decision,
+            prices=price_path.prices,
             allocation=allocation,
             risk=risk,
             costs=costs,
             chapter=row.get("chapter"),
         )
-        expected_hash = strategy.identity(prices=price_path.prices)
+        if len(plan.members) != 1:
+            raise RuntimeError("one futures strategy request must resolve to one backtest")
+        expected_hash = plan.expected_hashes[0]
         expected.append(expected_hash)
         prepared.append((row, selected, price_path, decision, expected_hash))
     if len(expected) != len(set(expected)):
