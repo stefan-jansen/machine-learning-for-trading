@@ -645,8 +645,11 @@ def _attach_darts_target(
     label_col: str,
     config: dict[str, Any],
 ) -> pd.DataFrame:
-    mode = str(config.get("params", {}).get("darts_target", "one_period_return"))
+    params = config.get("params", {})
+    mode = str(params.get("darts_target", "one_period_return"))
     if mode == "one_period_return":
+        if params.get("decision_cadence") is not None:
+            raise ValueError("cadence-selected Darts runs require an explicit cadence-aware target")
         return _attach_base_target(dataset_pd, case_study, date_col)
     if mode != "lagged_label":
         raise ValueError(f"unsupported Darts target mode {mode!r}")

@@ -24,6 +24,7 @@ from case_studies.utils.darts_forecasting import (
     validate_darts_checkpoint_population,
     write_darts_checkpoint,
 )
+from case_studies.utils.deep_learning import _select_sequence_observations, run_dl_cv
 from case_studies.utils.registry import evaluate_prediction_coverage
 from utils.modeling import load_configs
 
@@ -158,6 +159,66 @@ def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> Non
     assert np.isnan(attached.loc[3, BASE_TARGET_COL])
     assert np.isnan(attached.loc[4, BASE_TARGET_COL])
     assert attached.loc[5, BASE_TARGET_COL] == pytest.approx(np.log1p(0.04))
+
+
+def test_cadence_selected_darts_target_rejects_daily_return_fallback() -> None:
+    dataset = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-05", "2024-01-12"]),
+            "symbol": ["S0", "S0"],
+            "fwd_ret_5d": [0.01, 0.02],
+        }
+    )
+
+    with pytest.raises(ValueError, match="require an explicit cadence-aware target"):
+        _attach_darts_target(
+            dataset,
+            case_study="us_equities_panel",
+            date_col="timestamp",
+            entity_col="symbol",
+            label_col="fwd_ret_5d",
+            config={"params": {"decision_cadence": "weekly_friday"}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("output_chunk_length", "labels", "match"),
+    [
+        (1, [0.01, 0.02, 0.03], "two-period forecast"),
+        (2, [-1.0, 0.02, 0.03], "returns greater than -1"),
+    ],
+)
+def test_lagged_label_target_rejects_unsafe_contracts(output_chunk_length, labels, match) -> None:
+    dataset = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-05", periods=3, freq="W-FRI"),
+            "symbol": ["S0"] * 3,
+            "fwd_ret_5d": labels,
+        }
+    )
+    dataset = _attach_expected_periods(
+        dataset,
+        date_col="timestamp",
+        calendar_id="NYSE",
+        case_study="us_equities_panel",
+    )
+
+    with pytest.raises(ValueError, match=match):
+        _attach_darts_target(
+            dataset,
+            case_study="us_equities_panel",
+            date_col="timestamp",
+            entity_col="symbol",
+            label_col="fwd_ret_5d",
+            config={
+                "config_name": "nbeats_weekly",
+                "params": {
+                    "darts_input_chunk_length": 12,
+                    "darts_output_chunk_length": output_chunk_length,
+                    "darts_target": "lagged_label",
+                },
+            },
+        )
 
 
 def test_lagged_label_forecast_scores_the_terminal_horizon() -> None:
@@ -317,6 +378,90 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(tmp_pat
             )
         )
         == 1
+    )
+
+
+def test_weekly_darts_runner_matches_resolved_eligible_keys(tmp_path) -> None:
+    dates = mcal.get_calendar("NYSE").valid_days("2023-01-03", "2023-06-30")
+    dates = dates.tz_localize(None)
+    dataset = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "symbol": f"S{symbol}",
+                "feature": symbol + day / 100,
+                "fwd_ret_5d": np.sin(day / 5) / 10 + symbol / 1000,
+            }
+            for symbol in range(6)
+            for day, timestamp in enumerate(dates)
+        ]
+    )
+    config = {
+        "family": "deep_learning",
+        "library": "darts",
+        "config_name": "nbeats_weekly",
+        "params": {
+            "architecture": "nbeats",
+            "decision_cadence": "weekly_friday",
+            "darts_output_chunk_length": 2,
+            "darts_target": "lagged_label",
+            "dropout": 0.0,
+            "hidden_size": 4,
+            "lookback": 3,
+            "n_blocks": 1,
+            "n_layers": 1,
+        },
+        "n_epochs": 1,
+        "batch_size": 32,
+        "checkpoint_interval": 1,
+    }
+    split = {
+        "fold": 0,
+        "train_start": dates[0],
+        "train_end": dates[59],
+        "val_start": dates[65],
+        "val_end": dates[-1],
+    }
+
+    result = run_dl_cv(
+        dataset,
+        [split],
+        configs=[config],
+        n_features=1,
+        feature_names=["feature"],
+        label_col="fwd_ret_5d",
+        date_col="timestamp",
+        entity_col="symbol",
+        device="cpu",
+        save_dir=tmp_path / "run",
+        case_study="us_equities_panel",
+        checkpoint_root=tmp_path / "models",
+    )
+    weekly = _select_sequence_observations(
+        dataset,
+        date_col="timestamp",
+        cadence="weekly_friday",
+        calendar="NYSE",
+    )
+    assert isinstance(weekly, pd.DataFrame)
+    expected = darts_validation_keys(
+        weekly,
+        [split],
+        config=config,
+        feature_names=["feature"],
+        label_col="fwd_ret_5d",
+        date_col="timestamp",
+        entity_col="symbol",
+        case_study="us_equities_panel",
+    )
+    predictions = result["all_predictions"].rename({"fold_id": "fold"})
+
+    assert evaluate_prediction_coverage(expected, predictions).complete
+    assert (
+        predictions.select("symbol", "timestamp", "fold")
+        .unique()
+        .sort("symbol", "timestamp", "fold")
+        .equals(expected)
     )
 
 

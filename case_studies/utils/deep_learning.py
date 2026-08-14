@@ -334,6 +334,8 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             f"not {requested_cadence!r}"
         )
     decision_cadence = requested_cadence or preset_cadence
+    if decision_cadence is not None:
+        config["params"]["decision_cadence"] = decision_cadence
     dataset = _select_sequence_observations(
         mds.dataset,
         date_col=mds.date_col,
