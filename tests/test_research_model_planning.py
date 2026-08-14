@@ -9,7 +9,12 @@ from case_studies.research.models import ModelRequest
 from case_studies.utils import gbm, linear, tabular_dl
 
 
-def _request(study, config_name: str) -> ModelRequest:
+def _request(
+    study,
+    config_name: str,
+    *,
+    execution_tier: ExecutionTier = ExecutionTier.CANONICAL,
+) -> ModelRequest:
     return ModelRequest(
         study=study,
         family="planned_family",
@@ -17,8 +22,8 @@ def _request(study, config_name: str) -> ModelRequest:
         config_name=config_name,
         overrides={},
         cv=None,
-        execution_tier=ExecutionTier.CANONICAL,
-        preview_reductions={},
+        execution_tier=execution_tier,
+        preview_reductions={"folds": [0]} if execution_tier is ExecutionTier.PREVIEW else {},
     )
 
 
@@ -99,6 +104,29 @@ def test_model_plan_rejects_execution_identity_drift(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="planned checkpoint population"):
         plan.run()
+
+
+def test_preview_model_plan_rejects_official_population_before_registry_write(
+    monkeypatch,
+) -> None:
+    study = SimpleNamespace()
+    request = _request(study, "first", execution_tier=ExecutionTier.PREVIEW)
+    preview_spec = _spec("first")
+    preview_spec["execution_tier"] = "preview"
+    monkeypatch.setattr(
+        "case_studies.research.model_planning.get_adapter",
+        lambda kind, family: SimpleNamespace(
+            plan_model_requests=lambda received_study, request_dicts: (
+                (preview_spec,),
+                request_dicts,
+            )
+        ),
+    )
+
+    plan = plan_models(study, requests=[request])
+
+    with pytest.raises(ValueError, match="preview model plans"):
+        plan.create_population(name="invalid-preview-population")
 
 
 @pytest.mark.parametrize(
