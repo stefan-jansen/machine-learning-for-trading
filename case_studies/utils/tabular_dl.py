@@ -1963,8 +1963,6 @@ def run_tabm_cv(
         )
     if len(feature_names) != len(set(feature_names)):
         raise ValueError("feature_names contains duplicates")
-    if not splits:
-        raise ValueError("TabM cross-validation requires at least one fold")
     if register and save_dir is None:
         raise ValueError(
             "register=True requires save_dir for incremental prediction saves. "
@@ -2115,6 +2113,8 @@ def run_tabm_cv(
         configs = pending_configs
 
     # Train every compatible candidate while one prepared fold is resident.
+    if not splits:
+        raise ValueError("TabM cross-validation requires at least one fold")
     config_results: list[dict[str, Any]] = list(cached_results)
     all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []
