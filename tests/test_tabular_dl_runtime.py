@@ -663,6 +663,78 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
     assert result["grid_results"][0]["cached"] is True
 
 
+def test_direct_registered_batch_preserves_completed_sibling_on_later_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class MissingStatus:
+        complete = False
+        partial = False
+
+    registered: list[str] = []
+
+    def train_candidate(*, model, X_val, **_kwargs):
+        hidden_dim = int(model.backbone[0].out_features)
+        if hidden_dim == 8:
+            raise RuntimeError("injected later candidate failure")
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", train_candidate)
+    monkeypatch.setattr(registry, "training_run_status", lambda *_args: MissingStatus())
+    monkeypatch.setattr(registry, "load_prediction_sets", lambda *_args, **_kwargs: pl.DataFrame())
+    monkeypatch.setattr(registry, "training_hash_from_spec", lambda _spec: "training")
+    monkeypatch.setattr(
+        tabular_dl,
+        "_register_tabm_config",
+        lambda **kwargs: registered.append(kwargs["config_name"]) or "training",
+    )
+
+    with pytest.raises(RuntimeError, match="injected later candidate failure"):
+        tabular_dl.run_tabm_cv(
+            _classification_frame(),
+            [
+                {
+                    "fold": 0,
+                    "train_start": pd.Timestamp("2020-01-01"),
+                    "train_end": pd.Timestamp("2020-03-01"),
+                    "val_start": pd.Timestamp("2020-04-01"),
+                    "val_end": pd.Timestamp("2020-05-01"),
+                }
+            ],
+            configs=[
+                {
+                    "family": "tabular_dl",
+                    "config_name": "tabm_s",
+                    "params": {"hidden_dim": 4, "n_members": 2, "dropout": 0.0},
+                    "n_epochs": 1,
+                    "batch_size": 32,
+                    "checkpoint_interval": 1,
+                },
+                {
+                    "family": "tabular_dl",
+                    "config_name": "tabm_m",
+                    "params": {"hidden_dim": 8, "n_members": 2, "dropout": 0.0},
+                    "n_epochs": 1,
+                    "batch_size": 32,
+                    "checkpoint_interval": 1,
+                },
+            ],
+            n_features=1,
+            feature_names=["feature"],
+            label_col="return",
+            date_col="timestamp",
+            entity_col="symbol",
+            device="cpu",
+            save_dir=tmp_path,
+            register=True,
+            case_study="probe",
+        )
+
+    assert registered == ["tabm_s"]
+    assert (tmp_path / "return" / "_incremental" / "tabm_s_fold0.parquet").exists()
+
+
 def test_saved_artifact_message_does_not_leak_absolute_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

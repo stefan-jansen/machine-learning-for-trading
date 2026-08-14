@@ -2360,7 +2360,7 @@ def run_tabm_cv(
                     del model
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    if _recovery is None:
+                    if _recovery is None and not (register and case_study):
                         raise
                     state["available"] = False
                     state["error"] = error
@@ -2628,6 +2628,7 @@ def run_tabm_cv(
         for candidate_key, state in states.items()
         if state["error"] is not None
     }
+    direct_failure = next(iter(failures.values()), None) if _recovery is None else None
     prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
     if incr_dir is not None and _recovery is None:
         for candidate_key in completed_candidate_keys:
@@ -2643,6 +2644,8 @@ def run_tabm_cv(
         },
     }
     if not config_results:
+        if direct_failure is not None:
+            raise direct_failure
         return {
             "all_learning_curves": pl.DataFrame(all_curves),
             "all_predictions": all_predictions,
@@ -2665,4 +2668,6 @@ def run_tabm_cv(
     )
     assembled["failures"] = failures
     assembled["execution_diagnostics"] = execution_diagnostics
+    if direct_failure is not None:
+        raise direct_failure
     return assembled
