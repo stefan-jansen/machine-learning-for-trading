@@ -123,7 +123,8 @@ def _assert_results(execution, family: str, folds: list[int]) -> dict[str, dict[
             fitted_folds = {path.stem for path in (model_dir / "boosters").glob("fold_*.txt")}
         else:
             fitted_folds = {
-                path.parent.name for path in (model_dir / config_name).glob("fold_*/epoch_0001.pt")
+                path.parent.name
+                for path in (model_dir / run.training.hash).glob("fold_*/epoch_0001.pt")
             }
         expected_fitted_folds = {
             f"fold_{fold:02d}" if family == "tabular_dl" else f"fold_{fold}" for fold in folds

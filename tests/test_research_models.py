@@ -321,6 +321,22 @@ def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
     assert result["execution_diagnostics"]["base_fold_preparations"] == 2
 
 
+def test_tabm_cv_rejects_empty_fold_population(tmp_path, monkeypatch) -> None:
+    _, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="at least one fold"):
+        tabular_dl.run_tabm_cv(
+            modeling_dataset.dataset.to_pandas(),
+            [],
+            configs=modeling.load_configs("etfs", "fwd_ret_1d", "tabular_dl")[:1],
+            n_features=len(modeling_dataset.feature_names),
+            feature_names=modeling_dataset.feature_names,
+            label_col=modeling_dataset.label_col,
+            date_col=modeling_dataset.date_col,
+            device="cpu",
+        )
+
+
 def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypatch) -> None:
     study, _, _ = _tabm_study(tmp_path, monkeypatch)
     calls: list[str] = []
@@ -470,7 +486,7 @@ def test_tabm_batch_rejects_corrupt_checkpoint_and_refits_only_its_fold(
     )
     original = request.run()
     model_root = original.training.root / "run_log" / "training" / original.training.hash / "models"
-    checkpoint = model_root / "tabm_s" / "fold_00" / "epoch_0001.pt"
+    checkpoint = model_root / original.training.hash / "fold_00" / "epoch_0001.pt"
     checkpoint.write_bytes(checkpoint.read_bytes() + b"corrupt")
 
     recovered = request.run()
@@ -500,7 +516,7 @@ def test_tabm_saved_weight_checkpoint_replays_validation_predictions(
         overrides={"device": "cpu", "num_threads": 1},
     ).run()
     model_root = run.training.root / "run_log" / "training" / run.training.hash / "models"
-    checkpoint = model_root / "tabm_s" / "fold_00" / "epoch_0001.pt"
+    checkpoint = model_root / run.training.hash / "fold_00" / "epoch_0001.pt"
     model, preprocessing, metadata = restore_deep_model(
         checkpoint,
         lambda architecture, kwargs: tabular_dl.TabMModel(**kwargs),
@@ -624,6 +640,15 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
     assert [
         run.training.spec()["computation"]["model"]["params"]["hidden_dim"] for run in result.runs
     ] == [5, 6]
+    for run in result.runs:
+        diagnostics = run.training.root / "run_log" / "training" / run.training.hash / "diagnostics"
+        assert {path.name for path in diagnostics.iterdir()} == {
+            "all_predictions.parquet",
+            "learning_curves.parquet",
+            "predictions.parquet",
+            "result.json",
+            "training_log.parquet",
+        }
 
 
 def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> None:
@@ -658,6 +683,49 @@ def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> N
     assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
     assert prepared_folds == [0, 1]
     assert {run.diagnostics["base_fold_preparations"] for run in result.runs} == {2}
+
+
+def test_tabm_equivalent_named_presets_share_identity_stable_checkpoints(
+    tmp_path, monkeypatch
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=name,
+            overrides={"device": "cpu", "hidden_dim": 6, "num_threads": 1},
+        )
+        for name in ("tabm_s", "tabm_m")
+    ]
+
+    result = run_models(study, requests=requests)
+    replay = requests[1].run()
+
+    assert result.runs[0].training.hash == result.runs[1].training.hash == replay.training.hash
+    assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
+    assert prepared_folds == [0, 1]
+    checkpoint_root = (
+        replay.training.root
+        / "run_log"
+        / "training"
+        / replay.training.hash
+        / "models"
+        / replay.training.hash
+    )
+    assert {path.parent.name for path in checkpoint_root.glob("fold_*/epoch_0001.pt")} == {
+        "fold_00",
+        "fold_01",
+    }
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:

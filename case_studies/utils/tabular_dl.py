@@ -474,7 +474,7 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
     try:
         validate_deep_checkpoint_population(
             model_root,
-            config_name=context.config["config_name"],
+            config_name=training.hash,
             fold_ids=tuple(int(split["fold"]) for split in context.splits),
             checkpoints=checkpoint_values,
             architecture="tabm",
@@ -538,6 +538,27 @@ def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: s
     runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 
 
+def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate_key: str) -> None:
+    diagnostics_dir = train_dir / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    predictions = result["all_predictions"].filter(pl.col("config") == candidate_key)
+    curves = result["all_learning_curves"]
+    if "config" in curves.columns:
+        curves = curves.filter(pl.col("config") == candidate_key)
+    training_log = result["training_log"]
+    if "config" in training_log.columns:
+        training_log = training_log.filter(pl.col("config") == candidate_key)
+    grid_row = next(row for row in result["grid_results"] if row["config_name"] == candidate_key)
+    best = predictions.filter(pl.col("epoch") == int(grid_row["best_epoch"]))
+    predictions.write_parquet(diagnostics_dir / "all_predictions.parquet")
+    best.write_parquet(diagnostics_dir / "predictions.parquet")
+    curves.write_parquet(diagnostics_dir / "learning_curves.parquet")
+    training_log.write_parquet(diagnostics_dir / "training_log.parquet")
+    (diagnostics_dir / "result.json").write_text(
+        json.dumps(grid_row, indent=2, sort_keys=True) + "\n"
+    )
+
+
 @dataclass
 class _TabMRecoveryCandidate:
     spec: dict[str, Any]
@@ -559,9 +580,8 @@ class _TabMRecovery:
 
     def _paths(self, candidate_key: str, fold_id: int) -> tuple[Path, Path]:
         candidate = self.candidates[candidate_key]
-        artifact_name = candidate.context.config["config_name"]
         manifest = (
-            self.model_root(candidate_key) / artifact_name / f"fold_{fold_id:02d}" / "manifest.json"
+            self.model_root(candidate_key) / candidate_key / f"fold_{fold_id:02d}" / "manifest.json"
         )
         shard = (
             candidate.training.root
@@ -587,13 +607,12 @@ class _TabMRecovery:
         from case_studies.utils.deep_model_state import checkpoint_sidecar, deep_checkpoint_path
 
         candidate = self.candidates[candidate_key]
-        artifact_name = candidate.context.config["config_name"]
         computation = candidate.spec.get("computation", candidate.spec)
         checkpoints = tuple(int(item["value"]) for item in computation["checkpoint_schedule"])
         files = []
         for checkpoint in checkpoints:
             path = deep_checkpoint_path(
-                self.model_root(candidate_key), artifact_name, fold_id, checkpoint
+                self.model_root(candidate_key), candidate_key, fold_id, checkpoint
             )
             files.extend((path, checkpoint_sidecar(path)))
         return tuple(files)
@@ -813,7 +832,11 @@ def _run_tabm_compatible_group(study: Study, items):
             first_context.dataset_pd,
             list(first_context.splits),
             configs=[
-                {**context.config, "_execution_key": candidate_key}
+                {
+                    **context.config,
+                    "_artifact_name": candidate_key,
+                    "_execution_key": candidate_key,
+                }
                 for _, _, context, _, _, candidate_key, _ in registered
             ],
             n_features=len(first_context.feature_names),
@@ -873,6 +896,7 @@ def _run_tabm_compatible_group(study: Study, items):
                 candidate_key=candidate_key,
             )
             _record_tabm_runtime(train_dir, result, candidate_key)
+            _persist_tabm_diagnostics(train_dir, result, candidate_key)
             verified = _cached_research_run(study, spec, context)
             if verified is None:
                 raise ValueError(
@@ -1888,6 +1912,8 @@ def run_tabm_cv(
         )
     if len(feature_names) != len(set(feature_names)):
         raise ValueError("feature_names contains duplicates")
+    if not splits:
+        raise ValueError("TabM cross-validation requires at least one fold")
     if register and save_dir is None:
         raise ValueError(
             "register=True requires save_dir for incremental prediction saves. "
@@ -2124,6 +2150,7 @@ def run_tabm_cv(
         for candidate_key, state in pending_states:
             cfg = state["config"]
             artifact_name = cfg["config_name"]
+            checkpoint_artifact_name = str(cfg.get("_artifact_name", artifact_name))
             cfg_params = dict(cfg.get("params", {}))
             cfg_n_epochs = cfg.get("n_epochs", 200)
             cfg_batch_size = cfg.get("batch_size", 4096)
@@ -2233,7 +2260,7 @@ def run_tabm_cv(
                         *,
                         _fold: int = int(fd["fold"]),
                         _preprocessing: dict[str, Any] = fd["preprocessing"],
-                        _config_name: str = artifact_name,
+                        _config_name: str = checkpoint_artifact_name,
                         _model_kwargs: dict[str, Any] = tabm_kwargs,
                         _checkpoint_root: Path = candidate_checkpoint_root,
                     ) -> None:
@@ -2367,6 +2394,7 @@ def run_tabm_cv(
             continue
         cfg = state["config"]
         artifact_name = cfg["config_name"]
+        checkpoint_artifact_name = str(cfg.get("_artifact_name", artifact_name))
         completed_candidate_keys.append(candidate_key)
         fold_checkpoint_ics = state["fold_checkpoint_ics"]
         config_prediction_frames = state["prediction_frames"]
@@ -2463,7 +2491,7 @@ def run_tabm_cv(
 
             validate_deep_checkpoint_population(
                 candidate_checkpoint_root,
-                config_name=artifact_name,
+                config_name=checkpoint_artifact_name,
                 fold_ids=tuple(int(split["fold"]) for split in splits),
                 checkpoints=_tabm_checkpoint_epochs(cfg),
                 architecture="tabm",
