@@ -606,6 +606,23 @@ def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, mon
     assert prepared_folds == [0, 1]
     assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
 
+    selected_path = training_log.parent / "predictions.parquet"
+    obsolete = (
+        pl.read_parquet(selected_path)
+        .drop("model_id")
+        .with_columns(
+            pl.lit("tabm_s").alias("config"),
+            pl.lit(1, dtype=pl.Int32).alias("epoch"),
+        )
+    )
+    obsolete.write_parquet(selected_path)
+
+    request.run()
+
+    selected = pl.read_parquet(selected_path)
+    assert "model_id" in selected.columns
+    assert {"config", "epoch"}.isdisjoint(selected.columns)
+
 
 def test_tabm_candidate_order_does_not_change_identities_or_predictions(
     tmp_path,

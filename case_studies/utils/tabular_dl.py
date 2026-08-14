@@ -494,6 +494,9 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
     try:
         for name in required - {"result.json"}:
             pl.read_parquet(diagnostics / name)
+        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        if "model_id" not in selected.columns or {"config", "epoch"} & set(selected.columns):
+            return None
         json.loads((diagnostics / "result.json").read_text())
     except (OSError, ValueError, json.JSONDecodeError, pl.exceptions.PolarsError):
         return None
