@@ -1686,6 +1686,7 @@ def prepare_single_fold(
         "entities": entities,
         "n_train": n_train,
         "n_val": n_val,
+        "preprocessor": preprocessor,
     }
 
 

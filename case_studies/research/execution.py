@@ -11,6 +11,8 @@ import polars as pl
 
 from case_studies.utils.registry.store import _open_registry, _utc_now
 
+from .adapters import get_adapter
+from .contracts import ExecutionTier
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .results import BacktestResult, PredictionResult, Result
 from .workspace import Study
@@ -35,15 +37,45 @@ def run_models(
     *,
     requests: Iterable[ModelRequest | ResolvedModelRequest],
 ) -> ModelExecution:
-    resolved: list[ResolvedModelRequest] = []
-    for request in requests:
+    submitted = list(requests)
+    if not submitted:
+        raise ValueError("run_models requires at least one request")
+    for request in submitted:
         if request.study != study:
             raise ValueError("model request belongs to another study")
-        resolved.append(request.resolve() if isinstance(request, ModelRequest) else request)
-    if not resolved:
-        raise ValueError("run_models requires at least one request")
 
-    runs = tuple(request.run() for request in resolved)
+    ordered_runs: list[ModelRun | None] = [None] * len(submitted)
+    unresolved: dict[str, list[tuple[int, ModelRequest]]] = {}
+    for index, request in enumerate(submitted):
+        if isinstance(request, ModelRequest):
+            unresolved.setdefault(request.family, []).append((index, request))
+            continue
+        study.activate(ExecutionTier(request.spec["execution_tier"]))
+        ordered_runs[index] = request.run()
+
+    for family, indexed_requests in unresolved.items():
+        module = get_adapter("model", family)
+        batch_runner = getattr(module, "run_model_requests", None)
+        if callable(batch_runner):
+            batch_runs = tuple(
+                batch_runner(study, [request.as_dict() for _, request in indexed_requests])
+            )
+            if len(batch_runs) != len(indexed_requests):
+                raise ValueError(
+                    f"{family!r} batch runner returned {len(batch_runs)} results for "
+                    f"{len(indexed_requests)} requests"
+                )
+            for (index, _), run in zip(indexed_requests, batch_runs, strict=True):
+                ordered_runs[index] = run
+            continue
+        for index, request in indexed_requests:
+            resolved = request.resolve()
+            study.activate(ExecutionTier(resolved.spec["execution_tier"]))
+            ordered_runs[index] = resolved.run()
+
+    if any(run is None for run in ordered_runs):
+        raise RuntimeError("model execution did not produce a result for every request")
+    runs = tuple(run for run in ordered_runs if run is not None)
     hashes = [prediction.hash for run in runs for prediction in run.predictions]
     catalog_rows = study.predictions.table(include_preview=True).filter(
         pl.col("prediction_hash").is_in(hashes)
