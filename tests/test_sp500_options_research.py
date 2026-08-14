@@ -20,6 +20,8 @@ from case_studies.sp500_options._htm_backtest import (
     run_htm_daily_mtm,
 )
 from case_studies.sp500_options.research_workflow import (
+    model_request_catalog,
+    open_study,
     publish_short_straddle_decisions,
     resolved_model_plan,
     run_official_backtest_requests,
@@ -120,6 +122,17 @@ def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None
     assert plan.select(
         "family", "config_name", "feature_count", "eligible_entities", "checkpoints"
     ).row(0) == ("deep_learning", "nlinear", 2, 2, 1)
+
+
+def test_preview_study_activates_before_model_catalog_resolution(tmp_path: Path) -> None:
+    study = open_study(execution_tier="preview", workspace=tmp_path)
+
+    catalog = model_request_catalog("linear", config_names=["ridge_a1.0"])
+
+    assert study.output_root == tmp_path
+    assert catalog.to_dicts() == [
+        {"family": "linear", "label": "ret_to_expiry", "config_name": "ridge_a1.0"}
+    ]
 
 
 def _contract_returns() -> pl.DataFrame:

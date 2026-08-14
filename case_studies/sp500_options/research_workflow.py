@@ -76,7 +76,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             shared_config.symlink_to(
                 REPO_ROOT / "case_studies" / "config", target_is_directory=True
             )
-        return Study(
+        study = Study(
             case_study=CASE_STUDY,
             root=REPO_ROOT / "case_studies" / CASE_STUDY,
             release_root=REPO_ROOT,
@@ -91,6 +91,8 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
                 "preview_only": True,
             },
         )
+        study.activate(execution_tier)
+        return study
     return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
 
 
