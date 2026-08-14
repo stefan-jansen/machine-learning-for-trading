@@ -1974,6 +1974,8 @@ def run_tabm_cv(
     runtime_spec = tabm_runtime_spec(device, seed=seed, num_threads=num_threads)
     torch_device = _configure_torch_runtime(runtime_spec)
     eval_col = "eval_actual" if eval_label_col else None
+    if not splits:
+        raise ValueError("TabM cross-validation requires at least one fold")
 
     dataset_pd = dataset_pd.sort_values([date_col, entity_col], kind="mergesort").reset_index(
         drop=True
@@ -2113,8 +2115,6 @@ def run_tabm_cv(
         configs = pending_configs
 
     # Train every compatible candidate while one prepared fold is resident.
-    if not splits:
-        raise ValueError("TabM cross-validation requires at least one fold")
     config_results: list[dict[str, Any]] = list(cached_results)
     all_curves: list[dict] = list(cached_curves)
     training_log: list[dict] = []

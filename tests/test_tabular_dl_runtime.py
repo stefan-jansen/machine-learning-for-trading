@@ -566,13 +566,13 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
 
     cached_predictions = pl.DataFrame(
         {
-            "timestamp": [pd.Timestamp("2020-04-01")] * 5,
-            "symbol": list(range(5)),
-            "y_true": np.arange(5, dtype=float),
-            "y_score": np.arange(5, dtype=float),
-            "fold_id": [0] * 5,
-            "config": ["tabm_probe"] * 5,
-            "epoch": [25] * 5,
+            "timestamp": [pd.Timestamp("2020-04-01")] * 50,
+            "symbol": list(range(50)),
+            "y_true": np.arange(50, dtype=float),
+            "y_score": np.arange(50, dtype=float),
+            "fold_id": [0] * 50,
+            "config": ["tabm_probe"] * 50,
+            "epoch": [25] * 50,
         }
     )
     cached_result = {
@@ -605,7 +605,15 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
 
     result = tabular_dl.run_tabm_cv(
         _classification_frame(),
-        [],
+        [
+            {
+                "fold": 0,
+                "train_start": "2020-01-01",
+                "train_end": "2020-03-01",
+                "val_start": "2020-04-01",
+                "val_end": "2020-04-01",
+            }
+        ],
         configs=[
             {
                 "family": "tabular_dl",
@@ -627,7 +635,7 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
     )
 
     assert result["best_config_name"] == "tabm_probe"
-    assert result["predictions"].height == 5
+    assert result["predictions"].height == 50
     assert result["grid_results"][0]["cached"] is True
 
 
