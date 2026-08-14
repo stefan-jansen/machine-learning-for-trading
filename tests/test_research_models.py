@@ -372,6 +372,15 @@ def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypat
     assert recovered.diagnostics["base_fold_preparations"] == 1
     assert recovered.predictions[0].complete
     assert recovered.predictions[0].coverage()["n_expected"] == 120
+    training_log = pl.read_parquet(
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    assert set(training_log["fold"]) == {0, 1}
 
 
 def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatch) -> None:
@@ -496,6 +505,15 @@ def test_tabm_batch_rejects_corrupt_checkpoint_and_refits_only_its_fold(
     assert recovered.diagnostics["fitted_folds"] == [0]
     assert recovered.diagnostics["reused_folds"] == [1]
     assert recovered.diagnostics["base_fold_preparations"] == 1
+    training_log = pl.read_parquet(
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    assert set(training_log["fold"]) == {0, 1}
     invalid = (
         original.training.root / "run_log" / "training" / original.training.hash / "invalid_folds"
     )

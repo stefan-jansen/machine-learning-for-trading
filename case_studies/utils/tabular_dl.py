@@ -481,6 +481,22 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
         )
     except ValueError:
         return None
+    diagnostics = training.root / "run_log" / "training" / training.hash / "diagnostics"
+    required = {
+        "all_predictions.parquet",
+        "learning_curves.parquet",
+        "predictions.parquet",
+        "result.json",
+        "training_log.parquet",
+    }
+    if not diagnostics.is_dir() or required - {path.name for path in diagnostics.iterdir()}:
+        return None
+    try:
+        for name in required - {"result.json"}:
+            pl.read_parquet(diagnostics / name)
+        json.loads((diagnostics / "result.json").read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
     return ModelRun(training=training, predictions=complete_predictions)
 
 
@@ -593,6 +609,10 @@ class _TabMRecovery:
         )
         return manifest, shard
 
+    def _diagnostic_path(self, candidate_key: str, fold_id: int) -> Path:
+        _, shard = self._paths(candidate_key, fold_id)
+        return shard.with_suffix(".json")
+
     def _settings(self, candidate_key: str, fold_id: int) -> dict[str, Any]:
         candidate = self.candidates[candidate_key]
         split = next(split for split in candidate.context.splits if int(split["fold"]) == fold_id)
@@ -638,6 +658,7 @@ class _TabMRecovery:
     def _quarantine(self, candidate_key: str, fold_id: int) -> None:
         candidate = self.candidates[candidate_key]
         manifest, shard = self._paths(candidate_key, fold_id)
+        diagnostic = self._diagnostic_path(candidate_key, fold_id)
         fold_dir = manifest.parent
         if not fold_dir.exists() and not shard.exists():
             return
@@ -648,18 +669,25 @@ class _TabMRecovery:
             os.replace(fold_dir, quarantine / "models")
         if shard.exists():
             os.replace(shard, quarantine / shard.name)
+        if diagnostic.exists():
+            os.replace(diagnostic, quarantine / diagnostic.name)
 
-    def reuse(self, candidate_key: str, fold_id: int) -> pl.DataFrame | None:
+    def reuse(self, candidate_key: str, fold_id: int) -> tuple[pl.DataFrame, dict[str, Any]] | None:
         candidate = self.candidates[candidate_key]
         manifest, shard = self._paths(candidate_key, fold_id)
-        if not candidate.ledger.reusable_fold(
-            training_hash=candidate.training.hash,
-            candidate_identity=candidate.training.hash,
-            fold_id=fold_id,
-            fitted_state=manifest,
-            prediction_shard=shard,
-            resolved_settings=self._settings(candidate_key, fold_id),
-        ) or not self._valid_manifest(candidate_key, fold_id, manifest):
+        diagnostic = self._diagnostic_path(candidate_key, fold_id)
+        if (
+            not candidate.ledger.reusable_fold(
+                training_hash=candidate.training.hash,
+                candidate_identity=candidate.training.hash,
+                fold_id=fold_id,
+                fitted_state=manifest,
+                prediction_shard=shard,
+                resolved_settings=self._settings(candidate_key, fold_id),
+            )
+            or not self._valid_manifest(candidate_key, fold_id, manifest)
+            or not diagnostic.is_file()
+        ):
             self._quarantine(candidate_key, fold_id)
             return None
         frame = pl.read_parquet(shard)
@@ -690,10 +718,21 @@ class _TabMRecovery:
         if frame.n_unique(keys) != frame.height:
             self._quarantine(candidate_key, fold_id)
             return None
+        try:
+            training_record = json.loads(diagnostic.read_text())
+        except (OSError, json.JSONDecodeError):
+            self._quarantine(candidate_key, fold_id)
+            return None
         candidate.reused_folds.append(fold_id)
-        return frame
+        return frame, training_record
 
-    def complete(self, candidate_key: str, fold_id: int, frame: pl.DataFrame) -> None:
+    def complete(
+        self,
+        candidate_key: str,
+        fold_id: int,
+        frame: pl.DataFrame,
+        training_record: dict[str, Any],
+    ) -> None:
         candidate = self.candidates[candidate_key]
         manifest, shard = self._paths(candidate_key, fold_id)
         files = self._checkpoint_files(candidate_key, fold_id)
@@ -704,6 +743,8 @@ class _TabMRecovery:
         manifest_tmp = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
         shard.parent.mkdir(parents=True, exist_ok=True)
         shard_tmp = shard.with_name(f".{shard.name}.{uuid.uuid4().hex}.tmp")
+        diagnostic = self._diagnostic_path(candidate_key, fold_id)
+        diagnostic_tmp = diagnostic.with_name(f".{diagnostic.name}.{uuid.uuid4().hex}.tmp")
         try:
             record = {
                 "files": {
@@ -714,11 +755,14 @@ class _TabMRecovery:
             }
             manifest_tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
             frame.write_parquet(shard_tmp)
+            diagnostic_tmp.write_text(json.dumps(training_record, indent=2, sort_keys=True) + "\n")
             os.replace(manifest_tmp, manifest)
             os.replace(shard_tmp, shard)
+            os.replace(diagnostic_tmp, diagnostic)
         finally:
             manifest_tmp.unlink(missing_ok=True)
             shard_tmp.unlink(missing_ok=True)
+            diagnostic_tmp.unlink(missing_ok=True)
         candidate.ledger.complete_fold(
             training_hash=candidate.training.hash,
             candidate_identity=candidate.training.hash,
@@ -887,6 +931,8 @@ def _run_tabm_compatible_group(study: Study, items):
                 )
                 candidate.attempt = None
                 continue
+            _record_tabm_runtime(train_dir, result, candidate_key)
+            _persist_tabm_diagnostics(train_dir, result, candidate_key)
             predictions = _publish_tabm_predictions(
                 study,
                 spec,
@@ -895,8 +941,6 @@ def _run_tabm_compatible_group(study: Study, items):
                 result,
                 candidate_key=candidate_key,
             )
-            _record_tabm_runtime(train_dir, result, candidate_key)
-            _persist_tabm_diagnostics(train_dir, result, candidate_key)
             verified = _cached_research_run(study, spec, context)
             if verified is None:
                 raise ValueError(
@@ -2125,7 +2169,9 @@ def run_tabm_cv(
             if _recovery is not None:
                 reused = _recovery.reuse(candidate_key, fold_id)
                 if reused is not None:
-                    state["prediction_frames"].append(reused)
+                    reused_predictions, reused_training_record = reused
+                    state["prediction_frames"].append(reused_predictions)
+                    training_log.append(reused_training_record)
                     print(f"  Fold {fold_id}: reused completed fitted state")
                     continue
             pending_states.append((candidate_key, state))
@@ -2159,6 +2205,7 @@ def run_tabm_cv(
             fold_t0 = time.perf_counter()
             seed_everything(seed + fd["fold"])
             fold_prediction_frame = None
+            fold_training_record = None
             if is_tabpfn:
                 try:
                     preds = _run_tabpfn_fold(
@@ -2218,17 +2265,16 @@ def run_tabm_cv(
                         state["prediction_frames"].append(fold_prediction_frame)
 
                     fold_elapsed = time.perf_counter() - fold_t0
-                    training_log.append(
-                        {
-                            "config": candidate_key,
-                            "fold": fd["fold"],
-                            "elapsed_s": round(fold_elapsed, 1),
-                            "n_train": fd["n_train"],
-                            "n_val": fd["n_val"],
-                            "best_ic": round(ic, 4),
-                            "n_checkpoints": 1,
-                        }
-                    )
+                    fold_training_record = {
+                        "config": candidate_key,
+                        "fold": fd["fold"],
+                        "elapsed_s": round(fold_elapsed, 1),
+                        "n_train": fd["n_train"],
+                        "n_val": fd["n_val"],
+                        "best_ic": round(ic, 4),
+                        "n_checkpoints": 1,
+                    }
+                    training_log.append(fold_training_record)
                     print(f"    Fold {fd['fold']}: IC={ic:+.4f} ({fold_elapsed:.1f}s)")
                 except ImportError:
                     if int(fd["fold"]) == int(splits[0]["fold"]):
@@ -2356,26 +2402,32 @@ def run_tabm_cv(
                     str(k): round(epoch_losses.get(k, 0.0), 6)
                     for k in sorted(checkpoint_ics.keys())
                 }
-                training_log.append(
-                    {
-                        "config": candidate_key,
-                        "fold": fd["fold"],
-                        "elapsed_s": round(fold_elapsed, 1),
-                        "n_train": fd["n_train"],
-                        "n_val": fd["n_val"],
-                        "best_ic": round(checkpoint_ics[best_ep], 4),
-                        "n_checkpoints": len(checkpoint_ics),
-                        "checkpoint_ics": {str(k): round(v, 4) for k, v in checkpoint_ics.items()},
-                        "checkpoint_losses": loss_at_checkpoints,
-                    }
-                )
+                fold_training_record = {
+                    "config": candidate_key,
+                    "fold": fd["fold"],
+                    "elapsed_s": round(fold_elapsed, 1),
+                    "n_train": fd["n_train"],
+                    "n_val": fd["n_val"],
+                    "best_ic": round(checkpoint_ics[best_ep], 4),
+                    "n_checkpoints": len(checkpoint_ics),
+                    "checkpoint_ics": {str(k): round(v, 4) for k, v in checkpoint_ics.items()},
+                    "checkpoint_losses": loss_at_checkpoints,
+                }
+                training_log.append(fold_training_record)
                 print(
                     f"    Fold {fd['fold']}: best_ep={best_ep}, "
                     f"IC={checkpoint_ics[best_ep]:+.4f} ({fold_elapsed:.1f}s)"
                 )
             if _recovery is not None and fold_prediction_frame is not None:
                 try:
-                    _recovery.complete(candidate_key, int(fd["fold"]), fold_prediction_frame)
+                    if fold_training_record is None:
+                        raise RuntimeError("TabM fold completed without a training record")
+                    _recovery.complete(
+                        candidate_key,
+                        int(fd["fold"]),
+                        fold_prediction_frame,
+                        fold_training_record,
+                    )
                 except Exception as error:
                     state["available"] = False
                     state["error"] = error
