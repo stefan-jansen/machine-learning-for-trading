@@ -1001,6 +1001,7 @@ def register_backtest_run(
     stored_strategy_spec.pop("_runtime_backtest_config", None)
     spec_json_str = canonical_json(stored_strategy_spec)
     existing_strategy_spec: dict | None = None
+    existing_backtest = False
 
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
@@ -1014,6 +1015,7 @@ def register_backtest_run(
         finally:
             db.close()
         if existing is not None:
+            existing_backtest = True
             existing_spec = json.loads(existing[1] or "{}")
             same_identity = canonical_json(
                 _hashable_strategy_spec(existing_spec)
@@ -1025,47 +1027,61 @@ def register_backtest_run(
 
             from case_studies.utils.artifact_digest import value_digest
 
-            existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
-            if returns is not None:
-                new_returns = (
-                    returns if isinstance(returns, pl.DataFrame) else pl.from_pandas(returns)
-                )
-                if existing_returns.exists() and value_digest(
-                    pl.read_parquet(existing_returns)
-                ) != value_digest(new_returns):
+            artifact_values = {
+                "daily_returns.parquet": returns,
+                "trades.parquet": trades,
+                "fills.parquet": fills,
+                "equity.parquet": equity,
+                "portfolio_state.parquet": portfolio_state,
+                "weights.parquet": weights,
+            }
+            for filename, value in artifact_values.items():
+                if value is None:
+                    continue
+                new_frame = value if isinstance(value, pl.DataFrame) else pl.from_pandas(value)
+                existing_path = _backtest_dir(case_dir, b_hash) / filename
+                if existing_path.exists() and value_digest(
+                    pl.read_parquet(existing_path)
+                ) != value_digest(new_frame):
                     raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
+            existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
             if existing_returns.exists() and existing[2]:
                 return b_hash
 
     # Write spec.json
     bt_dir = _backtest_dir(case_dir, b_hash)
-    _save_json(
-        bt_dir / "spec.json",
-        existing_strategy_spec if existing_strategy_spec is not None else strategy_spec,
-    )
+    if not (bt_dir / "spec.json").exists():
+        _save_json(
+            bt_dir / "spec.json",
+            existing_strategy_spec if existing_strategy_spec is not None else strategy_spec,
+        )
 
     # Save returns
-    if returns is not None:
+    if returns is not None and not (
+        existing_backtest and (bt_dir / "daily_returns.parquet").exists()
+    ):
         _save_parquet(bt_dir / "daily_returns.parquet", returns)
 
     # Save trade log
-    if trades is not None:
+    if trades is not None and not (existing_backtest and (bt_dir / "trades.parquet").exists()):
         _save_parquet(bt_dir / "trades.parquet", trades)
 
     # Save fill-level execution records
-    if fills is not None:
+    if fills is not None and not (existing_backtest and (bt_dir / "fills.parquet").exists()):
         _save_parquet(bt_dir / "fills.parquet", fills)
 
     # Save bar-level equity curve
-    if equity is not None:
+    if equity is not None and not (existing_backtest and (bt_dir / "equity.parquet").exists()):
         _save_parquet(bt_dir / "equity.parquet", equity)
 
     # Save bar-level portfolio state
-    if portfolio_state is not None:
+    if portfolio_state is not None and not (
+        existing_backtest and (bt_dir / "portfolio_state.parquet").exists()
+    ):
         _save_parquet(bt_dir / "portfolio_state.parquet", portfolio_state)
 
     # Save target weights
-    if weights is not None:
+    if weights is not None and not (existing_backtest and (bt_dir / "weights.parquet").exists()):
         _save_parquet(bt_dir / "weights.parquet", weights)
 
     # Defensive: compute per-backtest uncertainty inline from daily

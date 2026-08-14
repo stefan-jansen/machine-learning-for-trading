@@ -681,6 +681,52 @@ def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
         )
 
 
+def test_backtest_retry_rejects_changed_existing_execution_artifacts(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    original_trades = pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]})
+    changed_trades = pl.DataFrame({"symbol": ["SPY"], "pnl": [2.0]})
+    strategy = {
+        "identity_version": 3,
+        "execution_tier": "canonical",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+    }
+
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        strategy,
+        stage="signal",
+        returns=returns,
+        trades=original_trades,
+        metrics={"sharpe": 1.0},
+        case_dir=study.root,
+    )
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
+        db.commit()
+
+    with pytest.raises(ValueError, match="immutable backtest artifact conflict"):
+        register_backtest_run(
+            "etfs",
+            prediction_hash,
+            strategy,
+            stage="signal",
+            returns=returns,
+            trades=changed_trades,
+            metrics={"sharpe": 1.0},
+            case_dir=study.root,
+        )
+
+    stored_trades = pl.read_parquet(
+        study.root / "run_log" / "backtest" / backtest_hash / "trades.parquet"
+    )
+    assert stored_trades.equals(original_trades)
+
+
 def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Path) -> None:
     release = _seed_release(tmp_path)
     release_case = release / "case_studies" / "etfs"

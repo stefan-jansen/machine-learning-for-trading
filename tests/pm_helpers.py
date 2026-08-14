@@ -893,6 +893,7 @@ def run_notebook(
     cwd: Path | None = None,
     kernel_python: str | None = None,
     kernel_launcher: Path | None = None,
+    research_preview: bool = False,
 ) -> dict:
     """Execute a notebook via Papermill with parameter injection.
 
@@ -913,6 +914,7 @@ def run_notebook(
         kernel_python: Interpreter to execute with, when the notebook needs an
             environment other than the one running pytest
         kernel_launcher: Optional launcher script for that interpreter
+        research_preview: Inject preview tier and workspace for migrated Study notebooks
 
     Returns:
         Dict with keys: status ("ok" or "error"), error (str if failed),
@@ -924,7 +926,8 @@ def run_notebook(
 
     start = time.time()
     nb_name = py_path.stem
-    parameters = research_preview_parameters(py_path, parameters, output_dir)
+    if research_preview:
+        parameters = research_preview_parameters(py_path, parameters, output_dir)
 
     def _log(msg: str) -> None:
         if log_path:

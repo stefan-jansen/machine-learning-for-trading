@@ -1000,6 +1000,35 @@ def test_reduced_harness_injects_only_migrated_study_preview_parameters(
     assert legacy_parameters == {"MAX_FOLDS": 1}
 
 
+def test_run_notebook_requires_explicit_research_preview_opt_in(
+    tmp_path: Path, monkeypatch
+) -> None:
+    py = tmp_path / "06_model.py"
+    py.write_text(
+        '# %% tags=["parameters"]\nEXECUTION_TIER = "canonical"\nWORKSPACE = None\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pm_helpers, "sync_notebook", lambda path: path.with_suffix(".ipynb"))
+    _fake_papermill(monkeypatch)
+    calls: list[Path] = []
+
+    def inject(py_path: Path, parameters: dict | None, output_dir: Path | None) -> dict:
+        calls.append(py_path)
+        return dict(parameters or {})
+
+    monkeypatch.setattr(pm_helpers, "research_preview_parameters", inject)
+
+    pm_helpers.run_notebook(py, output_dir=tmp_path / "canonical")
+    assert calls == []
+
+    pm_helpers.run_notebook(
+        py,
+        output_dir=tmp_path / "preview",
+        research_preview=True,
+    )
+    assert calls == [py]
+
+
 def test_notebook_worker_caps_the_same_pools(tmp_path: Path, monkeypatch) -> None:
     """The full-execution path builds its own env table, so it can drift from
     run_notebook's. Both read one table, and this is what notices if they stop."""

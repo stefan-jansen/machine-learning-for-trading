@@ -227,6 +227,7 @@ def main():
                 parameters=parameters,
                 timeout=timeout,
                 output_dir=output_dir,
+                research_preview=False,
             )
 
             elapsed = time.time() - start
