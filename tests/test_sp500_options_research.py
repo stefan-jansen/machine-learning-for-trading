@@ -185,9 +185,16 @@ def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: P
         max_symbols=2,
         max_sessions=5,
     )
+    replayed = _seed_real_preview_prediction(
+        study,
+        source_prediction_hash=source_hash,
+        max_symbols=2,
+        max_sessions=5,
+    )
     computation = prediction.lineage()["training_spec"]["computation"]
 
     assert prediction.complete
+    assert replayed.hash == prediction.hash
     assert prediction.execution_tier == "preview"
     assert prediction.load().shape == (10, 5)
     assert computation["input_data_spec"]["source_prediction_hash"] == source_hash
