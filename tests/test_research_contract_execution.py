@@ -430,6 +430,28 @@ def test_backtest_population_precedes_writes_and_retry_reuses_completed_results(
     assert retried.population.require_complete() == tuple(sorted(planned.expected_hashes))
     assert [result.hash for result in retried.results] == list(planned.expected_hashes)
 
+    interrupted_hash = retried.results[0].hash
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "DELETE FROM backtest_metrics WHERE backtest_hash = ?",
+            (interrupted_hash,),
+        )
+        db.commit()
+    with pytest.raises(ValueError, match="partial"):
+        retried.population.require_complete()
+
+    repaired = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+        population_name="planned-backtests",
+    )
+
+    assert [item["status"] for item in repaired.diagnostics] == ["completed", "reused"]
+    assert repaired.population is not None
+    assert repaired.population.require_complete() == tuple(sorted(planned.expected_hashes))
+
 
 def test_strategy_change_creates_a_backtest_without_retraining(tmp_path: Path) -> None:
     study = _study(tmp_path)
@@ -496,6 +518,7 @@ def test_custom_stateful_decision_backtests_but_requires_promotion_for_candidate
     )
     result = execution.results[0]
 
+    assert execution.population is None
     assert result.spec()["decision_artifact"]["hash"] == artifact.hash
     assert result.spec()["decision_artifact"]["state_transition_policy"] == {
         "fold_boundary": "liquidate",
@@ -509,6 +532,16 @@ def test_custom_stateful_decision_backtests_but_requires_promotion_for_candidate
             name="exploratory-decision",
             member_kind="backtest",
             members=[result.hash],
+        )
+    with pytest.raises(ValueError, match="exploratory.*official population"):
+        run_backtests(
+            study,
+            predictions=selected,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            prices=_prices(),
+            execution_mode="vectorized",
+            decision=artifact,
+            population_name="exploratory-must-not-be-official",
         )
 
 
@@ -662,6 +695,37 @@ def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Pat
     assert isinstance(relocated_prediction, PredictionResult)
     assert relocated_prediction.root == release_case
     assert relocated_prediction.load().height == _predictions().height
+
+
+def test_workspace_can_freeze_and_rank_a_released_backtest(tmp_path: Path) -> None:
+    release = _seed_release(tmp_path)
+    release_case = release / "case_studies" / "etfs"
+    prediction_hash = _publish(release_case, spec=_resolved_spec())
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {
+            "identity_version": 2,
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=returns,
+        metrics={"sharpe": 1.0},
+        case_dir=release_case,
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    selected = study.backtests.table().filter(pl.col("backtest_hash") == backtest_hash)
+
+    frozen = study.backtests.freeze(selected, name="released-backtest")
+    ranked = frozen.ranked_validation_sharpe()
+
+    assert selected.item(0, "origin") == "released"
+    assert ranked[0].hash == backtest_hash
+    assert ranked[0].origin == "released"
 
 
 def test_quick_start_uses_human_fields_and_exposes_lineage_within_budget(tmp_path: Path) -> None:

@@ -320,7 +320,8 @@ def run_backtests(
         decision=decision,
     )
     population = None
-    if plan.execution_tier is ExecutionTier.CANONICAL:
+    canonical_decision = decision is None or decision.canonical
+    if plan.execution_tier is ExecutionTier.CANONICAL and canonical_decision:
         ordered_hashes = tuple(sorted(plan.expected_hashes))
         if population_name is None:
             suffix = compute_hash(canonical_json({"members": list(ordered_hashes)}))
@@ -332,7 +333,8 @@ def run_backtests(
             members=ordered_hashes,
         )
     elif population_name is not None:
-        raise ValueError("preview backtests cannot create an official population")
+        ancestry = "preview" if plan.execution_tier is ExecutionTier.PREVIEW else "exploratory"
+        raise ValueError(f"{ancestry} backtests cannot create an official population")
     for item in resolved:
         _import_released_prediction(study, item.prediction)
 

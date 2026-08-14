@@ -1005,8 +1005,10 @@ def register_backtest_run(
         db = _open_registry(case_dir)
         try:
             existing = db.execute(
-                "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
-                (b_hash,),
+                "SELECT prediction_hash, spec_json, "
+                "EXISTS(SELECT 1 FROM backtest_metrics m WHERE m.backtest_hash = ?) "
+                "FROM backtest_runs WHERE backtest_hash = ?",
+                (b_hash, b_hash),
             ).fetchone()
         finally:
             db.close()
@@ -1026,11 +1028,12 @@ def register_backtest_run(
                 new_returns = (
                     returns if isinstance(returns, pl.DataFrame) else pl.from_pandas(returns)
                 )
-                if not existing_returns.exists() or value_digest(
+                if existing_returns.exists() and value_digest(
                     pl.read_parquet(existing_returns)
                 ) != value_digest(new_returns):
                     raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
-            return b_hash
+            if existing_returns.exists() and existing[2]:
+                return b_hash
 
     # Write spec.json
     bt_dir = _backtest_dir(case_dir, b_hash)
