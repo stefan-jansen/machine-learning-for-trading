@@ -853,6 +853,35 @@ def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[
     return kernel_name, root
 
 
+def research_preview_parameters(
+    py_path: Path,
+    parameters: dict | None,
+    output_dir: Path | None,
+) -> dict:
+    """Route migrated Study notebooks to the isolated reduced-run workspace."""
+    resolved = dict(parameters or {})
+    if output_dir is None:
+        return resolved
+    source = py_path.read_text(encoding="utf-8")
+    parameter_bounds = next(
+        (
+            (first_line, last_line)
+            for header, first_line, last_line in _percent_cell_bounds(source)
+            if PARAMETERS_CELL_MARKER in header
+        ),
+        None,
+    )
+    if parameter_bounds is None:
+        return resolved
+    first_line, last_line = parameter_bounds
+    tree = ast.parse(source, filename=str(py_path))
+    declared = {name for name, line in _top_level_bindings(tree) if first_line <= line <= last_line}
+    if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
+        resolved["EXECUTION_TIER"] = "preview"
+        resolved["WORKSPACE"] = str(output_dir.resolve())
+    return resolved
+
+
 def run_notebook(
     py_path: Path,
     parameters: dict | None = None,
@@ -895,6 +924,7 @@ def run_notebook(
 
     start = time.time()
     nb_name = py_path.stem
+    parameters = research_preview_parameters(py_path, parameters, output_dir)
 
     def _log(msg: str) -> None:
         if log_path:

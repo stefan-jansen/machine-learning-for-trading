@@ -17,6 +17,7 @@ from case_studies.research import (
     Result,
     StateTransitionPolicy,
     Study,
+    plan_backtests,
     run_backtests,
     run_models,
 )
@@ -168,6 +169,39 @@ def test_catalog_one_reports_fields_that_disambiguate_matches(tmp_path: Path) ->
         study.predictions.one(config_name="ridge")
 
 
+def test_prediction_catalog_freezes_only_authoritative_polars_rows(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+
+    frozen = study.predictions.freeze(selected, name="visible-model-selection")
+
+    assert frozen.member_kind == "prediction"
+    assert frozen.members == tuple(sorted((first, second)))
+    assert CandidateSet.one(study, name="visible-model-selection").hash == frozen.hash
+    altered = selected.with_columns(pl.lit("altered-training").alias("training_hash"))
+    with pytest.raises(ValueError, match="altered lineage.*training_hash"):
+        study.predictions.freeze(altered, name="altered")
+    with pytest.raises(ValueError, match="duplicate.*ambiguous"):
+        study.predictions.freeze(pl.concat([selected, selected]), name="duplicate")
+
+    training = study.results.register_training(_resolved_spec(alpha=3.0))
+    frame = _predictions()
+    partial = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=3,
+        split="validation",
+        predictions=frame.head(1),
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+        allow_partial=True,
+    )
+    partial_selection = study.predictions.table().filter(pl.col("prediction_hash") == partial.hash)
+    with pytest.raises(ValueError, match="partial"):
+        study.predictions.freeze(partial_selection, name="partial")
+
+
 def test_version_3_candidate_protocol_uses_computation_cv_identity(tmp_path: Path) -> None:
     study = _study(tmp_path)
     first_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
@@ -198,10 +232,203 @@ def test_n_catalog_rows_fan_out_to_n_independent_backtests(tmp_path: Path) -> No
     assert len({result.hash for result in execution.results}) == 2
     assert {item["prediction_hash"] for item in execution.diagnostics} == {first, second}
     assert _backtest_count(study) == 2
-    candidate_set = CandidateSet.create(study, "two-backtests", execution.results)
+    assert execution.population is not None
+    assert execution.population.require_complete() == tuple(
+        sorted(result.hash for result in execution.results)
+    )
+    assert "backtest_hash" in execution.catalog_rows.columns
+    assert execution.catalog_rows.height == 2
+    assert set(execution.catalog_rows["prediction_hash"]) == {first, second}
+    candidate_set = study.backtests.freeze(
+        execution.catalog_rows,
+        name="two-backtests",
+    )
+    with pytest.raises(ValueError, match="disambiguate.*checkpoint_value"):
+        study.backtests.one(config_name="ridge")
+    with pytest.raises(ValueError, match="required identity columns"):
+        study.backtests.freeze(
+            execution.catalog_rows.drop("training_hash"),
+            name="missing-backtest-lineage",
+        )
     assert CandidateSet.one(study, name="two-backtests").hash == candidate_set.hash
     assert len(candidate_set.ranked_validation_sharpe()) == 2
     assert len(candidate_set.ranked_validation_sharpe(limit=1)) == 1
+
+
+def test_backtest_catalog_is_typed_and_filters_nested_model_and_strategy_fields(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    selected = study.predictions.table().filter(pl.col("prediction_hash") == prediction_hash)
+
+    execution = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+        allocation={"method": "equal_weight"},
+    )
+    catalog = study.backtests.table()
+    filtered = catalog.filter(
+        (pl.col("model__params__alpha") == 1.0)
+        & (pl.col("strategy__signal__top_k") == 1)
+        & (pl.col("strategy__allocation__method") == "equal_weight")
+    )
+
+    assert filtered.height == 1
+    assert filtered.item(0, "backtest_hash") == execution.results[0].hash
+    assert filtered.item(0, "completion_state") == "complete"
+    assert filtered.item(0, "complete") is True
+    assert filtered.schema["model__params__alpha"] == pl.Float64
+    assert filtered.schema["strategy__signal__top_k"] == pl.Int64
+    assert filtered.schema["sharpe"] == pl.Float64
+    assert filtered.item(0, "spec_json") == execution.results[0].registry_record()["spec_json"]
+    altered = filtered.with_columns(pl.lit("wrong-prediction").alias("prediction_hash"))
+    with pytest.raises(ValueError, match="altered lineage.*prediction_hash"):
+        study.backtests.freeze(altered, name="altered-backtest")
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "DELETE FROM backtest_metrics WHERE backtest_hash = ?",
+            (execution.results[0].hash,),
+        )
+        db.commit()
+    partial = study.backtests.table().filter(pl.col("backtest_hash") == execution.results[0].hash)
+    with pytest.raises(ValueError, match="partial"):
+        study.backtests.freeze(partial, name="partial-backtest")
+
+
+def test_backtest_planning_resolves_every_identity_without_writes(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+
+    plan = plan_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+
+    assert len(plan.members) == 2
+    assert len(set(plan.expected_hashes)) == 2
+    assert {member.prediction_hash for member in plan.members} == {first, second}
+    assert _backtest_count(study) == 0
+
+
+def test_explicit_backtest_bridge_preserves_strategy_identity_and_returns(tmp_path: Path) -> None:
+    direct_study = _study(tmp_path / "direct")
+    direct_prediction_hash = _publish_prediction(
+        direct_study,
+        alpha=1.0,
+        checkpoint=1,
+    )
+    direct_prediction = Result.open(direct_study, direct_prediction_hash)
+    assert isinstance(direct_prediction, PredictionResult)
+    direct_strategy = direct_study.strategy(
+        prediction=direct_prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+    )
+    expected_identity = direct_strategy.identity(prices=_prices())
+    direct_result = direct_strategy.run(prices=_prices())
+
+    explicit_study = _study(tmp_path / "explicit")
+    explicit_prediction_hash = _publish_prediction(
+        explicit_study,
+        alpha=1.0,
+        checkpoint=1,
+    )
+    selected = explicit_study.predictions.table().filter(
+        pl.col("prediction_hash") == explicit_prediction_hash
+    )
+    plan = plan_backtests(
+        explicit_study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+    explicit_result = run_backtests(
+        explicit_study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    ).results[0]
+
+    assert plan.expected_hashes == (expected_identity,)
+    assert direct_result.hash == explicit_result.hash == expected_identity
+    direct_returns = (
+        direct_result.root / "run_log" / "backtest" / direct_result.hash / "daily_returns.parquet"
+    )
+    explicit_returns = (
+        explicit_result.root
+        / "run_log"
+        / "backtest"
+        / explicit_result.hash
+        / "daily_returns.parquet"
+    )
+    assert pl.read_parquet(direct_returns).equals(pl.read_parquet(explicit_returns))
+
+
+def test_backtest_population_precedes_writes_and_retry_reuses_completed_results(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from case_studies.research.strategy import Strategy
+
+    study = _study(tmp_path)
+    first = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    second = _publish_prediction(study, alpha=2.0, checkpoint=2)
+    selected = study.predictions.table().filter(pl.col("prediction_hash").is_in([first, second]))
+    planned = plan_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+    )
+    original_run = Strategy.run
+    calls = 0
+    observed_population_hash = None
+
+    def fail_second(self, *, prices=None):
+        nonlocal calls, observed_population_hash
+        calls += 1
+        population = OfficialPopulation.one(study, name="planned-backtests")
+        observed_population_hash = population.hash
+        assert population.members == tuple(sorted(planned.expected_hashes))
+        if calls == 1:
+            assert _backtest_count(study) == 0
+            return original_run(self, prices=prices)
+        raise RuntimeError("induced second backtest failure")
+
+    monkeypatch.setattr(Strategy, "run", fail_second)
+    with pytest.raises(RuntimeError, match="induced second backtest failure"):
+        run_backtests(
+            study,
+            predictions=selected,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            prices=_prices(),
+            population_name="planned-backtests",
+        )
+
+    population = OfficialPopulation.open(study, str(observed_population_hash))
+    with pytest.raises(ValueError, match="missing"):
+        population.require_complete()
+    assert _backtest_count(study) == 1
+
+    monkeypatch.setattr(Strategy, "run", original_run)
+    retried = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+        population_name="planned-backtests",
+    )
+
+    assert retried.population_hash == observed_population_hash
+    assert [item["status"] for item in retried.diagnostics] == ["reused", "completed"]
+    assert retried.population is not None
+    assert retried.population.require_complete() == tuple(sorted(planned.expected_hashes))
+    assert [result.hash for result in retried.results] == list(planned.expected_hashes)
 
 
 def test_strategy_change_creates_a_backtest_without_retraining(tmp_path: Path) -> None:
@@ -307,13 +534,50 @@ def test_preview_prediction_is_excluded_from_official_population(
     )
 
     assert study.predictions.table().is_empty()
-    assert study.predictions.table(include_preview=True).height == 1
+    preview_selection = study.predictions.table(include_preview=True)
+    assert preview_selection.height == 1
+    with pytest.raises(ValueError, match="preview.*candidate set"):
+        study.predictions.freeze(preview_selection, name="preview-must-not-freeze")
     with pytest.raises(ValueError, match="preview.*cannot enter"):
         OfficialPopulation.create(
             study,
             name="preview-must-not-enter-official",
             member_kind="prediction",
             members=[preview.hash],
+        )
+    preview_returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    preview_backtest_hash = register_backtest_run(
+        "etfs",
+        preview.hash,
+        {
+            "identity_version": 2,
+            "execution_tier": "preview",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=preview_returns,
+        metrics={"sharpe": 1.0},
+        case_dir=preview.root,
+    )
+    preview_backtest_rows = study.backtests.table(include_preview=True).filter(
+        pl.col("backtest_hash") == preview_backtest_hash
+    )
+    assert preview_backtest_rows.item(0, "complete") is True
+    with pytest.raises(ValueError, match="preview.*candidate set"):
+        study.backtests.freeze(
+            preview_backtest_rows,
+            name="preview-backtest-must-not-freeze",
+        )
+    with pytest.raises(ValueError, match="preview.*official population"):
+        run_backtests(
+            study,
+            predictions=preview_selection,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            prices=_prices(),
+            execution_mode="vectorized",
+            population_name="preview-not-official",
         )
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         assert db.execute("SELECT COUNT(*) FROM official_populations").fetchone() == (0,)
@@ -385,7 +649,10 @@ def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Pat
     reopened = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
 
     assert len(execution.results) == 1
+    assert execution.catalog_rows.item(0, "complete") is True
+    assert execution.catalog_rows.item(0, "origin") == "workspace"
     assert _backtest_count(reopened) == 1
+    assert reopened.backtests.table().item(0, "complete") is True
     assert reopened.predictions.table().item(0, "origin") == "released"
     assert _tree_digest(release_case) == before
 
