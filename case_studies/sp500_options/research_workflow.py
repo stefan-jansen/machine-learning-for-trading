@@ -59,15 +59,10 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
     workspace = Path(workspace).expanduser().resolve()
-    try:
-        return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
-    except ValueError as error:
-        generated = tuple(
-            REPO_ROOT / "case_studies" / CASE_STUDY / name
-            for name in ("features", "labels", "run_log")
-        )
-        if "artifact bundle" not in str(error) or not all(path.is_symlink() for path in generated):
-            raise
+    generated = tuple(
+        REPO_ROOT / "case_studies" / CASE_STUDY / name for name in ("features", "labels", "run_log")
+    )
+    if all(path.is_symlink() for path in generated):
         workspace.mkdir(parents=True, exist_ok=True)
         shared_config = workspace / "config"
         if not shared_config.exists():
@@ -89,6 +84,7 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
                 "preview_only": True,
             },
         )
+    return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
 
 
 def selected_prediction(study: Study, catalog_row: dict[str, Any]) -> PredictionResult:
@@ -236,6 +232,9 @@ def _clean_replay_digests(
     requests: list[dict[str, Any]],
 ) -> dict[str, str]:
     """Replay a complete decision request set in a fresh interpreter."""
+    tiers = {str(request["execution_tier"]) for request in requests}
+    if len(tiers) != 1:
+        raise ValueError("clean option decision replay cannot mix execution tiers")
     payload = {
         "study": {
             "case_study": study.case_study,
@@ -244,6 +243,7 @@ def _clean_replay_digests(
             "output_root": str(study.output_root) if study.output_root is not None else None,
             "manifest": study.manifest,
         },
+        "execution_tier": tiers.pop(),
         "requests": requests,
     }
     completed = subprocess.run(
@@ -346,6 +346,7 @@ def run_official_backtest_requests(
                 "label": row["label"],
                 "signal": row["signal"],
                 "allocation": allocation,
+                "execution_tier": prediction.execution_tier,
             }
         )
     replay_digests = _clean_replay_digests(study, replay_requests)
@@ -444,7 +445,7 @@ def _replay_from_stdin() -> None:
         read_only=False,
         manifest=descriptor["manifest"],
     )
-    study.activate()
+    study.activate(payload["execution_tier"])
     catalog = study.predictions.table(include_preview=True)
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     replayed = []

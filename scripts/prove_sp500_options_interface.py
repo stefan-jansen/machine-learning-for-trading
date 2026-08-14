@@ -182,6 +182,7 @@ def main() -> None:
                 "label": "ret_to_expiry",
                 "signal": signal,
                 "allocation": None,
+                "execution_tier": prediction.execution_tier,
             }
         ],
     )
