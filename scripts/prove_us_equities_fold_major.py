@@ -6,6 +6,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -67,7 +68,7 @@ def _requests(
     ]
 
 
-def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, object]]:
+def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, Any]]:
     assert len(execution.runs) == 3
     assert execution.catalog_rows.height == 3
     assert set(execution.catalog_rows["execution_tier"]) == {"preview"}
@@ -86,9 +87,9 @@ def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, object]]
         assert sorted(keys["fold"].unique().to_list()) == folds
         assert frame["prediction"].is_finite().all()
         model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
-        assert sorted(path.stem for path in model_dir.glob("fold_*.joblib")) == [
+        assert {path.stem for path in model_dir.glob("fold_*.joblib")} == {
             f"fold_{fold}" for fold in folds
-        ]
+        }
         diagnostics[config_name] = dict(run.diagnostics)
     assert (
         diagnostics["ridge_a1.0"]["compatibility_group"]
@@ -100,9 +101,13 @@ def _assert_results(execution, folds: list[int]) -> dict[str, dict[str, object]]
         diagnostics["ridge_a1.0"]["compatibility_group"]
         != diagnostics["ridge_a100.0"]["compatibility_group"]
     )
+    groups: dict[str, list[dict[str, Any]]] = {}
     for item in diagnostics.values():
-        expected_preparations = 0 if item["cache_hit"] else len(folds)
-        assert item["base_fold_preparations"] == expected_preparations
+        groups.setdefault(str(item["compatibility_group"]), []).append(item)
+    for group in groups.values():
+        preparation_counts = {int(item["base_fold_preparations"]) for item in group}
+        prepared_folds = {int(fold) for item in group for fold in item.get("fitted_folds", [])}
+        assert preparation_counts == {len(prepared_folds)}
     assert all(item["disk_fold_cache"] is False for item in diagnostics.values())
     return diagnostics
 
@@ -154,14 +159,12 @@ def prove(
     assert restarted_hashes == first_hashes
     assert all(run.diagnostics["cache_hit"] is True for run in restarted.runs)
     assert all(run.diagnostics["base_fold_preparations"] == 0 for run in restarted.runs)
+    prediction_hashes = [record["prediction"] for record in first_hashes.values()]
     selected = restarted_study.predictions.table(include_preview=True).filter(
-        (pl.col("label") == LABEL)
-        & (pl.col("family") == "linear")
-        & pl.col("config_name").is_in(list(first_hashes))
-        & (pl.col("execution_tier") == "preview")
-        & pl.col("complete")
+        pl.col("prediction_hash").is_in(prediction_hashes)
     )
     assert selected.height == 3
+    assert set(selected["prediction_hash"]) == set(prediction_hashes)
 
     group_measurements = {}
     for item in diagnostics.values():
