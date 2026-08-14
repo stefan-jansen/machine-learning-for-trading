@@ -785,6 +785,7 @@ def run_latent_factor_cv(
                 fold_id=split["fold"],
                 model_name=model_name,
                 epoch=epoch,
+                entity_col=entity_col,
             )
             scored_frame = _score_prediction_frame(
                 frame,
@@ -792,7 +793,7 @@ def run_latent_factor_cv(
                 score_cadence=metric_policy["score_cadence"],
                 score_rebalance_step=metric_policy["score_rebalance_step"],
             )
-            ic, n_scored_dates = _compute_frame_ic(scored_frame)
+            ic, n_scored_dates = _compute_frame_ic(scored_frame, entity_col)
             checkpoint_ics[epoch] = ic
             state[model_name]["fold_ics"].append(
                 {
@@ -821,6 +822,7 @@ def run_latent_factor_cv(
             predictions=checkpoint_preds,
             model_input=model_input,
             model_name=model_name,
+            entity_col=entity_col,
         )
 
     if fold_workers > 1 and active_models:
@@ -1041,7 +1043,8 @@ def run_latent_factor_cv(
 def _frame_digest(frame: pl.DataFrame) -> str:
     """Return a stable digest of an ordered Polars frame and its schema."""
     columns = list(frame.columns)
-    key_cols = [column for column in ("fold", "timestamp", "symbol") if column in columns]
+    entity_col = "product" if "product" in columns else "symbol"
+    key_cols = [column for column in ("fold", "timestamp", entity_col) if column in columns]
     ordered = frame.sort(key_cols) if key_cols else frame
     row_hashes = ordered.hash_rows(seed=42).to_numpy()
     schema = [(column, str(ordered.schema[column])) for column in columns]
@@ -1408,7 +1411,7 @@ def _score_prediction_frame(
     )
 
 
-def _compute_frame_ic(frame: pl.DataFrame | None) -> tuple[float, int]:
+def _compute_frame_ic(frame: pl.DataFrame | None, entity_col: str) -> tuple[float, int]:
     if frame is None or frame.height == 0:
         return 0.0, 0
 
@@ -1419,12 +1422,12 @@ def _compute_frame_ic(frame: pl.DataFrame | None) -> tuple[float, int]:
 
     predictions = scored.select(
         pl.col("timestamp").alias("date"),
-        pl.col("symbol").alias("entity"),
+        pl.col(entity_col).alias("entity"),
         pl.col("y_score").alias("prediction"),
     )
     returns = scored.select(
         pl.col("timestamp").alias("date"),
-        pl.col("symbol").alias("entity"),
+        pl.col(entity_col).alias("entity"),
         pl.col(target_col).alias("forward_return"),
     )
     ic_result = cross_sectional_ic(
@@ -1452,6 +1455,7 @@ def _build_prediction_frame(
     fold_id: int,
     model_name: str,
     epoch: int,
+    entity_col: str = "symbol",
 ) -> pl.DataFrame | None:
     frames: list[pl.DataFrame] = []
     for date_idx in range(predictions.shape[0]):
@@ -1465,7 +1469,7 @@ def _build_prediction_frame(
             pl.DataFrame(
                 {
                     "timestamp": [timestamp] * int(valid.sum()),
-                    "symbol": [val_entities[date_idx, idx] for idx in np.nonzero(valid)[0]],
+                    entity_col: [val_entities[date_idx, idx] for idx in np.nonzero(valid)[0]],
                     "y_true": returns_val[date_idx, valid].astype(np.float64).tolist(),
                     "y_score": predictions[date_idx, valid].astype(np.float64).tolist(),
                     "fold_id": [fold_id] * int(valid.sum()),
@@ -1503,6 +1507,7 @@ def _write_incremental_fold(
     predictions: dict[int, np.ndarray],
     model_input: dict[str, Any],
     model_name: str,
+    entity_col: str,
 ) -> None:
     if model_dir is None:
         return
@@ -1519,6 +1524,7 @@ def _write_incremental_fold(
             fold_id=fold_id,
             model_name=model_name,
             epoch=epoch,
+            entity_col=entity_col,
         )
         if frame is not None:
             frames.append(frame)

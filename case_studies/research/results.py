@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
+
 from case_studies.utils.registry import register_prediction_set, register_training_run
 from case_studies.utils.registry.specs import (
     IDENTITY_VERSION,
@@ -284,6 +286,12 @@ class TrainingResult(Result):
     def complete(self) -> bool:
         if self.identity_version not in SUPPORTED_IDENTITY_VERSIONS or not self.spec():
             return False
+        spec_path = self.root / "run_log" / "training" / self.hash / "spec.json"
+        try:
+            if json.loads(spec_path.read_text()) != self.spec():
+                return False
+        except (OSError, json.JSONDecodeError):
+            return False
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             tables = {
                 row[0]
@@ -344,14 +352,22 @@ class PredictionResult(Result):
 
     @property
     def complete(self) -> bool:
+        from case_studies.utils.artifact_digest import value_digest
+
         coverage = self.coverage()
         prediction_file = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
         if (
             self.identity_version not in SUPPORTED_IDENTITY_VERSIONS
             or not coverage
             or coverage["status"] != "complete"
+            or not coverage.get("artifact_digest")
             or not prediction_file.is_file()
         ):
+            return False
+        try:
+            if value_digest(self.load()) != coverage["artifact_digest"]:
+                return False
+        except (OSError, ValueError, pl.exceptions.PolarsError):
             return False
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             headline = db.execute(
@@ -373,7 +389,17 @@ class PredictionResult(Result):
 class BacktestResult(Result):
     @property
     def complete(self) -> bool:
+        from case_studies.utils.artifact_digest import value_digest
+
         record = self.registry_record()
+        spec_path = self.root / "run_log" / "backtest" / self.hash / "spec.json"
+        try:
+            stored_spec = json.loads(spec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        stored_spec.pop("_runtime_backtest_config", None)
+        if stored_spec != self.spec():
+            return False
         prediction = Result.open(
             self.study,
             record["prediction_hash"],
@@ -386,7 +412,23 @@ class BacktestResult(Result):
             metrics = db.execute(
                 "SELECT 1 FROM backtest_metrics WHERE backtest_hash = ?", (self.hash,)
             ).fetchone()
-        return returns.is_file() and metrics is not None
+        try:
+            artifact_digests = json.loads(record.get("artifact_digests_json") or "")
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if (
+            not isinstance(artifact_digests, dict)
+            or "daily_returns.parquet" not in artifact_digests
+        ):
+            return False
+        for filename, expected_digest in artifact_digests.items():
+            path = returns.parent / filename
+            try:
+                if not path.is_file() or value_digest(pl.read_parquet(path)) != expected_digest:
+                    return False
+            except (OSError, ValueError, pl.exceptions.PolarsError):
+                return False
+        return metrics is not None
 
 
 class ResultsCatalog:

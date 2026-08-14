@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -14,6 +16,8 @@ from case_studies.utils.registry import (
     prediction_hash_from_parts,
     training_hash_from_spec,
 )
+from case_studies.utils.registry.completeness import evaluate_prediction_coverage
+from case_studies.utils.registry.registration import register_backtest_run
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
 
@@ -62,6 +66,25 @@ def _predictions() -> pl.DataFrame:
             "y_score": [0.02, -0.01],
         }
     ).with_columns(pl.col("timestamp").str.to_date())
+
+
+def test_prediction_coverage_preserves_cme_product_and_position_keys() -> None:
+    expected = pl.DataFrame(
+        {
+            "product": ["ES", "ES"],
+            "position": [1, 2],
+            "timestamp": ["2024-01-05", "2024-01-05"],
+            "fold": [0, 0],
+        }
+    )
+    predictions = expected.rename({"fold": "fold_id"}).with_columns(
+        pl.Series("y_score", [0.1, 0.2])
+    )
+
+    coverage = evaluate_prediction_coverage(expected, predictions)
+
+    assert coverage.complete
+    assert coverage.n_expected == 2
 
 
 def test_version_2_identity_is_semantic_and_legacy_hashes_are_pinned() -> None:
@@ -293,6 +316,134 @@ def test_version_2_registration_is_immutable(tmp_path: Path) -> None:
         )
 
     assert prediction.load().get_column("y_score").to_list() == [0.02, -0.01]
+
+
+def test_training_registration_preserves_conflicting_orphan_and_adopts_exact_retry(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    spec = _training_spec()
+    training_hash = training_hash_from_spec(spec)
+    artifact = study.root / "run_log" / "training" / training_hash / "spec.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    conflicting = {**spec, "seed": 99}
+    artifact.write_text(json.dumps(conflicting))
+
+    with pytest.raises(ValueError, match="training spec artifact conflict"):
+        study.results.register_training(spec)
+
+    assert json.loads(artifact.read_text()) == conflicting
+    artifact.write_text(json.dumps(spec))
+    training = study.results.register_training(spec)
+    assert training.hash == training_hash
+
+
+def test_prediction_registration_preserves_conflicting_orphan_and_adopts_exact_retry(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    expected = frame.select("symbol", "timestamp", "fold_id")
+    prediction_hash = prediction_hash_from_parts(
+        training.hash,
+        None,
+        "validation",
+        checkpoint_kind="final",
+        identity_version=2,
+    )
+    artifact = study.root / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    conflicting = frame.with_columns((pl.col("y_score") + 1).alias("y_score"))
+    conflicting.write_parquet(artifact)
+    conflicting_bytes = artifact.read_bytes()
+
+    with pytest.raises(ValueError, match="prediction artifact conflict"):
+        study.results.publish_predictions(
+            training,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+            split="validation",
+            predictions=frame,
+            expected_keys=expected,
+        )
+
+    assert artifact.read_bytes() == conflicting_bytes
+    assert pl.read_parquet(artifact).equals(conflicting)
+    frame.write_parquet(artifact)
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=expected,
+    )
+    assert prediction.hash == prediction_hash
+
+
+def test_backtest_registration_preserves_conflicting_orphan_and_adopts_exact_retry(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    result = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        execution_mode="vectorized",
+    ).run(
+        prices=pl.DataFrame(
+            {
+                "symbol": ["A", "B"],
+                "timestamp": [date(2024, 1, 5), date(2024, 1, 5)],
+                "open": [100.0, 100.0],
+                "high": [101.0, 101.0],
+                "low": [99.0, 99.0],
+                "close": [100.5, 99.5],
+                "volume": [1_000, 1_000],
+            }
+        )
+    )
+    artifact = study.root / "run_log" / "backtest" / result.hash / "daily_returns.parquet"
+    original = pl.read_parquet(artifact)
+    strategy_spec = result.spec()
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (result.hash,))
+        db.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (result.hash,))
+        db.commit()
+    conflicting = original.with_columns((pl.col("daily_return") + 0.01).alias("daily_return"))
+
+    with pytest.raises(ValueError, match="backtest artifact conflict"):
+        register_backtest_run(
+            "etfs",
+            prediction.hash,
+            strategy_spec,
+            returns=conflicting,
+            metrics={"sharpe": 0.0, "sharpe_se_lo": 0.0},
+            case_dir=study.root,
+        )
+
+    assert pl.read_parquet(artifact).equals(original)
+    assert (
+        register_backtest_run(
+            "etfs",
+            prediction.hash,
+            strategy_spec,
+            returns=original,
+            metrics={"sharpe": 0.0, "sharpe_se_lo": 0.0},
+            case_dir=study.root,
+        )
+        == result.hash
+    )
 
 
 def test_checkpoint_prediction_schema_must_match(tmp_path: Path) -> None:

@@ -100,7 +100,7 @@ def write_darts_checkpoint(
     return path
 
 
-def load_darts_checkpoint(path: Path):
+def load_darts_checkpoint(path: Path, *, device: str = "cpu"):
     """Load a Darts checkpoint after both persisted files pass their digests."""
     model_path, weights_path, sidecar_path = _darts_checkpoint_files(Path(path))
     if not all(item.is_file() for item in (model_path, weights_path, sidecar_path)):
@@ -120,7 +120,7 @@ def load_darts_checkpoint(path: Path):
         raise ValueError(f"unsupported Darts architecture at {model_path}")
     model = model_cls.load(
         str(model_path),
-        pl_trainer_kwargs=_trainer_kwargs("cpu"),
+        pl_trainer_kwargs=_trainer_kwargs(device),
         weights_only=False,
     )
     return model, record["metadata"]
@@ -694,6 +694,7 @@ def darts_validation_keys(
     date_col: str,
     entity_col: str,
     case_study: str,
+    calendar_id: str | None = None,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -702,12 +703,14 @@ def darts_validation_keys(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         config, _parse_label_horizon(label_col)
     )
-    from utils.cv_splits import make_walk_forward_config
+    if calendar_id is None:
+        from utils.cv_splits import make_walk_forward_config
 
+        calendar_id = make_walk_forward_config(case_study, date_col=date_col).calendar_id
     dataset_pd = _attach_expected_periods(
         dataset_pd.copy(),
         date_col=date_col,
-        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        calendar_id=calendar_id,
         case_study=case_study,
     )
     dataset_pd = _attach_darts_target(

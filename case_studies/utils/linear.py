@@ -80,6 +80,10 @@ class LinearContext:
     class_values: tuple[Any, ...]
     expected_keys: pl.DataFrame
     runtime_provenance: dict[str, Any]
+    prediction_split: str = "validation"
+    checkpoint_kind: str = "final"
+    checkpoint_value: int | None = None
+    immutable_recovery: bool = False
 
 
 @dataclass
@@ -189,12 +193,12 @@ def _expected_keys(folds: list[dict[str, Any]], entity_col: str, date_col: str) 
     frames = [
         pl.from_pandas(fold["meta"][[entity_col, date_col]])
         .with_columns(pl.lit(int(fold["fold"]), dtype=pl.Int64).alias("fold"))
-        .rename({entity_col: "symbol", date_col: "timestamp"})
-        .select("symbol", "timestamp", "fold")
+        .rename({date_col: "timestamp"})
+        .select(entity_col, "timestamp", "fold")
         for fold in folds
     ]
-    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
-    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
+    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
         raise ValueError("linear request produced duplicate expected prediction keys")
     return expected
 
@@ -291,14 +295,14 @@ def _expected_keys_from_dataset(
             )
             .select(entity_col, date_col)
             .with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
-            .rename({entity_col: "symbol", date_col: "timestamp"})
-            .select("symbol", "timestamp", "fold")
+            .rename({date_col: "timestamp"})
+            .select(entity_col, "timestamp", "fold")
         )
         if frame.is_empty():
             raise ValueError(f"linear request produced no validation keys for fold {split['fold']}")
         frames.append(frame)
-    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
-    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
+    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
         raise ValueError("linear request produced duplicate expected prediction keys")
     return expected
 
@@ -349,7 +353,7 @@ def _build_resolved_request(
         },
         "checkpoint_schedule": [{"kind": "final", "value": None}],
         "expected_prediction_keys": {
-            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+            "digest": value_digest(expected, tuple(expected.columns)),
             "n_rows": expected.height,
             "n_folds": expected.get_column("fold").n_unique(),
         },
@@ -501,13 +505,137 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def reconstruct_locked_request(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+):
+    """Reconstruct a linear holdout fit without consulting a mutable preset."""
+    from case_studies.research.models import (
+        ResolvedModelRequest,
+        locked_holdout_split,
+        validate_locked_expected_keys,
+    )
+
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+    if spec.get("seed") != 42:
+        raise ValueError("locked linear seed cannot be reproduced")
+    computation = spec["computation"]
+    sampling = computation.get("sampling")
+    if sampling != {"train_sample_frac": 1.0, "max_symbols": 0}:
+        raise ValueError("locked linear holdout requires an unreduced canonical dataset")
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("locked linear runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"locked linear runner does not support entity key {entity_col!r}")
+
+    expected_inputs = {
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": mds.input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "input_data_spec": mds.input_lineage,
+        "source_identity": _source_identity(),
+        "runtime_identity": _runtime_identity(),
+        "task": {
+            "type": mds.task_type,
+            "class_values": list(mds.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+        "preprocessing": {
+            "imputer": {"class": "SimpleImputer", "strategy": "median"},
+            "scaler": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        },
+        "checkpoint_schedule": [{"kind": "final", "value": None}],
+    }
+    for name, expected_value in expected_inputs.items():
+        if computation.get(name) != expected_value:
+            raise ValueError(f"locked linear {name} does not match the available computation")
+    if (checkpoint_kind, checkpoint_value) != ("final", None):
+        raise ValueError("linear holdout supports only the final checkpoint")
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
+        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+    expected = _expected_keys_from_dataset(
+        mds.dataset,
+        [split],
+        entity_col=entity_col,
+        date_col=mds.date_col,
+        label_col=mds.label_col,
+    )
+    validate_locked_expected_keys(spec, expected)
+    fold = prepare_single_fold(
+        mds.dataset,
+        split,
+        mds.feature_names,
+        mds.label_col,
+        mds.date_col,
+        entity_col,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=mds.temporal_keys,
+        temporal_feature_names=mds.temporal_feature_names,
+        train_sample_frac=1.0,
+        eval_label_col=mds.eval_label_col,
+    )
+    if fold is None:
+        raise ValueError("locked linear holdout fold could not be prepared")
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or model.get("class") not in _MODEL_CLASSES:
+        raise ValueError("locked linear model class cannot be reconstructed")
+    fold_id = str(split["fold"])
+    effective = model.get("effective_params_by_fold")
+    if not isinstance(effective, dict) or set(effective) != {fold_id}:
+        raise ValueError("locked linear model must declare parameters for the holdout fold")
+    params = effective[fold_id]
+    try:
+        reconstructed = _MODEL_CLASSES[model["class"]](**params).get_params(deep=True)
+    except TypeError as exc:
+        raise ValueError("locked linear model parameters cannot be reconstructed") from exc
+    if reconstructed != params:
+        raise ValueError("locked linear model parameters do not reproduce exactly")
+    expected_model = {
+        "class": model["class"],
+        "implementation": "scikit-learn",
+        "objective": "classification" if mds.task_type == "classification" else "regression",
+        "effective_params_by_fold": effective,
+    }
+    if model != expected_model:
+        raise ValueError("locked linear model specification is unsupported")
+
+    context = LinearContext(
+        folds=(fold,),
+        fold_ids=(int(split["fold"]),),
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=entity_col,
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        expected_keys=expected,
+        runtime_provenance=_runtime_provenance(study),
+        prediction_split="holdout",
+        checkpoint_kind=checkpoint_kind,
+        checkpoint_value=checkpoint_value,
+        immutable_recovery=True,
+    )
+    return ResolvedModelRequest(study, "linear", spec, context)
+
+
 def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> ModelRun | None:
     training_hash = training_hash_from_spec(spec)
     prediction_hash = prediction_hash_from_parts(
         training_hash,
-        None,
-        "validation",
-        checkpoint_kind="final",
+        context.checkpoint_value,
+        context.prediction_split,
+        checkpoint_kind=context.checkpoint_kind,
         identity_version=spec["identity_version"],
     )
     try:
@@ -537,6 +665,20 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LinearContext) -> M
         return None
     if any(_sha256(model_dir / name) != digest for name, digest in record["files"].items()):
         return None
+    if context.immutable_recovery:
+        ledger = ExecutionLedger(study, training.root)
+        shard_dir = training.root / "run_log" / "training" / training.hash / "prediction_folds"
+        for fold_id in context.fold_ids:
+            params = spec["computation"]["model"]["effective_params_by_fold"][str(fold_id)]
+            if not ledger.reusable_fold(
+                training_hash=training.hash,
+                candidate_identity=training.hash,
+                fold_id=fold_id,
+                fitted_state=model_dir / f"fold_{fold_id}.joblib",
+                prediction_shard=shard_dir / f"fold_{fold_id}.parquet",
+                resolved_settings=params,
+            ):
+                return None
     return ModelRun(
         training=training,
         predictions=(prediction,),
@@ -579,7 +721,7 @@ def _prediction_frame(
     )
     if fold.get("y_eval") is not None:
         frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
-    return frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"}).with_columns(
+    return frame.rename({context.date_col: "timestamp"}).with_columns(
         pl.col("timestamp").cast(context.expected_keys.schema["timestamp"])
     )
 
@@ -621,6 +763,51 @@ def _fit_or_reuse_fold(
         resolved_settings=params,
     ):
         return pl.read_parquet(shard), True, 0.0
+    completed = ledger.fold_completion_exists(
+        training_hash=training.hash,
+        candidate_identity=training.hash,
+        fold_id=fold_id,
+    )
+    if context.immutable_recovery and completed:
+        raise ValueError(f"locked linear fold {fold_id} has conflicting persisted artifacts")
+    if context.immutable_recovery and artifact.is_file() and shard.is_file():
+        try:
+            persisted = joblib.load(artifact)
+            if persisted.get("feature_names") != context.feature_names:
+                raise ValueError("feature identity changed")
+            recovered = _prediction_frame(
+                fold,
+                _fold_predictions(persisted["model"], fold, context),
+                context,
+            )
+            if not pl.read_parquet(shard).equals(recovered):
+                raise ValueError("prediction shard changed")
+            ledger.complete_fold(
+                training_hash=training.hash,
+                candidate_identity=training.hash,
+                fold_id=fold_id,
+                fitted_state=artifact,
+                prediction_shard=shard,
+                resolved_settings=params,
+            )
+            return recovered, True, 0.0
+        except Exception as exc:
+            raise ValueError(
+                f"locked linear fold {fold_id} has conflicting uncommitted artifacts"
+            ) from exc
+    if context.immutable_recovery and (artifact.exists() or shard.exists()):
+        incomplete = (
+            training.root
+            / "run_log"
+            / "training"
+            / training.hash
+            / "incomplete_folds"
+            / f"fold_{fold_id}.{uuid.uuid4().hex}"
+        )
+        incomplete.mkdir(parents=True)
+        for path in (artifact, shard):
+            if path.exists():
+                os.replace(path, incomplete / path.name)
 
     started = time.perf_counter()
     cls = _MODEL_CLASSES[spec["computation"]["model"]["class"]]
@@ -660,15 +847,18 @@ def _fit_or_reuse_fold(
     return frame, False, time.perf_counter() - started
 
 
-def _write_model_manifest(training: TrainingResult) -> None:
+def _write_model_manifest(training: TrainingResult, *, immutable: bool = False) -> None:
     model_dir = training.root / "run_log" / "training" / training.hash / "models"
     files = {path.name: _sha256(path) for path in sorted(model_dir.glob("fold_*.joblib"))}
     manifest = model_dir / "manifest.json"
+    record = {"files": files, "schema_version": 1}
+    if immutable and manifest.exists():
+        if json.loads(manifest.read_text()) != record:
+            raise ValueError("locked linear fitted-state manifest conflict")
+        return
     manifest_temp = model_dir / f".manifest.{uuid.uuid4().hex}.tmp"
     try:
-        manifest_temp.write_text(
-            json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
-        )
+        manifest_temp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         os.replace(manifest_temp, manifest)
     finally:
         manifest_temp.unlink(missing_ok=True)
@@ -692,8 +882,8 @@ def _fit_or_reuse_predictions(
         else:
             fitted_folds.append(fold_id)
 
-    _write_model_manifest(training)
-    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
+    _write_model_manifest(training, immutable=context.immutable_recovery)
+    predictions = pl.concat(prediction_frames).sort(context.entity_col, "timestamp", "fold")
     return predictions, reused_folds, fitted_folds
 
 
@@ -834,7 +1024,9 @@ def _finish_batch_candidate(study: Study, candidate: _BatchCandidate) -> None:
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_model_manifest(candidate.training)
-        predictions = pl.concat(candidate.frames).sort("symbol", "timestamp", "fold")
+        predictions = pl.concat(candidate.frames).sort(
+            candidate.context.entity_col, "timestamp", "fold"
+        )
         prediction = study.results.publish_predictions(
             candidate.training,
             checkpoint_kind="final",
@@ -1173,9 +1365,9 @@ def run_resolved_request(
         )
         prediction = study.results.publish_predictions(
             training,
-            checkpoint_kind="final",
-            checkpoint_value=None,
-            split="validation",
+            checkpoint_kind=context.checkpoint_kind,
+            checkpoint_value=context.checkpoint_value,
+            split=context.prediction_split,
             predictions=predictions,
             expected_keys=context.expected_keys,
             task_type=context.task_type,
@@ -1195,3 +1387,60 @@ def run_resolved_request(
     runtime_path = train_dir / "runtime.json"
     _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
     return ModelRun(training=training, predictions=(prediction,), diagnostics=diagnostics)
+
+
+def validate_locked_run(
+    study: Study,
+    spec: dict[str, Any],
+    context: LinearContext,
+    run: ModelRun,
+) -> str:
+    """Validate the persisted fit, prediction shard, and selected prediction."""
+    if run.training.hash != training_hash_from_spec(spec) or len(run.predictions) != 1:
+        raise ValueError("locked linear run has the wrong training or prediction identity")
+    prediction = run.predictions[0]
+    record = prediction.registry_record()
+    expected_checkpoint = (
+        context.prediction_split,
+        context.checkpoint_kind,
+        context.checkpoint_value,
+    )
+    if (
+        record["split"],
+        record["checkpoint_kind"],
+        record["checkpoint_value"],
+    ) != expected_checkpoint:
+        raise ValueError("locked linear run published the wrong checkpoint")
+    published = prediction.load().sort(context.entity_col, "timestamp", "fold")
+
+    training_dir = run.training.root / "run_log" / "training" / run.training.hash
+    model_dir = training_dir / "models"
+    manifest = model_dir / "manifest.json"
+    if not manifest.is_file():
+        raise ValueError("locked linear run has no fitted-state manifest")
+    manifest_record = json.loads(manifest.read_text())
+    expected_files = {f"fold_{fold_id}.joblib" for fold_id in context.fold_ids}
+    if set(manifest_record.get("files") or {}) != expected_files:
+        raise ValueError("locked linear fitted-state manifest has the wrong fold population")
+    ledger = ExecutionLedger(study, run.training.root)
+    shards = []
+    for fold_id in context.fold_ids:
+        params = spec["computation"]["model"]["effective_params_by_fold"][str(fold_id)]
+        artifact = model_dir / f"fold_{fold_id}.joblib"
+        shard = training_dir / "prediction_folds" / f"fold_{fold_id}.parquet"
+        if manifest_record["files"][artifact.name] != _sha256(artifact):
+            raise ValueError("locked linear fitted-state digest does not validate")
+        if not ledger.reusable_fold(
+            training_hash=run.training.hash,
+            candidate_identity=run.training.hash,
+            fold_id=fold_id,
+            fitted_state=artifact,
+            prediction_shard=shard,
+            resolved_settings=params,
+        ):
+            raise ValueError("locked linear completed-fold record does not validate")
+        shards.append(pl.read_parquet(shard))
+    reconstructed = pl.concat(shards).sort(context.entity_col, "timestamp", "fold")
+    if not reconstructed.equals(published):
+        raise ValueError("locked linear fitted state does not reproduce published predictions")
+    return hashlib.sha256(canonical_json(manifest_record).encode()).hexdigest()

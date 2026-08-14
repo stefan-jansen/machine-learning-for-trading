@@ -1515,15 +1515,15 @@ def test_model_adapters_reject_custom_cv_for_fold_scoped_temporal_features(
         ).resolve()
 
 
-def test_product_entity_is_normalized_at_prediction_boundary() -> None:
+def test_product_entity_remains_canonical_at_prediction_boundary() -> None:
     meta = pl.DataFrame(
         {"product": ["ES", "NQ"], "timestamp": ["2024-01-01", "2024-01-01"]}
     ).to_pandas()
 
     expected = linear._expected_keys([{"fold": 0, "meta": meta}], "product", "timestamp")
 
-    assert expected.columns == ["symbol", "timestamp", "fold"]
-    assert expected.get_column("symbol").to_list() == ["ES", "NQ"]
+    assert expected.columns == ["product", "timestamp", "fold"]
+    assert expected.get_column("product").to_list() == ["ES", "NQ"]
 
 
 def _gbm_study(tmp_path, monkeypatch):
