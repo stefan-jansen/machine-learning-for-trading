@@ -652,6 +652,13 @@ def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
         metrics={"sharpe": 1.0},
         case_dir=study.root,
     )
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        first_spec_json = db.execute(
+            "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?",
+            (first_hash,),
+        ).fetchone()[0]
+        db.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (first_hash,))
+        db.commit()
     second_hash = register_backtest_run(
         "etfs",
         prediction_hash,
@@ -663,6 +670,15 @@ def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
     )
 
     assert first_hash == second_hash
+    assert Result.open(study, second_hash).complete
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        assert (
+            db.execute(
+                "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?",
+                (second_hash,),
+            ).fetchone()[0]
+            == first_spec_json
+        )
 
 
 def test_released_catalog_prediction_backtests_into_workspace_only(tmp_path: Path) -> None:

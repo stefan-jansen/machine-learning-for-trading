@@ -1000,6 +1000,7 @@ def register_backtest_run(
     stored_strategy_spec = dict(strategy_spec)
     stored_strategy_spec.pop("_runtime_backtest_config", None)
     spec_json_str = canonical_json(stored_strategy_spec)
+    existing_strategy_spec: dict | None = None
 
     if identity_version in SUPPORTED_IDENTITY_VERSIONS:
         db = _open_registry(case_dir)
@@ -1019,6 +1020,7 @@ def register_backtest_run(
             ) == canonical_json(_hashable_strategy_spec(strategy_spec))
             if existing[0] != prediction_hash or not same_identity:
                 raise ValueError(f"immutable backtest identity conflict for {b_hash}")
+            existing_strategy_spec = existing_spec
             import polars as pl
 
             from case_studies.utils.artifact_digest import value_digest
@@ -1037,7 +1039,10 @@ def register_backtest_run(
 
     # Write spec.json
     bt_dir = _backtest_dir(case_dir, b_hash)
-    _save_json(bt_dir / "spec.json", strategy_spec)
+    _save_json(
+        bt_dir / "spec.json",
+        existing_strategy_spec if existing_strategy_spec is not None else strategy_spec,
+    )
 
     # Save returns
     if returns is not None:
@@ -1119,8 +1124,13 @@ def register_backtest_run(
                 "SELECT prediction_hash, spec_json FROM backtest_runs WHERE backtest_hash = ?",
                 (b_hash,),
             ).fetchone()
-            if existing is not None and existing != (prediction_hash, spec_json_str):
-                raise ValueError(f"immutable backtest identity conflict for {b_hash}")
+            if existing is not None:
+                existing_spec = json.loads(existing[1] or "{}")
+                same_identity = canonical_json(
+                    _hashable_strategy_spec(existing_spec)
+                ) == canonical_json(_hashable_strategy_spec(strategy_spec))
+                if existing[0] != prediction_hash or not same_identity:
+                    raise ValueError(f"immutable backtest identity conflict for {b_hash}")
             db.execute(
                 """
                 INSERT OR IGNORE INTO backtest_runs
