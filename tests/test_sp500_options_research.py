@@ -414,6 +414,10 @@ def test_reader_boundary_publishes_contracts_consumed_by_strategy(
     declared_inputs = canonical.spec["source_identity"]["declared_inputs"]
     assert declared_inputs["option_contract_returns"]
     assert "option_sources" not in declared_inputs
+    assert canonical.spec["source_identity"]["holdout_replay"] == {
+        "version": 1,
+        "function": "resolve_short_straddle_decisions",
+    }
 
 
 def test_typed_decision_runs_through_registered_option_backtest_path(

@@ -8,6 +8,7 @@ import inspect
 import json
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,13 @@ from case_studies.research import (
     DecisionArtifact,
     OfficialPopulation,
     PredictionResult,
+    ResolvedModelRequest,
     Result,
     Study,
     plan_backtests,
+    run_models,
 )
+from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.sp500_options._htm_backtest import (
     _apply_cohort_allocator,
@@ -37,17 +41,20 @@ from case_studies.utils.backtest_runner import (
     apply_universe_filter,
     normalize_prediction_columns,
 )
+from case_studies.utils.registry import prediction_hash_from_parts
+from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
 
 CASE_STUDY = "sp500_options"
 PRIMARY_LABEL = "ret_to_expiry"
+ALL_LABELS = (PRIMARY_LABEL,)
 
 
 @dataclass(frozen=True)
 class OptionBacktestExecution:
     results: tuple[BacktestResult, ...]
     catalog_rows: pl.DataFrame
-    population: OfficialPopulation
+    population: OfficialPopulation | None
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
@@ -85,6 +92,227 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             },
         )
     return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+
+
+def model_request_catalog(
+    family: str,
+    *,
+    labels: Iterable[str] = ALL_LABELS,
+    config_names: Iterable[str] | None = None,
+) -> pl.DataFrame:
+    """Return the declared model population as visible Polars rows."""
+    selected = set(config_names) if config_names is not None else None
+    rows = []
+    for label in labels:
+        for config in load_configs(CASE_STUDY, label, family):
+            name = str(config["config_name"])
+            if selected is None or name in selected:
+                rows.append({"family": family, "label": label, "config_name": name})
+    if not rows:
+        raise ValueError(f"no declared requests for {family!r}")
+    return pl.DataFrame(rows).unique(maintain_order=True)
+
+
+def resolve_model_requests(
+    study: Study,
+    request_catalog: pl.DataFrame,
+    *,
+    execution_tier: str,
+    overrides: dict[str, Any] | None = None,
+    preview_reductions: dict[str, Any] | None = None,
+) -> tuple[ResolvedModelRequest, ...]:
+    """Resolve visible catalog rows through the shared family boundary."""
+    required = {"family", "label", "config_name"}
+    missing = required - set(request_catalog.columns)
+    if missing:
+        raise ValueError(f"model request catalog is missing {sorted(missing)}")
+    return tuple(
+        study.model(
+            **row,
+            execution_tier=execution_tier,
+            overrides=dict(overrides or {}),
+            preview_reductions=dict(preview_reductions or {}),
+        ).resolve()
+        for row in request_catalog.select(*sorted(required)).iter_rows(named=True)
+    )
+
+
+def run_resolved_model_requests(
+    study: Study,
+    resolved_requests: Iterable[ResolvedModelRequest],
+) -> ModelExecution:
+    """Execute already-resolved requests without re-resolving their inputs."""
+    resolved = tuple(resolved_requests)
+    if not resolved:
+        raise ValueError("resolved model requests cannot be empty")
+    execution = run_models(study, requests=resolved)
+    expected_rows = sum(len(run.predictions) for run in execution.runs)
+    if execution.catalog_rows.height != expected_rows:
+        raise RuntimeError("model execution did not return every checkpoint catalog row")
+    if execution.catalog_rows.filter(~pl.col("complete")).height:
+        raise RuntimeError("model execution returned incomplete prediction rows")
+    return execution
+
+
+def expected_prediction_hashes(
+    resolved_requests: Iterable[ResolvedModelRequest],
+) -> tuple[str, ...]:
+    """Project declared checkpoints to immutable validation prediction identities."""
+    hashes = []
+    for request in resolved_requests:
+        computation = request.spec.get("computation", request.spec)
+        for checkpoint in computation["checkpoint_schedule"]:
+            hashes.append(
+                prediction_hash_from_parts(
+                    request.identity,
+                    checkpoint["value"],
+                    "validation",
+                    checkpoint_kind=checkpoint["kind"],
+                    identity_version=request.spec["identity_version"],
+                )
+            )
+    if len(hashes) != len(set(hashes)):
+        raise ValueError("declared request population contains duplicate prediction identities")
+    return tuple(hashes)
+
+
+def run_official_model_catalog(
+    study: Study,
+    request_catalog: pl.DataFrame,
+    *,
+    population_name: str,
+    resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
+) -> tuple[ModelExecution, OfficialPopulation]:
+    """Snapshot and execute one complete canonical model population."""
+    resolved = tuple(resolved_requests or ())
+    if not resolved:
+        resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
+    population = snapshot_official_model_catalog(
+        study,
+        request_catalog,
+        population_name=population_name,
+        resolved_requests=resolved,
+        supersedes=supersedes,
+    )
+    execution, population = run_official_model_subset(
+        study,
+        resolved,
+        population_name=population.name,
+        require_population_complete=True,
+    )
+    return execution, population
+
+
+def snapshot_official_model_catalog(
+    study: Study,
+    request_catalog: pl.DataFrame,
+    *,
+    population_name: str,
+    resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
+) -> OfficialPopulation:
+    """Snapshot every expected canonical prediction before any member executes."""
+    resolved = tuple(resolved_requests or ())
+    if not resolved:
+        resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
+    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+        raise ValueError("official model populations require canonical requests")
+    expected = expected_prediction_hashes(resolved)
+    return OfficialPopulation.create(
+        study,
+        name=population_name,
+        member_kind="prediction",
+        members=expected,
+        supersedes=supersedes,
+    )
+
+
+def run_official_model_subset(
+    study: Study,
+    resolved_requests: Iterable[ResolvedModelRequest],
+    *,
+    population_name: str,
+    require_population_complete: bool = False,
+) -> tuple[ModelExecution, OfficialPopulation]:
+    """Execute members already declared by a case-wide official population."""
+    resolved = tuple(resolved_requests)
+    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+        raise ValueError("official model subsets require canonical requests")
+    population = OfficialPopulation.one(study, name=population_name)
+    expected = expected_prediction_hashes(resolved)
+    undeclared = sorted(set(expected) - set(population.members))
+    if undeclared:
+        raise ValueError(f"model subset contains undeclared predictions: {undeclared}")
+    execution = run_resolved_model_requests(study, resolved)
+    actual = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+    if set(actual) != set(expected) or len(actual) != len(expected):
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        raise RuntimeError(f"model population mismatch: missing={missing}, extra={extra}")
+    if require_population_complete:
+        population.require_complete()
+    return execution, population
+
+
+def resolved_model_plan(
+    resolved_requests: Iterable[ResolvedModelRequest],
+) -> pl.DataFrame:
+    """Show the data, folds, checkpoints, and eligibility for each request."""
+    rows = []
+    for request in resolved_requests:
+        computation = request.spec["computation"]
+        expected = request._context.expected_keys
+        entity = next(
+            (column for column in ("symbol", "product") if column in expected.columns), None
+        )
+        fold = next((column for column in ("fold", "fold_id") if column in expected.columns), None)
+        if entity is None or fold is None:
+            raise ValueError("resolved model eligibility has no entity or fold key")
+        timestamps = expected.get_column("timestamp")
+        rows.append(
+            {
+                "family": request.family,
+                "label": request.spec["label"],
+                "config_name": request.spec.get("config_name"),
+                "task": (computation.get("task") or {}).get("type", "regression"),
+                "feature_count": len(computation.get("feature_names") or []),
+                "eligible_entities": expected.get_column(entity).n_unique(),
+                "eligible_rows": expected.height,
+                "folds": expected.get_column(fold).n_unique(),
+                "validation_start": timestamps.min(),
+                "validation_end": timestamps.max(),
+                "checkpoints": len(computation["checkpoint_schedule"]),
+                "execution_tier": request.spec["execution_tier"],
+                "training_hash": request.identity,
+            }
+        )
+    return pl.DataFrame(rows).sort("label", "family", "config_name")
+
+
+def official_prediction_catalog(
+    study: Study,
+    population_names: Iterable[str],
+) -> pl.DataFrame:
+    """Resolve named complete prediction populations to exact Polars catalog rows."""
+    members = []
+    for name in population_names:
+        population = OfficialPopulation.one(study, name=name)
+        if population.member_kind != "prediction":
+            raise ValueError(f"official population {name!r} does not contain predictions")
+        members.extend(population.require_complete())
+    if len(members) != len(set(members)):
+        raise ValueError("official prediction populations overlap")
+    catalog = study.predictions.table().filter(pl.col("prediction_hash").is_in(members))
+    if catalog.height != len(members) or catalog.filter(~pl.col("complete")).height:
+        raise ValueError("official prediction catalog is incomplete")
+    return catalog.sort(
+        "label",
+        "family",
+        "config_name",
+        "checkpoint_kind",
+        "checkpoint_value",
+    )
 
 
 def selected_prediction(study: Study, catalog_row: dict[str, Any]) -> PredictionResult:
@@ -198,6 +426,10 @@ def _publish_resolved_short_straddle_decisions(
             "source_digest": hashlib.sha256(
                 inspect.getsource(resolve_short_straddle_decisions).encode()
             ).hexdigest(),
+            "holdout_replay": {
+                "version": 1,
+                "function": "resolve_short_straddle_decisions",
+            },
             "declared_inputs": {
                 "prediction_hashes": [prediction.hash],
                 "prices": value_digest(prices),
@@ -283,10 +515,10 @@ def run_official_backtest_requests(
     study: Study,
     requests: pl.DataFrame,
     *,
-    population_name: str,
+    population_name: str | None,
     supersedes: str | None = None,
 ) -> OptionBacktestExecution:
-    """Resolve, snapshot, and execute a complete typed option request population."""
+    """Resolve and execute typed option requests, snapshotting canonical populations."""
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
     if missing:
@@ -312,6 +544,7 @@ def run_official_backtest_requests(
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     resolved = []
     replay_requests = []
+    execution_tiers = set()
     for row in request_rows:
         selected = catalog.filter(pl.col("prediction_hash") == row["prediction_hash"])
         if selected.height != 1 or not selected.item(0, "complete"):
@@ -321,6 +554,7 @@ def run_official_backtest_requests(
         if selected.item(0, "label") != row["label"] or row["label"] != PRIMARY_LABEL:
             raise ValueError("option request label does not match its prediction catalog row")
         prediction = selected_prediction(study, selected.row(0, named=True))
+        execution_tiers.add(prediction.execution_tier)
         allocation = row.get("allocation")
         warmup = strategy_warmup_periods({"strategy": {"allocation": allocation}})
         cache_key = (str(row["label"]), warmup)
@@ -349,6 +583,15 @@ def run_official_backtest_requests(
                 "execution_tier": prediction.execution_tier,
             }
         )
+    if len(execution_tiers) != 1:
+        raise ValueError("one option request population cannot mix execution tiers")
+    execution_tier = execution_tiers.pop()
+    if execution_tier == "canonical" and population_name is None:
+        raise ValueError("canonical option execution requires an official population name")
+    if execution_tier == "preview" and population_name is not None:
+        raise ValueError("preview option execution cannot create an official population")
+    if execution_tier == "preview" and supersedes is not None:
+        raise ValueError("preview option execution cannot supersede an official population")
     replay_digests = _clean_replay_digests(study, replay_requests)
     local_digests = {
         row["request_name"]: value_digest(decisions)
@@ -368,7 +611,7 @@ def run_official_backtest_requests(
             prices=prices,
             signal=row["signal"],
             allocation=allocation,
-            canonical=True,
+            canonical=execution_tier == "canonical",
             clean_replay_digest=replay_digests[row["request_name"]],
         )
         plan = plan_backtests(
@@ -390,12 +633,16 @@ def run_official_backtest_requests(
         prepared.append((row, prediction, prices, decision, expected_hash))
     if len(expected) != len(set(expected)):
         raise ValueError("strategy requests resolve to duplicate backtest identities")
-    population = OfficialPopulation.create(
-        study,
-        name=population_name,
-        member_kind="backtest",
-        members=expected,
-        supersedes=supersedes,
+    population = (
+        OfficialPopulation.create(
+            study,
+            name=population_name,
+            member_kind="backtest",
+            members=expected,
+            supersedes=supersedes,
+        )
+        if population_name is not None
+        else None
     )
     labels_dir, raw_options_dir = option_data_paths()
     del labels_dir
@@ -428,7 +675,8 @@ def run_official_backtest_requests(
         )
     if tuple(result.hash for result in results) != tuple(expected):
         raise RuntimeError("backtest execution did not preserve declared request order")
-    population.require_complete()
+    if population is not None:
+        population.require_complete()
     return OptionBacktestExecution(tuple(results), pl.DataFrame(rows), population)
 
 
