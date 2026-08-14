@@ -742,6 +742,283 @@ def test_gbm_runner_persists_every_declared_checkpoint(tmp_path, monkeypatch) ->
     ]
 
 
+def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
+    study = _gbm_study(tmp_path / "batch", monkeypatch)
+    individual_study = _gbm_study(tmp_path / "individual", monkeypatch)
+    original_prepare = gbm_utils.prepare_gbm_folds
+    prepared: list[list[int]] = []
+    released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
+
+    def observed_prepare(dataset, splits, *args, **kwargs):
+        gc.collect()
+        if released_arrays:
+            assert released_arrays[-1]() is None
+        prepared.append([int(split["fold"]) for split in splits])
+        folds = original_prepare(dataset, splits, *args, **kwargs)
+        released_arrays.append(weakref.ref(folds[0]["X_train"]))
+        return folds
+
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    requests = [
+        study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63, "learning_rate": learning_rate},
+        )
+        for learning_rate in (0.1, 0.2)
+    ]
+
+    batch = run_models(study, requests=requests)
+    batch_preparations = list(prepared)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", original_prepare)
+    individual = (
+        individual_study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63, "learning_rate": 0.1},
+        )
+        .resolve()
+        .run()
+    )
+    gc.collect()
+
+    assert batch_preparations == [[0], [1]]
+    assert released_arrays[-1]() is None
+    assert batch.runs[0].training.hash == individual.training.hash
+    assert [prediction.hash for prediction in batch.runs[0].predictions] == [
+        prediction.hash for prediction in individual.predictions
+    ]
+    for batch_prediction, individual_prediction in zip(
+        batch.runs[0].predictions,
+        individual.predictions,
+        strict=True,
+    ):
+        assert batch_prediction.load().equals(individual_prediction.load())
+    assert all(run.diagnostics["execution_order"] == "fold_major" for run in batch.runs)
+    assert all(run.diagnostics["compatibility_group_size"] == 2 for run in batch.runs)
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in batch.runs)
+    assert all(run.diagnostics["disk_fold_cache"] is False for run in batch.runs)
+
+
+def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
+    study = _gbm_study(tmp_path, monkeypatch)
+    original_prepare = gbm_utils.prepare_gbm_folds
+    prepared: list[int] = []
+
+    def configs(*_args, **_kwargs):
+        common = {
+            "checkpoint_interval": 2,
+            "family": "gbm",
+            "library": "lightgbm",
+            "max_iterations": 4,
+        }
+        return [
+            {
+                **common,
+                "config_name": "mse",
+                "params": {"learning_rate": 0.1, "objective": "regression"},
+            },
+            {
+                **common,
+                "config_name": "huber",
+                "huber_alpha_scale": 0.5,
+                "params": {"learning_rate": 0.1, "objective": "huber"},
+            },
+        ]
+
+    def observed_prepare(*args, **kwargs):
+        folds = original_prepare(*args, **kwargs)
+        prepared.extend(int(fold["fold"]) for fold in folds)
+        return folds
+
+    monkeypatch.setattr(modeling, "load_configs", configs)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+
+    batch = run_models(
+        study,
+        requests=[
+            study.model(
+                family="gbm",
+                label="fwd_ret_1d",
+                config_name=config_name,
+                overrides={"device": "cpu", "max_bin": 63},
+            )
+            for config_name in ("mse", "huber")
+        ],
+    )
+
+    assert prepared == [0, 1, 0, 1]
+    params = batch.runs[1].training.spec()["computation"]["model"]["effective_params_by_fold"]
+    assert params["0"]["alpha"] > 0
+    assert params["1"]["alpha"] > 0
+    assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
+
+
+def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypatch) -> None:
+    first = _gbm_study(tmp_path / "first", monkeypatch)
+    second = _gbm_study(tmp_path / "second", monkeypatch)
+    original_prepare = gbm_utils.prepare_gbm_folds
+    original_load = modeling.load_modeling_dataset
+    preparation: list[tuple[int, float]] = []
+    load_count = 0
+
+    def observed_load(*args, **kwargs):
+        nonlocal load_count
+        load_count += 1
+        return original_load(*args, **kwargs)
+
+    def observed_prepare(*args, **kwargs):
+        folds = original_prepare(*args, **kwargs)
+        preparation.extend(
+            (int(fold["fold"]), float(kwargs["train_sample_frac"])) for fold in folds
+        )
+        return folds
+
+    monkeypatch.setattr(modeling, "load_modeling_dataset", observed_load)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+
+    def requests(study, order):
+        return [
+            study.model(
+                family="gbm",
+                label="fwd_ret_1d",
+                config_name="leaves_7_mse",
+                overrides={
+                    "device": "cpu",
+                    "learning_rate": learning_rate,
+                    "max_bin": 63,
+                },
+                execution_tier="preview",
+                preview_reductions={
+                    "folds": [0, 1],
+                    "train_sample_frac": sample,
+                },
+            )
+            for learning_rate, sample in order
+        ]
+
+    forward = run_models(
+        first,
+        requests=requests(first, [(0.1, 0.75), (0.2, 0.75), (0.3, 0.5)]),
+    )
+    forward_preparation = list(preparation)
+    forward_load_count = load_count
+    preparation.clear()
+    load_count = 0
+    reverse = run_models(
+        second,
+        requests=requests(second, [(0.3, 0.5), (0.2, 0.75), (0.1, 0.75)]),
+    )
+
+    assert forward_preparation == [(0, 0.75), (1, 0.75), (0, 0.5), (1, 0.5)]
+    assert forward_load_count == 1
+    assert preparation == [(0, 0.5), (1, 0.5), (0, 0.75), (1, 0.75)]
+    assert load_count == 1
+    forward_by_rate = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"][
+            "learning_rate"
+        ]: run
+        for run in forward.runs
+    }
+    reverse_by_rate = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"][
+            "learning_rate"
+        ]: run
+        for run in reverse.runs
+    }
+    assert set(forward_by_rate) == set(reverse_by_rate) == {0.1, 0.2, 0.3}
+    for learning_rate in forward_by_rate:
+        assert (
+            forward_by_rate[learning_rate].training.hash
+            == reverse_by_rate[learning_rate].training.hash
+        )
+        for forward_prediction, reverse_prediction in zip(
+            forward_by_rate[learning_rate].predictions,
+            reverse_by_rate[learning_rate].predictions,
+            strict=True,
+        ):
+            assert forward_prediction.load().equals(reverse_prediction.load())
+
+
+def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monkeypatch) -> None:
+    study = _gbm_study(tmp_path, monkeypatch)
+    original_train = gbm_utils.train_gbm_config
+    rate_two_fits = 0
+
+    def interrupted_train(*args, **kwargs):
+        nonlocal rate_two_fits
+        params = next(iter(kwargs["effective_params_by_fold"].values()))
+        if params["learning_rate"] == 0.2:
+            rate_two_fits += 1
+            if rate_two_fits == 2:
+                raise RuntimeError("injected GBM candidate failure")
+        return original_train(*args, **kwargs)
+
+    monkeypatch.setattr(gbm_utils, "train_gbm_config", interrupted_train)
+    requests = [
+        study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63, "learning_rate": rate},
+        )
+        for rate in (0.1, 0.2, 0.3)
+    ]
+
+    with pytest.raises(RuntimeError, match="injected GBM candidate failure"):
+        run_models(study, requests=requests)
+
+    assert study.predictions.table().filter(pl.col("complete")).height == 4
+    monkeypatch.setattr(gbm_utils, "train_gbm_config", original_train)
+    recovered = run_models(study, requests=requests)
+    recovered_by_rate = {
+        run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"][
+            "learning_rate"
+        ]: run
+        for run in recovered.runs
+    }
+
+    assert recovered_by_rate[0.1].diagnostics["cache_hit"] is True
+    assert recovered_by_rate[0.3].diagnostics["cache_hit"] is True
+    assert recovered_by_rate[0.2].diagnostics["reused_folds"] == [0]
+    assert recovered_by_rate[0.2].diagnostics["fitted_folds"] == [1]
+    assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
+    assert study.predictions.table().filter(pl.col("complete")).height == 6
+
+
+def test_gbm_batch_rejects_a_modified_booster(tmp_path, monkeypatch) -> None:
+    study = _gbm_study(tmp_path, monkeypatch)
+    requests = [
+        study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63, "learning_rate": rate},
+        )
+        for rate in (0.1, 0.2)
+    ]
+    first = run_models(study, requests=requests)
+    artifact = (
+        first.runs[0].training.root
+        / "run_log"
+        / "training"
+        / first.runs[0].training.hash
+        / "models"
+        / "boosters"
+        / "fold_0.txt"
+    )
+    artifact.write_text("modified\n")
+
+    recovered = run_models(study, requests=requests)
+
+    assert recovered.runs[0].diagnostics["reused_folds"] == [1]
+    assert recovered.runs[0].diagnostics["fitted_folds"] == [0]
+    assert recovered.runs[0].diagnostics["base_fold_preparations"] == 1
+    assert recovered.runs[1].diagnostics["cache_hit"] is True
+
+
 def test_gbm_request_uses_setup_execution_config_then_request_overrides(
     tmp_path, monkeypatch
 ) -> None:

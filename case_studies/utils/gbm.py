@@ -25,7 +25,7 @@ import subprocess
 import time
 import uuid
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -51,9 +51,15 @@ import torch  # noqa: F401
 import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
+from case_studies.research.contracts import ExecutionTier
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.research.identity import ResolvedSpec
+from case_studies.research.models import ModelRun
+from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
+from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+from case_studies.utils.registry.specs import canonical_json
 from utils.modeling import RANDOM_SEED, seed_everything
 
 if TYPE_CHECKING:
@@ -80,6 +86,7 @@ _GBM_REQUEST_FIELDS = {
 @dataclass(frozen=True)
 class GBMContext:
     folds: tuple[dict[str, Any], ...]
+    fold_ids: tuple[int, ...]
     feature_names: tuple[str, ...]
     label_col: str
     eval_label_col: str | None
@@ -89,6 +96,29 @@ class GBMContext:
     class_values: tuple[Any, ...]
     expected_keys: pl.DataFrame
     runtime_provenance: dict[str, Any]
+
+
+@dataclass
+class _GBMBatchCandidate:
+    index: int
+    request: dict[str, Any]
+    config: dict[str, Any]
+    effective_params: dict[str, dict[str, Any]]
+    device: str
+    max_bin: int
+    num_threads: int
+    spec: dict[str, Any] | None = None
+    context: GBMContext | None = None
+    training: TrainingResult | None = None
+    ledger: ExecutionLedger | None = None
+    attempt: ExecutionAttempt | None = None
+    frames: list[pl.DataFrame] = field(default_factory=list)
+    reused_folds: list[int] = field(default_factory=list)
+    fitted_folds: list[int] = field(default_factory=list)
+    fit_elapsed_s: float = 0.0
+    started_at_s: float = 0.0
+    result: ModelRun | None = None
+    error: Exception | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1577,8 +1607,45 @@ def _load_gbm_request_config(
     return config, request_fields
 
 
-def resolve_model_request(study: Study, request: dict[str, Any]):
-    from case_studies.research.contracts import ExecutionTier
+def _gbm_expected_keys_from_dataset(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
+    date_dtype = mds.dataset.schema[mds.date_col]
+    label_valid = pl.col(mds.label_col).is_not_null()
+    if mds.dataset.schema[mds.label_col] in {pl.Float32, pl.Float64}:
+        label_valid &= pl.col(mds.label_col).is_not_nan()
+    frames = []
+    for split in splits:
+        val_start = split.get("val_start", split.get("test_start"))
+        val_end = split.get("val_end", split.get("test_end"))
+        frame = (
+            mds.dataset.filter(
+                pl.col(mds.date_col).is_between(
+                    pl.lit(val_start).cast(date_dtype, strict=False),
+                    pl.lit(val_end).cast(date_dtype, strict=False),
+                    closed="both",
+                )
+                & label_valid
+            )
+            .select(
+                pl.col(mds.entity_cols[0]).alias("symbol"),
+                pl.col(mds.date_col).alias("timestamp"),
+            )
+            .with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
+        )
+        if frame.is_empty():
+            raise ValueError(f"GBM request produced no validation keys for fold {split['fold']}")
+        frames.append(frame)
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
+        raise ValueError("GBM request produced duplicate expected prediction keys")
+    return expected
+
+
+def _load_gbm_batch_base(
+    study: Study,
+    request: dict[str, Any],
+    *,
+    inputs: tuple[Any, Any, Any] | None = None,
+) -> dict[str, Any]:
     from utils.modeling import load_modeling_dataset
 
     tier = ExecutionTier(request["execution_tier"])
@@ -1588,12 +1655,16 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported GBM preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"], execution_tier=tier)
     max_symbols = int(reductions.get("max_symbols", 0))
     train_sample_frac = float(reductions.get("train_sample_frac", 1.0))
     if not 0 < train_sample_frac <= 1:
         raise ValueError("train_sample_frac must be in (0, 1]")
-    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
+    if inputs is None:
+        label_ref = study.labels.get(request["label"], execution_tier=tier)
+        mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
+        dataset_pd = mds.dataset.to_pandas()
+    else:
+        label_ref, mds, dataset_pd = inputs
     if mds.date_col != "timestamp" or not mds.entity_cols:
         raise ValueError("GBM runner requires timestamp and an entity key")
     entity_col = mds.entity_cols[0]
@@ -1611,34 +1682,18 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         and mds.temporal_feature_names
     ):
         require_fold_scoped_temporal_compatibility(splits, mds.temporal_artifact_splits)
-    folds = prepare_gbm_folds(
-        mds.dataset.to_pandas(),
-        splits,
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        entity_col,
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=train_sample_frac,
-        eval_label_col=mds.eval_label_col,
-        seed=RANDOM_SEED,
-    )
-    if len(folds) != len(splits) or any(not fold["n_train"] or not fold["n_val"] for fold in folds):
-        raise ValueError("GBM request did not prepare every declared fold")
-    config, request_fields = _load_gbm_request_config(
-        study,
-        label_ref.name,
-        request["config_name"],
-        request["overrides"],
-    )
-    if tier is ExecutionTier.PREVIEW:
-        for field in ("max_iterations", "checkpoint_interval"):
-            if field in reductions:
-                config[field] = int(reductions[field])
+    return {
+        "label_ref": label_ref,
+        "mds": mds,
+        "dataset_pd": dataset_pd,
+        "splits": splits,
+        "cv_record": cv_record,
+        "expected": _gbm_expected_keys_from_dataset(mds, splits),
+        "train_sample_frac": train_sample_frac,
+    }
+
+
+def _gbm_execution_settings(study: Study, request_fields: dict[str, Any]) -> tuple[str, int, int]:
     setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
     setup_gbm = (setup.get("modeling") or {}).get("gbm") or {}
     execution_config = {
@@ -1649,19 +1704,25 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             if key in request_fields
         },
     }
-    device, max_bin, num_threads = resolve_gbm_execution_config(execution_config)
-    effective = _gbm_effective_params_by_fold(
-        config,
-        folds,
-        device=device,
-        max_bin=max_bin,
-        num_threads=num_threads,
-        seed=RANDOM_SEED,
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-    )
+    return resolve_gbm_execution_config(execution_config)
+
+
+def _build_gbm_resolved_request(
+    study: Study,
+    request: dict[str, Any],
+    *,
+    base: dict[str, Any],
+    config: dict[str, Any],
+    effective: dict[str, dict[str, Any]],
+    folds: tuple[dict[str, Any], ...],
+    device: str,
+) -> tuple[dict[str, Any], GBMContext]:
+    tier = ExecutionTier(request["execution_tier"])
+    reductions = dict(request["preview_reductions"])
+    mds = base["mds"]
+    label_ref = base["label_ref"]
     checkpoints = gbm_checkpoint_iterations(config)
-    expected = _gbm_expected_keys(folds, entity_col, mds.date_col)
+    expected = base["expected"]
     input_lineage = mds.input_lineage
     computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
@@ -1672,7 +1733,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "class_values": list(mds.class_values),
             "continuous_eval_label": label_ref.definition.continuous_eval_label,
         },
-        "cv": cv_record,
+        "cv": base["cv_record"],
         "model": {
             "class": "lightgbm.Booster",
             "implementation": "lightgbm",
@@ -1689,7 +1750,10 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "n_folds": expected.get_column("fold").n_unique(),
         },
         "input_data_spec": input_lineage,
-        "sampling": {"train_sample_frac": train_sample_frac, "max_symbols": max_symbols},
+        "sampling": {
+            "train_sample_frac": base["train_sample_frac"],
+            "max_symbols": int(reductions.get("max_symbols", 0)),
+        },
         "source_identity": _gbm_source_identity(),
         "runtime_identity": _gbm_runtime_identity(),
     }
@@ -1706,18 +1770,115 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         execution_tier=tier.value,
     ).as_dict()
     context = GBMContext(
-        folds=tuple(folds),
+        folds=folds,
+        fold_ids=tuple(int(split["fold"]) for split in base["splits"]),
         feature_names=tuple(mds.feature_names),
         label_col=mds.label_col,
         eval_label_col=mds.eval_label_col,
         date_col=mds.date_col,
-        entity_col=entity_col,
+        entity_col=mds.entity_cols[0],
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         expected_keys=expected,
         runtime_provenance=runtime_provenance,
     )
     return spec, context
+
+
+def _apply_gbm_preview_reductions(config: dict[str, Any], request: dict[str, Any]) -> None:
+    if ExecutionTier(request["execution_tier"]) is not ExecutionTier.PREVIEW:
+        return
+    reductions = request["preview_reductions"]
+    for name in ("max_iterations", "checkpoint_interval"):
+        if name in reductions:
+            config[name] = int(reductions[name])
+
+
+def _gbm_input_compatibility_key(request: dict[str, Any]) -> tuple[str, str, int]:
+    reductions = request["preview_reductions"]
+    return (
+        request["label"],
+        request["execution_tier"],
+        int(reductions.get("max_symbols", 0)),
+    )
+
+
+def _gbm_compatibility_key(study: Study, request: dict[str, Any]) -> str:
+    _, request_fields = _load_gbm_request_config(
+        study,
+        request["label"],
+        request["config_name"],
+        request["overrides"],
+    )
+    device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+    cv = request.get("cv")
+    reductions = request["preview_reductions"]
+    return canonical_json(
+        {
+            "label": request["label"],
+            "execution_tier": request["execution_tier"],
+            "cv": asdict(cv) if cv is not None else None,
+            "folds": reductions.get("folds"),
+            "max_symbols": reductions.get("max_symbols", 0),
+            "train_sample_frac": reductions.get("train_sample_frac", 1.0),
+            "device": device,
+            "max_bin": max_bin,
+            "num_threads": num_threads,
+            "preprocessing": "lightgbm-native-float32/v1",
+        }
+    )
+
+
+def resolve_model_request(study: Study, request: dict[str, Any]):
+    base = _load_gbm_batch_base(study, request)
+    mds = base["mds"]
+    folds = prepare_gbm_folds(
+        base["dataset_pd"],
+        base["splits"],
+        mds.feature_names,
+        mds.label_col,
+        mds.date_col,
+        mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=mds.class_values,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=mds.temporal_keys,
+        temporal_feature_names=mds.temporal_feature_names,
+        train_sample_frac=base["train_sample_frac"],
+        eval_label_col=mds.eval_label_col,
+        seed=RANDOM_SEED,
+    )
+    if len(folds) != len(base["splits"]) or any(
+        not fold["n_train"] or not fold["n_val"] for fold in folds
+    ):
+        raise ValueError("GBM request did not prepare every declared fold")
+    config, request_fields = _load_gbm_request_config(
+        study,
+        base["label_ref"].name,
+        request["config_name"],
+        request["overrides"],
+    )
+    _apply_gbm_preview_reductions(config, request)
+    device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+    effective = _gbm_effective_params_by_fold(
+        config,
+        folds,
+        device=device,
+        max_bin=max_bin,
+        num_threads=num_threads,
+        seed=RANDOM_SEED,
+        task_type=mds.task_type,
+        class_values=mds.class_values,
+    )
+    return _build_gbm_resolved_request(
+        study,
+        request,
+        base=base,
+        config=config,
+        effective=effective,
+        folds=tuple(folds),
+        device=device,
+    )
 
 
 def _gbm_manifest_files(model_dir: Path) -> dict[str, str]:
@@ -1730,7 +1891,7 @@ def _gbm_manifest_files(model_dir: Path) -> dict[str, str]:
 
 def _valid_gbm_model_dir(model_dir: Path, context: GBMContext) -> bool:
     files = _gbm_manifest_files(model_dir)
-    expected = {f"boosters/fold_{int(fold['fold'])}.txt" for fold in context.folds}
+    expected = {f"boosters/fold_{fold_id}.txt" for fold_id in context.fold_ids}
     return set(files) == expected and all(
         (model_dir / name).is_file() and _gbm_sha256(model_dir / name) == digest
         for name, digest in files.items()
@@ -1789,7 +1950,15 @@ def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
         curves_path, spec
     ):
         return None
-    return ModelRun(training=training, predictions=prediction_results)
+    return ModelRun(
+        training=training,
+        predictions=prediction_results,
+        diagnostics={
+            "cache_hit": True,
+            "reused_folds": sorted(context.fold_ids),
+            "fitted_folds": [],
+        },
+    )
 
 
 def _gbm_prediction_frame(
@@ -1810,7 +1979,9 @@ def _gbm_prediction_frame(
         )
         if entry.get("y_eval") is not None:
             frame = frame.with_columns(pl.Series("eval_actual", entry["y_eval"]))
-        frames.append(frame)
+        frames.append(
+            frame.with_columns(pl.col("timestamp").cast(context.expected_keys.schema["timestamp"]))
+        )
     if len(frames) != len(context.folds):
         raise ValueError(f"GBM checkpoint {checkpoint} is missing a declared fold")
     return pl.concat(frames).sort("symbol", "timestamp", "fold")
@@ -1877,6 +2048,578 @@ def _write_learning_curves(path: Path, rows: list[dict[str, Any]]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _gbm_fixed_effective_params(
+    config: dict[str, Any],
+    fold_ids: tuple[int, ...],
+    *,
+    device: str,
+    max_bin: int,
+    num_threads: int,
+    task_type: str,
+    class_values: tuple[Any, ...],
+) -> dict[str, dict[str, Any]] | None:
+    params = config["params"]
+    if (
+        params.get("objective") == "huber"
+        and "alpha" not in params
+        and config.get("huber_alpha_scale") is not None
+    ):
+        return None
+    return _gbm_effective_params_by_fold(
+        config,
+        [{"fold": fold_id} for fold_id in fold_ids],
+        device=device,
+        max_bin=max_bin,
+        num_threads=num_threads,
+        seed=RANDOM_SEED,
+        task_type=task_type,
+        class_values=class_values,
+    )
+
+
+def _prepare_gbm_batch_fold(base: dict[str, Any], split: dict[str, Any]) -> dict[str, Any]:
+    mds = base["mds"]
+    folds = prepare_gbm_folds(
+        base["dataset_pd"],
+        [split],
+        mds.feature_names,
+        mds.label_col,
+        mds.date_col,
+        mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=mds.class_values,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=mds.temporal_keys,
+        temporal_feature_names=mds.temporal_feature_names,
+        train_sample_frac=base["train_sample_frac"],
+        eval_label_col=mds.eval_label_col,
+        seed=RANDOM_SEED,
+    )
+    if len(folds) != 1 or not folds[0]["n_train"] or not folds[0]["n_val"]:
+        raise ValueError(f"GBM request could not prepare fold {split['fold']}")
+    return folds[0]
+
+
+def _gbm_fold_settings(candidate: _GBMBatchCandidate, fold_id: int) -> dict[str, Any]:
+    assert candidate.spec is not None
+    return {
+        "effective_params": candidate.spec["computation"]["model"]["effective_params_by_fold"][
+            str(fold_id)
+        ],
+        "checkpoint_schedule": candidate.spec["computation"]["checkpoint_schedule"],
+    }
+
+
+def _gbm_fold_prediction_shard(entries: list[dict[str, Any]], context: GBMContext) -> pl.DataFrame:
+    frames = []
+    timestamp_dtype = context.expected_keys.schema["timestamp"]
+    for entry in entries:
+        frame = pl.DataFrame(
+            {
+                "symbol": entry["entities"],
+                "timestamp": entry["dates"],
+                "fold": [int(entry["fold"])] * len(entry["y_pred"]),
+                "checkpoint": [int(entry["n_trees"])] * len(entry["y_pred"]),
+                "prediction": entry["y_pred"],
+                "actual": entry["y_true"],
+            }
+        ).with_columns(pl.col("timestamp").cast(timestamp_dtype))
+        if entry.get("y_eval") is not None:
+            frame = frame.with_columns(pl.Series("eval_actual", entry["y_eval"]))
+        frames.append(frame)
+    if not frames:
+        raise ValueError("GBM fold fit produced no checkpoint predictions")
+    return pl.concat(frames).sort("checkpoint", "symbol", "timestamp", "fold")
+
+
+def _fit_or_reuse_gbm_fold(
+    candidate: _GBMBatchCandidate,
+    fold: dict[str, Any],
+) -> tuple[pl.DataFrame, bool, float]:
+    assert candidate.spec is not None
+    assert candidate.context is not None
+    assert candidate.training is not None
+    assert candidate.ledger is not None
+    fold_id = int(fold["fold"])
+    training_dir = candidate.training.root / "run_log" / "training" / candidate.training.hash
+    artifact = training_dir / "models" / "boosters" / f"fold_{fold_id}.txt"
+    shard = training_dir / "prediction_folds" / f"fold_{fold_id}.parquet"
+    settings = _gbm_fold_settings(candidate, fold_id)
+    if candidate.ledger.reusable_fold(
+        training_hash=candidate.training.hash,
+        candidate_identity=candidate.training.hash,
+        fold_id=fold_id,
+        fitted_state=artifact,
+        prediction_shard=shard,
+        resolved_settings=settings,
+    ):
+        return pl.read_parquet(shard), True, 0.0
+
+    started = time.perf_counter()
+    staging = training_dir / f".fold_{fold_id}.{uuid.uuid4().hex}.tmp"
+    staging.mkdir(parents=True)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    shard_staging = staging / "predictions.parquet"
+    try:
+        result = train_gbm_config(
+            candidate.config,
+            [fold],
+            feature_names=list(candidate.context.feature_names),
+            device=candidate.device,
+            num_threads=candidate.num_threads,
+            max_bin=candidate.max_bin,
+            entity_col=candidate.context.entity_col,
+            date_col=candidate.context.date_col,
+            task_type=candidate.context.task_type,
+            class_values=list(candidate.context.class_values) or None,
+            save_dir=staging,
+            effective_params_by_fold={
+                str(fold_id): settings["effective_params"],
+            },
+        )
+        booster = staging / "boosters" / f"fold_{fold_id}.txt"
+        if not booster.is_file():
+            raise ValueError(f"GBM fit did not persist fold {fold_id} booster")
+        frame = _gbm_fold_prediction_shard(result["predictions"], candidate.context)
+        expected_checkpoints = {
+            int(item["value"]) for item in candidate.spec["computation"]["checkpoint_schedule"]
+        }
+        if set(frame.get_column("checkpoint").unique()) != expected_checkpoints:
+            raise ValueError(f"GBM fold {fold_id} did not produce every checkpoint")
+        expected_rows = candidate.context.expected_keys.filter(pl.col("fold") == fold_id).height
+        if frame.height != expected_rows * len(expected_checkpoints):
+            raise ValueError(f"GBM fold {fold_id} prediction coverage is incomplete")
+        frame.write_parquet(shard_staging)
+        os.replace(booster, artifact)
+        os.replace(shard_staging, shard)
+        candidate.ledger.complete_fold(
+            training_hash=candidate.training.hash,
+            candidate_identity=candidate.training.hash,
+            fold_id=fold_id,
+            fitted_state=artifact,
+            prediction_shard=shard,
+            resolved_settings=settings,
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return frame, False, time.perf_counter() - started
+
+
+def _write_gbm_training_manifest(training: TrainingResult, fold_ids: tuple[int, ...]) -> None:
+    model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    expected = [model_dir / "boosters" / f"fold_{fold_id}.txt" for fold_id in fold_ids]
+    missing = [path for path in expected if not path.is_file()]
+    if missing:
+        raise ValueError(f"GBM fit did not persist every fold booster: {missing}")
+    files = {str(path.relative_to(model_dir)): _gbm_sha256(path) for path in expected}
+    manifest = model_dir / "manifest.json"
+    temporary = model_dir / f".manifest.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_text(
+            json.dumps({"files": files, "schema_version": 1}, indent=2, sort_keys=True) + "\n"
+        )
+        os.replace(temporary, manifest)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _gbm_curves_from_shards(
+    config_name: str,
+    predictions: pl.DataFrame,
+    checkpoints: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    target = "eval_actual" if "eval_actual" in predictions.columns else "actual"
+    curves = []
+    for checkpoint in checkpoints:
+        frame = predictions.filter(pl.col("checkpoint") == checkpoint)
+        metric = cross_sectional_ic(
+            frame,
+            frame,
+            pred_col="prediction",
+            ret_col=target,
+            date_col="timestamp",
+            entity_col="symbol",
+            min_obs=5,
+        )
+        curves.append(
+            {
+                "config": config_name,
+                "iteration": checkpoint,
+                "ic_mean": float(metric["ic_mean"]),
+                "ic_std": float(metric.get("ic_std", 0.0)),
+            }
+        )
+    return curves
+
+
+def _write_gbm_runtime_fields(path: Path, **fields: float) -> None:
+    if not path.exists():
+        return
+    runtime = json.loads(path.read_text())
+    runtime.update(fields)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _resolve_gbm_batch_candidate(
+    study: Study,
+    candidate: _GBMBatchCandidate,
+    base: dict[str, Any],
+) -> None:
+    placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
+    spec, context = _build_gbm_resolved_request(
+        study,
+        candidate.request,
+        base=base,
+        config=candidate.config,
+        effective=candidate.effective_params,
+        folds=placeholder_folds,
+        device=candidate.device,
+    )
+    candidate.spec = spec
+    candidate.context = context
+    cached = _cached_model_run(study, spec, context)
+    if cached is not None:
+        candidate.result = cached
+        return
+    candidate.started_at_s = time.perf_counter()
+    candidate.training = study.results.register_training(
+        spec,
+        execution_tier=spec["execution_tier"],
+        runtime_provenance=context.runtime_provenance,
+    )
+    candidate.ledger = ExecutionLedger(study, candidate.training.root)
+    candidate.attempt = candidate.ledger.start(candidate.training.hash)
+
+
+def _fail_gbm_batch_candidate(candidate: _GBMBatchCandidate, error: Exception) -> None:
+    if candidate.error is not None:
+        return
+    candidate.error = error
+    if candidate.attempt is not None:
+        candidate.attempt.finish(
+            "failed",
+            {
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "reused_folds": candidate.reused_folds,
+                "fitted_folds": candidate.fitted_folds,
+            },
+        )
+        candidate.attempt = None
+
+
+def _reuse_gbm_batch_fold(candidate: _GBMBatchCandidate, fold_id: int) -> bool:
+    if candidate.result is not None or candidate.error is not None:
+        return True
+    assert candidate.training is not None
+    assert candidate.ledger is not None
+    training_dir = candidate.training.root / "run_log" / "training" / candidate.training.hash
+    artifact = training_dir / "models" / "boosters" / f"fold_{fold_id}.txt"
+    shard = training_dir / "prediction_folds" / f"fold_{fold_id}.parquet"
+    if not candidate.ledger.reusable_fold(
+        training_hash=candidate.training.hash,
+        candidate_identity=candidate.training.hash,
+        fold_id=fold_id,
+        fitted_state=artifact,
+        prediction_shard=shard,
+        resolved_settings=_gbm_fold_settings(candidate, fold_id),
+    ):
+        return False
+    candidate.frames.append(pl.read_parquet(shard))
+    candidate.reused_folds.append(fold_id)
+    return True
+
+
+def _run_gbm_batch_fold(candidate: _GBMBatchCandidate, fold: dict[str, Any]) -> None:
+    if candidate.result is not None or candidate.error is not None:
+        return
+    fold_id = int(fold["fold"])
+    if fold_id in candidate.reused_folds or fold_id in candidate.fitted_folds:
+        return
+    try:
+        frame, reused, elapsed = _fit_or_reuse_gbm_fold(candidate, fold)
+    except Exception as exc:
+        _fail_gbm_batch_candidate(candidate, exc)
+        return
+    candidate.frames.append(frame)
+    candidate.fit_elapsed_s += elapsed
+    (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
+
+
+def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> None:
+    if candidate.result is not None or candidate.error is not None:
+        return
+    assert candidate.spec is not None
+    assert candidate.context is not None
+    assert candidate.training is not None
+    assert candidate.attempt is not None
+    try:
+        if len(candidate.frames) != len(candidate.context.fold_ids):
+            raise RuntimeError(
+                f"GBM candidate produced {len(candidate.frames)} of "
+                f"{len(candidate.context.fold_ids)} fold shards"
+            )
+        _write_gbm_training_manifest(candidate.training, candidate.context.fold_ids)
+        predictions = pl.concat(candidate.frames).sort("checkpoint", "symbol", "timestamp", "fold")
+        prediction_results = []
+        checkpoints = tuple(
+            int(item["value"]) for item in candidate.spec["computation"]["checkpoint_schedule"]
+        )
+        for checkpoint in checkpoints:
+            frame = predictions.filter(pl.col("checkpoint") == checkpoint).drop("checkpoint")
+            prediction_results.append(
+                study.results.publish_predictions(
+                    candidate.training,
+                    checkpoint_kind="iteration",
+                    checkpoint_value=checkpoint,
+                    split="validation",
+                    predictions=frame,
+                    expected_keys=candidate.context.expected_keys,
+                    task_type=candidate.context.task_type,
+                    class_values=list(candidate.context.class_values) or None,
+                    eval_col="eval_actual" if candidate.context.eval_label_col else None,
+                    label=candidate.spec["label"],
+                )
+            )
+        curves_path = (
+            candidate.training.root
+            / "run_log"
+            / "training"
+            / candidate.training.hash
+            / "learning_curves.parquet"
+        )
+        curves = _gbm_curves_from_shards(candidate.spec["config_name"], predictions, checkpoints)
+        _write_learning_curves(curves_path, curves)
+        diagnostics = {
+            "cache_hit": False,
+            "reused_folds": candidate.reused_folds,
+            "fitted_folds": candidate.fitted_folds,
+        }
+        candidate.attempt.finish("completed", diagnostics)
+        candidate.attempt = None
+        runtime_path = curves_path.with_name("runtime.json")
+        _write_gbm_runtime_fields(
+            runtime_path,
+            elapsed_s=time.perf_counter() - candidate.started_at_s,
+        )
+        candidate.result = ModelRun(
+            candidate.training,
+            tuple(prediction_results),
+            diagnostics,
+        )
+    except Exception as exc:
+        _fail_gbm_batch_candidate(candidate, exc)
+
+
+def _run_gbm_batch_group(
+    study: Study,
+    indexed_requests: list[tuple[int, dict[str, Any]]],
+    compatibility_key: str,
+    base: dict[str, Any],
+    *,
+    report_batch: bool,
+) -> list[_GBMBatchCandidate]:
+    mds = base["mds"]
+    fold_ids = tuple(int(split["fold"]) for split in base["splits"])
+    candidates = []
+    dependent = []
+    for index, request in indexed_requests:
+        config, request_fields = _load_gbm_request_config(
+            study,
+            base["label_ref"].name,
+            request["config_name"],
+            request["overrides"],
+        )
+        _apply_gbm_preview_reductions(config, request)
+        device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+        effective = _gbm_fixed_effective_params(
+            config,
+            fold_ids,
+            device=device,
+            max_bin=max_bin,
+            num_threads=num_threads,
+            task_type=mds.task_type,
+            class_values=tuple(mds.class_values),
+        )
+        candidate = _GBMBatchCandidate(
+            index=index,
+            request=request,
+            config=config,
+            effective_params=effective or {},
+            device=device,
+            max_bin=max_bin,
+            num_threads=num_threads,
+        )
+        candidates.append(candidate)
+        if effective is None:
+            dependent.append(candidate)
+        else:
+            _resolve_gbm_batch_candidate(study, candidate, base)
+    dependent_indices = {candidate.index for candidate in dependent}
+
+    preparation_elapsed_s = 0.0
+    preparation_count = 0
+    first_pass_needed = bool(dependent) or any(
+        candidate.result is None and candidate.error is None for candidate in candidates
+    )
+    if first_pass_needed:
+        for split in base["splits"]:
+            fold_id = int(split["fold"])
+            fixed_pending = [
+                candidate
+                for candidate in candidates
+                if candidate.index not in dependent_indices
+                and not _reuse_gbm_batch_fold(candidate, fold_id)
+            ]
+            if not dependent and not fixed_pending:
+                continue
+            started = time.perf_counter()
+            try:
+                fold = _prepare_gbm_batch_fold(base, split)
+            except Exception as exc:
+                for candidate in candidates:
+                    _fail_gbm_batch_candidate(candidate, exc)
+                break
+            preparation_elapsed_s += time.perf_counter() - started
+            preparation_count += 1
+            for candidate in dependent:
+                if candidate.error is not None:
+                    continue
+                try:
+                    candidate.effective_params.update(
+                        _gbm_effective_params_by_fold(
+                            candidate.config,
+                            [fold],
+                            device=candidate.device,
+                            max_bin=candidate.max_bin,
+                            num_threads=candidate.num_threads,
+                            seed=RANDOM_SEED,
+                            task_type=mds.task_type,
+                            class_values=tuple(mds.class_values),
+                        )
+                    )
+                except Exception as exc:
+                    _fail_gbm_batch_candidate(candidate, exc)
+            for candidate in fixed_pending:
+                _run_gbm_batch_fold(candidate, fold)
+            del fold
+            gc.collect()
+
+    for candidate in candidates:
+        if candidate.index not in dependent_indices:
+            _finish_gbm_batch_candidate(study, candidate)
+
+    active_dependent = []
+    for candidate in dependent:
+        if candidate.error is not None:
+            continue
+        if set(candidate.effective_params) != {str(fold_id) for fold_id in fold_ids}:
+            _fail_gbm_batch_candidate(
+                candidate,
+                RuntimeError("GBM candidate did not resolve parameters for every fold"),
+            )
+            continue
+        try:
+            _resolve_gbm_batch_candidate(study, candidate, base)
+        except Exception as exc:
+            _fail_gbm_batch_candidate(candidate, exc)
+            continue
+        if candidate.result is None:
+            active_dependent.append(candidate)
+
+    if active_dependent:
+        for split in base["splits"]:
+            fold_id = int(split["fold"])
+            pending = [
+                candidate
+                for candidate in active_dependent
+                if not _reuse_gbm_batch_fold(candidate, fold_id)
+            ]
+            if not pending:
+                continue
+            started = time.perf_counter()
+            try:
+                fold = _prepare_gbm_batch_fold(base, split)
+            except Exception as exc:
+                for candidate in active_dependent:
+                    _fail_gbm_batch_candidate(candidate, exc)
+                break
+            preparation_elapsed_s += time.perf_counter() - started
+            preparation_count += 1
+            for candidate in pending:
+                _run_gbm_batch_fold(candidate, fold)
+            del fold
+            gc.collect()
+        for candidate in active_dependent:
+            _finish_gbm_batch_candidate(study, candidate)
+
+    group_digest = hashlib.sha256(compatibility_key.encode()).hexdigest()[:12]
+    fit_elapsed_s = sum(candidate.fit_elapsed_s for candidate in candidates)
+    measured_s = preparation_elapsed_s + fit_elapsed_s
+    for candidate in candidates:
+        if candidate.result is None or not report_batch:
+            continue
+        candidate.result.diagnostics.update(
+            {
+                "execution_order": "fold_major",
+                "compatibility_group": group_digest,
+                "compatibility_group_size": len(candidates),
+                "base_fold_preparations": preparation_count,
+                "base_fold_preparation_s": preparation_elapsed_s,
+                "candidate_fit_s": candidate.fit_elapsed_s,
+                "preparation_fraction": (preparation_elapsed_s / measured_s if measured_s else 0.0),
+                "disk_fold_cache": False,
+            }
+        )
+    return candidates
+
+
+def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[ModelRun, ...]:
+    if not requests:
+        raise ValueError("GBM batch runner requires at least one request")
+    groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        groups.setdefault(_gbm_compatibility_key(study, request), []).append((index, request))
+
+    ordered: list[ModelRun | None] = [None] * len(requests)
+    failures = []
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any, Any]] = {}
+    for key, indexed_requests in groups.items():
+        input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        base = _load_gbm_batch_base(
+            study,
+            indexed_requests[0][1],
+            inputs=input_cache.get(input_key),
+        )
+        input_cache.setdefault(
+            input_key,
+            (base["label_ref"], base["mds"], base["dataset_pd"]),
+        )
+        candidates = _run_gbm_batch_group(
+            study,
+            indexed_requests,
+            key,
+            base,
+            report_batch=len(requests) > 1,
+        )
+        for candidate in candidates:
+            if candidate.error is not None:
+                failures.append(candidate.error)
+            elif candidate.result is not None:
+                ordered[candidate.index] = candidate.result
+    if failures:
+        raise failures[0]
+    if any(result is None for result in ordered):
+        raise RuntimeError("GBM batch did not produce every requested result")
+    return tuple(result for result in ordered if result is not None)
 
 
 def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext):
