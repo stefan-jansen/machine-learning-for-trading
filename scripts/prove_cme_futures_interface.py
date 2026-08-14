@@ -138,26 +138,33 @@ def prove(workspace: Path) -> dict[str, object]:
     assert set(price_path.expiry_rules.get_column("product")) == products
 
     signal = {"method": "equal_weight_top_k", "top_k": 2}
+    allocation = {"method": "inverse_vol", "vol_window": 20}
     decision = publish_product_weights(
         prediction,
         prices=price_path.prices,
         signal=signal,
+        allocation=allocation,
     )
     assert decision.spec["decision_keys"] == ["product", "timestamp"]
     resolved_signal = decision.spec["parameters"]["signal"]
+    resolved_allocation = decision.spec["parameters"]["allocation"]
     assert resolved_signal["long_short"] is True
+    assert resolved_allocation["long_short"] is True
     assert decision.load().filter(pl.col("weight") < 0).height > 0
     assert decision.load().filter(pl.col("weight") > 0).height > 0
     typed = run_backtests(
         study,
         predictions=selected,
         signal=resolved_signal,
+        allocation=resolved_allocation,
         decision=decision,
         prices=price_path.prices,
     ).results[0]
-    direct = study.strategy(prediction=prediction, signal=resolved_signal).run(
-        prices=price_path.prices
-    )
+    direct = study.strategy(
+        prediction=prediction,
+        signal=resolved_signal,
+        allocation=resolved_allocation,
+    ).run(prices=price_path.prices)
     assert _returns(typed).equals(_returns(direct))
     typed_spec = typed.spec()
     assert typed_spec["entity_contract"]["reader_key"] == "product"

@@ -449,6 +449,14 @@ def _resolved_signal(signal: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _resolved_allocation(allocation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if allocation is None:
+        return None
+    resolved = dict(allocation)
+    resolved.setdefault("long_short", get_backtest_config(CASE_STUDY).long_short)
+    return resolved
+
+
 def resolve_product_weights(
     prediction: PredictionResult,
     *,
@@ -463,6 +471,7 @@ def resolve_product_weights(
         raise ValueError("reader-facing CME prices require product and cannot contain symbol")
     study = prediction.study
     signal = _resolved_signal(signal)
+    allocation = _resolved_allocation(allocation)
     unresolved = study.strategy(
         prediction=prediction,
         signal=signal,
@@ -530,6 +539,7 @@ def publish_product_weights(
 ) -> DecisionArtifact:
     """Publish validated CME weights with product, roll, expiry, and fold lineage."""
     signal = _resolved_signal(signal)
+    allocation = _resolved_allocation(allocation)
     weights = resolve_product_weights(
         prediction,
         prices=prices,
@@ -636,7 +646,7 @@ def run_official_backtest_requests(
         if selected.item(0, "label") != row["label"]:
             raise ValueError("strategy request label does not match its prediction catalog row")
         prediction = selected_prediction(study, selected.row(0, named=True))
-        allocation = row.get("allocation")
+        allocation = _resolved_allocation(row.get("allocation"))
         risk = row.get("risk")
         costs = row.get("costs")
         warmup = strategy_warmup_periods({"strategy": {"allocation": allocation}})

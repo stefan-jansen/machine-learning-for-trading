@@ -132,23 +132,32 @@ def test_product_decision_matches_existing_futures_engine_path(tmp_path: Path) -
     prediction = _prediction(study)
     prices = _product_prices()
     signal = {"method": "equal_weight_top_k", "top_k": 1}
+    allocation = {"method": "inverse_vol", "vol_window": 2}
 
     decision = publish_product_weights(
         prediction,
         prices=prices,
         signal=signal,
+        allocation=allocation,
     )
     resolved_signal = decision.spec["parameters"]["signal"]
-    direct = study.strategy(prediction=prediction, signal=resolved_signal).run(prices=prices)
+    resolved_allocation = decision.spec["parameters"]["allocation"]
+    direct = study.strategy(
+        prediction=prediction,
+        signal=resolved_signal,
+        allocation=resolved_allocation,
+    ).run(prices=prices)
     typed = study.strategy(
         prediction=prediction,
         signal=resolved_signal,
+        allocation=resolved_allocation,
         decision=decision,
     ).run(prices=prices)
 
     assert decision.spec["decision_keys"] == ["product", "timestamp"]
     assert decision.load().columns == ["product", "timestamp", "weight", "fold"]
     assert decision.spec["parameters"]["signal"]["long_short"] is True
+    assert decision.spec["parameters"]["allocation"]["long_short"] is True
     assert decision.load().filter(pl.col("weight") < 0).height > 0
     assert decision.load().filter(pl.col("weight") > 0).height > 0
     assert typed.spec()["entity_contract"] == {
