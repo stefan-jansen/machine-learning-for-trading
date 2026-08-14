@@ -610,9 +610,12 @@ def run_official_backtest_requests(
             canonical=execution_tier == "canonical",
             clean_replay_digest=replay_digests[row["request_name"]],
         )
+        prediction_row = catalog.filter(pl.col("prediction_hash") == prediction.hash)
+        if prediction_row.height != 1:
+            raise RuntimeError("prepared option prediction no longer resolves uniquely")
         plan = plan_backtests(
             study,
-            predictions=selected,
+            predictions=prediction_row,
             signal=row["signal"],
             prices=prices,
             allocation=allocation,
