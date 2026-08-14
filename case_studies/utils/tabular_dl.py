@@ -996,6 +996,57 @@ def _run_tabm_compatible_group(study: Study, items):
     return completed
 
 
+def plan_model_requests(
+    study: Study,
+    requests: list[dict[str, Any]],
+) -> tuple[tuple[dict[str, Any], ...], tuple[Any, ...]]:
+    """Resolve compatible TabM requests once without fitting or result writes."""
+    if not requests:
+        raise ValueError("TabM batch planner requires at least one request")
+    ordered: list[dict[str, Any] | None] = [None] * len(requests)
+    resolved_by_index = []
+    materialization_groups: dict[tuple[str, str, int], list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        materialization_groups.setdefault(_tabm_materialization_key(request), []).append(
+            (index, request)
+        )
+    for group in materialization_groups.values():
+        materialized = _materialize_tabm_request_group(study, group[0][1])
+        dataset_pd = None
+        for index, request in group:
+            spec, context = _resolve_model_request_from_materialized(
+                study,
+                request,
+                label_ref=materialized[0],
+                mds=materialized[1],
+                dataset_pd=dataset_pd,
+                configured_by_name=materialized[2],
+                runtime_provenance=materialized[3],
+            )
+            dataset_pd = context.dataset_pd
+            ordered[index] = spec
+            resolved_by_index.append((index, spec, context))
+    if any(spec is None for spec in ordered):
+        raise RuntimeError("TabM batch planner did not resolve every request")
+    return tuple(spec for spec in ordered if spec is not None), tuple(resolved_by_index)
+
+
+def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[Any, ...]:
+    execution_groups: dict[str, list[Any]] = {}
+    for item in payload:
+        execution_groups.setdefault(_tabm_execution_key(item[1]), []).append(item)
+    completed = {}
+    failures = []
+    for compatible in execution_groups.values():
+        try:
+            completed.update(_run_tabm_compatible_group(study, compatible))
+        except Exception as error:
+            failures.append(error)
+    if failures:
+        raise failures[0]
+    return tuple(completed[index] for index in range(len(payload)))
+
+
 def run_model_requests(study: Study, requests: list[dict[str, Any]]):
     if not requests:
         return ()

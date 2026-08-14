@@ -17,8 +17,10 @@ from case_studies.research import (
     CVSpec,
     LabelDefinition,
     ModelRun,
+    OfficialPopulation,
     Study,
     get_adapter,
+    plan_models,
     register_adapter,
     registered_adapters,
     run_models,
@@ -252,7 +254,19 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
         for config_name in ("tabm_s", "tabm_m")
     ]
 
-    result = run_models(study, requests=requests)
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-tabm-checkpoints",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
+    assert loads == [("etfs", "fwd_ret_1d", 0)]
+    assert conversions == 1
+    assert executions == []
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    result = plan.run()
 
     assert loads == [("etfs", "fwd_ret_1d", 0)]
     assert conversions == 1
@@ -264,6 +278,7 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
     assert all(run.diagnostics["base_fold_preparations"] == 2 for run in result.runs)
     assert all(run.diagnostics["compatibility_group_size"] == 2 for run in result.runs)
     assert all(run.diagnostics["disk_fold_cache"] is False for run in result.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
@@ -409,12 +424,23 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
         )
         for config_name in ("tabm_s", "tabm_m")
     ]
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-tabm-recovery",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
 
     with pytest.raises(RuntimeError, match="injected TabM candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
     first_calls = list(calls)
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     fail_small = False
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
 
     assert first_calls == [
         (4, "2024-01-03"),
@@ -430,6 +456,7 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
     assert len({run.diagnostics["preparation_fraction"] for run in recovered.runs}) == 1
     assert recovered.runs[1].diagnostics["candidate_fit_s"] == 0.0
     assert all(run.predictions[0].complete for run in recovered.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_tabm_batch_matches_individual_resolved_execution(tmp_path, monkeypatch) -> None:
@@ -964,6 +991,73 @@ def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
     assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
 
 
+def test_linear_model_plan_reuses_one_materialization_and_one_execution_fold_pass(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_load = linear.load_modeling_dataset
+    original_prepare = modeling.prepare_single_fold
+    loads = 0
+    prepared_folds = []
+
+    def observed_load(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load(*args, **kwargs)
+
+    def load_preset(config_name):
+        if config_name == "lasso":
+            return {
+                "config_name": config_name,
+                "family": "linear",
+                "library": "sklearn",
+                "model_class": "Lasso",
+                "params": {"alpha_frac": 0.5, "max_iter": 5000},
+            }
+        return {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha": 1.0},
+        }
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        assert fold is not None
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(linear, "load_modeling_dataset", observed_load)
+    monkeypatch.setattr(linear, "_load_preset", load_preset)
+    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    requests = [
+        study.model(family="linear", label="fwd_ret_1d", config_name=config_name)
+        for config_name in ("ridge", "lasso")
+    ]
+
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-linear-checkpoints",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    execution = plan.run()
+
+    assert loads == 1
+    assert prepared_folds == [0, 1, 0, 1]
+    assert tuple(run.training.hash for run in execution.runs) == plan.expected_training_hashes
+    assert (
+        tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+        == plan.expected_prediction_hashes
+    )
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in execution.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
+
+
 def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
     tmp_path, monkeypatch
 ) -> None:
@@ -1065,14 +1159,25 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
         )
         for alpha in (1.0, 2.0, 3.0)
     ]
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-linear-recovery",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
 
     with pytest.raises(RuntimeError, match="injected candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
 
     completed = study.predictions.table().filter(pl.col("complete"))
     assert completed.height == 2
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     monkeypatch.setattr(linear.Ridge, "fit", original_fit)
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
     recovered_by_alpha = {
         run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]: run
         for run in recovered.runs
@@ -1085,6 +1190,7 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
     assert recovered_by_alpha[2.0].diagnostics["base_fold_preparations"] == 1
     assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
     assert study.predictions.table().filter(pl.col("complete")).height == 3
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_linear_batch_rejects_a_modified_fitted_preprocessor(tmp_path, monkeypatch) -> None:
@@ -1439,7 +1545,16 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
         for learning_rate in (0.1, 0.2)
     ]
 
-    batch = run_models(study, requests=requests)
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-gbm-checkpoints",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    batch = plan.run()
     batch_preparations = list(prepared)
     monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", original_prepare)
     individual = (
@@ -1470,6 +1585,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
     assert all(run.diagnostics["compatibility_group_size"] == 2 for run in batch.runs)
     assert all(run.diagnostics["base_fold_preparations"] == 2 for run in batch.runs)
     assert all(run.diagnostics["disk_fold_cache"] is False for run in batch.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
@@ -1640,13 +1756,24 @@ def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monk
         )
         for rate in (0.1, 0.2, 0.3)
     ]
+    plan = plan_models(study, requests=requests)
+    population = OfficialPopulation.create(
+        study,
+        name="planned-gbm-recovery",
+        member_kind="prediction",
+        members=plan.expected_prediction_hashes,
+    )
 
     with pytest.raises(RuntimeError, match="injected GBM candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
 
     assert study.predictions.table().filter(pl.col("complete")).height == 4
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     monkeypatch.setattr(gbm_utils, "train_gbm_config", original_train)
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
     recovered_by_rate = {
         run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"][
             "learning_rate"
@@ -1660,6 +1787,7 @@ def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monk
     assert recovered_by_rate[0.2].diagnostics["fitted_folds"] == [1]
     assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
     assert study.predictions.table().filter(pl.col("complete")).height == 6
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_gbm_batch_rejects_a_modified_booster(tmp_path, monkeypatch) -> None:
