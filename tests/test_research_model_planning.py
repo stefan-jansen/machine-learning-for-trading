@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -6,6 +7,7 @@ from case_studies.research.contracts import ExecutionTier
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.model_planning import plan_models
 from case_studies.research.models import ModelRequest
+from case_studies.research.workspace import Study
 from case_studies.utils import gbm, linear, tabular_dl
 
 
@@ -49,7 +51,7 @@ def _spec(config_name: str) -> dict:
 
 
 def test_plan_models_resolves_one_family_batch_and_declares_every_checkpoint(monkeypatch) -> None:
-    study = SimpleNamespace()
+    study = cast(Study, SimpleNamespace())
     requests = [_request(study, "first"), _request(study, "second")]
     calls = []
 
@@ -79,7 +81,7 @@ def test_plan_models_resolves_one_family_batch_and_declares_every_checkpoint(mon
 
 
 def test_model_plan_rejects_execution_identity_drift(monkeypatch) -> None:
-    study = SimpleNamespace()
+    study = cast(Study, SimpleNamespace())
     request = _request(study, "first")
 
     def run_model_plan(received_study, payload):
@@ -109,7 +111,7 @@ def test_model_plan_rejects_execution_identity_drift(monkeypatch) -> None:
 def test_preview_model_plan_rejects_official_population_before_registry_write(
     monkeypatch,
 ) -> None:
-    study = SimpleNamespace()
+    study = cast(Study, SimpleNamespace())
     request = _request(study, "first", execution_tier=ExecutionTier.PREVIEW)
     preview_spec = _spec("first")
     preview_spec["execution_tier"] = "preview"
@@ -171,6 +173,6 @@ def test_planned_tabm_runner_attempts_later_group_after_failure(monkeypatch) -> 
     payload = ((0, "first", object()), (1, "second", object()))
 
     with pytest.raises(RuntimeError, match="injected compatibility-group failure"):
-        tabular_dl.run_model_plan(SimpleNamespace(), payload)
+        tabular_dl.run_model_plan(cast(Study, SimpleNamespace()), payload)
 
     assert calls == ["first", "second"]
