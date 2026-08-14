@@ -565,7 +565,11 @@ def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate
     if "config" in training_log.columns:
         training_log = training_log.filter(pl.col("config") == candidate_key)
     grid_row = next(row for row in result["grid_results"] if row["config_name"] == candidate_key)
-    best = predictions.filter(pl.col("epoch") == int(grid_row["best_epoch"]))
+    best = (
+        predictions.filter(pl.col("epoch") == int(grid_row["best_epoch"]))
+        .with_columns(pl.lit(candidate_key).alias("model_id"))
+        .drop("config", "epoch")
+    )
     predictions.write_parquet(diagnostics_dir / "all_predictions.parquet")
     best.write_parquet(diagnostics_dir / "predictions.parquet")
     curves.write_parquet(diagnostics_dir / "learning_curves.parquet")

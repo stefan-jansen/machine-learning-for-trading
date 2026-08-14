@@ -703,6 +703,9 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
             "result.json",
             "training_log.parquet",
         }
+        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        assert "model_id" in selected.columns
+        assert {"config", "epoch"}.isdisjoint(selected.columns)
 
 
 def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> None:
