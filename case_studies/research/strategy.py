@@ -18,8 +18,12 @@ from case_studies.utils.backtest_loaders import (
     load_contract_specs_from_yaml,
     load_futures_market_contract,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
-from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    serializable_backtest_spec,
+    strategy_view,
+)
+from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
     ensure_conformal_calibration_identity,
@@ -506,6 +510,48 @@ class Strategy:
             selected.append("_state_transition")
         return weights.select(*selected)
 
+    def _risk_state_weights(
+        self,
+        predictions: pl.DataFrame,
+        prices: pl.DataFrame,
+        strategy_spec: dict[str, Any],
+    ) -> pl.DataFrame | None:
+        risk = strategy_view(strategy_spec).get("risk") or {}
+        policy = risk.get("state_transition_policy")
+        if policy is None or self.decision is not None:
+            return None
+        cadence = risk.get("state_transition_cadence")
+        if cadence is None:
+            raise ValueError("risk state-transition policy requires an explicit cadence")
+        weights = precompute_weights(
+            predictions,
+            strategy_spec,
+            prices,
+            label=self.label,
+            case_study=self.study.case_study,
+            prediction_hash=self.prediction.hash,
+        )
+        fold_columns = [column for column in ("fold", "fold_id") if column in predictions.columns]
+        if len(fold_columns) != 1:
+            raise ValueError("stateful strategy predictions require exactly one fold column")
+        fold_map = predictions.select("timestamp", fold_columns[0]).unique()
+        if fold_map.get_column("timestamp").n_unique() != fold_map.height:
+            raise ValueError("each stateful strategy timestamp must belong to exactly one fold")
+        if fold_columns[0] == "fold_id":
+            fold_map = fold_map.rename({"fold_id": "fold"})
+        fold_map = fold_map.with_columns(pl.col("timestamp").cast(weights.schema["timestamp"]))
+        weights = weights.join(fold_map, on="timestamp", how="left", validate="m:1")
+        if weights.get_column("fold").null_count():
+            raise ValueError("stateful strategy weights contain timestamps without a fold")
+        return apply_state_transition_policy(
+            weights,
+            policy=policy,
+            cadence=str(cadence),
+            price_keys=prices.select("symbol", "timestamp")
+            .unique()
+            .with_columns(pl.col("timestamp").cast(weights.schema["timestamp"])),
+        )
+
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
@@ -554,13 +600,16 @@ class Strategy:
             )
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
+        decision_weights = self._decision_weights(resolved_prices)
+        if decision_weights is None:
+            decision_weights = self._risk_state_weights(predictions, resolved_prices, spec)
         result = run_backtest(
             self.study.case_study,
             self.prediction.hash,
             spec,
             prices=resolved_prices,
             predictions=predictions,
-            precomputed_weights=self._decision_weights(resolved_prices),
+            precomputed_weights=decision_weights,
             funding_rates=self._funding_rates(resolved_prices),
             label=self.label,
             initial_cash=float(spec["backtest_config"]["cash"]["initial"]),

@@ -114,6 +114,62 @@ def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
     ]
 
 
+def test_generated_strategy_weights_execute_declared_fold_and_gap_policy(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    timestamps = [date(2024, 1, day) for day in (1, 2, 5)]
+    frame = pl.DataFrame(
+        {
+            "symbol": [symbol for timestamp in timestamps for symbol in ("A", "B")],
+            "timestamp": [timestamp for timestamp in timestamps for _ in ("A", "B")],
+            "fold_id": [fold for fold in (0, 0, 1) for _ in ("A", "B")],
+            "y_true": [0.01, -0.01] * len(timestamps),
+            "y_score": [0.02, -0.02] * len(timestamps),
+        }
+    )
+    training = study.results.register_training(_resolved_spec())
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    prices = pl.DataFrame(
+        {
+            "symbol": [symbol for day in range(1, 6) for symbol in ("A", "B")],
+            "timestamp": [date(2024, 1, day) for day in range(1, 6) for _ in ("A", "B")],
+            "open": [100.0] * 10,
+            "high": [101.0] * 10,
+            "low": [99.0] * 10,
+            "close": [100.0] * 10,
+            "volume": [1_000] * 10,
+        }
+    )
+    strategy = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        risk={
+            "state_transition_policy": {
+                "fold_boundary": "liquidate",
+                "temporal_gap": "reset",
+            },
+            "state_transition_cadence": "1d",
+        },
+    )
+
+    weights = strategy._risk_state_weights(frame, prices, strategy.resolve(prices=prices))
+
+    assert weights is not None
+    transitions = weights.filter(pl.col("_state_transition")).get_column("timestamp").unique()
+    assert {timestamp.date() for timestamp in transitions} == {
+        date(2024, 1, 3),
+        date(2024, 1, 5),
+    }
+
+
 def _prediction(study: Study) -> str:
     training = study.results.register_training(_resolved_spec())
     frame = _predictions()
