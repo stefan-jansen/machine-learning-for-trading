@@ -124,12 +124,12 @@ def prove(workspace: Path) -> dict[str, object]:
         assert prediction.hash not in canonical_catalog.get_column("prediction_hash").to_list()
     _reject_preview_population(study, member_kind="prediction", member_hash=prediction.hash)
 
+    products = set(actual.get_column("product"))
     price_path = load_futures_price_path(
         "fwd_ret_5d",
         split="validation",
-        max_products=6,
+        products=sorted(products),
     )
-    products = set(actual.get_column("product"))
     assert set(price_path.prices.get_column("product")) == products
     assert "symbol" not in price_path.prices.columns
     assert price_path.audit.get_column("position").unique().to_list() == [0]

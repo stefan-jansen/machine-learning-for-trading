@@ -344,9 +344,13 @@ def load_futures_price_path(
     *,
     split: Literal["validation", "holdout"] = "validation",
     max_products: int = 0,
+    products: Iterable[str] | None = None,
     warmup_periods: int = 0,
 ) -> FuturesPricePath:
     """Load front-contract prices while retaining the rows that prove each roll."""
+    selected_products = sorted(set(products or ()))
+    if max_products and selected_products:
+        raise ValueError("select CME prices by max_products or products, not both")
     engine_prices = load_backtest_prices_for(
         CASE_STUDY,
         label,
@@ -354,10 +358,17 @@ def load_futures_price_path(
         max_symbols=max_products,
         warmup_periods=warmup_periods,
     ).rename({"symbol": "product"})
+    if selected_products:
+        engine_prices = engine_prices.filter(pl.col("product").is_in(selected_products))
+        loaded_products = set(engine_prices.get_column("product"))
+        missing_products = sorted(set(selected_products) - loaded_products)
+        if missing_products:
+            raise ValueError(f"selected CME products have no backtest prices: {missing_products}")
     price_keys = engine_prices.select("product", "timestamp").unique()
     start = str(price_keys.get_column("timestamp").min())[:10]
     end = str(price_keys.get_column("timestamp").max())[:10]
     loaded_audit = load_cme_futures(
+        products=selected_products or None,
         max_symbols=max_products,
         start_date=start,
         end_date=end,
