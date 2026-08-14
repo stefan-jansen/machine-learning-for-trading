@@ -11,6 +11,7 @@ import pytest
 from case_studies.cme_futures.research_workflow import (
     FuturesPricePath,
     _expiry_rules,
+    create_label_candidate_sets,
     product_universe_table,
     publish_product_weights,
     resolved_model_plan,
@@ -82,8 +83,8 @@ def _prediction(study: Study):
     )
 
 
-def _current_prediction(study: Study):
-    training = study.results.register_training(_resolved_spec())
+def _current_prediction(study: Study, *, alpha: float = 1.0):
+    training = study.results.register_training(_resolved_spec(alpha=alpha))
     dates = pl.date_range(pl.date(2024, 1, 2), pl.date(2024, 1, 5), eager=True)
     frame = pl.DataFrame(
         {
@@ -279,6 +280,7 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
 
     study = _study(tmp_path)
     prediction = _current_prediction(study)
+    second_prediction = _current_prediction(study, alpha=2.0)
     prices = _product_prices()
     path = FuturesPricePath(
         prices=prices,
@@ -305,7 +307,17 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
                 "risk": None,
                 "costs": None,
                 "chapter": "ch16",
-            }
+            },
+            {
+                "request_name": "ridge-alpha2-equal-weight-k1",
+                "prediction_hash": second_prediction.hash,
+                "label": "fwd_ret_21d",
+                "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+                "chapter": "ch16",
+            },
         ]
     )
 
@@ -315,8 +327,17 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
         population_name="test-cme-signal",
     )
 
-    assert execution.catalog_rows.get_column("complete").to_list() == [True]
+    assert execution.catalog_rows.get_column("complete").to_list() == [True, True]
     assert execution.population.require_complete() == tuple(
         execution.catalog_rows.get_column("backtest_hash")
     )
     assert execution.results[0].spec()["decision_artifact"]["canonical"] is True
+    candidate_sets = create_label_candidate_sets(
+        study,
+        execution,
+        name_prefix="test-cme-signal",
+    )
+    assert set(candidate_sets) == {"fwd_ret_21d"}
+    assert set(candidate_sets["fwd_ret_21d"].members) == set(
+        execution.catalog_rows.get_column("backtest_hash")
+    )
