@@ -22,11 +22,16 @@ def test_funding_changes_broker_cash_before_same_timestamp_sizing() -> None:
         }
     )
 
-    position = SimpleNamespace(quantity=1.0, current_price=100.0, multiplier=1.0)
-    broker = SimpleNamespace(cash=1_000.0, positions={"BTCUSDT": position})
+    position = SimpleNamespace(quantity=1.0, current_price=90.0, multiplier=1.0)
+    marks = {"BTCUSDT": 90.0}
+    broker = SimpleNamespace(
+        cash=1_000.0,
+        positions={"BTCUSDT": position},
+        get_mark_price=lambda symbol, **_kwargs: marks[symbol],
+    )
 
     def update_time(timestamp, prices, *_args, **_kwargs):
-        position.current_price = prices["BTCUSDT"]
+        marks.update(prices)
 
     broker._update_time = update_time
     ledger = FundingSettlementLedger(funding)
@@ -63,7 +68,11 @@ def test_longs_pay_and_shorts_receive_the_same_funding_rate() -> None:
         "LONG": SimpleNamespace(quantity=2.0, current_price=100.0, multiplier=1.0),
         "SHORT": SimpleNamespace(quantity=-1.0, current_price=100.0, multiplier=1.0),
     }
-    broker = SimpleNamespace(cash=1_000.0, positions=positions)
+    broker = SimpleNamespace(
+        cash=1_000.0,
+        positions=positions,
+        get_mark_price=lambda symbol, **_kwargs: positions[symbol].current_price,
+    )
     ledger = FundingSettlementLedger(funding)
 
     ledger.settle(timestamp, broker)
@@ -316,3 +325,90 @@ def test_timezone_naive_engine_targets_match_timezone_naive_feed() -> None:
     )
 
     assert result.engine_result.fills
+
+
+def test_date_engine_targets_match_date_feed() -> None:
+    timestamps = [datetime(2024, 1, day).date() for day in (2, 3)]
+    prices = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * 2,
+            "open": [100.0] * 2,
+            "high": [100.0] * 2,
+            "low": [100.0] * 2,
+            "close": [100.0] * 2,
+            "volume": [1_000_000.0] * 2,
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * 2,
+            "y_score": [0.1] * 2,
+            "y_true": [0.0] * 2,
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["A"] * 2,
+            "weight": [0.5] * 2,
+        }
+    )
+
+    result = backtest_runner.run_backtest(
+        "etfs",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+
+    assert result.engine_result.fills
+
+
+def test_contiguous_state_transition_flattens_then_reenters_at_boundary() -> None:
+    timestamps = [datetime(2024, 1, 1, hour=hour, tzinfo=UTC) for hour in (0, 8)]
+    prices = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "open": [100.0] * 2,
+            "high": [100.0] * 2,
+            "low": [100.0] * 2,
+            "close": [100.0] * 2,
+            "volume": [1_000_000.0] * 2,
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "y_score": [0.1] * 2,
+            "y_true": [0.0] * 2,
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "symbol": ["BTCUSDT"] * 2,
+            "weight": [0.5, 0.5],
+            "_state_transition": [False, True],
+        }
+    )
+
+    result = backtest_runner.run_backtest(
+        "crypto_perps_funding",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+
+    assert [fill.side.value for fill in result.engine_result.fills] == ["buy", "sell", "buy"]
+    assert result.engine_result.fills[1].timestamp == timestamps[1]
+    assert result.engine_result.fills[2].timestamp == timestamps[1]

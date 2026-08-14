@@ -61,8 +61,9 @@ def apply_state_transition_policy(
     *,
     policy: dict[str, str],
     cadence: str | None,
+    price_keys: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Insert explicit flat targets before fold boundaries and temporal gaps."""
+    """Preserve targets while making fold and temporal state resets executable."""
     required = {"symbol", "timestamp", "weight"}
     missing = required - set(weights.columns)
     if missing:
@@ -82,25 +83,46 @@ def apply_state_transition_policy(
             raise ValueError("non-continuing temporal-gap policy requires decision cadence")
         expected = _cadence_delta(cadence)
 
-    flatten_at: set[object] = set()
+    transition_at: set[object] = set()
+    flat_frames: list[pl.DataFrame] = []
+    price_timestamps = (
+        set(price_keys.get_column("timestamp").unique().to_list())
+        if price_keys is not None
+        else set()
+    )
     rows = timeline.iter_rows(named=True)
     previous = next(rows, None)
     for current in rows:
         assert previous is not None
         fold_changed = fold_column is not None and current[fold_column] != previous[fold_column]
         if fold_changed and policy.get("fold_boundary", "continue") != "continue":
-            flatten_at.add(previous["timestamp"])
+            transition_at.add(current["timestamp"])
         if expected is not None and current["timestamp"] - previous["timestamp"] > expected:
-            flatten_at.add(previous["timestamp"])
+            first_missing = previous["timestamp"] + expected
+            if first_missing in price_timestamps:
+                flat_frames.append(
+                    weights.filter(pl.col("timestamp") == previous["timestamp"]).with_columns(
+                        pl.lit(first_missing).cast(weights.schema["timestamp"]).alias("timestamp"),
+                        pl.lit(0.0).alias("weight"),
+                    )
+                )
+            else:
+                transition_at.add(current["timestamp"])
         previous = current
-    if not flatten_at:
-        return weights.sort("timestamp", "symbol")
-    return weights.with_columns(
-        pl.when(pl.col("timestamp").is_in(list(flatten_at)))
-        .then(0.0)
-        .otherwise(pl.col("weight"))
-        .alias("weight")
-    ).sort("timestamp", "symbol")
+    result = weights.with_columns(
+        pl.col("timestamp").is_in(list(transition_at)).alias("_state_transition")
+    )
+    if flat_frames:
+        result = pl.concat(
+            [
+                result,
+                *[
+                    frame.with_columns(pl.lit(True).alias("_state_transition"))
+                    for frame in flat_frames
+                ],
+            ]
+        )
+    return result.sort("timestamp", "symbol")
 
 
 def _date_string(value: object) -> str:
@@ -316,26 +338,11 @@ class Strategy:
             return None
         from case_studies.crypto_perps_funding.funding_data import load_funding_rates
 
-        prediction_timestamps = self.prediction.load().get_column("timestamp")
-        prediction_start = prediction_timestamps.min()
-        prediction_end = prediction_timestamps.max()
-        if prediction_start is None or prediction_end is None:
-            raise ValueError("crypto backtest prediction set has no timestamps")
         timestamp_dtype = prices.schema["timestamp"]
-        price_keys = (
-            prices.filter(
-                pl.col("timestamp").is_between(
-                    pl.lit(prediction_start).cast(timestamp_dtype, strict=False),
-                    pl.lit(prediction_end).cast(timestamp_dtype, strict=False),
-                    closed="both",
-                )
-            )
-            .select("symbol", "timestamp")
-            .unique()
-        )
+        price_keys = prices.select("symbol", "timestamp").unique()
         symbols = price_keys.get_column("symbol").unique().to_list()
-        start = _date_string(prediction_start)
-        end = _date_string(prediction_end)
+        start = _date_string(price_keys.get_column("timestamp").min())
+        end = _date_string(price_keys.get_column("timestamp").max())
         funding = load_funding_rates(symbols=symbols, start_date=start, end_date=end)
         funding = funding.with_columns(
             pl.col("symbol").cast(price_keys.schema["symbol"]),
@@ -370,22 +377,26 @@ class Strategy:
             raise ValueError("canonical backtesting does not support order decision artifacts")
         if fold_column == "fold_id":
             weights = weights.rename({"fold_id": "fold"})
+        price_keys = prices.select("symbol", "timestamp").unique()
+        weights = weights.with_columns(
+            pl.col("symbol").cast(price_keys.schema["symbol"]),
+            pl.col("timestamp").cast(price_keys.schema["timestamp"]),
+        )
         policy = self.decision.spec.get("state_transition_policy")
         if policy is not None:
             weights = apply_state_transition_policy(
                 weights,
                 policy=policy,
                 cadence=self.decision.spec.get("parameters", {}).get("cadence"),
+                price_keys=price_keys,
             )
-        price_keys = prices.select("symbol", "timestamp").unique()
-        weights = weights.with_columns(
-            pl.col("symbol").cast(price_keys.schema["symbol"]),
-            pl.col("timestamp").cast(price_keys.schema["timestamp"]),
-        )
         missing = weights.join(price_keys, on=["symbol", "timestamp"], how="anti")
         if not missing.is_empty():
             raise ValueError("decision artifact contains keys outside the backtest price grid")
-        return weights.select("symbol", "timestamp", "weight")
+        selected = ["symbol", "timestamp", "weight"]
+        if "_state_transition" in weights.columns:
+            selected.append("_state_transition")
+        return weights.select(*selected)
 
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)

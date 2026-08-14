@@ -57,7 +57,7 @@ class FundingSettlementLedger:
             position = broker.positions.get(symbol)
             if position is None or float(position.quantity) == 0.0:
                 continue
-            mark = position.current_price
+            mark = broker.get_mark_price(symbol, quantity=position.quantity)
             if mark is None:
                 raise RuntimeError(f"funding settlement has no current mark for {symbol!r}")
             event_cash -= (

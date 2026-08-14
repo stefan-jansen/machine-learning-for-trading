@@ -68,7 +68,8 @@ def test_fold_boundary_liquidates_unchanged_positions_before_next_fold() -> None
         cadence="1d",
     )
 
-    assert transitioned.get_column("weight").to_list() == [1.0, 0.0, 1.0]
+    assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 1.0]
+    assert transitioned.get_column("_state_transition").to_list() == [False, False, True]
 
 
 def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
@@ -89,9 +90,27 @@ def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
         decisions,
         policy={"fold_boundary": "continue", "temporal_gap": "reset"},
         cadence="1d",
+        price_keys=pl.DataFrame(
+            {
+                "symbol": ["A"] * 5,
+                "timestamp": [date(2024, 1, day) for day in range(1, 6)],
+            }
+        ),
     )
 
-    assert transitioned.get_column("weight").to_list() == [1.0, 0.0, 1.0]
+    assert transitioned.get_column("timestamp").to_list() == [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 5),
+    ]
+    assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 0.0, 1.0]
+    assert transitioned.get_column("_state_transition").to_list() == [
+        False,
+        False,
+        True,
+        False,
+    ]
 
 
 def _prediction(study: Study) -> str:

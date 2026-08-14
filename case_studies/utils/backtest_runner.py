@@ -370,14 +370,16 @@ class BacktestRunResult:
     execution_mode: str = "engine"
 
 
-def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[str, float]]:
+def _target_weights_by_timestamp(
+    weights: pl.DataFrame,
+) -> dict[date | datetime, dict[str, float]]:
     """Build deterministic timestamp and symbol ordered engine targets."""
     duplicate_count = weights.select(pl.struct("timestamp", "symbol").is_duplicated().sum()).item()
     if duplicate_count:
         raise ValueError(
             f"Target weights contain {duplicate_count} duplicate timestamp-symbol rows"
         )
-    targets: dict[datetime, dict[str, float]] = {}
+    targets: dict[date | datetime, dict[str, float]] = {}
     for row in weights.sort("timestamp", "symbol").iter_rows(named=True):
         timestamp = row["timestamp"]
         if timestamp not in targets:
@@ -389,9 +391,16 @@ def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[s
 def _engine_timestamp(
     value: object,
     *,
+    feed_is_date: bool,
     feed_timezone: str | None,
     configured_timezone: str,
-) -> datetime:
+) -> date | datetime:
+    if feed_is_date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        raise TypeError(f"engine target timestamp must be date-like, got {type(value).__name__}")
     if isinstance(value, datetime):
         timestamp = value
     elif isinstance(value, date):
@@ -1110,6 +1119,11 @@ def run_backtest(
     if rebal_spec["mode"] == "vectorized":
         if funding_rates is not None:
             raise ValueError("vectorized backtests cannot execute funding cashflows")
+        if (
+            "_state_transition" in weights.columns
+            and weights.filter(pl.col("_state_transition")).height
+        ):
+            raise ValueError("vectorized backtests cannot sequence state transitions")
         # sp500_options HTM short-straddle uses a dedicated multi-cohort daily-MTM
         # backtest path: overlapping 5-cohort book, per-cohort daily premium + hedge
         # P&L, entry-spread + hedge-rebalance transaction costs. The simple
@@ -1266,6 +1280,7 @@ def _run_engine(
 
     # Pre-compute weight dict from DataFrame
     price_timestamp_dtype = prices.schema["timestamp"]
+    feed_is_date = price_timestamp_dtype == pl.Date
     feed_timezone = (
         price_timestamp_dtype.time_zone if isinstance(price_timestamp_dtype, pl.Datetime) else None
     )
@@ -1273,6 +1288,7 @@ def _run_engine(
     weight_dict = {
         _engine_timestamp(
             timestamp,
+            feed_is_date=feed_is_date,
             feed_timezone=feed_timezone,
             configured_timezone=config.resolved_timezone,
         ): targets
@@ -1309,11 +1325,28 @@ def _run_engine(
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
+            feed_is_date=feed_is_date,
             feed_timezone=feed_timezone,
             configured_timezone=config.resolved_timezone,
         )
         for timestamp in schedule_dates.to_list()
     }
+    transition_timestamps = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        )
+        for timestamp in (
+            weights.filter(pl.col("_state_transition")).get_column("timestamp").unique().to_list()
+            if "_state_transition" in weights.columns
+            else []
+        )
+    }
+    rebalance_schedule.update(transition_timestamps)
+    if transition_timestamps and config.execution_mode.value != "same_bar":
+        raise ValueError("state-transition sequencing requires same-bar engine execution")
 
     # Build risk components from spec (Ch19)
     position_rules = _build_position_rules(risk_spec)
@@ -1355,6 +1388,10 @@ def _run_engine(
                 if position_rules:
                     broker.set_position_rules(position_rules)
                 self._rules_set = True
+
+            if timestamp in transition_timestamps:
+                broker.flatten_all_positions(reason="declared state transition")
+                broker._process_orders()
 
             # Check portfolio-level limits (each bar)
             if risk_manager:
