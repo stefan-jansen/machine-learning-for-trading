@@ -11,6 +11,7 @@ from darts.models import TSMixerModel
 from case_studies.utils.darts_forecasting import (
     BASE_TARGET_COL,
     _attach_base_target,
+    _attach_darts_target,
     _attach_expected_periods,
     _predict_fold,
     _prepare_fold_series,
@@ -105,6 +106,44 @@ def test_darts_checkpoint_population_rejects_missing_weights(tmp_path) -> None:
             checkpoints=(1,),
             architecture="tsmixer",
         )
+
+
+def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> None:
+    dataset = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-05", "2024-01-12", "2024-01-26", "2024-02-02"]),
+            "symbol": ["S0"] * 4,
+            "fwd_ret_5d": [0.01, 0.02, 0.03, 0.04],
+        }
+    )
+    dataset = _attach_expected_periods(
+        dataset,
+        date_col="timestamp",
+        calendar_id="NYSE",
+        case_study="us_equities_panel",
+    )
+    config = {
+        "config_name": "nbeats_weekly",
+        "params": {
+            "darts_input_chunk_length": 12,
+            "darts_output_chunk_length": 1,
+            "darts_target": "lagged_label",
+        },
+    }
+
+    attached = _attach_darts_target(
+        dataset,
+        case_study="us_equities_panel",
+        date_col="timestamp",
+        entity_col="symbol",
+        label_col="fwd_ret_5d",
+        config=config,
+    )
+
+    assert np.isnan(attached.loc[0, BASE_TARGET_COL])
+    assert attached.loc[1, BASE_TARGET_COL] == pytest.approx(np.log1p(0.01))
+    assert np.isnan(attached.loc[2, BASE_TARGET_COL])
+    assert attached.loc[3, BASE_TARGET_COL] == pytest.approx(np.log1p(0.03))
 
 
 def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(

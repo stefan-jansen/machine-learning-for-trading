@@ -185,6 +185,7 @@ def test_darts_request_resolves_installed_runtime_identity(tmp_path, monkeypatch
     monkeypatch.setattr(
         "case_studies.utils.darts_forecasting.darts_training_identity",
         lambda *args, **kwargs: {
+            "base_target_data_spec": {"kind": "one_period_return"},
             "input_data_spec": mds.input_lineage,
             "input_chunk_length": 2,
             "output_chunk_length": 1,
@@ -219,6 +220,7 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
             "symbol": [f"S{symbol}" for symbol in range(3) for _ in dates],
             "timestamp": dates.to_list() * 3,
             "feature": [float(index) for index in range(3 * len(dates))],
+            "temporal": [float(index % 7) for index in range(3 * len(dates))],
             "fwd_ret_5d": [float(index % 3) / 100 for index in range(3 * len(dates))],
         }
     )
@@ -226,18 +228,38 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
         LabelDefinition("fwd_ret_5d", "regression", "5D"),
         frame.select("symbol", "timestamp", "fwd_ret_5d"),
     )
+    cv = CVSpec.walk_forward(
+        training_window="80D",
+        validation_window="20D",
+        retrain_every="20D",
+        folds=(0,),
+        horizon="5D",
+        gap="5D",
+        holdout_start="2024-02-01",
+        holdout_end="2024-03-29",
+        calendar="NYSE",
+        decision_cadence="weekly_friday",
+    )
+    canonical_folds = [
+        dict(fold) for fold in cv.resolve(frame.select("timestamp").unique()).normalized_folds
+    ]
+    temporal_by_fold = (
+        frame.select("symbol", "timestamp", "temporal")
+        .with_columns(pl.lit(0, dtype=pl.Int64).alias("fold"))
+        .to_pandas()
+    )
     mds = SimpleNamespace(
         dataset=frame,
-        feature_names=["feature"],
+        feature_names=["feature", "temporal"],
         label_col="fwd_ret_5d",
         date_col="timestamp",
         entity_cols=["symbol"],
-        splits=[],
+        splits=canonical_folds,
         task_type="regression",
         class_values=[],
-        temporal_by_fold=None,
-        temporal_keys=[],
-        temporal_feature_names=[],
+        temporal_by_fold=temporal_by_fold,
+        temporal_keys=["symbol", "timestamp"],
+        temporal_feature_names=["temporal"],
         input_lineage={
             "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
             "fingerprint": "fixture-v1",
@@ -256,6 +278,7 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
                     "lookback": 12,
                     "darts_input_chunk_length": 12,
                     "darts_output_chunk_length": 1,
+                    "darts_target": "lagged_label",
                 },
                 "config_name": "nbeats_weekly",
                 "family": "deep_learning",
@@ -263,47 +286,6 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
             }
         ],
     )
-    observed: dict[str, object] = {}
-
-    def validation_keys(dataset_pd, splits, **kwargs):
-        observed["timestamps"] = sorted(dataset_pd["timestamp"].unique())
-        observed["splits"] = splits
-        rows = []
-        for split in splits:
-            validation = dataset_pd[
-                dataset_pd["timestamp"].between(split["val_start"], split["val_end"])
-            ]
-            rows.append(
-                pl.from_pandas(validation[["symbol", "timestamp"]]).with_columns(
-                    pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold")
-                )
-            )
-        return pl.concat(rows).sort("symbol", "timestamp", "fold")
-
-    monkeypatch.setattr(
-        "case_studies.utils.darts_forecasting.darts_validation_keys",
-        validation_keys,
-    )
-    monkeypatch.setattr(
-        "case_studies.utils.darts_forecasting.darts_training_identity",
-        lambda *args, **kwargs: {
-            "input_data_spec": mds.input_lineage,
-            "input_chunk_length": 12,
-            "output_chunk_length": 1,
-            "max_train_sequences": 0,
-        },
-    )
-    cv = CVSpec.walk_forward(
-        training_window="12W",
-        validation_window="4W",
-        retrain_every="4W",
-        folds=(0,),
-        horizon="5D",
-        gap="5D",
-        calendar="NYSE",
-        decision_cadence="weekly_friday",
-    )
-
     resolved = study.model(
         family="deep_learning",
         label=label.name,
@@ -312,13 +294,12 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
         cv=cv,
     ).resolve()
 
-    observed_timestamps = observed["timestamps"]
-    split = observed["splits"][0]
+    context = resolved._context
+    observed_timestamps = sorted(context.dataset_pd["timestamp"].unique())
+    split = context.splits[0]
     assert len(observed_timestamps) < len(dates)
     assert all(timestamp.weekday() == 4 for timestamp in observed_timestamps)
-    assert all(
-        pd.Timestamp(split[field]) in observed_timestamps for field in ("train_end", "val_start")
-    )
+    assert list(context.splits) == canonical_folds
     assert pd.Timestamp(split["val_start"]) - pd.Timestamp(split["train_end"]) >= pd.Timedelta("5D")
     assert resolved.spec["cv"]["request"]["decision_cadence"] == "weekly_friday"
     assert resolved.spec["cv"]["request"]["gap"] == "5D"
@@ -327,7 +308,15 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
         for timestamp in observed_timestamps
         if pd.Timestamp(split["val_start"]) <= timestamp <= pd.Timestamp(split["val_end"])
     ]
-    assert resolved.spec["expected_prediction_keys"]["n_rows"] == 3 * len(eligible_timestamps)
+    expected = pl.DataFrame(
+        {
+            "symbol": [f"S{symbol}" for symbol in range(3) for _ in eligible_timestamps],
+            "timestamp": eligible_timestamps * 3,
+            "fold": [0] * (3 * len(eligible_timestamps)),
+        }
+    ).sort("symbol", "timestamp", "fold")
+    assert context.expected_keys.equals(expected)
+    assert resolved.spec["expected_prediction_keys"]["n_rows"] == expected.height
 
 
 @pytest.mark.parametrize(

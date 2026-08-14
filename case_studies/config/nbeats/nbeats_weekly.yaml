@@ -5,6 +5,7 @@ params:
   architecture: nbeats
   darts_input_chunk_length: 12
   darts_output_chunk_length: 1
+  darts_target: lagged_label
   dropout: 0.1
   hidden_size: 128
   lookback: 12

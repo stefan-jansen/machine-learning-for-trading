@@ -378,9 +378,15 @@ def darts_training_identity(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         cfg, _parse_label_horizon(label_col)
     )
+    target_mode = str(cfg.get("params", {}).get("darts_target", "one_period_return"))
+    base_target_data_spec = (
+        {"kind": "lagged_label", "label": label_col}
+        if target_mode == "lagged_label"
+        else darts_base_target_identity(case_study)
+    )
     return {
         "batch_size": cfg.get("batch_size", 2048),
-        "base_target_data_spec": darts_base_target_identity(case_study),
+        "base_target_data_spec": base_target_data_spec,
         "input_chunk_length": input_chunk_length,
         "input_data_spec": input_data_spec,
         "lookback": cfg.get("params", {}).get("lookback", input_chunk_length),
@@ -624,6 +630,49 @@ def _panel_identity_columns(dataset_pd: pd.DataFrame, entity_col: str) -> list[s
     return identity_cols
 
 
+def _attach_darts_target(
+    dataset_pd: pd.DataFrame,
+    *,
+    case_study: str,
+    date_col: str,
+    entity_col: str,
+    label_col: str,
+    config: dict[str, Any],
+) -> pd.DataFrame:
+    mode = str(config.get("params", {}).get("darts_target", "one_period_return"))
+    if mode == "one_period_return":
+        return _attach_base_target(dataset_pd, case_study, date_col)
+    if mode != "lagged_label":
+        raise ValueError(f"unsupported Darts target mode {mode!r}")
+    _, output_chunk_length = _resolve_chunk_lengths(config, _parse_label_horizon(label_col))
+    if output_chunk_length != 1:
+        raise ValueError("lagged-label Darts targets require a one-period forecast")
+    if _DARTS_PERIOD_COL not in dataset_pd.columns:
+        raise ValueError("lagged-label Darts targets require expected-period identity")
+    if label_col not in dataset_pd.columns:
+        raise ValueError(f"lagged-label Darts target is missing {label_col!r}")
+
+    result = dataset_pd.copy()
+    result[date_col] = pd.to_datetime(result[date_col])
+    identity_cols = _panel_identity_columns(result, entity_col)
+    result = result.sort_values([*identity_cols, date_col], kind="stable")
+    segment_col = "_darts_target_segment"
+    if segment_col in result.columns:
+        raise ValueError(f"Darts dataset contains reserved column {segment_col!r}")
+    result[segment_col] = (
+        result.groupby(identity_cols, sort=False)[_DARTS_PERIOD_COL]
+        .diff()
+        .ne(1)
+        .groupby([result[column] for column in identity_cols])
+        .cumsum()
+    )
+    target = result.groupby([*identity_cols, segment_col], sort=False)[label_col].shift(1)
+    if (target.dropna() <= -1.0).any():
+        raise ValueError("lagged-label Darts targets require returns greater than -1")
+    result[BASE_TARGET_COL] = np.log1p(target)
+    return result.drop(columns=segment_col)
+
+
 def darts_validation_keys(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -644,12 +693,19 @@ def darts_validation_keys(
     )
     from utils.cv_splits import make_walk_forward_config
 
-    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
     dataset_pd = _attach_expected_periods(
-        dataset_pd,
+        dataset_pd.copy(),
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
         case_study=case_study,
+    )
+    dataset_pd = _attach_darts_target(
+        dataset_pd,
+        case_study=case_study,
+        date_col=date_col,
+        entity_col=entity_col,
+        label_col=label_col,
+        config=config,
     )
     identity_cols = _panel_identity_columns(dataset_pd, entity_col)
     frames: list[pl.DataFrame] = []
@@ -939,11 +995,10 @@ def run_darts_cv(
         return params or None
 
     label_horizon = _parse_label_horizon(label_col)
-    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
     from utils.cv_splits import make_walk_forward_config
 
     dataset_pd = _attach_expected_periods(
-        dataset_pd,
+        dataset_pd.copy(),
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
         case_study=case_study,
@@ -958,6 +1013,14 @@ def run_darts_cv(
     for cfg in configs:
         config_name = cfg["config_name"]
         params = cfg.get("params", {})
+        config_dataset = _attach_darts_target(
+            dataset_pd,
+            case_study=case_study,
+            date_col=date_col,
+            entity_col=entity_col,
+            label_col=label_col,
+            config=cfg,
+        )
         input_chunk_length, output_chunk_length = _resolve_chunk_lengths(cfg, label_horizon)
         cfg_seed = int(cfg.get("seed", RANDOM_SEED))
         n_epochs = int(cfg.get("n_epochs", 100))
@@ -978,7 +1041,7 @@ def run_darts_cv(
             seed_everything(fold_seed)
             fold_dataset = (
                 _overlay_fold_temporal_features(
-                    dataset_pd,
+                    config_dataset,
                     split,
                     date_col,
                     temporal_by_fold,
@@ -986,7 +1049,7 @@ def run_darts_cv(
                     temporal_feature_names,
                 )
                 if has_fold_temporal
-                else dataset_pd
+                else config_dataset
             )
             fold_series = _prepare_fold_series(
                 fold_dataset,

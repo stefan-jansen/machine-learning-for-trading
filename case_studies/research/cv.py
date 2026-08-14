@@ -221,12 +221,6 @@ class CVSpec:
         date_col: str = "timestamp",
         eligibility: EligibilityManifest | None = None,
     ) -> ResolvedCVSpec:
-        timeline = _select_decision_observations(
-            timeline,
-            date_col=date_col,
-            cadence=self.decision_cadence,
-            calendar=self.calendar,
-        )
         step_size = self.retrain_every
         if isinstance(step_size, str):
             if step_size != self.validation_window:

@@ -164,15 +164,9 @@ def _normalize_sequence_splits(
     )
 
 
-def _sequence_splits(
-    mds,
-    request: dict[str, Any],
-    *,
-    dataset: pl.DataFrame | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from case_studies.utils.artifact_digest import value_digest
 
-    source = mds.dataset if dataset is None else dataset
     cv = request.get("cv")
     if cv is None:
         splits = [dict(split) for split in mds.splits]
@@ -183,7 +177,7 @@ def _sequence_splits(
             "identity": value_digest(pl.DataFrame(list(normalized))),
         }
     else:
-        resolved = cv.resolve(source.select(mds.date_col).unique(), date_col=mds.date_col)
+        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
         splits = [dict(fold) for fold in resolved.normalized_folds]
         cv_record = resolved.as_dict()
     requested_folds = request["preview_reductions"].get("folds")
@@ -295,7 +289,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         cadence=cv.decision_cadence if cv is not None else None,
         calendar=cv.calendar if cv is not None else None,
     )
-    splits, cv_record = _sequence_splits(mds, request, dataset=dataset)
+    splits, cv_record = _sequence_splits(mds, request)
     configs = {
         config["config_name"]: config
         for config in load_configs(study.case_study, label_ref.name, "deep_learning")
@@ -345,7 +339,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         )
         preprocessing = {
             "class": "fold_train_standardization",
-            "base_target": "one_period_log_return",
+            "base_target": sequence_identity["base_target_data_spec"],
             "input_chunk_length": sequence_identity["input_chunk_length"],
             "output_chunk_length": sequence_identity["output_chunk_length"],
         }
