@@ -446,6 +446,7 @@ def _build_darts_model(
     params = dict(cfg.get("params", {}))
     arch = params.pop("architecture")
     model_cls = NBEATSModel if arch == "nbeats" else TSMixerModel
+    params.pop("decision_cadence", None)
     params.pop("lookback", None)
     params.pop("darts_input_chunk_length", None)
     params.pop("darts_output_chunk_length", None)
@@ -1010,18 +1011,31 @@ def run_darts_cv(
     training_log: list[dict[str, Any]] = []
     prediction_frames: list[pl.DataFrame] = []
     has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    one_period_dataset: pd.DataFrame | None = None
 
     for cfg in configs:
         config_name = cfg["config_name"]
         params = cfg.get("params", {})
-        config_dataset = _attach_darts_target(
-            dataset_pd,
-            case_study=case_study,
-            date_col=date_col,
-            entity_col=entity_col,
-            label_col=label_col,
-            config=cfg,
-        )
+        if params.get("darts_target", "one_period_return") == "one_period_return":
+            if one_period_dataset is None:
+                one_period_dataset = _attach_darts_target(
+                    dataset_pd,
+                    case_study=case_study,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                    label_col=label_col,
+                    config=cfg,
+                )
+            config_dataset = one_period_dataset
+        else:
+            config_dataset = _attach_darts_target(
+                dataset_pd,
+                case_study=case_study,
+                date_col=date_col,
+                entity_col=entity_col,
+                label_col=label_col,
+                config=cfg,
+            )
         input_chunk_length, output_chunk_length = _resolve_chunk_lengths(cfg, label_horizon)
         cfg_seed = int(cfg.get("seed", RANDOM_SEED))
         n_epochs = int(cfg.get("n_epochs", 100))

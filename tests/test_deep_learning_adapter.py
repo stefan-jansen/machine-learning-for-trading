@@ -238,7 +238,6 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
         holdout_start="2024-02-01",
         holdout_end="2024-03-29",
         calendar="NYSE",
-        decision_cadence="weekly_friday",
     )
     canonical_folds = [
         dict(fold) for fold in cv.resolve(frame.select("timestamp").unique()).normalized_folds
@@ -275,6 +274,7 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
                 "n_epochs": 1,
                 "params": {
                     "architecture": "nbeats",
+                    "decision_cadence": "weekly_friday",
                     "lookback": 12,
                     "darts_input_chunk_length": 12,
                     "darts_output_chunk_length": 1,
@@ -301,8 +301,10 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
     assert all(timestamp.weekday() == 4 for timestamp in observed_timestamps)
     assert list(context.splits) == canonical_folds
     assert pd.Timestamp(split["val_start"]) - pd.Timestamp(split["train_end"]) >= pd.Timedelta("5D")
-    assert resolved.spec["cv"]["request"]["decision_cadence"] == "weekly_friday"
+    assert resolved.spec["cv"]["request"]["decision_cadence"] is None
     assert resolved.spec["cv"]["request"]["gap"] == "5D"
+    assert resolved.spec["model"]["params"]["decision_cadence"] == "weekly_friday"
+    assert resolved.spec["preprocessing"]["decision_cadence"] == "weekly_friday"
     eligible_timestamps = [
         timestamp
         for timestamp in observed_timestamps

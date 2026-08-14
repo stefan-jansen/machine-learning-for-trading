@@ -304,12 +304,6 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     if mds.task_type != "regression":
         raise ValueError("sequence runner currently supports regression labels only")
     cv = request.get("cv")
-    dataset = _select_sequence_observations(
-        mds.dataset,
-        date_col=mds.date_col,
-        cadence=cv.decision_cadence if cv is not None else None,
-        calendar=cv.calendar if cv is not None else None,
-    )
     splits, cv_record = _sequence_splits(mds, request)
     configs = {
         config["config_name"]: config
@@ -322,6 +316,20 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     config = _resolve_sequence_config(configured, request["overrides"])
     if config.get("family") != "deep_learning":
         raise ValueError(f"sequence preset belongs to unsupported family {config.get('family')!r}")
+    preset_cadence = config["params"].get("decision_cadence")
+    requested_cadence = cv.decision_cadence if cv is not None else None
+    if preset_cadence and requested_cadence and preset_cadence != requested_cadence:
+        raise ValueError(
+            f"sequence preset requires decision cadence {preset_cadence!r}, "
+            f"not {requested_cadence!r}"
+        )
+    decision_cadence = requested_cadence or preset_cadence
+    dataset = _select_sequence_observations(
+        mds.dataset,
+        date_col=mds.date_col,
+        cadence=decision_cadence,
+        calendar=cv.calendar if cv is not None else None,
+    )
     seed = int(config.get("seed", RANDOM_SEED))
     runtime = _sequence_runtime_spec(
         str(request["overrides"].get("device", "cuda")),
@@ -361,6 +369,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         preprocessing = {
             "class": "fold_train_standardization",
             "base_target": sequence_identity["base_target_data_spec"],
+            "decision_cadence": decision_cadence,
             "input_chunk_length": sequence_identity["input_chunk_length"],
             "output_chunk_length": sequence_identity["output_chunk_length"],
         }
@@ -662,6 +671,7 @@ def build_arch_kwargs(cfg: dict[str, Any], n_features: int, lookback: int) -> di
     """
     params = dict(cfg.get("params", {}))
     params.pop("architecture", None)
+    params.pop("decision_cadence", None)
     params.pop("lookback", None)
 
     dim_vals = {"n_features": n_features, "lookback": lookback}
