@@ -236,6 +236,60 @@ def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, m
     assert all(run.diagnostics["disk_fold_cache"] is False for run in batch.runs)
 
 
+def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_prepare = modeling.prepare_single_fold
+    prepared_folds: list[int] = []
+
+    def load_preset(config_name):
+        if config_name == "lasso":
+            return {
+                "config_name": config_name,
+                "family": "linear",
+                "library": "sklearn",
+                "model_class": "Lasso",
+                "params": {"alpha_frac": 0.5, "max_iter": 5000},
+            }
+        return {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha": 1.0},
+        }
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        assert fold is not None
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(linear, "_load_preset", load_preset)
+    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+
+    batch = run_models(
+        study,
+        requests=[
+            study.model(
+                family="linear",
+                label="fwd_ret_1d",
+                config_name=config_name,
+            )
+            for config_name in ("ridge", "lasso")
+        ],
+    )
+
+    assert prepared_folds == [0, 1, 0, 1]
+    assert all(run.predictions[0].complete for run in batch.runs)
+    lasso_params = batch.runs[1].training.spec()["computation"]["model"]["effective_params_by_fold"]
+    assert set(lasso_params) == {"0", "1"}
+    assert all(params["alpha"] > 0 for params in lasso_params.values())
+    assert all("alpha_frac" not in params for params in lasso_params.values())
+    assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
+
+
 def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
     tmp_path, monkeypatch
 ) -> None:
