@@ -17,6 +17,7 @@ from .models import ModelRequest
 
 if TYPE_CHECKING:
     from .execution import ModelExecution
+    from .population import OfficialPopulation
     from .workspace import Study
 
 
@@ -54,6 +55,25 @@ class ModelPlan:
     @property
     def expected_prediction_hashes(self) -> tuple[str, ...]:
         return tuple(member.prediction_hash for member in self.members)
+
+    def create_population(
+        self,
+        *,
+        name: str,
+        supersedes: str | None = None,
+    ) -> OfficialPopulation:
+        """Persist the complete canonical checkpoint population before execution."""
+        from .population import OfficialPopulation
+
+        if self.execution_tier is not ExecutionTier.CANONICAL:
+            raise ValueError("preview model plans cannot create an official population")
+        return OfficialPopulation.create(
+            self.study,
+            name=name,
+            member_kind="prediction",
+            members=self.expected_prediction_hashes,
+            supersedes=supersedes,
+        )
 
     def run(self) -> ModelExecution:
         from .execution import ModelExecution

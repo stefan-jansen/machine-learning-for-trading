@@ -17,7 +17,6 @@ from case_studies.research import (
     CVSpec,
     LabelDefinition,
     ModelRun,
-    OfficialPopulation,
     Study,
     get_adapter,
     plan_models,
@@ -255,11 +254,8 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
     ]
 
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-tabm-checkpoints",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
     assert loads == [("etfs", "fwd_ret_1d", 0)]
     assert conversions == 1
@@ -425,11 +421,8 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
         for config_name in ("tabm_s", "tabm_m")
     ]
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-tabm-recovery",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
 
     with pytest.raises(RuntimeError, match="injected TabM candidate failure"):
@@ -1037,11 +1030,8 @@ def test_linear_model_plan_reuses_one_materialization_and_one_execution_fold_pas
     ]
 
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-linear-checkpoints",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
     with pytest.raises(ValueError, match="incomplete"):
         population.require_complete()
@@ -1160,11 +1150,8 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
         for alpha in (1.0, 2.0, 3.0)
     ]
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-linear-recovery",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
 
     with pytest.raises(RuntimeError, match="injected candidate failure"):
@@ -1546,11 +1533,8 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
     ]
 
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-gbm-checkpoints",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
     with pytest.raises(ValueError, match="incomplete"):
         population.require_complete()
@@ -1757,11 +1741,8 @@ def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monk
         for rate in (0.1, 0.2, 0.3)
     ]
     plan = plan_models(study, requests=requests)
-    population = OfficialPopulation.create(
-        study,
+    population = plan.create_population(
         name="planned-gbm-recovery",
-        member_kind="prediction",
-        members=plan.expected_prediction_hashes,
     )
 
     with pytest.raises(RuntimeError, match="injected GBM candidate failure"):
