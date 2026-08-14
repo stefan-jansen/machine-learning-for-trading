@@ -111,6 +111,7 @@ def test_classification_cv_keeps_continuous_evaluation_target(
         eval_label_col="return",
         task_type="classification",
         class_values=[0, 1],
+        class_weights_by_fold={0: (1.0, 1.0)},
         date_col="timestamp",
         entity_col="symbol",
         device="cpu",

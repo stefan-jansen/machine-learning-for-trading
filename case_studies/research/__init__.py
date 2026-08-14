@@ -1,4 +1,5 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
+from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
 from .comparison import CandidateSet
 from .contracts import ExecutionTier, LifecycleState
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
@@ -19,6 +20,8 @@ __all__ = [
     "BacktestExecution",
     "CVSpec",
     "CandidateSet",
+    "CausalRequest",
+    "CausalResult",
     "DecisionArtifact",
     "ExecutionTier",
     "EligibilityManifest",
@@ -32,6 +35,7 @@ __all__ = [
     "OfficialPopulation",
     "ResearchLock",
     "ResolvedModelRequest",
+    "ResolvedCausalRequest",
     "ResolvedSpec",
     "ResolvedCVSpec",
     "Result",

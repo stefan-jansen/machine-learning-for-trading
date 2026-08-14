@@ -141,6 +141,19 @@ class TestQuarantinePolicy:
             )
 
 
+def test_crypto_long_short_grid_keeps_only_disjoint_selections() -> None:
+    schemes = get_entry_schemes_for(
+        "crypto_perps_funding",
+        "fwd_ret_8h",
+        n_assets=19,
+        long_short=True,
+    )
+
+    top_k = [scheme["top_k"] for scheme in schemes if scheme["method"] == "equal_weight_top_k"]
+    assert top_k == [5]
+    assert load_sweep("crypto_perps_funding")["top_k_grid"]["fwd_ret_8h"] == [5, 10]
+
+
 # ---------------------------------------------------------------------------
 # Registry reconciliation - declared sweep covers rank-1 per (CS, label)
 # ---------------------------------------------------------------------------

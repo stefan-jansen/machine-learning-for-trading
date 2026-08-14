@@ -15,6 +15,7 @@ from case_studies.research import (
     StateTransitionPolicy,
     Study,
 )
+from case_studies.research.strategy import apply_state_transition_policy
 from tests.test_research_contract_catalog import _publish, _resolved_spec
 from tests.test_research_flow import _patch_holdout_prices, _prices
 from tests.test_research_registry import _predictions
@@ -45,6 +46,72 @@ def _decisions() -> pl.DataFrame:
             "position": [1.0, 0.0],
         }
     )
+
+
+def test_fold_boundary_liquidates_unchanged_positions_before_next_fold() -> None:
+    decisions = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "timestamp": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+            ],
+            "fold": [0, 0, 1],
+            "weight": pl.Series([1.0, 1.0, 1.0], dtype=pl.Float32),
+        }
+    )
+
+    transitioned = apply_state_transition_policy(
+        decisions,
+        policy={"fold_boundary": "liquidate", "temporal_gap": "continue"},
+        cadence="1d",
+    )
+
+    assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 1.0]
+    assert transitioned.get_column("_state_transition").to_list() == [False, False, True]
+
+
+def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
+    decisions = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "timestamp": [
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+                date(2024, 1, 5),
+            ],
+            "fold": [0, 0, 0],
+            "weight": pl.Series([1.0, 1.0, 1.0], dtype=pl.Float32),
+        }
+    )
+
+    transitioned = apply_state_transition_policy(
+        decisions,
+        policy={"fold_boundary": "continue", "temporal_gap": "reset"},
+        cadence="1d",
+        price_keys=pl.DataFrame(
+            {
+                "symbol": ["A"] * 5,
+                "timestamp": [date(2024, 1, day) for day in range(1, 6)],
+            }
+        ),
+    )
+
+    assert transitioned.get_column("timestamp").to_list() == [
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 5),
+    ]
+    assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 0.0, 1.0]
+    assert transitioned.schema["weight"] == pl.Float32
+    assert transitioned.get_column("_state_transition").to_list() == [
+        False,
+        False,
+        True,
+        False,
+    ]
 
 
 def _prediction(study: Study) -> str:
@@ -173,6 +240,24 @@ def test_canonical_decision_promotion_requires_replay_evidence(tmp_path: Path) -
             canonical=True,
         )
 
+    with pytest.raises(ValueError, match="exact prediction_hashes"):
+        DecisionArtifact.publish(
+            study,
+            kind="target_positions",
+            decisions=_decisions(),
+            prediction_hashes=[prediction_hash],
+            parameters={},
+            source_identity={
+                "module": "case_studies.research.decisions",
+                "source_digest": "source-a",
+                "declared_inputs": {"prediction_hashes": ["undisclosed-other-input"]},
+                "determinism": {"seed": 42},
+                "clean_replay_digest": "not-reached",
+            },
+            state_transition_policy=policy,
+            canonical=True,
+        )
+
     exploratory = DecisionArtifact.publish(
         study,
         kind="target_positions",
@@ -184,7 +269,7 @@ def test_canonical_decision_promotion_requires_replay_evidence(tmp_path: Path) -
     evidence = {
         "module": "case_studies.research.decisions",
         "source_digest": "source-a",
-        "declared_inputs": {"prediction": prediction_hash},
+        "declared_inputs": {"prediction_hashes": [prediction_hash]},
         "determinism": {"seed": 42},
         "clean_replay_digest": exploratory.spec["artifact_digest"],
     }
@@ -240,6 +325,15 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
         selected_backtest_hash=validation_backtest.hash,
         selection_evidence={"metric": "validation_backtest_sharpe"},
         holdout_training_spec=holdout_spec,
+    )
+    assert (
+        study.lifecycle.lock(
+            candidate_set_hash=candidates.hash,
+            selected_backtest_hash=validation_backtest.hash,
+            selection_evidence={"metric": "validation_backtest_sharpe"},
+            holdout_training_spec=holdout_spec,
+        ).hash
+        == lock.hash
     )
     holdout_training = study.results.register_training(holdout_spec)
     holdout_frame = frame.with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))

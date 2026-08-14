@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime, time
+from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
@@ -369,21 +370,53 @@ class BacktestRunResult:
     execution_mode: str = "engine"
 
 
-def _target_weights_by_timestamp(weights: pl.DataFrame) -> dict[datetime, dict[str, float]]:
+def _target_weights_by_timestamp(
+    weights: pl.DataFrame,
+) -> dict[date | datetime, dict[str, float]]:
     """Build deterministic timestamp and symbol ordered engine targets."""
     duplicate_count = weights.select(pl.struct("timestamp", "symbol").is_duplicated().sum()).item()
     if duplicate_count:
         raise ValueError(
             f"Target weights contain {duplicate_count} duplicate timestamp-symbol rows"
         )
-    targets: dict[datetime, dict[str, float]] = {}
+    targets: dict[date | datetime, dict[str, float]] = {}
     for row in weights.sort("timestamp", "symbol").iter_rows(named=True):
         timestamp = row["timestamp"]
         if timestamp not in targets:
             targets[timestamp] = {}
-        if row["weight"] != 0:
-            targets[timestamp][row["symbol"]] = row["weight"]
+        targets[timestamp][row["symbol"]] = row["weight"]
     return targets
+
+
+def _engine_timestamp(
+    value: object,
+    *,
+    feed_is_date: bool,
+    feed_timezone: str | None,
+    configured_timezone: str,
+) -> date | datetime:
+    if feed_is_date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        raise TypeError(f"engine target timestamp must be date-like, got {type(value).__name__}")
+    if isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, date):
+        timestamp = datetime.combine(value, time.min)
+    else:
+        raise TypeError(f"engine target timestamp must be date-like, got {type(value).__name__}")
+    if feed_timezone is not None:
+        zone = ZoneInfo(feed_timezone)
+        return (
+            timestamp.replace(tzinfo=zone)
+            if timestamp.tzinfo is None
+            else timestamp.astimezone(zone)
+        )
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(ZoneInfo(configured_timezone)).replace(tzinfo=None)
+    return timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +895,7 @@ def run_backtest(
     initial_cash: float = 1_000_000.0,
     calendar: str = "NYSE",
     precomputed_weights: pl.DataFrame | None = None,
+    funding_rates: pl.DataFrame | None = None,
     force_rebacktest: bool = False,
     contract_specs: dict | None = None,
 ) -> BacktestRunResult:
@@ -900,6 +934,8 @@ def run_backtest(
     contract_specs : dict, optional
         Per-asset contract specifications (futures multipliers, tick sizes).
         Pass for futures case studies to get correct P&L scaling.
+    funding_rates : pl.DataFrame, optional
+        Official position-signed perpetual-futures funding settlements.
 
     Returns
     -------
@@ -939,6 +975,16 @@ def run_backtest(
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     strategy = strategy_view(strategy_spec)
+    signal_config = strategy["signal"]
+    allow_short = bool(
+        strategy_spec["backtest_config"]["account"].get("allow_short_selling", False)
+    ) or bool(signal_config.get("long_short", False))
+    allow_short = allow_short or (
+        str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
+    )
+    if precomputed_weights is not None:
+        allow_short = allow_short or bool(precomputed_weights.filter(pl.col("weight") < 0).height)
+    strategy_spec["backtest_config"]["account"]["allow_short_selling"] = allow_short
 
     # Apply spec-declared universe restriction (e.g., sp500_options rung-3
     # 'liquid' subset). Driven purely by strategy.signal.universe_filter so
@@ -994,7 +1040,6 @@ def run_backtest(
                     execution_mode=strategy.get("rebalance", {}).get("mode", "unknown"),
                 )
 
-    signal_config = strategy["signal"]
     rebal_spec = strategy.get("rebalance", {})
 
     if precomputed_weights is not None:
@@ -1072,6 +1117,13 @@ def run_backtest(
         }
 
     if rebal_spec["mode"] == "vectorized":
+        if funding_rates is not None:
+            raise ValueError("vectorized backtests cannot execute funding cashflows")
+        if (
+            "_state_transition" in weights.columns
+            and weights.filter(pl.col("_state_transition")).height
+        ):
+            raise ValueError("vectorized backtests cannot sequence state transitions")
         # sp500_options HTM short-straddle uses a dedicated multi-cohort daily-MTM
         # backtest path: overlapping 5-cohort book, per-cohort daily premium + hedge
         # P&L, entry-spread + hedge-rebalance transaction costs. The simple
@@ -1102,9 +1154,6 @@ def run_backtest(
                 prediction_hash=prediction_hash,
             )
     else:
-        allow_short = signal_config.get("long_short", False) or (
-            str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
-        )
         result = _run_engine(
             weights=weights,
             prices=prices,
@@ -1118,6 +1167,7 @@ def run_backtest(
             contract_specs=contract_specs,
             case_study=case_study,
             label=label,
+            funding_rates=funding_rates,
         )
 
     # Build metrics dict
@@ -1209,6 +1259,7 @@ def _run_engine(
     *,
     case_study: str | None = None,
     label: str | None = None,
+    funding_rates: pl.DataFrame | None = None,
 ) -> dict:
     """Run backtest via ml4t-backtest Engine."""
     from ml4t.backtest import DataFeed, Engine, RebalanceConfig, Strategy, TargetWeightExecutor
@@ -1228,7 +1279,21 @@ def _run_engine(
     apply_calendar_session_enforcement(config, calendar)
 
     # Pre-compute weight dict from DataFrame
-    weight_dict = _target_weights_by_timestamp(weights)
+    price_timestamp_dtype = prices.schema["timestamp"]
+    feed_is_date = price_timestamp_dtype == pl.Date
+    feed_timezone = (
+        price_timestamp_dtype.time_zone if isinstance(price_timestamp_dtype, pl.Datetime) else None
+    )
+    raw_weight_dict = _target_weights_by_timestamp(weights)
+    weight_dict = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        ): targets
+        for timestamp, targets in raw_weight_dict.items()
+    }
 
     # Resolve calendar-aware rebalance schedule, then thin by the label's
     # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
@@ -1257,7 +1322,31 @@ def _run_engine(
         step = get_rebalance_step(case_study, label)
         if step > 1:
             schedule_dates = schedule_dates.gather_every(step)
-    rebalance_schedule = set(schedule_dates.to_list())
+    rebalance_schedule = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        )
+        for timestamp in schedule_dates.to_list()
+    }
+    transition_timestamps = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        )
+        for timestamp in (
+            weights.filter(pl.col("_state_transition")).get_column("timestamp").unique().to_list()
+            if "_state_transition" in weights.columns
+            else []
+        )
+    }
+    rebalance_schedule.update(transition_timestamps)
+    if transition_timestamps and config.execution_mode.value != "same_bar":
+        raise ValueError("state-transition sequencing requires same-bar engine execution")
 
     # Build risk components from spec (Ch19)
     position_rules = _build_position_rules(risk_spec)
@@ -1268,6 +1357,12 @@ def _run_engine(
     # ensure_backtest_spec()).
     min_weight_change = float(rebalance_spec["min_weight_change"])
     min_trade_value = float(rebalance_spec["min_trade_value"])
+
+    funding_ledger = None
+    if funding_rates is not None:
+        from case_studies.crypto_perps_funding.funding_backtest import FundingSettlementLedger
+
+        funding_ledger = FundingSettlementLedger(funding_rates)
 
     # Build strategy
     class _PrecomputedStrategy(Strategy):
@@ -1283,12 +1378,20 @@ def _run_engine(
                 )
             )
 
+        def on_start(self, broker):
+            if funding_ledger is not None:
+                funding_ledger.install(broker)
+
         def on_data(self, timestamp, data, context, broker):
             # Set position rules on broker (once, first bar)
             if not self._rules_set:
                 if position_rules:
                     broker.set_position_rules(position_rules)
                 self._rules_set = True
+
+            if timestamp in transition_timestamps:
+                broker.flatten_all_positions(reason="declared state transition")
+                broker._process_orders()
 
             # Check portfolio-level limits (each bar)
             if risk_manager:
@@ -1352,8 +1455,8 @@ def _run_engine(
         # weights. The daily_returns frame is sliced to [win_start, win_end]
         # below regardless of how wide the load was.
         prices_dates = prices["timestamp"].dt.date()
-        prices_min_date = prices_dates.min()
-        prices_max_date = prices_dates.max()
+        prices_min_date = cast(date | None, prices_dates.min())
+        prices_max_date = cast(date | None, prices_dates.max())
         if prices_min_date is None or prices_max_date is None:
             raise RuntimeError(
                 f"Empty prices frame for cs={case_study} label={label} "
@@ -1386,6 +1489,8 @@ def _run_engine(
     engine = Engine.from_config(feed, strategy, config, contract_specs=contract_specs)
     engine_result = engine.run()
 
+    funding_metrics = funding_ledger.metrics() if funding_ledger is not None else {}
+
     # Extract daily returns
     session_aligned = infer_session_alignment(calendar)
     daily_df = extract_daily_returns_frame(
@@ -1408,6 +1513,7 @@ def _run_engine(
 
     ppy = overall_periods_per_year(case_study, calendar, daily_df)
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=ppy, trim_leading_zeros=False)
+    metrics.update(funding_metrics)
 
     # Engine-specific metrics (execution details not derivable from returns)
     m = engine_result.metrics
@@ -1422,22 +1528,53 @@ def _run_engine(
     # for leveraged products (cme_futures multipliers inflate it 10⁴–10⁵×) and
     # mixes incompatibly with vectorized-path rows on the same column.
     if weights.height > 0:
-        weights_sorted = weights.sort("symbol", "timestamp").with_columns(
+        turnover_weights = weights.with_columns(pl.lit(1).alias("_event_order"))
+        if "_state_transition" in weights.columns:
+            flat_states = []
+            transition_timestamps = (
+                weights.filter(pl.col("_state_transition"))
+                .get_column("timestamp")
+                .unique()
+                .sort()
+                .to_list()
+            )
+            for transition_timestamp in transition_timestamps:
+                previous_state = (
+                    weights.filter(pl.col("timestamp") < transition_timestamp)
+                    .sort("symbol", "timestamp")
+                    .group_by("symbol", maintain_order=True)
+                    .last()
+                )
+                if previous_state.height > 0:
+                    flat_states.append(
+                        previous_state.with_columns(
+                            pl.lit(transition_timestamp)
+                            .cast(weights.schema["timestamp"])
+                            .alias("timestamp"),
+                            pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
+                            pl.lit(0).alias("_event_order"),
+                        ).select(turnover_weights.columns)
+                    )
+            if flat_states:
+                turnover_weights = pl.concat([turnover_weights, *flat_states])
+        weights_sorted = turnover_weights.sort("symbol", "timestamp", "_event_order").with_columns(
             abs_change=(
                 pl.col("weight") - pl.col("weight").shift(1).over("symbol").fill_null(0.0)
             ).abs(),
         )
-        turnover_by_ts = weights_sorted.group_by("timestamp").agg(
-            turnover=pl.col("abs_change").sum()
+        turnover_by_ts = (
+            weights_sorted.with_columns(pl.col("timestamp").cast(daily_df.schema["timestamp"]))
+            .group_by("timestamp")
+            .agg(turnover=pl.col("abs_change").sum())
         )
         # Align to daily timeline so non-rebalance days contribute 0 to the mean
         # (matches port_ret.join(turnover) in the vectorized path).
         turnover_aligned = daily_df.join(
-            turnover_by_ts.with_columns(pl.col("timestamp").cast(daily_df.schema["timestamp"])),
+            turnover_by_ts,
             on="timestamp",
             how="left",
         ).with_columns(pl.col("turnover").fill_null(0.0))
-        mean_turnover = turnover_aligned["turnover"].mean()
+        mean_turnover = cast(float | None, turnover_aligned["turnover"].mean())
         metrics["avg_turnover"] = float(mean_turnover) if mean_turnover is not None else 0.0
     else:
         metrics["avg_turnover"] = 0.0
@@ -1868,7 +2005,7 @@ def _run_vectorized(
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=periods_per_year or 252)
 
     # Vectorized-specific metrics (not derivable from returns alone)
-    avg_turnover = float(port_ret["turnover"].mean()) if n > 0 else 0.0
+    avg_turnover = cast(float, port_ret["turnover"].mean()) if n > 0 else 0.0
     metrics["avg_turnover"] = avg_turnover
     metrics["n_periods"] = n
 

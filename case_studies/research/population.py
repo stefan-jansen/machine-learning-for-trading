@@ -48,6 +48,13 @@ class OfficialPopulation:
                 raise ValueError(
                     f"preview result {member_hash} cannot enter an official population"
                 )
+            if (
+                member_kind == "backtest"
+                and (result.spec().get("decision_artifact") or {}).get("canonical") is False
+            ):
+                raise ValueError(
+                    f"exploratory decision backtest {member_hash} cannot enter an official population"
+                )
         snapshot = {
             "schema_version": 1,
             "name": name,
@@ -102,6 +109,21 @@ class OfficialPopulation:
         finally:
             db.close()
         return cls(study, population_hash, name, member_kind, normalized, supersedes)
+
+    @classmethod
+    def one(cls, study: Study, *, name: str) -> OfficialPopulation:
+        """Resolve one immutable population by name without a hash handoff."""
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            rows = db.execute(
+                "SELECT population_hash FROM official_populations WHERE name = ? "
+                "ORDER BY population_hash",
+                (name,),
+            ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(
+                f"official population name {name!r} resolved to {len(rows)} identities"
+            )
+        return cls.open(study, rows[0][0])
 
     @classmethod
     def open(cls, study: Study, population_hash: str) -> OfficialPopulation:

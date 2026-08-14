@@ -419,6 +419,10 @@ def get_entry_schemes_for(
         # prediction-based portfolio; exclude it to match get_top_k_values_for.
         if k >= n_assets:
             continue
+        # Long and short selections must be disjoint. Keep the declared grid and
+        # exclude only members that the available cross-section cannot realize.
+        if long_short and 2 * k > n_assets:
+            continue
         schemes.append(
             {
                 "name": f"ew_top{k}",
@@ -703,6 +707,8 @@ def get_allocators(case_study: str) -> list[dict]:
         # Calendar-string overrides (``"3M"`` etc.) resolved against ppy.
         for key in _LOOKBACK_KEYS:
             if key in out and isinstance(out[key], str):
+                if ppy is None:
+                    raise RuntimeError("calendar lookback resolution requires periods_per_year")
                 out[key] = _resolve_calendar_lookback(out[key], ppy)
         resolved.append(out)
     return resolved

@@ -10,10 +10,12 @@ import pytest
 
 from case_studies.research import (
     CandidateSet,
+    DecisionArtifact,
     EligibilityManifest,
     OfficialPopulation,
     PredictionResult,
     Result,
+    StateTransitionPolicy,
     Study,
     run_backtests,
     run_models,
@@ -196,6 +198,10 @@ def test_n_catalog_rows_fan_out_to_n_independent_backtests(tmp_path: Path) -> No
     assert len({result.hash for result in execution.results}) == 2
     assert {item["prediction_hash"] for item in execution.diagnostics} == {first, second}
     assert _backtest_count(study) == 2
+    candidate_set = CandidateSet.create(study, "two-backtests", execution.results)
+    assert CandidateSet.one(study, name="two-backtests").hash == candidate_set.hash
+    assert len(candidate_set.ranked_validation_sharpe()) == 2
+    assert len(candidate_set.ranked_validation_sharpe(limit=1)) == 1
 
 
 def test_strategy_change_creates_a_backtest_without_retraining(tmp_path: Path) -> None:
@@ -228,6 +234,55 @@ def test_strategy_change_creates_a_backtest_without_retraining(tmp_path: Path) -
             for table in ("training_runs", "prediction_sets")
         }
     assert after == before
+
+
+def test_custom_stateful_decision_backtests_but_requires_promotion_for_candidates(
+    tmp_path: Path,
+) -> None:
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    selected = study.predictions.table().filter(pl.col("prediction_hash") == prediction_hash)
+    decisions = (
+        _predictions()
+        .select("symbol", "timestamp")
+        .with_columns(pl.Series("position", [1.0, -1.0]))
+    )
+    artifact = DecisionArtifact.publish(
+        study,
+        kind="target_positions",
+        decisions=decisions,
+        prediction_hashes=[prediction_hash],
+        parameters={"generator": "ordinary_python", "cadence": "1d"},
+        state_transition_policy=StateTransitionPolicy(
+            fold_boundary="liquidate",
+            temporal_gap="reset",
+        ),
+    )
+
+    execution = run_backtests(
+        study,
+        predictions=selected,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        prices=_prices(),
+        execution_mode="vectorized",
+        decision=artifact,
+    )
+    result = execution.results[0]
+
+    assert result.spec()["decision_artifact"]["hash"] == artifact.hash
+    assert result.spec()["decision_artifact"]["state_transition_policy"] == {
+        "fold_boundary": "liquidate",
+        "temporal_gap": "reset",
+    }
+    with pytest.raises(ValueError, match="exploratory decision"):
+        CandidateSet.create(study, "exploratory-decision", [result])
+    with pytest.raises(ValueError, match="exploratory decision"):
+        OfficialPopulation.create(
+            study,
+            name="exploratory-decision",
+            member_kind="backtest",
+            members=[result.hash],
+        )
 
 
 def test_preview_prediction_is_excluded_from_official_population(
@@ -379,6 +434,7 @@ def test_unfinished_training_cannot_satisfy_an_official_population(tmp_path: Pat
         member_kind="training",
         members=[training.hash],
     )
+    assert OfficialPopulation.one(study, name="training-population").hash == population.hash
 
     assert training.complete is False
     with pytest.raises(ValueError, match="partial"):

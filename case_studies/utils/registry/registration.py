@@ -1466,8 +1466,38 @@ def register_causal_run(
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
+    import json
+
+    version = (json.loads(spec_json) or {}).get("identity_version")
+    immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
+        existing = db.execute(
+            "SELECT label, treatment, confounders_json, embargo, n_folds, n_obs, "
+            "dml_effect, dml_se_hac, p_value_hac, naive_effect, confounding_bias_pct, "
+            "refutation_p, spec_json, notebook FROM causal_runs WHERE causal_hash = ?",
+            (causal_hash,),
+        ).fetchone()
+        expected = (
+            label,
+            treatment,
+            confounders_json,
+            embargo,
+            n_folds,
+            n_obs,
+            dml_effect,
+            dml_se_hac,
+            p_value_hac,
+            naive_effect,
+            confounding_bias_pct,
+            refutation_p,
+            spec_json,
+            notebook,
+        )
+        if immutable and existing is not None:
+            if existing != expected:
+                raise ValueError(f"immutable causal result conflict for {causal_hash}")
+            return
         # ON CONFLICT DO UPDATE rather than INSERT OR REPLACE — consistent with
         # register_paired_metrics, avoids the implicit DELETE that triggers
         # FK cascades and loses the original created_at timestamp.
