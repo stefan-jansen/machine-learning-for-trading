@@ -321,6 +321,80 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
     assert resolved.spec["expected_prediction_keys"]["n_rows"] == expected.height
 
 
+def test_run_dl_cv_applies_preset_cadence_before_backend(monkeypatch) -> None:
+    dates = pd.bdate_range("2024-01-01", "2024-01-19")
+    dataset = pd.DataFrame(
+        {
+            "symbol": "S0",
+            "timestamp": dates,
+            "feature": range(len(dates)),
+            "fwd_ret_5d": 0.01,
+        }
+    )
+    config = {
+        "batch_size": 8,
+        "checkpoint_interval": 1,
+        "config_name": "nbeats_weekly",
+        "family": "deep_learning",
+        "library": "darts",
+        "n_epochs": 1,
+        "params": {
+            "architecture": "nbeats",
+            "decision_cadence": "weekly_friday",
+            "darts_input_chunk_length": 2,
+            "darts_output_chunk_length": 1,
+            "darts_target": "lagged_label",
+            "lookback": 2,
+        },
+    }
+    observed: dict[str, pd.DataFrame] = {}
+    sentinel = {"all_predictions": pl.DataFrame()}
+
+    def capture_backend(dataset_pd, _splits, **_kwargs):
+        observed["dataset"] = dataset_pd
+        return sentinel
+
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.run_darts_cv",
+        capture_backend,
+    )
+
+    result = deep_learning.run_dl_cv(
+        dataset,
+        [
+            {
+                "fold": 0,
+                "train_start": dates[0],
+                "train_end": dates[7],
+                "val_start": dates[8],
+                "val_end": dates[-1],
+            }
+        ],
+        configs=[config],
+        n_features=1,
+        feature_names=["feature"],
+        label_col="fwd_ret_5d",
+        date_col="timestamp",
+        device="cpu",
+        case_study="us_equities_panel",
+    )
+
+    assert result is sentinel
+    assert observed["dataset"]["timestamp"].dt.weekday.eq(4).all()
+
+
+def test_sequence_adapter_rejects_unknown_decision_cadence() -> None:
+    dataset = pd.DataFrame({"timestamp": pd.bdate_range("2024-01-01", periods=5)})
+
+    with pytest.raises(ValueError, match="unsupported sequence decision cadence"):
+        deep_learning._select_sequence_observations(
+            dataset,
+            date_col="timestamp",
+            cadence="weekly_fri",
+            calendar="NYSE",
+        )
+
+
 @pytest.mark.parametrize(
     "split_resolver", [deep_learning._sequence_splits, tabular_dl._tabm_splits]
 )

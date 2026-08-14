@@ -165,26 +165,36 @@ def _normalize_sequence_splits(
 
 
 def _select_sequence_observations(
-    frame: pl.DataFrame,
+    frame: pl.DataFrame | pd.DataFrame,
     *,
     date_col: str,
     cadence: str | None,
     calendar: str | None,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pd.DataFrame:
     if cadence is None:
         return frame
     from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
 
+    supported = {"monthly_month_end", "weekly", "weekly_friday", "weekly_friday_close"}
+    if cadence not in supported:
+        raise ValueError(f"unsupported sequence decision cadence {cadence!r}")
     if date_col not in frame.columns:
         raise ValueError(f"decision cadence requires timestamp column {date_col!r}")
+    timestamps = (
+        frame.get_column(date_col).unique()
+        if isinstance(frame, pl.DataFrame)
+        else pl.Series(date_col, frame[date_col].unique().to_numpy())
+    )
     selected = resolve_rebalance_timestamps(
-        frame.get_column(date_col).unique(),
+        timestamps,
         cadence,
         calendar or "NYSE",
     )
     if selected.is_empty():
         raise ValueError(f"decision cadence {cadence!r} selected no observations")
-    return frame.join(pl.DataFrame({date_col: selected}), on=date_col, how="semi")
+    if isinstance(frame, pl.DataFrame):
+        return frame.join(pl.DataFrame({date_col: selected}), on=date_col, how="semi")
+    return frame.loc[frame[date_col].isin(selected.to_pandas())].copy()
 
 
 def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1067,6 +1077,18 @@ def run_dl_cv(
     _configure_sequence_runtime(
         _sequence_runtime_spec(device, seed=int(seed), num_threads=int(num_threads))
     )
+
+    cadences = {cfg.get("params", {}).get("decision_cadence") for cfg in configs}
+    if len(cadences) > 1:
+        raise ValueError("sequence configurations with different decision cadences must run apart")
+    decision_cadence = next(iter(cadences), None)
+    dataset_pd = _select_sequence_observations(
+        dataset_pd,
+        date_col=date_col,
+        cadence=decision_cadence,
+        calendar=None,
+    )
+    assert isinstance(dataset_pd, pd.DataFrame)
 
     if register and save_dir is None:
         raise ValueError(
