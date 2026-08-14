@@ -382,9 +382,9 @@ def get_entry_schemes_for(
     inherently long-short by construction. ``long_short`` controls only the
     sign of top-k / percentile schemes.
 
-    Specialized signal mechanisms are not included. Call their explicit
-    resolver when constructing a named Strategy request outside the equal-weight
-    baseline.
+    When the case study declares a ``backtest.sweep.signal_nasdaq100`` block
+    (the nasdaq100 v4 slot-mechanism sweep), schemes from that block are
+    appended — see ``get_signal_nasdaq100_schemes_for`` for the cross-product.
     """
     sweep = load_sweep(case_study)
     schemes: list[dict] = []
@@ -466,6 +466,10 @@ def get_entry_schemes_for(
                 "long_short": True,
             }
         )
+
+    # nasdaq100 v4 slot mechanism — appended when the block is present.
+    if "signal_nasdaq100" in sweep:
+        schemes.extend(get_signal_nasdaq100_schemes_for(case_study, label, n_assets))
 
     return schemes
 

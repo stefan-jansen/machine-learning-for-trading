@@ -49,8 +49,7 @@ except ImportError:  # pragma: no cover - polars-version drift safety
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
-from case_studies.utils.backtest_presets import serializable_backtest_spec
-from case_studies.utils.backtest_runner import bind_cost_feasible_universe, run_backtest
+from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.carrier_pins import prioritize_carrier_hash
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
@@ -1191,9 +1190,6 @@ def generate_holdout(
         prices = _load_prices_for(
             label, candidate["strategy_spec"].get("strategy", candidate["strategy_spec"])
         )
-        holdout_strategy_spec = bind_cost_feasible_universe(
-            candidate["strategy_spec"], cs_id, "holdout"
-        )
 
         # If the candidate's allocator is conformal_weighted, the holdout
         # prediction_hash must be registered AND conformal widths written to
@@ -1262,7 +1258,7 @@ def generate_holdout(
             bt_result = run_backtest(
                 cs_id,
                 pre_registered_hash or "",  # empty if not pre-registered
-                holdout_strategy_spec,
+                candidate["strategy_spec"],
                 prices=prices,
                 predictions=predictions,
                 label=label,
@@ -1401,16 +1397,10 @@ def generate_holdout(
                 f"daily_returns was emitted."
             )
 
-    registered_strategy_spec = serializable_backtest_spec(
-        bind_cost_feasible_universe(bt_result.strategy_spec, cs_id, "holdout")
-    )
-    registered_strategy_spec.setdefault("backtest_config", {}).setdefault("metadata", {})[
-        "prediction_hash"
-    ] = prediction_hash
     backtest_hash = register_backtest_run(
         cs_id,
         prediction_hash,
-        registered_strategy_spec,
+        best["strategy_spec"],
         returns=bt_result.daily_returns,
         trades=trades_df,
         weights=bt_result.weights,

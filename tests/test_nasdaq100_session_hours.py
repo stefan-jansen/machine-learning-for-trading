@@ -101,26 +101,21 @@ class TestThroughTheLoader:
         """A minute-bar archive in the layout the loader scans."""
         rows = []
         for date in [FULL_DAY, HOLIDAY, *HALF_DAYS]:
-            for symbol in ["AAPL", "MSFT"]:
-                stamp = dt.datetime.combine(date, dt.time(9, 0))
-                while stamp.time() <= dt.time(16, 45):
-                    if symbol != "MSFT" or stamp.time() != dt.time(9, 30):
-                        price = (
-                            100.0 if symbol == "AAPL" else 100.0 + stamp.hour + stamp.minute / 100
-                        )
-                        rows.append(
-                            {
-                                "timestamp": stamp,
-                                "symbol": symbol,
-                                "date": date,
-                                "first_trade_price": price,
-                                "high_trade_price": price + 1.0,
-                                "low_trade_price": price - 1.0,
-                                "last_trade_price": price + 0.5,
-                                "volume": 1_000.0,
-                            }
-                        )
-                    stamp += dt.timedelta(minutes=15)
+            stamp = dt.datetime.combine(date, dt.time(9, 0))
+            while stamp.time() <= dt.time(16, 45):
+                rows.append(
+                    {
+                        "timestamp": stamp,
+                        "symbol": "AAPL",
+                        "date": date,
+                        "first_trade_price": 100.0,
+                        "high_trade_price": 101.0,
+                        "low_trade_price": 99.0,
+                        "last_trade_price": 100.5,
+                        "volume": 1_000.0,
+                    }
+                )
+                stamp += dt.timedelta(minutes=15)
 
         partition = tmp_path / "equities" / "market" / "nasdaq100" / "minute_bars" / "year=2020"
         partition.mkdir(parents=True)
@@ -152,102 +147,6 @@ class TestThroughTheLoader:
         assert bars["timestamp"].min().time() == dt.time(9, 0)
         assert bars["timestamp"].max().time() == dt.time(16, 45)
         assert bars["timestamp"].dt.date().n_unique() == 4
-
-    @pytest.mark.parametrize("frequency", ["30m", "1h", "4h"])
-    def test_resampled_decisions_align_to_each_session_open(self, archive, frequency: str):
-        minute_bars = archive.load_nasdaq100_bars(regular_hours=True)
-        decision_bars = archive.load_nasdaq100_bars(
-            frequency=frequency,
-            regular_hours=True,
-        )
-
-        minute_timestamps = set(minute_bars["timestamp"].to_list())
-        assert set(decision_bars["timestamp"].to_list()).issubset(minute_timestamps)
-
-        for session in [FULL_DAY, *HALF_DAYS]:
-            session_times = (
-                decision_bars.filter(
-                    (pl.col("timestamp").dt.date() == session) & (pl.col("symbol") == "AAPL")
-                )
-                .get_column("timestamp")
-                .dt.time()
-                .to_list()
-            )
-            assert session_times[0] == dt.time(9, 30)
-
-        if frequency == "4h":
-            full_day_times = (
-                decision_bars.filter(
-                    (pl.col("timestamp").dt.date() == FULL_DAY) & (pl.col("symbol") == "AAPL")
-                )
-                .get_column("timestamp")
-                .dt.time()
-                .to_list()
-            )
-            assert full_day_times == [dt.time(9, 30), dt.time(13, 30)]
-
-    def test_resampling_uses_the_common_open_when_a_symbol_misses_its_first_minute(self, archive):
-        decision_bars = archive.load_nasdaq100_bars(
-            frequency="1h",
-            regular_hours=True,
-        ).filter(pl.col("timestamp").dt.date() == FULL_DAY)
-
-        times_by_symbol = {
-            symbol: group.get_column("timestamp").dt.time().to_list()
-            for (symbol,), group in decision_bars.group_by("symbol")
-        }
-        assert times_by_symbol["MSFT"] == times_by_symbol["AAPL"]
-        assert times_by_symbol["MSFT"][0] == dt.time(9, 30)
-        msft_open = decision_bars.filter(
-            (pl.col("symbol") == "MSFT") & (pl.col("timestamp").dt.time() == dt.time(9, 30))
-        )
-        assert msft_open["open"].item() == pytest.approx(109.45)
-
-    @pytest.mark.parametrize("frequency", ["1h", "4h"])
-    def test_production_resampling_and_alignment_never_crosses_sessions(
-        self, archive, frequency: str
-    ):
-        from case_studies.utils.backtest_loaders import align_predictions_to_decision_grid
-
-        decision_bars = archive.load_nasdaq100_bars(
-            frequency=frequency,
-            regular_hours=True,
-        )
-        predictions = pl.DataFrame(
-            {
-                "timestamp": [
-                    dt.datetime.combine(FULL_DAY, dt.time(15, 45)),
-                    dt.datetime.combine(HALF_DAYS[0], dt.time(10, 0)),
-                ],
-                "symbol": ["AAPL", "AAPL"],
-                "y_score": [1.0, 2.0],
-            }
-        )
-
-        aligned = align_predictions_to_decision_grid(
-            predictions,
-            decision_bars.get_column("timestamp").unique().sort(),
-        )
-
-        next_session = aligned.filter(pl.col("timestamp").dt.date() == HALF_DAYS[0])
-        if frequency == "1h":
-            assert next_session.select("timestamp", "y_score").to_dicts() == [
-                {
-                    "timestamp": dt.datetime.combine(HALF_DAYS[0], dt.time(10, 30)),
-                    "y_score": 2.0,
-                },
-                {
-                    "timestamp": dt.datetime.combine(HALF_DAYS[0], dt.time(11, 30)),
-                    "y_score": 2.0,
-                },
-                {
-                    "timestamp": dt.datetime.combine(HALF_DAYS[0], dt.time(12, 30)),
-                    "y_score": 2.0,
-                },
-            ]
-        else:
-            assert next_session.is_empty()
-        assert aligned.filter(pl.col("timestamp").dt.date() == HALF_DAYS[1]).is_empty()
 
 
 class TestTheSessionTable:

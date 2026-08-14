@@ -6,11 +6,12 @@ Chapter 20 still lands a populated ``backtest_paired_metrics`` table. It renders
 §2 (stage-transition waterfall), §6 (holdout decay + holdout-vs-benchmark) and
 §7 (benchmark-aware diagnostics) without inline bootstrap recomputation.
 
-This module is the shared implementation used by the case-study analysis
-notebooks and the Chapter 20 aggregate. It owns selection, benchmark cadence,
-explicit outcome-period alignment, uncertainty computation, and registry
-writes. Callers provide per-case-study restrictions rather than reproducing
-that computation locally.
+The logic is extracted verbatim from the two producer loops in
+``20_strategy_synthesis/01_aggregate_synthesis.py``; the only change is that the
+per-case-study selection config (label restriction, rung pin, carrier pin,
+frequency) is passed in as arguments rather than read from Ch20 module globals,
+so a single case study can run standalone. The Chapter-20 aggregate can later
+call this function per case study and become a pure reader.
 
 Six pair types are produced per case study:
 
@@ -30,7 +31,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -38,10 +38,7 @@ import polars as pl
 
 from case_studies.utils.analytics import DISPLAY_NAMES
 from case_studies.utils.backtest_explorer import BacktestExplorer
-from case_studies.utils.benchmark import (
-    load_benchmark_periods_per_year,
-    load_benchmark_returns,
-)
+from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.registry.registration import register_paired_metrics
 from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
@@ -58,7 +55,7 @@ _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 _PPY_BY_FREQ = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}
 
 
-def _min_paired_n(ppy: float) -> int:
+def _min_paired_n(ppy: int) -> int:
     """Minimum series length for paired-bootstrap stability, frequency-aware.
 
     The ~21 floor was written for daily cadences (about a month of obs).
@@ -122,20 +119,20 @@ def _apply_carrier_pin(df: pl.DataFrame, predicate: pl.Expr | None) -> pl.DataFr
 
 def _benchmark_returns_from_artifact(
     cs: str, label: str, period: str = "overall"
-) -> tuple[str, pl.DataFrame, str, float | None] | None:
+) -> tuple[str, pl.DataFrame, str] | None:
     """Resolve the side-artifact equal-weight benchmark for ``(cs, label)``.
 
-    The benchmark is the scheduled EW forward-return series persisted by
-    ``scripts/generate_case_study_benchmarks.py`` at
+    The benchmark is the daily-MTM EW reference series persisted by
+    ``scripts/compute_vectorized_ew_benchmark.py`` at
     ``case_studies/{cs}/benchmark/{label}.parquet``. Single, well-defined
     methodology per (cs, label). ``period`` selects the window slice
     (``"overall"`` or ``"holdout"``). Classification-label fallback to the
     matching ``fwd_ret_*`` artifact applies in both periods.
 
-    Returns ``(synthetic_hash, returns_df, resolved_label, periods_per_year)``
-    or ``None`` when the artifact is missing. ``synthetic_hash`` is a
-    deterministic identifier safe as the PK column in
-    ``backtest_paired_metrics`` (no FK on ``benchmark_hash``).
+    Returns ``(synthetic_hash, returns_df, resolved_label)`` or ``None`` when
+    the artifact is missing. ``synthetic_hash`` is a deterministic identifier
+    safe as the PK column in ``backtest_paired_metrics`` (no FK on
+    ``benchmark_hash``).
     """
     df = load_benchmark_returns(cs, label, period=period)
     bench_label = label
@@ -153,49 +150,13 @@ def _benchmark_returns_from_artifact(
         bench_label = fallback
     suffix = "" if period == "overall" else f":{period}"
     bench_hash = f"side_ew:{cs}:{bench_label}{suffix}"
-    benchmark_ppy = load_benchmark_periods_per_year(cs, bench_label)
     return (
         bench_hash,
         df.select(
             pl.col("timestamp").cast(pl.Date).alias("timestamp"),
-            pl.col("period_end").cast(pl.Date),
             pl.col("ew_return").cast(pl.Float64).alias("ret"),
         ),
         bench_label,
-        benchmark_ppy,
-    )
-
-
-def _align_challenger_to_benchmark_periods(
-    challenger: pl.DataFrame,
-    benchmark: pl.DataFrame,
-) -> pl.DataFrame:
-    """Align daily challenger P&L to the benchmark's retained decision periods."""
-    if "period_end" not in benchmark.columns:
-        raise ValueError("benchmark returns require an explicit period_end")
-    same_session = benchmark.select((pl.col("period_end") == pl.col("timestamp")).all()).item()
-    if same_session:
-        return challenger.join(benchmark, on="timestamp", how="inner", suffix="_b").select(
-            "timestamp", "ret", "ret_b"
-        )
-
-    intervals = benchmark.rename(
-        {"timestamp": "_period_start", "period_end": "_period_end", "ret": "ret_b"}
-    )
-    if intervals.is_empty():
-        return pl.DataFrame(schema={"timestamp": pl.Date, "ret": pl.Float64, "ret_b": pl.Float64})
-    return (
-        challenger.join(intervals, how="cross")
-        .filter(
-            (pl.col("timestamp") > pl.col("_period_start"))
-            & (pl.col("timestamp") <= pl.col("_period_end"))
-        )
-        .group_by("_period_start", maintain_order=True)
-        .agg(
-            ((pl.col("ret") + 1.0).product() - 1.0).alias("ret"),
-            pl.col("ret_b").first(),
-        )
-        .rename({"_period_start": "timestamp"})
     )
 
 
@@ -414,25 +375,6 @@ def _val_rank1_full_spec(
     return None
 
 
-def validation_strategy_sql_filter(
-    cs: str,
-    explorer: BacktestExplorer,
-    *,
-    label_restriction: frozenset[str] | None = None,
-    rung: dict | None = None,
-    carrier_pin_predicate: pl.Expr | None = None,
-) -> tuple[list[str], list[object]]:
-    """Return SQL clauses and parameters for the resolved validation carrier."""
-    strategy_spec = _val_rank1_full_spec(
-        cs,
-        explorer,
-        label_restriction=label_restriction,
-        rung=rung,
-        carrier_pin_predicate=carrier_pin_predicate,
-    )
-    return _full_strategy_clauses(strategy_spec)
-
-
 def _holdout_lineage_for(
     cs: str,
     leader_label: str,
@@ -576,7 +518,6 @@ def _populate_pair(
     label,
     *,
     disjoint_windows: bool = False,
-    comparison_periods_per_year: float | None = None,
     benchmark_label: str | None = None,
     write_case_dir: Path | None = None,
 ):
@@ -586,12 +527,9 @@ def _populate_pair(
     bootstrapped independently over its full window and the difference
     distribution is built from independent draws. Otherwise, the streams are
     inner-joined on timestamp and a paired stationary bootstrap runs on the
-    aligned diff series. A side benchmark with a lower observation frequency
-    compounds challenger daily P&L between consecutive benchmark decisions
-    before that bootstrap.
+    aligned diff series.
     """
-    effective_ppy = comparison_periods_per_year or ppy
-    min_n = _min_paired_n(effective_ppy)
+    min_n = _min_paired_n(ppy)
     if disjoint_windows:
         c_arr = challenger_returns.sort("timestamp")["ret"].to_numpy()
         b_arr = benchmark_returns.sort("timestamp")["ret"].to_numpy()
@@ -610,22 +548,15 @@ def _populate_pair(
         paired = compute_independent_diff_uncertainty(
             c_arr,
             b_arr,
-            periods_per_year=effective_ppy,
+            periods_per_year=ppy,
             case_study=cs,
             label=label,
             n_boot=2000,
             seed=42,
         )
     else:
-        aligned = (
-            _align_challenger_to_benchmark_periods(
-                challenger_returns,
-                benchmark_returns,
-            )
-            if comparison_periods_per_year is not None
-            else challenger_returns.join(
-                benchmark_returns, on="timestamp", how="inner", suffix="_b"
-            )
+        aligned = challenger_returns.join(
+            benchmark_returns, on="timestamp", how="inner", suffix="_b"
         )
         if aligned.height < min_n:
             return {
@@ -650,7 +581,7 @@ def _populate_pair(
         paired = compute_paired_uncertainty(
             c_arr,
             b_arr,
-            periods_per_year=effective_ppy,
+            periods_per_year=ppy,
             case_study=cs,
             label=label,
             n_boot=2000,
@@ -671,7 +602,7 @@ def _populate_pair(
         benchmark_hash,
         paired,
         benchmark_kind=benchmark_kind,
-        periods_per_year=effective_ppy,
+        periods_per_year=ppy,
         case_dir=write_case_dir,
     )
     # disjoint path: paired carries n_c/n_b (post-coerce per-side sizes); use
@@ -709,9 +640,10 @@ def populate_paired_metrics(
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
 
-    This is the authoritative single-case producer used by case-study analysis
-    notebooks and the aggregate producer. Per-case selection configuration is
-    passed in:
+    Extracted from the two producer loops in
+    ``20_strategy_synthesis/01_aggregate_synthesis.py``, specialized to a single
+    case study. The per-CS selection config that Ch20 reads from module globals
+    is passed in:
 
     * ``label_restriction`` — ``holdout.LABEL_RESTRICTIONS.get(cs)`` (e.g.
       sp500_options → ``frozenset({'ret_to_expiry'})``); None for most CSs.
@@ -764,13 +696,9 @@ def populate_paired_metrics(
             bench_resolution = _benchmark_returns_from_artifact(cs, leader_label)
             chal = _aligned_returns(cs, leader_hash)
             if bench_resolution and chal is not None:
-                benchmark_hash, base, resolved_bench_label, benchmark_ppy = bench_resolution
-                comparison_ppy = benchmark_ppy or float(ppy)
-                min_n = _min_paired_n(comparison_ppy)
-                aligned = _align_challenger_to_benchmark_periods(
-                    chal,
-                    base,
-                )
+                benchmark_hash, base, resolved_bench_label = bench_resolution
+                min_n = _min_paired_n(ppy)
+                aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
                 if aligned.height >= min_n:
                     c_arr, b_arr = _joint_coerce(
                         aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
@@ -779,7 +707,7 @@ def populate_paired_metrics(
                         paired = compute_paired_uncertainty(
                             c_arr,
                             b_arr,
-                            periods_per_year=comparison_ppy,
+                            periods_per_year=ppy,
                             case_study=cs,
                             label=leader_label,
                             n_boot=2000,
@@ -796,7 +724,7 @@ def populate_paired_metrics(
                                 benchmark_hash,
                                 paired,
                                 benchmark_kind=benchmark_kind,
-                                periods_per_year=comparison_ppy,
+                                periods_per_year=ppy,
                                 case_dir=write_case_dir,
                             )
                             rows.append(
@@ -887,7 +815,7 @@ def populate_paired_metrics(
 
     baseline_kind = SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, "equal_weight")
     if bench_ho_resolved is not None and chal_ho is not None:
-        bench_ho_hash, bench_ho_norm, bench_ho_label, bench_ho_ppy = bench_ho_resolved
+        bench_ho_hash, bench_ho_norm, bench_ho_label = bench_ho_resolved
         rows.append(
             _populate_pair(
                 cs,
@@ -898,7 +826,6 @@ def populate_paired_metrics(
                 bench_ho_norm,
                 ppy,
                 ho_label,
-                comparison_periods_per_year=bench_ho_ppy or float(ppy),
                 benchmark_label=bench_ho_label,
                 write_case_dir=write_case_dir,
             )
@@ -983,39 +910,6 @@ def populate_paired_metrics(
 
     _report(cs, rows, verbose)
     return rows
-
-
-def populate_paired_metrics_for_studies(
-    explorers: Mapping[str, BacktestExplorer],
-    *,
-    label_restrictions: Mapping[str, frozenset[str]] | None = None,
-    rungs: Mapping[str, dict] | None = None,
-    carrier_pin_predicates: Mapping[str, pl.Expr] | None = None,
-    frequencies: Mapping[str, str] | None = None,
-    verbose: bool = False,
-) -> list[dict]:
-    """Populate paired metrics for each supplied case study and tag every row."""
-    label_restrictions = label_restrictions or {}
-    rungs = rungs or {}
-    carrier_pin_predicates = carrier_pin_predicates or {}
-    frequencies = frequencies or {}
-
-    combined: list[dict] = []
-    for cs, explorer in explorers.items():
-        rows = populate_paired_metrics(
-            cs,
-            explorer,
-            label_restriction=label_restrictions.get(cs),
-            rung=rungs.get(cs),
-            carrier_pin_predicate=carrier_pin_predicates.get(cs),
-            freq=frequencies.get(cs, "daily"),
-            verbose=verbose,
-        )
-        for row in rows:
-            tagged = dict(row)
-            tagged.setdefault("cs", cs)
-            combined.append(tagged)
-    return combined
 
 
 def _report(cs: str, rows: list[dict], verbose: bool) -> None:

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
-from case_studies.utils.backtest_runner import resolve_cost_feasible_universe
 from case_studies.utils.registry.specs import (
     canonical_json,
     compute_hash,
@@ -60,55 +59,7 @@ def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
     input_identity = projected.get("input_identity")
     if isinstance(input_identity, dict):
         input_identity.pop("prices", None)
-    signal = projected.get("strategy", {}).get("signal")
-    if isinstance(signal, dict) and signal.get("universe_filter") == "cost_feasible":
-        if isinstance(input_identity, dict):
-            input_identity.pop("universe", None)
-        signal.pop("universe_split", None)
-        signal.pop("universe_symbols", None)
     return projected
-
-
-def _strategy_roster_is_resolved(
-    spec: dict[str, Any],
-    case_study: str,
-    prediction_hash: str,
-) -> bool:
-    signal = spec.get("strategy", {}).get("signal", {})
-    if signal.get("universe_filter") != "cost_feasible":
-        return True
-    split, symbols = resolve_cost_feasible_universe(case_study, prediction_hash)
-    expected_digest = compute_hash(canonical_json({"split": split, "symbols": symbols}))
-    return (
-        signal.get("universe_split") == split
-        and signal.get("universe_symbols") == symbols
-        and spec.get("input_identity", {}).get("universe") == expected_digest
-    )
-
-
-def _candidate_prices_are_canonical(candidates: CandidateSet) -> bool:
-    price_digests: dict[tuple[str, int], str] = {}
-    for member_hash in candidates.members:
-        member = Result.open(candidates.study, member_hash)
-        if not isinstance(member, BacktestResult):
-            return False
-        training_spec = member.lineage()["training_spec"]
-        label = training_spec.get("label")
-        if not isinstance(label, str) or not label:
-            return False
-        warmup = strategy_warmup_periods(member.spec())
-        cache_key = (label, warmup)
-        if cache_key not in price_digests:
-            prices = load_backtest_prices_for(
-                candidates.study.case_study,
-                label,
-                split="validation",
-                warmup_periods=warmup,
-            )
-            price_digests[cache_key] = value_digest(prices)
-        if member.spec().get("input_identity", {}).get("prices") != price_digests[cache_key]:
-            return False
-    return True
 
 
 class Lifecycle:
@@ -142,8 +93,6 @@ class Lifecycle:
         candidates = CandidateSet.open(self.study, candidate_set_hash)
         if candidates.member_kind != "backtest" or selected_backtest_hash not in candidates.members:
             raise ValueError("selected backtest must be an exact member of the candidate set")
-        if not _candidate_prices_are_canonical(candidates):
-            raise ValueError("research lock requires canonical validation prices for every member")
         if candidates.best_validation_sharpe().hash != selected_backtest_hash:
             raise ValueError("research lock must select highest validation backtest Sharpe")
         selected = Result.open(self.study, selected_backtest_hash)
@@ -154,10 +103,6 @@ class Lifecycle:
         backtest_record = selected.registry_record()
         prediction = Result.open(self.study, backtest_record["prediction_hash"])
         assert isinstance(prediction, PredictionResult)
-        if not _strategy_roster_is_resolved(
-            selected.spec(), self.study.case_study, prediction.hash
-        ):
-            raise ValueError("selected strategy does not contain its resolved validation roster")
         prediction_record = prediction.registry_record()
         training = Result.open(self.study, prediction_record["training_hash"])
         assert isinstance(training, TrainingResult)
@@ -261,9 +206,6 @@ class Lifecycle:
             and backtest.execution_tier == "canonical"
             and backtest.registry_record()["prediction_hash"] == prediction.hash
             and backtest.spec().get("input_identity", {}).get("prices") == canonical_price_digest
-            and _strategy_roster_is_resolved(
-                backtest.spec(), self.study.case_study, prediction.hash
-            )
             and _locked_strategy_projection(backtest.spec())
             == _locked_strategy_projection(lock.record["strategy_spec"])
         )

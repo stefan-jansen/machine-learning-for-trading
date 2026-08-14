@@ -7,12 +7,10 @@ These tests validate the fixes for:
 - Finding 4: Vectorized path must use resolved schedule, not gather_every
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import polars as pl
 import pytest
-
-import utils
 
 # ---------------------------------------------------------------------------
 # resolve_rebalance_timestamps tests
@@ -260,48 +258,9 @@ class TestThinToRebalanceDates:
             assert len(later) == 0, f"{dt} is not the last trading day of {year}-{month:02d}"
 
 
-@pytest.mark.parametrize(
-    ("cadence", "expected"),
-    [
-        ("1_minute", 14),
-        ("15_minute", 1),
-        ("30_minute", 1),
-        ("1_hour", 1),
-        ("4_hour", 1),
-    ],
-)
-def test_nasdaq_label_step_resolves_on_each_sweep_cadence(cadence: str, expected: int) -> None:
-    from case_studies.utils.backtest_loaders import get_rebalance_step_for_cadence
-
-    assert (
-        get_rebalance_step_for_cadence("nasdaq100_microstructure", "fwd_ret_15m", cadence)
-        == expected
-    )
-
-
 # ---------------------------------------------------------------------------
 # Rebalance-step lookup (declared in each case study's setup.yaml)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def nasdaq_minute_rebalance_steps(tmp_path, monkeypatch):
-    from case_studies.utils.backtest_loaders import get_rebalance_step
-
-    config_dir = tmp_path / "nasdaq100_microstructure" / "config"
-    config_dir.mkdir(parents=True)
-    (config_dir / "setup.yaml").write_text(
-        "labels:\n"
-        "  rebalance_step:\n"
-        "    fwd_ret_5m: 4\n"
-        "    fwd_ret_15m: 14\n"
-        "    fwd_dir_15m: 14\n"
-        "    fwd_ret_60m: 59\n"
-    )
-    monkeypatch.setattr(utils, "CASE_STUDIES_DIR", tmp_path)
-    get_rebalance_step.cache_clear()
-    yield
-    get_rebalance_step.cache_clear()
 
 
 class TestGetRebalanceStep:
@@ -337,30 +296,22 @@ class TestGetRebalanceStep:
 
         assert get_rebalance_step("us_firm_characteristics", "fwd_ret_1m") == 1
 
-    def test_nasdaq100_fwd_ret_60m_replaces_at_the_minute_before_exit(
-        self, nasdaq_minute_rebalance_steps
-    ):
-        """A t+1 entry exits at t+60 when the replacement decision is at t+59."""
+    def test_nasdaq100_fwd_ret_60m_is_4(self):
+        """nasdaq100 fwd_ret_60m on 15-minute schedule -> ceil(60/15) = 4."""
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_60m") == 59
+        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_60m") == 4
 
-    def test_nasdaq100_fwd_ret_5m_replaces_at_the_minute_before_exit(
-        self, nasdaq_minute_rebalance_steps
-    ):
-        """A t+1 entry exits at t+5 when the replacement decision is at t+4."""
+    def test_nasdaq100_fwd_ret_5m_is_1(self):
+        """Regression: fwd_ret_5m on 15-minute schedule must stay at 1.
+
+        Pre-fix, the regex matched `(5, m)` and the old `n <= 12` branch
+        mis-read it as 5 MONTHS, computing step ~10,000 and collapsing
+        backtests to a handful of points.
+        """
         from case_studies.utils.backtest_loaders import get_rebalance_step
 
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") == 4
-
-    def test_nasdaq100_15m_labels_replace_at_the_minute_before_exit(
-        self, nasdaq_minute_rebalance_steps
-    ):
-        """Both 15-minute labels exit at t+15 after a replacement decision at t+14."""
-        from case_studies.utils.backtest_loaders import get_rebalance_step
-
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_15m") == 14
-        assert get_rebalance_step("nasdaq100_microstructure", "fwd_dir_15m") == 14
+        assert get_rebalance_step("nasdaq100_microstructure", "fwd_ret_5m") == 1
 
     def test_crypto_fwd_ret_24h_is_3(self):
         """crypto 24h label on 8h schedule -> ceil(24/8) = 3."""
@@ -374,38 +325,6 @@ class TestGetRebalanceStep:
 
         with pytest.raises(KeyError, match="rebalance_step"):
             get_rebalance_step("sp500_options", "fwd_ret_unknown_label")
-
-
-def test_intraday_nonoverlap_step_restarts_at_each_equity_session() -> None:
-    from case_studies.utils.backtest_loaders import thin_to_rebalance_dates
-
-    first = datetime(2024, 1, 2, 9, 30)
-    second = datetime(2024, 1, 3, 9, 30)
-    timestamps = [
-        *(first + timedelta(minutes=offset) for offset in range(6)),
-        *(second + timedelta(minutes=offset) for offset in range(6)),
-    ]
-    predictions = pl.DataFrame(
-        {
-            "timestamp": timestamps,
-            "symbol": ["A"] * len(timestamps),
-            "y_score": [0.0] * len(timestamps),
-        }
-    )
-
-    thinned = thin_to_rebalance_dates(
-        predictions,
-        cadence="1_minute",
-        step=4,
-        calendar="NYSE",
-    )
-
-    assert thinned["timestamp"].to_list() == [
-        first,
-        first + timedelta(minutes=4),
-        second,
-        second + timedelta(minutes=4),
-    ]
 
 
 # ---------------------------------------------------------------------------

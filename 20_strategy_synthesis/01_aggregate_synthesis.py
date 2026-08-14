@@ -45,6 +45,7 @@ import yaml
 warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
+from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import compute_cost_bps
 from utils.paths import get_case_study_dir, get_chapter_dir
 
@@ -173,8 +174,9 @@ print(f"\nLoaded: {len(explorers)}/{len(ALL_CASE_STUDIES)} case studies")
 # full spec — degenerate predictions, vol-window-vs-history mismatch,
 # universe-filter rejection, or other generation failures — the rule falls
 # back to the next-highest validation Sharpe with a usable holdout, and so
-# on until one succeeds. The shared paired-metrics API resolves this carrier
-# for both the aggregate producer and `query_holdout_rows`.
+# on until one succeeds. The `_val_rank1_full_spec` helper implements this
+# walk; `query_holdout_rows` and `_holdout_lineage_for` consume its output
+# to pin val/holdout pairs to the same full strategy carrier.
 
 # %%
 # Label restrictions that align the cluster-diagnostics rank-1 with the
@@ -730,15 +732,13 @@ print(
 # Each case study's rank-1 signal-stage backtest (with the same label,
 # universe-filter, and rung restrictions used for the cluster diagnostics) is
 # compared to its equal-weight benchmark using a **paired stationary block
-# bootstrap on label-aligned strategy returns**. Intraday benchmark decisions
-# are compounded by session; sparse benchmarks compound strategy daily P&L to
-# each label's explicit outcome endpoint. Block length is derived from
+# bootstrap on daily strategy returns**. Block length is derived from
 # ``setup.yaml.labels.{label}.rebalance_step`` (falling back to the optimal
 # block size, never below the label horizon). Reported quantities:
 #
 # - ``sharpe_diff`` with 95 % bootstrap CI
 # - ``ret_diff`` (annualized return difference) with 95 % CI
-# - ``info_ratio`` of the aligned-return difference
+# - ``info_ratio`` of the daily-return difference
 # - ``prob_challenger_wins`` — bootstrap fraction in which challenger Sharpe
 #   exceeds the benchmark
 # - ``p_value`` — two-sided bootstrap p-value for ``sharpe_diff = 0``
@@ -751,41 +751,226 @@ print(
 
 
 # %%
-from case_studies.utils.paired_metrics import (
-    populate_paired_metrics_for_studies,
-    validation_strategy_sql_filter,
+def _benchmark_returns_from_artifact(
+    cs: str, label: str, period: str = "overall"
+) -> tuple[str, pl.DataFrame, str] | None:
+    """Resolve the side-artifact equal-weight benchmark for ``(cs, label)``.
+
+    The benchmark is the daily-MTM EW reference series persisted by
+    ``scripts/compute_vectorized_ew_benchmark.py`` at
+    ``case_studies/{cs}/benchmark/{label}.parquet``. Single, well-defined
+    methodology per (cs, label) — no universe/rung/cadence ambiguity that
+    a registry-side ``family='benchmark'`` lookup would have to disambiguate.
+
+    ``period`` selects the time window slice (``"overall"`` or ``"holdout"``)
+    applied by ``load_benchmark_returns``. Classification-label fallback to
+    the matching ``fwd_ret_*`` artifact applies in both periods.
+
+    Returns ``(synthetic_hash, returns_df, resolved_label)`` where
+    ``synthetic_hash`` is a deterministic identifier safe to use as the PK
+    column in ``backtest_paired_metrics`` (which has no FK on
+    ``benchmark_hash``) and ``resolved_label`` is the actual label whose
+    artifact was loaded — equal to ``label`` unless the classification
+    fallback fired, in which case it's the matching ``fwd_ret_*`` label.
+    Returns ``None`` if the artifact is missing.
+    """
+    df = load_benchmark_returns(cs, label, period=period)
+    bench_label = label
+    if df.is_empty() or "ew_return" not in df.columns:
+        # Fallback: classification labels (``fwd_class_*``, ``fwd_dir_*``,
+        # ``fwd_tb_*``, ``fwd_carry_*``) share the same forecast window as
+        # their continuous counterpart (``fwd_ret_*``). The EW universe over
+        # the same window is identical regardless of the label being
+        # predicted, so map e.g. ``fwd_class_1m`` to ``fwd_ret_1m``.
+        fallback = None
+        for prefix in ("fwd_class_", "fwd_dir_", "fwd_tb_", "fwd_carry_"):
+            if label.startswith(prefix):
+                fallback = "fwd_ret_" + label[len(prefix) :]
+                break
+        if fallback is None:
+            return None
+        df = load_benchmark_returns(cs, fallback, period=period)
+        if df.is_empty() or "ew_return" not in df.columns:
+            return None
+        bench_label = fallback
+    suffix = "" if period == "overall" else f":{period}"
+    bench_hash = f"side_ew:{cs}:{bench_label}{suffix}"
+    return (
+        bench_hash,
+        df.select(
+            pl.col("timestamp").cast(pl.Date).alias("timestamp"),
+            pl.col("ew_return").cast(pl.Float64).alias("ret"),
+        ),
+        bench_label,
+    )
+
+
+def _aligned_returns(cs: str, h: str) -> pl.DataFrame | None:
+    """Load and normalize a backtest's daily returns; columns ``[timestamp, ret]``."""
+    parquet = get_case_study_dir(cs) / "run_log" / "backtest" / h / "daily_returns.parquet"
+    if not parquet.exists():
+        return None
+    df = pl.read_parquet(parquet)
+    ret_col = next(
+        (c for c in ("daily_return", "ret", "return", "value") if c in df.columns),
+        df.columns[-1],
+    )
+    ts_col = next(
+        (c for c in ("timestamp", "date", "datetime") if c in df.columns),
+        df.columns[0],
+    )
+    return df.select(
+        pl.col(ts_col).cast(pl.Date).alias("timestamp"),
+        pl.col(ret_col).cast(pl.Float64).alias("ret"),
+    )
+
+
+# %%
+import numpy as np
+
+from case_studies.utils.uncertainty import (
+    SIGNAL_BASELINE_BY_CASE_STUDY,
+    compute_independent_diff_uncertainty,
+    compute_paired_uncertainty,
 )
 
-all_paired_rows = populate_paired_metrics_for_studies(
-    explorers,
-    label_restrictions=_CLUSTER_LABEL_RESTRICTIONS,
-    rungs=_CLUSTER_RUNG_RESTRICTIONS,
-    carrier_pin_predicates=_CARRIER_PIN_PREDICATES,
-    frequencies=FREQ_MAP,
-)
+
+def _min_paired_n(ppy: int) -> int:
+    """Minimum series length for paired-bootstrap stability, frequency-aware.
+
+    The ~21 floor was written for daily cadences (about a month of obs).
+    Monthly case studies (e.g. ``us_firm_characteristics``) have ~12 holdout
+    observations by design, and ``compute_paired_uncertainty`` runs cleanly
+    on n=12. Scale the floor with ``ppy`` so monthly/weekly CSs aren't
+    blocked by a daily-tuned guard.
+    """
+    if ppy <= 12:  # monthly
+        return 6
+    if ppy <= 52:  # weekly
+        return 12
+    return 21  # daily / 8h / intraday
 
 
-def _is_overall_side_benchmark(row: dict) -> bool:
-    kind = str(row.get("kind", ""))
-    return kind.endswith("_side_artifact") and "_holdout_" not in kind
+def _joint_coerce(c_arr, b_arr):
+    """Filter NaN/non-finite jointly across paired series and trim leading
+    rows where *either* is zero. Matches ``_coerce_returns`` semantics but
+    preserves index alignment so ``compute_paired_uncertainty``'s
+    equal-length precondition survives — the upstream helper trims leading
+    zeros independently per series, which can desynchronize a paired
+    bootstrap if one side has more leading inactive bars than the other.
+    """
+    c = np.asarray(c_arr, dtype=np.float64)
+    b = np.asarray(b_arr, dtype=np.float64)
+    finite = np.isfinite(c) & np.isfinite(b)
+    c, b = c[finite], b[finite]
+    if c.size == 0:
+        return c, b
+    nonzero = np.flatnonzero((c != 0.0) & (b != 0.0))
+    if nonzero.size == 0:
+        return c[:0], b[:0]
+    start = int(nonzero[0])
+    return c[start:], b[start:]
 
 
-paired_rows = [
-    row for row in all_paired_rows if _is_overall_side_benchmark(row) and "skip" not in row
-]
-paired_case_studies = {str(row["cs"]) for row in paired_rows}
-paired_skips = [
-    {
-        "case_study": cs,
-        "reason": "shared paired-metric producer returned no overall side benchmark",
-    }
-    for cs in explorers
-    if cs not in paired_case_studies
-]
+# Distinguish skipped CSs from real failures so empty cross-dataset rollups
+# aren't indistinguishable from a silent crash.
+paired_rows: list[dict] = []
+paired_skips: list[dict] = []
+
+for cs, explorer in explorers.items():
+    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
+    # Cross-stage rank-1 (signal/allocation/risk_overlay), mirroring
+    # holdout.py::HOLDOUT_SELECTION_STAGES. Dedup by prediction_hash so the
+    # leader corresponds to a distinct trained model.
+    cand = pl.concat(
+        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        how="diagonal_relaxed",
+    )
+    if cand.is_empty() or "backtest_hash" not in cand.columns:
+        paired_skips.append({"case_study": cs, "reason": "no_signal_stage_candidates"})
+        continue
+    if "family" in cand.columns:
+        cand = cand.filter(pl.col("family") != "benchmark")
+    if label_restriction and "label" in cand.columns:
+        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
+    cand = _apply_rung_restriction(cand, cs)
+    if cand.is_empty():
+        paired_skips.append({"case_study": cs, "reason": "no_candidates_after_restriction"})
+        continue
+    cand = cand.sort("sharpe", descending=True).unique(
+        subset=["prediction_hash"], keep="first", maintain_order=True
+    )
+
+    leader_hash = cand["backtest_hash"][0]
+    leader_label = cand["label"][0] if "label" in cand.columns else None
+    if not leader_label:
+        paired_skips.append({"case_study": cs, "reason": "no_label_on_leader"})
+        continue
+    bench_resolution = _benchmark_returns_from_artifact(cs, leader_label)
+    if not bench_resolution:
+        paired_skips.append(
+            {"case_study": cs, "reason": f"no_benchmark_artifact_for_label:{leader_label}"}
+        )
+        continue
+    benchmark_hash, base, resolved_bench_label = bench_resolution
+
+    chal = _aligned_returns(cs, leader_hash)
+    if chal is None:
+        paired_skips.append({"case_study": cs, "reason": "no_challenger_returns_parquet"})
+        continue
+
+    ppy = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}.get(
+        FREQ_MAP.get(cs, "daily"), 252
+    )
+    min_n = _min_paired_n(ppy)
+    aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
+    if aligned.height < min_n:
+        paired_skips.append(
+            {"case_study": cs, "reason": f"insufficient_overlap:n={aligned.height}"}
+        )
+        continue
+    c_arr, b_arr = _joint_coerce(aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy())
+    if c_arr.size < min_n:
+        paired_skips.append(
+            {"case_study": cs, "reason": f"insufficient_after_coerce:n={c_arr.size}"}
+        )
+        continue
+    paired = compute_paired_uncertainty(
+        c_arr,
+        b_arr,
+        periods_per_year=ppy,
+        case_study=cs,
+        label=leader_label,
+        n_boot=2000,
+        seed=42,
+    )
+    if not paired:
+        paired_skips.append({"case_study": cs, "reason": "paired_uncertainty_empty"})
+        continue
+
+    # Side-artifact benchmark — deterministic across (cs, label), no
+    # universe/rung ambiguity, no fallback-by-recency.
+    benchmark_kind = f"{SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, 'equal_weight')}_side_artifact"
+    paired_rows.append(
+        {
+            "case_study": DISPLAY_NAMES.get(cs, cs),
+            "label": leader_label,
+            "benchmark_label": resolved_bench_label,  # may differ from leader_label when classification fallback fired
+            "sharpe_diff": paired.get("sharpe_diff"),
+            "sharpe_diff_ci_lo": paired.get("sharpe_diff_ci95_lo"),
+            "sharpe_diff_ci_hi": paired.get("sharpe_diff_ci95_hi"),
+            "ret_diff": paired.get("ret_diff"),
+            "info_ratio": paired.get("info_ratio"),
+            "p_value": paired.get("p_value"),
+            "prob_wins": paired.get("prob_challenger_wins"),
+            "block": paired.get("bootstrap_block_length"),
+            "n_boot": paired.get("bootstrap_n"),
+        }
+    )
 
 paired_df = pl.DataFrame(paired_rows)
-print("\n=== Paired Bootstrap: rank-1 vs equal-weight ===")
 if not paired_df.is_empty():
+    print("\n=== Paired Bootstrap: rank-1 vs equal-weight ===")
     print(
         paired_df.select(
             "case_study",
@@ -800,19 +985,22 @@ if not paired_df.is_empty():
         )
     )
 else:
-    print("No paired-bootstrap rows produced; see the skip table below.")
+    print("\n=== Paired Bootstrap: rank-1 vs equal-weight ===")
+    print("No paired-bootstrap rows produced — see skip table below for reasons.")
 
 if paired_skips:
     print("\nSkipped case studies:")
-    for skip in paired_skips:
-        print(f"  - {skip['case_study']:<32}  {skip['reason']}")
+    for s in paired_skips:
+        print(f"  - {s['case_study']:<32}  {s['reason']}")
 
+# Loud invariant — a 0/N or all-skipped outcome is now obvious in the
+# notebook output instead of buried under "no paired-bootstrap rows."
 print(f"\npaired={len(paired_rows)}/{len(explorers)}, skipped={len(paired_skips)}/{len(explorers)}")
 
 # %% [markdown]
 # Read each row as: rank-1 challenger annualized Sharpe **minus** equal-weight
 # benchmark Sharpe, with a 95 % CI from the paired stationary block bootstrap
-# on the label-aligned return difference; the information ratio summarizes the
+# on the daily-return difference; the information ratio summarizes the
 # excess-return-to-tracking-error ratio; ``prob_wins`` is the fraction of
 # bootstrap resamples in which the challenger beat the benchmark; ``p_value``
 # tests ``H0: sharpe_diff = 0``. A confident "the model adds skill over the
@@ -822,15 +1010,702 @@ print(f"\npaired={len(paired_rows)}/{len(explorers)}, skipped={len(paired_skips)
 # block-bootstrap sampling error and should be reported as such.
 
 # %% [markdown]
-# ## Paired metrics: full strategy-analysis coverage
+# ## Paired metrics — full coverage for strategy-analysis notebook
 #
-# The shared paired-metric producer above computes the overall benchmark pair,
-# the holdout benchmark pair, same-lineage validation-to-holdout decay, and the
-# three stage-transition pairs. It owns benchmark frequency alignment and
-# registry writes, so this notebook only displays its returned rows.
+# The block above populates pair type #1 (signal rank-1 vs equal-weight,
+# overall window). The strategy-analysis notebook (per-CS strategy notebooks)
+# requires five additional pair types per case study to render §2 (stage-
+# transition waterfall), §6 (holdout decay + holdout-vs-benchmark) and §7
+# (benchmark-aware diagnostics) without inline bootstrap recomputation.
+#
+# The pair set:
+#
+# 1. signal rank-1 (overall) ↔ equal-weight (overall) — populated above
+# 2. signal rank-1 (holdout) ↔ equal-weight (holdout window)
+# 3. holdout rank-1 ↔ validation rank-1 (same lineage decay; min-length
+#    truncation since the windows are disjoint)
+# 4. allocation rank-1 ↔ signal rank-1 (same window, stage transition)
+# 5. cost-sensitivity rank-1 ↔ allocation rank-1 (same window)
+# 6. risk-overlay rank-1 ↔ cost-sensitivity rank-1 (same window)
+#
+# Pair #3 truncates both series to ``min(len(val), len(ho))`` to satisfy
+# ``compute_paired_uncertainty``'s equal-length precondition. The CI is
+# interpreted as bootstrap resampling Sharpe in each window independently
+# and taking the difference; the truncation is preserved in the
+# ``benchmark_kind`` value (``val_rank1_self`` always carries the truncation
+# caveat). All pairs use the same paired stationary block bootstrap helper.
+
 
 # %%
-extra_paired_rows = [row for row in all_paired_rows if not _is_overall_side_benchmark(row)]
+def _full_strategy_spec_from_backtest(db: sqlite3.Connection, bt_hash: str) -> dict | None:
+    """Pull the full strategy spec dict (signal + allocation + risk) from
+    `bt_hash`'s spec_json. Returns None if the row is missing or signal has
+    no `method` field.
+
+    The carrier of a backtest is the tuple (signal, allocation, risk). Pinning
+    the val→holdout pair on this full spec keeps the comparison apples-to-
+    apples; pinning on signal alone allows MAX(sharpe) to surface a holdout
+    row with a different allocation (e.g. conformal_weighted) or risk overlay
+    than the validation rank-1 carrier.
+    """
+    row = db.execute(
+        "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?",
+        (bt_hash,),
+    ).fetchone()
+    if not row:
+        return None
+    strat = json.loads(row[0]).get("strategy", {})
+    sig = strat.get("signal", {})
+    if not sig.get("method"):
+        return None
+    alloc = strat.get("allocation") or {}
+    risk = strat.get("risk") or {}
+    return {
+        "signal": {
+            "method": sig.get("method"),
+            "top_k": sig.get("top_k"),
+            "percentile": sig.get("percentile"),
+        },
+        "allocation": {
+            "method": alloc.get("method"),
+            "top_k": alloc.get("top_k"),
+            "long_short": alloc.get("long_short"),
+        },
+        "risk": {
+            "name": risk.get("name"),
+        },
+    }
+
+
+def _val_rank1_full_spec(cs: str) -> dict | None:
+    """Return the val rank-1 *full strategy* spec for ``cs`` — the
+    highest-Sharpe validation backtest across (signal, allocation,
+    risk_overlay) stages — walking candidates by val Sharpe descending until
+    one with a matching holdout backtest at the SAME full spec is found.
+
+    Implements the carrier-selection rule documented in §20.1: the deployed
+    holdout for each case study is the val rank-1 across all three pipeline
+    stages, retrained on holdout data; when retrain produces no usable
+    holdout at that full spec (degenerate predictions, vol-window mismatch,
+    universe filter rejection, etc.) the walk falls through to the next
+    candidate by val Sharpe. The first val candidate with a registered
+    holdout backtest at the same (signal, allocation, risk) tuple defines
+    the apples-to-apples carrier pair.
+
+    Returns None when no val candidate up to rank ~200 has a matching
+    holdout under the case study's label / rung restrictions.
+    """
+    explorer = explorers.get(cs)
+    if explorer is None:
+        return None
+    cand = pl.concat(
+        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        how="diagonal_relaxed",
+    )
+    if cand.is_empty() or "backtest_hash" not in cand.columns:
+        return None
+    if "family" in cand.columns:
+        cand = cand.filter(pl.col("family") != "benchmark")
+    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
+    if label_restriction and "label" in cand.columns:
+        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
+    cand = _apply_rung_restriction(cand, cs)
+    cand = _apply_carrier_pin(cand, cs)
+    if cand.is_empty():
+        return None
+    # Do NOT dedup by prediction_hash here. The walk needs to surface every
+    # registered (signal, allocation, risk_overlay) tuple — when the val
+    # rank-1 carrier has no matching holdout retrain but a same-prediction
+    # lower-sharpe variant (different allocator or risk overlay) does, the
+    # dedup would silently jump to a *different* prediction instead of
+    # accepting the same-prediction variant as the apples-to-apples carrier.
+    cand = cand.sort("sharpe", descending=True)
+
+    case_dir = get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
+    db = sqlite3.connect(str(db_path))
+    try:
+        for i in range(min(cand.height, 200)):
+            bt_hash = cand["backtest_hash"][i]
+            spec = _full_strategy_spec_from_backtest(db, bt_hash)
+            if spec is None:
+                continue
+            spec_clauses, spec_params = _full_strategy_clauses(spec)
+            ho_clauses = ["p.split = 'holdout'"] + spec_clauses
+            ho_params: list[object] = list(spec_params)
+            if label_restriction:
+                placeholders = ",".join("?" for _ in label_restriction)
+                ho_clauses.append(f"t.label IN ({placeholders})")
+                ho_params.extend(sorted(label_restriction))
+            if rung is not None:
+                ho_clauses.append(
+                    "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
+                )
+                ho_params.append(rung["universe_filter"])
+                if rung["exit_at_max_days"] is None:
+                    ho_clauses.append(
+                        "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
+                    )
+                else:
+                    ho_clauses.append(
+                        "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
+                    )
+                    ho_params.append(rung["exit_at_max_days"])
+            row = db.execute(
+                f"""
+                SELECT 1 FROM prediction_sets p
+                JOIN training_runs t ON p.training_hash = t.training_hash
+                JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
+                                     AND b.stage IN ('signal','allocation','risk_overlay','holdout')
+                JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
+                WHERE {" AND ".join(ho_clauses)}
+                  AND bm.sharpe IS NOT NULL
+                LIMIT 1
+                """,
+                ho_params,
+            ).fetchone()
+            if row:
+                return spec
+    finally:
+        db.close()
+    return None
+
+
+def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
+    """Build SQL WHERE clauses + params that pin a backtest row to the full
+    strategy spec (signal + allocation + risk). Empty list returned when
+    spec is None (no constraint).
+
+    Pinning on the full spec ensures `MAX(sharpe)` over candidate holdout
+    backtests cannot surface a different allocator (e.g. conformal_weighted
+    when val rank-1 was score_weighted) or a different risk overlay than
+    the validation carrier — the val→holdout pair stays apples-to-apples
+    on the full pipeline configuration, not just the signal.
+    """
+    if not spec:
+        return [], []
+    clauses: list[str] = []
+    params: list[object] = []
+
+    sig = spec.get("signal") or {}
+    method = sig.get("method")
+    if method is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.signal.method') IS NULL")
+    else:
+        clauses.append("json_extract(b.spec_json, '$.strategy.signal.method') = ?")
+        params.append(method)
+    top_k = sig.get("top_k")
+    if top_k is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.signal.top_k') IS NULL")
+    else:
+        clauses.append("CAST(json_extract(b.spec_json, '$.strategy.signal.top_k') AS INTEGER) = ?")
+        params.append(int(top_k))
+    pct = sig.get("percentile")
+    if pct is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.signal.percentile') IS NULL")
+    else:
+        clauses.append(
+            "CAST(json_extract(b.spec_json, '$.strategy.signal.percentile') AS REAL) = ?"
+        )
+        params.append(float(pct))
+
+    alloc = spec.get("allocation") or {}
+    am = alloc.get("method")
+    if am is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.allocation.method') IS NULL")
+    else:
+        clauses.append("json_extract(b.spec_json, '$.strategy.allocation.method') = ?")
+        params.append(am)
+    ak = alloc.get("top_k")
+    if ak is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.allocation.top_k') IS NULL")
+    else:
+        clauses.append(
+            "CAST(json_extract(b.spec_json, '$.strategy.allocation.top_k') AS INTEGER) = ?"
+        )
+        params.append(int(ak))
+    als = alloc.get("long_short")
+    if als is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.allocation.long_short') IS NULL")
+    else:
+        clauses.append(
+            "CAST(json_extract(b.spec_json, '$.strategy.allocation.long_short') AS INTEGER) = ?"
+        )
+        params.append(int(bool(als)))
+
+    risk = spec.get("risk") or {}
+    risk_name = risk.get("name")
+    if risk_name is None:
+        clauses.append("json_extract(b.spec_json, '$.strategy.risk.name') IS NULL")
+    else:
+        clauses.append("json_extract(b.spec_json, '$.strategy.risk.name') = ?")
+        params.append(risk_name)
+
+    return clauses, params
+
+
+def _holdout_lineage_for(
+    cs: str,
+    leader_label: str,
+    strategy_spec: dict | None = None,
+    *,
+    prefer_training_hash: str | None = None,
+) -> dict | None:
+    """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
+    for the highest-Sharpe holdout backtest registered in this case study,
+    honoring per-CS cluster restrictions but **not** the leader's label.
+
+    Note: ``leader_label`` is intentionally unused in the SQL — kept in the
+    signature for call-site symmetry with ``_val_backtest_for_lineage`` and
+    so call sites remain self-documenting about which validation leader the
+    holdout pairs against.
+
+    Returns the holdout's *own* label so callers can pair it against
+    matching benchmarks. The decoupling matters when ``generate_holdout``'s
+    degeneracy fallback accepts a candidate on a different label than the
+    validation rank-1 (e.g., crypto's cross-stage rank-1 — over signal,
+    allocation, and risk_overlay — runs on fwd_ret_24h but the next fall-
+    through candidate runs on fwd_ret_8h). A label-restricted query would
+    silently miss the holdout and leave val_rank1_self /
+    equal_weight_holdout_side_artifact pairs unpopulated.
+
+    The label_restriction (e.g., sp500_options pinned to ret_to_expiry)
+    is applied to the holdout query so we don't pick up cross-rung
+    holdouts in CSs with HTM-coherent label scoping.
+
+    When ``strategy_spec`` is provided, the holdout pick is restricted to
+    backtests with the same full (signal, allocation, risk) tuple as val's
+    rank-1 carrier, so the val→holdout comparison stays apples-to-apples
+    on the full pipeline configuration, not just the signal block.
+    """
+    case_dir = get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.exists():
+        return None
+
+    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
+    rung = _CLUSTER_RUNG_RESTRICTIONS.get(cs)
+    clauses = ["p.split = 'holdout'"]
+    params: list[object] = []
+    if label_restriction:
+        placeholders = ",".join("?" for _ in label_restriction)
+        clauses.append(f"t.label IN ({placeholders})")
+        params.extend(label_restriction)
+    if rung is not None:
+        clauses.append(
+            "COALESCE(json_extract(b.spec_json, '$.strategy.signal.universe_filter'), 'full') = ?"
+        )
+        params.append(rung["universe_filter"])
+        if rung["exit_at_max_days"] is None:
+            clauses.append(
+                "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') IS NULL"
+            )
+        else:
+            clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
+            params.append(rung["exit_at_max_days"])
+    spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
+    clauses.extend(spec_clauses)
+    params.extend(spec_params)
+    where_sql = " AND ".join(clauses)
+
+    db = sqlite3.connect(str(db_path))
+    db.row_factory = sqlite3.Row
+    try:
+        # Same-lineage preference: when the caller knows the validation rank-1's
+        # training_hash, prefer a holdout that shares it. This pins val→holdout
+        # decay to the same trained model rather than a same-spec but
+        # different-lineage holdout that happens to have a higher Sharpe.
+        if prefer_training_hash is not None:
+            row = db.execute(
+                f"""
+                SELECT t.family, t.config_name, t.label,
+                       p.prediction_hash, b.backtest_hash
+                FROM prediction_sets p
+                JOIN training_runs t ON p.training_hash = t.training_hash
+                JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
+                                     AND b.stage IN ('signal','allocation','risk_overlay','holdout')
+                JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
+                WHERE {where_sql} AND p.training_hash = ?
+                ORDER BY bm.sharpe DESC NULLS LAST
+                LIMIT 1
+                """,
+                params + [prefer_training_hash],
+            ).fetchone()
+            if row:
+                return dict(row)
+
+        row = db.execute(
+            f"""
+            SELECT t.family, t.config_name, t.label,
+                   p.prediction_hash, b.backtest_hash
+            FROM prediction_sets p
+            JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
+                                 AND b.stage IN ('signal','allocation','risk_overlay','holdout')
+            JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
+            WHERE {where_sql}
+            ORDER BY bm.sharpe DESC NULLS LAST
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+    finally:
+        db.close()
+    return dict(row) if row else None
+
+
+def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
+    """Return the highest-Sharpe validation signal-stage backtest_hash for
+    the given (family, config_name, label) lineage, or None if absent.
+
+    Used by ``val_rank1_self`` pair construction so the comparison stays
+    *within* a lineage when the holdout retrain came from a fallback
+    candidate (ranks 2+) rather than the validation rank-1.
+    """
+    case_dir = get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.exists():
+        return None
+    db = sqlite3.connect(str(db_path))
+    try:
+        row = db.execute(
+            """
+            SELECT b.backtest_hash
+            FROM prediction_sets p
+            JOIN training_runs t ON p.training_hash = t.training_hash
+            JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
+                                 AND b.stage = 'signal'
+            JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
+            WHERE p.split = 'validation'
+              AND t.family = ?
+              AND t.config_name = ?
+              AND t.label = ?
+            ORDER BY bm.sharpe DESC NULLS LAST
+            LIMIT 1
+            """,
+            (family, config_name, label),
+        ).fetchone()
+    finally:
+        db.close()
+    return row[0] if row else None
+
+
+# %%
+def _populate_pair(
+    cs,
+    challenger_hash,
+    benchmark_hash,
+    benchmark_kind,
+    challenger_returns,
+    benchmark_returns,
+    ppy,
+    label,
+    *,
+    disjoint_windows: bool = False,
+    benchmark_label: str | None = None,
+):
+    """Compute one paired-metric row without mutating a case-study registry.
+
+    With ``disjoint_windows=True`` (val→holdout decay), each side is
+    bootstrapped independently over its full window and the difference
+    distribution is built from independent draws — no spurious head/tail
+    truncation. ``info_ratio`` columns will be NaN since there is no
+    aligned diff series to ratio.
+
+    Otherwise, the streams are inner-joined on timestamp and a paired
+    stationary bootstrap runs on the aligned diff series.
+    """
+    min_n = _min_paired_n(ppy)
+    if disjoint_windows:
+        c_arr = challenger_returns.sort("timestamp")["ret"].to_numpy()
+        b_arr = benchmark_returns.sort("timestamp")["ret"].to_numpy()
+        finite_c = np.isfinite(c_arr)
+        finite_b = np.isfinite(b_arr)
+        c_arr, b_arr = c_arr[finite_c], b_arr[finite_b]
+        if c_arr.size < min_n or b_arr.size < min_n:
+            return {
+                "cs": cs,
+                "kind": benchmark_kind,
+                "label": label,
+                "benchmark_label": benchmark_label if benchmark_label is not None else label,
+                "skip": f"insufficient_disjoint:n_c={c_arr.size},n_b={b_arr.size}",
+            }
+        n_overlap = min(c_arr.size, b_arr.size)
+        paired = compute_independent_diff_uncertainty(
+            c_arr,
+            b_arr,
+            periods_per_year=ppy,
+            case_study=cs,
+            label=label,
+            n_boot=2000,
+            seed=42,
+        )
+    else:
+        aligned = challenger_returns.join(
+            benchmark_returns, on="timestamp", how="inner", suffix="_b"
+        )
+        if aligned.height < min_n:
+            return {
+                "cs": cs,
+                "kind": benchmark_kind,
+                "label": label,
+                "benchmark_label": benchmark_label if benchmark_label is not None else label,
+                "skip": f"insufficient_overlap:n={aligned.height}",
+            }
+        c_arr = aligned["ret"].to_numpy()
+        b_arr = aligned["ret_b"].to_numpy()
+        c_arr, b_arr = _joint_coerce(c_arr, b_arr)
+        n_overlap = c_arr.size
+        if n_overlap < min_n:
+            return {
+                "cs": cs,
+                "kind": benchmark_kind,
+                "label": label,
+                "benchmark_label": benchmark_label if benchmark_label is not None else label,
+                "skip": f"insufficient_after_coerce:n={n_overlap}",
+            }
+        paired = compute_paired_uncertainty(
+            c_arr,
+            b_arr,
+            periods_per_year=ppy,
+            case_study=cs,
+            label=label,
+            n_boot=2000,
+            seed=42,
+        )
+
+    if not paired:
+        return {
+            "cs": cs,
+            "kind": benchmark_kind,
+            "label": label,
+            "benchmark_label": benchmark_label if benchmark_label is not None else label,
+            "skip": "uncertainty_empty",
+        }
+    # For the disjoint path, paired carries n_c/n_b (post-coerce per-side
+    # sizes); use min(n_c, n_b) so n_overlap reflects what the bootstrap
+    # actually used, not the pre-coerce min from the populator. For the
+    # paired path, paired has no n_c/n_b and n_overlap is already the
+    # post-_joint_coerce length.
+    n_actual = n_overlap
+    n_c = paired.get("n_c")
+    n_b = paired.get("n_b")
+    if n_c is not None and n_b is not None:
+        n_actual = int(min(float(n_c), float(n_b)))
+    return {
+        "cs": cs,
+        "kind": benchmark_kind,
+        "label": label,
+        "benchmark_label": benchmark_label if benchmark_label is not None else label,
+        "n_overlap": n_actual,
+        "sharpe_diff": paired.get("sharpe_diff"),
+        "sharpe_diff_ci_lo": paired.get("sharpe_diff_ci95_lo"),
+        "sharpe_diff_ci_hi": paired.get("sharpe_diff_ci95_hi"),
+        "info_ratio": paired.get("info_ratio"),
+        "p_value": paired.get("p_value"),
+    }
+
+
+# %%
+extra_paired_rows: list[dict] = []
+_PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
+for cs, explorer in explorers.items():
+    label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
+    # Pool validation backtests across the same stages that holdout.py uses
+    # for cross-stage rank-1 (`HOLDOUT_SELECTION_STAGES`). When the val
+    # rank-1 is an allocation- or risk_overlay-stage strategy, the holdout
+    # retrain uses THAT strategy_spec; pulling only signal-stage candidates
+    # here surfaces a leader whose signal.method differs from the holdout's,
+    # so `_val_rank1_signal_spec` can't find a matching holdout (e.g.,
+    # crypto signal-stage rank-1 = quintile_long_short but cross-stage
+    # rank-1 = score_weighted/equal_weight_top_k). Carrier-selection rule:
+    # val rank-1 is the highest-Sharpe validation backtest across the three
+    # stages; see `_val_rank1_full_spec`.
+    cand = pl.concat(
+        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        how="diagonal_relaxed",
+    )
+    if cand.is_empty() or "backtest_hash" not in cand.columns:
+        continue
+    if "family" in cand.columns:
+        cand = cand.filter(pl.col("family") != "benchmark")
+    if label_restriction and "label" in cand.columns:
+        cand = cand.filter(pl.col("label").is_in(list(label_restriction)))
+    cand = _apply_rung_restriction(cand, cs)
+    cand = _apply_carrier_pin(cand, cs)
+    if cand.is_empty():
+        continue
+    cand = cand.sort("sharpe", descending=True).unique(
+        subset=["prediction_hash"], keep="first", maintain_order=True
+    )
+
+    leader = cand.row(0, named=True)
+    leader_hash = leader["backtest_hash"]
+    leader_phash = leader["prediction_hash"]
+    leader_label = leader.get("label")
+    if not leader_label:
+        continue
+    ppy = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}.get(
+        FREQ_MAP.get(cs, "daily"), 252
+    )
+
+    chal_full = _aligned_returns(cs, leader_hash)
+    if chal_full is None:
+        continue
+
+    # Pair #2: cross-stage rank-1 holdout backtest ↔ equal-weight (holdout
+    # window). Use the holdout's *own* label for benchmark resolution. The
+    # holdout lineage may differ from the validation rank-1 in both family
+    # AND label when generate_holdout's degeneracy fallback fires (e.g.,
+    # crypto's cross-stage rank-1 over signal/allocation/risk_overlay runs
+    # on fwd_ret_24h but the next fall-through candidate runs on
+    # fwd_ret_8h). Constrain by val rank-1's full (signal, allocation,
+    # risk) spec so val→holdout decay isn't measured across different
+    # allocators (e.g. score_weighted vs conformal_weighted), different
+    # position-sizing parameters, or different risk overlays.
+    val_spec = _val_rank1_full_spec(cs)
+    # Resolve the val rank-1's training_hash so the holdout pick prefers the
+    # same-lineage holdout when one exists (avoids cross-pollination across
+    # training_hashes that happen to share signal_spec).
+    _val_training_hash: str | None = None
+    try:
+        _case_db = get_case_study_dir(cs) / "run_log" / "registry.db"
+        with sqlite3.connect(str(_case_db)) as _con:
+            _row = _con.execute(
+                "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
+                (leader_phash,),
+            ).fetchone()
+            if _row:
+                _val_training_hash = _row[0]
+    except (sqlite3.Error, OSError) as exc:
+        # Surface real registry corruption / IO problems instead of silently
+        # falling back to cross-lineage selection. Keep the fallback so the
+        # populator still produces a row, but emit a one-line warning so
+        # downstream noticeably distinguishes "no preferred lineage" from
+        # "DB unavailable".
+        print(
+            f"[warn] {cs}: failed to resolve val_training_hash from "
+            f"prediction_hash={leader_phash}: {type(exc).__name__}: {exc}"
+        )
+        _val_training_hash = None
+    ho_lineage = _holdout_lineage_for(
+        cs,
+        leader_label,
+        strategy_spec=val_spec,
+        prefer_training_hash=_val_training_hash,
+    )
+    ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
+    ho_label = ho_lineage["label"] if ho_lineage else leader_label
+    chal_ho = _aligned_returns(cs, ho_hash) if ho_hash else None
+    bench_ho_resolved = _benchmark_returns_from_artifact(cs, ho_label, period="holdout")
+
+    if bench_ho_resolved is not None and chal_ho is not None:
+        bench_ho_hash, bench_ho_norm, bench_ho_label = bench_ho_resolved
+        extra_paired_rows.append(
+            _populate_pair(
+                cs,
+                ho_hash,
+                bench_ho_hash,
+                f"{SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, 'equal_weight')}_holdout_side_artifact",
+                chal_ho,
+                bench_ho_norm,
+                ppy,
+                ho_label,
+                benchmark_label=bench_ho_label,
+            )
+        )
+    else:
+        # Surface the silent skip so downstream summaries don't conflate
+        # "no holdout EW pair" with "fallback succeeded but bootstrap empty".
+        # Hits us_firm_characteristics fwd_class_1m when the holdout-window
+        # EW artifact is absent for both the classification label and its
+        # fwd_ret_* fallback.
+        # Multi-axis classification: when both inputs are missing, combine
+        # the reasons so reviewers see the full gap, not just the first one.
+        skip_parts: list[str] = []
+        if chal_ho is None:
+            skip_parts.append("no_holdout_challenger_returns")
+        if bench_ho_resolved is None:
+            skip_parts.append("no_holdout_benchmark_artifact")
+        extra_paired_rows.append(
+            {
+                "cs": cs,
+                "kind": f"{SIGNAL_BASELINE_BY_CASE_STUDY.get(cs, 'equal_weight')}_holdout_side_artifact",
+                "label": ho_label,
+                "benchmark_label": None,
+                "skip": "+".join(skip_parts),
+            }
+        )
+
+    # Pair #3: holdout rank-1 ↔ validation backtest of the SAME lineage.
+    # Per-CS holdout regen may fall back from val rank-1 to rank-K when the
+    # rank-1 retrain produces degenerate predictions (see holdout.py
+    # `generate_holdout` fallback loop). When that happens, comparing the
+    # holdout against the val rank-1 of a *different* lineage measures
+    # cross-lineage difference, not decay. Always pair against the
+    # holdout-lineage's own validation backtest so val_rank1_self holds its
+    # "same-lineage decay" semantics.
+    if chal_ho is not None and ho_lineage is not None:
+        ho_family = ho_lineage["family"]
+        ho_config = ho_lineage["config_name"]
+        same_lineage = (
+            ho_family == leader["family"]
+            and ho_config == leader["config_name"]
+            and ho_label == leader_label
+        )
+        if same_lineage:
+            val_self_hash = leader_hash
+            val_self_returns = chal_full
+        else:
+            val_self_hash = _val_backtest_for_lineage(cs, ho_family, ho_config, ho_label)
+            val_self_returns = _aligned_returns(cs, val_self_hash) if val_self_hash else None
+        if val_self_hash is not None and val_self_returns is not None:
+            extra_paired_rows.append(
+                _populate_pair(
+                    cs,
+                    ho_hash,
+                    val_self_hash,
+                    "val_rank1_self",
+                    chal_ho,
+                    val_self_returns,
+                    ppy,
+                    ho_label,
+                    disjoint_windows=True,
+                )
+            )
+
+    # Pairs #4–6: stage transitions on the validation rank-1 lineage
+    lineage = explorer.champion_lineage(leader_phash)
+    for prev_stage, this_stage, kind in [
+        ("signal", "allocation", "signal_leader"),
+        ("allocation", "cost_sensitivity", "allocation_leader"),
+        ("cost_sensitivity", "risk_overlay", "cost_sensitivity_leader"),
+    ]:
+        prev_entry = lineage.get(prev_stage)
+        this_entry = lineage.get(this_stage)
+        if not prev_entry or not this_entry:
+            continue
+        prev_hash = prev_entry["backtest_hash"]
+        this_hash = this_entry["backtest_hash"]
+        prev_returns = _aligned_returns(cs, prev_hash)
+        this_returns = _aligned_returns(cs, this_hash)
+        if prev_returns is None or this_returns is None:
+            continue
+        extra_paired_rows.append(
+            _populate_pair(
+                cs,
+                this_hash,
+                prev_hash,
+                kind,
+                this_returns,
+                prev_returns,
+                ppy,
+                leader_label,
+            )
+        )
+
+# %%
 extra_paired_df = pl.DataFrame(extra_paired_rows)
 if extra_paired_df.is_empty():
     print("\n=== Extended Paired-Bootstrap Coverage ===")
@@ -1083,13 +1958,8 @@ def query_holdout_rows():
         # different top_k, or a different risk overlay than the validation
         # carrier — pairing those two reads as decay but is actually a
         # full-spec mismatch.
-        spec_clauses, spec_params = validation_strategy_sql_filter(
-            cs,
-            explorers[cs],
-            label_restriction=label_restriction,
-            rung=rung,
-            carrier_pin_predicate=_CARRIER_PIN_PREDICATES.get(cs),
-        )
+        val_spec = _val_rank1_full_spec(cs)
+        spec_clauses, spec_params = _full_strategy_clauses(val_spec)
         clauses.extend(spec_clauses)
         params.extend(spec_params)
         where_sql = " AND ".join(clauses)

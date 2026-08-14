@@ -25,7 +25,6 @@ Usage::
 from __future__ import annotations
 
 import warnings
-from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, cast
@@ -41,7 +40,6 @@ from case_studies.utils.backtest_presets import (
     runtime_backtest_config,
     strategy_view,
 )
-from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.signals import build_target_weights_from_config
 
 # ---------------------------------------------------------------------------
@@ -421,66 +419,6 @@ def _engine_timestamp(
     return timestamp
 
 
-def _add_intraday_session_exit_targets(
-    targets: dict[date | datetime, dict[str, float]],
-    schedule: pl.Series,
-    prices: pl.DataFrame,
-    *,
-    cadence: str,
-    calendar: str,
-    step: int,
-) -> pl.Series:
-    """Add flat decisions whose next-bar fills close each intraday session."""
-    intraday_equity = cadence in {
-        "1_minute",
-        "15_minute",
-        "30_minute",
-        "1_hour",
-        "2_hour",
-        "4_hour",
-    } and calendar.upper() in {"NYSE", "NASDAQ"}
-    if not intraday_equity or schedule.is_empty():
-        return schedule
-
-    timestamp = schedule.name or "timestamp"
-    price_times = prices.get_column("timestamp").unique().sort()
-    valid_decisions: list[datetime] = []
-    flat_decisions: list[datetime] = []
-    sessions = schedule.dt.date().unique(maintain_order=True).to_list()
-    for session in sessions:
-        session_prices = price_times.filter(price_times.dt.date() == session).to_list()
-        price_index = {price_time: index for index, price_time in enumerate(session_prices)}
-        session_decisions = schedule.filter(schedule.dt.date() == session).to_list()
-        for decision in session_decisions:
-            if decision not in price_index:
-                raise ValueError(f"Rebalance decision {decision!s} is absent from the price grid")
-            if price_index[decision] + step + 1 < len(session_prices):
-                valid_decisions.append(decision)
-
-    valid_schedule = pl.Series(timestamp, valid_decisions, dtype=schedule.dtype)
-    entry_decisions = [decision for decision in valid_decisions if targets.get(decision)]
-    if not entry_decisions:
-        return valid_schedule
-    entry_series = pl.Series(timestamp, entry_decisions, dtype=schedule.dtype)
-    for session in entry_series.dt.date().unique(maintain_order=True).to_list():
-        session_prices = price_times.filter(price_times.dt.date() == session).to_list()
-        session_entries = entry_series.filter(entry_series.dt.date() == session).to_list()
-        for index, decision in enumerate(session_entries):
-            flat_decision = session_prices[session_prices.index(decision) + step]
-            next_decision = session_entries[index + 1] if index + 1 < len(session_entries) else None
-            if next_decision is None or next_decision > flat_decision:
-                targets[flat_decision] = {}
-                flat_decisions.append(flat_decision)
-
-    return (
-        pl.concat(
-            [valid_schedule, pl.Series(timestamp, flat_decisions, dtype=schedule.dtype)],
-        )
-        .unique()
-        .sort()
-    )
-
-
 # ---------------------------------------------------------------------------
 # Weight precomputation (for risk sweep reuse)
 # ---------------------------------------------------------------------------
@@ -527,7 +465,6 @@ def precompute_weights(
             case_study=case_study,
             prediction_hash=prediction_hash,
             conformal_widths=conformal_widths,
-            rebalance_step=rebal_spec.get("step"),
         )
     return weights
 
@@ -773,43 +710,24 @@ def substitute_continuous_return_for_classification(
     return joined
 
 
-def resolve_cost_feasible_universe_for_split(
-    case_study: str,
-    split: str,
-) -> tuple[str, list[str]]:
-    """Resolve the frozen cost-feasible roster for an explicit data split."""
-    import yaml
-
-    from utils.paths import get_case_study_dir
-
-    if split not in ("validation", "holdout"):
-        raise ValueError(
-            "cost-feasible universe split must be 'validation' or 'holdout'; "
-            f"got {split!r} for case_study={case_study!r}"
-        )
-    setup = yaml.safe_load((get_case_study_dir(case_study) / "config" / "setup.yaml").read_text())
-    symbols = (((setup.get("universe") or {}).get("cost_feasible")) or {}).get(split)
-    if not symbols:
-        raise KeyError(
-            f"setup.yaml::universe.cost_feasible.{split} missing/empty for "
-            f"case_study={case_study!r}; required when "
-            f"signal.universe_filter='cost_feasible'."
-        )
-    resolved = [str(symbol) for symbol in symbols]
-    if len(resolved) != len(set(resolved)):
-        raise ValueError(
-            f"setup.yaml::universe.cost_feasible.{split} contains duplicate symbols "
-            f"for case_study={case_study!r}."
-        )
-    return split, sorted(resolved)
-
-
-def resolve_cost_feasible_universe(
+def _apply_cost_feasible_filter(
+    predictions: pl.DataFrame,
     case_study: str,
     prediction_hash: str | None,
-) -> tuple[str, list[str]]:
-    """Resolve the frozen cost-feasible roster for a registered prediction set."""
+) -> pl.DataFrame:
+    """Restrict predictions to the frozen, per-split cost-feasible universe.
+
+    The split is resolved from the prediction set's registry entry; the
+    symbol list is read from ``setup.yaml::universe.cost_feasible.{split}``.
+    Raises if the split cannot be resolved or the list is absent — a silent
+    full-universe fallback would change the registered result.
+    """
+    from pathlib import Path as _Path
+
+    import yaml as _yaml
+
     from case_studies.utils.cv_window import lookup_split
+    from utils import CASE_STUDIES_DIR
 
     if not prediction_hash:
         raise ValueError(
@@ -824,64 +742,16 @@ def resolve_cost_feasible_universe(
             f"lookup_split returned {split!r}. The prediction set must be "
             f"registered with a 'validation' or 'holdout' split first."
         )
-    return resolve_cost_feasible_universe_for_split(case_study, split)
-
-
-def bind_cost_feasible_universe(
-    strategy_spec: dict,
-    case_study: str,
-    split: str,
-) -> dict:
-    """Copy a strategy spec and bind its cost-feasible roster to ``split``."""
-    resolved = deepcopy(strategy_spec)
-    signal = strategy_view(resolved).get("signal", {})
-    if signal.get("universe_filter") != "cost_feasible":
-        return resolved
-    resolved_split, symbols = resolve_cost_feasible_universe_for_split(case_study, split)
-    signal["universe_split"] = resolved_split
-    signal["universe_symbols"] = symbols
-    resolved.setdefault("input_identity", {})["universe"] = compute_hash(
-        canonical_json({"split": resolved_split, "symbols": symbols})
+    setup = _yaml.safe_load(
+        (_Path(CASE_STUDIES_DIR) / case_study / "config" / "setup.yaml").read_text()
     )
-    return resolved
-
-
-def _apply_cost_feasible_filter(
-    predictions: pl.DataFrame,
-    case_study: str,
-    prediction_hash: str | None,
-    signal_config: dict,
-) -> pl.DataFrame:
-    """Restrict predictions to the exact cost-feasible roster in Strategy identity."""
-    has_split = "universe_split" in signal_config
-    has_symbols = "universe_symbols" in signal_config
-    if has_split != has_symbols:
-        raise ValueError(
-            "cost-feasible Strategy identity requires both universe_split and universe_symbols"
+    symbols = (((setup.get("universe") or {}).get("cost_feasible")) or {}).get(split)
+    if not symbols:
+        raise KeyError(
+            f"setup.yaml::universe.cost_feasible.{split} missing/empty for "
+            f"case_study={case_study!r}; required when "
+            f"signal.universe_filter='cost_feasible'."
         )
-    if has_split:
-        split = str(signal_config["universe_split"])
-        symbols = [str(symbol) for symbol in signal_config["universe_symbols"]]
-        if split not in {"validation", "holdout"} or not symbols:
-            raise ValueError("cost-feasible Strategy identity has an invalid split or empty roster")
-        if len(symbols) != len(set(symbols)):
-            raise ValueError("cost-feasible Strategy identity contains duplicate symbols")
-        if prediction_hash:
-            registered_split, registered_symbols = resolve_cost_feasible_universe(
-                case_study, prediction_hash
-            )
-            if split != registered_split:
-                raise ValueError(
-                    f"cost-feasible Strategy split {split!r} does not match prediction split "
-                    f"{registered_split!r}"
-                )
-            if symbols != registered_symbols:
-                raise ValueError(
-                    "cost-feasible Strategy symbols do not match the frozen roster for "
-                    f"case_study={case_study!r} split={split!r}"
-                )
-    else:
-        split, symbols = resolve_cost_feasible_universe(case_study, prediction_hash)
     filtered = predictions.filter(pl.col("symbol").is_in(list(symbols)))
     if filtered.is_empty() and not predictions.is_empty():
         raise ValueError(
@@ -889,7 +759,7 @@ def _apply_cost_feasible_filter(
             f"case_study={case_study!r} split={split!r}: the prediction set's "
             f"symbols do not intersect the frozen cost-feasible list (e.g. a "
             f"point-in-time ticker mismatch like FB/META). Refusing to run a "
-            f"zero-row backtest."
+            f"zero-row backtest — same 'no silent fallback' intent as above."
         )
     return filtered
 
@@ -911,16 +781,18 @@ def apply_universe_filter(
     spread column is ``instr_rel_spread`` on the prices frame.
 
     When ``signal_config["universe_filter"] == "cost_feasible"``
-    (nasdaq100_microstructure), the backtest restricts predictions to the
-    per-split symbol list resolved before Strategy identity is computed. The
-    exact split and symbols are part of the strategy specification and its
-    hash. Legacy callers without those fields resolve the same list from
-    ``setup.yaml::universe.cost_feasible.{validation,holdout}`` and the
-    registered prediction split.
+    (nasdaq100_microstructure), the backtest restricts predictions to a
+    FROZEN, per-split symbol list committed under
+    ``setup.yaml::universe.cost_feasible.{validation,holdout}``. The list is
+    the cost-feasible universe — the cheapest-to-trade names by round-trip
+    cost, profiled strictly before each window (no look-ahead — see
+    ``build_cost_feasible_universe.py``); the split is resolved from the
+    prediction set's registry entry via ``lookup_split``. Like ``liquid``,
+    only the filter *name* enters the backtest hash, not the resolved symbols.
 
     Returns predictions unchanged when no filter applies. Built into
-    ``run_backtest`` so any caller, including sweep notebooks and holdout
-    generation, gets the same filter as the bespoke sp500_options
+    ``run_backtest`` so any caller — sweep notebooks, ``generate_holdout``,
+    ad-hoc scripts — gets the same filter as the bespoke sp500_options
     pipeline, driven purely by the strategy spec.
     """
     if not signal_config:
@@ -929,12 +801,7 @@ def apply_universe_filter(
     if uf in ("", "full", "none"):
         return predictions
     if uf == "cost_feasible":
-        return _apply_cost_feasible_filter(
-            predictions,
-            case_study,
-            prediction_hash,
-            signal_config,
-        )
+        return _apply_cost_feasible_filter(predictions, case_study, prediction_hash)
     if uf != "liquid":
         raise ValueError(
             f"universe_filter={uf!r} not supported. Allowed: 'liquid', 'cost_feasible', or 'full'."
@@ -1229,7 +1096,6 @@ def run_backtest(
                 label=label,
                 case_study=case_study,
                 prediction_hash=prediction_hash,
-                rebalance_step=rebal_spec.get("step"),
             )
 
     # 2. Dispatch to engine or vectorized
@@ -1291,7 +1157,6 @@ def run_backtest(
                 initial_cash=initial_cash,
                 risk_spec=strategy.get("risk", {}),
                 prediction_hash=prediction_hash,
-                rebalance_step=rebal_spec.get("step"),
             )
     else:
         result = _run_engine(
@@ -1425,9 +1290,18 @@ def _run_engine(
         price_timestamp_dtype.time_zone if isinstance(price_timestamp_dtype, pl.Datetime) else None
     )
     raw_weight_dict = _target_weights_by_timestamp(weights)
+    weight_dict = {
+        _engine_timestamp(
+            timestamp,
+            feed_is_date=feed_is_date,
+            feed_timezone=feed_timezone,
+            configured_timezone=config.resolved_timezone,
+        ): targets
+        for timestamp, targets in raw_weight_dict.items()
+    }
 
-    # Resolve calendar-aware rebalance schedule, then thin by the request's
-    # identity-covered step or the label's configured default. Mirrors
+    # Resolve calendar-aware rebalance schedule, then thin by the label's
+    # non-overlapping step from setup.yaml::labels.rebalance_step. Mirrors
     # the same two-step thinning that thin_to_rebalance_dates() applies on
     # the vectorized path (see backtest_loaders.thin_to_rebalance_dates).
     # Without this, multi-step labels (e.g. fwd_ret_60m on a 15m cadence
@@ -1444,38 +1318,15 @@ def _run_engine(
     from case_studies.utils.backtest_loaders import (
         get_rebalance_step,
         resolve_rebalance_timestamps,
-        thin_rebalance_schedule,
     )
 
     cadence = rebalance_spec.get("cadence", "monthly_month_end")
     all_pred_ts = pl.Series("ts", predictions["timestamp"].unique().sort().to_list())
     schedule_dates = resolve_rebalance_timestamps(all_pred_ts, cadence, calendar)
     if case_study and label:
-        step = int(rebalance_spec.get("step", get_rebalance_step(case_study, label)))
-        exit_step = int(rebalance_spec.get("exit_step", step))
-        schedule_dates = thin_rebalance_schedule(
-            schedule_dates,
-            cadence=cadence,
-            step=step,
-            calendar=calendar,
-        )
-        schedule_dates = _add_intraday_session_exit_targets(
-            raw_weight_dict,
-            schedule_dates,
-            prices,
-            cadence=cadence,
-            calendar=calendar,
-            step=exit_step,
-        )
-    weight_dict = {
-        _engine_timestamp(
-            timestamp,
-            feed_is_date=feed_is_date,
-            feed_timezone=feed_timezone,
-            configured_timezone=config.resolved_timezone,
-        ): targets
-        for timestamp, targets in raw_weight_dict.items()
-    }
+        step = get_rebalance_step(case_study, label)
+        if step > 1:
+            schedule_dates = schedule_dates.gather_every(step)
     rebalance_schedule = {
         _engine_timestamp(
             timestamp,
@@ -1570,7 +1421,8 @@ def _run_engine(
 
             if timestamp in weight_dict:
                 targets = {a: w for a, w in weight_dict[timestamp].items() if a in data}
-                self.executor.execute(targets, data, broker)
+                if targets:
+                    self.executor.execute(targets, data, broker)
 
     # Resolve the canonical (cs, label, split) window — same window for every
     # strategy on the same (cs, label, split). Callers pre-window `prices` via
@@ -1624,23 +1476,14 @@ def _run_engine(
                 f"or call load_backtest_prices_for(cs, label, split=split)."
             )
     elif predictions.height > 0:
-        # Fallback when the canonical window is unavailable: exclude pre-history,
-        # but retain the bar after the final scheduled decision so NEXT_BAR can
-        # execute a terminal flat target beyond the prediction timeline.
+        # Fallback when canonical window unavailable: still slice to the
+        # predictions' span so demo notebooks with sentinel prediction_hash
+        # don't process pre-history.
         pred_ts = predictions["timestamp"]
         if pred_ts.dtype != prices_ts_dtype:
             pred_ts = pred_ts.cast(prices_ts_dtype)
-        upper_bound = pred_ts.max()
-        if rebalance_schedule:
-            final_decision = max(rebalance_schedule)
-            available_price_times = prices.get_column("timestamp").unique().sort()
-            following_prices = available_price_times.filter(available_price_times > final_decision)
-            if not following_prices.is_empty():
-                following_price = following_prices.min()
-                if upper_bound is None or following_price > upper_bound:
-                    upper_bound = following_price
         prices = prices.filter(
-            (pl.col("timestamp") >= pred_ts.min()) & (pl.col("timestamp") <= upper_bound)
+            (pl.col("timestamp") >= pred_ts.min()) & (pl.col("timestamp") <= pred_ts.max())
         )
 
     # signals_df is intentionally omitted: _PrecomputedStrategy reads
@@ -1972,7 +1815,6 @@ def _run_vectorized(
     initial_cash: float,
     risk_spec: dict | None = None,
     prediction_hash: str | None = None,
-    rebalance_step: int | None = None,
 ) -> dict:
     """Run vectorized backtest (weight × forward return - costs).
 
@@ -1997,7 +1839,7 @@ def _run_vectorized(
 
     # Thin predictions to non-overlapping periods. Step is declared per-label
     # in the case study's setup.yaml under labels.rebalance_step.
-    step = rebalance_step or get_rebalance_step(case_study, label)
+    step = get_rebalance_step(case_study, label)
     thinned = thin_to_rebalance_dates(predictions, cadence=cadence, step=step)
 
     # Re-compute weights on thinned predictions
@@ -2245,7 +2087,6 @@ def _apply_allocation(
     case_study: str = "",
     prediction_hash: str | None = None,
     conformal_widths: pl.DataFrame | None = None,
-    rebalance_step: int | None = None,
 ) -> pl.DataFrame:
     """Post-process signal weights with an allocation method.
 
@@ -2310,7 +2151,7 @@ def _apply_allocation(
             "_apply_allocation requires both case_study and label to look up "
             "labels.rebalance_step from setup.yaml. Pass them from the caller."
         )
-    step = rebalance_step or get_rebalance_step(case_study, label)
+    step = get_rebalance_step(case_study, label)
     rebal_preds = thin_to_rebalance_dates(filtered_preds, cadence=cadence, step=step)
 
     # Max weight cap — applied after all covariance-based allocators

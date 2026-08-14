@@ -97,7 +97,7 @@ def test_microstructure_pilot_helpers_preserve_current_outputs() -> None:
     assert bt.primary_label == "fwd_ret_15m"
     assert bt.label_buffer == "15min"
     assert bt.calendar == "NYSE"
-    assert bt.cadence == "1_minute"
+    assert bt.cadence == "15_minute"
 
     # Microstructure carries OHLCV + bid/ask OHLC so the backtest engine can
     # cost spread-aware fills.

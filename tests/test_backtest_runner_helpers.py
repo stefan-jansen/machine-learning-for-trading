@@ -25,7 +25,6 @@ from case_studies.utils.backtest_runner import (
     _align_symbol_dtype,
     _target_weights_by_timestamp,
     apply_universe_filter,
-    bind_cost_feasible_universe,
     run_plumbing_test,
     substitute_continuous_return_for_classification,
 )
@@ -290,87 +289,6 @@ def test_apply_universe_filter_collapses_intraday_to_date_grain(
     )
     # Only the tighter-spread symbol (A) survives the 0.50 quantile.
     assert out["symbol"].to_list() == ["A"]
-
-
-def test_cost_feasible_filter_uses_resolved_roster_from_strategy_identity() -> None:
-    predictions = pl.DataFrame(
-        {
-            "timestamp": [datetime(2024, 1, 2), datetime(2024, 1, 2)],
-            "symbol": ["A", "B"],
-        }
-    )
-    signal = {
-        "universe_filter": "cost_feasible",
-        "universe_split": "validation",
-        "universe_symbols": ["B"],
-    }
-
-    filtered = apply_universe_filter(
-        predictions,
-        pl.DataFrame(),
-        case_study="nasdaq100_microstructure",
-        signal_config=signal,
-        prediction_hash=None,
-    )
-
-    assert filtered["symbol"].to_list() == ["B"]
-
-
-def test_cost_feasible_filter_rejects_incomplete_resolved_identity() -> None:
-    predictions = pl.DataFrame({"timestamp": [datetime(2024, 1, 2)], "symbol": ["A"]})
-
-    with pytest.raises(ValueError, match="universe_split and universe_symbols"):
-        apply_universe_filter(
-            predictions,
-            pl.DataFrame(),
-            case_study="nasdaq100_microstructure",
-            signal_config={
-                "universe_filter": "cost_feasible",
-                "universe_symbols": ["A"],
-            },
-            prediction_hash=None,
-        )
-
-
-def test_holdout_strategy_rebinds_cost_feasible_roster(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    case_study = "roster_test"
-    config_dir = tmp_path / case_study / "config"
-    config_dir.mkdir(parents=True)
-    (config_dir / "setup.yaml").write_text(
-        dedent(
-            """
-            universe:
-              cost_feasible:
-                validation: [A]
-                holdout: [B, C]
-            """
-        ).strip()
-    )
-    import utils
-
-    monkeypatch.setattr(utils, "CASE_STUDIES_DIR", tmp_path)
-    validation_spec = {
-        "version": 2,
-        "strategy": {
-            "signal": {
-                "method": "equal_weight_top_k",
-                "universe_filter": "cost_feasible",
-                "universe_split": "validation",
-                "universe_symbols": ["A"],
-            }
-        },
-        "backtest_config": {},
-        "input_identity": {"universe": "validation-digest"},
-    }
-
-    holdout_spec = bind_cost_feasible_universe(validation_spec, case_study, "holdout")
-
-    assert validation_spec["strategy"]["signal"]["universe_symbols"] == ["A"]
-    assert holdout_spec["strategy"]["signal"]["universe_split"] == "holdout"
-    assert holdout_spec["strategy"]["signal"]["universe_symbols"] == ["B", "C"]
-    assert holdout_spec["input_identity"]["universe"] != "validation-digest"
 
 
 def test_substitute_continuous_return_dedupe_assertion(

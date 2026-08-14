@@ -774,7 +774,7 @@ def _load_via_canonical(
     if loader_name == "nasdaq100_bars":
         from data.equities.loader import load_nasdaq100_bars
 
-        freq = frequency or "1m"
+        freq = frequency or "15m"
         return load_nasdaq100_bars(
             frequency=freq,
             max_symbols=max_symbols,
@@ -952,7 +952,7 @@ def load_backtest_prices(
             .sort("n", descending=True)
             .head(max_symbols)["symbol"]
         )
-        df = df.filter(pl.col("symbol").is_in(top_symbols.implode()))
+        df = df.filter(pl.col("symbol").is_in(top_symbols))
 
     return df.sort("timestamp", "symbol")
 
@@ -1015,9 +1015,8 @@ _CADENCE_CALENDAR_DAYS_PER_PERIOD: dict[str, float] = {
     "weekly_friday": 7.0,
     # 8-hour funding
     "8_hour_funding_aligned": 1.0 / 3.0,
-    # Intraday equity microstructure uses 390 minute bars or 26 fifteen-minute
-    # bars per regular trading day; multiply by 1.4 to account for weekends.
-    "1_minute": (1.0 / 390.0) * 1.4,
+    # Intraday equity microstructure: ~26 fifteen-minute bars per RTH
+    # trading day; multiply by 1.4 to account for weekends.
     "15_minute": (1.0 / 26.0) * 1.4,
     # Monthly month-end
     "monthly_month_end": 31.0,
@@ -1238,116 +1237,11 @@ def get_rebalance_step(case_study: str, label: str) -> int:
     return step
 
 
-def get_rebalance_step_for_cadence(case_study: str, label: str, cadence: str) -> int:
-    """Resolve a non-overlapping decision step for an explicit intraday cadence."""
-    from utils import CASE_STUDIES_DIR
-
-    setup_path = CASE_STUDIES_DIR / case_study / "config" / "setup.yaml"
-    setup = yaml.safe_load(setup_path.read_text())
-    labels = setup.get("labels") or {}
-    primary = labels.get("primary")
-    buffer_token = (
-        labels.get("buffer")
-        if label == primary
-        else (labels.get("variant_buffers") or {}).get(label)
-    )
-    if not buffer_token:
-        raise KeyError(f"No label buffer is declared for {case_study}/{label}")
-
-    def duration_minutes(token: str) -> int:
-        normalized = str(token).strip().lower().replace("_", "")
-        match = re.fullmatch(r"(\d+)(minute|minutes|min|m|hour|hours|h)", normalized)
-        if match is None:
-            raise ValueError(f"Unsupported intraday duration token: {token!r}")
-        value = int(match.group(1))
-        return value * 60 if match.group(2) in {"hour", "hours", "h"} else value
-
-    horizon_minutes = duration_minutes(str(buffer_token))
-    cadence_minutes = duration_minutes(cadence)
-    return max(1, (horizon_minutes - 1 + cadence_minutes - 1) // cadence_minutes)
-
-
-def align_predictions_to_decision_grid(
-    predictions: pl.DataFrame,
-    decision_timestamps: pl.Series,
-) -> pl.DataFrame:
-    """Align each symbol's latest prediction within the same trading session."""
-    required = {"timestamp", "symbol", "y_score"}
-    missing = sorted(required.difference(predictions.columns))
-    if missing:
-        raise ValueError(f"Predictions are missing required columns: {missing}")
-    if decision_timestamps.is_empty() or predictions.is_empty():
-        return predictions.head(0)
-
-    timestamp_dtype = predictions.schema["timestamp"]
-    if decision_timestamps.dtype != timestamp_dtype:
-        decision_timestamps = decision_timestamps.cast(timestamp_dtype)
-    decision_grid = (
-        pl.DataFrame({"timestamp": decision_timestamps})
-        .unique()
-        .sort("timestamp")
-        .with_columns(pl.col("timestamp").dt.date().alias("_session"))
-    )
-    session_predictions = predictions.with_columns(
-        pl.col("timestamp").dt.date().alias("_session")
-    ).sort("symbol", "_session", "timestamp")
-
-    aligned = []
-    for symbol in predictions.get_column("symbol").unique().sort().to_list():
-        symbol_grid = decision_grid.with_columns(pl.lit(symbol).alias("symbol")).sort(
-            "symbol", "_session", "timestamp"
-        )
-        symbol_predictions = session_predictions.filter(pl.col("symbol") == symbol)
-        joined = symbol_grid.join_asof(
-            symbol_predictions,
-            on="timestamp",
-            by=["symbol", "_session"],
-            strategy="backward",
-            check_sortedness=False,
-        ).drop_nulls("y_score")
-        if not joined.is_empty():
-            aligned.append(joined.drop("_session"))
-
-    return pl.concat(aligned) if aligned else predictions.head(0)
-
-
-def thin_rebalance_schedule(
-    schedule: pl.Series,
-    *,
-    cadence: str,
-    step: int,
-    calendar: str = "NYSE",
-) -> pl.Series:
-    """Apply a non-overlapping step, resetting intraday equity schedules each session."""
-    if step <= 1 or schedule.len() <= 1:
-        return schedule
-    intraday_equity = cadence in {
-        "1_minute",
-        "15_minute",
-        "30_minute",
-        "1_hour",
-        "2_hour",
-        "4_hour",
-    } and calendar.upper() in {"NYSE", "NASDAQ"}
-    if not intraday_equity:
-        return schedule.gather_every(step)
-    timestamp = schedule.name or "timestamp"
-    return (
-        pl.DataFrame({timestamp: schedule})
-        .with_columns(pl.col(timestamp).dt.date().alias("_session"))
-        .group_by("_session", maintain_order=True)
-        .agg(pl.col(timestamp).gather_every(step))
-        .explode(timestamp)
-        .sort(timestamp)[timestamp]
-    )
-
-
 def thin_to_rebalance_dates(
     predictions: pl.DataFrame,
     cadence: str = "",
     step: int = 1,
     time_col: str = "timestamp",
-    calendar: str = "NYSE",
 ) -> pl.DataFrame:
     """Thin predictions to non-overlapping rebalance dates.
 
@@ -1387,12 +1281,8 @@ def thin_to_rebalance_dates(
     schedule_dates = resolve_rebalance_timestamps(all_dates, cadence)
 
     # Step 2: Apply design-time non-overlapping step
-    schedule_dates = thin_rebalance_schedule(
-        schedule_dates,
-        cadence=cadence,
-        step=step,
-        calendar=calendar,
-    )
+    if step > 1:
+        schedule_dates = schedule_dates.gather_every(step)
 
     # Semi-join to filter — avoids Polars is_in precision mismatch
     # (group_by().agg(max) can change Datetime precision)

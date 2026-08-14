@@ -245,7 +245,7 @@ universe:
       - UAL
 
 decision:
-  bar_frequency: 1_minute
+  bar_frequency: 15_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar
   execution_price_assumption: next_bar_open_or_vwap
@@ -256,7 +256,7 @@ decision:
 features:
   windows:
     fast: 5              # one fast aggregate
-    decision: 15         # one 15-minute feature window
+    decision: 15         # one decision bar at the declared bar_frequency
     slow: 30             # realized-volatility horizon and the Amihud average
     hour: 60             # Kyle's lambda regression and the slow regime average
     ewma_half_life: 30   # half-life of the EWMA volatility, in bars
@@ -403,7 +403,7 @@ features:
 execution:
   initial_cash: 1_000_000        # restores prior validated state
   share_type: integer            # US equities trade in whole shares
-  allocator_lookback: 7800       # about 20 trading days of minute bars
+  allocator_lookback: 520        # ~20 trading days of 15-min bars
 
 mapping:
   class: intraday_rank_and_trade
@@ -459,14 +459,16 @@ backtest:
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
-    # No expensive allocators on nasdaq. The minute panel makes covariance
-    # estimation on the rebalance schedule prohibitive. Earlier 15-minute
-    # comparisons put every expensive allocator (risk_parity,
-    # mvo_ledoit_wolf, hrp) below equal_weight on every label; the minute
-    # panel is larger, so signal-stage selection remains the comparison here.
+    # No expensive allocators on nasdaq. At 15-min frequency the 1.3M-bar
+    # panel makes covariance estimation on the rebalance schedule
+    # prohibitive; empirically every expensive allocator (risk_parity,
+    # mvo_ledoit_wolf, hrp) produces deeply negative Sharpes (-7 to -10)
+    # on every nasdaq label and equal_weight ties at the top. The 15-min
+    # cadence is a costs-dominated regime where signal-stage selection
+    # carries the entire story.
     expensive_allocators_skip: true
     # Ch16 signal-stage selection. Long-short equal-weight top-k on the
-    # minute schedule across four labels (5m/15m/60m continuous + 15m
+    # 15-min schedule across four labels (5m/15m/60m continuous + 15m
     # direction). The classification label fwd_dir_15m is a first-class
     # signal alongside the continuous labels and carries the same top_k
     # grid.
@@ -497,7 +499,7 @@ backtest:
     # ``cost_grid_half_spread_usd`` grid above. Tokens are the same cadence
     # vocabulary recognized by the engine; the notebook pulls the list from
     # here, never hardcoded.
-    cadence_sweep: [1_minute, 15_minute, 30_minute, 1_hour, 4_hour]
+    cadence_sweep: [15_minute, 30_minute, 1_hour, 4_hour]
     # nasdaq100 v4 slot-mechanism sweep (Ch16 signal stage replacement).
     #
     # Adds two selection methods to the canonical Ch16 expansion:
@@ -529,10 +531,10 @@ backtest:
       long_q: [0.90, 0.95, 0.99]
       direction: [long_only, long_short]
       max_slots: [5, 10, 20]
-      hold_bars: [120, 240, 480]          # 2h, 4h, 8h at the production 1m grid
+      hold_bars: [8, 16, 32]              # 2h, 4h, 8h at 15-min grid
       exit_signal_q: [null, 0.30, 0.50, 0.70]  # null disables signal-exit
       pred_freshness_max_min: 14          # variant-A: freshest 1m pred per 15m bar
-      bars_per_day_grid: [210]            # preserves the prior 14 x 15m daily window
+      bars_per_day_grid: [14]             # 15m only; 1m cadence failed comprehensively
       top_k_grid: [5, 10, 20]
       lookback_days: 21
     # Ch19 risk overlays.
@@ -549,9 +551,9 @@ backtest:
         - {name: trailing_10pct,  type: trailing_stop, threshold: 0.10}
         - {name: trailing_15pct,  type: trailing_stop, threshold: 0.15}
         - {name: trailing_20pct,  type: trailing_stop, threshold: 0.20}
-        - {name: time_exit_10,    type: time_exit,     bars: 150}
-        - {name: time_exit_20,    type: time_exit,     bars: 300}
-        - {name: time_exit_40,    type: time_exit,     bars: 600}
+        - {name: time_exit_10,    type: time_exit,     bars: 10}
+        - {name: time_exit_20,    type: time_exit,     bars: 20}
+        - {name: time_exit_40,    type: time_exit,     bars: 40}
 
 evaluation:
   n_splits: 2
@@ -573,13 +575,13 @@ labels:
     fwd_ret_5m: 5min
     fwd_ret_60m: 60min
     fwd_dir_15m: 15min
-  # Decision-minute step between trades. A decision at t fills at t+1, so
-  # the replacement decision is made at t+H-1 and fills at the label exit t+H.
+  # Vectorized-backtest thinning step per label: number of schedule slots
+  # to advance per trade so holding periods don't overlap.
   rebalance_step:
-    fwd_ret_15m: 14
-    fwd_ret_5m: 4
-    fwd_ret_60m: 59
-    fwd_dir_15m: 14
+    fwd_ret_15m: 1
+    fwd_ret_5m: 1
+    fwd_ret_60m: 4   # 15min schedule, 60min horizon -> ceil(60/15) = 4
+    fwd_dir_15m: 1
   # Continuous return that each classification label is derived from.
   classification_eval_label:
     fwd_dir_15m: fwd_ret_15m
