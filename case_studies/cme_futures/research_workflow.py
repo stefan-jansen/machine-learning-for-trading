@@ -30,7 +30,7 @@ from case_studies.research import (
 from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
-from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_runner import precompute_weights
 from case_studies.utils.registry import prediction_hash_from_parts
 from data import load_cme_futures
@@ -119,11 +119,19 @@ def model_request_catalog(
     """Return the declared model population as visible Polars rows."""
     selected = set(config_names) if config_names is not None else None
     rows = []
+    missing_by_label = {}
     for label in labels:
-        for config in load_configs(CASE_STUDY, label, family):
+        configs = load_configs(CASE_STUDY, label, family)
+        available = {str(config["config_name"]) for config in configs}
+        missing = sorted((selected or set()) - available)
+        if missing:
+            missing_by_label[label] = missing
+        for config in configs:
             name = str(config["config_name"])
             if selected is None or name in selected:
                 rows.append({"family": family, "label": label, "config_name": name})
+    if missing_by_label:
+        raise ValueError(f"unknown {family!r} configurations by label: {missing_by_label}")
     if not rows:
         raise ValueError(f"no declared requests for {family!r}")
     return pl.DataFrame(rows).unique(maintain_order=True)
@@ -223,7 +231,7 @@ def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl
     """Show the data, folds, checkpoints, and eligibility each request will use."""
     rows = []
     for request in resolved_requests:
-        computation = request.spec["computation"]
+        computation = request.spec.get("computation", request.spec)
         expected = request._context.expected_keys
         entity = next(
             (column for column in ("product", "symbol") if column in expected.columns),
@@ -424,6 +432,12 @@ def load_futures_price_path(
     )
 
 
+def _resolved_signal(signal: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(signal)
+    resolved.setdefault("long_short", get_backtest_config(CASE_STUDY).long_short)
+    return resolved
+
+
 def resolve_product_weights(
     prediction: PredictionResult,
     *,
@@ -437,6 +451,7 @@ def resolve_product_weights(
     if "product" not in prices.columns or "symbol" in prices.columns:
         raise ValueError("reader-facing CME prices require product and cannot contain symbol")
     study = prediction.study
+    signal = _resolved_signal(signal)
     unresolved = study.strategy(
         prediction=prediction,
         signal=signal,
@@ -503,6 +518,7 @@ def publish_product_weights(
     canonical: bool = False,
 ) -> DecisionArtifact:
     """Publish validated CME weights with product, roll, expiry, and fold lineage."""
+    signal = _resolved_signal(signal)
     weights = resolve_product_weights(
         prediction,
         prices=prices,
@@ -513,6 +529,16 @@ def publish_product_weights(
     )
     source_identity: dict[str, Any] | None = None
     if canonical:
+        replay = resolve_product_weights(
+            prediction,
+            prices=prices,
+            signal=signal,
+            allocation=allocation,
+            risk=risk,
+            costs=costs,
+        )
+        if value_digest(replay) != value_digest(weights):
+            raise RuntimeError("canonical CME decision replay was not deterministic")
         source_identity = {
             "module": "case_studies.cme_futures.research_workflow",
             "source_digest": hashlib.sha256(
@@ -523,7 +549,7 @@ def publish_product_weights(
                 "prices": value_digest(prices),
             },
             "determinism": {"deterministic": True},
-            "clean_replay_digest": value_digest(weights),
+            "clean_replay_digest": value_digest(replay),
         }
     return DecisionArtifact.publish(
         prediction.study,
@@ -611,10 +637,11 @@ def run_official_backtest_requests(
                 warmup_periods=warmup,
             )
         price_path = price_cache[cache_key]
+        signal = _resolved_signal(row["signal"])
         decision = publish_product_weights(
             prediction,
             prices=price_path.prices,
-            signal=row["signal"],
+            signal=signal,
             allocation=allocation,
             risk=risk,
             costs=costs,
@@ -623,7 +650,7 @@ def run_official_backtest_requests(
         plan = plan_backtests(
             study,
             predictions=selected,
-            signal=row["signal"],
+            signal=signal,
             decision=decision,
             prices=price_path.prices,
             allocation=allocation,
@@ -635,7 +662,7 @@ def run_official_backtest_requests(
             raise RuntimeError("one futures strategy request must resolve to one backtest")
         expected_hash = plan.expected_hashes[0]
         expected.append(expected_hash)
-        prepared.append((row, selected, price_path, decision, expected_hash))
+        prepared.append((row, selected, price_path, signal, decision, expected_hash))
     if len(expected) != len(set(expected)):
         raise ValueError("strategy requests resolve to duplicate backtest identities")
     population = OfficialPopulation.create(
@@ -646,11 +673,11 @@ def run_official_backtest_requests(
     )
     results = []
     rows = []
-    for row, selected, price_path, decision, expected_hash in prepared:
+    for row, selected, price_path, signal, decision, expected_hash in prepared:
         result = run_backtests(
             study,
             predictions=selected,
-            signal=row["signal"],
+            signal=signal,
             prices=price_path.prices,
             allocation=row.get("allocation"),
             risk=row.get("risk"),

@@ -144,14 +144,20 @@ def prove(workspace: Path) -> dict[str, object]:
         signal=signal,
     )
     assert decision.spec["decision_keys"] == ["product", "timestamp"]
+    resolved_signal = decision.spec["parameters"]["signal"]
+    assert resolved_signal["long_short"] is True
+    assert decision.load().filter(pl.col("weight") < 0).height > 0
+    assert decision.load().filter(pl.col("weight") > 0).height > 0
     typed = run_backtests(
         study,
         predictions=selected,
-        signal=signal,
+        signal=resolved_signal,
         decision=decision,
         prices=price_path.prices,
     ).results[0]
-    direct = study.strategy(prediction=prediction, signal=signal).run(prices=price_path.prices)
+    direct = study.strategy(prediction=prediction, signal=resolved_signal).run(
+        prices=price_path.prices
+    )
     assert _returns(typed).equals(_returns(direct))
     typed_spec = typed.spec()
     assert typed_spec["entity_contract"]["reader_key"] == "product"

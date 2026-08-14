@@ -13,6 +13,7 @@ from case_studies.cme_futures.research_workflow import (
     FuturesPricePath,
     _expiry_rules,
     create_label_candidate_sets,
+    model_request_catalog,
     product_universe_table,
     publish_product_weights,
     resolved_model_plan,
@@ -132,20 +133,24 @@ def test_product_decision_matches_existing_futures_engine_path(tmp_path: Path) -
     prices = _product_prices()
     signal = {"method": "equal_weight_top_k", "top_k": 1}
 
-    direct = study.strategy(prediction=prediction, signal=signal).run(prices=prices)
     decision = publish_product_weights(
         prediction,
         prices=prices,
         signal=signal,
     )
+    resolved_signal = decision.spec["parameters"]["signal"]
+    direct = study.strategy(prediction=prediction, signal=resolved_signal).run(prices=prices)
     typed = study.strategy(
         prediction=prediction,
-        signal=signal,
+        signal=resolved_signal,
         decision=decision,
     ).run(prices=prices)
 
     assert decision.spec["decision_keys"] == ["product", "timestamp"]
     assert decision.load().columns == ["product", "timestamp", "weight", "fold"]
+    assert decision.spec["parameters"]["signal"]["long_short"] is True
+    assert decision.load().filter(pl.col("weight") < 0).height > 0
+    assert decision.load().filter(pl.col("weight") > 0).height > 0
     assert typed.spec()["entity_contract"] == {
         "reader_key": "product",
         "engine_key": "symbol",
@@ -272,6 +277,77 @@ def test_reader_plan_exposes_resolved_population_and_product_contract(tmp_path: 
     assert universe.get_column("product").n_unique() == 30
     assert universe.select(pl.col("expiry_rule").is_null().any()).item() is False
     assert universe.select(pl.col("contract_months").is_null().any()).item() is False
+
+
+def test_reader_plan_accepts_flat_family_spec(tmp_path: Path) -> None:
+    expected = pl.DataFrame(
+        {
+            "symbol": ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 2), datetime(2024, 1, 2)],
+            "fold": [0, 0],
+        }
+    )
+    nested = _resolved_spec()
+    computation = nested.pop("computation")
+    spec = {**nested, **computation}
+    spec.update(
+        {
+            "identity_version": 2,
+            "label": "fwd_ret_5d",
+            "execution_tier": "preview",
+            "checkpoint_schedule": [{"kind": "epoch", "value": 2}],
+        }
+    )
+    request = ResolvedModelRequest(
+        study=_study(tmp_path),
+        family="deep_learning",
+        spec=spec,
+        _context=SimpleNamespace(expected_keys=expected),
+    )
+
+    plan = resolved_model_plan([request])
+
+    assert plan.item(0, "family") == "deep_learning"
+    assert plan.item(0, "checkpoints") == len(spec["checkpoint_schedule"])
+
+
+def test_model_request_catalog_rejects_each_unknown_requested_config() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        model_request_catalog(
+            "linear",
+            labels=("fwd_ret_5d",),
+            config_names=("ols", "missing"),
+        )
+
+
+def test_canonical_decision_rejects_divergent_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from case_studies.cme_futures import research_workflow
+
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    prices = _product_prices()
+    original = research_workflow.resolve_product_weights
+    calls = 0
+
+    def divergent_replay(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        weights = original(*args, **kwargs)
+        if calls == 2:
+            weights = weights.with_columns((pl.col("weight") + 0.01).alias("weight"))
+        return weights
+
+    monkeypatch.setattr(research_workflow, "resolve_product_weights", divergent_replay)
+
+    with pytest.raises(RuntimeError, match="not deterministic"):
+        research_workflow.publish_product_weights(
+            prediction,
+            prices=prices,
+            signal={"method": "equal_weight_top_k", "top_k": 1},
+            canonical=True,
+        )
 
 
 def test_visible_requests_snapshot_complete_canonical_backtests(
