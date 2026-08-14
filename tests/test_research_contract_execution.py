@@ -681,7 +681,10 @@ def test_backtest_immutability_uses_the_same_semantic_projection_as_hashing(
         )
 
 
-def test_backtest_retry_rejects_changed_existing_execution_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("identity_version", [3, None], ids=["versioned", "unversioned"])
+def test_backtest_retry_rejects_changed_existing_execution_artifacts(
+    tmp_path: Path, identity_version: int | None
+) -> None:
     study = _study(tmp_path)
     prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
     returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
@@ -689,11 +692,12 @@ def test_backtest_retry_rejects_changed_existing_execution_artifacts(tmp_path: P
     )
     original_trades = pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]})
     changed_trades = pl.DataFrame({"symbol": ["SPY"], "pnl": [2.0]})
-    strategy = {
-        "identity_version": 3,
+    strategy: dict = {
         "execution_tier": "canonical",
         "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
     }
+    if identity_version is not None:
+        strategy["identity_version"] = identity_version
 
     backtest_hash = register_backtest_run(
         "etfs",

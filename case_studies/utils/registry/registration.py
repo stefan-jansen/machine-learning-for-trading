@@ -1003,50 +1003,50 @@ def register_backtest_run(
     existing_strategy_spec: dict | None = None
     existing_backtest = False
 
-    if identity_version in SUPPORTED_IDENTITY_VERSIONS:
-        db = _open_registry(case_dir)
-        try:
-            existing = db.execute(
-                "SELECT prediction_hash, spec_json, "
-                "EXISTS(SELECT 1 FROM backtest_metrics m WHERE m.backtest_hash = ?) "
-                "FROM backtest_runs WHERE backtest_hash = ?",
-                (b_hash, b_hash),
-            ).fetchone()
-        finally:
-            db.close()
-        if existing is not None:
-            existing_backtest = True
-            existing_spec = json.loads(existing[1] or "{}")
+    db = _open_registry(case_dir)
+    try:
+        existing = db.execute(
+            "SELECT prediction_hash, spec_json, "
+            "EXISTS(SELECT 1 FROM backtest_metrics m WHERE m.backtest_hash = ?) "
+            "FROM backtest_runs WHERE backtest_hash = ?",
+            (b_hash, b_hash),
+        ).fetchone()
+    finally:
+        db.close()
+    if existing is not None:
+        existing_backtest = True
+        existing_spec = json.loads(existing[1] or "{}")
+        if identity_version in SUPPORTED_IDENTITY_VERSIONS:
             same_identity = canonical_json(
                 _hashable_strategy_spec(existing_spec)
             ) == canonical_json(_hashable_strategy_spec(strategy_spec))
             if existing[0] != prediction_hash or not same_identity:
                 raise ValueError(f"immutable backtest identity conflict for {b_hash}")
-            existing_strategy_spec = existing_spec
-            import polars as pl
+        existing_strategy_spec = existing_spec
+        import polars as pl
 
-            from case_studies.utils.artifact_digest import value_digest
+        from case_studies.utils.artifact_digest import value_digest
 
-            artifact_values = {
-                "daily_returns.parquet": returns,
-                "trades.parquet": trades,
-                "fills.parquet": fills,
-                "equity.parquet": equity,
-                "portfolio_state.parquet": portfolio_state,
-                "weights.parquet": weights,
-            }
-            for filename, value in artifact_values.items():
-                if value is None:
-                    continue
-                new_frame = value if isinstance(value, pl.DataFrame) else pl.from_pandas(value)
-                existing_path = _backtest_dir(case_dir, b_hash) / filename
-                if existing_path.exists() and value_digest(
-                    pl.read_parquet(existing_path)
-                ) != value_digest(new_frame):
-                    raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
-            existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
-            if existing_returns.exists() and existing[2]:
-                return b_hash
+        artifact_values = {
+            "daily_returns.parquet": returns,
+            "trades.parquet": trades,
+            "fills.parquet": fills,
+            "equity.parquet": equity,
+            "portfolio_state.parquet": portfolio_state,
+            "weights.parquet": weights,
+        }
+        for filename, value in artifact_values.items():
+            if value is None:
+                continue
+            new_frame = value if isinstance(value, pl.DataFrame) else pl.from_pandas(value)
+            existing_path = _backtest_dir(case_dir, b_hash) / filename
+            if existing_path.exists() and value_digest(
+                pl.read_parquet(existing_path)
+            ) != value_digest(new_frame):
+                raise ValueError(f"immutable backtest artifact conflict for {b_hash}")
+        existing_returns = _backtest_dir(case_dir, b_hash) / "daily_returns.parquet"
+        if existing_returns.exists() and existing[2]:
+            return b_hash
 
     # Write spec.json
     bt_dir = _backtest_dir(case_dir, b_hash)
