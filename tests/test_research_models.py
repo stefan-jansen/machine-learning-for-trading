@@ -401,6 +401,9 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
         (4, "2024-01-04"),
     ]
     assert recovered.runs[1].diagnostics["reused"] is True
+    assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {2}
+    assert len({run.diagnostics["preparation_fraction"] for run in recovered.runs}) == 1
+    assert recovered.runs[1].diagnostics["candidate_fit_s"] == 0.0
     assert all(run.predictions[0].complete for run in recovered.runs)
 
 

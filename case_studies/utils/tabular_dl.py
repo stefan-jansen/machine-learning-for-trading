@@ -749,6 +749,7 @@ def _run_tabm_compatible_group(study: Study, items):
 
     compatibility_group = hashlib.sha256(_tabm_execution_key(items[0][1]).encode()).hexdigest()[:12]
     completed: dict[int, ModelRun] = {}
+    cached_indices = []
     pending = []
     for index, spec, context in items:
         cached = _cached_research_run(study, spec, context)
@@ -769,6 +770,7 @@ def _run_tabm_compatible_group(study: Study, items):
                     "disk_fold_cache": False,
                 },
             )
+            cached_indices.append(index)
         else:
             pending.append((index, spec, context))
     if not pending:
@@ -841,6 +843,13 @@ def _run_tabm_compatible_group(study: Study, items):
         measured_s = preparation_elapsed_s + sum(
             float(value) for value in fit_elapsed_by_candidate.values()
         )
+        group_measurements = {
+            "base_fold_preparations": int(execution_diagnostics["base_fold_preparations"]),
+            "base_fold_preparation_s": preparation_elapsed_s,
+            "preparation_fraction": (preparation_elapsed_s / measured_s if measured_s else 0.0),
+        }
+        for index in cached_indices:
+            completed[index].diagnostics.update(group_measurements)
         for index, spec, context, training, train_dir, candidate_key, candidate in registered:
             failure = result.get("failures", {}).get(candidate_key)
             if failure is not None:
@@ -877,10 +886,8 @@ def _run_tabm_compatible_group(study: Study, items):
                 "group_size": len(pending),
                 "reused": False,
                 "reused_folds": candidate.reused_folds,
-                "base_fold_preparations": int(execution_diagnostics["base_fold_preparations"]),
-                "base_fold_preparation_s": preparation_elapsed_s,
+                **group_measurements,
                 "candidate_fit_s": float(fit_elapsed_by_candidate[candidate_key]),
-                "preparation_fraction": (preparation_elapsed_s / measured_s if measured_s else 0.0),
                 "disk_fold_cache": False,
             }
             candidate.attempt.finish("completed", diagnostics)
