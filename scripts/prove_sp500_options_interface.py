@@ -146,6 +146,7 @@ def main() -> None:
         "preview_excluded": True,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
+    print("OPTION_GATE_REPORT=" + json.dumps(report, sort_keys=True))
 
 
 if __name__ == "__main__":
