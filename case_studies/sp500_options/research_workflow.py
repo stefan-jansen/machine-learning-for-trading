@@ -182,7 +182,6 @@ def run_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
-    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
     """Snapshot and execute one complete canonical model population."""
     resolved = tuple(resolved_requests or ())
@@ -193,12 +192,11 @@ def run_official_model_catalog(
         request_catalog,
         population_name=population_name,
         resolved_requests=resolved,
-        supersedes=supersedes,
     )
     execution, population = run_official_model_subset(
         study,
         resolved,
-        population_name=population.name,
+        population=population,
         require_population_complete=True,
     )
     return execution, population
@@ -210,7 +208,6 @@ def snapshot_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
-    supersedes: str | None = None,
 ) -> OfficialPopulation:
     """Snapshot every expected canonical prediction before any member executes."""
     resolved = tuple(resolved_requests or ())
@@ -224,7 +221,6 @@ def snapshot_official_model_catalog(
         name=population_name,
         member_kind="prediction",
         members=expected,
-        supersedes=supersedes,
     )
 
 
@@ -232,14 +228,17 @@ def run_official_model_subset(
     study: Study,
     resolved_requests: Iterable[ResolvedModelRequest],
     *,
-    population_name: str,
+    population: OfficialPopulation | str,
     require_population_complete: bool = False,
 ) -> tuple[ModelExecution, OfficialPopulation]:
     """Execute members already declared by a case-wide official population."""
     resolved = tuple(resolved_requests)
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model subsets require canonical requests")
-    population = OfficialPopulation.one(study, name=population_name)
+    if isinstance(population, str):
+        population = OfficialPopulation.one(study, name=population)
+    elif population.study != study:
+        raise ValueError("official model population belongs to another study")
     expected = expected_prediction_hashes(resolved)
     undeclared = sorted(set(expected) - set(population.members))
     if undeclared:
@@ -261,7 +260,7 @@ def resolved_model_plan(
     """Show the data, folds, checkpoints, and eligibility for each request."""
     rows = []
     for request in resolved_requests:
-        computation = request.spec["computation"]
+        computation = request.spec.get("computation", request.spec)
         expected = request._context.expected_keys
         entity = next(
             (column for column in ("symbol", "product") if column in expected.columns), None
@@ -516,7 +515,6 @@ def run_official_backtest_requests(
     requests: pl.DataFrame,
     *,
     population_name: str | None,
-    supersedes: str | None = None,
 ) -> OptionBacktestExecution:
     """Resolve and execute typed option requests, snapshotting canonical populations."""
     required = {"request_name", "prediction_hash", "label", "signal"}
@@ -540,7 +538,7 @@ def run_official_backtest_requests(
             )
         if row["signal"].get("exit_at_max_days") is not None:
             raise ValueError("official short-straddle requests must hold to expiration")
-    catalog = study.predictions.table()
+    catalog = study.predictions.table(include_preview=True)
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     resolved = []
     replay_requests = []
@@ -590,8 +588,6 @@ def run_official_backtest_requests(
         raise ValueError("canonical option execution requires an official population name")
     if execution_tier == "preview" and population_name is not None:
         raise ValueError("preview option execution cannot create an official population")
-    if execution_tier == "preview" and supersedes is not None:
-        raise ValueError("preview option execution cannot supersede an official population")
     replay_digests = _clean_replay_digests(study, replay_requests)
     local_digests = {
         row["request_name"]: value_digest(decisions)
@@ -639,7 +635,6 @@ def run_official_backtest_requests(
             name=population_name,
             member_kind="backtest",
             members=expected,
-            supersedes=supersedes,
         )
         if population_name is not None
         else None
