@@ -1530,11 +1530,33 @@ def _run_engine(
     if weights.height > 0:
         turnover_weights = weights.with_columns(pl.lit(1).alias("_event_order"))
         if "_state_transition" in weights.columns:
-            flat_states = weights.filter(pl.col("_state_transition")).with_columns(
-                pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
-                pl.lit(0).alias("_event_order"),
+            flat_states = []
+            transition_timestamps = (
+                weights.filter(pl.col("_state_transition"))
+                .get_column("timestamp")
+                .unique()
+                .sort()
+                .to_list()
             )
-            turnover_weights = pl.concat([turnover_weights, flat_states])
+            for transition_timestamp in transition_timestamps:
+                previous_state = (
+                    weights.filter(pl.col("timestamp") < transition_timestamp)
+                    .sort("symbol", "timestamp")
+                    .group_by("symbol", maintain_order=True)
+                    .last()
+                )
+                if previous_state.height > 0:
+                    flat_states.append(
+                        previous_state.with_columns(
+                            pl.lit(transition_timestamp)
+                            .cast(weights.schema["timestamp"])
+                            .alias("timestamp"),
+                            pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
+                            pl.lit(0).alias("_event_order"),
+                        ).select(turnover_weights.columns)
+                    )
+            if flat_states:
+                turnover_weights = pl.concat([turnover_weights, *flat_states])
         weights_sorted = turnover_weights.sort("symbol", "timestamp", "_event_order").with_columns(
             abs_change=(
                 pl.col("weight") - pl.col("weight").shift(1).over("symbol").fill_null(0.0)

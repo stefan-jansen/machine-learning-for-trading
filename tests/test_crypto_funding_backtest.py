@@ -422,3 +422,54 @@ def test_contiguous_state_transition_flattens_then_reenters_at_boundary(
     assert result.engine_result.fills[1].timestamp == timestamps[1]
     assert result.engine_result.fills[2].timestamp == timestamps[1]
     assert result.metrics["avg_turnover"] == pytest.approx(expected_avg_turnover)
+
+
+def test_state_transition_turnover_includes_symbol_missing_from_new_target() -> None:
+    timestamps = [datetime(2024, 1, day, tzinfo=UTC) for day in (1, 2)]
+    price_keys = [(timestamp, symbol) for timestamp in timestamps for symbol in ("BTC", "ETH")]
+    prices = pl.DataFrame(
+        {
+            "timestamp": [timestamp for timestamp, _ in price_keys],
+            "symbol": [symbol for _, symbol in price_keys],
+            "open": [100.0] * 4,
+            "high": [100.0] * 4,
+            "low": [100.0] * 4,
+            "close": [100.0] * 4,
+            "volume": [1_000_000.0] * 4,
+        }
+    )
+    predictions = pl.DataFrame(
+        {
+            "timestamp": [timestamp for timestamp, _ in price_keys],
+            "symbol": [symbol for _, symbol in price_keys],
+            "y_score": [0.1] * 4,
+            "y_true": [0.0] * 4,
+        }
+    )
+    weights = pl.DataFrame(
+        {
+            "timestamp": [timestamps[0], timestamps[0], timestamps[1]],
+            "symbol": ["BTC", "ETH", "BTC"],
+            "weight": [0.5, 0.5, 0.5],
+            "_state_transition": [False, False, True],
+        }
+    )
+
+    result = backtest_runner.run_backtest(
+        "crypto_perps_funding",
+        "prediction-a",
+        _strategy_spec("engine"),
+        prices=prices,
+        predictions=predictions,
+        precomputed_weights=weights,
+        register=False,
+    )
+
+    assert [fill.side.value for fill in result.engine_result.fills] == [
+        "buy",
+        "buy",
+        "sell",
+        "sell",
+        "buy",
+    ]
+    assert result.metrics["avg_turnover"] == pytest.approx(1.25)
