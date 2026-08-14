@@ -20,6 +20,27 @@ def _normalize_boundary(value: Any) -> str:
     return boundary.isoformat()
 
 
+def _select_decision_observations(
+    frame, *, date_col: str, cadence: str | None, calendar: str | None
+):
+    if cadence is None:
+        return frame
+    import polars as pl
+
+    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+    if date_col not in frame.columns:
+        raise ValueError(f"decision cadence requires timestamp column {date_col!r}")
+    selected = resolve_rebalance_timestamps(
+        frame.get_column(date_col).unique(),
+        cadence,
+        calendar or "NYSE",
+    )
+    if selected.is_empty():
+        raise ValueError(f"decision cadence {cadence!r} selected no observations")
+    return frame.join(pl.DataFrame({date_col: selected}), on=date_col, how="semi")
+
+
 def require_fold_scoped_temporal_compatibility(
     requested_folds: list[dict[str, Any]],
     artifact_folds: list[dict[str, Any]],
@@ -200,6 +221,12 @@ class CVSpec:
         date_col: str = "timestamp",
         eligibility: EligibilityManifest | None = None,
     ) -> ResolvedCVSpec:
+        timeline = _select_decision_observations(
+            timeline,
+            date_col=date_col,
+            cadence=self.decision_cadence,
+            calendar=self.calendar,
+        )
         step_size = self.retrain_every
         if isinstance(step_size, str):
             if step_size != self.validation_window:

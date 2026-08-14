@@ -4,10 +4,11 @@ import os
 from importlib.metadata import version
 from types import SimpleNamespace
 
+import pandas as pd
 import polars as pl
 import pytest
 
-from case_studies.research import LabelDefinition, Study
+from case_studies.research import CVSpec, LabelDefinition, Study
 from case_studies.utils import deep_learning, tabular_dl
 from tests.test_research_workspace import _seed_release
 
@@ -200,6 +201,133 @@ def test_darts_request_resolves_installed_runtime_identity(tmp_path, monkeypatch
 
     assert resolved.spec["runtime_identity"]["darts"] == version("darts")
     assert resolved.spec["model"]["implementation"] == "darts"
+
+
+def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monkeypatch) -> None:
+    release = _seed_release(tmp_path)
+    (release / "case_studies" / "etfs").rename(release / "case_studies" / "us_equities_panel")
+    study = Study.open(
+        "us_equities_panel",
+        workspace=tmp_path / "workspace",
+        release_root=release,
+    )
+    dates = pl.date_range(pl.date(2023, 1, 2), pl.date(2024, 3, 29), eager=True).filter(
+        pl.date_range(pl.date(2023, 1, 2), pl.date(2024, 3, 29), eager=True).dt.weekday() <= 5
+    )
+    frame = pl.DataFrame(
+        {
+            "symbol": [f"S{symbol}" for symbol in range(3) for _ in dates],
+            "timestamp": dates.to_list() * 3,
+            "feature": [float(index) for index in range(3 * len(dates))],
+            "fwd_ret_5d": [float(index % 3) / 100 for index in range(3 * len(dates))],
+        }
+    )
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_5d", "regression", "5D"),
+        frame.select("symbol", "timestamp", "fwd_ret_5d"),
+    )
+    mds = SimpleNamespace(
+        dataset=frame,
+        feature_names=["feature"],
+        label_col="fwd_ret_5d",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        splits=[],
+        task_type="regression",
+        class_values=[],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *args, **kwargs: mds)
+    monkeypatch.setattr(
+        "utils.modeling.load_configs",
+        lambda *args, **kwargs: [
+            {
+                "batch_size": 64,
+                "checkpoint_interval": 1,
+                "n_epochs": 1,
+                "params": {
+                    "architecture": "nbeats",
+                    "lookback": 12,
+                    "darts_input_chunk_length": 12,
+                    "darts_output_chunk_length": 1,
+                },
+                "config_name": "nbeats_weekly",
+                "family": "deep_learning",
+                "library": "darts",
+            }
+        ],
+    )
+    observed: dict[str, object] = {}
+
+    def validation_keys(dataset_pd, splits, **kwargs):
+        observed["timestamps"] = sorted(dataset_pd["timestamp"].unique())
+        observed["splits"] = splits
+        rows = []
+        for split in splits:
+            validation = dataset_pd[
+                dataset_pd["timestamp"].between(split["val_start"], split["val_end"])
+            ]
+            rows.append(
+                pl.from_pandas(validation[["symbol", "timestamp"]]).with_columns(
+                    pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold")
+                )
+            )
+        return pl.concat(rows).sort("symbol", "timestamp", "fold")
+
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.darts_validation_keys",
+        validation_keys,
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.darts_training_identity",
+        lambda *args, **kwargs: {
+            "input_data_spec": mds.input_lineage,
+            "input_chunk_length": 12,
+            "output_chunk_length": 1,
+            "max_train_sequences": 0,
+        },
+    )
+    cv = CVSpec.walk_forward(
+        training_window="12W",
+        validation_window="4W",
+        retrain_every="4W",
+        folds=(0,),
+        horizon="5D",
+        gap="5D",
+        calendar="NYSE",
+        decision_cadence="weekly_friday",
+    )
+
+    resolved = study.model(
+        family="deep_learning",
+        label=label.name,
+        config_name="nbeats_weekly",
+        overrides={"device": "cpu"},
+        cv=cv,
+    ).resolve()
+
+    observed_timestamps = observed["timestamps"]
+    split = observed["splits"][0]
+    assert len(observed_timestamps) < len(dates)
+    assert all(timestamp.weekday() == 4 for timestamp in observed_timestamps)
+    assert all(
+        pd.Timestamp(split[field]) in observed_timestamps for field in ("train_end", "val_start")
+    )
+    assert pd.Timestamp(split["val_start"]) - pd.Timestamp(split["train_end"]) >= pd.Timedelta("5D")
+    assert resolved.spec["cv"]["request"]["decision_cadence"] == "weekly_friday"
+    assert resolved.spec["cv"]["request"]["gap"] == "5D"
+    eligible_timestamps = [
+        timestamp
+        for timestamp in observed_timestamps
+        if pd.Timestamp(split["val_start"]) <= timestamp <= pd.Timestamp(split["val_end"])
+    ]
+    assert resolved.spec["expected_prediction_keys"]["n_rows"] == 3 * len(eligible_timestamps)
 
 
 @pytest.mark.parametrize(

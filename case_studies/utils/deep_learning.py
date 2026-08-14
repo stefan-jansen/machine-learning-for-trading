@@ -164,9 +164,15 @@ def _normalize_sequence_splits(
     )
 
 
-def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _sequence_splits(
+    mds,
+    request: dict[str, Any],
+    *,
+    dataset: pl.DataFrame | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from case_studies.utils.artifact_digest import value_digest
 
+    source = mds.dataset if dataset is None else dataset
     cv = request.get("cv")
     if cv is None:
         splits = [dict(split) for split in mds.splits]
@@ -177,7 +183,7 @@ def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]]
             "identity": value_digest(pl.DataFrame(list(normalized))),
         }
     else:
-        resolved = cv.resolve(mds.dataset.select(mds.date_col).unique(), date_col=mds.date_col)
+        resolved = cv.resolve(source.select(mds.date_col).unique(), date_col=mds.date_col)
         splits = [dict(fold) for fold in resolved.normalized_folds]
         cv_record = resolved.as_dict()
     requested_folds = request["preview_reductions"].get("folds")
@@ -280,7 +286,16 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError("sequence runner requires canonical symbol and timestamp keys")
     if mds.task_type != "regression":
         raise ValueError("sequence runner currently supports regression labels only")
-    splits, cv_record = _sequence_splits(mds, request)
+    from case_studies.research.cv import _select_decision_observations
+
+    cv = request.get("cv")
+    dataset = _select_decision_observations(
+        mds.dataset,
+        date_col=mds.date_col,
+        cadence=cv.decision_cadence if cv is not None else None,
+        calendar=cv.calendar if cv is not None else None,
+    )
+    splits, cv_record = _sequence_splits(mds, request, dataset=dataset)
     configs = {
         config["config_name"]: config
         for config in load_configs(study.case_study, label_ref.name, "deep_learning")
@@ -301,7 +316,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     max_train_sequences = int(reductions.get("max_train_sequences", 0))
     calendar_id = make_walk_forward_config(study.case_study, date_col=mds.date_col).calendar_id
     lookback = int(config["params"].get("lookback", 60))
-    dataset_pd = mds.dataset.to_pandas()
+    dataset_pd = dataset.to_pandas()
     if config.get("library") == "darts":
         from case_studies.utils.darts_forecasting import (
             darts_training_identity,
