@@ -354,6 +354,7 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
     assert recovered_by_alpha[3.0].diagnostics["cache_hit"] is True
     assert recovered_by_alpha[2.0].diagnostics["reused_folds"] == [0]
     assert recovered_by_alpha[2.0].diagnostics["fitted_folds"] == [1]
+    assert recovered_by_alpha[2.0].diagnostics["base_fold_preparations"] == 1
     assert study.predictions.table().filter(pl.col("complete")).height == 3
 
 
@@ -385,6 +386,7 @@ def test_linear_batch_rejects_a_modified_fitted_preprocessor(tmp_path, monkeypat
 
     assert recovered.runs[0].diagnostics["reused_folds"] == [1]
     assert recovered.runs[0].diagnostics["fitted_folds"] == [0]
+    assert recovered.runs[0].diagnostics["base_fold_preparations"] == 1
     assert recovered.runs[1].diagnostics["cache_hit"] is True
 
 

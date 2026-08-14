@@ -760,6 +760,9 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
     assert candidate.context is not None
     assert candidate.training is not None
     assert candidate.ledger is not None
+    fold_id = int(fold["fold"])
+    if fold_id in candidate.reused_folds or fold_id in candidate.fitted_folds:
+        return
     try:
         frame, reused, elapsed = _fit_or_reuse_fold(
             candidate.spec,
@@ -773,8 +776,31 @@ def _run_batch_candidate_fold(candidate: _BatchCandidate, fold: dict[str, Any]) 
         return
     candidate.frames.append(frame)
     candidate.fit_elapsed_s += elapsed
-    fold_id = int(fold["fold"])
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
+
+
+def _reuse_batch_candidate_fold(candidate: _BatchCandidate, fold_id: int) -> bool:
+    if candidate.result is not None or candidate.error is not None:
+        return True
+    assert candidate.spec is not None
+    assert candidate.training is not None
+    assert candidate.ledger is not None
+    params = candidate.spec["computation"]["model"]["effective_params_by_fold"][str(fold_id)]
+    training_dir = candidate.training.root / "run_log" / "training" / candidate.training.hash
+    artifact = training_dir / "models" / f"fold_{fold_id}.joblib"
+    shard = training_dir / "prediction_folds" / f"fold_{fold_id}.parquet"
+    if not candidate.ledger.reusable_fold(
+        training_hash=candidate.training.hash,
+        candidate_identity=candidate.training.hash,
+        fold_id=fold_id,
+        fitted_state=artifact,
+        prediction_shard=shard,
+        resolved_settings=params,
+    ):
+        return False
+    candidate.frames.append(pl.read_parquet(shard))
+    candidate.reused_folds.append(fold_id)
+    return True
 
 
 def _finish_batch_candidate(study: Study, candidate: _BatchCandidate) -> None:
@@ -829,6 +855,8 @@ def _run_batch_group(
     indexed_requests: list[tuple[int, dict[str, Any]]],
     compatibility_key: str,
     base: dict[str, Any],
+    *,
+    report_batch: bool,
 ) -> tuple[list[_BatchCandidate], float, int]:
     fold_ids = tuple(int(split["fold"]) for split in base["splits"])
     candidates = []
@@ -851,6 +879,15 @@ def _run_batch_group(
     )
     if first_pass_needed:
         for split in base["splits"]:
+            fold_id = int(split["fold"])
+            fixed_pending = [
+                candidate
+                for candidate in candidates
+                if candidate.index not in dependent_indices
+                and not _reuse_batch_candidate_fold(candidate, fold_id)
+            ]
+            if not dependent and not fixed_pending:
+                continue
             started = time.perf_counter()
             try:
                 fold = _prepare_batch_fold(base, split)
@@ -869,9 +906,8 @@ def _run_batch_group(
                     )
                 except Exception as exc:
                     _fail_batch_candidate(candidate, exc)
-            for candidate in candidates:
-                if candidate.index not in dependent_indices:
-                    _run_batch_candidate_fold(candidate, fold)
+            for candidate in fixed_pending:
+                _run_batch_candidate_fold(candidate, fold)
             del fold
 
     for candidate in candidates:
@@ -898,6 +934,14 @@ def _run_batch_group(
 
     if active_dependent:
         for split in base["splits"]:
+            fold_id = int(split["fold"])
+            pending = [
+                candidate
+                for candidate in active_dependent
+                if not _reuse_batch_candidate_fold(candidate, fold_id)
+            ]
+            if not pending:
+                continue
             started = time.perf_counter()
             try:
                 fold = _prepare_batch_fold(base, split)
@@ -907,7 +951,7 @@ def _run_batch_group(
                 break
             preparation_elapsed_s += time.perf_counter() - started
             preparation_count += 1
-            for candidate in active_dependent:
+            for candidate in pending:
                 _run_batch_candidate_fold(candidate, fold)
             del fold
         for candidate in active_dependent:
@@ -917,7 +961,7 @@ def _run_batch_group(
     fit_elapsed_s = sum(candidate.fit_elapsed_s for candidate in candidates)
     measured_s = preparation_elapsed_s + fit_elapsed_s
     for candidate in candidates:
-        if candidate.result is None or len(candidates) == 1:
+        if candidate.result is None or not report_batch:
             continue
         candidate.result.diagnostics.update(
             {
@@ -952,7 +996,13 @@ def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[Mo
             inputs=input_cache.get(input_key),
         )
         input_cache.setdefault(input_key, (base["label_ref"], base["mds"]))
-        candidates, _, _ = _run_batch_group(study, indexed_requests, key, base)
+        candidates, _, _ = _run_batch_group(
+            study,
+            indexed_requests,
+            key,
+            base,
+            report_batch=len(requests) > 1,
+        )
         for candidate in candidates:
             if candidate.error is not None:
                 failures.append(candidate.error)
