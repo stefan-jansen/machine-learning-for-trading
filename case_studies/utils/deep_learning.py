@@ -164,6 +164,29 @@ def _normalize_sequence_splits(
     )
 
 
+def _select_sequence_observations(
+    frame: pl.DataFrame,
+    *,
+    date_col: str,
+    cadence: str | None,
+    calendar: str | None,
+) -> pl.DataFrame:
+    if cadence is None:
+        return frame
+    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+    if date_col not in frame.columns:
+        raise ValueError(f"decision cadence requires timestamp column {date_col!r}")
+    selected = resolve_rebalance_timestamps(
+        frame.get_column(date_col).unique(),
+        cadence,
+        calendar or "NYSE",
+    )
+    if selected.is_empty():
+        raise ValueError(f"decision cadence {cadence!r} selected no observations")
+    return frame.join(pl.DataFrame({date_col: selected}), on=date_col, how="semi")
+
+
 def _sequence_splits(mds, request: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from case_studies.utils.artifact_digest import value_digest
 
@@ -280,10 +303,8 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError("sequence runner requires canonical symbol and timestamp keys")
     if mds.task_type != "regression":
         raise ValueError("sequence runner currently supports regression labels only")
-    from case_studies.research.cv import _select_decision_observations
-
     cv = request.get("cv")
-    dataset = _select_decision_observations(
+    dataset = _select_sequence_observations(
         mds.dataset,
         date_col=mds.date_col,
         cadence=cv.decision_cadence if cv is not None else None,

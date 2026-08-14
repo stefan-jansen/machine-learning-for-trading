@@ -6,13 +6,14 @@ import pandas_market_calendars as mcal
 import polars as pl
 import pytest
 from darts import TimeSeries
-from darts.models import TSMixerModel
+from darts.models import NBEATSModel, TSMixerModel
 
 from case_studies.utils.darts_forecasting import (
     BASE_TARGET_COL,
     _attach_base_target,
     _attach_darts_target,
     _attach_expected_periods,
+    _build_darts_model,
     _predict_fold,
     _prepare_fold_series,
     darts_checkpoint_path,
@@ -23,6 +24,7 @@ from case_studies.utils.darts_forecasting import (
     write_darts_checkpoint,
 )
 from case_studies.utils.registry import evaluate_prediction_coverage
+from utils.modeling import load_configs
 
 
 def _fit_tiny_tsmixer() -> tuple[TSMixerModel, TimeSeries]:
@@ -146,9 +148,25 @@ def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> Non
     assert attached.loc[3, BASE_TARGET_COL] == pytest.approx(np.log1p(0.03))
 
 
-def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
-    tmp_path, monkeypatch
-) -> None:
+def test_weekly_nbeats_preset_builds_without_adapter_parameters() -> None:
+    config = next(
+        config
+        for config in load_configs("us_equities_panel", "fwd_ret_5d", "deep_learning")
+        if config["config_name"] == "nbeats_weekly"
+    )
+
+    model = _build_darts_model(
+        config,
+        device="cpu",
+        fold_seed=7,
+        input_chunk_length=12,
+        output_chunk_length=1,
+    )
+
+    assert isinstance(model, NBEATSModel)
+
+
+def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(tmp_path) -> None:
     dates = mcal.get_calendar("NYSE").valid_days("2024-01-02", "2024-02-15")[:20]
     dates = dates.tz_localize(None)
     dataset = pd.DataFrame(
@@ -167,20 +185,13 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
     dataset = dataset.loc[dataset["timestamp"] != missing_date].reset_index(drop=True)
     exact_lookback = pd.DataFrame(
         {
-            "timestamp": dates[-4:],
+            "timestamp": dates[-5:],
             "symbol": "S6",
-            "feature": np.arange(4, dtype=np.float32),
-            "fwd_ret_1d": np.arange(4, dtype=np.float32) / 100,
+            "feature": np.arange(5, dtype=np.float32),
+            "fwd_ret_1d": np.arange(5, dtype=np.float32) / 100,
         }
     )
     dataset = pd.concat([dataset, exact_lookback], ignore_index=True)
-
-    def attach_base_target(frame, _case_study, _date_col):
-        return frame.assign(**{BASE_TARGET_COL: np.log1p(frame["fwd_ret_1d"] / 10)})
-
-    monkeypatch.setattr(
-        "case_studies.utils.darts_forecasting._attach_base_target", attach_base_target
-    )
     config = {
         "family": "deep_learning",
         "library": "darts",
@@ -191,6 +202,7 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
             "hidden_dim": 4,
             "n_blocks": 1,
             "dropout": 0.0,
+            "darts_target": "lagged_label",
         },
         "n_epochs": 1,
         "batch_size": 32,
@@ -237,7 +249,7 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(
     observed_dates = set(expected["timestamp"].dt.date().to_list())
     assert missing_date.date() not in observed_dates
     assert not {date.date() for date in dates[13:16]} & observed_dates
-    assert {date.date() for date in dates[16:]} <= observed_dates
+    assert {date.date() for date in dates[17:]} <= observed_dates
     assert (
         expected.filter((pl.col("symbol") == "S6") & (pl.col("timestamp") == dates[-1])).height == 1
     )

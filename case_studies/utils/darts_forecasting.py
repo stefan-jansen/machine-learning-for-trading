@@ -449,6 +449,7 @@ def _build_darts_model(
     params.pop("lookback", None)
     params.pop("darts_input_chunk_length", None)
     params.pop("darts_output_chunk_length", None)
+    params.pop("darts_target", None)
     params.pop("input_chunk_length", None)
     params.pop("output_chunk_length", None)
     params["input_chunk_length"] = input_chunk_length
