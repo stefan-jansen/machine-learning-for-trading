@@ -187,9 +187,10 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
         prediction_frames = []
         for config_index, config in enumerate(configs):
             config_name = config["config_name"]
+            candidate_key = config.get("_execution_key", config_name)
             for split in splits:
                 fold = int(split["fold"])
-                root = _recovery.model_root(config_name) if _recovery else checkpoint_root
+                root = _recovery.model_root(candidate_key) if _recovery else checkpoint_root
                 checkpoint = root / config_name / f"fold_{fold:02d}" / "epoch_0001.pt"
                 checkpoint.parent.mkdir(parents=True, exist_ok=True)
                 checkpoint.write_text("fixture\n")
@@ -205,7 +206,7 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
                             "y_true": frame["fwd_ret_1d"],
                             "y_score": frame["x1"] + config_index / 100,
                             "fold_id": [fold] * len(frame),
-                            "config": [config_name] * len(frame),
+                            "config": [candidate_key] * len(frame),
                             "epoch": [1] * len(frame),
                         }
                     )
@@ -219,7 +220,7 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
                 {
                     "best_epoch": 1,
                     "best_ic": 0.0,
-                    "config_name": config["config_name"],
+                    "config_name": config.get("_execution_key", config["config_name"]),
                     "elapsed_s": 0.0,
                 }
                 for config in configs
@@ -566,6 +567,13 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
     monkeypatch,
 ) -> None:
     study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
 
     def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
         if state_callback is not None:
@@ -575,6 +583,7 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
         return {1: 0.1}, {1: predictions}, {1: 0.01}
 
     monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
     result = run_models(
         study,
         requests=[
@@ -590,6 +599,7 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
 
     assert len({run.training.hash for run in result.runs}) == 2
     assert len({run.predictions[0].hash for run in result.runs}) == 2
+    assert prepared_folds == [0, 1]
     assert {run.training.spec()["identity_version"] for run in result.runs} == {3}
     assert {run.training.spec()["resolved_spec_schema"] for run in result.runs} == {
         "ml4t.resolved-spec/v1"
@@ -597,6 +607,39 @@ def test_tabm_variants_from_one_named_preset_keep_separate_identities(
     assert [
         run.training.spec()["computation"]["model"]["params"]["hidden_dim"] for run in result.runs
     ] == [5, 6]
+
+
+def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+
+    result = run_models(study, requests=[request, request])
+
+    assert len(result.runs) == 2
+    assert result.runs[0].training.hash == result.runs[1].training.hash
+    assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
+    assert prepared_folds == [0, 1]
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
