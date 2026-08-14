@@ -300,6 +300,42 @@ class Strategy:
         spec["identity_version"] = 2
         spec["execution_tier"] = self.prediction.execution_tier
         spec["input_identity"] = {"prices": value_digest(prices)}
+        if self.study.case_study == "sp500_options" and self.label == "ret_to_expiry":
+            from case_studies.sp500_options._htm_backtest import (
+                option_accounting_parameters,
+                option_data_paths,
+                option_source_identity,
+            )
+
+            if self.risk is not None:
+                raise ValueError("the specialized option path does not support risk overlays")
+            if self.costs is not None:
+                raise ValueError(
+                    "option cost variants use signal.option_spread_fraction; generic costs are unsupported"
+                )
+
+            labels_dir, raw_options_dir = option_data_paths()
+            option_inputs = option_source_identity(labels_dir, raw_options_dir)
+            spec["input_identity"]["option_contract_returns"] = option_inputs["contract_returns"]
+            spec["input_identity"]["option_lifecycle"] = compute_hash(
+                canonical_json(option_inputs["raw_lifecycle"])
+            )
+            accounting = option_accounting_parameters(self.signal)
+            if (
+                self.decision is not None
+                and self.decision.kind == "short_straddles"
+                and accounting["exit_at_max_days"] is not None
+            ):
+                raise ValueError("hold-to-expiry decisions cannot declare an earlier option exit")
+            spec["options_market"] = {
+                "decision_timestamp": "feature_session_close",
+                "entry": "next_session_close",
+                "position": "short_atm_call_and_put",
+                "marking": "paired_daily_midpoint",
+                "settlement": accounting["settlement"],
+                "hedge": "retained_underlying_delta_with_threshold",
+            }
+            spec["options_accounting"] = accounting
         if self.study.case_study == "crypto_perps_funding":
             funding_rates = self._funding_rates(prices)
             assert funding_rates is not None
@@ -314,6 +350,9 @@ class Strategy:
                 "source_identity": self.decision.spec["source_identity"],
                 "state_transition_policy": self.decision.spec["state_transition_policy"],
             }
+            if self.decision.kind == "short_straddles":
+                spec["decision_artifact"]["decision_keys"] = self.decision.spec["decision_keys"]
+                spec["decision_artifact"]["parameters"] = self.decision.spec["parameters"]
             decision_weights = self._decision_weights(prices)
             assert decision_weights is not None
             spec["backtest_config"]["account"]["allow_short_selling"] = bool(
@@ -373,6 +412,25 @@ class Strategy:
                 .otherwise(0.0)
                 .alias("weight")
             ).select("symbol", "timestamp", "weight", *selected_fold)
+        elif self.decision.kind == "short_straddles":
+            if self.study.case_study != "sp500_options" or self.label != "ret_to_expiry":
+                raise ValueError("short-straddle decisions require sp500_options and ret_to_expiry")
+            parameters = self.decision.spec.get("parameters") or {}
+            expected = {
+                "decision_cadence": "weekly_friday",
+                "entry_policy": "next_session_close",
+                "exit_policy": "hold_to_expiry",
+                "settlement_policy": "cash_intrinsic_at_expiration",
+                "hedge_policy": "retained_underlying_delta_with_threshold",
+            }
+            mismatched = {
+                key: (parameters.get(key), value)
+                for key, value in expected.items()
+                if parameters.get(key) != value
+            }
+            if mismatched:
+                raise ValueError(f"short-straddle decision parameters are invalid: {mismatched}")
+            weights = decisions
         else:
             raise ValueError("canonical backtesting does not support order decision artifacts")
         if fold_column == "fold_id":
@@ -393,6 +451,8 @@ class Strategy:
         missing = weights.join(price_keys, on=["symbol", "timestamp"], how="anti")
         if not missing.is_empty():
             raise ValueError("decision artifact contains keys outside the backtest price grid")
+        if self.decision.kind == "short_straddles":
+            return weights.sort("timestamp", "symbol")
         selected = ["symbol", "timestamp", "weight"]
         if "_state_transition" in weights.columns:
             selected.append("_state_transition")
@@ -402,7 +462,12 @@ class Strategy:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
 
-    def run(self, *, prices: pl.DataFrame | None = None) -> BacktestResult:
+    def run(
+        self,
+        *,
+        prices: pl.DataFrame | None = None,
+        option_lifecycle: pl.DataFrame | None = None,
+    ) -> BacktestResult:
         self.study.require_writable()
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
@@ -447,6 +512,7 @@ class Strategy:
             initial_cash=float(spec["backtest_config"]["cash"]["initial"]),
             calendar=case_config.calendar,
             contract_specs=contract_specs,
+            option_lifecycle=option_lifecycle,
         )
         expected_hash = backtest_hash_from_parts(
             self.prediction.hash,
