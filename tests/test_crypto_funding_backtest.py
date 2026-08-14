@@ -370,7 +370,7 @@ def test_date_engine_targets_match_date_feed() -> None:
 
 
 def test_contiguous_state_transition_flattens_then_reenters_at_boundary() -> None:
-    timestamps = [datetime(2024, 1, 1, hour=hour, tzinfo=UTC) for hour in (0, 8)]
+    timestamps = [datetime(2024, 1, day, tzinfo=UTC) for day in (1, 2)]
     prices = pl.DataFrame(
         {
             "timestamp": timestamps,
@@ -412,3 +412,4 @@ def test_contiguous_state_transition_flattens_then_reenters_at_boundary() -> Non
     assert [fill.side.value for fill in result.engine_result.fills] == ["buy", "sell", "buy"]
     assert result.engine_result.fills[1].timestamp == timestamps[1]
     assert result.engine_result.fills[2].timestamp == timestamps[1]
+    assert result.metrics["avg_turnover"] == pytest.approx(0.75)

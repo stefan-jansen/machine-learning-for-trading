@@ -103,7 +103,7 @@ def apply_state_transition_policy(
                 flat_frames.append(
                     weights.filter(pl.col("timestamp") == previous["timestamp"]).with_columns(
                         pl.lit(first_missing).cast(weights.schema["timestamp"]).alias("timestamp"),
-                        pl.lit(0.0).alias("weight"),
+                        pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
                     )
                 )
             else:

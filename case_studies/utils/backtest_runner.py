@@ -27,7 +27,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -1455,8 +1455,8 @@ def _run_engine(
         # weights. The daily_returns frame is sliced to [win_start, win_end]
         # below regardless of how wide the load was.
         prices_dates = prices["timestamp"].dt.date()
-        prices_min_date = prices_dates.min()
-        prices_max_date = prices_dates.max()
+        prices_min_date = cast(date | None, prices_dates.min())
+        prices_max_date = cast(date | None, prices_dates.max())
         if prices_min_date is None or prices_max_date is None:
             raise RuntimeError(
                 f"Empty prices frame for cs={case_study} label={label} "
@@ -1528,7 +1528,14 @@ def _run_engine(
     # for leveraged products (cme_futures multipliers inflate it 10⁴–10⁵×) and
     # mixes incompatibly with vectorized-path rows on the same column.
     if weights.height > 0:
-        weights_sorted = weights.sort("symbol", "timestamp").with_columns(
+        turnover_weights = weights.with_columns(pl.lit(1).alias("_event_order"))
+        if "_state_transition" in weights.columns:
+            flat_states = weights.filter(pl.col("_state_transition")).with_columns(
+                pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
+                pl.lit(0).alias("_event_order"),
+            )
+            turnover_weights = pl.concat([turnover_weights, flat_states])
+        weights_sorted = turnover_weights.sort("symbol", "timestamp", "_event_order").with_columns(
             abs_change=(
                 pl.col("weight") - pl.col("weight").shift(1).over("symbol").fill_null(0.0)
             ).abs(),
@@ -1543,7 +1550,7 @@ def _run_engine(
             on="timestamp",
             how="left",
         ).with_columns(pl.col("turnover").fill_null(0.0))
-        mean_turnover = turnover_aligned["turnover"].mean()
+        mean_turnover = cast(float | None, turnover_aligned["turnover"].mean())
         metrics["avg_turnover"] = float(mean_turnover) if mean_turnover is not None else 0.0
     else:
         metrics["avg_turnover"] = 0.0
@@ -1974,7 +1981,7 @@ def _run_vectorized(
     metrics = compute_portfolio_metrics(returns_arr, periods_per_year=periods_per_year or 252)
 
     # Vectorized-specific metrics (not derivable from returns alone)
-    avg_turnover = float(port_ret["turnover"].mean()) if n > 0 else 0.0
+    avg_turnover = cast(float, port_ret["turnover"].mean()) if n > 0 else 0.0
     metrics["avg_turnover"] = avg_turnover
     metrics["n_periods"] = n
 

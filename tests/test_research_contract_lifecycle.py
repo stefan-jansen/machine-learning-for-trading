@@ -58,7 +58,7 @@ def test_fold_boundary_liquidates_unchanged_positions_before_next_fold() -> None
                 date(2024, 1, 3),
             ],
             "fold": [0, 0, 1],
-            "weight": [1.0, 1.0, 1.0],
+            "weight": pl.Series([1.0, 1.0, 1.0], dtype=pl.Float32),
         }
     )
 
@@ -82,7 +82,7 @@ def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
                 date(2024, 1, 5),
             ],
             "fold": [0, 0, 0],
-            "weight": [1.0, 1.0, 1.0],
+            "weight": pl.Series([1.0, 1.0, 1.0], dtype=pl.Float32),
         }
     )
 
@@ -105,6 +105,7 @@ def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
         date(2024, 1, 5),
     ]
     assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 0.0, 1.0]
+    assert transitioned.schema["weight"] == pl.Float32
     assert transitioned.get_column("_state_transition").to_list() == [
         False,
         False,
