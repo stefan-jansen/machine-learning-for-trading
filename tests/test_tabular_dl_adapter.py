@@ -92,15 +92,21 @@ def test_tabm_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -
     spec = resolved.spec
     context = resolved._context
 
-    assert spec["identity_version"] == 2
-    assert "resolved_spec_schema" not in spec
+    assert spec["identity_version"] == 3
+    assert spec["resolved_spec_schema"] == "ml4t.resolved-spec/v1"
     assert set(spec) == {
         "identity_version",
+        "resolved_spec_schema",
         "execution_tier",
         "family",
         "label",
         "seed",
         "config_name",
+        "computation",
+        "provenance",
+    }
+    computation = spec["computation"]
+    assert set(computation) == {
         "label_artifact",
         "feature_artifacts",
         "feature_names",
@@ -116,11 +122,11 @@ def test_tabm_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -
         "source_identity",
         "runtime_identity",
     }
-    assert spec["label_artifact"]["digest"] == label.digest
-    assert spec["model"]["params"]["n_epochs"] == 11
-    assert [row["value"] for row in spec["checkpoint_schedule"]] == [5, 10, 11]
-    assert spec["expected_prediction_keys"] == {
-        "digest": spec["expected_prediction_keys"]["digest"],
+    assert computation["label_artifact"]["digest"] == label.digest
+    assert computation["model"]["params"]["n_epochs"] == 11
+    assert [row["value"] for row in computation["checkpoint_schedule"]] == [5, 10, 11]
+    assert computation["expected_prediction_keys"] == {
+        "digest": computation["expected_prediction_keys"]["digest"],
         "n_rows": 12,
         "n_folds": 1,
     }

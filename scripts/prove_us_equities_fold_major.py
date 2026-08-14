@@ -45,12 +45,24 @@ def _requests(
     folds: list[int],
     max_symbols: int,
     train_sample_frac: float,
+    device: str,
 ):
-    common_reductions = {
-        "folds": folds,
-        "max_symbols": max_symbols,
-        "train_sample_frac": train_sample_frac,
-    }
+    common_reductions = {"folds": folds, "max_symbols": max_symbols}
+    if family == "tabular_dl":
+        common_reductions.update({"checkpoint_interval": 1, "n_epochs": 1})
+        variants = ((64, max_symbols), (80, max_symbols), (96, max(1, max_symbols // 2)))
+        return [
+            study.model(
+                family=family,
+                label=LABEL,
+                config_name="tabm_s",
+                overrides={"device": device, "hidden_dim": hidden_dim, "num_threads": 8},
+                execution_tier="preview",
+                preview_reductions={**common_reductions, "max_symbols": symbols},
+            )
+            for hidden_dim, symbols in variants
+        ]
+    common_reductions["train_sample_frac"] = train_sample_frac
     if family == "gbm":
         common_reductions.update({"checkpoint_interval": 2, "max_iterations": 4})
     incompatible_reductions = {
@@ -76,16 +88,24 @@ def _requests(
     ]
 
 
+def _run_key(run, family: str) -> str:
+    spec = run.training.spec()
+    if family != "tabular_dl":
+        return str(spec["config_name"])
+    hidden_dim = spec["computation"]["model"]["params"]["hidden_dim"]
+    return f"{spec['config_name']}-h{hidden_dim}"
+
+
 def _assert_results(execution, family: str, folds: list[int]) -> dict[str, dict[str, Any]]:
     assert len(execution.runs) == 3
-    expected_predictions = 3 if family == "linear" else 6
+    expected_predictions = 6 if family == "gbm" else 3
     assert execution.catalog_rows.height == expected_predictions
     assert set(execution.catalog_rows["execution_tier"]) == {"preview"}
     diagnostics = {}
     for run in execution.runs:
         spec = run.training.spec()
         config_name = spec["config_name"]
-        assert len(run.predictions) == (1 if family == "linear" else 2)
+        assert len(run.predictions) == (2 if family == "gbm" else 1)
         for prediction in run.predictions:
             frame = prediction.load()
             coverage = prediction.coverage()
@@ -97,13 +117,20 @@ def _assert_results(execution, family: str, folds: list[int]) -> dict[str, dict[
             assert sorted(keys["fold"].unique().to_list()) == folds
             assert frame["prediction"].is_finite().all()
         model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
-        fitted = (
-            model_dir.glob("fold_*.joblib")
-            if family == "linear"
-            else (model_dir / "boosters").glob("fold_*.txt")
-        )
-        assert {path.stem for path in fitted} == {f"fold_{fold}" for fold in folds}
-        diagnostics[config_name] = dict(run.diagnostics)
+        if family == "linear":
+            fitted_folds = {path.stem for path in model_dir.glob("fold_*.joblib")}
+        elif family == "gbm":
+            fitted_folds = {path.stem for path in (model_dir / "boosters").glob("fold_*.txt")}
+        else:
+            fitted_folds = {
+                path.parent.name
+                for path in (model_dir / run.training.hash).glob("fold_*/epoch_0001.pt")
+            }
+        expected_fitted_folds = {
+            f"fold_{fold:02d}" if family == "tabular_dl" else f"fold_{fold}" for fold in folds
+        }
+        assert fitted_folds == expected_fitted_folds
+        diagnostics[_run_key(run, family)] = dict(run.diagnostics)
     config_names = list(diagnostics)
     assert (
         diagnostics[config_names[0]]["compatibility_group"]
@@ -133,6 +160,7 @@ def prove(
     folds: list[int],
     max_symbols: int,
     train_sample_frac: float,
+    device: str,
 ) -> dict[str, object]:
     _seed_worktree_workspace(workspace)
     study = Study.open(CASE_STUDY, workspace=workspace)
@@ -144,11 +172,12 @@ def prove(
             folds=folds,
             max_symbols=max_symbols,
             train_sample_frac=train_sample_frac,
+            device=device,
         ),
     )
     diagnostics = _assert_results(execution, family, folds)
     first_hashes = {
-        run.training.spec()["config_name"]: {
+        _run_key(run, family): {
             "training": run.training.hash,
             "predictions": [prediction.hash for prediction in run.predictions],
         }
@@ -164,17 +193,19 @@ def prove(
             folds=folds,
             max_symbols=max_symbols,
             train_sample_frac=train_sample_frac,
+            device=device,
         ),
     )
     restarted_hashes = {
-        run.training.spec()["config_name"]: {
+        _run_key(run, family): {
             "training": run.training.hash,
             "predictions": [prediction.hash for prediction in run.predictions],
         }
         for run in restarted.runs
     }
     assert restarted_hashes == first_hashes
-    assert all(run.diagnostics["cache_hit"] is True for run in restarted.runs)
+    reuse_field = "reused" if family == "tabular_dl" else "cache_hit"
+    assert all(run.diagnostics[reuse_field] is True for run in restarted.runs)
     assert all(run.diagnostics["base_fold_preparations"] == 0 for run in restarted.runs)
     prediction_hashes = [
         prediction_hash
@@ -210,7 +241,7 @@ def prove(
         "hashes": first_hashes,
         "max_symbols": max_symbols,
         "selected_catalog_rows": selected.height,
-        "train_sample_frac": train_sample_frac,
+        "train_sample_frac": train_sample_frac if family != "tabular_dl" else None,
         "workspace": str(study.storage_root("preview")),
     }
 
@@ -218,7 +249,8 @@ def prove(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("workspace", type=Path)
-    parser.add_argument("--family", choices=("gbm", "linear"), default="linear")
+    parser.add_argument("--family", choices=("gbm", "linear", "tabular_dl"), default="linear")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--folds", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--max-symbols", type=int, default=50)
     parser.add_argument("--train-sample-frac", type=float, default=0.05)
@@ -231,6 +263,7 @@ def main() -> None:
                 folds=sorted(set(args.folds)),
                 max_symbols=args.max_symbols,
                 train_sample_frac=args.train_sample_frac,
+                device=args.device,
             ),
             indent=2,
             sort_keys=True,

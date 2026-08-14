@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
+import torch
 import yaml
 
 from case_studies.research import (
@@ -24,7 +25,7 @@ from case_studies.research import (
 )
 from case_studies.research.results import ResultsCatalog
 from case_studies.utils import gbm as gbm_utils
-from case_studies.utils import linear
+from case_studies.utils import linear, tabular_dl
 from case_studies.utils.latent_factors import adapter as latent_adapter
 from case_studies.utils.latent_factors import case_study as latent_case_study
 from case_studies.utils.latent_factors.cae import run_cae_fold
@@ -51,12 +52,12 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _linear_study(tmp_path, monkeypatch):
+def _linear_study(tmp_path, monkeypatch, *, n_symbols: int = 6):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
-    symbols = [f"S{index}" for index in range(6)]
+    symbols = [f"S{index}" for index in range(n_symbols)]
     rows = []
     for date_index, date in enumerate(dates):
         for symbol_index, symbol in enumerate(symbols):
@@ -130,6 +131,675 @@ def _linear_study(tmp_path, monkeypatch):
         },
     )
     return study
+
+
+def _tabm_study(tmp_path, monkeypatch):
+    study = _linear_study(tmp_path, monkeypatch, n_symbols=60)
+    modeling_dataset = linear.load_modeling_dataset("etfs", "fwd_ret_1d")
+    loads: list[tuple[str, str, int]] = []
+
+    def load_dataset(case_study, label, *, max_symbols=0):
+        loads.append((case_study, label, max_symbols))
+        return modeling_dataset
+
+    configs = [
+        {
+            "batch_size": 64,
+            "checkpoint_interval": 1,
+            "config_name": name,
+            "family": "tabular_dl",
+            "library": "tabm",
+            "n_epochs": 1,
+            "params": {"dropout": 0.0, "hidden_dim": hidden, "n_members": 2},
+        }
+        for name, hidden in (("tabm_s", 4), ("tabm_m", 8))
+    ]
+    monkeypatch.setattr(modeling, "load_modeling_dataset", load_dataset)
+    monkeypatch.setattr(modeling, "load_configs", lambda *args, **kwargs: configs)
+    return study, modeling_dataset, loads
+
+
+def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, modeling_dataset, loads = _tabm_study(tmp_path, monkeypatch)
+    conversions = 0
+    executions: list[tuple[str, ...]] = []
+    original_to_pandas = pl.DataFrame.to_pandas
+
+    def counted_to_pandas(frame, *args, **kwargs):
+        nonlocal conversions
+        if frame is modeling_dataset.dataset:
+            conversions += 1
+        return original_to_pandas(frame, *args, **kwargs)
+
+    def fake_run_tabm_cv(
+        dataset_pd,
+        splits,
+        *,
+        configs,
+        checkpoint_root,
+        _recovery=None,
+        **kwargs,
+    ):
+        executions.append(tuple(config["config_name"] for config in configs))
+        prediction_frames = []
+        for config_index, config in enumerate(configs):
+            config_name = config["config_name"]
+            candidate_key = config.get("_execution_key", config_name)
+            for split in splits:
+                fold = int(split["fold"])
+                root = _recovery.model_root(candidate_key) if _recovery else checkpoint_root
+                checkpoint = root / config_name / f"fold_{fold:02d}" / "epoch_0001.pt"
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint.write_text("fixture\n")
+                valid = dataset_pd["timestamp"].between(
+                    split["val_start"], split["val_end"], inclusive="both"
+                )
+                frame = dataset_pd.loc[valid]
+                prediction_frames.append(
+                    pl.DataFrame(
+                        {
+                            "timestamp": frame["timestamp"],
+                            "symbol": frame["symbol"],
+                            "y_true": frame["fwd_ret_1d"],
+                            "y_score": frame["x1"] + config_index / 100,
+                            "fold_id": [fold] * len(frame),
+                            "config": [candidate_key] * len(frame),
+                            "epoch": [1] * len(frame),
+                        }
+                    )
+                )
+        all_predictions = pl.concat(prediction_frames)
+        return {
+            "all_learning_curves": pl.DataFrame(),
+            "all_predictions": all_predictions,
+            "execution_diagnostics": {
+                "base_fold_preparation_s": 0.2,
+                "base_fold_preparations": len(splits),
+                "candidate_fit_s": {
+                    config.get("_execution_key", config["config_name"]): 0.1 for config in configs
+                },
+            },
+            "fold_metrics": pl.DataFrame(),
+            "grid_results": [
+                {
+                    "best_epoch": 1,
+                    "best_ic": 0.0,
+                    "config_name": config.get("_execution_key", config["config_name"]),
+                    "elapsed_s": 0.0,
+                }
+                for config in configs
+            ],
+            "predictions": all_predictions,
+            "training_log": pl.DataFrame(),
+        }
+
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", counted_to_pandas)
+    monkeypatch.setattr(tabular_dl, "run_tabm_cv", fake_run_tabm_cv)
+    monkeypatch.setattr(
+        "case_studies.utils.deep_model_state.validate_deep_checkpoint_population",
+        lambda *args, **kwargs: (),
+    )
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=config_name,
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        for config_name in ("tabm_s", "tabm_m")
+    ]
+
+    result = run_models(study, requests=requests)
+
+    assert loads == [("etfs", "fwd_ret_1d", 0)]
+    assert conversions == 1
+    assert executions == [("tabm_s", "tabm_m")]
+    assert len(result.runs) == 2
+    assert len({run.training.hash for run in result.runs}) == 2
+    assert all(run.predictions[0].complete for run in result.runs)
+    assert all(run.diagnostics["execution_order"] == "fold_major" for run in result.runs)
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in result.runs)
+    assert all(run.diagnostics["compatibility_group_size"] == 2 for run in result.runs)
+    assert all(run.diagnostics["disk_fold_cache"] is False for run in result.runs)
+
+
+def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+    configs = modeling.load_configs("etfs", "fwd_ret_1d", "tabular_dl")
+    original_prepare = tabular_dl._prepare_tabm_fold
+    released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
+    prepared_folds: list[int] = []
+    training_order: list[tuple[str, int]] = []
+
+    def observed_prepare(*args, **kwargs):
+        gc.collect()
+        if released_arrays:
+            assert released_arrays[-1]() is None
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        released_arrays.append(weakref.ref(fold["X_train"]))
+        return fold
+
+    def fake_train_tabm_fold(*, model, X_val, val_dates, **kwargs):
+        hidden_dim = int(model.backbone[0].out_features)
+        training_order.append((str(val_dates[0])[:10], hidden_dim))
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", fake_train_tabm_fold)
+
+    result = tabular_dl.run_tabm_cv(
+        modeling_dataset.dataset.to_pandas(),
+        modeling_dataset.splits,
+        configs=configs,
+        n_features=len(modeling_dataset.feature_names),
+        feature_names=modeling_dataset.feature_names,
+        label_col=modeling_dataset.label_col,
+        date_col=modeling_dataset.date_col,
+        entity_col=modeling_dataset.entity_cols[0],
+        device="cpu",
+        seed=42,
+        num_threads=1,
+        strict=True,
+    )
+
+    assert prepared_folds == [0, 1]
+    assert training_order == [
+        ("2024-01-03", 4),
+        ("2024-01-03", 8),
+        ("2024-01-04", 4),
+        ("2024-01-04", 8),
+    ]
+    assert result["all_predictions"].height == 240
+    assert result["execution_diagnostics"]["base_fold_preparations"] == 2
+
+
+def test_tabm_cv_rejects_empty_fold_population(tmp_path, monkeypatch) -> None:
+    _, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="at least one fold"):
+        tabular_dl.run_tabm_cv(
+            modeling_dataset.dataset.to_pandas(),
+            [],
+            configs=modeling.load_configs("etfs", "fwd_ret_1d", "tabular_dl")[:1],
+            n_features=len(modeling_dataset.feature_names),
+            feature_names=modeling_dataset.feature_names,
+            label_col=modeling_dataset.label_col,
+            date_col=modeling_dataset.date_col,
+            device="cpu",
+        )
+
+
+def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+    fail_second_fold = True
+
+    def interrupted_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        nonlocal fail_second_fold
+        validation_date = str(val_dates[0])[:10]
+        calls.append(validation_date)
+        if validation_date == "2024-01-04" and fail_second_fold:
+            fail_second_fold = False
+            raise RuntimeError("injected TabM interruption")
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", interrupted_train)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="injected TabM interruption"):
+        request.run()
+    recovered = request.run()
+
+    assert calls == ["2024-01-03", "2024-01-04", "2024-01-04"]
+    assert recovered.diagnostics["reused_folds"] == [0]
+    assert recovered.diagnostics["fitted_folds"] == [1]
+    assert recovered.diagnostics["base_fold_preparations"] == 1
+    assert recovered.predictions[0].complete
+    assert recovered.predictions[0].coverage()["n_expected"] == 120
+    training_log = pl.read_parquet(
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    assert set(training_log["fold"]) == {0, 1}
+
+
+def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[tuple[int, str]] = []
+    fail_small = True
+
+    def candidate_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        hidden_dim = int(model.backbone[0].out_features)
+        validation_date = str(val_dates[0])[:10]
+        calls.append((hidden_dim, validation_date))
+        if hidden_dim == 4 and fail_small:
+            raise RuntimeError("injected TabM candidate failure")
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", candidate_train)
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=config_name,
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        for config_name in ("tabm_s", "tabm_m")
+    ]
+
+    with pytest.raises(RuntimeError, match="injected TabM candidate failure"):
+        run_models(study, requests=requests)
+    first_calls = list(calls)
+    fail_small = False
+    recovered = run_models(study, requests=requests)
+
+    assert first_calls == [
+        (4, "2024-01-03"),
+        (8, "2024-01-03"),
+        (8, "2024-01-04"),
+    ]
+    assert calls[len(first_calls) :] == [
+        (4, "2024-01-03"),
+        (4, "2024-01-04"),
+    ]
+    assert recovered.runs[1].diagnostics["reused"] is True
+    assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {2}
+    assert len({run.diagnostics["preparation_fraction"] for run in recovered.runs}) == 1
+    assert recovered.runs[1].diagnostics["candidate_fit_s"] == 0.0
+    assert all(run.predictions[0].complete for run in recovered.runs)
+
+
+def test_tabm_batch_matches_individual_resolved_execution(tmp_path, monkeypatch) -> None:
+    batch_study, _, _ = _tabm_study(tmp_path / "batch", monkeypatch)
+    individual_study, _, _ = _tabm_study(tmp_path / "individual", monkeypatch)
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    batch = run_models(
+        batch_study,
+        requests=[
+            batch_study.model(
+                family="tabular_dl",
+                label="fwd_ret_1d",
+                config_name=config_name,
+                overrides={"device": "cpu", "num_threads": 1},
+            )
+            for config_name in ("tabm_s", "tabm_m")
+        ],
+    )
+    individual = (
+        individual_study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name="tabm_s",
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        .resolve()
+        .run()
+    )
+
+    assert batch.runs[0].training.hash == individual.training.hash
+    assert batch.runs[0].predictions[0].hash == individual.predictions[0].hash
+    assert batch.runs[0].predictions[0].load().equals(individual.predictions[0].load())
+
+
+def test_tabm_batch_rejects_corrupt_checkpoint_and_refits_only_its_fold(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def deterministic_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        calls.append(str(val_dates[0])[:10])
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+    original = request.run()
+    model_root = original.training.root / "run_log" / "training" / original.training.hash / "models"
+    checkpoint = model_root / original.training.hash / "fold_00" / "epoch_0001.pt"
+    checkpoint.write_bytes(checkpoint.read_bytes() + b"corrupt")
+
+    recovered = request.run()
+
+    assert calls == ["2024-01-03", "2024-01-04", "2024-01-03"]
+    assert recovered.training.hash == original.training.hash
+    assert recovered.diagnostics["fitted_folds"] == [0]
+    assert recovered.diagnostics["reused_folds"] == [1]
+    assert recovered.diagnostics["base_fold_preparations"] == 1
+    training_log = pl.read_parquet(
+        recovered.training.root
+        / "run_log"
+        / "training"
+        / recovered.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    assert set(training_log["fold"]) == {0, 1}
+    invalid = (
+        original.training.root / "run_log" / "training" / original.training.hash / "invalid_folds"
+    )
+    assert len(list(invalid.glob("fold_0.*"))) == 1
+
+
+def test_tabm_saved_weight_checkpoint_replays_validation_predictions(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from case_studies.utils.deep_model_state import restore_deep_model
+
+    study, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+    run = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    ).run()
+    model_root = run.training.root / "run_log" / "training" / run.training.hash / "models"
+    checkpoint = model_root / run.training.hash / "fold_00" / "epoch_0001.pt"
+    model, preprocessing, metadata = restore_deep_model(
+        checkpoint,
+        lambda architecture, kwargs: tabular_dl.TabMModel(**kwargs),
+    )
+    sorted_dataset = (
+        modeling_dataset.dataset.to_pandas()
+        .sort_values(["timestamp", "symbol"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    fold = tabular_dl._prepare_tabm_fold(
+        sorted_dataset,
+        modeling_dataset.splits[0],
+        feature_names=modeling_dataset.feature_names,
+        label_col=modeling_dataset.label_col,
+        eval_label_col=None,
+        date_col=modeling_dataset.date_col,
+        entity_col=modeling_dataset.entity_cols[0],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+    )
+    replay = tabular_dl._predict_in_chunks(model, fold["X_val"], torch.device("cpu"))
+    stored = (
+        run.predictions[0]
+        .load()
+        .filter(pl.col("fold") == 0)
+        .sort("timestamp", "symbol")
+        .get_column("prediction")
+        .to_numpy()
+    )
+
+    assert metadata["fold"] == 0
+    assert preprocessing["feature_names"] == modeling_dataset.feature_names
+    np.testing.assert_allclose(replay, stored, rtol=0.0, atol=1e-7)
+
+
+def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+    original = request.run()
+    training_log = (
+        original.training.root
+        / "run_log"
+        / "training"
+        / original.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    training_log.write_bytes(b"truncated")
+
+    repaired = request.run()
+
+    assert repaired.training.hash == original.training.hash
+    assert repaired.diagnostics["base_fold_preparations"] == 0
+    assert prepared_folds == [0, 1]
+    assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
+
+    selected_path = training_log.parent / "predictions.parquet"
+    obsolete = (
+        pl.read_parquet(selected_path)
+        .drop("model_id")
+        .with_columns(
+            pl.lit("tabm_s").alias("config"),
+            pl.lit(1, dtype=pl.Int32).alias("epoch"),
+        )
+    )
+    obsolete.write_parquet(selected_path)
+
+    request.run()
+
+    selected = pl.read_parquet(selected_path)
+    assert "model_id" in selected.columns
+    assert {"config", "epoch"}.isdisjoint(selected.columns)
+
+
+def test_tabm_candidate_order_does_not_change_identities_or_predictions(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    forward_study, _, _ = _tabm_study(tmp_path / "forward", monkeypatch)
+    reverse_study, _, _ = _tabm_study(tmp_path / "reverse", monkeypatch)
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+
+    def execute(study, names):
+        result = run_models(
+            study,
+            requests=[
+                study.model(
+                    family="tabular_dl",
+                    label="fwd_ret_1d",
+                    config_name=name,
+                    overrides={"device": "cpu", "num_threads": 1},
+                )
+                for name in names
+            ],
+        )
+        return {run.training.spec()["config_name"]: run for run in result.runs}
+
+    forward = execute(forward_study, ("tabm_s", "tabm_m"))
+    reverse = execute(reverse_study, ("tabm_m", "tabm_s"))
+
+    assert set(forward) == set(reverse)
+    for name in forward:
+        assert forward[name].training.hash == reverse[name].training.hash
+        assert forward[name].predictions[0].hash == reverse[name].predictions[0].hash
+        assert forward[name].predictions[0].load().equals(reverse[name].predictions[0].load())
+
+
+def test_tabm_variants_from_one_named_preset_keep_separate_identities(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    result = run_models(
+        study,
+        requests=[
+            study.model(
+                family="tabular_dl",
+                label="fwd_ret_1d",
+                config_name="tabm_s",
+                overrides={"device": "cpu", "hidden_dim": hidden, "num_threads": 1},
+            )
+            for hidden in (5, 6)
+        ],
+    )
+
+    assert len({run.training.hash for run in result.runs}) == 2
+    assert len({run.predictions[0].hash for run in result.runs}) == 2
+    assert prepared_folds == [0, 1]
+    assert {run.diagnostics["base_fold_preparations"] for run in result.runs} == {2}
+    assert {run.training.spec()["identity_version"] for run in result.runs} == {3}
+    assert {run.training.spec()["resolved_spec_schema"] for run in result.runs} == {
+        "ml4t.resolved-spec/v1"
+    }
+    assert [
+        run.training.spec()["computation"]["model"]["params"]["hidden_dim"] for run in result.runs
+    ] == [5, 6]
+    for run in result.runs:
+        diagnostics = run.training.root / "run_log" / "training" / run.training.hash / "diagnostics"
+        assert {path.name for path in diagnostics.iterdir()} == {
+            "all_predictions.parquet",
+            "learning_curves.parquet",
+            "predictions.parquet",
+            "result.json",
+            "training_log.parquet",
+        }
+        selected = pl.read_parquet(diagnostics / "predictions.parquet")
+        assert "model_id" in selected.columns
+        assert {"config", "epoch"}.isdisjoint(selected.columns)
+
+
+def test_tabm_duplicate_requests_share_one_execution(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+
+    result = run_models(study, requests=[request, request])
+
+    assert len(result.runs) == 2
+    assert result.runs[0].training.hash == result.runs[1].training.hash
+    assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
+    assert prepared_folds == [0, 1]
+    assert {run.diagnostics["base_fold_preparations"] for run in result.runs} == {2}
+
+
+def test_tabm_equivalent_named_presets_share_identity_stable_checkpoints(
+    tmp_path, monkeypatch
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=name,
+            overrides={"device": "cpu", "hidden_dim": 6, "num_threads": 1},
+        )
+        for name in ("tabm_s", "tabm_m")
+    ]
+
+    result = run_models(study, requests=requests)
+    replay = requests[1].run()
+
+    assert result.runs[0].training.hash == result.runs[1].training.hash == replay.training.hash
+    assert result.runs[0].predictions[0].hash == result.runs[1].predictions[0].hash
+    assert prepared_folds == [0, 1]
+    checkpoint_root = (
+        replay.training.root
+        / "run_log"
+        / "training"
+        / replay.training.hash
+        / "models"
+        / replay.training.hash
+    )
+    assert {path.parent.name for path in checkpoint_root.glob("fold_*/epoch_0001.pt")} == {
+        "fold_00",
+        "fold_01",
+    }
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
