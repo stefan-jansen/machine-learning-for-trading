@@ -407,7 +407,7 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
                 "prediction_hash": prediction.hash,
                 "label": "fwd_ret_21d",
                 "signal": {"method": "equal_weight_top_k", "top_k": 1},
-                "allocation": None,
+                "allocation": {"method": "inverse_vol", "vol_window": 2},
                 "risk": None,
                 "costs": None,
                 "chapter": "ch16",

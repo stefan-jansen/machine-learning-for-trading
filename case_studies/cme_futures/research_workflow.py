@@ -683,7 +683,7 @@ def run_official_backtest_requests(
             raise RuntimeError("one futures strategy request must resolve to one backtest")
         expected_hash = plan.expected_hashes[0]
         expected.append(expected_hash)
-        prepared.append((row, selected, price_path, signal, decision, expected_hash))
+        prepared.append((row, selected, price_path, signal, allocation, decision, expected_hash))
     if len(expected) != len(set(expected)):
         raise ValueError("strategy requests resolve to duplicate backtest identities")
     population = OfficialPopulation.create(
@@ -694,13 +694,13 @@ def run_official_backtest_requests(
     )
     results = []
     rows = []
-    for row, selected, price_path, signal, decision, expected_hash in prepared:
+    for row, selected, price_path, signal, allocation, decision, expected_hash in prepared:
         result = run_backtests(
             study,
             predictions=selected,
             signal=signal,
             prices=price_path.prices,
-            allocation=row.get("allocation"),
+            allocation=allocation,
             risk=row.get("risk"),
             costs=row.get("costs"),
             chapter=row.get("chapter"),
