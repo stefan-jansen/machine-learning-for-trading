@@ -21,7 +21,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 import uuid
@@ -361,30 +360,17 @@ def _resolve_model_request_from_materialized(
         "source_identity": _tabm_source_identity(),
         "runtime_identity": _tabm_runtime_identity(),
     }
-    if mds.task_type == "classification":
-        if tier is ExecutionTier.PREVIEW:
-            computation["preview_reductions"] = reductions
-        spec = ResolvedSpec.create(
-            family="tabular_dl",
-            label=label_ref.name,
-            seed=int(runtime["seed"]),
-            computation=computation,
-            provenance=runtime_provenance,
-            config_name=config["config_name"],
-            execution_tier=tier.value,
-        ).as_dict()
-    else:
-        spec = {
-            "identity_version": 2,
-            "execution_tier": tier.value,
-            "family": "tabular_dl",
-            "label": label_ref.name,
-            "seed": int(runtime["seed"]),
-            "config_name": config["config_name"],
-            **computation,
-        }
-        if tier is ExecutionTier.PREVIEW:
-            spec["preview_reductions"] = reductions
+    if tier is ExecutionTier.PREVIEW:
+        computation["preview_reductions"] = reductions
+    spec = ResolvedSpec.create(
+        family="tabular_dl",
+        label=label_ref.name,
+        seed=int(runtime["seed"]),
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=config["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
     context = TabMResearchContext(
         dataset_pd=mds.dataset.to_pandas() if dataset_pd is None else dataset_pd,
         splits=tuple(splits),
@@ -552,56 +538,179 @@ def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: s
     runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 
 
-def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
-    from case_studies.research.models import ModelRun
+@dataclass
+class _TabMRecoveryCandidate:
+    spec: dict[str, Any]
+    context: TabMResearchContext
+    training: Any
+    ledger: Any
+    attempt: Any
+    reused_folds: list[int]
+    fitted_folds: list[int]
 
-    cached = _cached_research_run(study, spec, context)
-    if cached is not None:
-        return cached
-    training = study.results.register_training(
-        spec,
-        execution_tier=spec["execution_tier"],
-        runtime_provenance=context.runtime_provenance,
-    )
-    train_dir = training.root / "run_log" / "training" / training.hash
-    model_dir = train_dir / "models"
-    if model_dir.exists():
-        raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
-    staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-    computation = spec.get("computation", spec)
-    try:
-        result = run_tabm_cv(
-            context.dataset_pd,
-            list(context.splits),
-            configs=[context.config],
-            n_features=len(context.feature_names),
-            feature_names=list(context.feature_names),
-            label_col=context.label_col,
-            eval_label_col=context.eval_label_col,
-            task_type=context.task_type,
-            class_values=list(context.class_values) or None,
-            date_col=context.date_col,
-            entity_col=context.entity_col,
-            device=computation["numerics"]["device"],
-            save_dir=train_dir / "diagnostics",
-            register=False,
-            temporal_by_fold=context.temporal_by_fold,
-            temporal_keys=list(context.temporal_keys),
-            temporal_feature_names=list(context.temporal_feature_names),
-            class_weights_by_fold=context.class_weights_by_fold,
-            seed=int(spec["seed"]),
-            num_threads=int(computation["numerics"]["num_threads"]),
-            checkpoint_root=staging,
-            strict=True,
+
+class _TabMRecovery:
+    def __init__(self, candidates: dict[str, _TabMRecoveryCandidate]) -> None:
+        self.candidates = candidates
+
+    def model_root(self, config_name: str) -> Path:
+        candidate = self.candidates[config_name]
+        return candidate.training.root / "run_log" / "training" / candidate.training.hash / "models"
+
+    def _paths(self, config_name: str, fold_id: int) -> tuple[Path, Path]:
+        candidate = self.candidates[config_name]
+        manifest = (
+            self.model_root(config_name) / config_name / f"fold_{fold_id:02d}" / "manifest.json"
         )
-        os.replace(staging, model_dir)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        shard = (
+            candidate.training.root
+            / "run_log"
+            / "training"
+            / candidate.training.hash
+            / "prediction_folds"
+            / f"fold_{fold_id}.parquet"
+        )
+        return manifest, shard
 
-    prediction_results = _publish_tabm_predictions(study, spec, context, training, result)
-    _record_tabm_runtime(train_dir, result, context.config["config_name"])
-    return ModelRun(training=training, predictions=prediction_results)
+    def _settings(self, config_name: str, fold_id: int) -> dict[str, Any]:
+        candidate = self.candidates[config_name]
+        split = next(split for split in candidate.context.splits if int(split["fold"]) == fold_id)
+        computation = candidate.spec.get("computation", candidate.spec)
+        return {
+            "checkpoint_schedule": computation["checkpoint_schedule"],
+            "fold": _normalize_splits([split])[0],
+            "training_hash": candidate.training.hash,
+        }
+
+    def _checkpoint_files(self, config_name: str, fold_id: int) -> tuple[Path, ...]:
+        from case_studies.utils.deep_model_state import checkpoint_sidecar, deep_checkpoint_path
+
+        candidate = self.candidates[config_name]
+        computation = candidate.spec.get("computation", candidate.spec)
+        checkpoints = tuple(int(item["value"]) for item in computation["checkpoint_schedule"])
+        files = []
+        for checkpoint in checkpoints:
+            path = deep_checkpoint_path(
+                self.model_root(config_name), config_name, fold_id, checkpoint
+            )
+            files.extend((path, checkpoint_sidecar(path)))
+        return tuple(files)
+
+    def _valid_manifest(self, config_name: str, fold_id: int, manifest: Path) -> bool:
+        if not manifest.is_file():
+            return False
+        try:
+            record = json.loads(manifest.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        files = self._checkpoint_files(config_name, fold_id)
+        expected = {
+            str(path.relative_to(self.model_root(config_name))): _sha256(path)
+            for path in files
+            if path.is_file()
+        }
+        return len(expected) == len(files) and record == {
+            "files": expected,
+            "schema_version": 1,
+        }
+
+    def _quarantine(self, config_name: str, fold_id: int) -> None:
+        candidate = self.candidates[config_name]
+        manifest, shard = self._paths(config_name, fold_id)
+        fold_dir = manifest.parent
+        if not fold_dir.exists() and not shard.exists():
+            return
+        train_dir = candidate.training.root / "run_log" / "training" / candidate.training.hash
+        quarantine = train_dir / "invalid_folds" / f"fold_{fold_id}.{uuid.uuid4().hex}"
+        quarantine.mkdir(parents=True)
+        if fold_dir.exists():
+            os.replace(fold_dir, quarantine / "models")
+        if shard.exists():
+            os.replace(shard, quarantine / shard.name)
+
+    def reuse(self, config_name: str, fold_id: int) -> pl.DataFrame | None:
+        candidate = self.candidates[config_name]
+        manifest, shard = self._paths(config_name, fold_id)
+        if not candidate.ledger.reusable_fold(
+            training_hash=candidate.training.hash,
+            candidate_identity=candidate.training.hash,
+            fold_id=fold_id,
+            fitted_state=manifest,
+            prediction_shard=shard,
+            resolved_settings=self._settings(config_name, fold_id),
+        ) or not self._valid_manifest(config_name, fold_id, manifest):
+            self._quarantine(config_name, fold_id)
+            return None
+        frame = pl.read_parquet(shard)
+        checkpoints = {
+            int(item["value"])
+            for item in candidate.spec.get("computation", candidate.spec)["checkpoint_schedule"]
+        }
+        required = {
+            candidate.context.date_col,
+            candidate.context.entity_col,
+            "config",
+            "epoch",
+            "fold_id",
+            "y_score",
+            "y_true",
+        }
+        if required - set(frame.columns):
+            self._quarantine(config_name, fold_id)
+            return None
+        if (
+            set(frame["config"].unique().to_list()) != {config_name}
+            or set(frame["fold_id"].unique().to_list()) != {fold_id}
+            or {int(value) for value in frame["epoch"].unique().to_list()} != checkpoints
+        ):
+            self._quarantine(config_name, fold_id)
+            return None
+        keys = [candidate.context.date_col, candidate.context.entity_col, "fold_id", "epoch"]
+        if frame.n_unique(keys) != frame.height:
+            self._quarantine(config_name, fold_id)
+            return None
+        candidate.reused_folds.append(fold_id)
+        return frame
+
+    def complete(self, config_name: str, fold_id: int, frame: pl.DataFrame) -> None:
+        candidate = self.candidates[config_name]
+        manifest, shard = self._paths(config_name, fold_id)
+        files = self._checkpoint_files(config_name, fold_id)
+        missing = [str(path) for path in files if not path.is_file()]
+        if missing:
+            raise ValueError(f"TabM fold checkpoint population is incomplete: {missing}")
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest_tmp = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        shard_tmp = shard.with_name(f".{shard.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            record = {
+                "files": {
+                    str(path.relative_to(self.model_root(config_name))): _sha256(path)
+                    for path in files
+                },
+                "schema_version": 1,
+            }
+            manifest_tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+            frame.write_parquet(shard_tmp)
+            os.replace(manifest_tmp, manifest)
+            os.replace(shard_tmp, shard)
+        finally:
+            manifest_tmp.unlink(missing_ok=True)
+            shard_tmp.unlink(missing_ok=True)
+        candidate.ledger.complete_fold(
+            training_hash=candidate.training.hash,
+            candidate_identity=candidate.training.hash,
+            fold_id=fold_id,
+            fitted_state=manifest,
+            prediction_shard=shard,
+            resolved_settings=self._settings(config_name, fold_id),
+        )
+        candidate.fitted_folds.append(fold_id)
+
+
+def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
+    return _run_tabm_compatible_group(study, [(0, spec, context)])[0]
 
 
 def _tabm_materialization_key(request: dict[str, Any]) -> tuple[str, str, int]:
@@ -653,6 +762,7 @@ def _tabm_unique_name_batches(items):
 
 def _run_tabm_compatible_group(study: Study, items):
     from case_studies.research.models import ModelRun
+    from case_studies.research.recovery import ExecutionLedger
 
     completed: dict[int, ModelRun] = {}
     pending = []
@@ -674,6 +784,7 @@ def _run_tabm_compatible_group(study: Study, items):
         return completed
 
     registered = []
+    recovery_candidates = {}
     for index, spec, context in pending:
         training = study.results.register_training(
             spec,
@@ -681,15 +792,22 @@ def _run_tabm_compatible_group(study: Study, items):
             runtime_provenance=context.runtime_provenance,
         )
         train_dir = training.root / "run_log" / "training" / training.hash
-        model_dir = train_dir / "models"
-        if model_dir.exists():
-            raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
-        registered.append((index, spec, context, training, train_dir, model_dir))
+        ledger = ExecutionLedger(study, training.root)
+        candidate = _TabMRecoveryCandidate(
+            spec=spec,
+            context=context,
+            training=training,
+            ledger=ledger,
+            attempt=ledger.start(training.hash),
+            reused_folds=[],
+            fitted_folds=[],
+        )
+        recovery_candidates[context.config["config_name"]] = candidate
+        registered.append((index, spec, context, training, train_dir, candidate))
 
     first_context = pending[0][2]
     first_computation = pending[0][1].get("computation", pending[0][1])
-    batch_root = registered[0][4].parent / f".tabm-batch.{uuid.uuid4().hex}.tmp"
-    checkpoint_root = batch_root / "models"
+    recovery = _TabMRecovery(recovery_candidates)
     try:
         result = run_tabm_cv(
             first_context.dataset_pd,
@@ -704,7 +822,7 @@ def _run_tabm_compatible_group(study: Study, items):
             date_col=first_context.date_col,
             entity_col=first_context.entity_col,
             device=str(first_computation["numerics"]["device"]),
-            save_dir=batch_root / "diagnostics",
+            save_dir=None,
             register=False,
             temporal_by_fold=first_context.temporal_by_fold,
             temporal_keys=list(first_context.temporal_keys),
@@ -712,41 +830,62 @@ def _run_tabm_compatible_group(study: Study, items):
             class_weights_by_fold=first_context.class_weights_by_fold,
             seed=int(pending[0][1]["seed"]),
             num_threads=int(first_computation["numerics"]["num_threads"]),
-            checkpoint_root=checkpoint_root,
+            checkpoint_root=None,
             strict=True,
+            _recovery=recovery,
         )
-        for index, spec, context, training, train_dir, model_dir in registered:
-            predictions = _publish_tabm_predictions(study, spec, context, training, result)
-            source = checkpoint_root / context.config["config_name"]
-            if not source.is_dir():
-                raise ValueError(
-                    f"TabM batch did not persist fitted state for {context.config['config_name']}"
+        for index, spec, context, training, train_dir, candidate in registered:
+            failure = result.get("failures", {}).get(context.config["config_name"])
+            if failure is not None:
+                candidate.attempt.finish(
+                    "failed",
+                    {
+                        "error": str(failure),
+                        "error_type": type(failure).__name__,
+                        "fitted_folds": candidate.fitted_folds,
+                        "reused_folds": candidate.reused_folds,
+                    },
                 )
-            staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-            staging.mkdir()
-            try:
-                os.replace(source, staging / context.config["config_name"])
-                os.replace(staging, model_dir)
-            except Exception:
-                shutil.rmtree(staging, ignore_errors=True)
-                raise
+                candidate.attempt = None
+                continue
+            predictions = _publish_tabm_predictions(study, spec, context, training, result)
             _record_tabm_runtime(train_dir, result, context.config["config_name"])
             verified = _cached_research_run(study, spec, context)
             if verified is None:
                 raise ValueError(
                     f"TabM batch result failed fitted-state validation for {context.config['config_name']}"
                 )
+            diagnostics = {
+                "execution_order": "fold_major",
+                "fitted_folds": candidate.fitted_folds,
+                "group_size": len(pending),
+                "reused": False,
+                "reused_folds": candidate.reused_folds,
+            }
+            candidate.attempt.finish("completed", diagnostics)
+            candidate.attempt = None
             completed[index] = ModelRun(
                 training=verified.training,
                 predictions=predictions,
-                diagnostics={
-                    "execution_order": "fold_major",
-                    "group_size": len(pending),
-                    "reused": False,
-                },
+                diagnostics=diagnostics,
             )
-    finally:
-        shutil.rmtree(batch_root, ignore_errors=True)
+        failures = list(result.get("failures", {}).values())
+        if failures:
+            raise failures[0]
+    except Exception as error:
+        for candidate in recovery_candidates.values():
+            if candidate.attempt is not None:
+                candidate.attempt.finish(
+                    "failed",
+                    {
+                        "error": str(error),
+                        "error_type": type(error).__name__,
+                        "fitted_folds": candidate.fitted_folds,
+                        "reused_folds": candidate.reused_folds,
+                    },
+                )
+                candidate.attempt = None
+        raise
     return completed
 
 
@@ -1658,6 +1797,7 @@ def run_tabm_cv(
     identity_params: dict[str, Any] | None = None,
     checkpoint_root: Path | None = None,
     strict: bool = False,
+    _recovery: _TabMRecovery | None = None,
 ) -> dict[str, Any]:
     """Walk-forward tabular DL CV with epoch-checkpoint IC evaluation.
 
@@ -1881,7 +2021,9 @@ def run_tabm_cv(
         config_name = cfg["config_name"]
         if config_name in states:
             raise ValueError(f"TabM configuration names must be unique: {config_name}")
-        if checkpoint_root is not None and config_name.startswith("tabpfn"):
+        if (checkpoint_root is not None or _recovery is not None) and config_name.startswith(
+            "tabpfn"
+        ):
             raise ValueError("TabPFN fitted-state persistence is not implemented")
         if register and case_study and force_retrain:
             from case_studies.utils.registry import build_training_spec, training_hash_from_spec
@@ -1907,6 +2049,7 @@ def run_tabm_cv(
             "available": True,
             "config": cfg,
             "elapsed_s": 0.0,
+            "error": None,
             "fold_checkpoint_ics": {},
             "prediction_frames": [],
             "started_at": datetime.now(UTC).isoformat(),
@@ -1938,6 +2081,13 @@ def run_tabm_cv(
             is_tabpfn = config_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
             seed_everything(seed + fd["fold"])
+            fold_prediction_frame = None
+            if _recovery is not None:
+                reused = _recovery.reuse(config_name, int(fd["fold"]))
+                if reused is not None:
+                    state["prediction_frames"].append(reused)
+                    print(f"    Fold {fd['fold']}: reused completed fitted state")
+                    continue
             if is_tabpfn:
                 try:
                     preds = _run_tabpfn_fold(
@@ -1965,7 +2115,21 @@ def run_tabm_cv(
                         min_obs=5,
                     )["ic_mean"]
                     state["fold_checkpoint_ics"].setdefault(1, []).append(ic)
-                    if incr_dir is not None:
+                    fold_prediction_frame = _checkpoint_prediction_frame(
+                        config_name,
+                        fd["fold"],
+                        {1: preds},
+                        fd["val_dates"],
+                        fd["val_entities"],
+                        fd["y_val"],
+                        date_col,
+                        entity_col,
+                        eval_actual=fd["y_eval_val"] if eval_col else None,
+                        eval_col=eval_col or "eval_actual",
+                    )
+                    if _recovery is not None:
+                        state["prediction_frames"].append(fold_prediction_frame)
+                    elif incr_dir is not None:
                         flush_fold_predictions(
                             incr_dir,
                             config_name,
@@ -1980,20 +2144,7 @@ def run_tabm_cv(
                             eval_col=eval_col or "eval_actual",
                         )
                     else:
-                        state["prediction_frames"].append(
-                            _checkpoint_prediction_frame(
-                                config_name,
-                                fd["fold"],
-                                {1: preds},
-                                fd["val_dates"],
-                                fd["val_entities"],
-                                fd["y_val"],
-                                date_col,
-                                entity_col,
-                                eval_actual=fd["y_eval_val"] if eval_col else None,
-                                eval_col=eval_col or "eval_actual",
-                            )
-                        )
+                        state["prediction_frames"].append(fold_prediction_frame)
 
                     fold_elapsed = time.perf_counter() - fold_t0
                     training_log.append(
@@ -2021,7 +2172,10 @@ def run_tabm_cv(
                 tabm_kwargs = {"n_features": n_features, "output_dim": output_dim, **cfg_params}
                 model = TabMModel(**tabm_kwargs)
                 train_kwargs: dict[str, Any] = {}
-                if checkpoint_root is not None:
+                candidate_checkpoint_root = (
+                    _recovery.model_root(config_name) if _recovery is not None else checkpoint_root
+                )
+                if candidate_checkpoint_root is not None:
                     from case_studies.utils.deep_model_state import (
                         deep_checkpoint_path,
                         write_deep_checkpoint,
@@ -2035,9 +2189,15 @@ def run_tabm_cv(
                         _preprocessing: dict[str, Any] = fd["preprocessing"],
                         _config_name: str = config_name,
                         _model_kwargs: dict[str, Any] = tabm_kwargs,
+                        _checkpoint_root: Path = candidate_checkpoint_root,
                     ) -> None:
                         write_deep_checkpoint(
-                            deep_checkpoint_path(checkpoint_root, _config_name, _fold, epoch),
+                            deep_checkpoint_path(
+                                _checkpoint_root,
+                                _config_name,
+                                _fold,
+                                epoch,
+                            ),
                             model=fitted_model,
                             architecture="tabm",
                             model_kwargs=_model_kwargs,
@@ -2051,27 +2211,53 @@ def run_tabm_cv(
                         )
 
                     train_kwargs["state_callback"] = persist_state
-                checkpoint_ics, checkpoint_preds, epoch_losses = _train_tabm_fold(
-                    model=model,
-                    X_train=fd["X_train"],
-                    y_train=fd["y_train"],
-                    X_val=fd["X_val"],
-                    y_val=fd["y_val"],
-                    y_eval_val=fd["y_eval_val"],
-                    val_dates=fd["val_dates"],
-                    val_entities=fd["val_entities"],
-                    n_epochs=cfg_n_epochs,
-                    batch_size=cfg_batch_size,
-                    checkpoint_interval=cfg_checkpoint,
-                    device=torch_device,
-                    task_type=task_type,
-                    class_values=tuple(class_values or ()),
-                    class_weights=(class_weights_by_fold or {}).get(int(fd["fold"]), ()),
-                    **train_kwargs,
-                )
+                try:
+                    checkpoint_ics, checkpoint_preds, epoch_losses = _train_tabm_fold(
+                        model=model,
+                        X_train=fd["X_train"],
+                        y_train=fd["y_train"],
+                        X_val=fd["X_val"],
+                        y_val=fd["y_val"],
+                        y_eval_val=fd["y_eval_val"],
+                        val_dates=fd["val_dates"],
+                        val_entities=fd["val_entities"],
+                        n_epochs=cfg_n_epochs,
+                        batch_size=cfg_batch_size,
+                        checkpoint_interval=cfg_checkpoint,
+                        device=torch_device,
+                        task_type=task_type,
+                        class_values=tuple(class_values or ()),
+                        class_weights=(class_weights_by_fold or {}).get(int(fd["fold"]), ()),
+                        **train_kwargs,
+                    )
+                except Exception as error:
+                    del model
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if _recovery is None:
+                        raise
+                    state["available"] = False
+                    state["error"] = error
+                    state["prediction_frames"].clear()
+                    print(f"    Fold {fd['fold']}: {config_name} failed: {error}")
+                    continue
                 for ep, ic in checkpoint_ics.items():
                     state["fold_checkpoint_ics"].setdefault(ep, []).append(ic)
-                if incr_dir is not None:
+                fold_prediction_frame = _checkpoint_prediction_frame(
+                    config_name,
+                    fd["fold"],
+                    checkpoint_preds,
+                    fd["val_dates"],
+                    fd["val_entities"],
+                    fd["y_val"],
+                    date_col,
+                    entity_col,
+                    eval_actual=fd["y_eval_val"] if eval_col else None,
+                    eval_col=eval_col or "eval_actual",
+                )
+                if _recovery is not None:
+                    state["prediction_frames"].append(fold_prediction_frame)
+                elif incr_dir is not None:
                     flush_fold_predictions(
                         incr_dir,
                         config_name,
@@ -2086,20 +2272,7 @@ def run_tabm_cv(
                         eval_col=eval_col or "eval_actual",
                     )
                 else:
-                    state["prediction_frames"].append(
-                        _checkpoint_prediction_frame(
-                            config_name,
-                            fd["fold"],
-                            checkpoint_preds,
-                            fd["val_dates"],
-                            fd["val_entities"],
-                            fd["y_val"],
-                            date_col,
-                            entity_col,
-                            eval_actual=fd["y_eval_val"] if eval_col else None,
-                            eval_col=eval_col or "eval_actual",
-                        )
-                    )
+                    state["prediction_frames"].append(fold_prediction_frame)
 
                 del model, checkpoint_preds
                 if torch.cuda.is_available():
@@ -2127,6 +2300,15 @@ def run_tabm_cv(
                     f"    Fold {fd['fold']}: best_ep={best_ep}, "
                     f"IC={checkpoint_ics[best_ep]:+.4f} ({fold_elapsed:.1f}s)"
                 )
+            if _recovery is not None and fold_prediction_frame is not None:
+                try:
+                    _recovery.complete(config_name, int(fd["fold"]), fold_prediction_frame)
+                except Exception as error:
+                    state["available"] = False
+                    state["error"] = error
+                    state["prediction_frames"].clear()
+                    print(f"    Fold {fd['fold']}: {config_name} persistence failed: {error}")
+                    continue
             state["elapsed_s"] += time.perf_counter() - fold_t0
         del fd
         if torch.cuda.is_available():
@@ -2141,14 +2323,13 @@ def run_tabm_cv(
         completed_config_names.append(config_name)
         fold_checkpoint_ics = state["fold_checkpoint_ics"]
         config_prediction_frames = state["prediction_frames"]
-        cfg_all_preds = (
-            _load_incremental_preds_for_config(incr_dir, config_name)
-            if incr_dir is not None
-            else (
-                pl.concat(config_prediction_frames) if config_prediction_frames else pl.DataFrame()
-            )
-        )
-        if incr_dir is None and cfg_all_preds.height:
+        prediction_parts = list(config_prediction_frames)
+        if incr_dir is not None:
+            incremental = _load_incremental_preds_for_config(incr_dir, config_name)
+            if incremental.height:
+                prediction_parts.append(incremental)
+        cfg_all_preds = pl.concat(prediction_parts) if prediction_parts else pl.DataFrame()
+        if (incr_dir is None or _recovery is not None) and cfg_all_preds.height:
             in_memory_prediction_frames.append(cfg_all_preds)
         checkpoint_metrics: dict[int, dict[str, float]] = {}
         if cfg_all_preds.height:
@@ -2227,11 +2408,14 @@ def run_tabm_cv(
             all_curves.append(entry)
             cfg_curves_list.append(entry)
         print(f"    → best_epoch={best_cp}, IC={best_ic_val:+.4f} ({elapsed:.1f}s)")
-        if checkpoint_root is not None:
+        candidate_checkpoint_root = (
+            _recovery.model_root(config_name) if _recovery is not None else checkpoint_root
+        )
+        if candidate_checkpoint_root is not None:
             from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
 
             validate_deep_checkpoint_population(
-                checkpoint_root,
+                candidate_checkpoint_root,
                 config_name=config_name,
                 fold_ids=tuple(int(split["fold"]) for split in splits),
                 checkpoints=_tabm_checkpoint_epochs(cfg),
@@ -2305,14 +2489,29 @@ def run_tabm_cv(
                 print(f"    WARN: incremental registration failed for {config_name}: {exc}")
         gc.collect()
 
+    failures = {
+        config_name: state["error"]
+        for config_name, state in states.items()
+        if state["error"] is not None
+    }
     prediction_frames = [*cached_prediction_frames, *in_memory_prediction_frames]
-    if incr_dir is not None:
+    if incr_dir is not None and _recovery is None:
         for config_name in completed_config_names:
             frame = _load_incremental_preds_for_config(incr_dir, config_name)
             if frame.height:
                 prediction_frames.append(frame)
     all_predictions = pl.concat(prediction_frames) if prediction_frames else pl.DataFrame()
-    return _assemble_tabm_results(
+    if not config_results:
+        return {
+            "all_learning_curves": pl.DataFrame(all_curves),
+            "all_predictions": all_predictions,
+            "failures": failures,
+            "fold_metrics": pl.DataFrame(),
+            "grid_results": [],
+            "predictions": pl.DataFrame(),
+            "training_log": pl.DataFrame(training_log),
+        }
+    assembled = _assemble_tabm_results(
         config_results=config_results,
         all_predictions=all_predictions,
         curve_rows=all_curves,
@@ -2322,3 +2521,5 @@ def run_tabm_cv(
         entity_col=entity_col,
         eval_col=eval_col,
     )
+    assembled["failures"] = failures
+    return assembled

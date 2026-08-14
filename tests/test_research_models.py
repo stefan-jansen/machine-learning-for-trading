@@ -10,6 +10,7 @@ from typing import Any, cast
 import numpy as np
 import polars as pl
 import pytest
+import torch
 import yaml
 
 from case_studies.research import (
@@ -173,14 +174,23 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
             conversions += 1
         return original_to_pandas(frame, *args, **kwargs)
 
-    def fake_run_tabm_cv(dataset_pd, splits, *, configs, checkpoint_root, **kwargs):
+    def fake_run_tabm_cv(
+        dataset_pd,
+        splits,
+        *,
+        configs,
+        checkpoint_root,
+        _recovery=None,
+        **kwargs,
+    ):
         executions.append(tuple(config["config_name"] for config in configs))
         prediction_frames = []
         for config_index, config in enumerate(configs):
             config_name = config["config_name"]
             for split in splits:
                 fold = int(split["fold"])
-                checkpoint = checkpoint_root / config_name / f"fold_{fold:02d}" / "epoch_0001.pt"
+                root = _recovery.model_root(config_name) if _recovery else checkpoint_root
+                checkpoint = root / config_name / f"fold_{fold:02d}" / "epoch_0001.pt"
                 checkpoint.parent.mkdir(parents=True, exist_ok=True)
                 checkpoint.write_text("fixture\n")
                 valid = dataset_pd["timestamp"].between(
@@ -297,6 +307,296 @@ def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
         ("2024-01-04", 8),
     ]
     assert result["all_predictions"].height == 240
+
+
+def test_tabm_batch_reuses_completed_fold_after_interruption(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+    fail_second_fold = True
+
+    def interrupted_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        nonlocal fail_second_fold
+        validation_date = str(val_dates[0])[:10]
+        calls.append(validation_date)
+        if validation_date == "2024-01-04" and fail_second_fold:
+            fail_second_fold = False
+            raise RuntimeError("injected TabM interruption")
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", interrupted_train)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="injected TabM interruption"):
+        request.run()
+    recovered = request.run()
+
+    assert calls == ["2024-01-03", "2024-01-04", "2024-01-04"]
+    assert recovered.diagnostics["reused_folds"] == [0]
+    assert recovered.diagnostics["fitted_folds"] == [1]
+    assert recovered.predictions[0].complete
+    assert recovered.predictions[0].coverage()["n_expected"] == 120
+
+
+def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[tuple[int, str]] = []
+    fail_small = True
+
+    def candidate_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        hidden_dim = int(model.backbone[0].out_features)
+        validation_date = str(val_dates[0])[:10]
+        calls.append((hidden_dim, validation_date))
+        if hidden_dim == 4 and fail_small:
+            raise RuntimeError("injected TabM candidate failure")
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", candidate_train)
+    requests = [
+        study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name=config_name,
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        for config_name in ("tabm_s", "tabm_m")
+    ]
+
+    with pytest.raises(RuntimeError, match="injected TabM candidate failure"):
+        run_models(study, requests=requests)
+    first_calls = list(calls)
+    fail_small = False
+    recovered = run_models(study, requests=requests)
+
+    assert first_calls == [
+        (4, "2024-01-03"),
+        (8, "2024-01-03"),
+        (8, "2024-01-04"),
+    ]
+    assert calls[len(first_calls) :] == [
+        (4, "2024-01-03"),
+        (4, "2024-01-04"),
+    ]
+    assert recovered.runs[1].diagnostics["reused"] is True
+    assert all(run.predictions[0].complete for run in recovered.runs)
+
+
+def test_tabm_batch_matches_individual_resolved_execution(tmp_path, monkeypatch) -> None:
+    batch_study, _, _ = _tabm_study(tmp_path / "batch", monkeypatch)
+    individual_study, _, _ = _tabm_study(tmp_path / "individual", monkeypatch)
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    batch = run_models(
+        batch_study,
+        requests=[
+            batch_study.model(
+                family="tabular_dl",
+                label="fwd_ret_1d",
+                config_name=config_name,
+                overrides={"device": "cpu", "num_threads": 1},
+            )
+            for config_name in ("tabm_s", "tabm_m")
+        ],
+    )
+    individual = (
+        individual_study.model(
+            family="tabular_dl",
+            label="fwd_ret_1d",
+            config_name="tabm_s",
+            overrides={"device": "cpu", "num_threads": 1},
+        )
+        .resolve()
+        .run()
+    )
+
+    assert batch.runs[0].training.hash == individual.training.hash
+    assert batch.runs[0].predictions[0].hash == individual.predictions[0].hash
+    assert batch.runs[0].predictions[0].load().equals(individual.predictions[0].load())
+
+
+def test_tabm_batch_rejects_corrupt_checkpoint_and_refits_only_its_fold(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def deterministic_train(*, model, X_val, val_dates, state_callback=None, **kwargs):
+        calls.append(str(val_dates[0])[:10])
+        if state_callback is not None:
+            state_callback(1, model)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64)
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+    original = request.run()
+    model_root = original.training.root / "run_log" / "training" / original.training.hash / "models"
+    checkpoint = model_root / "tabm_s" / "fold_00" / "epoch_0001.pt"
+    checkpoint.write_bytes(checkpoint.read_bytes() + b"corrupt")
+
+    recovered = request.run()
+
+    assert calls == ["2024-01-03", "2024-01-04", "2024-01-03"]
+    assert recovered.training.hash == original.training.hash
+    assert recovered.diagnostics["fitted_folds"] == [0]
+    assert recovered.diagnostics["reused_folds"] == [1]
+    invalid = (
+        original.training.root / "run_log" / "training" / original.training.hash / "invalid_folds"
+    )
+    assert len(list(invalid.glob("fold_0.*"))) == 1
+
+
+def test_tabm_saved_weight_checkpoint_replays_validation_predictions(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from case_studies.utils.deep_model_state import restore_deep_model
+
+    study, modeling_dataset, _ = _tabm_study(tmp_path, monkeypatch)
+    run = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    ).run()
+    model_root = run.training.root / "run_log" / "training" / run.training.hash / "models"
+    checkpoint = model_root / "tabm_s" / "fold_00" / "epoch_0001.pt"
+    model, preprocessing, metadata = restore_deep_model(
+        checkpoint,
+        lambda architecture, kwargs: tabular_dl.TabMModel(**kwargs),
+    )
+    sorted_dataset = (
+        modeling_dataset.dataset.to_pandas()
+        .sort_values(["timestamp", "symbol"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    fold = tabular_dl._prepare_tabm_fold(
+        sorted_dataset,
+        modeling_dataset.splits[0],
+        feature_names=modeling_dataset.feature_names,
+        label_col=modeling_dataset.label_col,
+        eval_label_col=None,
+        date_col=modeling_dataset.date_col,
+        entity_col=modeling_dataset.entity_cols[0],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+    )
+    replay = tabular_dl._predict_in_chunks(model, fold["X_val"], torch.device("cpu"))
+    stored = (
+        run.predictions[0]
+        .load()
+        .filter(pl.col("fold") == 0)
+        .sort("timestamp", "symbol")
+        .get_column("prediction")
+        .to_numpy()
+    )
+
+    assert metadata["fold"] == 0
+    assert preprocessing["feature_names"] == modeling_dataset.feature_names
+    np.testing.assert_allclose(replay, stored, rtol=0.0, atol=1e-7)
+
+
+def test_tabm_candidate_order_does_not_change_identities_or_predictions(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    forward_study, _, _ = _tabm_study(tmp_path / "forward", monkeypatch)
+    reverse_study, _, _ = _tabm_study(tmp_path / "reverse", monkeypatch)
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+
+    def execute(study, names):
+        result = run_models(
+            study,
+            requests=[
+                study.model(
+                    family="tabular_dl",
+                    label="fwd_ret_1d",
+                    config_name=name,
+                    overrides={"device": "cpu", "num_threads": 1},
+                )
+                for name in names
+            ],
+        )
+        return {run.training.spec()["config_name"]: run for run in result.runs}
+
+    forward = execute(forward_study, ("tabm_s", "tabm_m"))
+    reverse = execute(reverse_study, ("tabm_m", "tabm_s"))
+
+    assert set(forward) == set(reverse)
+    for name in forward:
+        assert forward[name].training.hash == reverse[name].training.hash
+        assert forward[name].predictions[0].hash == reverse[name].predictions[0].hash
+        assert forward[name].predictions[0].load().equals(reverse[name].predictions[0].load())
+
+
+def test_tabm_variants_from_one_named_preset_keep_separate_identities(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+
+    def deterministic_train(*, model, X_val, state_callback=None, **kwargs):
+        if state_callback is not None:
+            state_callback(1, model)
+        hidden_dim = int(model.backbone[0].out_features)
+        predictions = np.asarray(X_val[:, 0], dtype=np.float64) + hidden_dim / 100
+        return {1: 0.1}, {1: predictions}, {1: 0.01}
+
+    monkeypatch.setattr(tabular_dl, "_train_tabm_fold", deterministic_train)
+    result = run_models(
+        study,
+        requests=[
+            study.model(
+                family="tabular_dl",
+                label="fwd_ret_1d",
+                config_name="tabm_s",
+                overrides={"device": "cpu", "hidden_dim": hidden, "num_threads": 1},
+            )
+            for hidden in (5, 6)
+        ],
+    )
+
+    assert len({run.training.hash for run in result.runs}) == 2
+    assert len({run.predictions[0].hash for run in result.runs}) == 2
+    assert {run.training.spec()["identity_version"] for run in result.runs} == {3}
+    assert {run.training.spec()["resolved_spec_schema"] for run in result.runs} == {
+        "ml4t.resolved-spec/v1"
+    }
+    assert [
+        run.training.spec()["computation"]["model"]["params"]["hidden_dim"] for run in result.runs
+    ] == [5, 6]
 
 
 def test_linear_notebook_and_public_request_resolve_identically(tmp_path, monkeypatch) -> None:
