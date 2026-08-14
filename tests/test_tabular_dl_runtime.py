@@ -636,6 +636,30 @@ def test_complete_registry_replays_predictions_instead_of_returning_empty(
 
     assert result["best_config_name"] == "tabm_probe"
     assert result["predictions"].height == 50
+
+    with pytest.raises(ValueError, match="at least one fold"):
+        tabular_dl.run_tabm_cv(
+            _classification_frame(),
+            [],
+            configs=[
+                {
+                    "family": "tabular_dl",
+                    "config_name": "tabm_probe",
+                    "params": {"hidden_dim": 4, "n_members": 2, "dropout": 0.0},
+                    "n_epochs": 25,
+                    "checkpoint_interval": 25,
+                }
+            ],
+            n_features=1,
+            feature_names=["feature"],
+            label_col="return",
+            date_col="timestamp",
+            entity_col="symbol",
+            device="cpu",
+            save_dir=tmp_path,
+            register=True,
+            case_study="probe",
+        )
     assert result["grid_results"][0]["cached"] is True
 
 
