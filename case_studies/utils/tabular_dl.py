@@ -495,7 +495,7 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
         for name in required - {"result.json"}:
             pl.read_parquet(diagnostics / name)
         json.loads((diagnostics / "result.json").read_text())
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError, pl.exceptions.PolarsError):
         return None
     return ModelRun(training=training, predictions=complete_predictions)
 

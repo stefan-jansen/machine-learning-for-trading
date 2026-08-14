@@ -571,6 +571,42 @@ def test_tabm_saved_weight_checkpoint_replays_validation_predictions(
     np.testing.assert_allclose(replay, stored, rtol=0.0, atol=1e-7)
 
 
+def test_tabm_corrupt_diagnostics_are_rebuilt_from_completed_folds(tmp_path, monkeypatch) -> None:
+    study, _, _ = _tabm_study(tmp_path, monkeypatch)
+    prepared_folds: list[int] = []
+    original_prepare = tabular_dl._prepare_tabm_fold
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(tabular_dl, "_prepare_tabm_fold", observed_prepare)
+    request = study.model(
+        family="tabular_dl",
+        label="fwd_ret_1d",
+        config_name="tabm_s",
+        overrides={"device": "cpu", "num_threads": 1},
+    )
+    original = request.run()
+    training_log = (
+        original.training.root
+        / "run_log"
+        / "training"
+        / original.training.hash
+        / "diagnostics"
+        / "training_log.parquet"
+    )
+    training_log.write_bytes(b"truncated")
+
+    repaired = request.run()
+
+    assert repaired.training.hash == original.training.hash
+    assert repaired.diagnostics["base_fold_preparations"] == 0
+    assert prepared_folds == [0, 1]
+    assert set(pl.read_parquet(training_log)["fold"]) == {0, 1}
+
+
 def test_tabm_candidate_order_does_not_change_identities_or_predictions(
     tmp_path,
     monkeypatch,
