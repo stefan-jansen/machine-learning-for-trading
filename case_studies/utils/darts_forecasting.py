@@ -380,7 +380,11 @@ def darts_training_identity(
     )
     target_mode = str(cfg.get("params", {}).get("darts_target", "one_period_return"))
     base_target_data_spec = (
-        {"kind": "lagged_label", "label": label_col}
+        {
+            "delay_periods": output_chunk_length,
+            "kind": "lagged_label",
+            "label": label_col,
+        }
         if target_mode == "lagged_label"
         else darts_base_target_identity(case_study)
     )
@@ -647,8 +651,8 @@ def _attach_darts_target(
     if mode != "lagged_label":
         raise ValueError(f"unsupported Darts target mode {mode!r}")
     _, output_chunk_length = _resolve_chunk_lengths(config, _parse_label_horizon(label_col))
-    if output_chunk_length != 1:
-        raise ValueError("lagged-label Darts targets require a one-period forecast")
+    if output_chunk_length != 2:
+        raise ValueError("lagged-label Darts targets require a two-period forecast")
     if _DARTS_PERIOD_COL not in dataset_pd.columns:
         raise ValueError("lagged-label Darts targets require expected-period identity")
     if label_col not in dataset_pd.columns:
@@ -668,7 +672,9 @@ def _attach_darts_target(
         .groupby([result[column] for column in identity_cols])
         .cumsum()
     )
-    target = result.groupby([*identity_cols, segment_col], sort=False)[label_col].shift(1)
+    target = result.groupby([*identity_cols, segment_col], sort=False)[label_col].shift(
+        output_chunk_length
+    )
     if (target.dropna() <= -1.0).any():
         raise ValueError("lagged-label Darts targets require returns greater than -1")
     result[BASE_TARGET_COL] = np.log1p(target)
@@ -891,6 +897,7 @@ def _predict_fold(
     date_col: str,
     entity_col: str,
     output_chunk_length: int,
+    forecast_reduction: str = "compound_path",
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
@@ -931,12 +938,18 @@ def _predict_fold(
             if not np.isfinite(state.y_true[base_pos]):
                 continue
             score_path = forecast.values(copy=False).reshape(-1).astype(np.float64, copy=False)
+            if forecast_reduction == "terminal":
+                y_score = float(np.expm1(score_path[-1]))
+            elif forecast_reduction == "compound_path":
+                y_score = float(np.expm1(score_path.sum()))
+            else:
+                raise ValueError(f"unsupported Darts forecast reduction {forecast_reduction!r}")
             rows.append(
                 {
                     date_col: pd.Timestamp(state.dates[base_pos]),
                     **state.identity,
                     "y_true": float(state.y_true[base_pos]),
-                    "y_score": float(np.expm1(score_path.sum())),
+                    "y_score": y_score,
                     "fold_id": fold_id,
                 }
             )
@@ -1173,6 +1186,11 @@ def run_darts_cv(
                     date_col,
                     entity_col,
                     output_chunk_length,
+                    forecast_reduction=(
+                        "terminal"
+                        if params.get("darts_target") == "lagged_label"
+                        else "compound_path"
+                    ),
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:

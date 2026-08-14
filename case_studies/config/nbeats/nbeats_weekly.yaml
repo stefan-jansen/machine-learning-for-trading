@@ -5,7 +5,7 @@ params:
   architecture: nbeats
   decision_cadence: weekly_friday
   darts_input_chunk_length: 12
-  darts_output_chunk_length: 1
+  darts_output_chunk_length: 2
   darts_target: lagged_label
   dropout: 0.1
   hidden_size: 128

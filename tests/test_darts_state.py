@@ -14,6 +14,7 @@ from case_studies.utils.darts_forecasting import (
     _attach_darts_target,
     _attach_expected_periods,
     _build_darts_model,
+    _FoldSeries,
     _predict_fold,
     _prepare_fold_series,
     darts_checkpoint_path,
@@ -113,9 +114,18 @@ def test_darts_checkpoint_population_rejects_missing_weights(tmp_path) -> None:
 def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> None:
     dataset = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-05", "2024-01-12", "2024-01-26", "2024-02-02"]),
-            "symbol": ["S0"] * 4,
-            "fwd_ret_5d": [0.01, 0.02, 0.03, 0.04],
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-05",
+                    "2024-01-12",
+                    "2024-01-19",
+                    "2024-02-02",
+                    "2024-02-09",
+                    "2024-02-16",
+                ]
+            ),
+            "symbol": ["S0"] * 6,
+            "fwd_ret_5d": [0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
         }
     )
     dataset = _attach_expected_periods(
@@ -128,7 +138,7 @@ def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> Non
         "config_name": "nbeats_weekly",
         "params": {
             "darts_input_chunk_length": 12,
-            "darts_output_chunk_length": 1,
+            "darts_output_chunk_length": 2,
             "darts_target": "lagged_label",
         },
     }
@@ -143,9 +153,51 @@ def test_lagged_label_target_aligns_weekly_horizon_and_resets_after_gap() -> Non
     )
 
     assert np.isnan(attached.loc[0, BASE_TARGET_COL])
-    assert attached.loc[1, BASE_TARGET_COL] == pytest.approx(np.log1p(0.01))
-    assert np.isnan(attached.loc[2, BASE_TARGET_COL])
-    assert attached.loc[3, BASE_TARGET_COL] == pytest.approx(np.log1p(0.03))
+    assert np.isnan(attached.loc[1, BASE_TARGET_COL])
+    assert attached.loc[2, BASE_TARGET_COL] == pytest.approx(np.log1p(0.01))
+    assert np.isnan(attached.loc[3, BASE_TARGET_COL])
+    assert np.isnan(attached.loc[4, BASE_TARGET_COL])
+    assert attached.loc[5, BASE_TARGET_COL] == pytest.approx(np.log1p(0.04))
+
+
+def test_lagged_label_forecast_scores_the_terminal_horizon() -> None:
+    target = TimeSeries.from_values(np.arange(6, dtype=np.float32))
+    covariates = TimeSeries.from_values(np.arange(6, dtype=np.float32))
+    state = _FoldSeries(
+        identity={"symbol": "S0"},
+        full_target=target,
+        full_covariates=covariates,
+        train_target=None,
+        train_covariates=None,
+        prediction_start_pos=4,
+        val_start_pos=3,
+        val_end_pos=3,
+        dates=pd.date_range("2024-01-05", periods=6, freq="W-FRI").to_numpy(),
+        y_true=np.arange(6, dtype=np.float32) / 100,
+        n_train_samples=0,
+    )
+
+    class _TwoPeriodModel:
+        def historical_forecasts(self, _series, *, start, **_kwargs):
+            return [
+                TimeSeries.from_times_and_values(
+                    pd.RangeIndex(start, start + 2),
+                    np.log1p(np.array([0.1, 0.2], dtype=np.float32)),
+                )
+            ]
+
+    predictions = _predict_fold(
+        _TwoPeriodModel(),
+        [state],
+        0,
+        "timestamp",
+        "symbol",
+        output_chunk_length=2,
+        forecast_reduction="terminal",
+    )
+
+    assert predictions["y_score"].item() == pytest.approx(0.2)
+    assert pd.Timestamp(predictions["timestamp"].item()) == pd.Timestamp(state.dates[3])
 
 
 def test_weekly_nbeats_preset_builds_without_adapter_parameters() -> None:
@@ -160,7 +212,7 @@ def test_weekly_nbeats_preset_builds_without_adapter_parameters() -> None:
         device="cpu",
         fold_seed=7,
         input_chunk_length=12,
-        output_chunk_length=1,
+        output_chunk_length=2,
     )
 
     assert isinstance(model, NBEATSModel)
@@ -185,10 +237,10 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(tmp_pat
     dataset = dataset.loc[dataset["timestamp"] != missing_date].reset_index(drop=True)
     exact_lookback = pd.DataFrame(
         {
-            "timestamp": dates[-5:],
+            "timestamp": dates[-7:],
             "symbol": "S6",
-            "feature": np.arange(5, dtype=np.float32),
-            "fwd_ret_1d": np.arange(5, dtype=np.float32) / 100,
+            "feature": np.arange(7, dtype=np.float32),
+            "fwd_ret_1d": np.arange(7, dtype=np.float32) / 100,
         }
     )
     dataset = pd.concat([dataset, exact_lookback], ignore_index=True)
@@ -203,6 +255,7 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(tmp_pat
             "n_blocks": 1,
             "dropout": 0.0,
             "darts_target": "lagged_label",
+            "darts_output_chunk_length": 2,
         },
         "n_epochs": 1,
         "batch_size": 32,
@@ -248,8 +301,8 @@ def test_darts_runner_persists_state_with_exact_gap_free_prediction_keys(tmp_pat
     assert evaluate_prediction_coverage(expected, predictions).complete
     observed_dates = set(expected["timestamp"].dt.date().to_list())
     assert missing_date.date() not in observed_dates
-    assert not {date.date() for date in dates[13:16]} & observed_dates
-    assert {date.date() for date in dates[17:]} <= observed_dates
+    assert not {date.date() for date in dates[13:18]} & observed_dates
+    assert {date.date() for date in dates[18:]} <= observed_dates
     assert (
         expected.filter((pl.col("symbol") == "S6") & (pl.col("timestamp") == dates[-1])).height == 1
     )
