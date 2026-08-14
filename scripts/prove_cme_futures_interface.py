@@ -17,7 +17,7 @@ from case_studies.cme_futures.research_workflow import (
     open_study,
     publish_product_weights,
     resolve_model_requests,
-    run_model_catalog,
+    run_resolved_model_requests,
 )
 from case_studies.research import CandidateSet, OfficialPopulation
 from case_studies.research.execution import run_backtests
@@ -93,12 +93,7 @@ def prove(workspace: Path) -> dict[str, object]:
     )[0]
     assert resolved.spec["computation"]["preview_reductions"] == preview_reductions
 
-    execution = run_model_catalog(
-        study,
-        request_catalog,
-        execution_tier="preview",
-        preview_reductions=preview_reductions,
-    )
+    execution = run_resolved_model_requests(study, [resolved])
     run = execution.runs[0]
     prediction = run.predictions[-1]
     prediction_frame = prediction.load()
@@ -115,12 +110,7 @@ def prove(workspace: Path) -> dict[str, object]:
     assert coverage["n_expected"] == coverage["n_actual"] == actual.height
     state_rows = _fitted_state_rows(study, run.training.hash)
 
-    restarted = run_model_catalog(
-        study,
-        request_catalog,
-        execution_tier="preview",
-        preview_reductions=preview_reductions,
-    ).runs[0]
+    restarted = run_resolved_model_requests(study, [resolved]).runs[0]
     assert restarted.training.hash == run.training.hash
     assert [item.hash for item in restarted.predictions] == [item.hash for item in run.predictions]
     assert value_digest(restarted.predictions[-1].load()) == value_digest(prediction_frame)
