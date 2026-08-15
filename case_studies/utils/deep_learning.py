@@ -499,7 +499,7 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
                     checkpoint,
                     "validation",
                     checkpoint_kind="epoch",
-                    identity_version=2,
+                    identity_version=spec["identity_version"],
                 ),
                 include_preview=spec["execution_tier"] == "preview",
             )

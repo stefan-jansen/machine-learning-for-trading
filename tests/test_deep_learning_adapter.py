@@ -23,7 +23,7 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -> None:
+def _resolve_nlinear_request(tmp_path, monkeypatch):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -97,6 +97,11 @@ def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatc
         config_name="nlinear_probe",
         overrides={"device": "cpu", "n_epochs": 3},
     ).resolve()
+    return study, label, resolved
+
+
+def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -> None:
+    _study, label, resolved = _resolve_nlinear_request(tmp_path, monkeypatch)
     spec = resolved.spec
     context = resolved._context
 
@@ -109,6 +114,39 @@ def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatc
     assert computation["sampling"] == {"max_symbols": 0, "max_train_sequences": 0}
     assert context.expected_keys.height == 12
     assert context.config["n_epochs"] == 3
+
+
+def test_cached_sequence_run_resolves_predictions_at_the_published_identity(
+    tmp_path, monkeypatch
+) -> None:
+    from case_studies.research.results import Result
+    from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
+
+    study, _label, resolved = _resolve_nlinear_request(tmp_path, monkeypatch)
+    spec = resolved.spec
+    requested: list[str] = []
+
+    @classmethod
+    def _record(cls, study_arg, result_hash, **kwargs):
+        requested.append(result_hash)
+        return SimpleNamespace(hash=result_hash)
+
+    monkeypatch.setattr(Result, "open", _record)
+
+    assert deep_learning._cached_sequence_run(study, spec, resolved._context) is None
+
+    training_hash = training_hash_from_spec(spec)
+    expected = [
+        prediction_hash_from_parts(
+            training_hash,
+            row["value"],
+            "validation",
+            checkpoint_kind="epoch",
+            identity_version=spec["identity_version"],
+        )
+        for row in spec["computation"]["checkpoint_schedule"]
+    ]
+    assert requested == [training_hash, *expected]
 
 
 def test_darts_request_resolves_installed_runtime_identity(tmp_path, monkeypatch) -> None:
