@@ -20,6 +20,7 @@ import torch
 
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
 from case_studies.research.identity import ResolvedSpec
+from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.latent_factors.cv import (
     _build_prediction_frame,
@@ -78,6 +79,8 @@ class LatentFactorContext:
     fold_workers: int
     expected_keys: pl.DataFrame
     runtime_provenance: dict[str, Any]
+    prediction_split: str = "validation"
+    published_checkpoints: tuple[int, ...] | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -524,6 +527,162 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     return spec, context
 
 
+def reconstruct_locked_request(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+):
+    """Reconstruct a latent-factor holdout fit without loading model defaults."""
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.models import (
+        ResolvedModelRequest,
+        locked_holdout_split,
+        validate_locked_expected_keys,
+    )
+    from case_studies.utils.latent_factors.case_study import load_case_study_context
+
+    computation = spec["computation"]
+    model = computation.get("model")
+    model_name = str(model.get("class", "")) if isinstance(model, dict) else ""
+    if model_name not in _LATENT_MODELS:
+        raise ValueError(f"unknown locked latent-factor model {model_name!r}")
+    if checkpoint_kind != "epoch" or checkpoint_value is None:
+        raise ValueError("latent-factor holdout requires one locked epoch checkpoint")
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+    if spec.get("seed") != RANDOM_SEED:
+        raise ValueError("locked latent-factor seed cannot be reproduced")
+    if computation.get("sampling") != {"max_symbols": 0}:
+        raise ValueError("locked latent-factor holdout requires an unreduced canonical dataset")
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    case = load_case_study_context(
+        study.case_study,
+        primary_label=label_ref.name,
+        max_symbols=0,
+        use_macro=model_name == "sdf",
+    )
+    if case.date_col != "timestamp" or case.entity_col not in {"product", "symbol"}:
+        raise ValueError("locked latent-factor runner requires timestamp and symbol or product")
+    if model_name == "pca" and not case.persistent_entities:
+        raise ValueError("locked PCA holdout requires persistent entity IDs")
+    expected_inputs = {
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": case.input_data_spec["files"],
+        "feature_names": list(case.feature_names),
+        "input_data_spec": case.input_data_spec,
+        "source_identity": _source_identity(),
+        "runtime_identity": _runtime_identity(),
+        "task": {
+            "type": case.task_type,
+            "class_values": list(case.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+    }
+    for name, expected_value in expected_inputs.items():
+        if computation.get(name) != expected_value:
+            raise ValueError(
+                f"locked latent-factor {name} does not match the available computation"
+            )
+    split = locked_holdout_split(spec, case.dataset, case.date_col, study.case_study)
+    if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
+        require_fold_scoped_temporal_compatibility([split], case.temporal_artifact_splits)
+    case.splits = [split]
+    expected = _prepare_expected_keys(case, model_name)
+    validate_locked_expected_keys(spec, expected)
+
+    if (
+        not isinstance(model, dict)
+        or model.get("class") != model_name
+        or model.get("implementation") != "ml4t-models"
+        or not isinstance(model.get("params"), dict)
+    ):
+        raise ValueError("locked latent-factor model specification is unsupported")
+    n_epochs = int(model.get("n_epochs", -1))
+    n_factors = int(model.get("n_factors", 0))
+    if n_epochs < 0 or n_factors < 1:
+        raise ValueError("locked latent-factor training budget is invalid")
+    model_kwargs = dict(model["params"])
+    runner = _model_runner(model_name)
+    positional = {"chars_train", "returns_train", "chars_val", "returns_val"}
+    allowed = (
+        set(inspect.signature(runner).parameters)
+        - positional
+        - {
+            "artifact_dir",
+            "log_fn",
+            "n_factors",
+            "n_epochs",
+        }
+    )
+    if set(model_kwargs) - allowed:
+        raise ValueError("locked latent-factor model parameters are unsupported")
+    checkpoint_metadata = {"checkpoint_interval": 0} if model_name in {"pca", "ipca"} else {}
+    expected_model = {
+        "class": model_name,
+        "implementation": "ml4t-models",
+        "n_epochs": n_epochs,
+        "n_factors": n_factors,
+        "params": model_kwargs,
+        **checkpoint_metadata,
+    }
+    if model != expected_model:
+        raise ValueError("locked latent-factor model specification does not reproduce exactly")
+    checkpoints = _expected_latent_checkpoints(
+        model_name,
+        n_epochs=n_epochs,
+        model_kwargs=model_kwargs,
+    )
+    expected_schedule = [{"kind": "epoch", "value": value} for value in checkpoints]
+    if (
+        computation.get("checkpoint_schedule") != expected_schedule
+        or checkpoint_value not in checkpoints
+    ):
+        raise ValueError("locked latent-factor checkpoint is absent from its exact schedule")
+    runtime = computation.get("runtime")
+    if not isinstance(runtime, dict) or computation.get("numerical_runtime") != runtime:
+        raise ValueError("locked latent-factor runtime declarations disagree")
+    required_runtime = {"deterministic_algorithms", "device", "fold_workers", "num_threads"}
+    if set(runtime) != required_runtime:
+        raise ValueError("locked latent-factor runtime declaration is incomplete")
+    device = str(runtime["device"])
+    fold_workers = int(runtime["fold_workers"])
+    num_threads = int(runtime["num_threads"])
+    if (
+        device not in {"cpu", "cuda"}
+        or num_threads < 1
+        or fold_workers < 1
+        or (fold_workers > 1 and model_name != "ipca")
+    ):
+        raise ValueError("locked latent-factor runtime cannot be reproduced")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("locked latent-factor runtime requires unavailable CUDA")
+    case.device = device
+    case.num_threads = num_threads
+    case.deterministic_algorithms = bool(runtime["deterministic_algorithms"])
+    macro_context = None
+    if model_name == "sdf":
+        macro_context = dict(case.macro_context_spec or {"policy": "unspecified", "version": "v1"})
+        if case.macro_panel is not None:
+            macro_context["resolved_fold_digest"] = _resolved_macro_digest(case)
+    if computation.get("macro_context") != macro_context:
+        raise ValueError("locked latent-factor macro context does not reproduce exactly")
+    context = LatentFactorContext(
+        case=case,
+        model_name=model_name,
+        model_kwargs=model_kwargs,
+        n_factors=n_factors,
+        n_epochs=n_epochs,
+        fold_workers=fold_workers,
+        expected_keys=expected,
+        runtime_provenance=_runtime_provenance(study, device),
+        prediction_split="holdout",
+        published_checkpoints=(int(checkpoint_value),),
+    )
+    return ResolvedModelRequest(study, "latent_factors", spec, context)
+
+
 def _manifest_files(model_dir: Path) -> dict[str, str]:
     path = model_dir / "manifest.json"
     if not path.is_file():
@@ -666,6 +825,9 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
 
     include_preview = spec["execution_tier"] == "preview"
     training_hash = training_hash_from_spec(spec)
+    published = context.published_checkpoints or tuple(
+        int(item["value"]) for item in spec["computation"]["checkpoint_schedule"]
+    )
     try:
         training = Result.open(study, training_hash, include_preview=include_preview)
         predictions = tuple(
@@ -673,14 +835,14 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
                 study,
                 prediction_hash_from_parts(
                     training_hash,
-                    checkpoint["value"],
-                    "validation",
+                    checkpoint,
+                    context.prediction_split,
                     checkpoint_kind="epoch",
                     identity_version=spec["identity_version"],
                 ),
                 include_preview=include_preview,
             )
-            for checkpoint in spec["computation"]["checkpoint_schedule"]
+            for checkpoint in published
         )
     except KeyError:
         return None
@@ -705,7 +867,10 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
     )
     for result in prediction_results:
         epoch = int(result.registry_record()["checkpoint_value"])
-        if not _same_predictions(_normalize_prediction_frame(result.load()), reconstructed[epoch]):
+        if not _same_predictions(
+            _normalize_prediction_frame(result.load()),
+            reconstructed[epoch],
+        ):
             raise ValueError(f"persisted latent checkpoint {epoch} disagrees with registered data")
     return ModelRun(training=training, predictions=prediction_results)
 
@@ -723,13 +888,26 @@ def _write_manifest(staging: Path) -> None:
     )
 
 
-def _publish_fold_extras(model_dir: Path, train_dir: Path) -> None:
+def _publish_fold_extras(
+    model_dir: Path,
+    train_dir: Path,
+    *,
+    immutable: bool = False,
+) -> None:
     source = model_dir / "fold_extras.json"
     serialized = source.read_text()
     extras = json.loads(serialized)
     if not isinstance(extras, list):
         raise ValueError(f"invalid latent fold diagnostics: {source}")
     target = train_dir / "fold_extras.json"
+    if immutable and target.exists():
+        try:
+            existing = json.loads(target.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("locked latent fold diagnostics are unreadable") from exc
+        if existing != extras:
+            raise ValueError("locked latent fold diagnostics conflict with fitted state")
+        return
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
         temporary.write_text(serialized)
@@ -820,17 +998,23 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-    _publish_fold_extras(model_dir, train_dir)
+    _publish_fold_extras(
+        model_dir,
+        train_dir,
+        immutable=context.prediction_split == "holdout",
+    )
 
     prediction_results = []
-    for checkpoint in computation["checkpoint_schedule"]:
-        value = int(checkpoint["value"])
+    published = context.published_checkpoints or tuple(
+        int(item["value"]) for item in computation["checkpoint_schedule"]
+    )
+    for value in published:
         prediction_results.append(
             study.results.publish_predictions(
                 training,
                 checkpoint_kind="epoch",
                 checkpoint_value=value,
-                split="validation",
+                split=context.prediction_split,
                 predictions=prediction_frames[value],
                 expected_keys=context.expected_keys,
                 task_type=context.case.task_type,
@@ -847,3 +1031,35 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
     return ModelRun(training=training, predictions=tuple(prediction_results))
+
+
+def validate_locked_run(
+    study: Study,
+    spec: dict[str, Any],
+    context: LatentFactorContext,
+    run: ModelRun,
+) -> str:
+    """Validate selected predictions against persisted latent fitted state."""
+    if run.training.hash != training_hash_from_spec(spec) or len(run.predictions) != 1:
+        raise ValueError("locked latent-factor run has the wrong identity")
+    selected = context.published_checkpoints
+    prediction = run.predictions[0]
+    record = prediction.registry_record()
+    if (
+        selected is None
+        or len(selected) != 1
+        or (
+            record["split"],
+            record["checkpoint_kind"],
+            record["checkpoint_value"],
+        )
+        != (context.prediction_split, "epoch", selected[0])
+    ):
+        raise ValueError("locked latent-factor run published the wrong checkpoint")
+    prediction.load()
+    reopened = _cached_run(study, spec, context)
+    if reopened is None or reopened.predictions[0].hash != prediction.hash:
+        raise ValueError("locked latent fitted state cannot reproduce the selected prediction")
+    model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
+    manifest = json.loads((model_dir / "manifest.json").read_text())
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()

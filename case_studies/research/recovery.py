@@ -75,6 +75,22 @@ class ExecutionLedger:
             db.close()
         return ExecutionAttempt(self.study, self.root, attempt_id, scientific_identity)
 
+    def fold_completion_exists(
+        self,
+        *,
+        training_hash: str,
+        candidate_identity: str,
+        fold_id: int,
+    ) -> bool:
+        db_path = self.root / "run_log" / "registry.db"
+        with sqlite3.connect(db_path) as db:
+            row = db.execute(
+                "SELECT 1 FROM candidate_fold_completions WHERE training_hash = ? "
+                "AND candidate_identity = ? AND fold_id = ?",
+                (training_hash, candidate_identity, fold_id),
+            ).fetchone()
+        return row is not None
+
     def reusable_fold(
         self,
         *,

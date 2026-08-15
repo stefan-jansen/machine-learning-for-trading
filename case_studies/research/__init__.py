@@ -8,10 +8,12 @@ from .decisions import DecisionArtifact, StateTransitionPolicy
 from .execution import (
     BacktestExecution,
     BacktestPlan,
+    HoldoutExecution,
     ModelExecution,
     PlannedBacktest,
     plan_backtests,
     run_backtests,
+    run_locked_holdout,
     run_models,
 )
 from .identity import ResolvedSpec
@@ -44,6 +46,7 @@ __all__ = [
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
+    "HoldoutExecution",
     "PredictionResult",
     "PredictionCatalog",
     "PlannedBacktest",
@@ -65,5 +68,6 @@ __all__ = [
     "plan_backtests",
     "plan_models",
     "run_backtests",
+    "run_locked_holdout",
     "run_models",
 ]

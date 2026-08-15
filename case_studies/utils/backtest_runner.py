@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, cast
@@ -37,6 +38,7 @@ from case_studies.utils.backtest_loaders import BacktestConfig, get_backtest_con
 from case_studies.utils.backtest_presets import (
     apply_calendar_session_enforcement,
     ensure_backtest_spec,
+    is_backtest_spec,
     runtime_backtest_config,
     strategy_view,
 )
@@ -883,6 +885,28 @@ def apply_universe_filter(
 # ---------------------------------------------------------------------------
 
 
+def resolved_allow_short_selling(
+    strategy_spec: dict,
+    precomputed_weights: pl.DataFrame | None = None,
+) -> bool:
+    """Return the account short-selling flag implied by a resolved strategy spec.
+
+    Identity-defining, so it has exactly one implementation: callers that hash a
+    spec before handing it to :func:`run_backtest` must derive the flag through
+    this function, or the spec they hashed and the spec that runs will differ.
+    """
+    signal_config = strategy_view(strategy_spec)["signal"]
+    allow_short = bool(
+        strategy_spec["backtest_config"]["account"].get("allow_short_selling", False)
+    ) or bool(signal_config.get("long_short", False))
+    allow_short = allow_short or (
+        str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
+    )
+    if precomputed_weights is not None:
+        allow_short = allow_short or bool(precomputed_weights.filter(pl.col("weight") < 0).height)
+    return allow_short
+
+
 def run_backtest(
     case_study: str,
     prediction_hash: str,
@@ -897,6 +921,7 @@ def run_backtest(
     precomputed_weights: pl.DataFrame | None = None,
     funding_rates: pl.DataFrame | None = None,
     force_rebacktest: bool = False,
+    resolved_spec_only: bool = False,
     contract_specs: dict | None = None,
     option_lifecycle: pl.DataFrame | None = None,
 ) -> BacktestRunResult:
@@ -956,14 +981,35 @@ def run_backtest(
     # ``substitute_continuous_return_for_classification`` docstring).
     predictions = normalize_prediction_columns(predictions)
     predictions = substitute_continuous_return_for_classification(predictions, case_study, label)
-    strategy_spec = ensure_backtest_spec(
-        case_study,
-        get_backtest_config(case_study),
-        strategy_spec,
-        prices=prices,
-        prediction_hash=prediction_hash,
-        initial_cash=initial_cash,
-    )
+    if resolved_spec_only:
+        # The caller (the locked-holdout producer) hashed this exact spec and must
+        # get that identity back. Re-deriving it here would reread the mutable
+        # preset that ensure_backtest_spec consults, so an unrelated setup.yaml
+        # edit could silently move a locked backtest's identity.
+        if not is_backtest_spec(strategy_spec):
+            raise ValueError("resolved_spec_only requires an already-canonical backtest spec")
+        declared = strategy_spec.get("backtest_config", {}).get("metadata", {})
+        if declared.get("prediction_hash") != prediction_hash:
+            raise ValueError(
+                "resolved backtest specification does not declare the prediction being run"
+            )
+        # ensure_backtest_spec would have filled these from the preset. Skipping it means
+        # a spec that omits them reaches the rebalance logic and dies on a bare KeyError
+        # far from the cause, so require them here instead of defaulting them back in.
+        rebalance = strategy_spec.get("strategy", {}).get("rebalance") or {}
+        missing = {"min_weight_change", "min_trade_value"} - set(rebalance)
+        if missing:
+            raise ValueError(f"resolved backtest specification omits rebalance {sorted(missing)}")
+        strategy_spec = deepcopy(strategy_spec)
+    else:
+        strategy_spec = ensure_backtest_spec(
+            case_study,
+            get_backtest_config(case_study),
+            strategy_spec,
+            prices=prices,
+            prediction_hash=prediction_hash,
+            initial_cash=initial_cash,
+        )
     from case_studies.utils.conformal import ensure_conformal_calibration_identity
 
     strategy_spec = ensure_conformal_calibration_identity(strategy_spec)
@@ -977,14 +1023,7 @@ def run_backtest(
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     strategy = strategy_view(strategy_spec)
     signal_config = strategy["signal"]
-    allow_short = bool(
-        strategy_spec["backtest_config"]["account"].get("allow_short_selling", False)
-    ) or bool(signal_config.get("long_short", False))
-    allow_short = allow_short or (
-        str(signal_config.get("direction", "long_only")).strip().lower() == "short_only"
-    )
-    if precomputed_weights is not None:
-        allow_short = allow_short or bool(precomputed_weights.filter(pl.col("weight") < 0).height)
+    allow_short = resolved_allow_short_selling(strategy_spec, precomputed_weights)
     strategy_spec["backtest_config"]["account"]["allow_short_selling"] = allow_short
 
     # Apply spec-declared universe restriction (e.g., sp500_options rung-3
