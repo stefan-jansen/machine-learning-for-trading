@@ -23,7 +23,9 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _resolve_nlinear_request(tmp_path, monkeypatch, entity: str = "symbol"):
+def _resolve_nlinear_request(
+    tmp_path, monkeypatch, entity: str = "symbol", library: str = "pytorch"
+):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -83,10 +85,14 @@ def _resolve_nlinear_request(tmp_path, monkeypatch, entity: str = "symbol"):
                 "batch_size": 64,
                 "checkpoint_interval": 2,
                 "n_epochs": 4,
-                "params": {"architecture": "nlinear", "dropout": 0.0, "lookback": 2},
+                "params": {
+                    "architecture": "tsmixer" if library == "darts" else "nlinear",
+                    "dropout": 0.0,
+                    "lookback": 2,
+                },
                 "config_name": "nlinear_probe",
                 "family": "deep_learning",
-                "library": "pytorch",
+                "library": library,
             }
         ],
     )
@@ -482,3 +488,9 @@ def test_sequence_resolver_accepts_either_canonical_entity_key(
 def test_sequence_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
     with pytest.raises(ValueError, match="does not support entity key 'ticker'"):
         _resolve_nlinear_request(tmp_path, monkeypatch, entity="ticker")
+
+
+def test_darts_presets_refuse_a_non_symbol_entity_key(tmp_path, monkeypatch) -> None:
+    """The Darts key builder names its keys after the entity column, unlike the other three."""
+    with pytest.raises(ValueError, match="Darts presets require the symbol entity key"):
+        _resolve_nlinear_request(tmp_path, monkeypatch, entity="product", library="darts")

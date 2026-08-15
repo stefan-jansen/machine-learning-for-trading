@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from types import SimpleNamespace
 
 import polars as pl
@@ -355,3 +356,62 @@ def test_tabm_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) 
             config_name="tabm_probe",
             overrides={"device": "cpu"},
         ).resolve()
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_tabm_publishes_predictions_under_the_expected_key_names(monkeypatch, entity) -> None:
+    """The runner emits the reader-facing entity key; the registry contract expects `symbol`."""
+    from case_studies.utils import tabular_dl
+
+    expected_keys = pl.DataFrame(
+        {
+            "symbol": ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 3), datetime(2024, 1, 3)],
+            "fold": [0, 0],
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
+    all_predictions = pl.DataFrame(
+        {
+            "config": ["tabm_probe"] * 2,
+            "epoch": [2, 2],
+            entity: ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 3), datetime(2024, 1, 3)],
+            "fold_id": [0, 0],
+            "y_true": [0.01, -0.01],
+            "y_score": [0.02, -0.02],
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    context = SimpleNamespace(
+        config={"config_name": "tabm_probe"},
+        date_col="timestamp",
+        entity_col=entity,
+        expected_keys=expected_keys,
+        task_type="regression",
+        class_values=(),
+        eval_label_col=None,
+        label_col="fwd_ret_1d",
+    )
+    published = []
+
+    def capture(_training, **kwargs):
+        published.append(kwargs["predictions"])
+        return kwargs["predictions"]
+
+    study = SimpleNamespace(results=SimpleNamespace(publish_predictions=capture))
+    spec = {"computation": {"checkpoint_schedule": [{"kind": "epoch", "value": 2}]}}
+
+    tabular_dl._publish_tabm_predictions(
+        study, spec, context, object(), {"all_predictions": all_predictions}
+    )
+
+    assert len(published) == 1
+    frame = published[0]
+    assert "symbol" in frame.columns and entity not in set(frame.columns) - {"symbol"}
+    assert frame.schema["symbol"] == expected_keys.schema["symbol"]
+    assert frame.schema["timestamp"] == expected_keys.schema["timestamp"]
+    assert frame.schema["fold"] == expected_keys.schema["fold"]
+    assert (
+        frame.select("symbol", "timestamp", "fold")
+        .sort("symbol")
+        .equals(expected_keys.sort("symbol"))
+    )

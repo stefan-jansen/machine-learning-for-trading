@@ -362,6 +362,14 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             darts_validation_keys,
         )
 
+        # darts_validation_keys names its keys after the entity column and adds
+        # `position` where the panel has one, unlike the three key builders that
+        # emit `symbol`. No product-keyed case study configures a Darts preset,
+        # so that combination has never been exercised; refuse it here rather
+        # than fail later on a key that is missing from the digest.
+        if entity_col != "symbol":
+            raise ValueError(f"Darts presets require the symbol entity key, not {entity_col!r}")
+
         expected = darts_validation_keys(
             dataset_pd,
             splits,
