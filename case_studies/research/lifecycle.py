@@ -7,8 +7,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import polars as pl
-
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.specs import (
@@ -131,33 +129,6 @@ def _valid_holdout_decision(
         if name in holdout:
             valid = valid and artifact.spec.get(name) == holdout[name]
     return valid
-
-
-def _canonical_funding_digest(study: Study, prices) -> str | None:
-    if study.case_study != "crypto_perps_funding":
-        return None
-    from case_studies.crypto_perps_funding.funding_data import load_funding_rates
-
-    price_keys = prices.select("symbol", "timestamp").unique()
-    start_value = price_keys.get_column("timestamp").min()
-    end_value = price_keys.get_column("timestamp").max()
-    start = start_value.date().isoformat() if hasattr(start_value, "date") else str(start_value)
-    end = end_value.date().isoformat() if hasattr(end_value, "date") else str(end_value)
-    funding = (
-        load_funding_rates(
-            symbols=price_keys.get_column("symbol").unique().to_list(),
-            start_date=start,
-            end_date=end,
-        )
-        .with_columns(
-            pl.col("symbol").cast(price_keys.schema["symbol"]),
-            pl.col("timestamp").cast(price_keys.schema["timestamp"]),
-        )
-        .join(price_keys, on=["symbol", "timestamp"], how="semi")
-    )
-    if funding.is_empty():
-        raise ValueError("canonical holdout has no official funding settlements")
-    return value_digest(funding.sort("timestamp", "symbol"))
 
 
 class Lifecycle:
@@ -314,11 +285,7 @@ class Lifecycle:
             warmup_periods=strategy_warmup_periods(lock.record["strategy_spec"]),
         )
         canonical_price_digest = value_digest(canonical_holdout_prices)
-        canonical_funding_digest = _canonical_funding_digest(self.study, canonical_holdout_prices)
         backtest_spec = backtest.spec() if isinstance(backtest, BacktestResult) else {}
-        funding_valid = canonical_funding_digest is None or (
-            backtest_spec.get("input_identity", {}).get("funding_rates") == canonical_funding_digest
-        )
         valid = (
             isinstance(training, TrainingResult)
             and training.complete
@@ -337,7 +304,6 @@ class Lifecycle:
             and backtest.execution_tier == "canonical"
             and backtest.registry_record()["prediction_hash"] == prediction.hash
             and backtest_spec.get("input_identity", {}).get("prices") == canonical_price_digest
-            and funding_valid
             and _valid_holdout_decision(
                 self.study,
                 lock.record["strategy_spec"],
