@@ -1490,14 +1490,14 @@ def test_rebalance_scoring_thins_to_declared_schedule() -> None:
         }
     )
 
-    _, full_periods = _compute_frame_ic(frame, "symbol")
+    _, full_periods = _compute_frame_ic(frame)
     thinned = _score_prediction_frame(
         frame,
         score_dates="rebalance",
         score_cadence="monthly_month_end",
         score_rebalance_step=1,
     )
-    _, thinned_periods = _compute_frame_ic(thinned, "symbol")
+    _, thinned_periods = _compute_frame_ic(thinned)
 
     assert full_periods == 4
     assert thinned_periods == 2

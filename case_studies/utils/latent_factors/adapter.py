@@ -366,17 +366,10 @@ def _prepare_expected_keys(
             fold_id=int(split["fold"]),
             model_name=model_name,
             epoch=0,
-            entity_col=case.entity_col,
         )
         if frame is None:
             raise ValueError(f"latent fold {split['fold']} has no eligible validation keys")
-        frames.append(
-            frame.select(
-                pl.col(case.entity_col).alias("symbol"),
-                "timestamp",
-                pl.col("fold_id").alias("fold"),
-            )
-        )
+        frames.append(frame.select("symbol", "timestamp", pl.col("fold_id").alias("fold")))
     expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
     if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("latent-factor request produced duplicate expected prediction keys")
@@ -713,7 +706,7 @@ def _valid_model_dir(model_dir: Path, context: LatentFactorContext) -> bool:
     )
 
 
-def _normalize_prediction_frame(frame: pl.DataFrame, entity_col: str = "symbol") -> pl.DataFrame:
+def _normalize_prediction_frame(frame: pl.DataFrame) -> pl.DataFrame:
     rename = {
         old: new
         for old, new in {
@@ -723,11 +716,11 @@ def _normalize_prediction_frame(frame: pl.DataFrame, entity_col: str = "symbol")
         }.items()
         if old in frame.columns
     }
-    columns = [entity_col, "timestamp", "fold", "prediction", "actual"]
+    columns = ["symbol", "timestamp", "fold", "prediction", "actual"]
     normalized = frame.rename(rename)
     if "eval_actual" in normalized.columns:
         columns.append("eval_actual")
-    return normalized.select(columns).sort(entity_col, "timestamp", "fold")
+    return normalized.select(columns).sort("symbol", "timestamp", "fold")
 
 
 def _reconstruct_predictions(
@@ -794,21 +787,20 @@ def _reconstruct_predictions(
                 fold_id=int(split["fold"]),
                 model_name=context.model_name,
                 epoch=epoch,
-                entity_col=case.entity_col,
             )
             if frame is None:
                 raise ValueError(f"persisted latent fold {split['fold']} produced no predictions")
             frames[int(epoch)].append(frame)
     return {
-        epoch: _normalize_prediction_frame(pl.concat(epoch_frames), case.entity_col)
+        epoch: _normalize_prediction_frame(pl.concat(epoch_frames))
         for epoch, epoch_frames in frames.items()
     }
 
 
-def _same_predictions(left: pl.DataFrame, right: pl.DataFrame, entity_col: str) -> bool:
+def _same_predictions(left: pl.DataFrame, right: pl.DataFrame) -> bool:
     if (
-        left.select(entity_col, "timestamp", "fold").equals(
-            right.select(entity_col, "timestamp", "fold")
+        left.select("symbol", "timestamp", "fold").equals(
+            right.select("symbol", "timestamp", "fold")
         )
         is False
     ):
@@ -876,9 +868,8 @@ def _cached_run(study: Study, spec: dict[str, Any], context: LatentFactorContext
     for result in prediction_results:
         epoch = int(result.registry_record()["checkpoint_value"])
         if not _same_predictions(
-            _normalize_prediction_frame(result.load(), context.case.entity_col),
+            _normalize_prediction_frame(result.load()),
             reconstructed[epoch],
-            context.case.entity_col,
         ):
             raise ValueError(f"persisted latent checkpoint {epoch} disagrees with registered data")
     return ModelRun(training=training, predictions=prediction_results)
@@ -991,16 +982,14 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
             model_stage = staging / context.model_name
             shutil.rmtree(model_stage / "_incremental", ignore_errors=True)
             fresh_frames = {
-                int(key[0]): _normalize_prediction_frame(frame, context.case.entity_col)
+                int(key[0]): _normalize_prediction_frame(frame)
                 for key, frame in result["all_predictions"][context.model_name]
                 .partition_by("epoch", as_dict=True)
                 .items()
             }
             prediction_frames = _reconstruct_predictions(staging, context)
             if set(fresh_frames) != set(prediction_frames) or any(
-                not _same_predictions(
-                    fresh_frames[epoch], prediction_frames[epoch], context.case.entity_col
-                )
+                not _same_predictions(fresh_frames[epoch], prediction_frames[epoch])
                 for epoch in fresh_frames
             ):
                 raise ValueError("persisted latent state does not reproduce fresh predictions")

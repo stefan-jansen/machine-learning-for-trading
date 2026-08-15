@@ -883,7 +883,7 @@ def _fit_or_reuse_predictions(
             fitted_folds.append(fold_id)
 
     _write_model_manifest(training, immutable=context.immutable_recovery)
-    predictions = pl.concat(prediction_frames).sort(context.entity_col, "timestamp", "fold")
+    predictions = pl.concat(prediction_frames).sort("symbol", "timestamp", "fold")
     return predictions, reused_folds, fitted_folds
 
 
@@ -1024,9 +1024,7 @@ def _finish_batch_candidate(study: Study, candidate: _BatchCandidate) -> None:
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_model_manifest(candidate.training)
-        predictions = pl.concat(candidate.frames).sort(
-            candidate.context.entity_col, "timestamp", "fold"
-        )
+        predictions = pl.concat(candidate.frames).sort("symbol", "timestamp", "fold")
         prediction = study.results.publish_predictions(
             candidate.training,
             checkpoint_kind="final",
@@ -1411,7 +1409,7 @@ def validate_locked_run(
         record["checkpoint_value"],
     ) != expected_checkpoint:
         raise ValueError("locked linear run published the wrong checkpoint")
-    published = prediction.load().sort(context.entity_col, "timestamp", "fold")
+    published = prediction.load().sort("symbol", "timestamp", "fold")
 
     training_dir = run.training.root / "run_log" / "training" / run.training.hash
     model_dir = training_dir / "models"
@@ -1440,7 +1438,7 @@ def validate_locked_run(
         ):
             raise ValueError("locked linear completed-fold record does not validate")
         shards.append(pl.read_parquet(shard))
-    reconstructed = pl.concat(shards).sort(context.entity_col, "timestamp", "fold")
+    reconstructed = pl.concat(shards).sort("symbol", "timestamp", "fold")
     if not reconstructed.equals(published):
         raise ValueError("locked linear fitted state does not reproduce published predictions")
     return hashlib.sha256(canonical_json(manifest_record).encode()).hexdigest()

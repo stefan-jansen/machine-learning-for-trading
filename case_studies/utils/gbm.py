@@ -1150,7 +1150,7 @@ def train_gbm_config(
                 pred_col="y_pred",
                 ret_col="y_true",
                 date_col="timestamp",
-                entity_col=entity_col,
+                entity_col="symbol",
                 min_obs=5,
             )["ic_mean"]
             checkpoint_ics[cp].append(ic)
@@ -1204,7 +1204,7 @@ def train_gbm_config(
             pred_col="y_pred",
             ret_col="y_true",
             date_col="timestamp",
-            entity_col=entity_col,
+            entity_col="symbol",
             min_obs=5,
         )["ic_mean"]
 
@@ -2140,7 +2140,7 @@ def _gbm_prediction_frame(
         )
     if len(frames) != len(context.folds):
         raise ValueError(f"GBM checkpoint {checkpoint} is missing a declared fold")
-    return pl.concat(frames).sort(context.entity_col, "timestamp", "fold")
+    return pl.concat(frames).sort("symbol", "timestamp", "fold")
 
 
 def _write_gbm_manifest(staging: Path, folds: tuple[dict[str, Any], ...]) -> None:
@@ -2312,7 +2312,7 @@ def _gbm_fold_prediction_shard(entries: list[dict[str, Any]], context: GBMContex
         frames.append(frame)
     if not frames:
         raise ValueError("GBM fold fit produced no checkpoint predictions")
-    return pl.concat(frames).sort("checkpoint", context.entity_col, "timestamp", "fold")
+    return pl.concat(frames).sort("checkpoint", "symbol", "timestamp", "fold")
 
 
 def _fit_or_reuse_gbm_fold(
@@ -2413,7 +2413,6 @@ def _gbm_curves_from_shards(
     checkpoints: tuple[int, ...],
 ) -> list[dict[str, Any]]:
     target = "eval_actual" if "eval_actual" in predictions.columns else "actual"
-    entity_col = "product" if "product" in predictions.columns else "symbol"
     curves = []
     for checkpoint in checkpoints:
         frame = predictions.filter(pl.col("checkpoint") == checkpoint)
@@ -2423,7 +2422,7 @@ def _gbm_curves_from_shards(
             pred_col="prediction",
             ret_col=target,
             date_col="timestamp",
-            entity_col=entity_col,
+            entity_col="symbol",
             min_obs=5,
         )
         curves.append(
@@ -2550,9 +2549,7 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
                 f"{len(candidate.context.fold_ids)} fold shards"
             )
         _write_gbm_training_manifest(candidate.training, candidate.context.fold_ids)
-        predictions = pl.concat(candidate.frames).sort(
-            "checkpoint", candidate.context.entity_col, "timestamp", "fold"
-        )
+        predictions = pl.concat(candidate.frames).sort("checkpoint", "symbol", "timestamp", "fold")
         prediction_results = []
         checkpoints = tuple(
             int(item["value"]) for item in candidate.spec["computation"]["checkpoint_schedule"]
@@ -2938,7 +2935,7 @@ def validate_locked_run(
         record["checkpoint_value"],
     ) != (context.prediction_split, "iteration", selected[0]):
         raise ValueError("locked GBM run published the wrong checkpoint")
-    published = prediction.load().sort(context.entity_col, "timestamp", "fold")
+    published = prediction.load().sort("symbol", "timestamp", "fold")
     model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
     if not _valid_gbm_model_dir(model_dir, context):
         raise ValueError("locked GBM fitted-state manifest does not validate")
@@ -2947,7 +2944,7 @@ def validate_locked_run(
         selected[0],
         context,
     )
-    key_columns = [context.entity_col, "timestamp", "fold"]
+    key_columns = ["symbol", "timestamp", "fold"]
     value_columns = ["prediction", "actual"]
     if "eval_actual" in published.columns or "eval_actual" in reconstructed.columns:
         if "eval_actual" not in published.columns or "eval_actual" not in reconstructed.columns:

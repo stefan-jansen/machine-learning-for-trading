@@ -283,20 +283,14 @@ def test_cme_family_eligibility_keys_use_the_internal_symbol_contract() -> None:
         fold_id=0,
         model_name="pca",
         epoch=0,
-        entity_col="product",
     )
 
-    # Eligibility keys are the internal contract and always name the entity `symbol`.
-    for frame in (linear_keys, gbm_keys, tabm_keys, sequence_keys):
+    # Every builder names the entity `symbol`, whatever reader key it was given. The
+    # runners that carry the reader key further rename it at the publish boundary.
+    for frame in (linear_keys, gbm_keys, tabm_keys, sequence_keys, latent):
         assert frame is not None
         assert "symbol" in frame.columns
         assert "product" not in frame.columns
-
-    # A prediction frame is not an eligibility manifest: it carries the reader-facing
-    # key its case study uses, and each runner renames it at the publish boundary.
-    assert latent is not None
-    assert "product" in latent.columns
-    assert "symbol" not in latent.columns
 
 
 def _real_linear_lock(

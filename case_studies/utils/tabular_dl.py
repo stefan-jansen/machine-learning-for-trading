@@ -1071,7 +1071,7 @@ def _reconstruct_locked_tabm_predictions(
         )
         columns: dict[str, Any] = {
             context.date_col: prepared["val_dates"],
-            context.entity_col: prepared["val_entities"],
+            "symbol": prepared["val_entities"],
             "fold": fold,
             "actual": prepared["y_val"],
             "prediction": prediction,
@@ -1083,7 +1083,7 @@ def _reconstruct_locked_tabm_predictions(
         pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
         # expected_keys names the entity `symbol` whatever the reader key is, so the
         # dtype has to be read from that column rather than from the reader name.
-        pl.col(context.entity_col).cast(context.expected_keys.schema["symbol"]),
+        pl.col("symbol").cast(context.expected_keys.schema["symbol"]),
         pl.col("fold").cast(context.expected_keys.schema["fold"]),
     )
 
@@ -1130,8 +1130,6 @@ def validate_locked_run(
         selected[0],
         device,
     )
-    if context.entity_col != "symbol":
-        reconstructed = reconstructed.rename({context.entity_col: "symbol"})
     reconstructed = reconstructed.sort("symbol", context.date_col, "fold")
     key_columns = ["symbol", context.date_col, "fold"]
     value_columns = ["prediction", "actual"]
@@ -1755,7 +1753,7 @@ def _train_tabm_fold(
             ic_frame = pl.DataFrame(
                 {
                     "timestamp": val_dates,
-                    entity_col: val_entities,
+                    "symbol": val_entities,
                     "y_true": y_eval_val,
                     "y_pred": val_preds,
                 }
@@ -2649,7 +2647,7 @@ def run_tabm_cv(
                     ic_frame = pl.DataFrame(
                         {
                             "timestamp": fd["val_dates"],
-                            entity_col: fd["val_entities"],
+                            "symbol": fd["val_entities"],
                             "y_true": fd["y_eval_val"],
                             "y_pred": preds,
                         }
