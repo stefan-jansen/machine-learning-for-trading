@@ -40,6 +40,13 @@ class StateTransitionPolicy:
             raise ValueError(f"state transitions must be one of {sorted(allowed)}")
 
 
+def _decision_entity_key(decisions: pl.DataFrame) -> str:
+    entity_keys = [column for column in ("symbol", "product") if column in decisions.columns]
+    if len(entity_keys) != 1:
+        raise ValueError("decision artifacts require exactly one entity key: symbol or product")
+    return entity_keys[0]
+
+
 def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     value_column = {
         "target_weights": "weight",
@@ -49,7 +56,7 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     }.get(kind)
     if value_column is None:
         raise ValueError("unsupported decision artifact kind")
-    keys = ("symbol", "timestamp")
+    keys = (_decision_entity_key(decisions), "timestamp")
     required = {*keys, value_column}
     missing = required - set(decisions.columns)
     if missing:

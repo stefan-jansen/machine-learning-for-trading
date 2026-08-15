@@ -16,6 +16,7 @@ from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
     load_contract_specs_from_yaml,
+    load_futures_market_contract,
 )
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
@@ -263,19 +264,41 @@ class Strategy:
         allocation = self._resolved_allocation()
         return strategy_warmup_periods({"allocation": allocation}) if allocation else 0
 
+    def _engine_prices(
+        self,
+        prices: pl.DataFrame,
+        *,
+        reader_supplied: bool,
+    ) -> pl.DataFrame:
+        if self.study.case_study != "cme_futures":
+            return prices
+        if "product" in prices.columns and "symbol" in prices.columns:
+            raise ValueError("CME prices cannot contain both product and symbol")
+        if "product" in prices.columns:
+            return prices.rename({"product": "symbol"})
+        if reader_supplied or "symbol" not in prices.columns:
+            raise ValueError("CME prices require the canonical product entity key")
+        return prices
+
     def resolve(self, *, prices: pl.DataFrame | None = None) -> dict[str, Any]:
         self.study.activate(ExecutionTier(self.prediction.execution_tier))
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
         case_config = get_backtest_config(self.study.case_study)
+        reader_supplied = prices is not None
         resolved_prices = prices
-        if resolved_prices is None:
+        if not reader_supplied:
             resolved_prices = load_backtest_prices_for(
                 self.study.case_study,
                 self.label,
                 split=self.split,
                 warmup_periods=self._warmup_periods(),
             )
+        assert resolved_prices is not None
+        resolved_prices = self._engine_prices(
+            resolved_prices,
+            reader_supplied=reader_supplied,
+        )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None
         )
@@ -345,6 +368,8 @@ class Strategy:
             spec["decision_artifact"] = {
                 "hash": self.decision.hash,
                 "kind": self.decision.kind,
+                "decision_keys": self.decision.spec["decision_keys"],
+                "parameters": self.decision.spec["parameters"],
                 "artifact_digest": self.decision.spec["artifact_digest"],
                 "canonical": self.decision.canonical,
                 "source_identity": self.decision.spec["source_identity"],
@@ -363,6 +388,15 @@ class Strategy:
                 symbol: asdict(contract_spec) for symbol, contract_spec in contract_specs.items()
             }
             spec["input_identity"]["contract_specs"] = compute_hash(canonical_json(serialized))
+            products = prices.get_column("symbol").unique().sort().to_list()
+            futures_market = load_futures_market_contract(products)
+            spec["input_identity"]["futures_market"] = compute_hash(canonical_json(futures_market))
+            spec["futures_market"] = futures_market
+            spec["entity_contract"] = {
+                "reader_key": "product",
+                "engine_key": "symbol",
+                "mapping": "one_to_one_at_backtest_boundary",
+            }
         resolved = ensure_conformal_calibration_identity(spec)
         if self.split == "holdout":
             from .lifecycle import _locked_strategy_projection
@@ -395,23 +429,35 @@ class Strategy:
         if self.decision is None:
             return None
         decisions = self.decision.load()
+        decision_keys = tuple(self.decision.spec.get("decision_keys") or ())
+        if len(decision_keys) != 2 or decision_keys[1] != "timestamp":
+            raise ValueError("decision artifact has an invalid key contract")
+        entity_key = decision_keys[0]
+        if entity_key not in {"symbol", "product"}:
+            raise ValueError(f"unsupported decision entity key {entity_key!r}")
+        if self.study.case_study == "cme_futures" and entity_key != "product":
+            raise ValueError("CME futures decisions require the canonical product entity key")
+        if self.study.case_study != "cme_futures" and entity_key != "symbol":
+            raise ValueError(
+                f"{self.study.case_study} decisions require the canonical symbol entity key"
+            )
         fold_columns = [column for column in ("fold", "fold_id") if column in decisions.columns]
         if len(fold_columns) > 1:
             raise ValueError("decision artifact cannot contain both fold and fold_id")
         fold_column = fold_columns[0] if fold_columns else None
         selected_fold = [fold_column] if fold_column else []
         if self.decision.kind == "target_weights":
-            weights = decisions.select("symbol", "timestamp", "weight", *selected_fold)
+            weights = decisions.select(entity_key, "timestamp", "weight", *selected_fold)
         elif self.decision.kind == "target_positions":
             weights = decisions.select(
-                "symbol", "timestamp", "position", *selected_fold
+                entity_key, "timestamp", "position", *selected_fold
             ).with_columns(pl.col("position").abs().sum().over("timestamp").alias("gross"))
             weights = weights.with_columns(
                 pl.when(pl.col("gross") > 0)
                 .then(pl.col("position") / pl.col("gross"))
                 .otherwise(0.0)
                 .alias("weight")
-            ).select("symbol", "timestamp", "weight", *selected_fold)
+            ).select(entity_key, "timestamp", "weight", *selected_fold)
         elif self.decision.kind == "short_straddles":
             if self.study.case_study != "sp500_options" or self.label != "ret_to_expiry":
                 raise ValueError("short-straddle decisions require sp500_options and ret_to_expiry")
@@ -433,6 +479,8 @@ class Strategy:
             weights = decisions
         else:
             raise ValueError("canonical backtesting does not support order decision artifacts")
+        if entity_key == "product":
+            weights = weights.rename({"product": "symbol"})
         if fold_column == "fold_id":
             weights = weights.rename({"fold_id": "fold"})
         price_keys = prices.select("symbol", "timestamp").unique()
@@ -472,15 +520,21 @@ class Strategy:
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
         predictions = self.prediction.load()
+        reader_supplied = prices is not None
         resolved_prices = prices
         self.study.activate(ExecutionTier(self.prediction.execution_tier))
-        if resolved_prices is None:
+        if not reader_supplied:
             resolved_prices = load_backtest_prices_for(
                 self.study.case_study,
                 self.label,
                 split=self.split,
                 warmup_periods=self._warmup_periods(),
             )
+        assert resolved_prices is not None
+        resolved_prices = self._engine_prices(
+            resolved_prices,
+            reader_supplied=reader_supplied,
+        )
         contract_specs = (
             load_contract_specs_from_yaml() if self.study.case_study == "cme_futures" else None
         )
