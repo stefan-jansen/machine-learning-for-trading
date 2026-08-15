@@ -17,6 +17,7 @@ import joblib
 import numpy as np
 import polars as pl
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
+from threadpoolctl import threadpool_limits
 
 from case_studies.research.contracts import ExecutionTier
 from case_studies.research.cv import require_fold_scoped_temporal_compatibility
@@ -37,6 +38,14 @@ from utils.modeling import (
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
+
+# Coordinate descent and the BLAS kernels behind these fits reduce in thread-order, so a fit is
+# a deterministic function of the pool rather than of the data alone. Measured on
+# crypto_perps_funding lasso_f0.08: identical training_hash 51c3b31a83a2 under both arms, with
+# prediction digests 37352b2ff14a4b6a uncapped (pools 16/24) against c81ca6b5302e1dc2 capped.
+# Fixed rather than derived: a value like -1 varies with the host, so a result would not be
+# identity-stable across the readers' hardware.
+LINEAR_THREAD_LIMIT = 1
 
 _MODEL_CLASSES = {
     "LinearRegression": LinearRegression,
@@ -334,6 +343,10 @@ def _build_resolved_request(
             "imputer": {"class": "SimpleImputer", "strategy": "median"},
             "scaler": {"class": "StandardScaler", "with_mean": True, "with_std": True},
         },
+        "numerics": {
+            "thread_limit": LINEAR_THREAD_LIMIT,
+            "deterministic_reduction": True,
+        },
         "checkpoint_schedule": [{"kind": "final", "value": None}],
         "expected_prediction_keys": {
             "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
@@ -612,8 +625,12 @@ def _fit_or_reuse_fold(
     started = time.perf_counter()
     cls = _MODEL_CLASSES[spec["computation"]["model"]["class"]]
     model = cls(**params)
-    model.fit(fold["X_train"], fold["y_train"])
-    predictions = _fold_predictions(model, fold, context)
+    thread_limit = int(
+        spec["computation"].get("numerics", {}).get("thread_limit", LINEAR_THREAD_LIMIT)
+    )
+    with threadpool_limits(limits=thread_limit):
+        model.fit(fold["X_train"], fold["y_train"])
+        predictions = _fold_predictions(model, fold, context)
     frame = _prediction_frame(fold, predictions, context)
     artifact_temp = model_dir / f".{artifact.name}.{uuid.uuid4().hex}.tmp"
     shard_temp = shard_dir / f".{shard.name}.{uuid.uuid4().hex}.tmp"
