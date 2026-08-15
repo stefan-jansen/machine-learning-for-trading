@@ -1379,7 +1379,6 @@ def _train_one_config(
     n_epochs: int,
     checkpoint_interval: int,
     device: torch.device,
-    entity_col: str = "symbol",
     checkpoint_callback: Callable[[dict[int, np.ndarray], np.ndarray, np.ndarray, np.ndarray], None]
     | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -2148,7 +2147,6 @@ def run_dl_cv(
                 n_epochs=cfg_n_epochs,
                 checkpoint_interval=cfg_checkpoint,
                 device=torch_device,
-                entity_col=entity_col,
                 checkpoint_callback=_on_checkpoint,
                 epoch_callback=_on_epoch,
                 **train_kwargs,

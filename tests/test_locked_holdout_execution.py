@@ -1537,3 +1537,55 @@ def test_locked_reconstruction_leaves_linear_training_identity_unmoved(
     fixed = ("symbol", "timestamp", "fold")
     assert value_digest(widened, fixed) == value_digest(keys, fixed)
     assert value_digest(widened, tuple(widened.columns)) != value_digest(keys, fixed)
+
+
+def test_tabm_checkpoint_ic_survives_product_entities() -> None:
+    """The checkpoint IC must compute for a product-keyed study, not be swallowed.
+
+    _train_tabm_fold builds its IC frame with the literal `symbol` key. When the
+    cross_sectional_ic call was left passing the reader key, the join raised
+    ColumnNotFoundError - and run_tabm_cv catches Exception per config, so a fresh
+    cme_futures run reported every config unavailable and skipped all training
+    rather than failing. Nothing else exercises this: the runtime suites monkeypatch
+    _train_tabm_fold, so the IC call never runs, and none drives a product key.
+    """
+    import numpy as np
+    import torch
+    from torch import nn
+
+    from case_studies.utils import tabular_dl
+
+    rows, features = 12, 3
+    rng = np.random.default_rng(0)
+    x_train = rng.normal(size=(rows, features)).astype(np.float32)
+    y_train = rng.normal(size=rows).astype(np.float32)
+    x_val = rng.normal(size=(rows, features)).astype(np.float32)
+    y_val = rng.normal(size=rows).astype(np.float32)
+    # Two products per timestamp, so the cross-sectional join has something to group.
+    val_dates = np.array([np.datetime64(f"2024-01-0{index % 6 + 1}") for index in range(rows)])
+    val_entities = np.array(["ES" if index % 2 else "NQ" for index in range(rows)])
+
+    class _Probe(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = nn.Linear(features, 1)
+
+        def forward(self, batch):  # noqa: D102
+            return self.linear(batch).squeeze(-1)
+
+    result = tabular_dl._train_tabm_fold(
+        model=_Probe(),
+        X_train=x_train,
+        y_train=y_train,
+        X_val=x_val,
+        y_val=y_val,
+        y_eval_val=y_val,
+        val_dates=val_dates,
+        val_entities=val_entities,
+        n_epochs=1,
+        batch_size=4,
+        checkpoint_interval=1,
+        device=torch.device("cpu"),
+    )
+
+    assert result is not None
