@@ -605,6 +605,10 @@ def run_resolved_request(
             .drop("config", "epoch")
             .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
         )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol" and context.entity_col in predictions.columns:
+            predictions = predictions.rename({context.entity_col: "symbol"})
         prediction_results.append(
             study.results.publish_predictions(
                 training,

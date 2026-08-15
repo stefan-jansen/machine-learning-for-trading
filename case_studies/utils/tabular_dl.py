@@ -524,11 +524,15 @@ def _publish_tabm_predictions(
             .filter((pl.col("config") == result_key) & (pl.col("epoch") == checkpoint))
             .drop("config", "epoch")
             .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-            .with_columns(
-                pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
-                pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
-                pl.col("fold").cast(context.expected_keys.schema["fold"]),
-            )
+        )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol":
+            predictions = predictions.rename({context.entity_col: "symbol"})
+        predictions = predictions.with_columns(
+            pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
+            pl.col("symbol").cast(context.expected_keys.schema["symbol"]),
+            pl.col("fold").cast(context.expected_keys.schema["fold"]),
         )
         prediction_results.append(
             study.results.publish_predictions(
