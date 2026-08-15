@@ -403,14 +403,13 @@ if len(placebo_arr) > 0:
 # it, so a later reader can tell two runs apart by their configuration rather
 # than by when they happened.
 #
-# The residuals come back one per analysis row, in that frame's order, with
-# training-only rows left empty. The check below requires that correspondence
-# to hold exactly, because a mismatch means the residuals and the rows describe
-# different observations, and pairing them by position would bury that.
+# Cross-fitting returns one treatment residual and one outcome residual per
+# analysis row, in that frame's order, with training-only rows left empty. The
+# check below requires that correspondence to hold exactly: a mismatch means the
+# residuals and the rows describe different observations, and pairing them by
+# position would bury that rather than surface it.
 
 # %%
-symbol_col = entity_cols[0]
-
 T_res = dml_result["T_res"]
 Y_res = dml_result["Y_res"]
 if len(T_res) != len(merged_clean) or len(Y_res) != len(merged_clean):
@@ -420,25 +419,10 @@ if len(T_res) != len(merged_clean) or len(Y_res) != len(merged_clean):
         f"the estimation frame"
     )
 
-predictions = pd.DataFrame(
-    {
-        "timestamp": pd.to_datetime(merged_clean[date_col]),
-        "symbol": merged_clean[symbol_col].values,
-        "y_true": merged_clean[label_col].values,
-        "treatment_value": merged_clean[TREATMENT_COL].values,
-        "treatment_residual": T_res,
-        "outcome_residual": Y_res,
-        "treatment_contribution": T_res * dml_effect,
-        "ate": dml_effect,
-        "ate_se": se_hac,
-    }
-)
-
 register_causal_run(
     case_study_id=CASE_STUDY_ID,
     label=PRIMARY_LABEL,
     results=results,
-    predictions=predictions,
     treatment_col=TREATMENT_COL,
     confounder_cols=CONFOUNDER_COLS,
     n_folds=CV_FOLDS,

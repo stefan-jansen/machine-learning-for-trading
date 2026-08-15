@@ -234,12 +234,19 @@ if curves.height > 0:
 all_predictions = result["all_predictions"]
 requested_folds = sorted(int(f) for f in (FOLD_IDS or [s["fold"] for s in splits]))
 
+# A score is unusable when it is absent, undefined, or infinite. Counting only
+# nulls would pass a fold whose every score is NaN, because a float column built
+# from a NumPy array holds NaN rather than null.
+_unusable = (
+    pl.col("y_score").is_null() | pl.col("y_score").is_nan() | pl.col("y_score").is_infinite()
+)
+
 coverage = (
     all_predictions.group_by("config")
     .agg(
-        pl.col("fold").n_unique().alias("folds"),
+        pl.col("fold_id").n_unique().alias("folds"),
         pl.len().alias("rows"),
-        pl.col("prediction").null_count().alias("null_predictions"),
+        _unusable.sum().alias("unusable_scores"),
     )
     .sort("config")
 )
@@ -250,22 +257,23 @@ incomplete = []
 for cfg in dl_configs:
     name = cfg["config_name"]
     produced = all_predictions.filter(pl.col("config") == name)
-    got = sorted(int(f) for f in produced["fold"].unique().to_list())
+    got = sorted(int(f) for f in produced["fold_id"].unique().to_list())
     absent = [f for f in requested_folds if f not in got]
-    if absent or produced["prediction"].null_count():
-        incomplete.append((name, absent, produced["prediction"].null_count()))
+    unusable = int(produced.select(_unusable.sum()).item()) if produced.height else 0
+    if absent or unusable:
+        incomplete.append((name, absent, unusable))
 
 print(f"Folds requested: {requested_folds}")
 if incomplete:
     detail = "; ".join(
-        f"{name}: missing folds {absent}, {nulls} null predictions"
-        for name, absent, nulls in incomplete
+        f"{name}: missing folds {absent}, {unusable} unusable scores"
+        for name, absent, unusable in incomplete
     )
     raise RuntimeError(
         f"{MODEL} did not produce a complete prediction set for every configuration "
         f"({detail}). These rows must not be compared or backtested."
     )
-print("Every configuration covered every requested fold with no null predictions.")
+print("Every configuration covered every requested fold with a usable score on every row.")
 
 # %% [markdown]
 # ## 5. Key Takeaways
