@@ -993,6 +993,13 @@ def run_backtest(
             raise ValueError(
                 "resolved backtest specification does not declare the prediction being run"
             )
+        # ensure_backtest_spec would have filled these from the preset. Skipping it means
+        # a spec that omits them reaches the rebalance logic and dies on a bare KeyError
+        # far from the cause, so require them here instead of defaulting them back in.
+        rebalance = strategy_spec.get("strategy", {}).get("rebalance") or {}
+        missing = {"min_weight_change", "min_trade_value"} - set(rebalance)
+        if missing:
+            raise ValueError(f"resolved backtest specification omits rebalance {sorted(missing)}")
         strategy_spec = deepcopy(strategy_spec)
     else:
         strategy_spec = ensure_backtest_spec(

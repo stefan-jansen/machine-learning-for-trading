@@ -1475,3 +1475,32 @@ def test_digest_verification_is_not_served_stale_after_an_artifact_changes(
     original.with_columns(pl.col(original.columns[-1]) * 2.0).write_parquet(returns)
 
     assert not Result.open(study, backtest.hash).complete
+
+
+def test_resolved_spec_only_requires_the_rebalance_thresholds_it_no_longer_fills(
+    tmp_path: Path,
+) -> None:
+    """Skipping ensure_backtest_spec means the caller must supply what it would have.
+
+    Without this the omission surfaces as a bare KeyError inside the rebalance logic,
+    far from the spec that caused it.
+    """
+    from case_studies.utils.backtest_runner import run_backtest
+
+    study, _candidates, backtest, _spec = _selection_for_fold_parameters(
+        tmp_path, {"0": {"alpha": 1.0}}
+    )
+    resolved = deepcopy(backtest.spec())
+    prediction_hash = backtest.registry_record()["prediction_hash"]
+    resolved["backtest_config"]["metadata"]["prediction_hash"] = prediction_hash
+    resolved["strategy"]["rebalance"].pop("min_trade_value")
+
+    with pytest.raises(ValueError, match=r"omits rebalance \['min_trade_value'\]"):
+        run_backtest(
+            study.case_study,
+            prediction_hash,
+            resolved,
+            prices=_prices(),
+            predictions=_predictions(),
+            resolved_spec_only=True,
+        )
