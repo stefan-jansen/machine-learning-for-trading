@@ -183,14 +183,28 @@ representatives.select(
 )
 
 # %% tags=["results"]
+# Families whose checkpoint is `final` carry no numeric checkpoint position, so they have no x
+# coordinate on this axis and plotly would drop them without saying so. They are excluded here by
+# name rather than silently, and the count is stated in the title.
+numbered = diagnosed.filter(pl.col("checkpoint_value").is_not_null())
+unnumbered = diagnosed.filter(pl.col("checkpoint_value").is_null())
+excluded_families = sorted(set(unnumbered.get_column("family"))) if unnumbered.height else []
 figure = px.scatter(
-    diagnosed,
+    numbered,
     x="checkpoint_value",
     y="ic_mean",
     color="family",
     facet_row="label",
     hover_data=["config_name", "prediction_hash"],
-    title="Validation rank correlation across model checkpoints",
+    title=(
+        "Validation rank correlation across numbered model checkpoints"
+        + (
+            f" (excludes {unnumbered.height} rows from {', '.join(excluded_families)},"
+            " whose checkpoint is `final` and has no numeric position)"
+            if excluded_families
+            else ""
+        )
+    ),
     labels={"checkpoint_value": "Checkpoint", "ic_mean": "Mean daily rank correlation"},
 )
 figure.show()
@@ -284,14 +298,22 @@ fold_figure.show()
 
 # %% tags=["results"]
 primary = representative_predictions.filter(pl.col("label") == PRIMARY_LABEL)
+# The pivot index is the canonical eligibility key alone. `actual` is the same realized return for
+# every model at a given key, but the families do not agree on its float representation, so including
+# it split the rows into disjoint groups - each score column populated on a different half - and every
+# correlation, including the diagonal, came out NaN.
 wide = primary.pivot(
     on="prediction_hash",
-    index=["symbol", "timestamp", "fold", "actual"],
+    index=["symbol", "timestamp", "fold"],
     values="prediction",
 )
 prediction_columns = [
-    column for column in wide.columns if column not in {"symbol", "timestamp", "fold", "actual"}
+    column for column in wide.columns if column not in {"symbol", "timestamp", "fold"}
 ]
+if wide.height != primary.height // primary.get_column("prediction_hash").n_unique():
+    raise RuntimeError("the agreement pivot did not align every representative on the same keys")
+if any(wide.get_column(column).null_count() for column in prediction_columns):
+    raise RuntimeError("a representative is missing scores at keys the others cover")
 agreement = wide.select(prediction_columns).corr()
 agreement
 
@@ -382,8 +404,6 @@ causal_summary
 handoff = catalog.select([*identity_columns, "cv_identity", "complete"]).sort(
     "label", "family", "config_name", "checkpoint_value"
 )
-if handoff.height != catalog.height:
-    raise RuntimeError("the analysis handoff dropped a prediction configuration")
 handoff
 
 # %% [markdown]
