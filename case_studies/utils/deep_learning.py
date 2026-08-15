@@ -291,6 +291,7 @@ def _configure_sequence_runtime(spec: dict[str, Any]) -> None:
 
 def resolve_model_request(study: Study, request: dict[str, Any]):
     from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.identity import ResolvedSpec
     from case_studies.utils.artifact_digest import value_digest
     from case_studies.utils.deep_model_state import declared_epoch_checkpoints
     from utils.cv_splits import make_walk_forward_config
@@ -408,17 +409,15 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     checkpoints = declared_epoch_checkpoints(
         int(config.get("n_epochs", 100)), int(config.get("checkpoint_interval", 5))
     )
-    spec = {
-        "identity_version": 2,
-        "execution_tier": tier.value,
-        "family": "deep_learning",
-        "label": label_ref.name,
-        "seed": seed,
-        "config_name": config["config_name"],
+    computation = {
         "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
         "feature_artifacts": mds.input_lineage["artifacts"],
         "feature_names": list(mds.feature_names),
-        "task": {"type": "regression", "class_values": []},
+        "task": {
+            "type": "regression",
+            "class_values": [],
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
         "cv": cv_record,
         "model": {
             "class": config["params"]["architecture"],
@@ -450,7 +449,17 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         "runtime_identity": _sequence_runtime_identity(config),
     }
     if tier is ExecutionTier.PREVIEW:
-        spec["preview_reductions"] = reductions
+        computation["preview_reductions"] = reductions
+    runtime_provenance = _sequence_runtime_provenance(study, config)
+    spec = ResolvedSpec.create(
+        family="deep_learning",
+        label=label_ref.name,
+        seed=seed,
+        computation=computation,
+        provenance=runtime_provenance,
+        config_name=config["config_name"],
+        execution_tier=tier.value,
+    ).as_dict()
     context = SequenceResearchContext(
         dataset_pd=dataset_pd,
         splits=tuple(splits),
@@ -466,7 +475,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         temporal_feature_names=tuple(mds.temporal_feature_names),
         expected_keys=expected,
         max_train_sequences=max_train_sequences,
-        runtime_provenance=_sequence_runtime_provenance(study, config),
+        runtime_provenance=runtime_provenance,
     )
     return spec, context
 
@@ -477,7 +486,7 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 
     training_hash = training_hash_from_spec(spec)
-    checkpoint_values = tuple(item["value"] for item in spec["checkpoint_schedule"])
+    checkpoint_values = tuple(item["value"] for item in spec["computation"]["checkpoint_schedule"])
     try:
         training = Result.open(
             study, training_hash, include_preview=spec["execution_tier"] == "preview"
@@ -490,7 +499,7 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
                     checkpoint,
                     "validation",
                     checkpoint_kind="epoch",
-                    identity_version=2,
+                    identity_version=spec["identity_version"],
                 ),
                 include_preview=spec["execution_tier"] == "preview",
             )
@@ -552,7 +561,8 @@ def run_resolved_request(
     if model_dir.exists():
         raise ValueError(f"partial fitted-state directory requires inspection: {model_dir}")
     staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
-    _configure_sequence_runtime(spec["numerics"])
+    computation = spec["computation"]
+    _configure_sequence_runtime(computation["numerics"])
     try:
         result = run_dl_cv(
             context.dataset_pd,
@@ -563,7 +573,7 @@ def run_resolved_request(
             label_col=context.label_col,
             date_col=context.date_col,
             entity_col=context.entity_col,
-            device=spec["numerics"]["device"],
+            device=computation["numerics"]["device"],
             save_dir=train_dir / "diagnostics",
             max_train_sequences=context.max_train_sequences,
             register=False,
@@ -574,7 +584,7 @@ def run_resolved_request(
             checkpoint_root=staging,
             strict=True,
             seed=int(spec["seed"]),
-            num_threads=int(spec["numerics"]["num_threads"]),
+            num_threads=int(computation["numerics"]["num_threads"]),
         )
         os.replace(staging, model_dir)
     except Exception:
@@ -582,7 +592,7 @@ def run_resolved_request(
         raise
 
     prediction_results = []
-    for checkpoint in (item["value"] for item in spec["checkpoint_schedule"]):
+    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
         predictions = (
             result["all_predictions"]
             .filter(
