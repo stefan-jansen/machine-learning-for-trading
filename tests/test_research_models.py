@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import weakref
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -866,6 +867,117 @@ def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) 
         "fold_0.joblib",
         "fold_1.joblib",
     ]
+
+
+def test_thread_limit_does_not_leak_into_families_that_already_record_threads(
+    tmp_path, monkeypatch
+) -> None:
+    """gbm, tabular_dl and deep_learning must be byte-identical before and after this change.
+
+    They already record thread state - gbm carries num_threads in _GBM_REQUEST_FIELDS,
+    tabular_dl and deep_learning carry numerics blocks. Adding a second thread field to a
+    family that already has one moves its training identities and buys nothing. The pinning
+    helper is shared; the `numerics.thread_limit` field is applied to linear and causal only.
+    """
+    gbm_study = _gbm_study(tmp_path / "gbm", monkeypatch)
+    gbm_spec = (
+        gbm_study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63},
+        )
+        .resolve()
+        .spec
+    )
+    gbm_numerics = gbm_spec["computation"].get("numerics", {})
+    assert "thread_limit" not in gbm_numerics, (
+        "thread_limit leaked into gbm, which already records num_threads; "
+        "this moves every gbm training identity"
+    )
+
+    tabm_study, *_ = _tabm_study(tmp_path / "tabm", monkeypatch)
+    tabm_spec = (
+        tabm_study.model(family="tabular_dl", label="fwd_ret_1d", config_name="tabm_s")
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in tabm_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into tabular_dl, which already carries a numerics block"
+    )
+
+    # deep_learning builds its own numerics block at utils/deep_learning.py, so it is the third
+    # family this scope protects and equally likely to be caught by a future widening.
+    from tests.test_deep_learning_adapter import _resolve_nlinear_request
+
+    _, _, sequence_resolved = _resolve_nlinear_request(tmp_path / "sequence", monkeypatch)
+    sequence_spec = sequence_resolved.spec
+    assert "thread_limit" not in sequence_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into deep_learning, which already carries a numerics block"
+    )
+    assert sequence_spec["computation"]["numerics"]["num_threads"]
+
+    # latent_factors records num_threads too (utils/latent_factors/adapter.py), so it is the
+    # fourth family this scope protects and equally exposed to a future widening.
+    latent_study = _latent_study(tmp_path / "latent", monkeypatch)
+    latent_spec = (
+        latent_study.model(
+            family="latent_factors",
+            label="fwd_ret_1d",
+            config_name="pca",
+            overrides={"device": "cpu"},
+        )
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in latent_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into latent_factors, which already records num_threads"
+    )
+
+
+def test_linear_pins_the_thread_pool_and_records_it_in_identity(tmp_path, monkeypatch) -> None:
+    """A linear fit is a deterministic function of the thread pool, not of the data alone.
+
+    Coordinate descent and the BLAS kernels reduce in thread order, so two runs can agree on
+    training_hash and prediction_hash and still differ in the coefficients. Measured on real
+    crypto data: lasso_f0.08 at identical training_hash produced prediction digests
+    37352b2ff14a4b6a uncapped (pools 16/24) against c81ca6b5302e1dc2 capped. Recording the
+    limit is what makes the identity cover the computation.
+    """
+    import threadpoolctl
+
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    resolved = request.resolve()
+
+    numerics = resolved.spec["computation"]["numerics"]
+    assert numerics["thread_limit"] == linear.LINEAR_THREAD_LIMIT
+    assert numerics["deterministic_reduction"] is True
+
+    other = deepcopy(resolved.spec)
+    other["computation"]["numerics"]["thread_limit"] = linear.LINEAR_THREAD_LIMIT + 1
+    assert linear.training_hash_from_spec(other) != linear.training_hash_from_spec(resolved.spec)
+
+    # Observed from inside the limited block rather than by trusting the source: the runner
+    # calls _fold_predictions immediately after model.fit, within the same context manager.
+    observed: list[int] = []
+    original_predictions = linear._fold_predictions
+
+    def recording_predictions(model, fold, context):
+        observed.extend(
+            info["num_threads"]
+            for info in threadpoolctl.threadpool_info()
+            if info["user_api"] in {"openmp", "blas"}
+        )
+        return original_predictions(model, fold, context)
+
+    monkeypatch.setattr(linear, "_fold_predictions", recording_predictions)
+    request.run()
+
+    assert observed, "no thread pool was observed during the linear fit"
+    assert set(observed) == {linear.LINEAR_THREAD_LIMIT}, (
+        f"linear fitted with pools at {sorted(set(observed))}, not {linear.LINEAR_THREAD_LIMIT}"
+    )
 
 
 def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
