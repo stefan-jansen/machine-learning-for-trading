@@ -277,22 +277,56 @@ def best_model_per_family_fast(
     metrics: pl.DataFrame,
     *,
     ic_col: str = "ic_mean_daily",
+    coverage_col: str = "ic_n_days",
+    require_full_coverage: bool = True,
 ) -> pl.DataFrame:
-    """Find the best (config, checkpoint) per family from pre-computed metrics.
+    """Find the representative (config, checkpoint) per family from stored metrics.
 
-    Much faster than select_best_per_family() which recomputes IC from raw predictions.
+    The representative stands in for its family in every comparison downstream, so
+    it has to have been scored over the same period as the rows it will be compared
+    against. A prediction set that failed partway still leaves rows in the registry,
+    and its score is an average over the decision days it managed rather than the
+    days it was asked for. Those scores are frequently the highest ones, because a
+    shorter window is an easier window.
+
+    Rows are therefore restricted to the maximum ``coverage_col`` observed within
+    each ``(family, label)`` before the highest score is taken. Restricting per
+    label rather than globally keeps labels with genuinely different histories
+    comparable within themselves.
+
+    Exact ties on ``ic_col`` resolve on ``prediction_hash`` so the same registry
+    returns the same representative on every machine and every re-run.
+
+    Set ``require_full_coverage=False`` for a diagnostic view of every scored row,
+    which is not a basis for comparing one family against another.
     """
     if metrics.height == 0:
         return metrics
     if ic_col not in metrics.columns:
         raise ValueError(f"Selection metric {ic_col!r} is not present")
 
+    eligible = metrics.filter(pl.col(ic_col).is_not_null())
+
+    if require_full_coverage:
+        if coverage_col not in eligible.columns:
+            raise ValueError(
+                f"Coverage column {coverage_col!r} is not present, so no representative "
+                f"can be shown to cover the same period as the rows it is compared "
+                f"against. Backfill it, or pass require_full_coverage=False and treat "
+                f"the result as a diagnostic rather than a comparison."
+            )
+        group_keys = ["family", "label"] if "label" in eligible.columns else ["family"]
+        eligible = eligible.filter(
+            pl.col(coverage_col).is_not_null()
+            & (pl.col(coverage_col) == pl.col(coverage_col).max().over(group_keys))
+        )
+
+    tie_break = ["prediction_hash"] if "prediction_hash" in eligible.columns else []
     return (
-        metrics.filter(pl.col(ic_col).is_not_null())
-        .sort(ic_col, descending=True)
+        eligible.sort([ic_col, *tie_break], descending=[True, *[False] * len(tie_break)])
         .group_by("family")
         .first()
-        .sort(ic_col, descending=True)
+        .sort([ic_col, "family"], descending=[True, False])
     )
 
 

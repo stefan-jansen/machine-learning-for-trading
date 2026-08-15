@@ -20,7 +20,10 @@ from pathlib import Path
 import polars as pl
 
 from case_studies.utils.backtest_presets import cost_view, strategy_view
-from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_sql,
+    full_coverage_prediction_sql,
+)
 from utils.paths import REPO_ROOT
 
 CASE_STUDY_META = {
@@ -157,12 +160,29 @@ def load_model_ic(
     *,
     split: str = "validation",
     case_studies: list[str] | None = None,
+    require_full_coverage: bool = True,
 ) -> pl.DataFrame:
     """Load IC metrics across case studies for specified model families.
 
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
         checkpoint_value, ic_mean, ic_std
+
+    A model family can hold prediction sets scored over different numbers of
+    decision days, because a run that failed partway still registers rows for the
+    folds it completed. Their scores are averages over different periods, so
+    comparing them measures the periods as much as the models, and the shorter
+    window usually scores higher. Rows are therefore restricted to the maximum
+    ``ic_n_days`` within each ``(split, family, label)`` before anything is
+    returned.
+
+    Ordering is fully determined: ``ic_mean`` descending, then
+    ``prediction_hash``, so a caller taking the first row of a tie gets the same
+    row on every machine.
+
+    **This is a diagnostic query, not a selection.** Ranking configurations by IC
+    selects nothing anywhere in the pipeline; a configuration is chosen on
+    validation backtest Sharpe. See ``reference/CASE_STUDY_PIPELINE.md``.
 
     Parameters
     ----------
@@ -173,6 +193,10 @@ def load_model_ic(
         Prediction split to filter by ("validation" or "holdout").
     case_studies : list of str, optional
         Case studies to query. None = all.
+    require_full_coverage : bool
+        Keep only the maximum-coverage rows per (split, family, label). Set False
+        for an inventory of everything scored, which cannot be compared across
+        rows.
     """
     if isinstance(families, str):
         families = [families]
@@ -200,6 +224,12 @@ def load_model_ic(
         ic_expr = (
             "COALESCE(pm.ic_mean_daily, pm.ic_mean)" if "ic_mean_daily" in pm_cols else "pm.ic_mean"
         )
+        # A registry predating that backfill also has no coverage column, so its
+        # rows cannot be shown to span the same decision days. Reporting that per
+        # row beats both failing outright on a legacy registry and letting a
+        # caller assume a guard that never ran.
+        coverage_enforced = require_full_coverage and "ic_n_days" in pm_cols
+        coverage_clause = full_coverage_prediction_sql("p", "t", "pm") if coverage_enforced else ""
 
         sql = f"""
             SELECT
@@ -221,7 +251,8 @@ def load_model_ic(
             WHERE 1=1 {family_clause}
               AND p.split = ?
               {degenerate_prediction_sql("p.prediction_hash")}
-            ORDER BY ic_mean DESC NULLS LAST
+              {coverage_clause}
+            ORDER BY ic_mean DESC NULLS LAST, p.prediction_hash ASC
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:
@@ -232,49 +263,16 @@ def load_model_ic(
             ]
             if casts:
                 df = df.with_columns(casts)
-            frames.append(df.with_columns(pl.lit(cs_id).alias("case_study")))
+            frames.append(
+                df.with_columns(
+                    pl.lit(cs_id).alias("case_study"),
+                    pl.lit(coverage_enforced).alias("coverage_enforced"),
+                )
+            )
 
     if not frames:
         return pl.DataFrame()
     return pl.concat(frames, how="diagonal")
-
-
-def resolve_best_prediction(
-    case_study: str,
-    label: str,
-    *,
-    family: str = "gbm",
-    split: str = "validation",
-) -> dict:
-    """Return rank-1 prediction-set metadata for (case_study, label, family).
-
-    Resolves the best-IC prediction set from `prediction_metrics` (sorted by
-    `ic_mean` descending). Useful for downstream notebooks (Ch16/17) that need
-    to consume registered upstream predictions without baking in a hash.
-
-    Returns
-    -------
-    dict
-        Keys: prediction_hash, config_name, ic_mean, ic_std, family, label, split.
-
-    Raises
-    ------
-    RuntimeError
-        If no prediction set matches (case_study, label, family, split).
-    """
-    df = (
-        load_model_ic([family], split=split, case_studies=[case_study])
-        .filter(pl.col("label") == label)
-        .filter(pl.col("ic_mean").is_not_null())
-        .sort("ic_mean", descending=True)
-    )
-    if df.is_empty():
-        raise RuntimeError(
-            f"No {family} predictions with non-null ic_mean for "
-            f"{case_study}/{label}/{split} in registry.db. "
-            f"Run the {family} training notebook for {case_study} before this notebook."
-        )
-    return df.row(0, named=True)
 
 
 def load_classification_metrics(
@@ -346,7 +344,17 @@ def load_best_ic_per_family(
     case_studies: list[str] | None = None,
     use_primary_label: bool = True,
 ) -> pl.DataFrame:
-    """Best IC per family per case study (one row per family-case_study pair).
+    """Highest-IC row per family per case study (one row per family-case_study pair).
+
+    Restricted to maximum-coverage prediction sets by ``load_model_ic``, so the
+    rows compared against each other were scored over the same decision days.
+    Exact ties resolve on ``prediction_hash``, so the same registry returns the
+    same row everywhere.
+
+    **A diagnostic view, not a selection.** IC ranks nothing in the pipeline; a
+    configuration is chosen on validation backtest Sharpe. Callers that display
+    a family's strongest score are using it correctly; a caller choosing what to
+    trade or fit from this result is not.
 
     Returns: case_study, display_name, family, config_name, label, ic_mean
     """
@@ -363,8 +371,13 @@ def load_best_ic_per_family(
             pl.col("label") == pl.col("primary_label")
         )
 
+    tie_break = ["prediction_hash"] if "prediction_hash" in all_ic.columns else []
     best = (
-        all_ic.sort("ic_mean", descending=True, nulls_last=True)
+        all_ic.sort(
+            ["ic_mean", *tie_break],
+            descending=[True, *[False] * len(tie_break)],
+            nulls_last=True,
+        )
         .group_by(["case_study", "family"])
         .first()
         .select("case_study", "family", "config_name", "label", "ic_mean")

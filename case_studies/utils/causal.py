@@ -63,23 +63,67 @@ class DMLResearchContext:
     runtime_provenance: dict[str, Any]
 
 
-def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = None) -> int:
+def observation_step(frame: Any, date_col: str = "timestamp") -> pd.Timedelta:
+    """Measure the spacing between consecutive decision times in *frame*.
+
+    Returns the most common gap between distinct sorted values of ``date_col``,
+    which is the observation grid the panel is actually recorded on. Sessions,
+    weekends and holidays introduce larger gaps; taking the mode rather than the
+    minimum or the mean makes those irrelevant.
+
+    Accepts a Polars or pandas frame, or anything exposing the column through
+    ``__getitem__``.
+    """
+    column = frame[date_col]
+    values = pd.Series(column.to_list() if hasattr(column, "to_list") else list(column))
+    stamps = pd.to_datetime(values).drop_duplicates().sort_values()
+    if len(stamps) < 2:
+        raise ValueError(f"{date_col!r} has fewer than two distinct values; no grid to measure")
+    gaps = stamps.diff().dropna()
+    return pd.Timedelta(gaps.mode().iloc[0])
+
+
+def embargo_from_buffer(
+    label_buffer: str,
+    *,
+    periods_per_year: int | None = None,
+    observed_step: str | pd.Timedelta | None = None,
+) -> int:
     """Convert a label buffer string to an integer embargo period count.
 
-    Supports all pandas duration units (D, H/h, M, T/min).
-    Returns the number of observation periods to skip between train and test.
+    The embargo is counted in *observation periods*, so converting a duration
+    into one requires knowing how long an observation period is. Pass
+    ``observed_step`` — from :func:`observation_step` on the frame being
+    analysed — and the conversion is exact: the number of periods spanning the
+    buffer, rounded up, at least one.
 
-    Bar-frequency assumptions baked into the conversion:
-    - D: one period per `value` days (e.g. "5D" → 5)
-    - H/h: the buffer is interpreted as the bar cadence; the result is the
-      number of `value`-hour bars in one trading day (24 // value), so "8H"
-      → 3 bars (a one-day embargo on 8-hour bars)
-    - M: `value` monthly groups when `periods_per_year=12`, otherwise
-      `value` months × 21 trading days
-    - T/min: the buffer is the cadence; the result is the bars in 15 minutes
-      (`value` // 15), assuming 15-minute base bars
+    Without ``observed_step`` the conversion falls back to a fixed assumption
+    about bar size per unit, which is correct only when that assumption holds:
+
+    - D: one period per ``value`` days, correct on a daily grid
+    - H/h: the number of ``value``-hour bars in one day, so "8H" gives a
+      one-day embargo on 8-hour bars
+    - M: ``value`` monthly groups when ``periods_per_year=12``, else
+      ``value`` months x 21 trading days
+    - T/min: the number of ``value``-minute spans in 15 minutes, which assumes
+      the panel is recorded in 15-minute bars
+
+    That last assumption is the one that bites. On a one-minute panel a "15min"
+    buffer resolves to a single period — a one-minute embargo against a
+    fifteen-minute label — and the fifteenfold error is invisible in the result.
+    Pass ``observed_step`` on any sub-daily panel.
     """
+    import math
     import re
+
+    if observed_step is not None:
+        step = pd.Timedelta(observed_step)
+        if step <= pd.Timedelta(0):
+            raise ValueError(f"observed_step must be positive, got {observed_step!r}")
+        # pandas deprecated the uppercase hour alias; the buffers are authored by
+        # hand in setup.yaml and still use it.
+        span = pd.Timedelta(re.sub(r"(?<=\d)H\b", "h", label_buffer.strip()))
+        return max(1, math.ceil(span / step))
 
     match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
     if not match:
