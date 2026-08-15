@@ -231,23 +231,41 @@ if curves.height > 0:
 # requested is what separates the two.
 
 # %%
-predictions = result["predictions"]
-fold_metrics = result["fold_metrics"]
-
+all_predictions = result["all_predictions"]
 requested_folds = sorted(int(f) for f in (FOLD_IDS or [s["fold"] for s in splits]))
-produced_folds = sorted(int(f) for f in predictions["fold"].unique().to_list())
-missing_folds = [f for f in requested_folds if f not in produced_folds]
+
+coverage = (
+    all_predictions.group_by("config")
+    .agg(
+        pl.col("fold").n_unique().alias("folds"),
+        pl.len().alias("rows"),
+        pl.col("prediction").null_count().alias("null_predictions"),
+    )
+    .sort("config")
+)
+coverage
+
+# %%
+incomplete = []
+for cfg in dl_configs:
+    name = cfg["config_name"]
+    produced = all_predictions.filter(pl.col("config") == name)
+    got = sorted(int(f) for f in produced["fold"].unique().to_list())
+    absent = [f for f in requested_folds if f not in got]
+    if absent or produced["prediction"].null_count():
+        incomplete.append((name, absent, produced["prediction"].null_count()))
 
 print(f"Folds requested: {requested_folds}")
-print(f"Folds with predictions: {produced_folds}")
-print(f"Validation rows: {predictions.height:,}")
-print(f"Null predictions: {predictions['prediction'].null_count():,}")
-
-if missing_folds:
-    raise RuntimeError(
-        f"{MODEL} produced no predictions for fold(s) {missing_folds}. The registered "
-        f"set is incomplete and must not be compared or backtested."
+if incomplete:
+    detail = "; ".join(
+        f"{name}: missing folds {absent}, {nulls} null predictions"
+        for name, absent, nulls in incomplete
     )
+    raise RuntimeError(
+        f"{MODEL} did not produce a complete prediction set for every configuration "
+        f"({detail}). These rows must not be compared or backtested."
+    )
+print("Every configuration covered every requested fold with no null predictions.")
 
 # %% [markdown]
 # ## 5. Key Takeaways
