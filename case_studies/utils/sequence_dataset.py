@@ -492,7 +492,7 @@ def sequence_validation_keys(
         )
         rows = [
             {
-                entity_col: entities[symbol_id],
+                "symbol": entities[symbol_id],
                 "timestamp": pd.Timestamp(timestamps[symbol_id][position]),
                 "fold": int(split["fold"]),
             }
@@ -503,10 +503,10 @@ def sequence_validation_keys(
             frames.append(pl.from_dicts(rows))
     if not frames:
         return pl.DataFrame(
-            schema={entity_col: pl.String, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
+            schema={"symbol": pl.String, "timestamp": pl.Datetime("ns"), "fold": pl.Int64}
         )
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("sequence request produced duplicate expected prediction keys")
     return expected
 

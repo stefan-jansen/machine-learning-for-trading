@@ -216,7 +216,13 @@ def test_latent_holdout_retry_preserves_conflicting_fold_diagnostics(tmp_path: P
     assert target.read_bytes() == conflicting
 
 
-def test_cme_family_eligibility_and_prediction_keys_remain_product() -> None:
+def test_cme_family_eligibility_keys_use_the_internal_symbol_contract() -> None:
+    """Every family names the eligibility entity `symbol`, whatever the reader key is.
+
+    cme_futures is the only product-keyed case study, so it is the sole exerciser of
+    this rename. The locked reconstruction validates a recorded eligibility digest, so
+    one family drifting off the shared naming would make its locks unreproducible.
+    """
     from case_studies.utils import gbm, linear, tabular_dl
     from case_studies.utils.latent_factors.cv import _build_prediction_frame
     from case_studies.utils.sequence_dataset import sequence_validation_keys
@@ -280,10 +286,17 @@ def test_cme_family_eligibility_and_prediction_keys_remain_product() -> None:
         entity_col="product",
     )
 
-    for frame in (linear_keys, gbm_keys, tabm_keys, sequence_keys, latent):
+    # Eligibility keys are the internal contract and always name the entity `symbol`.
+    for frame in (linear_keys, gbm_keys, tabm_keys, sequence_keys):
         assert frame is not None
-        assert "product" in frame.columns
-        assert "symbol" not in frame.columns
+        assert "symbol" in frame.columns
+        assert "product" not in frame.columns
+
+    # A prediction frame is not an eligibility manifest: it carries the reader-facing
+    # key its case study uses, and each runner renames it at the publish boundary.
+    assert latent is not None
+    assert "product" in latent.columns
+    assert "symbol" not in latent.columns
 
 
 def _real_linear_lock(

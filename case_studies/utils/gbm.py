@@ -1524,14 +1524,14 @@ def _gbm_expected_keys(folds: list[dict[str, Any]], entity_col: str, date_col: s
     for fold in folds:
         frame = pl.DataFrame(
             {
-                entity_col: fold["entities"],
+                "symbol": fold["entities"],
                 "timestamp": fold["dates"],
                 "fold": [int(fold["fold"])] * int(fold["n_val"]),
             }
         )
         frames.append(frame)
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("GBM request produced duplicate expected prediction keys")
     return expected
 
@@ -1630,7 +1630,7 @@ def _gbm_expected_keys_from_dataset(mds, splits: list[dict[str, Any]]) -> pl.Dat
                 & label_valid
             )
             .select(
-                pl.col(mds.entity_cols[0]),
+                pl.col(mds.entity_cols[0]).alias("symbol"),
                 pl.col(mds.date_col).alias("timestamp"),
             )
             .with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
@@ -1638,9 +1638,8 @@ def _gbm_expected_keys_from_dataset(mds, splits: list[dict[str, Any]]) -> pl.Dat
         if frame.is_empty():
             raise ValueError(f"GBM request produced no validation keys for fold {split['fold']}")
         frames.append(frame)
-    entity_col = mds.entity_cols[0]
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("GBM request produced duplicate expected prediction keys")
     return expected
 

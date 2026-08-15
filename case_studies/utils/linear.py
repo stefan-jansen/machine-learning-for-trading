@@ -193,12 +193,12 @@ def _expected_keys(folds: list[dict[str, Any]], entity_col: str, date_col: str) 
     frames = [
         pl.from_pandas(fold["meta"][[entity_col, date_col]])
         .with_columns(pl.lit(int(fold["fold"]), dtype=pl.Int64).alias("fold"))
-        .rename({date_col: "timestamp"})
-        .select(entity_col, "timestamp", "fold")
+        .rename({entity_col: "symbol", date_col: "timestamp"})
+        .select("symbol", "timestamp", "fold")
         for fold in folds
     ]
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("linear request produced duplicate expected prediction keys")
     return expected
 
@@ -295,14 +295,14 @@ def _expected_keys_from_dataset(
             )
             .select(entity_col, date_col)
             .with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
-            .rename({date_col: "timestamp"})
-            .select(entity_col, "timestamp", "fold")
+            .rename({entity_col: "symbol", date_col: "timestamp"})
+            .select("symbol", "timestamp", "fold")
         )
         if frame.is_empty():
             raise ValueError(f"linear request produced no validation keys for fold {split['fold']}")
         frames.append(frame)
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("linear request produced duplicate expected prediction keys")
     return expected
 

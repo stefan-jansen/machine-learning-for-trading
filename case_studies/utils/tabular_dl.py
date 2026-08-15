@@ -256,12 +256,12 @@ def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
         ).drop_nulls([mds.label_col, *([mds.eval_label_col] if mds.eval_label_col else [])])
         frames.append(
             frame.select(
-                pl.col(entity_col),
+                pl.col(entity_col).alias("symbol"),
                 pl.col(mds.date_col).alias("timestamp"),
             ).with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
         )
-    expected = pl.concat(frames).sort(entity_col, "timestamp", "fold")
-    if expected.n_unique([entity_col, "timestamp", "fold"]) != expected.height:
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("TabM request produced duplicate expected prediction keys")
     return expected
 
