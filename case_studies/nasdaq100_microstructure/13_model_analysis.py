@@ -210,47 +210,43 @@ else:
     print(f"\n[OK] All {len(EXPECTED_FAMILIES)} expected model families present.")
 
 # %% [markdown]
-# ### Restrict representatives to prediction sets with complete coverage
+# ### How much of the period each prediction set was scored on
 #
-# A family's representative is the prediction set that stands in for it in every
-# comparison below, so it has to be one that was scored on the whole validation
-# period. A run that failed partway still leaves rows in the registry, and the
-# score computed from them is an average over the days it managed rather than
-# over the days it was asked for. Those scores are frequently the highest ones,
-# because a short window is an easier window.
+# A family's representative stands in for it in every comparison below, so it has
+# to have been scored over the same period as the sets it is compared against. A
+# run that failed partway still leaves rows in the registry, and its score is an
+# average over the days it managed rather than the days it was asked for - which
+# is frequently the higher number, because a shorter window is an easier window.
 #
-# `ic_n_days` counts the decision days that contributed to a prediction set's
-# score. Keeping only the sets that reach the maximum observed for this label
-# means the representatives are comparable to each other by construction.
+# `ic_n_days` counts the decision days behind a set's score. The restriction is
+# applied within each family and label, because families legitimately differ: a
+# sequence model cannot score the first observations of a fold, since no window
+# ends there yet, so it covers fewer days than a model that scores every row.
+# Comparing each family against its own peers is what keeps such a family in the
+# comparison at all.
+#
+# The table below shows where each family stands before that restriction runs.
 
 # %%
-if "ic_n_days" in all_metrics.columns:
-    max_days = all_metrics["ic_n_days"].max()
-    complete_metrics = all_metrics.filter(pl.col("ic_n_days") == max_days)
-    dropped = all_metrics.height - complete_metrics.height
-    print(f"Full coverage is {max_days} scored days for {PRIMARY_LABEL}")
-    print(f"Prediction sets at full coverage: {complete_metrics.height} of {all_metrics.height}")
-    if dropped:
-        short = (
-            all_metrics.filter(pl.col("ic_n_days") < max_days)
-            .group_by("family")
-            .agg(pl.len().alias("sets"), pl.col("ic_n_days").max().alias("best_days"))
-            .sort("family")
-        )
-        print(f"Excluded {dropped} partially covered set(s):")
-        print(short)
-else:
-    raise RuntimeError(
-        "prediction_metrics carries no ic_n_days column, so coverage cannot be "
-        "established and no representative can be compared against another."
+coverage_by_family = (
+    all_metrics.group_by("family")
+    .agg(
+        pl.len().alias("sets"),
+        pl.col("ic_n_days").min().alias("min_days"),
+        pl.col("ic_n_days").max().alias("max_days"),
     )
+    .sort("family")
+)
+print(f"Scored-day coverage per family for {PRIMARY_LABEL}:")
+print(coverage_by_family)
 
-if complete_metrics.height == 0:
-    raise RuntimeError(f"No fully covered prediction set for {CASE_STUDY} / {PRIMARY_LABEL}")
+# %% [markdown]
+# `best_model_per_family_fast` applies the full-coverage restriction itself,
+# within each family and label, and raises rather than dropping a group whose
+# coverage cannot be established.
 
 # %%
-# Best model per family
-best_per_family = best_model_per_family_fast(complete_metrics)
+best_per_family = best_model_per_family_fast(all_metrics)
 
 print("\nRepresentative model per family:")
 print(best_per_family.select(["family", "config_name", "checkpoint_value", "ic_mean", "ic_std"]))
