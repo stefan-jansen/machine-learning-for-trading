@@ -284,10 +284,12 @@ def _stub_price_loaders(
     *,
     engine_products: list[str],
     cum_ratio: float = 1.0,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    engine_calls: list[dict[str, object]] = []
     audit_calls: list[dict[str, object]] = []
 
     def fake_backtest_prices(case_study, label, **kwargs):
+        engine_calls.append(kwargs)
         return _engine_price_frame(engine_products)
 
     def fake_load_cme_futures(**kwargs):
@@ -297,16 +299,17 @@ def _stub_price_loaders(
 
     monkeypatch.setattr(research_workflow, "load_backtest_prices_for", fake_backtest_prices)
     monkeypatch.setattr(research_workflow, "load_cme_futures", fake_load_cme_futures)
-    return audit_calls
+    return engine_calls, audit_calls
 
 
 def test_price_path_audits_exactly_the_products_the_engine_load_sampled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    audit_calls = _stub_price_loaders(monkeypatch, engine_products=["GC", "NQ"])
+    engine_calls, audit_calls = _stub_price_loaders(monkeypatch, engine_products=["GC", "NQ"])
 
     path = research_workflow.load_futures_price_path("fwd_ret_5d", max_products=2)
 
+    assert [call["max_symbols"] for call in engine_calls] == [2]
     assert len(audit_calls) == 1
     assert audit_calls[0]["products"] == ["GC", "NQ"]
     assert not audit_calls[0].get("max_symbols")
@@ -395,6 +398,7 @@ def test_reader_plan_exposes_resolved_population_and_product_contract(tmp_path: 
         (sector, product) for sector, products in grouped.items() for product in products
     )
 
+    assert universe.height == 30
     assert universe.height == len(expected_universe)
     assert universe.get_column("product").n_unique() == universe.height
     assert list(zip(universe.get_column("sector"), universe.get_column("product"))) == [
