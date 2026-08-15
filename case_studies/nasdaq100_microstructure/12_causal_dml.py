@@ -210,7 +210,11 @@ print(f"Label: {label_col} | Date: {date_col} | Entities: {entity_cols}")
 #   placebo distribution than the data supports.
 #
 # Both are counted in observation periods, so the notebook measures the grid step
-# from the data rather than assuming it.
+# from the data rather than assuming it. The measurement is not a formality here:
+# `decision.bar_frequency` in `setup.yaml` says fifteen minutes, and that is how
+# often the strategy acts, not how far apart the observations are. Dividing the
+# label horizon by it would give one period instead of fifteen, and the result
+# would look entirely normal.
 
 # %%
 grid = dataset.select(pl.col(date_col).unique().sort().alias("t"))
