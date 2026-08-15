@@ -16,6 +16,7 @@ import pytest
 from case_studies.research import (
     CandidateSet,
     DecisionArtifact,
+    LabelDefinition,
     ModelRun,
     ResearchLock,
     ResolvedModelRequest,
@@ -1217,3 +1218,129 @@ def test_lock_rejects_list_valued_class_weights_contradicting_the_selected_train
         )
 
     assert study.lifecycle.state == "DEVELOPMENT"
+
+
+def _darts_sequence_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Resolve a canonical Darts request the way the case study would."""
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    dates = [f"2024-01-{day:02d}" for day in range(2, 13)]
+    frame = pl.DataFrame(
+        {
+            "symbol": [f"S{symbol}" for symbol in range(3) for _ in dates],
+            "timestamp": dates * 3,
+            "feature": [float(index) for index in range(3 * len(dates))],
+            "fwd_ret_1d": [float(index % 3) / 100 for index in range(3 * len(dates))],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        frame.select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    mds = SimpleNamespace(
+        dataset=frame,
+        feature_names=["feature"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        splits=[
+            {
+                "fold": 0,
+                "train_start": "2024-01-02",
+                "train_end": "2024-01-10",
+                "val_start": "2024-01-11",
+                "val_end": "2024-01-12",
+            }
+        ],
+        task_type="regression",
+        class_values=[],
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+    # The etfs fixture resolves no calendar_id, which a real case study always has and
+    # the locked reconstruction requires.
+    monkeypatch.setattr(
+        "utils.cv_splits.make_walk_forward_config",
+        lambda *a, **k: SimpleNamespace(calendar_id="crypto-24x7"),
+    )
+    monkeypatch.setattr(
+        "utils.modeling.load_configs",
+        lambda *a, **k: [
+            {
+                "batch_size": 8,
+                "checkpoint_interval": 1,
+                "n_epochs": 1,
+                "params": {"architecture": "tsmixer", "lookback": 2},
+                "config_name": "tsmixer_probe",
+                "family": "deep_learning",
+                "library": "darts",
+            }
+        ],
+    )
+    expected_keys = (
+        frame.filter(pl.col("timestamp") >= pl.date(2024, 1, 11))
+        .select("symbol", "timestamp")
+        .with_columns(pl.lit(0, dtype=pl.Int64).alias("fold"))
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.darts_validation_keys",
+        lambda *a, **k: expected_keys,
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.darts_forecasting.darts_training_identity",
+        lambda *a, **k: {
+            "base_target_data_spec": {"kind": "one_period_return", "source": "close"},
+            "input_data_spec": mds.input_lineage,
+            "input_chunk_length": 2,
+            "output_chunk_length": 1,
+            "max_train_sequences": 0,
+        },
+    )
+    resolved = study.model(
+        family="deep_learning",
+        label=label.name,
+        config_name="tsmixer_probe",
+        overrides={"device": "cpu"},
+    ).resolve()
+    return study, resolved.spec
+
+
+def test_locked_sequence_reconstruction_round_trips_its_own_resolved_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reconstruction must accept exactly what the resolver produced.
+
+    The Darts preprocessing block is the part that drifted: it records the resolved
+    base-target spec and the decision cadence, and the reconstruction expected a
+    hardcoded string and omitted the cadence key, so no Darts model could reconstruct.
+    """
+    from case_studies.utils import deep_learning
+
+    study, spec = _darts_sequence_spec(tmp_path, monkeypatch)
+    holdout_spec = deepcopy(spec)
+    holdout_spec["computation"]["cv"] = {
+        "identity": "holdout-cv",
+        "split": "holdout",
+        "train_start": "2024-01-02",
+        "train_end": "2024-01-10",
+        "evaluation_start": "2024-01-11",
+        "evaluation_end": "2024-01-12",
+    }
+
+    request = deep_learning.reconstruct_locked_request(
+        study,
+        holdout_spec,
+        checkpoint_kind="epoch",
+        checkpoint_value=1,
+    )
+
+    assert request.spec == holdout_spec
+    assert request._context.prediction_split == "holdout"
+    assert request._context.published_checkpoints == (1,)

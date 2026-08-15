@@ -597,10 +597,22 @@ def reconstruct_locked_request(
     if numerics != reproduced_numerics or int(spec["seed"]) != int(numerics["seed"]):
         raise ValueError("locked sequence numerics cannot be reproduced")
 
-    dataset_pd = mds.dataset.to_pandas()
     preprocessing = computation.get("preprocessing")
     if not isinstance(preprocessing, dict) or not preprocessing.get("calendar_id"):
         raise ValueError("locked sequence preprocessing omits the exact calendar")
+    # resolve_model_request thins the dataset to the decision cadence before it builds
+    # any target or window, so reconstruction has to thin it the same way. Otherwise a
+    # weekly-cadence lock retrains on every session, which is a different model.
+    # The cadence comes from the locked model params and the calendar from the locked
+    # CV request; neither is reread from the preset.
+    decision_cadence = config["params"].get("decision_cadence")
+    locked_cv_request = computation.get("cv", {}).get("request") or {}
+    dataset_pd = _select_sequence_observations(
+        mds.dataset,
+        date_col=mds.date_col,
+        cadence=decision_cadence,
+        calendar=locked_cv_request.get("calendar"),
+    ).to_pandas()
     lookback = int(config["params"].get("lookback", 60))
     if config.get("library") == "darts":
         from case_studies.utils.darts_forecasting import (
@@ -631,8 +643,9 @@ def reconstruct_locked_request(
         )
         expected_preprocessing = {
             "class": "fold_train_standardization",
-            "base_target": "one_period_log_return",
+            "base_target": input_data_spec["base_target_data_spec"],
             "calendar_id": preprocessing["calendar_id"],
+            "decision_cadence": decision_cadence,
             "input_chunk_length": input_data_spec["input_chunk_length"],
             "output_chunk_length": input_data_spec["output_chunk_length"],
         }
@@ -887,7 +900,7 @@ def _reconstruct_darts_predictions(
     case_study: str,
 ) -> pl.DataFrame:
     from case_studies.utils.darts_forecasting import (
-        _attach_base_target,
+        _attach_darts_target,
         _attach_expected_periods,
         _overlay_fold_temporal_features,
         _parse_label_horizon,
@@ -902,12 +915,24 @@ def _reconstruct_darts_predictions(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         config, _parse_label_horizon(context.label_col)
     )
-    dataset = _attach_base_target(context.dataset_pd.copy(), case_study, context.date_col)
+    # Same pipeline and same order as darts_validation_keys: expected periods first,
+    # because the lagged-label target is built from them, then _attach_darts_target,
+    # which dispatches on params.darts_target. Calling _attach_base_target directly
+    # built the one-period target for every config, so replaying a lagged-label
+    # checkpoint scored it against a target the fit never saw.
     dataset = _attach_expected_periods(
-        dataset,
+        context.dataset_pd.copy(),
         date_col=context.date_col,
         calendar_id=str(computation["preprocessing"]["calendar_id"]),
         case_study=case_study,
+    )
+    dataset = _attach_darts_target(
+        dataset,
+        case_study=case_study,
+        date_col=context.date_col,
+        entity_col=context.entity_col,
+        label_col=context.label_col,
+        config=config,
     )
     frames = []
     has_temporal = bool(
