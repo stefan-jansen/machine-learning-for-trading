@@ -1540,7 +1540,7 @@ def test_locked_reconstruction_leaves_linear_training_identity_unmoved(
 
 
 def test_tabm_checkpoint_ic_survives_product_entities() -> None:
-    """The checkpoint IC must compute for a product-keyed study, not be swallowed.
+    """The checkpoint IC must actually compute for a product-keyed study.
 
     _train_tabm_fold builds its IC frame with the literal `symbol` key. When the
     cross_sectional_ic call was left passing the reader key, the join raised
@@ -1548,6 +1548,9 @@ def test_tabm_checkpoint_ic_survives_product_entities() -> None:
     cme_futures run reported every config unavailable and skipped all training
     rather than failing. Nothing else exercises this: the runtime suites monkeypatch
     _train_tabm_fold, so the IC call never runs, and none drives a product key.
+
+    The fixture gives each timestamp min_obs entities, so a NaN IC is a failure
+    rather than the expected shape of a too-thin cross-section.
     """
     import numpy as np
     import torch
@@ -1555,37 +1558,37 @@ def test_tabm_checkpoint_ic_survives_product_entities() -> None:
 
     from case_studies.utils import tabular_dl
 
-    rows, features = 12, 3
+    products = ["ES", "NQ", "CL", "GC", "ZN", "6E"]
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    rows, features = len(products) * len(dates), 3
     rng = np.random.default_rng(0)
-    x_train = rng.normal(size=(rows, features)).astype(np.float32)
-    y_train = rng.normal(size=rows).astype(np.float32)
-    x_val = rng.normal(size=(rows, features)).astype(np.float32)
-    y_val = rng.normal(size=rows).astype(np.float32)
-    # Two products per timestamp, so the cross-sectional join has something to group.
-    val_dates = np.array([np.datetime64(f"2024-01-0{index % 6 + 1}") for index in range(rows)])
-    val_entities = np.array(["ES" if index % 2 else "NQ" for index in range(rows)])
+    val_entities = np.array([product for _ in dates for product in products])
+    val_dates = np.array([np.datetime64(day) for day in dates for _ in products])
 
     class _Probe(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.linear = nn.Linear(features, 1)
 
-        def forward(self, batch):  # noqa: D102
+        def forward(self, batch):
             return self.linear(batch).squeeze(-1)
 
-    result = tabular_dl._train_tabm_fold(
+    ics, preds, losses = tabular_dl._train_tabm_fold(
         model=_Probe(),
-        X_train=x_train,
-        y_train=y_train,
-        X_val=x_val,
-        y_val=y_val,
-        y_eval_val=y_val,
+        X_train=rng.normal(size=(rows, features)).astype(np.float32),
+        y_train=rng.normal(size=rows).astype(np.float32),
+        X_val=rng.normal(size=(rows, features)).astype(np.float32),
+        y_val=rng.normal(size=rows).astype(np.float32),
+        y_eval_val=rng.normal(size=rows).astype(np.float32),
         val_dates=val_dates,
         val_entities=val_entities,
         n_epochs=1,
-        batch_size=4,
+        batch_size=8,
         checkpoint_interval=1,
         device=torch.device("cpu"),
     )
 
-    assert result is not None
+    assert set(ics) == {1}
+    assert np.isfinite(ics[1]), "product-keyed cross-section produced no usable IC"
+    assert preds[1].shape == (rows,)
+    assert np.isfinite(losses[1])
