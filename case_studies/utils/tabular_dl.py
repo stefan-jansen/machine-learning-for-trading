@@ -1081,7 +1081,9 @@ def _reconstruct_locked_tabm_predictions(
         frames.append(pl.DataFrame(columns))
     return pl.concat(frames).with_columns(
         pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
-        pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
+        # expected_keys names the entity `symbol` whatever the reader key is, so the
+        # dtype has to be read from that column rather than from the reader name.
+        pl.col(context.entity_col).cast(context.expected_keys.schema["symbol"]),
         pl.col("fold").cast(context.expected_keys.schema["fold"]),
     )
 
@@ -1112,7 +1114,10 @@ def validate_locked_run(
         != (context.prediction_split, "epoch", selected[0])
     ):
         raise ValueError("locked TabM run published the wrong checkpoint")
-    published = prediction.load().sort(context.entity_col, context.date_col, "fold")
+    # prediction.load() returns what was published, and publishing renames the entity to
+    # `symbol`; the reconstruction still carries the reader key, so bring it to the
+    # published contract before comparing rather than sorting a column that is not there.
+    published = prediction.load().sort("symbol", context.date_col, "fold")
     reopened = _cached_research_run(study, spec, context)
     if reopened is None or reopened.predictions[0].hash != prediction.hash:
         raise ValueError("locked TabM fitted state cannot be reused exactly")
@@ -1124,8 +1129,11 @@ def validate_locked_run(
         context,
         selected[0],
         device,
-    ).sort(context.entity_col, context.date_col, "fold")
-    key_columns = [context.entity_col, context.date_col, "fold"]
+    )
+    if context.entity_col != "symbol":
+        reconstructed = reconstructed.rename({context.entity_col: "symbol"})
+    reconstructed = reconstructed.sort("symbol", context.date_col, "fold")
+    key_columns = ["symbol", context.date_col, "fold"]
     value_columns = ["prediction", "actual"]
     if context.eval_label_col:
         value_columns.append("eval_actual")

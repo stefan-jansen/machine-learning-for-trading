@@ -370,9 +370,15 @@ def _prepare_expected_keys(
         )
         if frame is None:
             raise ValueError(f"latent fold {split['fold']} has no eligible validation keys")
-        frames.append(frame.select(case.entity_col, "timestamp", pl.col("fold_id").alias("fold")))
-    expected = pl.concat(frames).sort(case.entity_col, "timestamp", "fold")
-    if expected.n_unique([case.entity_col, "timestamp", "fold"]) != expected.height:
+        frames.append(
+            frame.select(
+                pl.col(case.entity_col).alias("symbol"),
+                "timestamp",
+                pl.col("fold_id").alias("fold"),
+            )
+        )
+    expected = pl.concat(frames).sort("symbol", "timestamp", "fold")
+    if expected.n_unique(["symbol", "timestamp", "fold"]) != expected.height:
         raise ValueError("latent-factor request produced duplicate expected prediction keys")
     return expected
 

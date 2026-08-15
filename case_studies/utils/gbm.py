@@ -1139,7 +1139,7 @@ def train_gbm_config(
             ic_frame = pl.DataFrame(
                 {
                     "timestamp": fd["dates"],
-                    entity_col: fd["entities"],
+                    "symbol": fd["entities"],
                     "y_true": fd["y_eval"] if fd.get("y_eval") is not None else fd["y_val"],
                     "y_pred": preds,
                 }
@@ -1193,7 +1193,7 @@ def train_gbm_config(
         frame = pl.DataFrame(
             {
                 "timestamp": e["dates"],
-                entity_col: e["entities"],
+                "symbol": e["entities"],
                 "y_true": ic_target,
                 "y_pred": e["y_pred"],
             }
@@ -2126,7 +2126,7 @@ def _gbm_prediction_frame(
             continue
         frame = pl.DataFrame(
             {
-                context.entity_col: entry["entities"],
+                "symbol": entry["entities"],
                 "timestamp": entry["dates"],
                 "fold": [int(entry["fold"])] * len(entry["y_pred"]),
                 "prediction": entry["y_pred"],
@@ -2299,7 +2299,7 @@ def _gbm_fold_prediction_shard(entries: list[dict[str, Any]], context: GBMContex
     for entry in entries:
         frame = pl.DataFrame(
             {
-                context.entity_col: entry["entities"],
+                "symbol": entry["entities"],
                 "timestamp": entry["dates"],
                 "fold": [int(entry["fold"])] * len(entry["y_pred"]),
                 "checkpoint": [int(entry["n_trees"])] * len(entry["y_pred"]),

@@ -1189,7 +1189,10 @@ def validate_locked_run(
         != (context.prediction_split, "epoch", selected[0])
     ):
         raise ValueError("locked sequence run published the wrong checkpoint")
-    published = prediction.load().sort(context.entity_col, "timestamp", "fold")
+    # prediction.load() returns what was published, and publishing renames the entity to
+    # `symbol`; the reconstruction still carries the reader key, so bring it to the
+    # published contract before comparing rather than sorting a column that is not there.
+    published = prediction.load().sort("symbol", "timestamp", "fold")
     reopened = _cached_sequence_run(study, spec, context)
     if reopened is None or reopened.predictions[0].hash != prediction.hash:
         raise ValueError("locked sequence fitted state cannot be reused exactly")
@@ -1206,9 +1209,11 @@ def validate_locked_run(
         )
         .drop("config", "epoch")
         .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-        .sort(context.entity_col, "timestamp", "fold")
     )
-    key_columns = [context.entity_col, "timestamp", "fold"]
+    if context.entity_col != "symbol":
+        reconstructed = reconstructed.rename({context.entity_col: "symbol"})
+    reconstructed = reconstructed.sort("symbol", "timestamp", "fold")
+    key_columns = ["symbol", "timestamp", "fold"]
     value_columns = ["prediction", "actual"]
     if not reconstructed.select(key_columns).equals(
         published.select(key_columns)

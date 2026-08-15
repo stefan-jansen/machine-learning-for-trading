@@ -721,7 +721,7 @@ def _prediction_frame(
     )
     if fold.get("y_eval") is not None:
         frame = frame.with_columns(pl.Series("eval_actual", fold["y_eval"]))
-    return frame.rename({context.date_col: "timestamp"}).with_columns(
+    return frame.rename({context.entity_col: "symbol", context.date_col: "timestamp"}).with_columns(
         pl.col("timestamp").cast(context.expected_keys.schema["timestamp"])
     )
 
