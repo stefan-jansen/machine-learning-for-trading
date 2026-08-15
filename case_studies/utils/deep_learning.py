@@ -606,18 +606,24 @@ def reconstruct_locked_request(
     # cadence comes from the locked model params, never from the preset.
     decision_cadence = config["params"].get("decision_cadence")
     locked_cv = computation.get("cv") or {}
-    cadence_calendar = locked_cv.get("calendar")
-    if cadence_calendar is None:
-        cadence_calendar = (locked_cv.get("request") or {}).get("calendar")
-    if decision_cadence is not None and cadence_calendar is None:
-        # resolve thinned with CVSpec.calendar. A holdout CV block is authored flat and
-        # carries no calendar, so there is nothing to reproduce it from. Defaulting here
-        # would silently thin on a different calendar than the fit did as soon as
-        # resolve_rebalance_timestamps starts honoring the argument.
-        raise ValueError(
-            "locked cadence-selected sequence training does not record its calendar, "
-            "so its observation selection cannot be reproduced"
-        )
+    locked_cv_request = locked_cv.get("request") or {}
+    # Presence, not truth. CVSpec.calendar is None whenever it was left unset, and a
+    # resolved CV record still writes the key, so None is an exactly reproducible
+    # choice rather than a missing one - rejecting it would refuse a canonical weekly
+    # run that simply never named a calendar. Only a block that never mentions the key
+    # leaves nothing to reproduce, and defaulting there would silently thin on a
+    # different calendar than the fit did once resolve_rebalance_timestamps honors it.
+    for block in (locked_cv, locked_cv_request):
+        if "calendar" in block:
+            cadence_calendar = block["calendar"]
+            break
+    else:
+        if decision_cadence is not None:
+            raise ValueError(
+                "locked cadence-selected sequence training does not record its calendar, "
+                "so its observation selection cannot be reproduced"
+            )
+        cadence_calendar = None
     dataset_pd = _select_sequence_observations(
         mds.dataset,
         date_col=mds.date_col,

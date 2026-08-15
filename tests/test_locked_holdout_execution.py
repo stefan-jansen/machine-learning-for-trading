@@ -1220,7 +1220,7 @@ def test_lock_rejects_list_valued_class_weights_contradicting_the_selected_train
     assert study.lifecycle.state == "DEVELOPMENT"
 
 
-def _darts_sequence_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _darts_sequence_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cadence=None):
     """Resolve a canonical Darts request the way the case study would."""
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -1277,7 +1277,11 @@ def _darts_sequence_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 "batch_size": 8,
                 "checkpoint_interval": 1,
                 "n_epochs": 1,
-                "params": {"architecture": "tsmixer", "lookback": 2},
+                "params": {
+                    "architecture": "tsmixer",
+                    "lookback": 2,
+                    **({"decision_cadence": cadence} if cadence else {}),
+                },
                 "config_name": "tsmixer_probe",
                 "family": "deep_learning",
                 "library": "darts",
@@ -1364,3 +1368,74 @@ def test_locked_sequence_reconstruction_round_trips_its_own_resolved_spec(
         deep_learning.reconstruct_locked_request(
             study, dropped, checkpoint_kind="epoch", checkpoint_value=1
         )
+
+
+def _holdout_cv_block(**extra):
+    return {
+        "identity": "holdout-cv",
+        "split": "holdout",
+        "train_start": "2024-01-02",
+        "train_end": "2024-01-10",
+        "evaluation_start": "2024-01-11",
+        "evaluation_end": "2024-01-12",
+        **extra,
+    }
+
+
+def test_cadence_selected_lock_without_a_recorded_calendar_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from case_studies.utils import deep_learning
+
+    study, spec = _darts_sequence_spec(tmp_path, monkeypatch, cadence="weekly_friday")
+    holdout_spec = deepcopy(spec)
+    holdout_spec["computation"]["cv"] = _holdout_cv_block()
+
+    with pytest.raises(ValueError, match="does not record its calendar"):
+        deep_learning.reconstruct_locked_request(
+            study, holdout_spec, checkpoint_kind="epoch", checkpoint_value=1
+        )
+
+
+@pytest.mark.parametrize("calendar", [None, "NYSE"])
+def test_cadence_selected_lock_reconstructs_from_a_recorded_calendar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calendar
+) -> None:
+    """A recorded calendar of None is a reproducible choice, not a missing one.
+
+    CVSpec.calendar is None whenever it was left unset and the resolved record still
+    writes the key, so a canonical weekly run that never named a calendar must
+    reconstruct rather than be refused.
+    """
+    from case_studies.utils import deep_learning
+
+    study, spec = _darts_sequence_spec(tmp_path, monkeypatch, cadence="weekly_friday")
+    holdout_spec = deepcopy(spec)
+    holdout_spec["computation"]["cv"] = _holdout_cv_block(calendar=calendar)
+
+    request = deep_learning.reconstruct_locked_request(
+        study, holdout_spec, checkpoint_kind="epoch", checkpoint_value=1
+    )
+
+    # Thinned to one observation per week, so the other nine fixture days are gone.
+    # The fixture runs over consecutive calendar days, so the first week ends on
+    # Sunday 2024-01-07 rather than on a Friday.
+    observed = sorted(request._context.dataset_pd["timestamp"].unique())
+    assert [stamp.strftime("%Y-%m-%d") for stamp in observed] == ["2024-01-07", "2024-01-12"]
+    assert request._context.config["params"]["decision_cadence"] == "weekly_friday"
+
+
+def test_cadence_selected_lock_accepts_the_calendar_from_a_nested_cv_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from case_studies.utils import deep_learning
+
+    study, spec = _darts_sequence_spec(tmp_path, monkeypatch, cadence="weekly_friday")
+    holdout_spec = deepcopy(spec)
+    holdout_spec["computation"]["cv"] = _holdout_cv_block(request={"calendar": None})
+
+    request = deep_learning.reconstruct_locked_request(
+        study, holdout_spec, checkpoint_kind="epoch", checkpoint_value=1
+    )
+
+    assert request._context.prediction_split == "holdout"
