@@ -903,7 +903,16 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(analysis, mds.date_col)
     horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
-    embargo = embargo_from_buffer(mds.label_buffer)
+    # The cadence is already measured on the frame being analysed, so the embargo
+    # is counted against it rather than against an assumed bar size. Leaving the
+    # fallback here would make the embargo short by the ratio between the two on
+    # any panel whose real cadence differs from its declared one, while the
+    # horizon computed on the line above stayed right. A month buffer has no
+    # fixed length and keeps the calendar branch.
+    try:
+        embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
+    except ValueError:
+        embargo = embargo_from_buffer(mds.label_buffer)
     nuisance_params = _resolve_nuisance_params(config, request["overrides"], seed)
     key_frame = analysis.select(mds.entity_cols[0], mds.date_col)
     if key_frame.n_unique([mds.entity_cols[0], mds.date_col]) != key_frame.height:

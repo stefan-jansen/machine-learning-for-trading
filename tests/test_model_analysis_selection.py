@@ -90,6 +90,22 @@ def test_best_model_per_family_refuses_to_drop_a_family_with_no_coverage() -> No
         best_model_per_family_fast(metrics)
 
 
+def test_best_model_per_family_names_the_label_whose_coverage_is_missing() -> None:
+    """A family survives on one label while another vanishes; check at group level."""
+    metrics = pl.DataFrame(
+        {
+            "family": ["gbm", "gbm"],
+            "label": ["fwd_ret_1d", "fwd_ret_60d"],
+            "config_name": ["backfilled", "uncounted"],
+            "ic_mean_daily": [0.10, 0.90],
+            "ic_n_days": [500, None],
+        }
+    )
+
+    with pytest.raises(ValueError, match="gbm/fwd_ret_60d"):
+        best_model_per_family_fast(metrics)
+
+
 def test_best_model_per_family_refuses_to_compare_without_a_coverage_column() -> None:
     metrics = pl.DataFrame(
         {
