@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from importlib.metadata import version
 from types import SimpleNamespace
 
@@ -494,3 +495,56 @@ def test_darts_presets_refuse_a_non_symbol_entity_key(tmp_path, monkeypatch) -> 
     """The Darts key builder names its keys after the entity column, unlike the other three."""
     with pytest.raises(ValueError, match="Darts presets require the symbol entity key"):
         _resolve_nlinear_request(tmp_path, monkeypatch, entity="product", library="darts")
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_sequence_publishes_predictions_under_the_expected_key_names(entity) -> None:
+    """The runner emits the reader-facing entity key; the registry contract expects `symbol`."""
+    from case_studies.utils import deep_learning
+
+    expected_keys = pl.DataFrame(
+        {
+            "symbol": ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 8), datetime(2024, 1, 8)],
+            "fold": [0, 0],
+        }
+    )
+    all_predictions = pl.DataFrame(
+        {
+            "config": ["nlinear_probe"] * 2,
+            "epoch": [2, 2],
+            entity: ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 8), datetime(2024, 1, 8)],
+            "fold_id": [0, 0],
+            "y_true": [0.01, -0.01],
+            "y_score": [0.02, -0.02],
+        }
+    )
+    context = SimpleNamespace(
+        config={"config_name": "nlinear_probe"},
+        entity_col=entity,
+        expected_keys=expected_keys,
+        label_col="fwd_ret_1d",
+    )
+    published = []
+
+    def capture(_training, **kwargs):
+        published.append(kwargs["predictions"])
+        return kwargs["predictions"]
+
+    study = SimpleNamespace(results=SimpleNamespace(publish_predictions=capture))
+    computation = {"checkpoint_schedule": [{"kind": "epoch", "value": 2}]}
+
+    results = deep_learning._publish_sequence_predictions(
+        study, computation, context, object(), {"all_predictions": all_predictions}
+    )
+
+    assert len(results) == 1 and len(published) == 1
+    frame = published[0]
+    assert "symbol" in frame.columns
+    assert entity not in set(frame.columns) - {"symbol"}
+    assert (
+        frame.select("symbol", "timestamp", "fold")
+        .sort("symbol")
+        .equals(expected_keys.sort("symbol"))
+    )

@@ -552,6 +552,45 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     return ModelRun(training=training, predictions=predictions)
 
 
+def _publish_sequence_predictions(
+    study: Study,
+    computation: dict[str, Any],
+    context: SequenceResearchContext,
+    training,
+    result: dict[str, Any],
+) -> tuple:
+    """Register one prediction set per declared checkpoint under the expected key names."""
+    prediction_results = []
+    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+        )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol":
+            predictions = predictions.rename({context.entity_col: "symbol"})
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type="regression",
+                class_values=None,
+                label=context.label_col,
+            )
+        )
+    return tuple(prediction_results)
+
+
 def run_resolved_request(
     study: Study,
     spec: dict[str, Any],
@@ -602,34 +641,9 @@ def run_resolved_request(
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    prediction_results = []
-    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
-        predictions = (
-            result["all_predictions"]
-            .filter(
-                (pl.col("config") == context.config["config_name"])
-                & (pl.col("epoch") == checkpoint)
-            )
-            .drop("config", "epoch")
-            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-        )
-        # The expected keys are the internal contract and always name the entity
-        # `symbol`; the runner emits the reader-facing key the case study uses.
-        if context.entity_col != "symbol" and context.entity_col in predictions.columns:
-            predictions = predictions.rename({context.entity_col: "symbol"})
-        prediction_results.append(
-            study.results.publish_predictions(
-                training,
-                checkpoint_kind="epoch",
-                checkpoint_value=int(checkpoint),
-                split="validation",
-                predictions=predictions,
-                expected_keys=context.expected_keys,
-                task_type="regression",
-                class_values=None,
-                label=context.label_col,
-            )
-        )
+    prediction_results = _publish_sequence_predictions(
+        study, computation, context, training, result
+    )
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
@@ -637,7 +651,7 @@ def run_resolved_request(
             float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
         )
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=tuple(prediction_results))
+    return ModelRun(training=training, predictions=prediction_results)
 
 
 # ---------------------------------------------------------------------------
