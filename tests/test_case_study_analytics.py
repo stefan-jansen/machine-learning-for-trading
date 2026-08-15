@@ -311,6 +311,84 @@ def seeded_registries(tmp_path, monkeypatch) -> Path:
 # -----------------------------------------------------------------------------
 
 
+def _seed_coverage_registry(db_path: Path) -> None:
+    """A current-shape registry where one config was scored on fewer days."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    _create_registry_schema(conn)
+    conn.execute("ALTER TABLE prediction_metrics ADD COLUMN ic_mean_daily REAL")
+    conn.execute("ALTER TABLE prediction_metrics ADD COLUMN ic_n_days INTEGER")
+    conn.executemany(
+        "INSERT INTO training_runs (training_hash, family, config_name, label, spec_json, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("th_short", "gbm", "short_window", "fwd_ret_21d", "{}", "2024-01-01"),
+            ("th_full", "gbm", "full_window", "fwd_ret_21d", "{}", "2024-01-01"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO prediction_sets (prediction_hash, training_hash, checkpoint_value, "
+        "checkpoint_kind, split, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("ph_short", "th_short", 0, "final", "validation", "2024-01-02"),
+            ("ph_full", "th_full", 0, "final", "validation", "2024-01-02"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO prediction_metrics (prediction_hash, computed_at, ic_mean, ic_mean_daily, "
+        "ic_n_days, task_type) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("ph_short", "2024-01-03", 0.40, 0.40, 40, "regression"),
+            ("ph_full", "2024-01-03", 0.10, 0.10, 500, "regression"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_load_model_ic_drops_partially_covered_prediction_sets(tmp_path, monkeypatch) -> None:
+    """The short window scores four times higher and is not comparable."""
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    _seed_coverage_registry(tmp_path / "etfs" / "run_log" / "registry.db")
+
+    guarded = analytics.load_model_ic(case_studies=["etfs"], split="validation")
+    assert guarded["config_name"].to_list() == ["full_window"]
+    assert guarded["coverage_enforced"].to_list() == [True]
+
+    # Without the guard the 40-day row leads the ranking.
+    unguarded = analytics.load_model_ic(
+        case_studies=["etfs"], split="validation", require_full_coverage=False
+    )
+    assert unguarded["config_name"].to_list() == ["short_window", "full_window"]
+    assert unguarded["coverage_enforced"].to_list() == [False, False]
+
+
+def test_load_model_ic_does_not_empty_a_registry_mid_backfill(tmp_path, monkeypatch) -> None:
+    """The column exists but holds nothing: guard off, rows returned, flag false."""
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    db = tmp_path / "etfs" / "run_log" / "registry.db"
+    _seed_coverage_registry(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE prediction_metrics SET ic_n_days = NULL")
+    conn.commit()
+    conn.close()
+
+    df = analytics.load_model_ic(case_studies=["etfs"], split="validation")
+
+    assert sorted(df["config_name"].to_list()) == ["full_window", "short_window"]
+    assert df["coverage_enforced"].unique().to_list() == [False]
+
+
+def test_load_model_ic_reports_when_a_legacy_registry_cannot_be_guarded(
+    seeded_registries,
+) -> None:
+    """A registry with no coverage column returns rows flagged as unguarded."""
+    df = analytics.load_model_ic(case_studies=["etfs"], split="validation")
+
+    assert df.height > 0
+    assert df["coverage_enforced"].unique().to_list() == [False]
+
+
 def test_load_model_ic_returns_all_families_by_default(seeded_registries) -> None:
     df = analytics.load_model_ic(case_studies=["etfs", "crypto_perps_funding"], split="validation")
     # etfs: 3 validation rows (lin_a, lin_b, gbm_a) with regression task_type;
