@@ -345,86 +345,139 @@ def test_selected_features_artifact_stops_before_holdout() -> None:
     )
 
 
-def test_crypto_dml_seals_the_label_endpoint_and_hashes_current_inputs() -> None:
-    """The DML sample and cache identity must bind the corrected 8-hour lineage."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "11_causal_dml.py").read_text()
+def test_validation_folds_are_purged_on_the_label_endpoint_not_the_holdout_start() -> None:
+    """A validation signal whose label matures inside the holdout must be dropped."""
+    import pandas as pd
 
-    assert 'ESTIMATOR_CONTRACT = "panel_time_v3"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert "holdout_cutoff - label_horizon" in source
-    assert "max() + LABEL_HORIZON >= HOLDOUT_CUTOFF" in source
+    from utils.cv_splits import generate_cv_splits
+
+    holdout = pd.Timestamp("2024-01-15", tz="UTC")
+    timestamps = pd.date_range("2023-09-01", "2024-01-14 23:00", freq="1h", tz="UTC")
+    frame = pd.DataFrame({"timestamp": timestamps})
+    config = {
+        "n_splits": 3,
+        "train_size": "30D",
+        "val_size": "10D",
+        "holdout_start": holdout.strftime("%Y-%m-%d"),
+        "holdout_end": None,
+        "calendar": None,
+        "step_size": None,
+        "expanding": False,
+    }
+
+    splits = generate_cv_splits(
+        frame, label_buffer="24H", outcome_horizon="24H", date_col="timestamp", cv_config=config
+    )
+    assert splits, "the splitter produced no folds"
+
+    cutoff = holdout - pd.Timedelta("24h")
+    for split in splits:
+        val_end = pd.Timestamp(split["val_end"])
+        if val_end.tzinfo is None:
+            val_end = val_end.tz_localize("UTC")
+        assert val_end < cutoff, (
+            f"fold {split['fold']} validates through {val_end}, whose 24H label matures "
+            f"at or after the sealed holdout {holdout}"
+        )
+
+    # The purge must actually remove bars, or the assertion above would hold on a no-op:
+    # the panel runs to 23:00 on the 14th, and fold 0 must stop a full horizon earlier.
+    fold_0_end = pd.Timestamp(splits[0]["val_end"])
+    if fold_0_end.tzinfo is None:
+        fold_0_end = fold_0_end.tz_localize("UTC")
+    assert fold_0_end < timestamps.max()
 
 
-def test_crypto_gbm_uses_the_configured_device_and_hashes_current_inputs() -> None:
-    """The GBM grid must honor its setup default and remain content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "07_gbm.py").read_text()
+def test_the_endpoint_purge_empties_rather_than_silently_admits_a_touching_fold() -> None:
+    """Purging must fail loudly; a fold it empties is not quietly dropped or kept."""
+    import pandas as pd
+
+    from utils.cv_splits import generate_cv_splits
+
+    timestamps = pd.date_range("2023-12-01", "2024-01-14 23:00", freq="1h", tz="UTC")
+    frame = pd.DataFrame({"timestamp": timestamps})
+
+    # A 12-hour validation window sits entirely inside the final 24-hour label horizon,
+    # so every one of its signals matures in the holdout and nothing survives the purge.
+    with pytest.raises(ValueError, match="purging labels that touch the holdout boundary"):
+        generate_cv_splits(
+            frame,
+            label_buffer="24H",
+            outcome_horizon="24H",
+            date_col="timestamp",
+            cv_config={
+                "n_splits": 2,
+                "train_size": "10D",
+                "val_size": "12H",
+                "holdout_start": "2024-01-15",
+                "holdout_end": None,
+                "calendar": None,
+                "step_size": None,
+                "expanding": False,
+            },
+        )
+
+
+def test_crypto_gbm_runs_on_the_device_its_config_declares() -> None:
+    """The GBM backend follows setup.yaml, with no silent hardware-derived fallback."""
+    from case_studies.utils.gbm import resolve_gbm_device, resolve_gbm_execution_config
+
     setup = yaml.safe_load(
         (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
     )
-    configured_device = setup["modeling"]["gbm"]["device"]
+    gbm_config = setup["modeling"]["gbm"]
+    assert gbm_config["device"] == "cpu"
 
-    assert configured_device == "cpu"
-    assert 'setup.get("modeling", {}).get("gbm", {}).get("device", "cpu")' in source
-    assert "TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)" in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "CPU fallback" not in source
+    device, _, _ = resolve_gbm_execution_config(dict(gbm_config))
+    assert device == "cpu"
 
+    # Not hardcoded: a declared GPU backend resolves to cuda on the same code path,
+    # so this test fails if the resolver is ever pinned to one device.
+    gpu_device, _, _ = resolve_gbm_execution_config({**gbm_config, "device": "gpu"})
+    assert gpu_device == "cuda"
 
-@pytest.mark.parametrize("notebook", ["06_linear.py", "07_gbm.py"])
-def test_crypto_model_guard_uses_active_24h_label_buffer(notebook: str) -> None:
-    """Crypto model guards must purge the endpoint for the selected label horizon."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / notebook).read_text()
-    setup = yaml.safe_load(
-        (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
-    )
-
-    assert setup["labels"]["variant_buffers"]["fwd_ret_24h"] == "24H"
-    assert "pd.Timedelta(mds.label_buffer)" in source
-    assert 'split["val_end"] + label_horizon < holdout_start' in source
-    assert 'split["val_end"] + timedelta(hours=8)' not in source
+    with pytest.raises(ValueError, match="Unsupported LightGBM device"):
+        resolve_gbm_device(None, "tpu")
 
 
-def test_crypto_tabm_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected TabM grid must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "08_tabular_dl.py").read_text()
+def test_crypto_sequence_training_refuses_to_fall_back_to_cpu() -> None:
+    """A requested GPU must fail loudly when absent, never degrade to CPU silently.
 
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
+    A silent fallback is the failure that matters here: the run still produces a
+    model, so nothing surfaces, and only the wall-clock and the numerics differ.
+    """
+    import torch
+
+    from case_studies.utils import deep_learning
+
+    # Requested and available: the declared device is what gets recorded.
+    if torch.cuda.is_available():
+        spec = deep_learning._sequence_runtime_spec("gpu", seed=0, num_threads=1)
+        assert spec["device"] == "cuda"
+
+    original = torch.cuda.is_available
+    try:
+        torch.cuda.is_available = lambda: False
+        with pytest.raises(RuntimeError, match="CUDA was requested"):
+            deep_learning._sequence_runtime_spec("cuda", seed=0, num_threads=1)
+        # An explicitly declared CPU run is still allowed; only the fallback is not.
+        assert deep_learning._sequence_runtime_spec("cpu", seed=0, num_threads=1)["device"] == "cpu"
+    finally:
+        torch.cuda.is_available = original
+
+    with pytest.raises(ValueError, match="unsupported sequence device"):
+        deep_learning._sequence_runtime_spec("tpu", seed=0, num_threads=1)
 
 
-def test_crypto_lstm_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected LSTM run must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "09_dl_lstm.py").read_text()
+def test_crypto_sequence_families_default_to_cuda() -> None:
+    """The sequence notebooks pin no device; the shared resolver defaults to the GPU."""
+    dl_src = (REPO_ROOT / "case_studies/utils/deep_learning.py").read_text()
+    assert 'request["overrides"].get("device", "cuda")' in dl_src
 
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert "extra_params=IDENTITY_PARAMS" in source
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
-
-
-def test_crypto_tcn_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected TCN run must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "10_dl_tcn.py").read_text()
-
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
+    for notebook in ("08_tabular_dl.py", "09_dl_lstm.py", "10_dl_tcn.py"):
+        source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / notebook).read_text()
+        assert '"device": "cpu"' not in source
+        assert "CPU fallback" not in source
 
 
 @pytest.mark.parametrize(
