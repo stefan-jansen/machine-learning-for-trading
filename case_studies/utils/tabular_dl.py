@@ -1114,9 +1114,8 @@ def validate_locked_run(
         != (context.prediction_split, "epoch", selected[0])
     ):
         raise ValueError("locked TabM run published the wrong checkpoint")
-    # prediction.load() returns what was published, and publishing renames the entity to
-    # `symbol`; the reconstruction still carries the reader key, so bring it to the
-    # published contract before comparing rather than sorting a column that is not there.
+    # Both sides name the entity `symbol`: publishing renames it, and the reconstruction
+    # builds it that way, so they compare directly.
     published = prediction.load().sort("symbol", context.date_col, "fold")
     reopened = _cached_research_run(study, spec, context)
     if reopened is None or reopened.predictions[0].hash != prediction.hash:
@@ -1764,7 +1763,7 @@ def _train_tabm_fold(
                 pred_col="y_pred",
                 ret_col="y_true",
                 date_col="timestamp",
-                entity_col=entity_col,
+                entity_col="symbol",
                 min_obs=5,
             )["ic_mean"]
             checkpoint_ics[epoch] = ic
@@ -2658,7 +2657,7 @@ def run_tabm_cv(
                         pred_col="y_pred",
                         ret_col="y_true",
                         date_col="timestamp",
-                        entity_col=entity_col,
+                        entity_col="symbol",
                         min_obs=5,
                     )["ic_mean"]
                     state["fold_checkpoint_ics"].setdefault(1, []).append(ic)

@@ -808,7 +808,7 @@ def _checkpoint_metrics_from_predictions(
                 pl.DataFrame(
                     {
                         "timestamp": entry["dates"],
-                        "entity": entry["entities"],
+                        "symbol": entry["entities"],
                         "y_true": target,
                         "y_pred": entry["y_pred"],
                     }
@@ -823,7 +823,7 @@ def _checkpoint_metrics_from_predictions(
             pred_col="y_pred",
             ret_col="y_true",
             date_col="timestamp",
-            entity_col="entity",
+            entity_col="symbol",
             min_obs=5,
         )
         metrics[int(checkpoint)] = {

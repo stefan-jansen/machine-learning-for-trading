@@ -1460,7 +1460,7 @@ def _train_one_config(
             ic_frame = pl.DataFrame(
                 {
                     "date": val_dates,
-                    entity_col: val_entities,
+                    "symbol": val_entities,
                     "y_true": y_val,
                     "y_pred": val_preds,
                 }
@@ -1471,7 +1471,7 @@ def _train_one_config(
                 pred_col="y_pred",
                 ret_col="y_true",
                 date_col="date",
-                entity_col=entity_col,
+                entity_col="symbol",
                 min_obs=5,
             )["ic_mean"]
             checkpoint_ics[epoch] = ic
