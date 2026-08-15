@@ -114,8 +114,13 @@ def apply_state_transition_policy(
             else:
                 transition_at.add(current["timestamp"])
         previous = current
+    transition_values = pl.Series(
+        "_transition_timestamp",
+        list(transition_at),
+        dtype=weights.schema["timestamp"],
+    )
     result = weights.with_columns(
-        pl.col("timestamp").is_in(list(transition_at)).alias("_state_transition")
+        pl.col("timestamp").is_in(transition_values.implode()).alias("_state_transition")
     )
     if flat_frames:
         result = pl.concat(
@@ -520,6 +525,11 @@ class Strategy:
         policy = risk.get("state_transition_policy")
         if policy is None or self.decision is not None:
             return None
+        if not isinstance(policy, dict):
+            raise TypeError("risk state-transition policy must be a mapping")
+        from .decisions import StateTransitionPolicy
+
+        policy = asdict(StateTransitionPolicy(**policy))
         cadence = risk.get("state_transition_cadence")
         if cadence is None:
             raise ValueError("risk state-transition policy requires an explicit cadence")

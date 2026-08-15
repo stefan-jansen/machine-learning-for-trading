@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -70,6 +70,31 @@ def test_fold_boundary_liquidates_unchanged_positions_before_next_fold() -> None
 
     assert transitioned.get_column("weight").to_list() == [1.0, 1.0, 1.0]
     assert transitioned.get_column("_state_transition").to_list() == [False, False, True]
+
+
+def test_state_transition_preserves_millisecond_utc_timestamp_dtype() -> None:
+    timestamps = pl.Series(
+        "timestamp",
+        [datetime(2024, 1, day, tzinfo=UTC) for day in (1, 2)],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    weights = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "timestamp": timestamps,
+            "fold": [0, 1],
+            "weight": [1.0, 1.0],
+        }
+    )
+
+    transitioned = apply_state_transition_policy(
+        weights,
+        policy={"fold_boundary": "liquidate", "temporal_gap": "continue"},
+        cadence="1d",
+    )
+
+    assert transitioned.schema["timestamp"] == pl.Datetime("ms", "UTC")
+    assert transitioned.get_column("_state_transition").to_list() == [False, True]
 
 
 def test_temporal_gap_resets_unchanged_positions_before_gap() -> None:
