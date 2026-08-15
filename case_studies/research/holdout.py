@@ -92,6 +92,7 @@ class LockedStrategyReplay:
             raise ValueError("holdout prediction belongs to another study")
         from case_studies.utils.artifact_digest import value_digest
         from case_studies.utils.backtest_presets import serializable_backtest_spec
+        from case_studies.utils.backtest_runner import resolved_allow_short_selling
         from case_studies.utils.registry import backtest_hash_from_parts
 
         from . import strategy as strategy_module
@@ -180,8 +181,8 @@ class LockedStrategyReplay:
             ) is not None:
                 raise ValueError("locked stateful strategy has no executable replay path")
         if weights is not None:
-            spec["backtest_config"]["account"]["allow_short_selling"] = bool(
-                weights.filter(pl.col("weight") < 0).height
+            spec["backtest_config"]["account"]["allow_short_selling"] = (
+                resolved_allow_short_selling(spec, weights)
             )
         if _locked_strategy_projection(spec) != _locked_strategy_projection(locked_spec):
             raise ValueError("holdout strategy reconstruction changed the locked computation")
