@@ -23,7 +23,7 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def test_sequence_resolver_builds_complete_v2_request(tmp_path, monkeypatch) -> None:
+def test_sequence_resolver_builds_complete_resolved_request(tmp_path, monkeypatch) -> None:
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -100,12 +100,13 @@ def test_sequence_resolver_builds_complete_v2_request(tmp_path, monkeypatch) -> 
     spec = resolved.spec
     context = resolved._context
 
-    assert spec["identity_version"] == 2
-    assert spec["label_artifact"]["digest"] == label.digest
-    assert spec["model"]["params"]["n_epochs"] == 3
-    assert [row["value"] for row in spec["checkpoint_schedule"]] == [2, 3]
-    assert spec["expected_prediction_keys"]["n_rows"] == 12
-    assert spec["sampling"] == {"max_symbols": 0, "max_train_sequences": 0}
+    computation = spec["computation"]
+    assert spec["identity_version"] == 3
+    assert computation["label_artifact"]["digest"] == label.digest
+    assert computation["model"]["params"]["n_epochs"] == 3
+    assert [row["value"] for row in computation["checkpoint_schedule"]] == [2, 3]
+    assert computation["expected_prediction_keys"]["n_rows"] == 12
+    assert computation["sampling"] == {"max_symbols": 0, "max_train_sequences": 0}
     assert context.expected_keys.height == 12
     assert context.config["n_epochs"] == 3
 
@@ -200,8 +201,9 @@ def test_darts_request_resolves_installed_runtime_identity(tmp_path, monkeypatch
         overrides={"device": "cpu"},
     ).resolve()
 
-    assert resolved.spec["runtime_identity"]["darts"] == version("darts")
-    assert resolved.spec["model"]["implementation"] == "darts"
+    computation = resolved.spec["computation"]
+    assert computation["runtime_identity"]["darts"] == version("darts")
+    assert computation["model"]["implementation"] == "darts"
 
 
 def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monkeypatch) -> None:
@@ -301,10 +303,11 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
     assert all(timestamp.weekday() == 4 for timestamp in observed_timestamps)
     assert list(context.splits) == canonical_folds
     assert pd.Timestamp(split["val_start"]) - pd.Timestamp(split["train_end"]) >= pd.Timedelta("5D")
-    assert resolved.spec["cv"]["request"]["decision_cadence"] is None
-    assert resolved.spec["cv"]["request"]["gap"] == "5D"
-    assert resolved.spec["model"]["params"]["decision_cadence"] == "weekly_friday"
-    assert resolved.spec["preprocessing"]["decision_cadence"] == "weekly_friday"
+    computation = resolved.spec["computation"]
+    assert computation["cv"]["request"]["decision_cadence"] is None
+    assert computation["cv"]["request"]["gap"] == "5D"
+    assert computation["model"]["params"]["decision_cadence"] == "weekly_friday"
+    assert computation["preprocessing"]["decision_cadence"] == "weekly_friday"
     eligible_timestamps = [
         timestamp
         for timestamp in observed_timestamps
@@ -318,7 +321,7 @@ def test_weekly_nbeats_request_applies_identity_cadence_before_cv(tmp_path, monk
         }
     ).sort("symbol", "timestamp", "fold")
     assert context.expected_keys.equals(expected)
-    assert resolved.spec["expected_prediction_keys"]["n_rows"] == expected.height
+    assert computation["expected_prediction_keys"]["n_rows"] == expected.height
 
 
 def test_run_dl_cv_applies_preset_cadence_before_backend(monkeypatch) -> None:
