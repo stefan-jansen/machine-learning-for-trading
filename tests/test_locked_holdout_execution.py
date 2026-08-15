@@ -1452,3 +1452,26 @@ def test_cadence_selected_lock_accepts_the_calendar_from_a_nested_cv_request(
     )
 
     assert request._context.prediction_split == "holdout"
+
+
+def test_digest_verification_is_not_served_stale_after_an_artifact_changes(
+    tmp_path: Path,
+) -> None:
+    """Completeness memoizes the digest read; a replaced artifact must still be caught.
+
+    The cache key carries the artifact's size and nanosecond mtime precisely so that a
+    rewritten file misses it. Without that, a population scan that had already read an
+    artifact would keep reporting it complete after it was replaced.
+    """
+    from case_studies.research.results import Result
+
+    study, _candidates, backtest, _spec = _selection_for_fold_parameters(
+        tmp_path, {"0": {"alpha": 1.0}}
+    )
+    assert Result.open(study, backtest.hash).complete
+
+    returns = study.root / "run_log" / "backtest" / backtest.hash / "daily_returns.parquet"
+    original = pl.read_parquet(returns)
+    original.with_columns(pl.col(original.columns[-1]) * 2.0).write_parquet(returns)
+
+    assert not Result.open(study, backtest.hash).complete

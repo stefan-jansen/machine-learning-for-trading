@@ -4,6 +4,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,26 @@ from case_studies.utils.registry.specs import (
 )
 
 from .contracts import ExecutionTier
+
+# Digest verification reads the artifact off disk, and `complete` is evaluated in loops
+# over whole populations - CandidateSet.members and OfficialPopulation both re-check
+# every member, and members is a property, so an unmemoized check re-reads two parquet
+# files per member on every access. Published artifacts are immutable, and the key
+# carries size and nanosecond mtime, so a file that is replaced misses the cache.
+_VERIFIED_ARTIFACT_DIGESTS: dict[tuple[str, int, int], str] = {}
+
+
+def _verified_digest(path: Path, load) -> str:
+    from case_studies.utils.artifact_digest import value_digest
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    digest = _VERIFIED_ARTIFACT_DIGESTS.get(key)
+    if digest is None:
+        digest = value_digest(load())
+        _VERIFIED_ARTIFACT_DIGESTS[key] = digest
+    return digest
+
 
 if TYPE_CHECKING:
     from .workspace import Study
@@ -373,7 +394,7 @@ class PredictionResult(Result):
         recorded_digest = coverage.get("artifact_digest")
         if recorded_digest:
             try:
-                if value_digest(self.load()) != recorded_digest:
+                if _verified_digest(prediction_file, self.load) != recorded_digest:
                     return False
             except (OSError, ValueError, pl.exceptions.PolarsError):
                 return False
@@ -439,7 +460,9 @@ class BacktestResult(Result):
         for filename, expected_digest in artifact_digests.items():
             path = returns.parent / filename
             try:
-                if not path.is_file() or value_digest(pl.read_parquet(path)) != expected_digest:
+                if not path.is_file():
+                    return False
+                if _verified_digest(path, partial(pl.read_parquet, path)) != expected_digest:
                     return False
             except (OSError, ValueError, pl.exceptions.PolarsError):
                 return False
