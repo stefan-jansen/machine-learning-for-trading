@@ -245,18 +245,33 @@ def _resolve_model_configuration(
     for field in ("max_iter", "n_epochs_cond", "n_epochs_moment", "n_epochs_unc"):
         if field in reductions:
             model_kwargs[field] = int(reductions[field])
-    if model_name == "sdf" and reductions:
-        reduced_budget = max(
+    if model_name == "sdf":
+        # The SDF names checkpoints in two schemes. The schedule this adapter
+        # publishes uses GLOBAL epochs - the unconditional stage's length plus a
+        # conditional epoch - so the configured [256, 512, 768, 1024, 1280] ends at
+        # 256 + 1024. StochasticDiscountFactorConfig reads checkpoint_epochs as
+        # CONDITIONAL-RELATIVE and rejects any entry above n_epochs_cond, and
+        # library_bridge passes the list through untransformed. So the configured
+        # list has to be clamped to the stage budget before it reaches the model,
+        # and the global labels are rebuilt from it afterwards by
+        # _expected_latent_checkpoints - which is why clamping does not shorten the
+        # published schedule.
+        #
+        # This clamp used to run only when `reductions` was non-empty, so a preview
+        # clamped and a canonical run did not: canonical handed 1280 to the library
+        # and every canonical SDF fit failed with "checkpoint_epochs entries must be
+        # <= 1024; got 1280", while every preview passed and hid it.
+        epoch_budget = max(
             int(model_kwargs.get("n_epochs_unc", 256)),
             int(model_kwargs.get("n_epochs_cond", 1024)),
         )
         configured = model_kwargs.get("checkpoint_epochs")
         if configured is not None:
             compatible = sorted(
-                {int(epoch) for epoch in configured if 1 <= int(epoch) <= reduced_budget}
+                {int(epoch) for epoch in configured if 1 <= int(epoch) <= epoch_budget}
             )
-            if reduced_budget not in compatible:
-                compatible.append(reduced_budget)
+            if epoch_budget not in compatible:
+                compatible.append(epoch_budget)
             model_kwargs["checkpoint_epochs"] = compatible
     if model_name == "sdf" and model_kwargs.get("expected_return_mapper", "linear") != "linear":
         raise ValueError("SDF expected_return_mapper currently supports only 'linear'")
