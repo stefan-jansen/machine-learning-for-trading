@@ -279,8 +279,11 @@ def _resolve_model_request_from_materialized(
     unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
     if unknown_reductions:
         raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("TabM runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("TabM runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"TabM runner does not support entity key {entity_col!r}")
     splits, cv_record = _tabm_splits(mds, request)
     try:
         configured = configured_by_name[request["config_name"]]
@@ -379,7 +382,7 @@ def _resolve_model_request_from_materialized(
         label_col=mds.label_col,
         eval_label_col=mds.eval_label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         class_weights_by_fold=class_weights_by_fold,
@@ -521,11 +524,15 @@ def _publish_tabm_predictions(
             .filter((pl.col("config") == result_key) & (pl.col("epoch") == checkpoint))
             .drop("config", "epoch")
             .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-            .with_columns(
-                pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
-                pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
-                pl.col("fold").cast(context.expected_keys.schema["fold"]),
-            )
+        )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol":
+            predictions = predictions.rename({context.entity_col: "symbol"})
+        predictions = predictions.with_columns(
+            pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
+            pl.col("symbol").cast(context.expected_keys.schema["symbol"]),
+            pl.col("fold").cast(context.expected_keys.schema["fold"]),
         )
         prediction_results.append(
             study.results.publish_predictions(

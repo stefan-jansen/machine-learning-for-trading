@@ -310,8 +310,11 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         label_ref.name,
         max_symbols=int(reductions.get("max_symbols", 0)),
     )
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("sequence runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("sequence runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"sequence runner does not support entity key {entity_col!r}")
     if mds.task_type != "regression":
         raise ValueError("sequence runner currently supports regression labels only")
     cv = request.get("cv")
@@ -359,6 +362,14 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             darts_validation_keys,
         )
 
+        # darts_validation_keys names its keys after the entity column and adds
+        # `position` where the panel has one, unlike the three key builders that
+        # emit `symbol`. No product-keyed case study configures a Darts preset,
+        # so that combination has never been exercised; refuse it here rather
+        # than fail later on a key that is missing from the digest.
+        if entity_col != "symbol":
+            raise ValueError(f"Darts presets require the symbol entity key, not {entity_col!r}")
+
         expected = darts_validation_keys(
             dataset_pd,
             splits,
@@ -366,7 +377,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             feature_names=list(mds.feature_names),
             label_col=mds.label_col,
             date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
+            entity_col=entity_col,
             case_study=study.case_study,
             temporal_by_fold=mds.temporal_by_fold,
             temporal_keys=list(mds.temporal_keys),
@@ -392,7 +403,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             splits,
             label_col=mds.label_col,
             date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
+            entity_col=entity_col,
             lookback=lookback,
             calendar_id=calendar_id,
         )
@@ -467,7 +478,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         feature_names=tuple(mds.feature_names),
         label_col=mds.label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         temporal_by_fold=mds.temporal_by_fold,
@@ -541,6 +552,45 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     return ModelRun(training=training, predictions=predictions)
 
 
+def _publish_sequence_predictions(
+    study: Study,
+    computation: dict[str, Any],
+    context: SequenceResearchContext,
+    training,
+    result: dict[str, Any],
+) -> tuple:
+    """Register one prediction set per declared checkpoint under the expected key names."""
+    prediction_results = []
+    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
+        predictions = (
+            result["all_predictions"]
+            .filter(
+                (pl.col("config") == context.config["config_name"])
+                & (pl.col("epoch") == checkpoint)
+            )
+            .drop("config", "epoch")
+            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
+        )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol":
+            predictions = predictions.rename({context.entity_col: "symbol"})
+        prediction_results.append(
+            study.results.publish_predictions(
+                training,
+                checkpoint_kind="epoch",
+                checkpoint_value=int(checkpoint),
+                split="validation",
+                predictions=predictions,
+                expected_keys=context.expected_keys,
+                task_type="regression",
+                class_values=None,
+                label=context.label_col,
+            )
+        )
+    return tuple(prediction_results)
+
+
 def run_resolved_request(
     study: Study,
     spec: dict[str, Any],
@@ -591,30 +641,9 @@ def run_resolved_request(
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    prediction_results = []
-    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
-        predictions = (
-            result["all_predictions"]
-            .filter(
-                (pl.col("config") == context.config["config_name"])
-                & (pl.col("epoch") == checkpoint)
-            )
-            .drop("config", "epoch")
-            .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-        )
-        prediction_results.append(
-            study.results.publish_predictions(
-                training,
-                checkpoint_kind="epoch",
-                checkpoint_value=int(checkpoint),
-                split="validation",
-                predictions=predictions,
-                expected_keys=context.expected_keys,
-                task_type="regression",
-                class_values=None,
-                label=context.label_col,
-            )
-        )
+    prediction_results = _publish_sequence_predictions(
+        study, computation, context, training, result
+    )
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
@@ -622,7 +651,7 @@ def run_resolved_request(
             float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
         )
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=tuple(prediction_results))
+    return ModelRun(training=training, predictions=prediction_results)
 
 
 # ---------------------------------------------------------------------------

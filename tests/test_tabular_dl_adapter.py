@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from types import SimpleNamespace
 
 import polars as pl
@@ -251,3 +252,166 @@ def test_tabm_classification_resolves_targets_imbalance_and_preview_checkpoints(
         "accuracy",
         "balanced_accuracy",
     ]
+
+
+def _entity_keyed_dataset(entity: str) -> tuple[pl.DataFrame, SimpleNamespace, list[dict]]:
+    """Build a four-session panel whose entity column carries the given canonical name."""
+    frame = pl.DataFrame(
+        {
+            entity: [f"S{index}" for index in range(6)] * 4,
+            "timestamp": [
+                date
+                for date in ("2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04")
+                for _ in range(6)
+            ],
+            "feature": [float(index) for index in range(24)],
+            "fwd_ret_1d": [float(index % 6) / 100 for index in range(24)],
+        }
+    ).with_columns(pl.col("timestamp").str.to_date())
+    splits = [
+        {
+            "fold": 0,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-02",
+            "val_start": "2024-01-03",
+            "val_end": "2024-01-04",
+        }
+    ]
+    mds = SimpleNamespace(
+        dataset=frame,
+        feature_names=["feature"],
+        label_col="fwd_ret_1d",
+        date_col="timestamp",
+        entity_cols=[entity],
+        splits=splits,
+        task_type="regression",
+        class_values=[],
+        eval_label_col=None,
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    return frame, mds, splits
+
+
+def _tabm_config() -> list[dict]:
+    return [
+        {
+            "batch_size": 64,
+            "checkpoint_interval": 5,
+            "n_epochs": 10,
+            "params": {"dropout": 0.0, "hidden_dim": 4, "n_members": 2},
+            "config_name": "tabm_probe",
+            "family": "tabular_dl",
+            "library": "tabm",
+        }
+    ]
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_tabm_resolver_accepts_either_canonical_entity_key(tmp_path, monkeypatch, entity) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    frame, mds, _ = _entity_keyed_dataset(entity)
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+    monkeypatch.setattr("utils.modeling.load_configs", lambda *a, **k: _tabm_config())
+
+    resolved = study.model(
+        family="tabular_dl",
+        label=label.name,
+        config_name="tabm_probe",
+        overrides={"device": "cpu"},
+    ).resolve()
+
+    assert resolved._context.entity_col == entity
+    assert resolved._context.expected_keys.columns == ["symbol", "timestamp", "fold"]
+    assert resolved._context.expected_keys.height == 12
+
+
+def test_tabm_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    frame, mds, _ = _entity_keyed_dataset("ticker")
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_1d", "regression", "1D"),
+        frame.rename({"ticker": "symbol"}).select("symbol", "timestamp", "fwd_ret_1d"),
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+    monkeypatch.setattr("utils.modeling.load_configs", lambda *a, **k: _tabm_config())
+
+    with pytest.raises(ValueError, match="does not support entity key 'ticker'"):
+        study.model(
+            family="tabular_dl",
+            label=label.name,
+            config_name="tabm_probe",
+            overrides={"device": "cpu"},
+        ).resolve()
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_tabm_publishes_predictions_under_the_expected_key_names(monkeypatch, entity) -> None:
+    """The runner emits the reader-facing entity key; the registry contract expects `symbol`."""
+    from case_studies.utils import tabular_dl
+
+    expected_keys = pl.DataFrame(
+        {
+            "symbol": ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 3), datetime(2024, 1, 3)],
+            "fold": [0, 0],
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
+    all_predictions = pl.DataFrame(
+        {
+            "config": ["tabm_probe"] * 2,
+            "epoch": [2, 2],
+            entity: ["ES", "NQ"],
+            "timestamp": [datetime(2024, 1, 3), datetime(2024, 1, 3)],
+            "fold_id": [0, 0],
+            "y_true": [0.01, -0.01],
+            "y_score": [0.02, -0.02],
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+    context = SimpleNamespace(
+        config={"config_name": "tabm_probe"},
+        date_col="timestamp",
+        entity_col=entity,
+        expected_keys=expected_keys,
+        task_type="regression",
+        class_values=(),
+        eval_label_col=None,
+        label_col="fwd_ret_1d",
+    )
+    published = []
+
+    def capture(_training, **kwargs):
+        published.append(kwargs["predictions"])
+        return kwargs["predictions"]
+
+    study = SimpleNamespace(results=SimpleNamespace(publish_predictions=capture))
+    spec = {"computation": {"checkpoint_schedule": [{"kind": "epoch", "value": 2}]}}
+
+    tabular_dl._publish_tabm_predictions(
+        study, spec, context, object(), {"all_predictions": all_predictions}
+    )
+
+    assert len(published) == 1
+    frame = published[0]
+    assert "symbol" in frame.columns and entity not in set(frame.columns) - {"symbol"}
+    assert frame.schema["symbol"] == expected_keys.schema["symbol"]
+    assert frame.schema["timestamp"] == expected_keys.schema["timestamp"]
+    assert frame.schema["fold"] == expected_keys.schema["fold"]
+    assert (
+        frame.select("symbol", "timestamp", "fold")
+        .sort("symbol")
+        .equals(expected_keys.sort("symbol"))
+    )

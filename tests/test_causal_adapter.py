@@ -25,7 +25,7 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _causal_fixture(tmp_path, monkeypatch):
+def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol"):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -46,7 +46,7 @@ def _causal_fixture(tmp_path, monkeypatch):
         for symbol_index in range(6):
             rows.append(
                 {
-                    "symbol": f"S{symbol_index}",
+                    entity: f"S{symbol_index}",
                     "timestamp": timestamp,
                     "feature": float(symbol_index),
                     "treatment": float(symbol_index) + timestamp_index / 100,
@@ -57,7 +57,7 @@ def _causal_fixture(tmp_path, monkeypatch):
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
         LabelDefinition("fwd_ret_8h", "regression", "8H"),
-        frame.select("symbol", "timestamp", "fwd_ret_8h"),
+        frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
         dataset=frame,
@@ -65,7 +65,7 @@ def _causal_fixture(tmp_path, monkeypatch):
         label_col="fwd_ret_8h",
         label_buffer="8H",
         date_col="timestamp",
-        entity_cols=["symbol"],
+        entity_cols=[entity],
         input_lineage={
             "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
             "fingerprint": "fixture-v1",
@@ -219,3 +219,34 @@ def test_block_permutation_resets_at_temporal_gap() -> None:
 
     assert set(permuted[:4]) == set(values[:4])
     assert set(permuted[4:]) == set(values[4:])
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_causal_resolver_accepts_either_canonical_entity_key(tmp_path, monkeypatch, entity) -> None:
+    study, label = _causal_fixture(tmp_path, monkeypatch, entity=entity)
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    assert resolved.spec["computation"]["analysis_population"]["n_rows"] > 0
+
+
+def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
+    study, label = _causal_fixture(tmp_path, monkeypatch, entity="ticker")
+
+    with pytest.raises(ValueError, match="does not support entity key 'ticker'"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()
