@@ -17,6 +17,7 @@ from .execution import (
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
 from .lifecycle import ResearchLock
+from .model_planning import ModelPlan, PlannedModel, plan_models
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
@@ -41,10 +42,12 @@ __all__ = [
     "LifecycleState",
     "ModelRequest",
     "ModelExecution",
+    "ModelPlan",
     "ModelRun",
     "PredictionResult",
     "PredictionCatalog",
     "PlannedBacktest",
+    "PlannedModel",
     "OfficialPopulation",
     "ResearchLock",
     "ResolvedModelRequest",
@@ -60,6 +63,7 @@ __all__ = [
     "register_adapter",
     "registered_adapters",
     "plan_backtests",
+    "plan_models",
     "run_backtests",
     "run_models",
 ]

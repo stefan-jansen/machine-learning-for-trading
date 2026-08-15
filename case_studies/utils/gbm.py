@@ -2451,27 +2451,35 @@ def _run_gbm_batch_group(
     base: dict[str, Any],
     *,
     report_batch: bool,
+    planned_candidates: dict[
+        int,
+        tuple[dict[str, Any], dict[str, dict[str, Any]], str, int, int],
+    ]
+    | None = None,
 ) -> list[_GBMBatchCandidate]:
     mds = base["mds"]
     candidates = []
     for index, request in indexed_requests:
-        config, request_fields = _load_gbm_request_config(
-            study,
-            base["label_ref"].name,
-            request["config_name"],
-            request["overrides"],
-        )
-        _apply_gbm_preview_reductions(config, request)
-        device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
-        effective = _gbm_effective_params_for_splits(
-            config,
-            base,
-            device=device,
-            max_bin=max_bin,
-            num_threads=num_threads,
-            task_type=mds.task_type,
-            class_values=tuple(mds.class_values),
-        )
+        if planned_candidates is None:
+            config, request_fields = _load_gbm_request_config(
+                study,
+                base["label_ref"].name,
+                request["config_name"],
+                request["overrides"],
+            )
+            _apply_gbm_preview_reductions(config, request)
+            device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+            effective = _gbm_effective_params_for_splits(
+                config,
+                base,
+                device=device,
+                max_bin=max_bin,
+                num_threads=num_threads,
+                task_type=mds.task_type,
+                class_values=tuple(mds.class_values),
+            )
+        else:
+            config, effective, device, max_bin, num_threads = planned_candidates[index]
         candidate = _GBMBatchCandidate(
             index=index,
             request=request,
@@ -2535,6 +2543,99 @@ def _run_gbm_batch_group(
             }
         )
     return candidates
+
+
+def plan_model_requests(
+    study: Study,
+    requests: list[dict[str, Any]],
+) -> tuple[tuple[dict[str, Any], ...], tuple[Any, ...]]:
+    """Resolve a request batch once without fitting or writing result rows."""
+    if not requests:
+        raise ValueError("GBM batch planner requires at least one request")
+    groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        groups.setdefault(_gbm_compatibility_key(study, request), []).append((index, request))
+
+    ordered: list[dict[str, Any] | None] = [None] * len(requests)
+    planned_groups = []
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any, Any]] = {}
+    for key, indexed_requests in groups.items():
+        input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        base = _load_gbm_batch_base(
+            study,
+            indexed_requests[0][1],
+            inputs=input_cache.get(input_key),
+        )
+        input_cache.setdefault(
+            input_key,
+            (base["label_ref"], base["mds"], base["dataset_pd"]),
+        )
+        mds = base["mds"]
+        placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
+        planned_candidates = {}
+        for index, request in indexed_requests:
+            config, request_fields = _load_gbm_request_config(
+                study,
+                base["label_ref"].name,
+                request["config_name"],
+                request["overrides"],
+            )
+            _apply_gbm_preview_reductions(config, request)
+            device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+            effective = _gbm_effective_params_for_splits(
+                config,
+                base,
+                device=device,
+                max_bin=max_bin,
+                num_threads=num_threads,
+                task_type=mds.task_type,
+                class_values=tuple(mds.class_values),
+            )
+            spec, _ = _build_gbm_resolved_request(
+                study,
+                request,
+                base=base,
+                config=config,
+                effective=effective,
+                folds=placeholder_folds,
+                device=device,
+            )
+            ordered[index] = spec
+            planned_candidates[index] = (config, effective, device, max_bin, num_threads)
+        planned_groups.append((key, indexed_requests, base, planned_candidates))
+    if any(spec is None for spec in ordered):
+        raise RuntimeError("GBM batch planner did not resolve every request")
+    return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
+
+
+def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ...]:
+    ordered: list[ModelRun | None] = [
+        None for _ in range(sum(len(indexed) for _, indexed, _, _ in payload))
+    ]
+    failures = []
+    for key, indexed_requests, base, planned_candidates in payload:
+        try:
+            candidates = _run_gbm_batch_group(
+                study,
+                indexed_requests,
+                key,
+                base,
+                report_batch=len(ordered) > 1,
+                planned_candidates=planned_candidates,
+            )
+        except Exception as error:
+            failures.append(error)
+            continue
+        for candidate in candidates:
+            if candidate.error is not None:
+                failures.append(candidate.error)
+            elif candidate.result is not None:
+                ordered[candidate.index] = candidate.result
+    if failures:
+        raise failures[0]
+    if any(result is None for result in ordered):
+        raise RuntimeError("GBM planned batch did not produce every requested result")
+    return tuple(result for result in ordered if result is not None)
 
 
 def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[ModelRun, ...]:

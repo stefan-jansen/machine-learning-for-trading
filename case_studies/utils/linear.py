@@ -857,13 +857,18 @@ def _run_batch_group(
     base: dict[str, Any],
     *,
     report_batch: bool,
+    planned_effective: dict[int, dict[str, dict[str, Any]]] | None = None,
 ) -> list[_BatchCandidate]:
     fold_ids = tuple(int(split["fold"]) for split in base["splits"])
     candidates = []
     dependent = []
     for index, request in indexed_requests:
         config = _load_preset(request["config_name"])
-        effective = _fixed_effective_params(config, request["overrides"], fold_ids)
+        effective = (
+            planned_effective[index]
+            if planned_effective is not None
+            else _fixed_effective_params(config, request["overrides"], fold_ids)
+        )
         candidate = _BatchCandidate(index, request, config, effective or {})
         candidates.append(candidate)
         if effective is None:
@@ -976,6 +981,118 @@ def _run_batch_group(
             }
         )
     return candidates
+
+
+def plan_model_requests(
+    study: Study,
+    requests: list[dict[str, Any]],
+) -> tuple[tuple[dict[str, Any], ...], tuple[Any, ...]]:
+    """Resolve a request batch once without fitting or writing result rows."""
+    if not requests:
+        raise ValueError("linear batch planner requires at least one request")
+    groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        groups.setdefault(_compatibility_key(request), []).append((index, request))
+
+    ordered: list[dict[str, Any] | None] = [None] * len(requests)
+    planned_groups = []
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any]] = {}
+    for key, indexed_requests in groups.items():
+        input_key = _input_compatibility_key(indexed_requests[0][1])
+        base = _load_batch_base(
+            study,
+            indexed_requests[0][1],
+            inputs=input_cache.get(input_key),
+        )
+        input_cache.setdefault(input_key, (base["label_ref"], base["mds"]))
+        fold_ids = tuple(int(split["fold"]) for split in base["splits"])
+        candidates = []
+        dependent = []
+        for index, request in indexed_requests:
+            config = _load_preset(request["config_name"])
+            effective = _fixed_effective_params(config, request["overrides"], fold_ids)
+            candidate = _BatchCandidate(index, request, config, effective or {})
+            candidates.append(candidate)
+            if effective is None:
+                dependent.append(candidate)
+
+        if dependent:
+            for split in base["splits"]:
+                fold = _prepare_batch_fold(base, split)
+                try:
+                    for candidate in dependent:
+                        candidate.effective_params.update(
+                            _effective_params(
+                                candidate.config,
+                                candidate.request["overrides"],
+                                [fold],
+                            )
+                        )
+                finally:
+                    del fold
+
+        placeholder_folds = tuple({"fold": fold_id} for fold_id in fold_ids)
+        for candidate in candidates:
+            if set(candidate.effective_params) != {str(fold_id) for fold_id in fold_ids}:
+                raise RuntimeError(
+                    f"linear planner did not resolve every fold for "
+                    f"{candidate.request['config_name']}"
+                )
+            spec, _ = _build_resolved_request(
+                study,
+                candidate.request,
+                label_ref=base["label_ref"],
+                mds=base["mds"],
+                splits=base["splits"],
+                cv_record=base["cv_record"],
+                config=candidate.config,
+                effective=candidate.effective_params,
+                expected=base["expected"],
+                folds=placeholder_folds,
+                runtime_provenance=base["runtime_provenance"],
+            )
+            ordered[candidate.index] = spec
+        planned_groups.append(
+            (
+                key,
+                indexed_requests,
+                base,
+                {candidate.index: candidate.effective_params for candidate in candidates},
+            )
+        )
+    if any(spec is None for spec in ordered):
+        raise RuntimeError("linear batch planner did not resolve every request")
+    return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
+
+
+def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ...]:
+    ordered: list[ModelRun | None] = [
+        None for _ in range(sum(len(indexed) for _, indexed, _, _ in payload))
+    ]
+    failures = []
+    for key, indexed_requests, base, planned_effective in payload:
+        try:
+            candidates = _run_batch_group(
+                study,
+                indexed_requests,
+                key,
+                base,
+                report_batch=len(ordered) > 1,
+                planned_effective=planned_effective,
+            )
+        except Exception as error:
+            failures.append(error)
+            continue
+        for candidate in candidates:
+            if candidate.error is not None:
+                failures.append(candidate.error)
+            elif candidate.result is not None:
+                ordered[candidate.index] = candidate.result
+    if failures:
+        raise failures[0]
+    if any(result is None for result in ordered):
+        raise RuntimeError("linear planned batch did not produce every requested result")
+    return tuple(result for result in ordered if result is not None)
 
 
 def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[ModelRun, ...]:
