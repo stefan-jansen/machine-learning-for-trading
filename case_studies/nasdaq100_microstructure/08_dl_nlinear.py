@@ -14,43 +14,71 @@
 # ---
 
 # %% [markdown]
-# # NLinear — NASDAQ-100 Microstructure
+# # NLinear - NASDAQ-100 Microstructure
 #
-# NLinear is the minimal temporal baseline for this case study. It asks whether
-# the intraday microstructure edge is already captured by last-value
-# normalization plus a single linear map before we move to recurrent,
-# convolutional, and attention-based architectures.
+# NLinear is the smallest sequence model in this case study. It takes the last
+# `LOOKBACK` observations of every feature for one stock, subtracts the most
+# recent value from the window so the model sees changes rather than levels, and
+# maps what is left to a forecast through a single linear layer. There is no
+# recurrence and no attention. It is worth fitting first because it separates
+# what a sequence model gains from *seeing a window* from what it gains from a
+# *complicated architecture* over that window.
+#
+# The label looks 15 minutes ahead on a one-minute grid, so consecutive windows
+# overlap heavily and neighbouring rows are far from independent. That shapes
+# everything below: how windows are built, where folds are cut, and how much of
+# the training set is sampled.
 #
 # **Learning Objectives**:
-# - Establish a standalone DL baseline for the NASDAQ microstructure case
-# - Compare the simplest temporal model against prior linear and GBM results
-# - Prepare a clean provenance chain for later DL architecture comparisons
+# - Fit a sequence model on a panel by declaring one request rather than
+#   assembling folds and windows in the notebook
+# - Read a learning curve across training epochs and say what it shows about
+#   capacity and noise
+# - Check that a fitted model produced predictions on every fold it was asked
+#   for, before any of those predictions are used
 #
 # **Book Reference**: Chapter 13
 #
-# **Prerequisites**: [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb)
+# **Prerequisites**: [`05_evaluation`](05_evaluation.ipynb)
 
 # %%
-"""NLinear — nasdaq100_microstructure deep learning."""
+"""NLinear - nasdaq100_microstructure deep learning."""
 
 import warnings
 
+import matplotlib.pyplot as plt
 import polars as pl
 import torch
 import yaml
 
-from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.deep_learning import run_dl_cv
 from utils.modeling import append_holdout_fold_if_needed, load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
+from utils.reproducibility import set_global_seeds
 
 warnings.filterwarnings("ignore")
+
+# %% [markdown]
+# ### Settings
+#
+# `LOOKBACK` is how many one-minute observations enter each window, so 60 gives
+# the model the trailing hour. `MAX_TRAIN_SEQUENCES` caps how many windows are
+# drawn per fold: every row starts a window, so an uncapped fold would build
+# tens of millions of near-identical overlapping sequences. `N_EPOCHS` is how
+# many passes are made over that sample, and checkpoints are written along the
+# way so the run can be inspected and resumed at a known epoch rather than only
+# at the end.
+#
+# `MAX_FOLDS` and `FOLD_IDS` restrict which walk-forward folds run. They exist
+# for previews; a run that uses them covers less of the history than the fold
+# plan declares, and the fold set is part of what the run is registered under.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
 MODEL = "nlinear"
 PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
+SEED = 42
 N_EPOCHS = 100
 LOOKBACK = 60
 BATCH_SIZE = 2048
@@ -61,21 +89,29 @@ FORCE_RETRAIN = False  # Set True to retrain configs that already have complete 
 PREDICTION_SPLIT = "validation"
 
 # %%
+set_global_seeds(SEED)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
 
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
+# The configured device is part of what the run is registered under, so an
+# unavailable accelerator stops the run rather than quietly retraining on CPU
+# and registering the result as though it were the requested one.
+DEVICE = setup.get("modeling", {}).get("dl", {}).get("device", "gpu")
+if DEVICE == "gpu" and not torch.cuda.is_available():
+    raise RuntimeError(
+        f"{CASE_STUDY_ID}/config/setup.yaml requests modeling.dl.device=gpu and no "
+        f"CUDA device is visible. Make the GPU available, or set the device to cpu "
+        f"in setup.yaml so the change is recorded with the run."
+    )
+device_str = "cuda" if DEVICE == "gpu" else "cpu"
 
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+print(f"Case study: {CASE_STUDY_ID} | architecture: {MODEL}")
+print(f"Label: {PRIMARY_LABEL} (from config/setup.yaml)")
+print(f"Device: {device_str} (configured {DEVICE})")
+print(f"Window: {LOOKBACK} one-minute observations | training epochs: {N_EPOCHS}")
 
 # %% [markdown]
 # ## 1. Load Data
@@ -99,33 +135,32 @@ dataset_pd = dataset.to_pandas()
 print(f"Entities: {dataset_pd[entity_col].nunique()}")
 
 # %% [markdown]
-# ## 2. Prior Baselines
-
-# %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print("  No prior results found — run 06_linear.py and 07_gbm.py first")
-
-# %% [markdown]
-# ## 3. NLinear
+# ## 2. Declare the fitting request
+#
+# Configurations come from the label's config file rather than from literals
+# here, and the notebook keeps only the ones whose architecture is the one it is
+# about. The three training settings above are then applied to every retained
+# configuration, so what is fitted is visible in one place instead of being
+# spread between a config file and the runner's defaults.
+#
+# Nothing about the windows, folds or gaps is assembled here. The runner receives
+# the label's fold plan and the observation cadence and derives the rest, so this
+# notebook and the ones for the other architectures cannot drift apart in how
+# they cut a window.
 
 # %%
 dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
 dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
 if not dl_configs:
+    available = sorted(
+        {
+            c["params"].get("architecture", "?")
+            for c in load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
+        }
+    )
     raise ValueError(
-        f"No '{MODEL}' configs found — add '{MODEL}' under 'deep_learning:' in the label config"
+        f"No '{MODEL}' configuration in the {PRIMARY_LABEL} deep_learning config. "
+        f"Declared architectures: {available}"
     )
 
 for cfg in dl_configs:
@@ -133,12 +168,9 @@ for cfg in dl_configs:
     cfg["batch_size"] = BATCH_SIZE
     cfg["params"]["lookback"] = LOOKBACK
 
-print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × "
-    f"{len(splits)} folds"
-)
+print(f"Fitting {len(dl_configs)} {MODEL} configuration(s) on {len(splits)} folds:")
 for cfg in dl_configs:
-    print(f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')}")
+    print(f"  {cfg['config_name']}: window {LOOKBACK}, batch {BATCH_SIZE}, {N_EPOCHS} epochs")
 
 # %%
 result = run_dl_cv(
@@ -162,65 +194,82 @@ result = run_dl_cv(
     temporal_by_fold=mds.temporal_by_fold,
     temporal_keys=mds.temporal_keys,
     temporal_feature_names=mds.temporal_feature_names,
+    seed=SEED,
 )
 
 # %% [markdown]
-# ## 4. Learning Curves
+# ## 3. Learning curves
+#
+# A checkpoint is written every few epochs and scored on the fold's validation
+# window, which gives one curve per configuration. The shape is what to read,
+# not any single point on it. A curve that climbs and then falls says the model
+# has started fitting noise and the useful capacity was reached earlier; a curve
+# that stays flat from the first checkpoint says the extra epochs are buying
+# nothing. At this label horizon the values are small in absolute terms, so read
+# the direction and the spread between configurations rather than the level.
 
 # %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
-
 curves = result["all_learning_curves"]
 if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
-    display_cps = [cp for cp in checkpoints if cp % 20 == 0 or cp == checkpoints[-1]]
-
-    print(f"{'Config':15s}", end="")
-    for cp in display_cps:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(display_cps)))
-
-    for row in grid_results:
-        cfg_data = curves.filter(pl.col("config") == row["config_name"])
-        print(f"{row['config_name']:15s}", end="")
-        for cp in display_cps:
-            ep_row = cfg_data.filter(pl.col("epoch") == cp)
-            print(f" {ep_row['ic_mean'][0]:+7.4f}" if ep_row.height > 0 else "     N/A", end="")
-        print()
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for config_name in sorted(curves["config"].unique().to_list()):
+        series = curves.filter(pl.col("config") == config_name).sort("epoch")
+        ax.plot(series["epoch"], series["ic_mean"], marker="o", markersize=3, label=config_name)
+    ax.axhline(0.0, color="0.6", linewidth=0.8)
+    ax.set_xlabel("Training epoch")
+    ax.set_ylabel("Validation information coefficient")
+    ax.set_title(f"{MODEL} validation score across training epochs")
+    ax.legend(title="Configuration")
 
 # %% [markdown]
-# ## 5. Comparison
-
-# %%
-comparison_rows = [{"Model": name, "IC": ic} for name, ic in prior_baselines.items()]
-comparison_rows.append({"Model": best_name, "IC": best_ic})
-comparison = pl.DataFrame(comparison_rows).with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
-)
-comparison
-
-# %% [markdown]
-# ## 6. Save Results
+# ## 4. Check what was produced
+#
+# Before these predictions are used anywhere, confirm the run covered the folds
+# it was asked for. A model that failed on one fold still leaves rows in the
+# registry for the others, and a downstream average over whatever is present
+# reads as a complete result. Comparing the folds returned against the folds
+# requested is what separates the two.
 
 # %%
 predictions = result["predictions"]
-all_predictions = result["all_predictions"]
 fold_metrics = result["fold_metrics"]
 
-print(f"Predictions: {predictions.height:,} rows")
-print(f"All predictions: {all_predictions.height:,} rows")
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
+requested_folds = sorted(int(f) for f in (FOLD_IDS or [s["fold"] for s in splits]))
+produced_folds = sorted(int(f) for f in predictions["fold"].unique().to_list())
+missing_folds = [f for f in requested_folds if f not in produced_folds]
+
+print(f"Folds requested: {requested_folds}")
+print(f"Folds with predictions: {produced_folds}")
+print(f"Validation rows: {predictions.height:,}")
+print(f"Null predictions: {predictions['prediction'].null_count():,}")
+
+if missing_folds:
+    raise RuntimeError(
+        f"{MODEL} produced no predictions for fold(s) {missing_folds}. The registered "
+        f"set is incomplete and must not be compared or backtested."
+    )
 
 # %% [markdown]
-# ## 7. Key Takeaways
+# ## 5. Key Takeaways
 #
-# This notebook gives NLinear its own provenance in the NASDAQ sequence. If the
-# later architectures outperform it, that gain is now attributable to the model
-# itself rather than to an inline baseline buried inside another notebook.
+# 1. **A sequence model is a request, not a loop.** The window length, fold plan,
+#    observation cadence and gap policy are declared once and resolved by the
+#    shared runner. A notebook that rebuilds them locally will eventually cut a
+#    window differently from its sibling notebooks, and the two results stop
+#    being comparable without anything looking wrong.
+#
+# 2. **Overlapping labels make sequence counts misleading.** Every row starts a
+#    window, so a fold holds almost as many sequences as it has rows, and nearly
+#    all of them share most of their content. Capping how many are drawn is what
+#    keeps the fit tractable; it also means the effective sample is far smaller
+#    than the sequence count suggests.
+#
+# 3. **Check coverage before you compare.** Fold-level completeness is the
+#    precondition for any comparison across architectures. `13_model_analysis`
+#    is where those comparisons happen, on the population this notebook and its
+#    siblings register.
+#
+# **Known limitations**: The validation score here is a diagnostic of the fit, not
+# a basis for choosing a configuration or a checkpoint. NLinear is deliberately
+# the least expressive of the four architectures, so its curve is best read as a
+# reference for what the window alone provides.
