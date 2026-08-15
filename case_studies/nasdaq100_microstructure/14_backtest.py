@@ -197,6 +197,14 @@ except ValueError as e:
 # ordering quality. The cost of those changes is charged here and not in any
 # score.
 
+# %% [markdown]
+# A grid cell is skipped when its identity is already registered or already
+# queued by this sweep. Two schemes can resolve to one identity - a backtest is
+# defined by what it computes, not by the label its scheme carries - and without
+# the queued half of that test the first computes the result while the second
+# reuses its cache and is still counted as work done, so the sweep reports more
+# backtests than the registry holds.
+
 # %%
 pred_index = load_prediction_index(
     CASE_STUDY_ID,
@@ -249,6 +257,9 @@ failed = 0
 completed = 0
 skipped = 0
 existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="signal")
+# Identities already registered, plus the ones this sweep has queued. Both mean
+# "running this grid cell would add nothing", which is what the skip test needs.
+planned = set(existing_hashes)
 print(f"Existing signal-stage hashes in registry: {len(existing_hashes):,}", flush=True)
 
 for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
@@ -278,7 +289,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
 
-        if backtest_hash in existing_hashes:
+        if backtest_hash in planned:
             skipped += 1
             if idx % 20 == 0 or idx == total_backtests:
                 elapsed = time.time() - t0
@@ -289,6 +300,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
                     flush=True,
                 )
             continue
+        planned.add(backtest_hash)
         pending_schemes.append((idx, scheme, spec))
 
     if not pending_schemes:
@@ -331,6 +343,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             completed += 1
             if result.backtest_hash:
                 existing_hashes.add(result.backtest_hash)
+                planned.add(result.backtest_hash)
         except Exception as e:
             failed += 1
             results.append(
