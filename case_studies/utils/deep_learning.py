@@ -602,16 +602,27 @@ def reconstruct_locked_request(
         raise ValueError("locked sequence preprocessing omits the exact calendar")
     # resolve_model_request thins the dataset to the decision cadence before it builds
     # any target or window, so reconstruction has to thin it the same way. Otherwise a
-    # weekly-cadence lock retrains on every session, which is a different model.
-    # The cadence comes from the locked model params and the calendar from the locked
-    # CV request; neither is reread from the preset.
+    # weekly-cadence lock retrains on every session, which is a different model. The
+    # cadence comes from the locked model params, never from the preset.
     decision_cadence = config["params"].get("decision_cadence")
-    locked_cv_request = computation.get("cv", {}).get("request") or {}
+    locked_cv = computation.get("cv") or {}
+    cadence_calendar = locked_cv.get("calendar")
+    if cadence_calendar is None:
+        cadence_calendar = (locked_cv.get("request") or {}).get("calendar")
+    if decision_cadence is not None and cadence_calendar is None:
+        # resolve thinned with CVSpec.calendar. A holdout CV block is authored flat and
+        # carries no calendar, so there is nothing to reproduce it from. Defaulting here
+        # would silently thin on a different calendar than the fit did as soon as
+        # resolve_rebalance_timestamps starts honoring the argument.
+        raise ValueError(
+            "locked cadence-selected sequence training does not record its calendar, "
+            "so its observation selection cannot be reproduced"
+        )
     dataset_pd = _select_sequence_observations(
         mds.dataset,
         date_col=mds.date_col,
         cadence=decision_cadence,
-        calendar=locked_cv_request.get("calendar"),
+        calendar=cadence_calendar,
     ).to_pandas()
     lookback = int(config["params"].get("lookback", 60))
     if config.get("library") == "darts":

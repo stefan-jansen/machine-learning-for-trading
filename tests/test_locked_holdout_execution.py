@@ -1341,6 +1341,26 @@ def test_locked_sequence_reconstruction_round_trips_its_own_resolved_spec(
         checkpoint_value=1,
     )
 
-    assert request.spec == holdout_spec
     assert request._context.prediction_split == "holdout"
     assert request._context.published_checkpoints == (1,)
+    assert request._context.config["params"]["architecture"] == "tsmixer"
+
+    # The accepting call above is only evidence if a spec the resolver could not have
+    # produced is rejected. Each of these is what the reconstruction used to expect.
+    for mutation in (
+        {"base_target": "one_period_log_return"},
+        {"decision_cadence": "weekly_friday"},
+    ):
+        drifted = deepcopy(holdout_spec)
+        drifted["computation"]["preprocessing"].update(mutation)
+        with pytest.raises(ValueError, match="preprocessing does not match"):
+            deep_learning.reconstruct_locked_request(
+                study, drifted, checkpoint_kind="epoch", checkpoint_value=1
+            )
+
+    dropped = deepcopy(holdout_spec)
+    del dropped["computation"]["preprocessing"]["decision_cadence"]
+    with pytest.raises(ValueError, match="preprocessing does not match"):
+        deep_learning.reconstruct_locked_request(
+            study, dropped, checkpoint_kind="epoch", checkpoint_value=1
+        )
