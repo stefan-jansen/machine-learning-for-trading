@@ -75,6 +75,21 @@ def test_best_model_per_family_compares_coverage_within_a_label() -> None:
     assert eligible["config_name"].item() in {"full_1d", "full_60d"}
 
 
+def test_best_model_per_family_refuses_to_drop_a_family_with_no_coverage() -> None:
+    """A family whose coverage is all null must stop the comparison, not vanish."""
+    metrics = pl.DataFrame(
+        {
+            "family": ["gbm", "gbm", "linear"],
+            "config_name": ["full", "short", "uncounted"],
+            "ic_mean_daily": [0.10, 0.40, 0.90],
+            "ic_n_days": [500, 40, None],
+        }
+    )
+
+    with pytest.raises(ValueError, match="linear"):
+        best_model_per_family_fast(metrics)
+
+
 def test_best_model_per_family_refuses_to_compare_without_a_coverage_column() -> None:
     metrics = pl.DataFrame(
         {

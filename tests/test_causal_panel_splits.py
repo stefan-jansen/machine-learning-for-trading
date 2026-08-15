@@ -81,16 +81,26 @@ def test_embargo_counts_label_horizons_on_the_observed_grid() -> None:
 
 
 def test_embargo_without_an_observed_step_assumes_a_bar_size() -> None:
-    """The legacy conversion is wrong by the grid ratio, which is why it is documented.
+    """The fallback is wrong by the ratio between the assumed bar and the real one.
 
-    This is the defect that put a one-minute embargo against a fifteen-minute
-    label. It fails only when the assumption holds, so the assertion pins the
-    assumption rather than blessing the answer.
+    It pins the assumption rather than blessing the answer: "15min" resolves to
+    one period whatever the panel is recorded at, which is right on a 15-minute
+    grid and wrong by fifteen on a one-minute grid.
     """
     assert embargo_from_buffer("15min") == 1
-    assert embargo_from_buffer("15min") != embargo_from_buffer(
-        "15min", observed_step=pd.Timedelta("1min")
-    )
+    assert embargo_from_buffer("15min", observed_step=pd.Timedelta("15min")) == 1
+    assert embargo_from_buffer("15min", observed_step=pd.Timedelta("1min")) == 15
+
+
+def test_embargo_rejects_a_month_buffer_against_an_observation_step() -> None:
+    """A month has no fixed length, so it cannot be divided by a bar size."""
+    assert embargo_from_buffer("1M", periods_per_year=12) == 1
+    try:
+        embargo_from_buffer("1M", observed_step=pd.Timedelta("1D"))
+    except ValueError as error:
+        assert "month" in str(error).lower()
+    else:
+        raise AssertionError("a month buffer must not resolve against an observation step")
 
 
 def test_embargo_rounds_a_partial_period_up() -> None:

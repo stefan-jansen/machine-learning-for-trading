@@ -224,11 +224,24 @@ def load_model_ic(
         ic_expr = (
             "COALESCE(pm.ic_mean_daily, pm.ic_mean)" if "ic_mean_daily" in pm_cols else "pm.ic_mean"
         )
-        # A registry predating that backfill also has no coverage column, so its
-        # rows cannot be shown to span the same decision days. Reporting that per
-        # row beats both failing outright on a legacy registry and letting a
-        # caller assume a guard that never ran.
-        coverage_enforced = require_full_coverage and "ic_n_days" in pm_cols
+        # A registry predating that backfill has no coverage column, and one
+        # caught mid-backfill has the column with nothing in it. In both cases
+        # the rows cannot be shown to span the same decision days, and the
+        # clause below would return nothing at all rather than everything
+        # unguarded. Probe for a usable value, not just the column, and report
+        # per row which of the two happened: that beats failing outright on a
+        # legacy registry and beats letting a caller assume a guard that never
+        # ran.
+        coverage_usable = False
+        if "ic_n_days" in pm_cols:
+            with sqlite3.connect(str(db_path)) as probe_con:
+                coverage_usable = (
+                    probe_con.execute(
+                        "SELECT 1 FROM prediction_metrics WHERE ic_n_days IS NOT NULL LIMIT 1"
+                    ).fetchone()
+                    is not None
+                )
+        coverage_enforced = require_full_coverage and coverage_usable
         coverage_clause = full_coverage_prediction_sql("p", "t", "pm") if coverage_enforced else ""
 
         sql = f"""

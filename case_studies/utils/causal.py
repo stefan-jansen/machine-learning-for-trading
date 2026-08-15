@@ -108,10 +108,15 @@ def embargo_from_buffer(
     - T/min: the number of ``value``-minute spans in 15 minutes, which assumes
       the panel is recorded in 15-minute bars
 
-    That last assumption is the one that bites. On a one-minute panel a "15min"
-    buffer resolves to a single period — a one-minute embargo against a
-    fifteen-minute label — and the fifteenfold error is invisible in the result.
-    Pass ``observed_step`` on any sub-daily panel.
+    That last assumption is the one that bites, because it is wrong by exactly
+    the ratio between the assumed bar and the real one, and nothing in the result
+    shows it. A "15min" buffer resolves to a single period whatever the panel is
+    recorded at, so on a one-minute grid it yields a one-minute embargo against a
+    fifteen-minute label. Pass ``observed_step`` on any sub-daily panel rather
+    than relying on the declared bar size, which can disagree with the artifacts.
+
+    A month buffer has no fixed length and is rejected when ``observed_step`` is
+    supplied; use the ``periods_per_year`` branch for it.
     """
     import math
     import re
@@ -122,7 +127,14 @@ def embargo_from_buffer(
             raise ValueError(f"observed_step must be positive, got {observed_step!r}")
         # pandas deprecated the uppercase hour alias; the buffers are authored by
         # hand in setup.yaml and still use it.
-        span = pd.Timedelta(re.sub(r"(?<=\d)H\b", "h", label_buffer.strip()))
+        normalized = re.sub(r"(?<=\d)H\b", "h", label_buffer.strip())
+        if re.match(r"\d+\s*M\b", normalized):
+            raise ValueError(
+                f"A month buffer ({label_buffer!r}) has no fixed length, so it cannot be "
+                f"divided by an observation step. Use the periods_per_year branch by "
+                f"omitting observed_step."
+            )
+        span = pd.Timedelta(normalized)
         return max(1, math.ceil(span / step))
 
     match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())

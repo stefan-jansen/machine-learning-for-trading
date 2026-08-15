@@ -316,10 +316,23 @@ def best_model_per_family_fast(
                 f"the result as a diagnostic rather than a comparison."
             )
         group_keys = ["family", "label"] if "label" in eligible.columns else ["family"]
-        eligible = eligible.filter(
+        covered = eligible.filter(
             pl.col(coverage_col).is_not_null()
             & (pl.col(coverage_col) == pl.col(coverage_col).max().over(group_keys))
         )
+        # A family whose rows all carry a null coverage count cannot be shown to
+        # span the same days as any other, and the filter above removes it
+        # entirely. Dropping a whole family from a comparison without saying so is
+        # the failure this guard exists to prevent, so it stops instead.
+        lost = sorted(set(eligible["family"].to_list()) - set(covered["family"].to_list()))
+        if lost:
+            raise ValueError(
+                f"No prediction set carries {coverage_col!r} for family/families {lost}, so "
+                f"they cannot be compared against the families that do. Backfill the column "
+                f"for those runs, or pass require_full_coverage=False and treat the whole "
+                f"result as a diagnostic rather than a comparison."
+            )
+        eligible = covered
 
     tie_break = ["prediction_hash"] if "prediction_hash" in eligible.columns else []
     return (

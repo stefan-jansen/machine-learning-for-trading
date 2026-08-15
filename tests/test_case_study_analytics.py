@@ -363,6 +363,22 @@ def test_load_model_ic_drops_partially_covered_prediction_sets(tmp_path, monkeyp
     assert unguarded["coverage_enforced"].to_list() == [False, False]
 
 
+def test_load_model_ic_does_not_empty_a_registry_mid_backfill(tmp_path, monkeypatch) -> None:
+    """The column exists but holds nothing: guard off, rows returned, flag false."""
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path))
+    db = tmp_path / "etfs" / "run_log" / "registry.db"
+    _seed_coverage_registry(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE prediction_metrics SET ic_n_days = NULL")
+    conn.commit()
+    conn.close()
+
+    df = analytics.load_model_ic(case_studies=["etfs"], split="validation")
+
+    assert sorted(df["config_name"].to_list()) == ["full_window", "short_window"]
+    assert df["coverage_enforced"].unique().to_list() == [False]
+
+
 def test_load_model_ic_reports_when_a_legacy_registry_cannot_be_guarded(
     seeded_registries,
 ) -> None:
