@@ -310,8 +310,11 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         label_ref.name,
         max_symbols=int(reductions.get("max_symbols", 0)),
     )
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("sequence runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("sequence runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"sequence runner does not support entity key {entity_col!r}")
     if mds.task_type != "regression":
         raise ValueError("sequence runner currently supports regression labels only")
     cv = request.get("cv")
@@ -366,7 +369,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             feature_names=list(mds.feature_names),
             label_col=mds.label_col,
             date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
+            entity_col=entity_col,
             case_study=study.case_study,
             temporal_by_fold=mds.temporal_by_fold,
             temporal_keys=list(mds.temporal_keys),
@@ -392,7 +395,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             splits,
             label_col=mds.label_col,
             date_col=mds.date_col,
-            entity_col=mds.entity_cols[0],
+            entity_col=entity_col,
             lookback=lookback,
             calendar_id=calendar_id,
         )
@@ -467,7 +470,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         feature_names=tuple(mds.feature_names),
         label_col=mds.label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         temporal_by_fold=mds.temporal_by_fold,

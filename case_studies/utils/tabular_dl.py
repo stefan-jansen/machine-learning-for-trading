@@ -279,8 +279,11 @@ def _resolve_model_request_from_materialized(
     unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
     if unknown_reductions:
         raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("TabM runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("TabM runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"TabM runner does not support entity key {entity_col!r}")
     splits, cv_record = _tabm_splits(mds, request)
     try:
         configured = configured_by_name[request["config_name"]]
@@ -379,7 +382,7 @@ def _resolve_model_request_from_materialized(
         label_col=mds.label_col,
         eval_label_col=mds.eval_label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         class_weights_by_fold=class_weights_by_fold,

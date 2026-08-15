@@ -855,8 +855,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         label_ref.name,
         max_symbols=int(reductions.get("max_symbols", 0)),
     )
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("DML runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("DML runner requires timestamp and an entity key")
+    if mds.entity_cols[0] not in {"product", "symbol"}:
+        raise ValueError(f"DML runner does not support entity key {mds.entity_cols[0]!r}")
     configs = {
         config["config_name"]: config
         for config in load_configs(study.case_study, label_ref.name, "causal_dml")

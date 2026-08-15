@@ -23,7 +23,7 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _resolve_nlinear_request(tmp_path, monkeypatch):
+def _resolve_nlinear_request(tmp_path, monkeypatch, entity: str = "symbol"):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -39,7 +39,7 @@ def _resolve_nlinear_request(tmp_path, monkeypatch):
     ]
     frame = pl.DataFrame(
         {
-            "symbol": [f"S{symbol}" for symbol in range(3) for _ in dates],
+            entity: [f"S{symbol}" for symbol in range(3) for _ in dates],
             "timestamp": dates * 3,
             "feature": [float(index) for index in range(24)],
             "fwd_ret_1d": [float(index % 3) / 100 for index in range(24)],
@@ -47,7 +47,7 @@ def _resolve_nlinear_request(tmp_path, monkeypatch):
     ).with_columns(pl.col("timestamp").str.to_date())
     label = study.labels.publish(
         LabelDefinition("fwd_ret_1d", "regression", "1D"),
-        frame.select("symbol", "timestamp", "fwd_ret_1d"),
+        frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_1d"),
     )
     splits = [
         {
@@ -63,7 +63,7 @@ def _resolve_nlinear_request(tmp_path, monkeypatch):
         feature_names=["feature"],
         label_col="fwd_ret_1d",
         date_col="timestamp",
-        entity_cols=["symbol"],
+        entity_cols=[entity],
         splits=splits,
         task_type="regression",
         class_values=[],
@@ -466,3 +466,19 @@ def test_deep_adapters_reject_custom_cv_with_stale_temporal_geometry(split_resol
 
     with pytest.raises(ValueError, match="Custom CV cannot reuse fold-specific temporal features"):
         split_resolver(mds, {"cv": cv, "preview_reductions": {}})
+
+
+@pytest.mark.parametrize("entity", ["symbol", "product"])
+def test_sequence_resolver_accepts_either_canonical_entity_key(
+    tmp_path, monkeypatch, entity
+) -> None:
+    _study, _label, resolved = _resolve_nlinear_request(tmp_path, monkeypatch, entity=entity)
+
+    assert resolved._context.entity_col == entity
+    assert resolved._context.expected_keys.columns == ["symbol", "timestamp", "fold"]
+    assert resolved._context.expected_keys.height > 0
+
+
+def test_sequence_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
+    with pytest.raises(ValueError, match="does not support entity key 'ticker'"):
+        _resolve_nlinear_request(tmp_path, monkeypatch, entity="ticker")
