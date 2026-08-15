@@ -1041,3 +1041,121 @@ def test_stateful_decision_is_recomputed_for_holdout_prediction(
         "temporal_gap": "reset",
     }
     assert replayed.spec["source_identity"]["declared_inputs"]["universe"] == ["A", "B"]
+
+
+def _selection_for_fold_parameters(
+    tmp_path: Path,
+    validation_by_fold: dict[str, dict[str, float]],
+):
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    validation_spec = _resolved_spec()
+    validation_spec["computation"]["checkpoint_schedule"] = [{"kind": "final", "value": None}]
+    validation_spec["computation"]["model"]["effective_params_by_fold"] = validation_by_fold
+    training = study.results.register_training(validation_spec)
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    backtest = study.strategy(
+        prediction=prediction,
+        decision=None,
+        signal={"method": "equal_weight_top_k", "top_k": 1},
+        execution_mode="vectorized",
+    ).run(prices=_prices())
+    candidates = CandidateSet.create(study, "fold-parameter-selection", [backtest])
+    return study, candidates, backtest, validation_spec
+
+
+def _lock_with_holdout_parameters(study, candidates, backtest, validation_spec, holdout_by_fold):
+    holdout_spec = deepcopy(validation_spec)
+    holdout_spec["computation"]["cv"] = {"identity": "holdout-cv", "split": "holdout"}
+    holdout_spec["computation"]["model"]["effective_params_by_fold"] = holdout_by_fold
+    return study.lifecycle.lock(
+        candidate_set_hash=candidates.hash,
+        selected_backtest_hash=backtest.hash,
+        selection_evidence={"metric": "validation_backtest_sharpe"},
+        holdout_training_spec=holdout_spec,
+    )
+
+
+def test_lock_rejects_holdout_parameters_that_contradict_the_selected_training(
+    tmp_path: Path,
+) -> None:
+    study, candidates, backtest, validation_spec = _selection_for_fold_parameters(
+        tmp_path,
+        {"0": {"alpha": 1.0}, "1": {"alpha": 1.0}},
+    )
+
+    with pytest.raises(ValueError, match="differ from the selected training"):
+        _lock_with_holdout_parameters(
+            study, candidates, backtest, validation_spec, {"2": {"alpha": 1000.0}}
+        )
+
+    assert study.lifecycle.state == "DEVELOPMENT"
+
+
+def test_lock_accepts_holdout_parameters_matching_a_fold_invariant_selection(
+    tmp_path: Path,
+) -> None:
+    study, candidates, backtest, validation_spec = _selection_for_fold_parameters(
+        tmp_path,
+        {"0": {"alpha": 1.0}, "1": {"alpha": 1.0}},
+    )
+
+    lock = _lock_with_holdout_parameters(
+        study, candidates, backtest, validation_spec, {"2": {"alpha": 1.0}}
+    )
+
+    assert lock.state == "LOCKED"
+
+
+def test_lock_allows_holdout_parameters_the_validation_folds_prove_are_fold_derived(
+    tmp_path: Path,
+) -> None:
+    study, candidates, backtest, validation_spec = _selection_for_fold_parameters(
+        tmp_path,
+        {"0": {"alpha": 1.0}, "1": {"alpha": 2.0}},
+    )
+
+    lock = _lock_with_holdout_parameters(
+        study, candidates, backtest, validation_spec, {"2": {"alpha": 3.0}}
+    )
+
+    assert lock.state == "LOCKED"
+
+
+def test_completeness_survives_registry_rows_written_before_artifact_digests(
+    tmp_path: Path,
+) -> None:
+    from case_studies.research.results import Result
+
+    study, candidates, backtest, _ = _selection_for_fold_parameters(tmp_path, {"0": {"alpha": 1.0}})
+    assert Result.open(study, backtest.hash).complete
+
+    # Reproduce a registry that predates both columns. A freshly created table
+    # declares artifact_digest NOT NULL, but _migrate_registry adds it to an existing
+    # table with ALTER TABLE ... ADD COLUMN, which is nullable and unbackfilled, so
+    # every row such a registry already held carries NULL.
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        ddl = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'prediction_coverage'"
+        ).fetchone()[0]
+        migrated_ddl = ddl.replace("artifact_digest      TEXT NOT NULL", "artifact_digest TEXT")
+        assert migrated_ddl != ddl, "prediction_coverage DDL no longer pins artifact_digest"
+        db.execute("ALTER TABLE prediction_coverage RENAME TO prediction_coverage_pinned")
+        db.execute(migrated_ddl)
+        db.execute("INSERT INTO prediction_coverage SELECT * FROM prediction_coverage_pinned")
+        db.execute("DROP TABLE prediction_coverage_pinned")
+        db.execute("UPDATE prediction_coverage SET artifact_digest = NULL")
+        db.execute("UPDATE backtest_runs SET artifact_digests_json = NULL")
+
+    legacy = Result.open(study, backtest.hash)
+    assert legacy.complete
+    assert CandidateSet.create(study, "legacy-selection", [legacy]).members == (legacy.hash,)

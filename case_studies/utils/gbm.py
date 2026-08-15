@@ -687,8 +687,6 @@ def prepare_gbm_folds(
         Each dict has: fold, X_train, y_train, y_train_lgb, X_val, y_val,
         y_val_lgb, dates, entities, n_train, n_val.
     """
-    import pandas as pd
-
     from utils.modeling import replace_temporal_columns
 
     dates_series = dataset_pd[date_col]
@@ -699,15 +697,9 @@ def prepare_gbm_folds(
     folds = []
     for split in splits:
         fold_id = split["fold"]
-        # Boundaries reach here as ISO strings from the preset CV path and as
-        # typed date/datetime objects from the locked-holdout reconstruction,
-        # which casts them to the dataset's Polars dtype. Comparing a
-        # datetime64 column against a datetime.date raises, so normalize first.
-        train_start = pd.Timestamp(split["train_start"])
-        train_end = pd.Timestamp(split["train_end"])
-        train_mask = (dates_series >= train_start) & (dates_series <= train_end)
-        val_start = pd.Timestamp(split.get("val_start", split.get("test_start")))
-        val_end = pd.Timestamp(split.get("val_end", split.get("test_end")))
+        train_mask = (dates_series >= split["train_start"]) & (dates_series <= split["train_end"])
+        val_start = split.get("val_start", split.get("test_start"))
+        val_end = split.get("val_end", split.get("test_end"))
         val_mask = (dates_series >= val_start) & (dates_series <= val_end)
 
         if has_fold_temporal:

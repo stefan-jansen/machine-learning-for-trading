@@ -116,6 +116,13 @@ class LockedStrategyReplay:
             decision=decision,
             **self.request,
         )
+        # The loader keys cme_futures prices on `product`, while the allocator and
+        # the engine both select `symbol`. Strategy.run renames before either sees
+        # the frame; reuse that owner's implementation rather than repeating it.
+        # The digest stays on the reader frame, because that is the one
+        # lifecycle._validated_holdout_lineage loads and digests, and the locked
+        # strategy projection excludes input_identity.prices from its comparison.
+        engine_prices = strategy._engine_prices(prices, reader_supplied=False)
         spec = deepcopy(locked_spec)
         spec.pop("_runtime_backtest_config", None)
         spec["backtest_config"]["metadata"]["prediction_hash"] = prediction.hash
@@ -150,7 +157,7 @@ class LockedStrategyReplay:
             )
             if spec["input_identity"].get("contract_specs") != contract_digest:
                 raise ValueError("locked futures contract specifications do not validate")
-        funding_rates = strategy._funding_rates(prices)
+        funding_rates = strategy._funding_rates(engine_prices)
         if funding_rates is not None:
             spec["input_identity"]["funding_rates"] = value_digest(funding_rates)
             spec["economic_cashflows"] = {"funding": "position_signed_before_same_timestamp_fills"}
@@ -171,11 +178,11 @@ class LockedStrategyReplay:
                 immutable=True,
             )
         predictions = prediction.load()
-        weights = strategy._decision_weights(prices)
+        weights = strategy._decision_weights(engine_prices)
         if weights is None:
             risk_replay = getattr(strategy, "_risk_state_weights", None)
             if callable(risk_replay):
-                weights = risk_replay(predictions, prices, spec)
+                weights = risk_replay(predictions, engine_prices, spec)
             elif (spec.get("strategy", {}).get("risk") or {}).get(
                 "state_transition_policy"
             ) is not None:
@@ -209,7 +216,7 @@ class LockedStrategyReplay:
             self.lock.study.case_study,
             prediction.hash,
             spec,
-            prices=prices,
+            prices=engine_prices,
             predictions=predictions,
             precomputed_weights=weights,
             funding_rates=funding_rates,

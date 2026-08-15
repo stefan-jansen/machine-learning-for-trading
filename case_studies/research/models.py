@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -187,7 +188,20 @@ def locked_holdout_split(
         boundaries["val_start"], boundaries["val_end"], closed="both"
     ).any():
         raise ValueError("locked holdout evaluation interval has no source rows")
-    return {"fold": fold["fold"], **boundaries}
+    # Widen a pl.Date boundary to datetime before handing the split to the family
+    # adapters. Polars casts either back to the column dtype, but the adapters that
+    # build masks over `dataset.to_pandas()` compare against a datetime64 column,
+    # and pandas raises TypeError on datetime64 vs datetime.date rather than
+    # coercing. The preset CV path never hits this because it passes ISO strings.
+    return {
+        "fold": fold["fold"],
+        **{
+            name: datetime.combine(value, time.min)
+            if isinstance(value, date) and not isinstance(value, datetime)
+            else value
+            for name, value in boundaries.items()
+        },
+    }
 
 
 def validate_locked_expected_keys(spec: dict[str, Any], expected: pl.DataFrame) -> None:

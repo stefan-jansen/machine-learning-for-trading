@@ -40,6 +40,56 @@ class ResearchLock:
         return reopened
 
 
+def _fold_keyed_parameters(computation: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    found: list[tuple[str, dict[str, Any]]] = []
+    model = computation.get("model")
+    if isinstance(model, dict) and isinstance(model.get("effective_params_by_fold"), dict):
+        found.append(("model parameters", model["effective_params_by_fold"]))
+    task = computation.get("task")
+    if isinstance(task, dict):
+        imbalance = task.get("imbalance")
+        if isinstance(imbalance, dict) and isinstance(
+            imbalance.get("effective_class_weights_by_fold"), dict
+        ):
+            found.append(("class weights", imbalance["effective_class_weights_by_fold"]))
+    return found
+
+
+def _require_consistent_fold_parameters(
+    validation_computation: dict[str, Any],
+    holdout_computation: dict[str, Any],
+) -> None:
+    """Reject a holdout spec whose per-fold parameters contradict the selected training.
+
+    These dicts are keyed by fold id, so the holdout's single entry can never equal the
+    validation's several and the comparison below has to drop them. Dropping them outright
+    would let a holdout spec declare any parameters at all - a different alpha locks and
+    then finalizes as the selected candidate's holdout result.
+
+    Only the homogeneous case is decidable here. When every validation fold resolved to the
+    same values, nothing about that configuration is derived from a fold, so the holdout
+    fold must resolve to those values too. When the validation folds disagree, the values
+    demonstrably depend on the fold's training data and the holdout's legitimately differs;
+    which keys may move is family-specific and is checked by each adapter's
+    ``reconstruct_locked_request``.
+    """
+    validation = dict(_fold_keyed_parameters(validation_computation))
+    for name, holdout_by_fold in _fold_keyed_parameters(holdout_computation):
+        validation_by_fold = validation.get(name)
+        if not validation_by_fold or len(holdout_by_fold) != 1:
+            continue
+        distinct = list({canonical_json(value): value for value in validation_by_fold.values()})
+        if len(distinct) != 1:
+            continue
+        expected = json.loads(distinct[0])
+        actual = next(iter(holdout_by_fold.values()))
+        if actual != expected:
+            raise ValueError(
+                f"locked holdout {name} differ from the selected training, which resolved "
+                f"identically on every validation fold: {actual!r} != {expected!r}"
+            )
+
+
 def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[str, Any]) -> dict:
     projected_validation = project_training_identity(validation_spec)
     projected_holdout = project_training_identity(holdout_spec)
@@ -52,6 +102,7 @@ def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[st
     if holdout_cv is None or holdout_cv == validation_cv:
         raise ValueError("holdout retraining requires an explicit, distinct CV interval")
     if "computation" in projected_holdout:
+        _require_consistent_fold_parameters(validation_computation, holdout_computation)
         for computation in (validation_computation, holdout_computation):
             computation.pop("expected_prediction_keys", None)
             model = computation.get("model")

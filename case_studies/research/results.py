@@ -360,15 +360,23 @@ class PredictionResult(Result):
             self.identity_version not in SUPPORTED_IDENTITY_VERSIONS
             or not coverage
             or coverage["status"] != "complete"
-            or not coverage.get("artifact_digest")
             or not prediction_file.is_file()
         ):
             return False
-        try:
-            if value_digest(self.load()) != coverage["artifact_digest"]:
+        # artifact_digest arrived as a nullable column on an existing table, so rows
+        # registered before it exists carry NULL and there is nothing to compare
+        # against. register_prediction_set reads that NULL as "legacy, backfill it"
+        # rather than as a conflict; completeness has to agree, or every prediction in
+        # a pre-existing registry reports incomplete and Lifecycle.lock refuses a
+        # backtest whose artifacts are all present. Rows written since always carry a
+        # digest and are held to it.
+        recorded_digest = coverage.get("artifact_digest")
+        if recorded_digest:
+            try:
+                if value_digest(self.load()) != recorded_digest:
+                    return False
+            except (OSError, ValueError, pl.exceptions.PolarsError):
                 return False
-        except (OSError, ValueError, pl.exceptions.PolarsError):
-            return False
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             headline = db.execute(
                 "SELECT 1 FROM prediction_metrics WHERE prediction_hash = ?", (self.hash,)
@@ -412,8 +420,15 @@ class BacktestResult(Result):
             metrics = db.execute(
                 "SELECT 1 FROM backtest_metrics WHERE backtest_hash = ?", (self.hash,)
             ).fetchone()
+        # As with prediction_coverage.artifact_digest, artifact_digests_json is NULL on
+        # every backtest_runs row that predates the column. Treat that as "nothing
+        # recorded to verify" and fall back to requiring the returns file, rather than
+        # reporting every pre-existing backtest incomplete.
+        recorded_digests = record.get("artifact_digests_json")
+        if not recorded_digests:
+            return metrics is not None and returns.is_file()
         try:
-            artifact_digests = json.loads(record.get("artifact_digests_json") or "")
+            artifact_digests = json.loads(recorded_digests)
         except (json.JSONDecodeError, TypeError):
             return False
         if (
