@@ -1043,16 +1043,28 @@ def test_stateful_decision_is_recomputed_for_holdout_prediction(
     assert replayed.spec["source_identity"]["declared_inputs"]["universe"] == ["A", "B"]
 
 
+def _install_model_parameters(computation, by_fold) -> None:
+    computation["model"]["effective_params_by_fold"] = by_fold
+
+
+def _install_class_weights(computation, by_fold) -> None:
+    computation["task"] = {
+        "type": "classification",
+        "imbalance": {"method": "balanced", "effective_class_weights_by_fold": by_fold},
+    }
+
+
 def _selection_for_fold_parameters(
     tmp_path: Path,
-    validation_by_fold: dict[str, dict[str, float]],
+    validation_by_fold,
+    install=_install_model_parameters,
 ):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     validation_spec = _resolved_spec()
     validation_spec["computation"]["checkpoint_schedule"] = [{"kind": "final", "value": None}]
-    validation_spec["computation"]["model"]["effective_params_by_fold"] = validation_by_fold
+    install(validation_spec["computation"], validation_by_fold)
     training = study.results.register_training(validation_spec)
     frame = _predictions()
     prediction = study.results.publish_predictions(
@@ -1073,10 +1085,17 @@ def _selection_for_fold_parameters(
     return study, candidates, backtest, validation_spec
 
 
-def _lock_with_holdout_parameters(study, candidates, backtest, validation_spec, holdout_by_fold):
+def _lock_with_holdout_parameters(
+    study,
+    candidates,
+    backtest,
+    validation_spec,
+    holdout_by_fold,
+    install=_install_model_parameters,
+):
     holdout_spec = deepcopy(validation_spec)
     holdout_spec["computation"]["cv"] = {"identity": "holdout-cv", "split": "holdout"}
-    holdout_spec["computation"]["model"]["effective_params_by_fold"] = holdout_by_fold
+    install(holdout_spec["computation"], holdout_by_fold)
     return study.lifecycle.lock(
         candidate_set_hash=candidates.hash,
         selected_backtest_hash=backtest.hash,
@@ -1093,7 +1112,7 @@ def test_lock_rejects_holdout_parameters_that_contradict_the_selected_training(
         {"0": {"alpha": 1.0}, "1": {"alpha": 1.0}},
     )
 
-    with pytest.raises(ValueError, match="differ from the selected training"):
+    with pytest.raises(ValueError, match=r"\{'alpha': 1000\.0\} != \{'alpha': 1\.0\}"):
         _lock_with_holdout_parameters(
             study, candidates, backtest, validation_spec, {"2": {"alpha": 1000.0}}
         )
@@ -1161,62 +1180,20 @@ def test_completeness_survives_registry_rows_written_before_artifact_digests(
     assert CandidateSet.create(study, "legacy-selection", [legacy]).members == (legacy.hash,)
 
 
-def _selection_for_class_weights(tmp_path: Path, validation_by_fold: dict[str, list[float]]):
-    study = Study.open(
-        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
-    )
-    validation_spec = _resolved_spec()
-    validation_spec["computation"]["checkpoint_schedule"] = [{"kind": "final", "value": None}]
-    validation_spec["computation"]["task"] = {
-        "type": "classification",
-        "imbalance": {
-            "method": "balanced",
-            "effective_class_weights_by_fold": validation_by_fold,
-        },
-    }
-    training = study.results.register_training(validation_spec)
-    frame = _predictions()
-    prediction = study.results.publish_predictions(
-        training,
-        checkpoint_kind="final",
-        checkpoint_value=None,
-        split="validation",
-        predictions=frame,
-        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
-    )
-    backtest = study.strategy(
-        prediction=prediction,
-        decision=None,
-        signal={"method": "equal_weight_top_k", "top_k": 1},
-        execution_mode="vectorized",
-    ).run(prices=_prices())
-    candidates = CandidateSet.create(study, "class-weight-selection", [backtest])
-    return study, candidates, backtest, validation_spec
-
-
-def _lock_with_holdout_class_weights(study, candidates, backtest, validation_spec, holdout_by_fold):
-    holdout_spec = deepcopy(validation_spec)
-    holdout_spec["computation"]["cv"] = {"identity": "holdout-cv", "split": "holdout"}
-    holdout_spec["computation"]["task"]["imbalance"]["effective_class_weights_by_fold"] = (
-        holdout_by_fold
-    )
-    return study.lifecycle.lock(
-        candidate_set_hash=candidates.hash,
-        selected_backtest_hash=backtest.hash,
-        selection_evidence={"metric": "validation_backtest_sharpe"},
-        holdout_training_spec=holdout_spec,
-    )
-
-
 def test_lock_accepts_list_valued_class_weights_matching_the_selected_training(
     tmp_path: Path,
 ) -> None:
-    study, candidates, backtest, validation_spec = _selection_for_class_weights(
-        tmp_path, {"0": [0.6, 3.0], "1": [0.6, 3.0]}
+    study, candidates, backtest, validation_spec = _selection_for_fold_parameters(
+        tmp_path, {"0": [0.6, 3.0], "1": [0.6, 3.0]}, install=_install_class_weights
     )
 
-    lock = _lock_with_holdout_class_weights(
-        study, candidates, backtest, validation_spec, {"2": [0.6, 3.0]}
+    lock = _lock_with_holdout_parameters(
+        study,
+        candidates,
+        backtest,
+        validation_spec,
+        {"2": [0.6, 3.0]},
+        install=_install_class_weights,
     )
 
     assert lock.state == "LOCKED"
@@ -1225,13 +1202,18 @@ def test_lock_accepts_list_valued_class_weights_matching_the_selected_training(
 def test_lock_rejects_list_valued_class_weights_contradicting_the_selected_training(
     tmp_path: Path,
 ) -> None:
-    study, candidates, backtest, validation_spec = _selection_for_class_weights(
-        tmp_path, {"0": [0.6, 3.0], "1": [0.6, 3.0]}
+    study, candidates, backtest, validation_spec = _selection_for_fold_parameters(
+        tmp_path, {"0": [0.6, 3.0], "1": [0.6, 3.0]}, install=_install_class_weights
     )
 
-    with pytest.raises(ValueError, match="differ from the selected training"):
-        _lock_with_holdout_class_weights(
-            study, candidates, backtest, validation_spec, {"2": [9.9, 0.1]}
+    with pytest.raises(ValueError, match=r"\[9\.9, 0\.1\] != \[0\.6, 3\.0\]"):
+        _lock_with_holdout_parameters(
+            study,
+            candidates,
+            backtest,
+            validation_spec,
+            {"2": [9.9, 0.1]},
+            install=_install_class_weights,
         )
 
     assert study.lifecycle.state == "DEVELOPMENT"

@@ -88,12 +88,12 @@ def _require_consistent_fold_parameters(
         # dict. Both sides go through canonical_value so a legacy spec, which
         # project_training_identity deep-copies rather than canonicalizing, does not
         # compare unequal to its canonicalized counterpart over a tuple or a float.
-        distinct = {_canonical_fold_value(value) for value in validation_by_fold.values()}
+        distinct = {_canonical_fold_value(value): value for value in validation_by_fold.values()}
         if len(distinct) != 1:
             continue
         actual = next(iter(holdout_by_fold.values()))
-        expected = next(iter(distinct))
-        if _canonical_fold_value(actual) != expected:
+        expected_key, expected = next(iter(distinct.items()))
+        if _canonical_fold_value(actual) != expected_key:
             raise ValueError(
                 f"locked holdout {name} differ from the selected training, which resolved "
                 f"identically on every validation fold: {actual!r} != {expected!r}"
