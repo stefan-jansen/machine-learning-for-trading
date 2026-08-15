@@ -364,12 +364,14 @@ def load_futures_price_path(
         missing_products = sorted(set(selected_products) - loaded_products)
         if missing_products:
             raise ValueError(f"selected CME products have no backtest prices: {missing_products}")
+    resolved_products = sorted(engine_prices.get_column("product").unique().to_list())
+    if not resolved_products:
+        raise ValueError(f"CME backtest prices for {label!r} resolved to no products")
     price_keys = engine_prices.select("product", "timestamp").unique()
     start = str(price_keys.get_column("timestamp").min())[:10]
     end = str(price_keys.get_column("timestamp").max())[:10]
     loaded_audit = load_cme_futures(
-        products=selected_products or None,
-        max_symbols=max_products,
+        products=resolved_products,
         start_date=start,
         end_date=end,
     )
@@ -407,10 +409,11 @@ def load_futures_price_path(
     )
     if not missing_audit.is_empty():
         raise ValueError("backtest price keys are missing from the front-contract roll audit")
-    if (
-        audit.select(pl.col("cum_ratio").is_null().any()).item()
-        or audit.filter(pl.col("cum_ratio") <= 0).height
-    ):
+    ratio = pl.col("cum_ratio").cast(pl.Float64)
+    invalid_ratio = audit.filter(
+        ratio.is_null() | ratio.is_nan() | ratio.is_infinite() | (ratio <= 0)
+    )
+    if not invalid_ratio.is_empty():
         raise ValueError("front-contract roll ratios must be finite positive values")
     scale = pl.max_horizontal(pl.col("adj_close").abs(), pl.lit(1.0))
     inconsistent = audit.filter(
@@ -434,12 +437,11 @@ def load_futures_price_path(
         "cum_ratio",
         (pl.col("cum_ratio") / pl.col("previous_cum_ratio")).alias("roll_adjustment_factor"),
     )
-    products = sorted(audit.get_column("product").unique().to_list())
     return FuturesPricePath(
         prices=engine_prices.sort("timestamp", "product"),
         audit=audit,
         roll_transitions=transitions,
-        expiry_rules=_expiry_rules(products),
+        expiry_rules=_expiry_rules(resolved_products),
     )
 
 

@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import polars as pl
 import pytest
+import yaml
 
+from case_studies.cme_futures import research_workflow
 from case_studies.cme_futures.research_workflow import (
     FuturesPricePath,
     _expiry_rules,
@@ -213,12 +215,113 @@ def test_cme_strategy_rejects_reader_supplied_symbol_prices(tmp_path: Path) -> N
         ).resolve(prices=_product_prices().rename({"product": "symbol"}))
 
 
-def test_expiry_rules_are_complete_for_requested_products() -> None:
+def test_expiry_rules_carry_the_configured_contract_terms() -> None:
     rules = _expiry_rules(["ES", "CL"])
 
     assert rules.get_column("product").to_list() == ["CL", "ES"]
-    assert all(rules.get_column("expiry_rule").str.len_chars() > 0)
-    assert all(rules.get_column("contract_months").str.len_chars() > 0)
+    assert rules.rows() == [
+        ("CL", "3bd_before_25th_prior_month", "F,G,H,J,K,M,N,Q,U,V,X,Z"),
+        ("ES", "3rd_friday", "H,M,U,Z"),
+    ]
+
+
+def test_expiry_rules_reject_unknown_and_incomplete_specifications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="no contract specification"):
+        _expiry_rules(["ES", "NOT_A_PRODUCT"])
+
+    market = tmp_path / "data" / "futures" / "market"
+    market.mkdir(parents=True)
+    (market / "futures_specs.yaml").write_text(
+        "products:\n"
+        "  ES:\n"
+        "    expiry_rule: 3rd_friday\n"
+        "    contract_months: []\n"
+        "  NQ:\n"
+        "    contract_months: [H, M, U, Z]\n"
+    )
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match="ES has an incomplete expiry specification"):
+        _expiry_rules(["ES"])
+    with pytest.raises(ValueError, match="NQ has an incomplete expiry specification"):
+        _expiry_rules(["NQ"])
+
+
+_PRICE_DATES = [datetime(2024, 1, 2), datetime(2024, 1, 3)]
+
+
+def _engine_price_frame(products: list[str]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "symbol": [product for product in products for _ in _PRICE_DATES],
+            "timestamp": [timestamp for _ in products for timestamp in _PRICE_DATES],
+            "close": [100.0 for _ in products for _ in _PRICE_DATES],
+        }
+    )
+
+
+def _audit_frame(products: list[str], cum_ratio: float = 1.0) -> pl.DataFrame:
+    rows = len(products) * len(_PRICE_DATES)
+    return pl.DataFrame(
+        {
+            "product": [product for product in products for _ in _PRICE_DATES],
+            "session_date": [timestamp for _ in products for timestamp in _PRICE_DATES],
+            "tenor": [0] * rows,
+            "adj_open": [100.0 * cum_ratio] * rows,
+            "adj_high": [100.0 * cum_ratio] * rows,
+            "adj_low": [100.0 * cum_ratio] * rows,
+            "adj_close": [100.0 * cum_ratio] * rows,
+            "raw_close": [100.0] * rows,
+            "cum_ratio": [cum_ratio] * rows,
+        }
+    )
+
+
+def _stub_price_loaders(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    engine_products: list[str],
+    cum_ratio: float = 1.0,
+) -> list[dict[str, object]]:
+    audit_calls: list[dict[str, object]] = []
+
+    def fake_backtest_prices(case_study, label, **kwargs):
+        return _engine_price_frame(engine_products)
+
+    def fake_load_cme_futures(**kwargs):
+        audit_calls.append(kwargs)
+        requested = kwargs.get("products") or engine_products
+        return _audit_frame(list(requested), cum_ratio=cum_ratio)
+
+    monkeypatch.setattr(research_workflow, "load_backtest_prices_for", fake_backtest_prices)
+    monkeypatch.setattr(research_workflow, "load_cme_futures", fake_load_cme_futures)
+    return audit_calls
+
+
+def test_price_path_audits_exactly_the_products_the_engine_load_sampled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit_calls = _stub_price_loaders(monkeypatch, engine_products=["GC", "NQ"])
+
+    path = research_workflow.load_futures_price_path("fwd_ret_5d", max_products=2)
+
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["products"] == ["GC", "NQ"]
+    assert not audit_calls[0].get("max_symbols")
+    assert path.audit.get_column("product").unique().sort().to_list() == ["GC", "NQ"]
+    assert path.expiry_rules.get_column("product").to_list() == ["GC", "NQ"]
+
+
+@pytest.mark.parametrize("cum_ratio", [float("nan"), float("inf"), 0.0, -1.0])
+def test_price_path_rejects_non_finite_or_non_positive_roll_ratios(
+    monkeypatch: pytest.MonkeyPatch, cum_ratio: float
+) -> None:
+    _stub_price_loaders(monkeypatch, engine_products=["ES"], cum_ratio=cum_ratio)
+
+    with pytest.raises(ValueError, match="finite positive"):
+        research_workflow.load_futures_price_path("fwd_ret_5d", products=["ES"])
 
 
 def test_reader_plan_exposes_resolved_population_and_product_contract(tmp_path: Path) -> None:
@@ -282,10 +385,27 @@ def test_reader_plan_exposes_resolved_population_and_product_contract(tmp_path: 
         "preview",
         request.identity,
     )
-    assert universe.height == 30
-    assert universe.get_column("product").n_unique() == 30
-    assert universe.select(pl.col("expiry_rule").is_null().any()).item() is False
-    assert universe.select(pl.col("contract_months").is_null().any()).item() is False
+    configured = yaml.safe_load(
+        (REPO_ROOT / "data" / "futures" / "market" / "futures_specs.yaml").read_text()
+    )["products"]
+    grouped = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / "cme_futures" / "config" / "setup.yaml").read_text()
+    )["universe"]["product_groups"]
+    expected_universe = sorted(
+        (sector, product) for sector, products in grouped.items() for product in products
+    )
+
+    assert universe.height == len(expected_universe)
+    assert universe.get_column("product").n_unique() == universe.height
+    assert list(zip(universe.get_column("sector"), universe.get_column("product"))) == [
+        tuple(row) for row in expected_universe
+    ]
+    assert universe.get_column("expiry_rule").to_list() == [
+        configured[product]["expiry_rule"] for _, product in expected_universe
+    ]
+    assert universe.get_column("contract_months").to_list() == [
+        ",".join(configured[product]["contract_months"]) for _, product in expected_universe
+    ]
 
 
 def test_reader_plan_accepts_flat_family_spec(tmp_path: Path) -> None:
