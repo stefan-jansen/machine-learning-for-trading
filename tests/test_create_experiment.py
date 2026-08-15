@@ -89,6 +89,30 @@ def test_create_experiment_seeds_editable_config_and_shared_presets(tmp_path: Pa
     assert (tmp_path / "repo/case_studies/etfs/config/setup.yaml").exists()
 
 
+def test_create_experiment_without_baseline_accepts_a_linked_release_run_log(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    source = _seed_source(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    linked_run_log = artifact_root / "run_log"
+    (source / "run_log").rename(linked_run_log)
+    (source / "run_log").symlink_to(linked_run_log, target_is_directory=True)
+
+    output_root = tmp_path / "experiments/etf-test"
+    result = module.create_experiment(
+        "etfs",
+        output_root,
+        repo_root=tmp_path / "repo",
+        include_release_run_log=False,
+    )
+
+    assert (source / "run_log").is_symlink()
+    assert (result / "run_log").is_dir()
+    assert not (result / "run_log/registry.db").exists()
+
+
 def test_create_experiment_requires_config_tree(tmp_path: Path) -> None:
     """A case study with artifacts but no config/ cannot form a runnable experiment."""
     module = _load_module()
