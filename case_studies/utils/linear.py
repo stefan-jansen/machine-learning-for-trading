@@ -353,7 +353,7 @@ def _build_resolved_request(
         },
         "checkpoint_schedule": [{"kind": "final", "value": None}],
         "expected_prediction_keys": {
-            "digest": value_digest(expected, tuple(expected.columns)),
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
             "n_rows": expected.height,
             "n_folds": expected.get_column("fold").n_unique(),
         },

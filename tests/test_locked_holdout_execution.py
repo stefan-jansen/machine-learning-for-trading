@@ -1504,3 +1504,42 @@ def test_resolved_spec_only_requires_the_rebalance_thresholds_it_no_longer_fills
             predictions=_predictions(),
             resolved_spec_only=True,
         )
+
+
+def test_locked_reconstruction_leaves_linear_training_identity_unmoved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This branch must not move a linear training identity the thread pin just fixed.
+
+    #548 made numerics.thread_limit identity-bearing for linear, so every linear lock
+    was re-taken against those identities. The locked reconstruction added here reads
+    the resolved spec and must not contribute to it.
+    """
+    from case_studies.utils import linear
+    from case_studies.utils.artifact_digest import value_digest
+
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    resolved = request.resolve()
+    computation = resolved.spec["computation"]
+
+    assert computation["numerics"]["thread_limit"] == linear.LINEAR_THREAD_LIMIT
+    assert linear.training_hash_from_spec(request.resolve().spec) == linear.training_hash_from_spec(
+        resolved.spec
+    )
+
+    holdout_spec = deepcopy(resolved.spec)
+    holdout_spec["computation"]["cv"] = {"identity": "holdout-cv", "split": "holdout"}
+    assert linear.training_hash_from_spec(holdout_spec) != linear.training_hash_from_spec(
+        resolved.spec
+    )
+
+    # Why the eligibility digest is taken over a fixed key tuple rather than over the
+    # frame's columns: the fixed tuple is insensitive to a builder gaining a column,
+    # so it cannot move an identity that is already registered. Deriving the tuple from
+    # the frame makes every added column a silent identity change.
+    keys = pl.DataFrame({"symbol": ["ES"], "timestamp": [date(2024, 1, 2)], "fold": [0]})
+    widened = keys.with_columns(pl.lit(1.0).alias("weight"))
+    fixed = ("symbol", "timestamp", "fold")
+    assert value_digest(widened, fixed) == value_digest(keys, fixed)
+    assert value_digest(widened, tuple(widened.columns)) != value_digest(keys, fixed)

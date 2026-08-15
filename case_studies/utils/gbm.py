@@ -1749,7 +1749,7 @@ def _build_gbm_resolved_request(
             {"kind": "iteration", "value": checkpoint} for checkpoint in checkpoints
         ],
         "expected_prediction_keys": {
-            "digest": value_digest(expected, tuple(expected.columns)),
+            "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
             "n_rows": expected.height,
             "n_folds": expected.get_column("fold").n_unique(),
         },

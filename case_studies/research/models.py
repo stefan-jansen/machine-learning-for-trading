@@ -211,7 +211,10 @@ def validate_locked_expected_keys(spec: dict[str, Any], expected: pl.DataFrame) 
     if not isinstance(record, dict):
         raise ValueError("locked holdout training specification has no eligibility manifest")
     actual = {
-        "digest": value_digest(expected, tuple(expected.columns)),
+        # The same key tuple every family resolver digests. Deriving it from the frame
+        # instead would silently change the recorded identity the moment a builder
+        # gained a column, and would stop matching the specs already registered.
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
         "n_rows": expected.height,
         "n_folds": expected.get_column("fold").n_unique(),
     }
