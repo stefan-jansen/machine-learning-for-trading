@@ -2750,3 +2750,61 @@ def test_model_and_causal_adapters_have_one_extension_seam() -> None:
     assert get_adapter("causal", "fixture_causal").__name__ == "case_studies.utils.causal"
     assert "tabular_dl" in {binding.name for binding in registered_adapters("model")}
     assert "dml" in {binding.name for binding in registered_adapters("causal")}
+
+
+def test_published_logistic_presets_resolve_to_the_model_their_name_claims() -> None:
+    """A preset name must describe the model it produces, for every preset in the family.
+
+    `logistic_none` declared only max_iter and solver, so it inherited scikit-learn's defaults
+    of penalty="l2", C=1.0 and fitted coefficients identical to `logistic_l2_C1.0`. The
+    published menu advertised an unpenalized baseline that has never existed, and six training
+    menus across four case studies reference it.
+
+    Checking `logistic_none` alone would leave the rule unenforced everywhere else: the six
+    `logistic_l2_*` presets take their l2 from the same constructor default, and a collision
+    check catches a mistyped C only when it happens to collide with a sibling - `C: 5.0` on
+    `logistic_l2_C10.0` would pass. Deriving the expectation from the stem checks the claim
+    each name makes rather than only that the names differ.
+    """
+    import re
+    from pathlib import Path
+
+    from sklearn.linear_model import LogisticRegression
+
+    from utils.paths import REPO_ROOT
+
+    preset_dir = Path(REPO_ROOT) / "case_studies" / "config" / "logistic"
+    presets = {
+        path.stem: yaml.safe_load(path.read_text())["params"]
+        for path in sorted(preset_dir.glob("*.yaml"))
+    }
+    assert presets, "no published logistic presets found"
+
+    effective = {}
+    for name, params in presets.items():
+        resolved = LogisticRegression(**params).get_params()
+        effective[name] = (resolved["penalty"], resolved["C"], resolved["solver"])
+
+        stem = name.removeprefix("logistic_")
+        if stem == "none":
+            expected_penalty, expected_c = None, None
+        else:
+            match = re.fullmatch(r"(l1|l2)_C([0-9.]+)", stem)
+            assert match, f"unrecognised logistic preset name {name!r}"
+            expected_penalty, expected_c = match.group(1), float(match.group(2))
+
+        assert resolved["penalty"] == expected_penalty, (
+            f"{name} resolves to penalty={resolved['penalty']!r}, "
+            f"but its name claims {expected_penalty!r}"
+        )
+        if expected_c is not None:
+            assert resolved["C"] == expected_c, (
+                f"{name} resolves to C={resolved['C']}, but its name claims {expected_c}"
+            )
+
+    duplicates = {
+        signature: sorted(n for n, sig in effective.items() if sig == signature)
+        for signature in set(effective.values())
+        if sum(sig == signature for sig in effective.values()) > 1
+    }
+    assert not duplicates, f"published logistic presets resolve to one model: {duplicates}"
