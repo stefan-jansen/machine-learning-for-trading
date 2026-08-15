@@ -34,6 +34,13 @@ So the executor states the parameters and the stamp records that statement:
 ``--production`` for an unparameterized run, or ``--parameters '<json>'``. One of
 the two is required; this tool never infers.
 
+That choice is about what the run carried, not about what tier it was. ``production``
+is computed from the parameters, not from their absence: a run whose every override is
+in ``PRODUCTION_SAFE_PARAMETERS`` stamps as production too. A canonical run that must
+carry an override - ``SUPERSEDES_POPULATION`` on a re-run into a changed population -
+declares it with ``--parameters`` and is still production. ``--production`` is
+shorthand for the empty set, not a claim the tool would otherwise have to weigh.
+
 Where the notebook *does* carry evidence of its own execution — papermill's
 ``injected-parameters`` cell, which lives in the cell list and is rewritten by
 every parameterized run — ``stamp`` cross-checks the declaration against it and
@@ -79,10 +86,46 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SKIP_PARTS = {"_reference", ".venv", ".git", ".ipynb_checkpoints"}
 STAMP_KEY = "ml4t_provenance"
 INJECTED_TAG = "injected-parameters"
-PRODUCTION_SAFE_PARAMETERS = {
+
+
+class _ValidatedByConsumer:
+    """An override whose value this gate deliberately does not check.
+
+    The allowlist otherwise pins each name to the one value that preserves the
+    production surface, because nothing downstream would catch the other one -
+    ``FORCE_RETRAIN=False`` silently reuses a cached fit and no later check notices.
+
+    This is a second kind of allowlist entry, not a second entry. Adding a name with a
+    pinned value says "this override is harmless at this value"; marking one with this
+    says "this gate is the wrong place to check this override at all". A parameter
+    earns the marker only when BOTH hold:
+
+    1. No value of it can reduce the execution surface. It adds a declaration rather
+       than removing work, which is what separates it from ``FORCE_RETRAIN=False``.
+    2. The code that consumes it rejects a wrong value outright, so nothing is left
+       unchecked - merely moved to where the check can actually be made. For an
+       identity-bearing value the gate could not make it anyway: the correct one
+       depends on registry state at run time, which a commit hook does not have.
+
+    Both conditions, not either. A future exemption citing this precedent has to show
+    both, and a name that fails the first is a reduced run wearing a declaration.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        return "<validated by the consumer>"
+
+
+VALIDATED_BY_CONSUMER = _ValidatedByConsumer()
+
+PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     "FORCE_REBACKTEST": True,
     "FORCE_RETRAIN": True,
     "USE_CACHE": False,
+    # Names the population this run supersedes, which research/population.py requires
+    # on a re-run into a changed population and which a person sets deliberately. It
+    # adds a declaration rather than removing work, so it cannot reduce the run, and
+    # population.py raises unless it equals the current population hash exactly.
+    "SUPERSEDES_POPULATION": VALIDATED_BY_CONSUMER,
 }
 
 
@@ -110,12 +153,21 @@ def _coerce_bool(value: object) -> bool | None:
 
 
 def production_parameters(parameters: dict[str, object]) -> bool:
-    """Whether overrides preserve the full production execution surface."""
-    return all(
-        name in PRODUCTION_SAFE_PARAMETERS
-        and _coerce_bool(value) is PRODUCTION_SAFE_PARAMETERS[name]
-        for name, value in parameters.items()
-    )
+    """Whether overrides preserve the full production execution surface.
+
+    Note that this is not "carries no overrides". A canonical run may legitimately be
+    parameterized; what makes it production is that every override is one the surface
+    survives. An unlisted name is never production, whatever its value.
+    """
+    for name, value in parameters.items():
+        if name not in PRODUCTION_SAFE_PARAMETERS:
+            return False
+        expected = PRODUCTION_SAFE_PARAMETERS[name]
+        if expected is VALIDATED_BY_CONSUMER:
+            continue
+        if _coerce_bool(value) is not expected:
+            return False
+    return True
 
 
 def _normalize_value(value: object) -> tuple[str, object]:
