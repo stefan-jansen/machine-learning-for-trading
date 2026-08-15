@@ -11,6 +11,7 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.specs import (
     canonical_json,
+    canonical_value,
     compute_hash,
     project_training_identity,
     training_hash_from_spec,
@@ -38,6 +39,10 @@ class ResearchLock:
         if reopened.record != self.record:
             raise ValueError("research lock object differs from its immutable registry record")
         return reopened
+
+
+def _canonical_fold_value(value: Any) -> str:
+    return json.dumps(canonical_value(value), sort_keys=True, separators=(",", ":"))
 
 
 def _fold_keyed_parameters(computation: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -78,12 +83,17 @@ def _require_consistent_fold_parameters(
         validation_by_fold = validation.get(name)
         if not validation_by_fold or len(holdout_by_fold) != 1:
             continue
-        distinct = list({canonical_json(value): value for value in validation_by_fold.values()})
+        # Not canonical_json: a fold entry is a dict of parameters for one family and a
+        # list of class weights for another, and canonical_json rejects anything but a
+        # dict. Both sides go through canonical_value so a legacy spec, which
+        # project_training_identity deep-copies rather than canonicalizing, does not
+        # compare unequal to its canonicalized counterpart over a tuple or a float.
+        distinct = {_canonical_fold_value(value) for value in validation_by_fold.values()}
         if len(distinct) != 1:
             continue
-        expected = json.loads(distinct[0])
         actual = next(iter(holdout_by_fold.values()))
-        if actual != expected:
+        expected = next(iter(distinct))
+        if _canonical_fold_value(actual) != expected:
             raise ValueError(
                 f"locked holdout {name} differ from the selected training, which resolved "
                 f"identically on every validation fold: {actual!r} != {expected!r}"
