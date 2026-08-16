@@ -42,6 +42,7 @@ import yaml
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 from case_studies.utils.registry import model_source
 from case_studies.utils.signals import build_target_weights
+from case_studies.utils.sp500_price_lineage import continuous_adjusted_panel
 from utils.artifact_specs import resolve_market_runtime, resolve_market_semantics
 from utils.paths import get_case_study_dir
 
@@ -660,6 +661,13 @@ _PRICE_CONFIG = {
         "close_col": "close",
         "ohlcv": True,
         "loader": "sp500_daily_bars",
+        # Backtest fills ride the same split- and dividend-adjusted series that
+        # 02_labels builds every label from (``close * adj_factor`` within a
+        # ``sec_id``). On the printed close 92 sessions in 2017-2021 carry a move
+        # above 30% that is a corporate action rather than a price change - GE
+        # +677% on its 1-for-8 reverse split, NVDA -75% and NEE -75% on 4-for-1
+        # subdivisions - and each one books as P&L.
+        "price_lineage": "sp500_daily_bars",
         "drop_cols": [
             "sec_id",
             "adj_factor",
@@ -745,6 +753,11 @@ _PRICE_CONFIG = {
         ],
     },
 }
+
+
+# Named price-lineage rules a panel spec may request, applied before any column
+# the rule reads can be dropped.
+_PRICE_LINEAGE = {"sp500_daily_bars": continuous_adjusted_panel}
 
 
 def _load_via_canonical(
@@ -929,6 +942,10 @@ def load_backtest_prices(
                         end_lit = end_lit.dt.replace_time_zone(tz)
                     lf = lf.filter(pl.col(ts_col) < end_lit + pl.duration(days=1))
         df = lf.collect()
+
+    # Resolve the price lineage before drop_cols removes what the rule reads
+    if "price_lineage" in config:
+        df = _PRICE_LINEAGE[config["price_lineage"]](df)
 
     # Drop unwanted columns
     drop = [c for c in config.get("drop_cols", []) if c in df.columns]
