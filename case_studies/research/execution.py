@@ -14,6 +14,7 @@ from case_studies.utils.registry.specs import (
     backtest_hash_from_parts,
     canonical_json,
     compute_hash,
+    prediction_hash_from_parts,
     training_hash_from_spec,
 )
 from case_studies.utils.registry.store import _open_registry, _utc_now
@@ -492,3 +493,102 @@ def run_backtests(
         pl.col("backtest_hash").is_in(result_hashes)
     )
     return BacktestExecution(tuple(results), catalog_rows, tuple(diagnostics), population)
+
+
+def expected_prediction_hashes(
+    resolved_requests: Iterable[ResolvedModelRequest],
+) -> tuple[str, ...]:
+    """Project declared checkpoints to the validation prediction identities they will produce.
+
+    Computed from the resolved specification alone, so it can be evaluated *before* anything is
+    fitted. That is what lets a canonical run state its whole expected population up front and be
+    held to it afterwards.
+    """
+    hashes = []
+    for request in resolved_requests:
+        computation = request.spec.get("computation", request.spec)
+        for checkpoint in computation["checkpoint_schedule"]:
+            hashes.append(
+                prediction_hash_from_parts(
+                    request.identity,
+                    checkpoint["value"],
+                    "validation",
+                    checkpoint_kind=checkpoint["kind"],
+                    identity_version=request.spec["identity_version"],
+                )
+            )
+    if len(hashes) != len(set(hashes)):
+        raise ValueError("declared request population contains duplicate prediction identities")
+    return tuple(hashes)
+
+
+def snapshot_official_models(
+    study: Study,
+    resolved_requests: Iterable[ResolvedModelRequest],
+    *,
+    population_name: str,
+) -> OfficialPopulation:
+    """Record every expected canonical prediction identity before any member executes."""
+    resolved = tuple(resolved_requests)
+    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+        raise ValueError("official model populations require canonical requests")
+    return OfficialPopulation.create(
+        study,
+        name=population_name,
+        member_kind="prediction",
+        members=expected_prediction_hashes(resolved),
+    )
+
+
+def run_official_model_subset(
+    study: Study,
+    resolved_requests: Iterable[ResolvedModelRequest],
+    *,
+    population: OfficialPopulation | str,
+    require_population_complete: bool = False,
+) -> tuple[ModelExecution, OfficialPopulation]:
+    """Execute members a case-wide official population already declared."""
+    resolved = tuple(resolved_requests)
+    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+        raise ValueError("official model subsets require canonical requests")
+    if isinstance(population, str):
+        population = OfficialPopulation.one(study, name=population)
+    elif population.study != study:
+        raise ValueError("official model population belongs to another study")
+    expected = expected_prediction_hashes(resolved)
+    undeclared = sorted(set(expected) - set(population.members))
+    if undeclared:
+        raise ValueError(f"model subset contains undeclared predictions: {undeclared}")
+    execution = run_models(study, requests=resolved)
+    actual = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+    if set(actual) != set(expected) or len(actual) != len(expected):
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        raise RuntimeError(f"model population mismatch: missing={missing}, extra={extra}")
+    if require_population_complete:
+        population.require_complete()
+    return execution, population
+
+
+def run_official_models(
+    study: Study,
+    requests: Iterable[ModelRequest | ResolvedModelRequest],
+    *,
+    population_name: str,
+) -> tuple[ModelExecution, OfficialPopulation]:
+    """Snapshot, execute and verify one complete canonical model population.
+
+    The population is written before the first fit, so a run that produces a different set of
+    predictions than it declared fails rather than quietly publishing the set it happened to
+    produce. This is the canonical entry point for a model-execution notebook.
+    """
+    resolved = tuple(
+        request.resolve() if isinstance(request, ModelRequest) else request for request in requests
+    )
+    population = snapshot_official_models(study, resolved, population_name=population_name)
+    return run_official_model_subset(
+        study,
+        resolved,
+        population=population,
+        require_population_complete=True,
+    )

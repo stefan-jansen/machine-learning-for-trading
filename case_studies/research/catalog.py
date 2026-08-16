@@ -20,6 +20,11 @@ _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
     "ic_t",
+    # Validation dates that produced a defined cross-sectional IC. A configuration whose
+    # predictions collapse to near-constant on some folds yields no IC on those dates, so its
+    # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.
+    # Ranking without this column reports the partial-coverage artifact as the leader.
+    "ic_n_days",
     "n_folds",
     "pct_positive",
     "accuracy",

@@ -2,6 +2,12 @@ from .adapters import AdapterBinding, get_adapter, register_adapter, registered_
 from .catalog import BacktestCatalog, PredictionCatalog
 from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
 from .comparison import CandidateSet
+from .configs import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    resolved_model_plan,
+)
 from .contracts import ExecutionTier, LifecycleState
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
 from .decisions import DecisionArtifact, StateTransitionPolicy
@@ -11,10 +17,14 @@ from .execution import (
     HoldoutExecution,
     ModelExecution,
     PlannedBacktest,
+    expected_prediction_hashes,
     plan_backtests,
     run_backtests,
     run_locked_holdout,
     run_models,
+    run_official_model_subset,
+    run_official_models,
+    snapshot_official_models,
 )
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
@@ -62,12 +72,20 @@ __all__ = [
     "Study",
     "StateTransitionPolicy",
     "TrainingResult",
+    "declared_labels",
     "get_adapter",
+    "load_model_configs",
+    "model_requests",
     "register_adapter",
     "registered_adapters",
     "plan_backtests",
     "plan_models",
+    "expected_prediction_hashes",
+    "resolved_model_plan",
     "run_backtests",
     "run_locked_holdout",
     "run_models",
+    "run_official_model_subset",
+    "run_official_models",
+    "snapshot_official_models",
 ]
