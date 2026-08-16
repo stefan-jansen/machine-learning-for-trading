@@ -137,12 +137,18 @@ def test_both_resolvers_agree_on_one_hash_for_the_same_carrier(case_study):
     at more than one checkpoint, and the pair lookup then returns empty: `etfs`
     reports NaN val-to-holdout decay and `us_firm_characteristics` raises.
 
-    The carrier is checkpoint 400 rather than 200 deliberately. The pinned query
-    orders by `backtest_hash`, so with carrier 200 it returns `b_holdout_200`
-    whether or not the checkpoint clauses are there, and the case would only
-    discriminate against the older `ORDER BY bm.sharpe DESC` form. Asking for the
-    checkpoint that does *not* sort first means deleting the pin yields
-    `b_holdout_200` and this fails.
+    The carrier is the checkpoint that wins neither tiebreak, which is what makes
+    the case discriminate against both ways of losing the pin. `_holdout_lineage_for`
+    reaches its pinned query only inside the `prefer_prediction_hash` branch and
+    otherwise falls through to an unpinned `ORDER BY bm.sharpe DESC`. So carrier
+    400 with the Sharpes inverted for this case is neither hash-first (200 sorts
+    before 400) nor Sharpe-best (200 is given 1.9 here): dropping the checkpoint
+    clauses yields `b_holdout_200` by hash order, and dropping the whole
+    preference branch yields `b_holdout_200` by Sharpe order. Both fail.
+
+    The default Sharpes are left alone because
+    `test_holdout_replay_uses_the_validation_checkpoint_not_the_better_one` needs
+    checkpoint 400 to be the better one for its own assertion to mean anything.
 
     Scope, stated because the name would otherwise overclaim: this covers the two
     resolvers, not the wiring that hands `_holdout_lineage_for` its carrier.
@@ -152,7 +158,7 @@ def test_both_resolvers_agree_on_one_hash_for_the_same_carrier(case_study):
     it, so a caller cannot supply half a pin; it can only omit the preference
     entirely and fall back.
     """
-    _build_registry(case_study)
+    _build_registry(case_study, holdout_sharpes=(1.9, 0.4))
 
     writer = _holdout_lineage_for(
         "etfs",
