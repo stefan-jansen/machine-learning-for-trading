@@ -137,6 +137,13 @@ def test_both_resolvers_agree_on_one_hash_for_the_same_carrier(case_study):
     at more than one checkpoint, and the pair lookup then returns empty: `etfs`
     reports NaN val-to-holdout decay and `us_firm_characteristics` raises.
 
+    The carrier is checkpoint 400 rather than 200 deliberately. The pinned query
+    orders by `backtest_hash`, so with carrier 200 it returns `b_holdout_200`
+    whether or not the checkpoint clauses are there, and the case would only
+    discriminate against the older `ORDER BY bm.sharpe DESC` form. Asking for the
+    checkpoint that does *not* sort first means deleting the pin yields
+    `b_holdout_200` and this fails.
+
     Scope, stated because the name would otherwise overclaim: this covers the two
     resolvers, not the wiring that hands `_holdout_lineage_for` its carrier.
     Mutating that call site does not fail this test. What removes that class of
@@ -153,12 +160,12 @@ def test_both_resolvers_agree_on_one_hash_for_the_same_carrier(case_study):
         strategy_spec=None,
         label_restriction=None,
         rung=None,
-        prefer_prediction_hash="p_validation_200",
+        prefer_prediction_hash="p_validation_400",
     )
-    reader = select_holdout_self_backtest("etfs", "b_validation_200")
+    reader = select_holdout_self_backtest("etfs", "b_validation_400")
 
     assert writer is not None
-    assert writer["backtest_hash"] == reader == "b_holdout_200"
+    assert writer["backtest_hash"] == reader == "b_holdout_400"
 
 
 def test_an_ambiguous_pinned_lineage_raises_rather_than_choosing(case_study):
