@@ -34,9 +34,11 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
     """One training run, one prediction set per checkpoint per split.
 
     The strategy spec is identical across checkpoints, which is what makes the
-    candidates indistinguishable without the checkpoint pin. The second
-    checkpoint is given the better holdout Sharpe so that a lookup ordering on
-    Sharpe picks it.
+    candidates indistinguishable without the checkpoint pin. By default the
+    second checkpoint is given the better holdout Sharpe, so a lookup ordering on
+    Sharpe picks it; a caller can invert `holdout_sharpes` to point Sharpe order
+    at the first checkpoint instead, which is how a case makes its carrier win
+    neither the `backtest_hash` nor the `sharpe` tiebreak.
     """
     run_log = case_dir / "run_log"
     run_log.mkdir(parents=True, exist_ok=True)
