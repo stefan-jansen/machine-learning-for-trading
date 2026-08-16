@@ -17,6 +17,7 @@ import sqlite3
 
 import pytest
 
+from case_studies.utils.paired_metrics import _holdout_lineage_for
 from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
 from case_studies.utils.strategy_analysis import select_holdout_self_backtest
 
@@ -47,14 +48,19 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
         (TRAINING_HASH,),
     )
     for checkpoint, holdout_sharpe in zip(checkpoints, holdout_sharpes, strict=True):
+        # A configuration with no checkpoint dimension stores NULL in *both*
+        # columns, which is what the linear and GBM holdout rows look like. Binding
+        # the kind to the value is what makes the `checkpoint_kind IS ?` half of the
+        # guard fail when it is written as `=`.
+        checkpoint_kind = "iteration" if checkpoint is not None else None
         for split in ("validation", "holdout"):
             pred = f"p_{split}_{checkpoint}"
             backtest = f"b_{split}_{checkpoint}"
             db.execute(
                 "INSERT INTO prediction_sets (prediction_hash, training_hash,"
                 " checkpoint_value, checkpoint_kind, split, created_at)"
-                " VALUES (?, ?, ?, 'iteration', ?, '2026-08-16T00:00:00+00:00')",
-                (pred, TRAINING_HASH, checkpoint, split),
+                " VALUES (?, ?, ?, ?, ?, '2026-08-16T00:00:00+00:00')",
+                (pred, TRAINING_HASH, checkpoint, checkpoint_kind, split),
             )
             db.execute(
                 "INSERT INTO backtest_runs (backtest_hash, prediction_hash, spec_json,"
@@ -73,8 +79,16 @@ def _build_registry(case_dir, *, checkpoints=(200, 400), holdout_sharpes=(0.4, 1
 
 @pytest.fixture
 def case_study(tmp_path, monkeypatch):
+    """Redirect both resolvers, which are bound differently.
+
+    ``strategy_analysis`` imports ``get_case_study_dir`` inside the function, so
+    patching ``utils.paths`` reaches it; ``paired_metrics`` binds it at module
+    import, so it needs its own patch or the test silently reads the real
+    registry instead of the fixture.
+    """
     case_dir = tmp_path / "etfs"
     monkeypatch.setattr("utils.paths.get_case_study_dir", lambda _: case_dir)
+    monkeypatch.setattr("case_studies.utils.paired_metrics.get_case_study_dir", lambda _: case_dir)
     return case_dir
 
 
@@ -111,6 +125,40 @@ def test_a_diverging_strategy_spec_is_not_a_replay(case_study):
     db.close()
 
     assert select_holdout_self_backtest("etfs", "b_validation_200") is None
+
+
+def test_both_resolvers_agree_on_one_hash_for_the_same_carrier(case_study):
+    """Given the same carrier prediction set, writer and reader return one hash.
+
+    `_holdout_lineage_for` picks the holdout the `val_rank1_self` pair is stored
+    against; `select_holdout_self_backtest` is what the strategy-analysis
+    notebooks pass to `load_paired_metrics` to find it again. Pinning one side
+    only makes them disagree exactly where a training run has holdout backtests
+    at more than one checkpoint, and the pair lookup then returns empty: `etfs`
+    reports NaN val-to-holdout decay and `us_firm_characteristics` raises.
+
+    Scope, stated because the name would otherwise overclaim: this covers the two
+    resolvers, not the wiring that hands `_holdout_lineage_for` its carrier.
+    Mutating that call site does not fail this test. What removes that class of
+    error is the signature rather than this assertion - the function takes one
+    prediction hash and derives both the training hash and the checkpoint from
+    it, so a caller cannot supply half a pin; it can only omit the preference
+    entirely and fall back.
+    """
+    _build_registry(case_study)
+
+    writer = _holdout_lineage_for(
+        "etfs",
+        "fwd_ret_21d",
+        strategy_spec=None,
+        label_restriction=None,
+        rung=None,
+        prefer_prediction_hash="p_validation_200",
+    )
+    reader = select_holdout_self_backtest("etfs", "b_validation_200")
+
+    assert writer is not None
+    assert writer["backtest_hash"] == reader == "b_holdout_200"
 
 
 def test_an_ambiguous_pinned_lineage_raises_rather_than_choosing(case_study):
