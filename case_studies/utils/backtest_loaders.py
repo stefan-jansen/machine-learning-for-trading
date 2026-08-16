@@ -42,7 +42,7 @@ import yaml
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 from case_studies.utils.registry import model_source
 from case_studies.utils.signals import build_target_weights
-from case_studies.utils.sp500_price_lineage import continuous_adjusted_panel
+from case_studies.utils.sp500_price_lineage import adjustment_scale, continuous_adjusted_panel
 from utils.artifact_specs import resolve_market_runtime, resolve_market_semantics
 from utils.paths import get_case_study_dir
 
@@ -755,9 +755,27 @@ _PRICE_CONFIG = {
 }
 
 
+@cache
+def _sp500_daily_bars_scale() -> pl.DataFrame:
+    """Resolve the back-adjustment scale once, over the complete bar history.
+
+    The panel handed to the rule is already narrowed by the ``start_date`` /
+    ``end_date`` pushdown, and the scale must not be: it depends on every segment
+    a ticker has and on which row is its last, so deriving it from the window
+    would make the same session's price depend on the query that asked for it.
+    """
+    from data import load_sp500_daily_bars
+
+    return adjustment_scale(load_sp500_daily_bars())
+
+
+def _sp500_daily_bars_lineage(df: pl.DataFrame) -> pl.DataFrame:
+    return continuous_adjusted_panel(df, scale=_sp500_daily_bars_scale())
+
+
 # Named price-lineage rules a panel spec may request, applied before any column
 # the rule reads can be dropped.
-_PRICE_LINEAGE = {"sp500_daily_bars": continuous_adjusted_panel}
+_PRICE_LINEAGE = {"sp500_daily_bars": _sp500_daily_bars_lineage}
 
 
 def _load_via_canonical(

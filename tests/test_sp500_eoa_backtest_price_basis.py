@@ -13,7 +13,7 @@ import polars as pl
 import pytest
 
 from case_studies.utils.backtest_loaders import load_backtest_prices
-from case_studies.utils.sp500_price_lineage import continuous_adjusted_panel
+from case_studies.utils.sp500_price_lineage import adjustment_scale, continuous_adjusted_panel
 from data import load_sp500_daily_bars
 from data.exceptions import DataNotFoundError
 
@@ -33,6 +33,11 @@ def _bars(rows: list[tuple[str, int, str, float, float, int]]) -> pl.DataFrame:
     )
 
 
+def _adjusted(bars: pl.DataFrame) -> pl.DataFrame:
+    """Adjust a frame that IS the complete history for the tickers it holds."""
+    return continuous_adjusted_panel(bars, scale=adjustment_scale(bars))
+
+
 def _returns(frame: pl.DataFrame, symbol: str) -> list[float]:
     series = frame.filter(pl.col("symbol") == symbol).sort("timestamp")["close"]
     return (series / series.shift(1) - 1).drop_nulls().to_list()
@@ -41,7 +46,7 @@ def _returns(frame: pl.DataFrame, symbol: str) -> list[float]:
 def test_a_subdivision_is_not_a_price_move():
     # AAPL's 4-for-1 on 2020-08-31: the printed close falls 499.23 -> 129.04
     # while adj_factor rises by the same 4x, so the adjusted move is +3.4%.
-    panel = continuous_adjusted_panel(
+    panel = _adjusted(
         _bars(
             [
                 ("AAPL", 33449, "2020-08-28", 499.23, 8.100549, 44_260_263),
@@ -55,7 +60,7 @@ def test_a_subdivision_is_not_a_price_move():
 
 def test_a_reverse_split_is_not_a_price_move():
     # GE's 1-for-8 on 2021-08-02: the printed close rises 12.96 -> 100.60.
-    panel = continuous_adjusted_panel(
+    panel = _adjusted(
         _bars(
             [
                 ("GE", 33645, "2021-07-30", 12.96, 8.0, 80_000_000),
@@ -70,7 +75,7 @@ def test_a_reverse_split_is_not_a_price_move():
 def test_a_ticker_reassignment_contributes_no_return():
     # The factor restarts at 1.0 with the new security, so multiplying without
     # splicing would fabricate a jump where the ticker changed hands.
-    panel = continuous_adjusted_panel(
+    panel = _adjusted(
         _bars(
             [
                 ("XRX", 44733, "2019-07-30", 30.00, 1.853437, 1_000_000),
@@ -94,7 +99,7 @@ def test_each_security_keeps_its_own_returns_across_a_reassignment():
         ("IR", 6285863, "2020-03-03", 32.80, 1.0, 1_000_000),
         ("IR", 6285863, "2020-03-04", 33.00, 1.0, 1_000_000),
     ]
-    panel = continuous_adjusted_panel(_bars(rows))
+    panel = _adjusted(_bars(rows))
     within = _returns(panel, "IR")
     assert within[0] == pytest.approx(130.00 / 129.04 - 1, abs=1e-9)
     assert within[2] == pytest.approx(33.00 / 32.80 - 1, abs=1e-9)
@@ -105,7 +110,7 @@ def test_dollar_volume_survives_the_adjustment():
         ("AAPL", 33449, "2020-08-28", 499.23, 8.100549, 44_260_263),
         ("AAPL", 33449, "2020-08-31", 129.04, 32.402197, 210_249_674),
     ]
-    panel = continuous_adjusted_panel(_bars(rows)).sort("timestamp")
+    panel = _adjusted(_bars(rows)).sort("timestamp")
     dollars = (panel["close"] * panel["volume"]).to_list()
     assert dollars == [
         pytest.approx(499.23 * 44_260_263),
@@ -120,7 +125,7 @@ def test_the_anchor_is_the_close_that_printed():
         ("AAPL", 33449, "2020-08-28", 499.23, 8.100549, 44_260_263),
         ("AAPL", 33449, "2020-08-31", 129.04, 32.402197, 210_249_674),
     ]
-    panel = continuous_adjusted_panel(_bars(rows)).sort("timestamp")
+    panel = _adjusted(_bars(rows)).sort("timestamp")
     assert panel["close"].to_list()[-1] == pytest.approx(129.04)
     # ...and the session before it is 499.23 carried through the ratio of the two
     # factors, which is the 4-for-1 plus the dividend that accrued with it.
@@ -130,9 +135,87 @@ def test_the_anchor_is_the_close_that_printed():
 
 def test_a_restarting_factor_without_a_lineage_column_is_refused():
     with pytest.raises(ValueError, match="missing columns"):
-        continuous_adjusted_panel(
-            _bars([("AAPL", 33449, "2020-08-31", 129.04, 32.402197, 1)]).drop("sec_id")
-        )
+        _adjusted(_bars([("AAPL", 33449, "2020-08-31", 129.04, 32.402197, 1)]).drop("sec_id"))
+
+
+def test_a_scale_that_does_not_cover_the_panel_is_refused():
+    # The failure mode this guards is a scale resolved over a narrower frame than
+    # the panel it is applied to, which is how the window dependence got in.
+    bars = _bars(
+        [
+            ("GE", 33645, "2021-07-30", 12.96, 8.0, 80_000_000),
+            ("GE", 33645, "2021-08-02", 100.60, 1.0, 10_000_000),
+        ]
+    )
+    partial = adjustment_scale(bars.head(1))
+    with pytest.raises(ValueError, match="complete bar history"):
+        continuous_adjusted_panel(bars, scale=partial)
+
+
+def test_two_windows_of_one_series_agree_about_the_dates_they_share():
+    """The regression guard for a scale anchored on the frame it was handed.
+
+    The holdout path concatenates a validation load and a holdout load to give the
+    rolling-volatility allocators their burn-in. If the anchor is the last row of
+    each *window*, the two halves are on different scales and the seam carries a
+    fabricated return. GE is the case that makes it unmissable: its 1-for-8 falls
+    inside the holdout year, so the two windows would disagree by a factor of 8.
+    """
+    history = _bars(
+        [
+            ("GE", 33645, "2020-11-30", 10.00, 8.0, 1_000_000),
+            ("GE", 33645, "2020-12-31", 11.00, 8.0, 1_000_000),
+            ("GE", 33645, "2021-06-30", 12.96, 8.0, 1_000_000),
+            ("GE", 33645, "2021-08-02", 100.60, 1.0, 1_000_000),
+            ("GE", 33645, "2021-12-31", 104.00, 1.0, 1_000_000),
+        ]
+    )
+    scale = adjustment_scale(history)
+    validation = continuous_adjusted_panel(
+        history.filter(pl.col("timestamp") <= pl.date(2020, 12, 31)), scale=scale
+    )
+    holdout = continuous_adjusted_panel(
+        history.filter(pl.col("timestamp") >= pl.date(2020, 12, 31)), scale=scale
+    )
+    shared = validation.join(holdout, on=["symbol", "timestamp"], suffix="_holdout")
+    assert shared.height == 1
+    assert shared["close"][0] == pytest.approx(shared["close_holdout"][0], abs=1e-12)
+
+    # And the seam itself: concatenating the two halves must reproduce the return
+    # the whole series gives, not an 8x step.
+    seam = pl.concat([validation, holdout]).unique(subset=["symbol", "timestamp"]).sort("timestamp")
+    whole = continuous_adjusted_panel(history, scale=scale).sort("timestamp")
+    assert seam["close"].to_list() == pytest.approx(whole["close"].to_list(), abs=1e-12)
+    assert max(abs(r) for r in _returns(seam, "GE")) < 0.20
+
+
+def test_two_real_loads_agree_about_the_dates_they_share():
+    """The same guard through `load_backtest_prices`, on the windows holdout actually uses.
+
+    `20_strategy_synthesis/holdout.py` concatenates a validation load and a
+    holdout load, so these are the two frames whose seam has to hold. GE's
+    1-for-8 on 2021-08-02 sits inside the holdout window.
+    """
+    try:
+        load_sp500_daily_bars(symbols=["GE"])
+    except DataNotFoundError:
+        pytest.skip("Licensed S&P 500 data is unavailable")
+
+    validation = load_backtest_prices(CASE_STUDY, start_date="2019-01-01", end_date="2020-12-31")
+    holdout = load_backtest_prices(CASE_STUDY, start_date="2020-06-01", end_date="2021-12-31")
+    shared = validation.join(holdout, on=["symbol", "timestamp"], suffix="_holdout")
+    assert shared.height > 50_000
+    drift = (shared["close"] - shared["close_holdout"]).abs().max()
+    assert drift == pytest.approx(0.0, abs=1e-9)
+
+    seam = (
+        pl.concat([validation, holdout])
+        .unique(subset=["symbol", "timestamp"])
+        .sort("symbol", "timestamp")
+        .with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("r"))
+        .drop_nulls("r")
+    )
+    assert seam.filter(pl.col("r").abs() > 0.60).is_empty()
 
 
 def test_the_real_panel_carries_no_corporate_action_as_a_price_move():

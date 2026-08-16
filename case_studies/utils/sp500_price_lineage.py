@@ -82,39 +82,37 @@ def reconcile_underlying_log_returns(prices: pl.DataFrame) -> pl.DataFrame:
     return frame
 
 
-def continuous_adjusted_panel(
-    prices: pl.DataFrame,
-    *,
-    price_cols: tuple[str, ...] = PRICE_COLS,
-    volume_col: str | None = "volume",
-) -> pl.DataFrame:
-    """Back-adjust every price column and splice at each security identity boundary.
+def adjustment_scale(bars: pl.DataFrame) -> pl.DataFrame:
+    """Return the per ``(symbol, timestamp)`` multiplier that back-adjusts a printed price.
 
-    A backtest feed reads a level, so it has no way to say that a return does not
-    exist. Each ``sec_id`` segment after a ticker's first is rescaled to meet the
-    level the previous segment closed at: the two securities keep their own
-    returns, and the changeover contributes zero instead of the jump the
-    restarting factor would otherwise produce. It is the treatment ``cme_futures``
-    gives a contract roll, applied to a ticker reassignment.
+    Two things go into it. ``adj_factor`` removes the corporate action. Then each
+    ``sec_id`` segment after a ticker's first is rescaled to meet the level the
+    previous segment closed at, so the two securities keep their own returns and
+    the changeover contributes zero rather than the jump a factor restarting at
+    1.0 would produce - the treatment ``cme_futures`` gives a contract roll,
+    applied to a ticker reassignment. A backtest feed reads a level, so unlike
+    :func:`reconcile_underlying_log_returns` it cannot say that a return does not
+    exist.
 
-    The series is then anchored so each ticker's **last** row equals the close
+    Finally the series is anchored so each ticker's **last** row equals the close
     that printed, which is what makes it a back-adjusted price rather than an
-    index. The level matters: this case study sizes positions in whole shares
-    against a fixed cash budget, so a series carried on the factor's own scale
-    would put AAPL near 4000 instead of near 130 and turn integer rounding into
-    a material allocation error. History before the anchor is the split- and
-    dividend-adjusted equivalent, exactly as ``us_equities_panel``'s stored
-    ``adj_close`` is.
+    index. The level is not cosmetic: this case study sizes positions in whole
+    shares against a fixed cash budget, and on the factor's own scale AAPL sits
+    near 4000 instead of near 130, which turns integer rounding into a material
+    allocation error.
 
-    ``volume_col`` is divided by the same total factor each row's price is
-    multiplied by, so ``price * volume`` stays the dollar volume that printed.
+    **Pass the complete bar history.** Both halves depend on every segment a
+    ticker has and on which row is its last, so a scale derived from a
+    date-filtered frame is a function of the window as well as the session, and
+    two windows would disagree about the same date. That is not hypothetical:
+    the holdout path concatenates a validation load and a holdout load to give
+    the rolling-volatility allocators their burn-in, and a window-dependent
+    scale puts a fabricated return on the seam - 8x for GE, whose 1-for-8 falls
+    inside the holdout year.
     """
-    frame = _validated(prices)
-    columns = [column for column in price_cols if column in frame.columns]
-    if "close" not in columns:
-        raise ValueError("the adjusted panel requires a close column")
-
-    frame = frame.with_columns(pl.col("identity_boundary").cum_sum().over("symbol").alias("_seg"))
+    frame = _validated(bars).with_columns(
+        pl.col("identity_boundary").cum_sum().over("symbol").alias("_seg")
+    )
     splice = (
         frame.group_by("symbol", "_seg")
         .agg(
@@ -122,30 +120,77 @@ def continuous_adjusted_panel(
             pl.col("adjusted_close").last().alias("_close"),
         )
         .sort("symbol", "_seg")
-        .with_columns(
-            (pl.col("_close").shift(1) / pl.col("_open")).over("symbol").fill_null(1.0).alias("_st")
+        .with_columns((pl.col("_close").shift(1) / pl.col("_open")).over("symbol").alias("_step"))
+    )
+    # The null `_step` belongs to a ticker's first segment, where there is nothing
+    # to splice onto. A null anywhere else means a null close reached the ratio -
+    # `_validated` tolerates those - and filling it would silently drop the splice
+    # and carry a wrong offset into every later segment, visible only as P&L.
+    unspliceable = splice.filter((pl.col("_seg") > 0) & pl.col("_step").is_null())
+    if not unspliceable.is_empty():
+        raise ValueError(
+            "cannot splice a security identity boundary whose adjusted close is null: "
+            f"{unspliceable.select('symbol', '_seg').rows()}"
         )
-        .with_columns(pl.col("_st").cum_prod().over("symbol").alias("_splice"))
+    splice = (
+        splice.with_columns(pl.col("_step").fill_null(1.0))
+        .with_columns(pl.col("_step").cum_prod().over("symbol").alias("_splice"))
         .select("symbol", "_seg", "_splice")
     )
-    frame = frame.join(splice, on=["symbol", "_seg"], how="left").with_columns(
-        (pl.col("adj_factor") * pl.col("_splice")).alias("_scale")
-    )
-    # Anchor: each ticker's last row keeps the close that printed, so the level a
-    # position is sized against is the one the market quoted.
-    frame = frame.with_columns(
-        (pl.col("_scale") / pl.col("_scale").last().over("symbol", order_by="timestamp")).alias(
-            "_scale"
+    return (
+        frame.join(splice, on=["symbol", "_seg"], how="inner")
+        .with_columns((pl.col("adj_factor") * pl.col("_splice")).alias("price_scale"))
+        .with_columns(
+            (
+                pl.col("price_scale")
+                / pl.col("price_scale").last().over("symbol", order_by="timestamp")
+            ).alias("price_scale")
         )
+        .select("symbol", "timestamp", "price_scale")
     )
+
+
+def continuous_adjusted_panel(
+    prices: pl.DataFrame,
+    *,
+    scale: pl.DataFrame,
+    price_cols: tuple[str, ...] = PRICE_COLS,
+    volume_col: str | None = "volume",
+) -> pl.DataFrame:
+    """Apply a full-history :func:`adjustment_scale` to a panel that may be one window of it.
+
+    Keeping the scale a separate argument is what makes the result a function of
+    ``(symbol, timestamp)`` alone: the caller resolves it once over the whole
+    series, and every window of that series then agrees about every date it
+    contains.
+
+    ``volume_col`` is divided by the same factor its row's price is multiplied
+    by, so ``price * volume`` stays the dollar volume that printed. Note that the
+    share **count** moves with the level, so a per-share cost schedule evaluated
+    on this panel is charged on adjusted share counts and is not comparable to a
+    live per-share commission.
+    """
+    columns = [column for column in price_cols if column in prices.columns]
+    if "close" not in columns:
+        raise ValueError("the adjusted panel requires a close column")
+    if "price_scale" in prices.columns:
+        raise ValueError("the panel already carries a price_scale column")
+
+    frame = prices.join(scale, on=["symbol", "timestamp"], how="left")
+    unscaled = frame.filter(pl.col("price_scale").is_null())
+    if not unscaled.is_empty():
+        raise ValueError(
+            "the adjustment scale does not cover every panel row; it must be resolved "
+            f"over the complete bar history. First uncovered: {unscaled.head(3).rows()}"
+        )
     volume = (
-        [(pl.col(volume_col) / pl.col("_scale")).alias(volume_col)]
+        [(pl.col(volume_col) / pl.col("price_scale")).alias(volume_col)]
         if _has(frame, volume_col)
         else []
     )
     return frame.with_columns(
-        [(pl.col(column) * pl.col("_scale")).alias(column) for column in columns] + volume
-    ).drop("_seg", "_splice", "_scale", "adjusted_close", "identity_boundary")
+        [(pl.col(column) * pl.col("price_scale")).alias(column) for column in columns] + volume
+    ).drop("price_scale")
 
 
 def _has(frame: pl.DataFrame, column: str | None) -> bool:
