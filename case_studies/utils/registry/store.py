@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS prediction_coverage (
     n_folds_expected    INTEGER NOT NULL,
     n_folds_actual      INTEGER NOT NULL,
     schema_json          TEXT NOT NULL,
+    artifact_digest      TEXT NOT NULL,
     status              TEXT NOT NULL
 );
 
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     created_at       TEXT NOT NULL,
     git_commit       TEXT,
     started_at       TEXT,
-    elapsed_s        REAL
+    elapsed_s        REAL,
+    artifact_digests_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_backtest_pred ON backtest_runs(prediction_hash);
@@ -253,6 +255,7 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
     holdout_training_hash   TEXT NOT NULL,
     holdout_prediction_hash TEXT NOT NULL,
     holdout_backtest_hash   TEXT NOT NULL,
+    fitted_state_digest     TEXT,
     evaluated_at            TEXT NOT NULL
 );
 
@@ -323,6 +326,7 @@ CREATE TABLE IF NOT EXISTS holdout_staging (
     holdout_training_hash   TEXT NOT NULL,
     holdout_prediction_hash TEXT NOT NULL,
     holdout_backtest_hash   TEXT NOT NULL,
+    fitted_state_digest     TEXT,
     lineage_digest          TEXT NOT NULL,
     staged_at               TEXT NOT NULL
 );
@@ -555,6 +559,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         }
         if "schema_json" not in coverage_cols:
             db.execute("ALTER TABLE prediction_coverage ADD COLUMN schema_json TEXT")
+        if "artifact_digest" not in coverage_cols:
+            db.execute("ALTER TABLE prediction_coverage ADD COLUMN artifact_digest TEXT")
 
     # Migration 2b: add runtime columns to backtest_runs
     if "backtest_runs" in tables:
@@ -564,10 +570,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
             "git_commit": "TEXT",
             "started_at": "TEXT",
             "elapsed_s": "REAL",
+            "artifact_digests_json": "TEXT",
         }
         for column, sql_type in backtest_columns.items():
             if column not in cols:
                 db.execute(f"ALTER TABLE backtest_runs ADD COLUMN {column} {sql_type}")
+
+    for table in ("holdout_staging", "holdout_evaluations"):
+        if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

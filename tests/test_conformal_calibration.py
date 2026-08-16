@@ -207,6 +207,27 @@ def test_legacy_width_artifact_must_be_preserved_before_regeneration(
         conformal.compute_conformal_widths("demo", "candidate", min_calibration_n=2, write=True)
 
 
+def test_locked_width_retry_rejects_conflict_without_replacing_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "conformal_widths.parquet"
+    original = pl.DataFrame(
+        {
+            "timestamp": [datetime(2020, 1, 1)],
+            "symbol": ["A"],
+            "fold_id": [-1],
+            "width": [2.0],
+            "alpha": [0.2],
+            "calibration_version": [conformal.CALIBRATION_VERSION],
+        }
+    )
+    original.write_parquet(path)
+    conflicting = original.with_columns(pl.lit(3.0).alias("width"))
+
+    with pytest.raises(ValueError, match="locked conformal artifact conflicts"):
+        conformal._write_widths(path, conflicting, 0.2, immutable=True)
+
+    assert pl.read_parquet(path).equals(original)
+
+
 def test_common_support_ranking_uses_identical_timestamps() -> None:
     full = pl.DataFrame(
         {

@@ -30,7 +30,9 @@ def create_experiment(
     """Copy available generated state into a new ML4T_OUTPUT_DIR."""
     source = repo_root / "case_studies" / case_study
     source_run_log = source / "run_log"
-    if not source.is_dir() or not source_run_log.is_dir() or source_run_log.is_symlink():
+    if not source.is_dir() or (
+        include_release_run_log and (not source_run_log.is_dir() or source_run_log.is_symlink())
+    ):
         raise ValueError(f"Install the {case_study} artifact bundle before creating an experiment")
     source_config = source / "config"
     if not source_config.is_dir():
@@ -54,11 +56,11 @@ def create_experiment(
     try:
         staging.mkdir()
         for name in GENERATED_DIRS:
+            if name == "run_log" and not include_release_run_log:
+                (staging / name).mkdir()
+                continue
             candidate = source / name
             if candidate.is_dir():
-                if name == "run_log" and not include_release_run_log:
-                    (staging / name).mkdir()
-                    continue
                 shutil.copytree(candidate, staging / name)
 
         # config/ is a version-controlled input, not a generated artifact, but the

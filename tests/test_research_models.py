@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import weakref
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -19,6 +20,7 @@ from case_studies.research import (
     ModelRun,
     Study,
     get_adapter,
+    plan_models,
     register_adapter,
     registered_adapters,
     run_models,
@@ -252,7 +254,16 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
         for config_name in ("tabm_s", "tabm_m")
     ]
 
-    result = run_models(study, requests=requests)
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-tabm-checkpoints",
+    )
+    assert loads == [("etfs", "fwd_ret_1d", 0)]
+    assert conversions == 1
+    assert executions == []
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    result = plan.run()
 
     assert loads == [("etfs", "fwd_ret_1d", 0)]
     assert conversions == 1
@@ -264,6 +275,7 @@ def test_tabm_public_batch_materializes_and_prepares_compatible_panel_once(
     assert all(run.diagnostics["base_fold_preparations"] == 2 for run in result.runs)
     assert all(run.diagnostics["compatibility_group_size"] == 2 for run in result.runs)
     assert all(run.diagnostics["disk_fold_cache"] is False for run in result.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_tabm_cv_releases_each_prepared_fold_after_all_candidates(
@@ -409,12 +421,20 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
         )
         for config_name in ("tabm_s", "tabm_m")
     ]
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-tabm-recovery",
+    )
 
     with pytest.raises(RuntimeError, match="injected TabM candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
     first_calls = list(calls)
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     fail_small = False
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
 
     assert first_calls == [
         (4, "2024-01-03"),
@@ -430,6 +450,7 @@ def test_tabm_candidate_failure_preserves_completed_sibling(tmp_path, monkeypatc
     assert len({run.diagnostics["preparation_fraction"] for run in recovered.runs}) == 1
     assert recovered.runs[1].diagnostics["candidate_fit_s"] == 0.0
     assert all(run.predictions[0].complete for run in recovered.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_tabm_batch_matches_individual_resolved_execution(tmp_path, monkeypatch) -> None:
@@ -848,6 +869,117 @@ def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) 
     ]
 
 
+def test_thread_limit_does_not_leak_into_families_that_already_record_threads(
+    tmp_path, monkeypatch
+) -> None:
+    """gbm, tabular_dl and deep_learning must be byte-identical before and after this change.
+
+    They already record thread state - gbm carries num_threads in _GBM_REQUEST_FIELDS,
+    tabular_dl and deep_learning carry numerics blocks. Adding a second thread field to a
+    family that already has one moves its training identities and buys nothing. The pinning
+    helper is shared; the `numerics.thread_limit` field is applied to linear and causal only.
+    """
+    gbm_study = _gbm_study(tmp_path / "gbm", monkeypatch)
+    gbm_spec = (
+        gbm_study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63},
+        )
+        .resolve()
+        .spec
+    )
+    gbm_numerics = gbm_spec["computation"].get("numerics", {})
+    assert "thread_limit" not in gbm_numerics, (
+        "thread_limit leaked into gbm, which already records num_threads; "
+        "this moves every gbm training identity"
+    )
+
+    tabm_study, *_ = _tabm_study(tmp_path / "tabm", monkeypatch)
+    tabm_spec = (
+        tabm_study.model(family="tabular_dl", label="fwd_ret_1d", config_name="tabm_s")
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in tabm_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into tabular_dl, which already carries a numerics block"
+    )
+
+    # deep_learning builds its own numerics block at utils/deep_learning.py, so it is the third
+    # family this scope protects and equally likely to be caught by a future widening.
+    from tests.test_deep_learning_adapter import _resolve_nlinear_request
+
+    _, _, sequence_resolved = _resolve_nlinear_request(tmp_path / "sequence", monkeypatch)
+    sequence_spec = sequence_resolved.spec
+    assert "thread_limit" not in sequence_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into deep_learning, which already carries a numerics block"
+    )
+    assert sequence_spec["computation"]["numerics"]["num_threads"]
+
+    # latent_factors records num_threads too (utils/latent_factors/adapter.py), so it is the
+    # fourth family this scope protects and equally exposed to a future widening.
+    latent_study = _latent_study(tmp_path / "latent", monkeypatch)
+    latent_spec = (
+        latent_study.model(
+            family="latent_factors",
+            label="fwd_ret_1d",
+            config_name="pca",
+            overrides={"device": "cpu"},
+        )
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in latent_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into latent_factors, which already records num_threads"
+    )
+
+
+def test_linear_pins_the_thread_pool_and_records_it_in_identity(tmp_path, monkeypatch) -> None:
+    """A linear fit is a deterministic function of the thread pool, not of the data alone.
+
+    Coordinate descent and the BLAS kernels reduce in thread order, so two runs can agree on
+    training_hash and prediction_hash and still differ in the coefficients. Measured on real
+    crypto data: lasso_f0.08 at identical training_hash produced prediction digests
+    37352b2ff14a4b6a uncapped (pools 16/24) against c81ca6b5302e1dc2 capped. Recording the
+    limit is what makes the identity cover the computation.
+    """
+    import threadpoolctl
+
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    resolved = request.resolve()
+
+    numerics = resolved.spec["computation"]["numerics"]
+    assert numerics["thread_limit"] == linear.LINEAR_THREAD_LIMIT
+    assert numerics["deterministic_reduction"] is True
+
+    other = deepcopy(resolved.spec)
+    other["computation"]["numerics"]["thread_limit"] = linear.LINEAR_THREAD_LIMIT + 1
+    assert linear.training_hash_from_spec(other) != linear.training_hash_from_spec(resolved.spec)
+
+    # Observed from inside the limited block rather than by trusting the source: the runner
+    # calls _fold_predictions immediately after model.fit, within the same context manager.
+    observed: list[int] = []
+    original_predictions = linear._fold_predictions
+
+    def recording_predictions(model, fold, context):
+        observed.extend(
+            info["num_threads"]
+            for info in threadpoolctl.threadpool_info()
+            if info["user_api"] in {"openmp", "blas"}
+        )
+        return original_predictions(model, fold, context)
+
+    monkeypatch.setattr(linear, "_fold_predictions", recording_predictions)
+    request.run()
+
+    assert observed, "no thread pool was observed during the linear fit"
+    assert set(observed) == {linear.LINEAR_THREAD_LIMIT}, (
+        f"linear fitted with pools at {sorted(set(observed))}, not {linear.LINEAR_THREAD_LIMIT}"
+    )
+
+
 def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
     study = _linear_study(tmp_path / "batch", monkeypatch)
     individual_study = _linear_study(tmp_path / "individual", monkeypatch)
@@ -964,6 +1096,70 @@ def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
     assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
 
 
+def test_linear_model_plan_reuses_one_materialization_and_one_execution_fold_pass(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_load = linear.load_modeling_dataset
+    original_prepare = modeling.prepare_single_fold
+    loads = 0
+    prepared_folds = []
+
+    def observed_load(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load(*args, **kwargs)
+
+    def load_preset(config_name):
+        if config_name == "lasso":
+            return {
+                "config_name": config_name,
+                "family": "linear",
+                "library": "sklearn",
+                "model_class": "Lasso",
+                "params": {"alpha_frac": 0.5, "max_iter": 5000},
+            }
+        return {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha": 1.0},
+        }
+
+    def observed_prepare(*args, **kwargs):
+        fold = original_prepare(*args, **kwargs)
+        assert fold is not None
+        prepared_folds.append(int(fold["fold"]))
+        return fold
+
+    monkeypatch.setattr(linear, "load_modeling_dataset", observed_load)
+    monkeypatch.setattr(linear, "_load_preset", load_preset)
+    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    requests = [
+        study.model(family="linear", label="fwd_ret_1d", config_name=config_name)
+        for config_name in ("ridge", "lasso")
+    ]
+
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-linear-checkpoints",
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    execution = plan.run()
+
+    assert loads == 1
+    assert prepared_folds == [0, 1, 0, 1]
+    assert tuple(run.training.hash for run in execution.runs) == plan.expected_training_hashes
+    assert (
+        tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+        == plan.expected_prediction_hashes
+    )
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in execution.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
+
+
 def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
     tmp_path, monkeypatch
 ) -> None:
@@ -1065,14 +1261,22 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
         )
         for alpha in (1.0, 2.0, 3.0)
     ]
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-linear-recovery",
+    )
 
     with pytest.raises(RuntimeError, match="injected candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
 
     completed = study.predictions.table().filter(pl.col("complete"))
     assert completed.height == 2
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     monkeypatch.setattr(linear.Ridge, "fit", original_fit)
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
     recovered_by_alpha = {
         run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"]["alpha"]: run
         for run in recovered.runs
@@ -1085,6 +1289,7 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
     assert recovered_by_alpha[2.0].diagnostics["base_fold_preparations"] == 1
     assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
     assert study.predictions.table().filter(pl.col("complete")).height == 3
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_linear_batch_rejects_a_modified_fitted_preprocessor(tmp_path, monkeypatch) -> None:
@@ -1439,7 +1644,13 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
         for learning_rate in (0.1, 0.2)
     ]
 
-    batch = run_models(study, requests=requests)
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-gbm-checkpoints",
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    batch = plan.run()
     batch_preparations = list(prepared)
     monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", original_prepare)
     individual = (
@@ -1470,6 +1681,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
     assert all(run.diagnostics["compatibility_group_size"] == 2 for run in batch.runs)
     assert all(run.diagnostics["base_fold_preparations"] == 2 for run in batch.runs)
     assert all(run.diagnostics["disk_fold_cache"] is False for run in batch.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
@@ -1640,13 +1852,21 @@ def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monk
         )
         for rate in (0.1, 0.2, 0.3)
     ]
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-gbm-recovery",
+    )
 
     with pytest.raises(RuntimeError, match="injected GBM candidate failure"):
-        run_models(study, requests=requests)
+        plan.run()
 
     assert study.predictions.table().filter(pl.col("complete")).height == 4
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
     monkeypatch.setattr(gbm_utils, "train_gbm_config", original_train)
-    recovered = run_models(study, requests=requests)
+    recovered_plan = plan_models(study, requests=requests)
+    assert recovered_plan.expected_prediction_hashes == plan.expected_prediction_hashes
+    recovered = recovered_plan.run()
     recovered_by_rate = {
         run.training.spec()["computation"]["model"]["effective_params_by_fold"]["0"][
             "learning_rate"
@@ -1660,6 +1880,7 @@ def test_gbm_batch_failure_preserves_siblings_and_completed_folds(tmp_path, monk
     assert recovered_by_rate[0.2].diagnostics["fitted_folds"] == [1]
     assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
     assert study.predictions.table().filter(pl.col("complete")).height == 6
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_gbm_batch_rejects_a_modified_booster(tmp_path, monkeypatch) -> None:
@@ -2529,3 +2750,61 @@ def test_model_and_causal_adapters_have_one_extension_seam() -> None:
     assert get_adapter("causal", "fixture_causal").__name__ == "case_studies.utils.causal"
     assert "tabular_dl" in {binding.name for binding in registered_adapters("model")}
     assert "dml" in {binding.name for binding in registered_adapters("causal")}
+
+
+def test_published_logistic_presets_resolve_to_the_model_their_name_claims() -> None:
+    """A preset name must describe the model it produces, for every preset in the family.
+
+    `logistic_none` declared only max_iter and solver, so it inherited scikit-learn's defaults
+    of penalty="l2", C=1.0 and fitted coefficients identical to `logistic_l2_C1.0`. The
+    published menu advertised an unpenalized baseline that has never existed, and six training
+    menus across four case studies reference it.
+
+    Checking `logistic_none` alone would leave the rule unenforced everywhere else: the six
+    `logistic_l2_*` presets take their l2 from the same constructor default, and a collision
+    check catches a mistyped C only when it happens to collide with a sibling - `C: 5.0` on
+    `logistic_l2_C10.0` would pass. Deriving the expectation from the stem checks the claim
+    each name makes rather than only that the names differ.
+    """
+    import re
+    from pathlib import Path
+
+    from sklearn.linear_model import LogisticRegression
+
+    from utils.paths import REPO_ROOT
+
+    preset_dir = Path(REPO_ROOT) / "case_studies" / "config" / "logistic"
+    presets = {
+        path.stem: yaml.safe_load(path.read_text())["params"]
+        for path in sorted(preset_dir.glob("*.yaml"))
+    }
+    assert presets, "no published logistic presets found"
+
+    effective = {}
+    for name, params in presets.items():
+        resolved = LogisticRegression(**params).get_params()
+        effective[name] = (resolved["penalty"], resolved["C"], resolved["solver"])
+
+        stem = name.removeprefix("logistic_")
+        if stem == "none":
+            expected_penalty, expected_c = None, None
+        else:
+            match = re.fullmatch(r"(l1|l2)_C([0-9.]+)", stem)
+            assert match, f"unrecognised logistic preset name {name!r}"
+            expected_penalty, expected_c = match.group(1), float(match.group(2))
+
+        assert resolved["penalty"] == expected_penalty, (
+            f"{name} resolves to penalty={resolved['penalty']!r}, "
+            f"but its name claims {expected_penalty!r}"
+        )
+        if expected_c is not None:
+            assert resolved["C"] == expected_c, (
+                f"{name} resolves to C={resolved['C']}, but its name claims {expected_c}"
+            )
+
+    duplicates = {
+        signature: sorted(n for n, sig in effective.items() if sig == signature)
+        for signature in set(effective.values())
+        if sum(sig == signature for sig in effective.values()) > 1
+    }
+    assert not duplicates, f"published logistic presets resolve to one model: {duplicates}"

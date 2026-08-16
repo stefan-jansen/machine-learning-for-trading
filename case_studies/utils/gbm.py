@@ -96,6 +96,10 @@ class GBMContext:
     class_values: tuple[Any, ...]
     expected_keys: pl.DataFrame
     runtime_provenance: dict[str, Any]
+    device: str
+    num_threads: int
+    prediction_split: str = "validation"
+    published_checkpoints: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -1781,6 +1785,8 @@ def _build_gbm_resolved_request(
         class_values=tuple(mds.class_values),
         expected_keys=expected,
         runtime_provenance=runtime_provenance,
+        device=device,
+        num_threads=int(next(iter(effective.values()))["num_threads"]),
     )
     return spec, context
 
@@ -1881,6 +1887,153 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def reconstruct_locked_request(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+):
+    """Reconstruct a GBM holdout fit without loading the named preset."""
+    from case_studies.research.models import (
+        ResolvedModelRequest,
+        locked_holdout_split,
+        validate_locked_expected_keys,
+    )
+    from utils.modeling import load_modeling_dataset
+
+    if checkpoint_kind != "iteration" or checkpoint_value is None:
+        raise ValueError("GBM holdout requires one locked iteration checkpoint")
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+    if spec.get("seed") != RANDOM_SEED:
+        raise ValueError("locked GBM seed cannot be reproduced")
+    computation = spec["computation"]
+    if computation.get("sampling") != {"train_sample_frac": 1.0, "max_symbols": 0}:
+        raise ValueError("locked GBM holdout requires an unreduced canonical dataset")
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("locked GBM runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"locked GBM runner does not support entity key {entity_col!r}")
+    expected_inputs = {
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": mds.input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "input_data_spec": mds.input_lineage,
+        "source_identity": _gbm_source_identity(),
+        "runtime_identity": _gbm_runtime_identity(),
+        "task": {
+            "type": mds.task_type,
+            "class_values": list(mds.class_values),
+            "continuous_eval_label": label_ref.definition.continuous_eval_label,
+        },
+    }
+    for name, expected_value in expected_inputs.items():
+        if computation.get(name) != expected_value:
+            raise ValueError(f"locked GBM {name} does not match the available computation")
+    schedule = computation.get("checkpoint_schedule")
+    if not isinstance(schedule, list) or not schedule:
+        raise ValueError("locked GBM checkpoint schedule is missing")
+    declared = tuple(
+        int(item["value"])
+        for item in schedule
+        if item.get("kind") == "iteration" and item.get("value") is not None
+    )
+    model = computation.get("model")
+    reproduced_schedule = (
+        gbm_checkpoint_iterations(
+            {
+                "max_iterations": int(model["max_iterations"]),
+                "checkpoint_interval": declared[0],
+            }
+        )
+        if declared and isinstance(model, dict) and model.get("max_iterations") is not None
+        else ()
+    )
+    if (
+        len(declared) != len(schedule)
+        or checkpoint_value not in declared
+        or declared != reproduced_schedule
+    ):
+        raise ValueError("locked GBM checkpoint is absent from its exact schedule")
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
+        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+    expected = _gbm_expected_keys_from_dataset(mds, [split])
+    validate_locked_expected_keys(spec, expected)
+    folds = prepare_gbm_folds(
+        mds.dataset.to_pandas(),
+        [split],
+        mds.feature_names,
+        mds.label_col,
+        mds.date_col,
+        entity_col,
+        task_type=mds.task_type,
+        class_values=mds.class_values,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=mds.temporal_keys,
+        temporal_feature_names=mds.temporal_feature_names,
+        train_sample_frac=1.0,
+        eval_label_col=mds.eval_label_col,
+        seed=RANDOM_SEED,
+    )
+    if len(folds) != 1 or not folds[0]["n_train"] or not folds[0]["n_val"]:
+        raise ValueError("locked GBM holdout fold could not be prepared")
+    if not isinstance(model, dict):
+        raise ValueError("locked GBM model specification is missing")
+    fold_id = str(split["fold"])
+    effective = model.get("effective_params_by_fold")
+    if not isinstance(effective, dict) or set(effective) != {fold_id}:
+        raise ValueError("locked GBM model must declare parameters for the holdout fold")
+    _validate_lightgbm_params(effective[fold_id])
+    locked_runtime = effective[fold_id]
+    device = "cpu" if locked_runtime.get("device_type") == "cpu" else "cuda"
+    num_threads = int(locked_runtime.get("num_threads", 0))
+    reproduced_runtime = lightgbm_runtime_params(
+        device,
+        num_threads=num_threads,
+        seed=int(spec["seed"]),
+    )
+    if any(locked_runtime.get(name) != value for name, value in reproduced_runtime.items()):
+        raise ValueError("locked GBM runtime parameters cannot be reproduced")
+    if (
+        model.get("class") != "lightgbm.Booster"
+        or model.get("implementation") != "lightgbm"
+        or set(model)
+        != {
+            "class",
+            "implementation",
+            "effective_params_by_fold",
+            "huber_alpha_scale",
+            "max_iterations",
+        }
+        or int(model["max_iterations"]) < int(checkpoint_value)
+    ):
+        raise ValueError("locked GBM model specification is unsupported")
+    context = GBMContext(
+        folds=(folds[0],),
+        fold_ids=(int(split["fold"]),),
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=entity_col,
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        expected_keys=expected,
+        runtime_provenance=_gbm_runtime_provenance(study, device),
+        device=device,
+        num_threads=num_threads,
+        prediction_split="holdout",
+        published_checkpoints=(int(checkpoint_value),),
+    )
+    return ResolvedModelRequest(study, "gbm", spec, context)
+
+
 def _gbm_manifest_files(model_dir: Path) -> dict[str, str]:
     manifest = model_dir / "manifest.json"
     if not manifest.is_file():
@@ -1919,6 +2072,9 @@ def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
 
     include_preview = spec["execution_tier"] == "preview"
     training_hash = training_hash_from_spec(spec)
+    published = context.published_checkpoints or tuple(
+        int(item["value"]) for item in spec["computation"]["checkpoint_schedule"]
+    )
     try:
         training = Result.open(study, training_hash, include_preview=include_preview)
         predictions = tuple(
@@ -1926,14 +2082,14 @@ def _cached_model_run(study: Study, spec: dict[str, Any], context: GBMContext):
                 study,
                 prediction_hash_from_parts(
                     training_hash,
-                    checkpoint["value"],
-                    "validation",
+                    checkpoint,
+                    context.prediction_split,
                     checkpoint_kind="iteration",
                     identity_version=spec["identity_version"],
                 ),
                 include_preview=include_preview,
             )
-            for checkpoint in spec["computation"]["checkpoint_schedule"]
+            for checkpoint in published
         )
     except KeyError:
         return None
@@ -2033,7 +2189,7 @@ def _predict_from_gbm_models(
     ]
     return {
         "learning_curves": _learning_curves_from_predictions(
-            spec["config_name"],
+            str(spec.get("config_name") or f"locked-{training_hash_from_spec(spec)}"),
             predictions,
             checkpoints,
         ),
@@ -2451,27 +2607,35 @@ def _run_gbm_batch_group(
     base: dict[str, Any],
     *,
     report_batch: bool,
+    planned_candidates: dict[
+        int,
+        tuple[dict[str, Any], dict[str, dict[str, Any]], str, int, int],
+    ]
+    | None = None,
 ) -> list[_GBMBatchCandidate]:
     mds = base["mds"]
     candidates = []
     for index, request in indexed_requests:
-        config, request_fields = _load_gbm_request_config(
-            study,
-            base["label_ref"].name,
-            request["config_name"],
-            request["overrides"],
-        )
-        _apply_gbm_preview_reductions(config, request)
-        device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
-        effective = _gbm_effective_params_for_splits(
-            config,
-            base,
-            device=device,
-            max_bin=max_bin,
-            num_threads=num_threads,
-            task_type=mds.task_type,
-            class_values=tuple(mds.class_values),
-        )
+        if planned_candidates is None:
+            config, request_fields = _load_gbm_request_config(
+                study,
+                base["label_ref"].name,
+                request["config_name"],
+                request["overrides"],
+            )
+            _apply_gbm_preview_reductions(config, request)
+            device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+            effective = _gbm_effective_params_for_splits(
+                config,
+                base,
+                device=device,
+                max_bin=max_bin,
+                num_threads=num_threads,
+                task_type=mds.task_type,
+                class_values=tuple(mds.class_values),
+            )
+        else:
+            config, effective, device, max_bin, num_threads = planned_candidates[index]
         candidate = _GBMBatchCandidate(
             index=index,
             request=request,
@@ -2535,6 +2699,99 @@ def _run_gbm_batch_group(
             }
         )
     return candidates
+
+
+def plan_model_requests(
+    study: Study,
+    requests: list[dict[str, Any]],
+) -> tuple[tuple[dict[str, Any], ...], tuple[Any, ...]]:
+    """Resolve a request batch once without fitting or writing result rows."""
+    if not requests:
+        raise ValueError("GBM batch planner requires at least one request")
+    groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, request in enumerate(requests):
+        groups.setdefault(_gbm_compatibility_key(study, request), []).append((index, request))
+
+    ordered: list[dict[str, Any] | None] = [None] * len(requests)
+    planned_groups = []
+    input_cache: dict[tuple[str, str, int], tuple[Any, Any, Any]] = {}
+    for key, indexed_requests in groups.items():
+        input_key = _gbm_input_compatibility_key(indexed_requests[0][1])
+        base = _load_gbm_batch_base(
+            study,
+            indexed_requests[0][1],
+            inputs=input_cache.get(input_key),
+        )
+        input_cache.setdefault(
+            input_key,
+            (base["label_ref"], base["mds"], base["dataset_pd"]),
+        )
+        mds = base["mds"]
+        placeholder_folds = tuple({"fold": int(split["fold"])} for split in base["splits"])
+        planned_candidates = {}
+        for index, request in indexed_requests:
+            config, request_fields = _load_gbm_request_config(
+                study,
+                base["label_ref"].name,
+                request["config_name"],
+                request["overrides"],
+            )
+            _apply_gbm_preview_reductions(config, request)
+            device, max_bin, num_threads = _gbm_execution_settings(study, request_fields)
+            effective = _gbm_effective_params_for_splits(
+                config,
+                base,
+                device=device,
+                max_bin=max_bin,
+                num_threads=num_threads,
+                task_type=mds.task_type,
+                class_values=tuple(mds.class_values),
+            )
+            spec, _ = _build_gbm_resolved_request(
+                study,
+                request,
+                base=base,
+                config=config,
+                effective=effective,
+                folds=placeholder_folds,
+                device=device,
+            )
+            ordered[index] = spec
+            planned_candidates[index] = (config, effective, device, max_bin, num_threads)
+        planned_groups.append((key, indexed_requests, base, planned_candidates))
+    if any(spec is None for spec in ordered):
+        raise RuntimeError("GBM batch planner did not resolve every request")
+    return tuple(spec for spec in ordered if spec is not None), tuple(planned_groups)
+
+
+def run_model_plan(study: Study, payload: tuple[Any, ...]) -> tuple[ModelRun, ...]:
+    ordered: list[ModelRun | None] = [
+        None for _ in range(sum(len(indexed) for _, indexed, _, _ in payload))
+    ]
+    failures = []
+    for key, indexed_requests, base, planned_candidates in payload:
+        try:
+            candidates = _run_gbm_batch_group(
+                study,
+                indexed_requests,
+                key,
+                base,
+                report_batch=len(ordered) > 1,
+                planned_candidates=planned_candidates,
+            )
+        except Exception as error:
+            failures.append(error)
+            continue
+        for candidate in candidates:
+            if candidate.error is not None:
+                failures.append(candidate.error)
+            elif candidate.result is not None:
+                ordered[candidate.index] = candidate.result
+    if failures:
+        raise failures[0]
+    if any(result is None for result in ordered):
+        raise RuntimeError("GBM planned batch did not produce every requested result")
+    return tuple(result for result in ordered if result is not None)
 
 
 def run_model_requests(study: Study, requests: list[dict[str, Any]]) -> tuple[ModelRun, ...]:
@@ -2602,14 +2859,17 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
         try:
             result = train_gbm_config(
                 {
-                    "config_name": spec["config_name"],
+                    "config_name": str(
+                        spec.get("config_name") or f"locked-{training_hash_from_spec(spec)}"
+                    ),
                     "max_iterations": computation["model"]["max_iterations"],
                     "checkpoint_interval": computation["checkpoint_schedule"][0]["value"],
                     "params": {},
                 },
                 list(context.folds),
                 feature_names=list(context.feature_names),
-                device="cpu",
+                device=context.device,
+                num_threads=context.num_threads,
                 entity_col=context.entity_col,
                 date_col=context.date_col,
                 task_type=context.task_type,
@@ -2623,15 +2883,17 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
             shutil.rmtree(staging, ignore_errors=True)
             raise
     prediction_results = []
-    for checkpoint in computation["checkpoint_schedule"]:
-        value = int(checkpoint["value"])
+    published = context.published_checkpoints or tuple(
+        int(item["value"]) for item in computation["checkpoint_schedule"]
+    )
+    for value in published:
         frame = _gbm_prediction_frame(result["predictions"], value, context)
         prediction_results.append(
             study.results.publish_predictions(
                 training,
                 checkpoint_kind="iteration",
                 checkpoint_value=value,
-                split="validation",
+                split=context.prediction_split,
                 predictions=frame,
                 expected_keys=context.expected_keys,
                 task_type=context.task_type,
@@ -2651,3 +2913,52 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
     return ModelRun(training=training, predictions=tuple(prediction_results))
+
+
+def validate_locked_run(
+    study: Study,
+    spec: dict[str, Any],
+    context: GBMContext,
+    run: ModelRun,
+) -> str:
+    """Validate the selected prediction and every persisted GBM booster digest."""
+    if run.training.hash != training_hash_from_spec(spec) or len(run.predictions) != 1:
+        raise ValueError("locked GBM run has the wrong training or prediction identity")
+    prediction = run.predictions[0]
+    record = prediction.registry_record()
+    selected = context.published_checkpoints
+    if selected is None or len(selected) != 1:
+        raise ValueError("locked GBM context must select exactly one checkpoint")
+    if (
+        record["split"],
+        record["checkpoint_kind"],
+        record["checkpoint_value"],
+    ) != (context.prediction_split, "iteration", selected[0]):
+        raise ValueError("locked GBM run published the wrong checkpoint")
+    published = prediction.load().sort("symbol", "timestamp", "fold")
+    model_dir = run.training.root / "run_log" / "training" / run.training.hash / "models"
+    if not _valid_gbm_model_dir(model_dir, context):
+        raise ValueError("locked GBM fitted-state manifest does not validate")
+    reconstructed = _gbm_prediction_frame(
+        _predict_from_gbm_models(model_dir, spec, context)["predictions"],
+        selected[0],
+        context,
+    )
+    key_columns = ["symbol", "timestamp", "fold"]
+    value_columns = ["prediction", "actual"]
+    if "eval_actual" in published.columns or "eval_actual" in reconstructed.columns:
+        if "eval_actual" not in published.columns or "eval_actual" not in reconstructed.columns:
+            raise ValueError("locked GBM fitted state changed the prediction schema")
+        value_columns.append("eval_actual")
+    if not reconstructed.select(key_columns).equals(
+        published.select(key_columns)
+    ) or not np.allclose(
+        reconstructed.select(value_columns).to_numpy(),
+        published.select(value_columns).to_numpy(),
+        rtol=1e-12,
+        atol=1e-12,
+        equal_nan=False,
+    ):
+        raise ValueError("locked GBM fitted state does not reproduce published predictions")
+    manifest = json.loads((model_dir / "manifest.json").read_text())
+    return hashlib.sha256(canonical_json(manifest).encode()).hexdigest()
