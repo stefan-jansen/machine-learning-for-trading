@@ -152,6 +152,52 @@ def test_a_scale_that_does_not_cover_the_panel_is_refused():
         continuous_adjusted_panel(bars, scale=partial)
 
 
+def test_a_null_close_at_a_segment_boundary_is_refused():
+    """The splice ratio reads the previous segment's last close, which may be null.
+
+    Filling that null the way a first segment's is filled would drop the splice and
+    carry a wrong offset into every later segment, visible only as P&L. The scale is
+    resolved over the whole history, so this must fail loudly rather than quietly.
+    """
+    bars = _bars(
+        [
+            ("XRX", 44733, "2019-07-30", 30.00, 1.853437, 1_000_000),
+            ("XRX", 44733, "2019-07-31", 31.00, 1.853437, 1_000_000),
+            ("XRX", 5888027, "2019-08-01", 31.64, 1.0, 1_000_000),
+        ]
+    ).with_columns(
+        pl.when(pl.col("timestamp") == pl.date(2019, 7, 31))
+        .then(None)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    with pytest.raises(ValueError, match="cannot splice"):
+        adjustment_scale(bars)
+
+
+def test_a_null_close_that_ends_a_ticker_is_not_refused():
+    """The 10 in the shipped extract are all of this shape and must keep working.
+
+    Measured on `daily_bars.parquet`: 10 segments carry a null close, every one the
+    terminal row of a delisted ticker that has a single `sec_id`, and none at a
+    segment boundary. Nothing splices onto them, so the guard above must not fire.
+    """
+    bars = _bars(
+        [
+            ("WFM", 40001, "2017-08-25", 41.00, 1.0, 1_000_000),
+            ("WFM", 40001, "2017-08-28", 30.89, 1.0, 1_000_000),
+        ]
+    ).with_columns(
+        pl.when(pl.col("timestamp") == pl.date(2017, 8, 28))
+        .then(None)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    scale = adjustment_scale(bars)
+    assert scale.height == 2
+    assert scale["price_scale"].null_count() == 0
+
+
 def test_two_windows_of_one_series_agree_about_the_dates_they_share():
     """The regression guard for a scale anchored on the frame it was handed.
 
