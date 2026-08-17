@@ -16,6 +16,7 @@ from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
 
 CASE_STUDY = "us_firm_characteristics"
+PREVIEW_DIR_NAME = ".preview"
 PREDICTIVE_FAMILIES = ("linear", "gbm", "tabular_dl", "latent_factors")
 _MODEL_OVERRIDES = {
     ("latent_factors", "ipca"): {"device": "cpu", "fold_workers": 4},
@@ -23,7 +24,12 @@ _MODEL_OVERRIDES = {
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
-    """Open a writable canonical or preview workspace without changing the release."""
+    """Open a writable canonical or preview workspace without changing the release.
+
+    A preview workspace is activated here rather than left to the individual requests, so
+    that everything the session writes lands under the isolated preview root instead of
+    only the results that happen to carry the tier.
+    """
     if execution_tier not in {"canonical", "preview"}:
         raise ValueError("execution_tier must be canonical or preview")
     output_root = os.environ.get("ML4T_OUTPUT_DIR") or workspace
@@ -32,7 +38,13 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
     resolved_root = Path(output_root).expanduser()
     if not resolved_root.is_absolute():
         resolved_root = REPO_ROOT / resolved_root
-    return Study.open(CASE_STUDY, workspace=resolved_root, release_root=REPO_ROOT)
+    # Activating a preview rewrites ML4T_OUTPUT_DIR to the preview root, so a second call
+    # in the same kernel would otherwise nest one preview root inside another.
+    if resolved_root.name == PREVIEW_DIR_NAME:
+        resolved_root = resolved_root.parent
+    study = Study.open(CASE_STUDY, workspace=resolved_root, release_root=REPO_ROOT)
+    study.activate(execution_tier)
+    return study
 
 
 def declared_labels() -> tuple[str, ...]:
@@ -52,7 +64,7 @@ def model_request_catalog(
     """Return the declared model population as a Polars request catalog."""
     selected_names = set(config_names) if config_names is not None else None
     rows = []
-    for label in labels or declared_labels():
+    for label in declared_labels() if labels is None else tuple(labels):
         for config in load_configs(CASE_STUDY, label, family):
             name = str(config["config_name"])
             if selected_names is None or name in selected_names:
