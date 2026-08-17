@@ -219,9 +219,10 @@ def test_an_empty_configuration_selection_names_itself():
 def test_an_empty_label_list_means_every_published_label():
     """The asymmetry with `config_names=[]`, pinned so it stays deliberate.
 
-    A parameters cell that leaves `LABELS = []` means "all" across all nine case
-    studies, and `06_linear.py` passes `LABELS or None` to get it. An empty
-    `config_names` cannot be that idiom - it is only ever passed in code - so one
-    is widened and the other refused.
+    This case study's six model notebooks leave `LABELS = []` to mean "all", though
+    each converts it with `LABELS or None` before calling, so no notebook reaches
+    this branch - it exists for consistency with that parameters-cell convention.
+    An empty `config_names` cannot be that convention, being only ever a literal in
+    code, so one is widened and the other refused.
     """
     assert model_request_catalog("linear", labels=[]).equals(model_request_catalog("linear"))

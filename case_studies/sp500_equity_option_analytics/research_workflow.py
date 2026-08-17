@@ -57,11 +57,17 @@ def model_request_catalog(
     """Return every configured label and model requested by one notebook.
 
     The two selection arguments treat an empty collection differently, on purpose.
-    ``labels`` comes from a notebook's parameters cell, where an empty list is the
-    established way across all nine case studies to say "every published label" -
-    `06_linear.py` passes `LABELS or None` for exactly that. ``config_names`` is
-    passed in code, never by a reader, so an empty list there cannot be that idiom
-    and is refused rather than silently widened to the whole menu.
+    This case study's six model notebooks leave `LABELS = []` in the parameters cell
+    to mean every published label, and each converts it with `LABELS or None` before
+    calling - so `labels=None` is what actually arrives, and widening an empty list
+    here is for consistency with that convention rather than something a notebook
+    depends on. ``config_names`` is only ever a literal in notebook code, never a
+    reader parameter, so an empty list there cannot be that convention and is
+    refused instead of silently widened to the whole menu.
+
+    The convention is this case study's, not the corpus's: `cme_futures` and
+    `crypto_perps_funding` are the only siblings with this function and both declare
+    `labels: Iterable[str] = ALL_LABELS` with no empty-means-all behaviour.
     """
     selected_labels = tuple(labels or published_labels())
     unknown = sorted(set(selected_labels) - set(published_labels()))
