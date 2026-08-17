@@ -1491,10 +1491,24 @@ def test_a_failed_runtime_update_leaves_the_row_as_it_was(tmp_path, monkeypatch)
     run = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").run()
     before = _recorded_runtime(study, run.training.hash)
 
-    def explode(*args, **kwargs):
-        raise RuntimeError("interrupted runtime update")
+    # The failure has to land after the UPDATE. Patching canonical_json, as this used to, raises
+    # while the argument tuple is still being built, so the row survived because nothing was ever
+    # written and the run this describes never happened. Failing the commit is the real case: the
+    # statement ran against the row, and its effect must not survive.
+    class FailsToCommit:
+        def __init__(self, real):
+            self._real = real
 
-    monkeypatch.setattr(registration, "canonical_json", explode)
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def commit(self):
+            raise RuntimeError("interrupted runtime update")
+
+    real_open = registration._open_registry
+    monkeypatch.setattr(
+        registration, "_open_registry", lambda case_dir: FailsToCommit(real_open(case_dir))
+    )
     with pytest.raises(RuntimeError, match="interrupted runtime update"):
         registration.record_training_runtime(
             study.case_study,
@@ -1503,6 +1517,7 @@ def test_a_failed_runtime_update_leaves_the_row_as_it_was(tmp_path, monkeypatch)
             measured={"elapsed_s": 999.0},
         )
 
+    monkeypatch.setattr(registration, "_open_registry", real_open)
     assert _recorded_runtime(study, run.training.hash) == before
 
 

@@ -186,18 +186,45 @@ class TestReuse:
         assert first[0]["X_train"] is second[0]["X_train"]
 
     def test_the_cache_key_ignores_everything_preparation_does_not_depend_on(self) -> None:
+        """Two callers describing the same fold set differently must share the arrays.
+
+        This used to compare the function with itself on byte-identical arguments, which measures
+        determinism and nothing else. What it has to show is that the key survives the ways a
+        caller can legitimately differ: a sequence type, a dict order, and a field on a split that
+        preparation never reads.
+        """
         common = {
             "case_study": "etfs",
             "label_col": "fwd_ret_5d",
             "eval_label_col": None,
-            "feature_names": FEATURES,
+            "input_lineage": {"fingerprint": "abc"},
+            "seed": 42,
+            "train_sample_frac": 1.0,
+        }
+        baseline = fold_cache_key(feature_names=FEATURES, splits=SPLITS, **common)
+
+        assert fold_cache_key(feature_names=tuple(FEATURES), splits=SPLITS, **common) == baseline
+
+        rearranged = [
+            {key: split[key] for key in reversed(list(split))} | {"selected_by": "a model"}
+            for split in SPLITS
+        ]
+        assert fold_cache_key(feature_names=FEATURES, splits=rearranged, **common) == baseline
+
+    def test_the_cache_key_changes_with_the_feature_order(self) -> None:
+        """The design matrix is built in this order, so it is an input, not a description."""
+        common = {
+            "case_study": "etfs",
+            "label_col": "fwd_ret_5d",
+            "eval_label_col": None,
             "splits": SPLITS,
             "input_lineage": {"fingerprint": "abc"},
             "seed": 42,
+            "train_sample_frac": 1.0,
         }
 
-        assert fold_cache_key(**common, train_sample_frac=1.0) == fold_cache_key(
-            **common, train_sample_frac=1.0
+        assert fold_cache_key(feature_names=FEATURES, **common) != fold_cache_key(
+            feature_names=list(reversed(FEATURES)), **common
         )
 
     def test_the_cache_key_changes_with_the_sampling_fraction(self) -> None:

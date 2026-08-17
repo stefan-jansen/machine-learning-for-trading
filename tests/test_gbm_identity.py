@@ -116,9 +116,14 @@ class TestWhatTheVersionClaims:
         assert fold["X_train"].dtype == np.float32
         assert fold["X_val"].dtype == np.float32
 
-    def test_missing_values_are_left_for_the_booster_to_route(self, fold):
-        """Imputing here would replace a missing value with a fabricated observation."""
-        raw = prepare_raw_folds(_dataset(), SPLITS, use_cache=False)[0]
-        if not np.isnan(raw.X_train).any():
-            pytest.skip("fixture has no missing values to preserve")
-        assert np.isnan(fold["X_train"]).any()
+    def test_missing_values_are_left_for_the_booster_to_route(self):
+        """Imputing here would replace a missing value with a fabricated observation.
+
+        The `fold` fixture comes from `_dataset()`, which injects no missing values, so this
+        builds its own. It used to take that fixture and skip when it found no NaN, which it
+        always did, so the assertion never ran in a file whose job is to make GBM_RUNNER_VERSION
+        enforceable.
+        """
+        raw = prepare_raw_folds(_dataset(missing=True), SPLITS, use_cache=False)[0]
+        assert np.isnan(raw.X_train).any(), "the fixture stopped injecting missing values"
+        assert np.isnan(gbm_fold(raw)["X_train"]).any()
