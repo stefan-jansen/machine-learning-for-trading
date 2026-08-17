@@ -377,27 +377,35 @@ def _recorded_family_cost(study, family: str, label: str) -> dict[str, Any] | No
     separately and only as a floor - they were timed against the features stage 01-05 replaced,
     and `REBUILD-PLAN.md` section 4 measured L1 configurations moving by an order of magnitude
     across that change.
+
+    Five of the nine registries still carry the pre-rebuild schema, which has neither
+    `execution_tier` nor `identity_version` on `training_runs`. Naming a column that a registry
+    does not have is how this crashed on `sp500_equity_option_analytics` and
+    `us_firm_characteristics`, so the query is built from the columns that are actually there.
     """
     db_path = study.root / "run_log" / "registry.db"
     if not db_path.exists():
         return None
     with sqlite3.connect(db_path) as db:
-        for identity_version, basis in ((3, "measured on the finalized inputs"), (None, "floor")):
-            clause = (
-                "identity_version = 3 AND label = ?"
-                if identity_version
-                else "(identity_version IS NULL OR identity_version < 3)"
+        columns = {row[1] for row in db.execute("PRAGMA table_info(training_runs)")}
+        if "elapsed_s" not in columns:
+            return None
+        canonical_only = ["execution_tier = 'canonical'"] if "execution_tier" in columns else []
+        attempts: list[tuple[str, list[Any], str]] = []
+        if "identity_version" in columns:
+            attempts.append(
+                ("identity_version = 3 AND label = ?", [label], "measured on the finalized inputs")
             )
-            params: list[Any] = [family]
-            if identity_version:
-                params.append(label)
+            attempts.append(("(identity_version IS NULL OR identity_version < 3)", [], "floor"))
+        else:
+            attempts.append(("1 = 1", [], "floor, pre-rebuild schema"))
+
+        for clause, extra, basis in attempts:
+            where = " AND ".join(["family = ?", "elapsed_s IS NOT NULL", clause, *canonical_only])
             rows = sorted(
                 row[0]
                 for row in db.execute(
-                    "SELECT elapsed_s FROM training_runs WHERE family = ? "
-                    "AND execution_tier = 'canonical' AND elapsed_s IS NOT NULL "
-                    f"AND {clause}",
-                    params,
+                    f"SELECT elapsed_s FROM training_runs WHERE {where}", [family, *extra]
                 )
             )
             if rows:
@@ -406,27 +414,56 @@ def _recorded_family_cost(study, family: str, label: str) -> dict[str, Any] | No
 
 
 def check_registry_ready(report: Report, case_study: str) -> None:
-    """The canonical registry must be present, writable and hold the tables a run will write."""
+    """The canonical registry must be present, writable and hold the tables a run will write.
+
+    Five of the nine registries predate the population and coverage tables, and asserting those
+    tables exist would refuse every one of them. The tables are not missing in any sense that
+    matters: `_open_registry` migrates and creates them on open, so the run would add them anyway.
+    This check therefore opens the registry through that code path and reports what the open
+    changed, which is the difference between "the tables will probably appear" and "they are
+    there". Opening is idempotent and additive - no row is read, written or altered.
+    """
+    from case_studies.utils.registry.store import _open_registry
     from utils.paths import get_case_study_dir
 
-    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    case_dir = get_case_study_dir(case_study)
+    db_path = case_dir / "run_log" / "registry.db"
     if not db_path.exists():
         report.add("canonical registry is ready", False, f"no registry at {db_path}")
         return
-    required = {"training_runs", "prediction_sets", "official_populations"}
-    with sqlite3.connect(db_path) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        existing = db.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0]
-    missing = sorted(required - tables)
+
+    def tables_in(path: Path) -> set[str]:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+            return {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+
+    before = tables_in(db_path)
+    try:
+        db = _open_registry(case_dir)
+        try:
+            existing = db.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0]
+        finally:
+            db.close()
+    except Exception as exc:
+        report.add("canonical registry is ready", False, f"cannot open for writing: {exc}")
+        return
+
+    after = tables_in(db_path)
+    required = {"training_runs", "prediction_sets", "official_populations", "prediction_coverage"}
+    missing = sorted(required - after)
+    added = sorted(after - before)
     report.add(
         "canonical registry is ready",
         not missing,
         (
-            f"{len(tables)} tables, {existing} existing training rows"
+            f"{len(after)} tables, {existing} existing training rows"
+            + (f"; migrated on open, added {len(added)}: {added[:4]}" if added else "")
             if not missing
-            else f"missing tables: {missing}"
+            else f"missing tables after migration: {missing}"
         ),
         existing_training_rows=existing,
+        tables_added=added,
     )
 
 
