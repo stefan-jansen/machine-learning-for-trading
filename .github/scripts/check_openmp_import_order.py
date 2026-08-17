@@ -114,10 +114,6 @@ KNOWN_BLOCKED = {
         "pins an approved etfs registry SHA-256 that the local registry no longer matches, "
         "so it cannot be executed here; reads registries and fits nothing, so it cannot crash"
     ),
-    "case_studies/fx_pairs/07_gbm.py": (
-        "fold 0 has no observations for the 10 kalman/hmm/arima temporal features in the "
-        "current local artifacts; needs the feature stage re-run first"
-    ),
 }
 
 

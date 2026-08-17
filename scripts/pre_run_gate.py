@@ -548,6 +548,10 @@ def check_notebook_prose(report: Report, case_study: str, notebook: str | None) 
             # for any of them but the first.
             "--stem",
             notebook.split("_", 1)[-1],
+            # Whether the executed notebook holds its figures is only answerable after the run;
+            # scripts/validate_notebook_run.py asks it there. Asking it here would fail every
+            # rewritten notebook for not yet having been executed.
+            "--pre-run",
             "--case-study",
             case_study,
             "--public-root",
