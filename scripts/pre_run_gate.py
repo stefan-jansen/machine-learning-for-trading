@@ -127,38 +127,50 @@ def check_fold_preparation(report: Report, study, requests) -> None:
 
     request = requests[0].as_dict() if hasattr(requests[0], "as_dict") else requests[0]
     base = linear_runner._load_batch_base(study, request)
-    # Resolving the configurations above already prepared these. Measuring reuse means measuring
-    # it against a real preparation, so the held copy goes first.
-    clear_memo()
-    started = time.perf_counter()
-    folds = prepare_standardized_folds(
-        base["mds"], base["splits"], train_sample_frac=base["train_sample_frac"]
-    )
-    first = time.perf_counter() - started
-
-    started = time.perf_counter()
-    prepare_standardized_folds(
-        base["mds"], base["splits"], train_sample_frac=base["train_sample_frac"]
-    )
-    second = time.perf_counter() - started
-
-    widths = {fold["X_train"].shape[1] for fold in folds}
     declared_width = len(base["mds"].feature_names)
+
+    # One fold at a time, and released before the next, because that is how the run prepares them
+    # and because the whole set does not fit: `us_equities_panel` is 16 folds of 9.97 million rows
+    # by 71 features, 90 GB standing. Every fold is still checked - what changes is that two are
+    # never live at once.
+    clear_memo()
+    widths, rows, first, total = set(), [], None, 0.0
+    for split in base["splits"]:
+        started = time.perf_counter()
+        fold = prepare_standardized_folds(
+            base["mds"], [split], train_sample_frac=base["train_sample_frac"]
+        )[0]
+        elapsed = time.perf_counter() - started
+        total += elapsed
+        if first is None:
+            first = elapsed
+            started = time.perf_counter()
+            prepare_standardized_folds(
+                base["mds"], [split], train_sample_frac=base["train_sample_frac"]
+            )
+            second = time.perf_counter() - started
+        widths.add(fold["X_train"].shape[1])
+        rows.append(int(fold["n_train"]))
+        del fold
+        clear_memo()
+
     report.add(
         "folds prepare with the declared feature set",
         widths == {declared_width},
         (
-            f"{len(folds)} folds, {declared_width} features each"
+            f"{len(base['splits'])} folds, {declared_width} features each, {total:.1f}s to build "
+            f"every one"
             if widths == {declared_width}
             else f"design matrix widths {sorted(widths)} against {declared_width} declared features"
         ),
-        folds=len(folds),
+        folds=len(base["splits"]),
         features=declared_width,
-        rows=[int(fold["n_train"]) for fold in folds],
+        rows=rows,
+        prepare_all_folds_s=total,
     )
     report.add(
         "prepared folds are reused, not rebuilt per configuration",
-        second < first / 10,
+        second < max(first, 1e-6) / 10,
         f"first preparation {first:.1f}s, reuse {second:.3f}s",
         first_s=first,
         reuse_s=second,

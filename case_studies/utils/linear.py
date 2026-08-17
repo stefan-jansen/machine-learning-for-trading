@@ -1005,14 +1005,22 @@ def _fit_or_reuse_predictions(
 
 
 def _prepare_batch_fold(base: dict[str, Any], split: dict[str, Any]) -> dict[str, Any]:
-    fold_id = int(split["fold"])
+    """One prepared fold, built as one fold.
+
+    The batch path walks folds on the outside so that a fold set never has to be held whole, and
+    asking for the whole set here and picking one out of it gave that back: when the set fits the
+    memoisation budget it is built once and shared, but when it does not - `us_equities_panel` is
+    16 folds of 9.97 million rows by 71 features, 90 GB in total - nothing is retained, so every
+    call rebuilt all sixteen folds to return one of them. Requesting the single split is both
+    bounded and linear. Preparation is per-fold independent, so a fold built alone is the same
+    fold built alongside its neighbours.
+    """
     folds = prepare_standardized_folds(
-        base["mds"], base["splits"], train_sample_frac=base["train_sample_frac"]
+        base["mds"], [split], train_sample_frac=base["train_sample_frac"]
     )
-    for fold in folds:
-        if int(fold["fold"]) == fold_id:
-            return fold
-    raise ValueError(f"linear request could not prepare fold {fold_id}")
+    if len(folds) != 1 or int(folds[0]["fold"]) != int(split["fold"]):
+        raise ValueError(f"linear request could not prepare fold {split['fold']}")
+    return folds[0]
 
 
 def _resolve_batch_candidate(

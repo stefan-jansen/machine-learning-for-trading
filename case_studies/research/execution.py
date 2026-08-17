@@ -23,6 +23,7 @@ from .adapters import get_adapter
 from .catalog import _resolve_authoritative_selection
 from .contracts import ExecutionTier
 from .lifecycle import ResearchLock
+from .model_planning import plan_models
 from .models import (
     ModelRequest,
     ModelRun,
@@ -510,6 +511,34 @@ def run_backtests(
     return BacktestExecution(tuple(results), catalog_rows, tuple(diagnostics), population)
 
 
+def prediction_hashes_from_specs(specs: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Project declared checkpoints to prediction identities, from specifications alone.
+
+    A specification is all this needs. Taking resolved request objects instead forces every one of
+    them to exist at the same moment, and a resolved linear request holds the prepared folds it
+    was resolved against: on `us_equities_panel` one fold set measures 90 GB, so the sixteen
+    declared configurations cannot be resolved together on any machine this program runs on.
+    Planning produces the same specifications without retaining the arrays.
+    """
+    hashes = []
+    for spec in specs:
+        computation = spec.get("computation", spec)
+        identity = training_hash_from_spec(spec)
+        for checkpoint in computation["checkpoint_schedule"]:
+            hashes.append(
+                prediction_hash_from_parts(
+                    identity,
+                    checkpoint["value"],
+                    "validation",
+                    checkpoint_kind=checkpoint["kind"],
+                    identity_version=spec["identity_version"],
+                )
+            )
+    if len(hashes) != len(set(hashes)):
+        raise ValueError("declared request population contains duplicate prediction identities")
+    return tuple(hashes)
+
+
 def expected_prediction_hashes(
     resolved_requests: Iterable[ResolvedModelRequest],
 ) -> tuple[str, ...]:
@@ -519,22 +548,7 @@ def expected_prediction_hashes(
     fitted. That is what lets a canonical run state its whole expected population up front and be
     held to it afterwards.
     """
-    hashes = []
-    for request in resolved_requests:
-        computation = request.spec.get("computation", request.spec)
-        for checkpoint in computation["checkpoint_schedule"]:
-            hashes.append(
-                prediction_hash_from_parts(
-                    request.identity,
-                    checkpoint["value"],
-                    "validation",
-                    checkpoint_kind=checkpoint["kind"],
-                    identity_version=request.spec["identity_version"],
-                )
-            )
-    if len(hashes) != len(set(hashes)):
-        raise ValueError("declared request population contains duplicate prediction identities")
-    return tuple(hashes)
+    return prediction_hashes_from_specs(request.spec for request in resolved_requests)
 
 
 def snapshot_official_models(
@@ -557,20 +571,35 @@ def snapshot_official_models(
 
 def run_official_model_subset(
     study: Study,
-    resolved_requests: Iterable[ResolvedModelRequest],
+    resolved_requests: Iterable[ResolvedModelRequest | ModelRequest],
     *,
     population: OfficialPopulation | str,
+    expected: Iterable[str] | None = None,
     require_population_complete: bool = False,
 ) -> tuple[ModelExecution, OfficialPopulation]:
-    """Execute members a case-wide official population already declared."""
+    """Execute members a case-wide official population already declared.
+
+    `expected` is the declared prediction set. It is derived from the requests when they are
+    resolved, and passed in when they are not - an unresolved request cannot state its identity
+    without resolving, which is exactly what a large panel cannot afford to do for every
+    configuration at once.
+    """
     resolved = tuple(resolved_requests)
-    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
+    tiers = {
+        request.spec["execution_tier"]
+        if isinstance(request, ResolvedModelRequest)
+        else request.execution_tier.value
+        for request in resolved
+    }
+    if tiers != {"canonical"}:
         raise ValueError("official model subsets require canonical requests")
     if isinstance(population, str):
         population = OfficialPopulation.one(study, name=population)
     elif population.study != study:
         raise ValueError("official model population belongs to another study")
-    expected = expected_prediction_hashes(resolved)
+    if expected is None:
+        expected = expected_prediction_hashes(resolved)
+    expected = tuple(expected)
     undeclared = sorted(set(expected) - set(population.members))
     if undeclared:
         raise ValueError(f"model subset contains undeclared predictions: {undeclared}")
@@ -596,9 +625,33 @@ def run_official_models(
     The population is written before the first fit, so a run that produces a different set of
     predictions than it declared fails rather than quietly publishing the set it happened to
     produce. This is the canonical entry point for a model-execution notebook.
+
+    Unresolved requests are planned rather than resolved, and then handed to the batch runner
+    still unresolved. Both halves of that matter on a large panel. Resolving every request up
+    front holds every configuration's prepared folds at once - 90 GB per fold set times sixteen
+    configurations on `us_equities_panel` - while planning computes the same identities from
+    placeholder folds; and the batch runner walks folds on the outside and configurations on the
+    inside, so one fold set is live at a time instead of one per configuration. The declaration
+    is unchanged: the same identities are written down before the same fits happen, and
+    `pre_run_gate.py` checks that the two paths agree on them.
     """
+    submitted = tuple(requests)
+    unresolved = tuple(request for request in submitted if isinstance(request, ModelRequest))
+    if len(unresolved) == len(submitted):
+        plan = plan_models(study, requests=list(unresolved))
+        if plan.execution_tier is not ExecutionTier.CANONICAL:
+            raise ValueError("official model populations require canonical requests")
+        population = plan.create_population(name=population_name)
+        return run_official_model_subset(
+            study,
+            submitted,
+            population=population,
+            expected=plan.expected_prediction_hashes,
+            require_population_complete=True,
+        )
+
     resolved = tuple(
-        request.resolve() if isinstance(request, ModelRequest) else request for request in requests
+        request.resolve() if isinstance(request, ModelRequest) else request for request in submitted
     )
     population = snapshot_official_models(study, resolved, population_name=population_name)
     return run_official_model_subset(
