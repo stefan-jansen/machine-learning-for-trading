@@ -1,10 +1,18 @@
-"""The equity-option reader-facing workflow, on the branches CI never reaches.
+"""The equity-option reader-facing workflow, on the branches nothing else reaches.
 
-`tests/overrides.yaml` gives every execution notebook of this case study a
-`MAX_FOLDS`/`MAX_SYMBOLS` reduction, which selects `ExecutionTier.PREVIEW`. So the
-canonical branches - the complete-surface requirement and the declared-menu
-coverage assertion - are exercised nowhere else, which is exactly the shape of a
-guard that cannot fail.
+What is genuinely uncovered elsewhere is the **refusal** side of these guards, plus
+all of `require_declared_menu_coverage`. The notebook lane does reach the passing
+side of `require_complete_canonical_requests`, because `tests/overrides.yaml`
+leaves `11a_pca`, `11c_conditional_autoencoder`, `11d_stochastic_discount_factor`
+and `11e_supervised_autoencoder` without a reduction, so those resolve
+`ExecutionTier.CANONICAL`. A guard is only proven by the case that makes it fire,
+and no notebook run can make these fire without failing the run.
+
+`load_configs` resolves the training menus through `get_case_study_dir`, which
+honours `ML4T_OUTPUT_DIR`; CI sets that workflow-wide and only the session-scoped
+`seeded_output_dir` fixture populates it. These tests want the repo's committed
+menus, not a trimmed copy, so the fixture below clears the redirect rather than
+depending on whether an earlier module happened to seed it.
 """
 
 from __future__ import annotations
@@ -22,6 +30,12 @@ from case_studies.sp500_equity_option_analytics.research_workflow import (
 
 PRIMARY = "fwd_ret_5d"
 UNFITTED = {("deep_learning", "nlinear"): "no notebook fits it"}
+
+
+@pytest.fixture(autouse=True)
+def _read_the_committed_menus(monkeypatch):
+    """Read `case_studies/`, not an `ML4T_OUTPUT_DIR` copy some other module seeded."""
+    monkeypatch.delenv("ML4T_OUTPUT_DIR", raising=False)
 
 
 def _covered() -> pl.DataFrame:
@@ -149,3 +163,24 @@ def test_an_exclusion_is_required_for_a_member_no_notebook_fits():
     """Without the entry, the same population must fail - the guard is not decorative."""
     with pytest.raises(RuntimeError, match="omits declared models"):
         require_declared_menu_coverage(_covered(), unfitted={})
+
+
+def test_a_label_that_declares_no_such_family_blames_the_label_not_the_name():
+    """The mirror of the defect above, which the first fix for it introduced.
+
+    `pca` is declared on all three return labels, so blaming the configuration name
+    here would send a reader hunting a typo that does not exist. The cause is that
+    `fwd_dir_5d` declares no latent factors at all. Reachable from `11a_pca.py` by
+    setting `PRIMARY_LABEL` to a direction label.
+    """
+    with pytest.raises(ValueError, match="no declared requests for 'latent_factors'"):
+        model_request_catalog("latent_factors", labels=["fwd_dir_5d"], config_names=["pca"])
+
+
+def test_an_undeclared_name_names_the_labels_it_was_checked_against():
+    with pytest.raises(ValueError, match="not declared") as excinfo:
+        model_request_catalog("latent_factors", labels=[PRIMARY], config_names=["no_such_factor"])
+    message = str(excinfo.value)
+    assert "latent_factors" in message
+    assert PRIMARY in message
+    assert "no_such_factor" in message

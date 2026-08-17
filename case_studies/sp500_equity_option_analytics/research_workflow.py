@@ -62,23 +62,33 @@ def model_request_catalog(
     selected_names = set(config_names) if config_names is not None else None
     rows = []
     declared_names: set[str] = set()
+    declaring_labels = []
     case_dir = REPO_ROOT / "case_studies" / CASE_STUDY
     for label in selected_labels:
         menu = yaml.safe_load((case_dir / "config" / "training" / f"{label}.yaml").read_text())
         if not menu.get(family):
             continue
+        declaring_labels.append(label)
         for config in load_configs(CASE_STUDY, label, family):
             name = str(config["config_name"])
             declared_names.add(name)
             if selected_names is None or name in selected_names:
                 rows.append({"family": family, "label": label, "config_name": name})
-    # A misnamed configuration is diagnosed before the empty result it causes, so
-    # the message names the caller's typo rather than reporting that a family with
-    # 28 declared members has none.
+    # Three ways this can come back empty, and each has to name its own cause. No
+    # selected label declares the family at all; or some do and the caller named a
+    # configuration none of them declares. Reporting either as the other sends a
+    # reader to the wrong place: the first version of this function blamed the
+    # family for a misnamed configuration, and the fix for that blamed the
+    # configuration for a label that declares no such family.
+    if not declaring_labels:
+        raise ValueError(f"no declared requests for {family!r}")
     if selected_names is not None:
         missing = sorted(selected_names - declared_names)
         if missing:
-            raise ValueError(f"requested configurations are not declared: {missing}")
+            raise ValueError(
+                f"requested configurations are not declared for {family!r} on "
+                f"{declaring_labels}: {missing}"
+            )
     if not rows:
         raise ValueError(f"no declared requests for {family!r}")
     return pl.DataFrame(rows).unique(maintain_order=True)
