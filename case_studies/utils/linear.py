@@ -27,6 +27,12 @@ from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.derived_params import (
+    DERIVED_PARAM_SIGNIFICANT_DIGITS as _DERIVED_PARAM_SIGNIFICANT_DIGITS,
+)
+from case_studies.utils.derived_params import (
+    quantize_derived as _quantize_shared,
+)
 from case_studies.utils.folds import (
     FOLD_PREPARATION_VERSION,
     PREPROCESSING_ID,
@@ -68,15 +74,10 @@ _PREVIEW_FIELDS = {"folds", "max_symbols", "train_sample_frac"}
 # is predicted. Do not bump for logging, comments, refactoring or anything a run merely records.
 LINEAR_RUNNER_VERSION = 1
 
-# Derived hyperparameters are rounded to this many significant digits before they are recorded
-# and before they are used to fit. A value like Lasso's alpha is computed from the training
-# matrix, so its last digits carry floating-point path noise rather than information: the polars
-# and pandas fold paths produced 0.004286799774493045 and 0.004286799774493049 for the same
-# configuration, which is no difference at all to the fit and two different training identities
-# to the registry. Twelve digits is far finer than any resolution the fit responds to and far
-# coarser than the noise. Rounding before the fit as well as before the hash keeps the recorded
-# identity a true description of the model that was fitted.
-DERIVED_PARAM_SIGNIFICANT_DIGITS = 12
+# Re-exported so the runner's own callers and tests keep one import. The rule and the measurement
+# behind it are in case_studies/utils/derived_params.py, which the GBM runner uses for the same
+# reason on Huber's delta.
+DERIVED_PARAM_SIGNIFICANT_DIGITS = _DERIVED_PARAM_SIGNIFICANT_DIGITS
 
 
 @dataclass(frozen=True)
@@ -252,13 +253,10 @@ def _load_preset(config_name: str) -> dict[str, Any]:
 def _quantize_derived(value: Any) -> Any:
     """Round a data-derived float to the digits that carry information.
 
-    See :data:`DERIVED_PARAM_SIGNIFICANT_DIGITS`. Applied before the value is recorded and
-    before it is passed to the estimator, so the identity always describes the fitted model.
+    See :mod:`case_studies.utils.derived_params`. Applied before the value is recorded and before
+    it is passed to the estimator, so the identity always describes the fitted model.
     """
-    if not isinstance(value, float) or value == 0.0 or not math.isfinite(value):
-        return value
-    magnitude = math.floor(math.log10(abs(value)))
-    return round(value, DERIVED_PARAM_SIGNIFICANT_DIGITS - 1 - magnitude)
+    return _quantize_shared(value)
 
 
 def _effective_params(config: dict[str, Any], overrides: dict[str, Any], folds) -> dict[str, dict]:

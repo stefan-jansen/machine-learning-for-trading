@@ -1703,22 +1703,29 @@ def test_gbm_runner_persists_every_declared_checkpoint(tmp_path, monkeypatch) ->
 
 
 def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
+    # A fold set above the memo budget is not held, and that is the case this guards: on
+    # us_equities_panel one set is 90 GB, so the batch path must release each fold as it takes the
+    # next. Below the budget the set is deliberately held and shared, which no large panel reaches.
+    monkeypatch.setenv("ML4T_FOLD_MEMO_BUDGET_BYTES", "1")
+    from case_studies.utils import folds as fold_utils
+
+    fold_utils.clear_memo()
     study = _gbm_study(tmp_path / "batch", monkeypatch)
     individual_study = _gbm_study(tmp_path / "individual", monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     prepared: list[list[int]] = []
     released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
 
-    def observed_prepare(dataset, splits, *args, **kwargs):
+    def observed_prepare(mds, splits, *args, **kwargs):
         gc.collect()
         if released_arrays:
             assert released_arrays[-1]() is None
         prepared.append([int(split["fold"]) for split in splits])
-        folds = original_prepare(dataset, splits, *args, **kwargs)
+        folds = original_prepare(mds, splits, *args, **kwargs)
         released_arrays.append(weakref.ref(folds[0]["X_train"]))
         return folds
 
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
     requests = [
         study.model(
             family="gbm",
@@ -1737,7 +1744,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
         population.require_complete()
     batch = plan.run()
     batch_preparations = list(prepared)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", original_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", original_prepare)
     individual = (
         individual_study.model(
             family="gbm",
@@ -1771,7 +1778,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
 
 def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
     study = _gbm_study(tmp_path, monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     prepared: list[int] = []
     prepared_label_std: dict[str, float] = {}
 
@@ -1805,7 +1812,7 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
         return folds
 
     monkeypatch.setattr(modeling, "load_configs", configs)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
 
     batch = run_models(
         study,
@@ -1830,7 +1837,7 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
 def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypatch) -> None:
     first = _gbm_study(tmp_path / "first", monkeypatch)
     second = _gbm_study(tmp_path / "second", monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     original_load = modeling.load_modeling_dataset
     preparation: list[tuple[int, float]] = []
     load_count = 0
@@ -1848,7 +1855,7 @@ def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypat
         return folds
 
     monkeypatch.setattr(modeling, "load_modeling_dataset", observed_load)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
 
     def requests(study, order):
         return [

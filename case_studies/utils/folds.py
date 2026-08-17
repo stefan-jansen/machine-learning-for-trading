@@ -55,6 +55,7 @@ __all__ = [
     "folds_built",
     "holds_in_memory",
     "gbm_fold",
+    "prepare_gbm_folds_from_mds",
     "prepare_raw_folds",
     "prepare_standardized_folds",
     "standardized_fold",
@@ -78,6 +79,7 @@ _DISABLE_ENV = "ML4T_FOLD_CACHE_DISABLED"
 _MEMO_LIMIT = 2
 _RAW_MEMO: dict[str, list[RawFold]] = {}
 _STANDARDIZED_MEMO: dict[str, list[dict[str, Any]]] = {}
+_GBM_MEMO: dict[str, list[dict[str, Any]]] = {}
 
 # A held fold set costs rows x features x 8 bytes per fold, which the case studies do not agree
 # on within an order of magnitude: eight etfs folds are 0.9 GB, us_equities_panel's are 24.5 GB
@@ -100,6 +102,7 @@ def clear_memo() -> None:
     """Drop every in-process fold set. For tests, and for freeing memory between labels."""
     _RAW_MEMO.clear()
     _STANDARDIZED_MEMO.clear()
+    _GBM_MEMO.clear()
 
 
 # Folds actually built from the dataset, as opposed to served from the memo or read from disk.
@@ -571,6 +574,50 @@ def prepare_standardized_folds(
     return _memoize(_STANDARDIZED_MEMO, key, standardized) if may_hold else standardized
 
 
+def prepare_gbm_folds_from_mds(
+    mds: Any,
+    splits: Sequence[dict[str, Any]],
+    *,
+    train_sample_frac: float = 1.0,
+    seed: int | None = None,
+    use_cache: bool = True,
+) -> list[dict[str, Any]]:
+    """Prepared folds cast to LightGBM's native precision, off the shared raw preparation.
+
+    The expensive half - slicing, temporal replacement, cleaning, subsampling - is
+    :func:`prepare_raw_folds`, the same one the standardising families use, so a case study pays
+    for it once however many families it fits. The GBM-specific half is :func:`gbm_fold`, which
+    is a cast.
+
+    Held in process only when the whole set fits the memo budget, which is what bounds a
+    fold-major run on a panel whose fold set runs to tens of gigabytes: there the memo declines
+    and each fold is released as the next is built.
+    """
+    from utils.modeling import RANDOM_SEED
+
+    key = _fold_key(
+        mds, splits, train_sample_frac=train_sample_frac, seed=RANDOM_SEED if seed is None else seed
+    )
+    if key in _GBM_MEMO:
+        return _GBM_MEMO[key]
+    may_hold = holds_in_memory(mds, splits)
+    raw = prepare_raw_folds(
+        mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
+    )
+    task_type = getattr(mds, "task_type", "regression")
+    class_values = getattr(mds, "class_values", None)
+    # float32 is a second copy of the design matrix, so the raw folds are consumed one at a time
+    # and dropped as they are cast, holding one raw fold at the peak instead of the whole set.
+    # The memo entry goes first, or it keeps the list alive through the loop.
+    _RAW_MEMO.pop(key, None)
+    pending = list(raw)
+    del raw
+    cast: list[dict[str, Any]] = []
+    while pending:
+        cast.append(gbm_fold(pending.pop(0), task_type=task_type, class_values=class_values))
+    return _memoize(_GBM_MEMO, key, cast) if may_hold else cast
+
+
 # ---------------------------------------------------------------------------
 # Family adapters - the cheap half
 # ---------------------------------------------------------------------------
@@ -631,6 +678,13 @@ def gbm_fold(
     No imputation and no scaling: a boosted tree splits on the ordering of a feature, which
     standardising does not change, and it routes a missing value down its own branch, which
     imputing a median would replace with a fabricated observation.
+
+    Only the design matrix is cast. The labels stay float64, which is where this differs from the
+    ``prepare_gbm_folds`` path it replaces: LightGBM converts a label to its own precision anyway,
+    so the fit is identical either way (measured, squared error and huber alike, to zero
+    difference), while ``y_eval`` is the target IC is measured against and the standardising
+    families keep it float64. Casting it here would have made a GBM IC and a linear IC two
+    slightly different measurements of the same quantity.
     """
     fold = {
         "fold": raw.fold,
