@@ -59,9 +59,14 @@ from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.derived_params import quantize_derived
-from case_studies.utils.folds import FOLD_PREPARATION_VERSION, prepare_gbm_folds_from_mds
+from case_studies.utils.folds import (
+    FOLD_PREPARATION_VERSION,
+    prepare_gbm_folds_from_mds,
+    training_labels_for_split,
+)
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.specs import canonical_json
+from case_studies.utils.runtime import cpu_seconds, resource_measurement
 from utils.modeling import RANDOM_SEED, seed_everything
 
 if TYPE_CHECKING:
@@ -123,6 +128,7 @@ class _GBMBatchCandidate:
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
     started_at_s: float = 0.0
+    started_cpu_s: float = 0.0
     result: ModelRun | None = None
     error: Exception | None = None
 
@@ -2226,19 +2232,16 @@ def _write_learning_curves(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _gbm_sampled_training_labels(base: dict[str, Any], split: dict[str, Any]) -> np.ndarray:
-    mds = base["mds"]
-    dataset = base["dataset_pd"]
-    dates = dataset[mds.date_col]
-    mask = (dates >= split["train_start"]) & (dates <= split["train_end"])
-    labels = dataset.loc[mask, mds.label_col].values.astype(np.float32)
-    labels = labels[~np.isnan(labels)]
-    train_sample_frac = base["train_sample_frac"]
-    if 0.0 < train_sample_frac < 1.0 and len(labels) > 0:
-        n_keep = max(1, int(len(labels) * train_sample_frac))
-        rng = np.random.default_rng(RANDOM_SEED + int(split["fold"]))
-        keep_idx = rng.choice(len(labels), size=n_keep, replace=False)
-        keep_idx.sort()
-        labels = labels[keep_idx]
+    """The training labels Huber's threshold is derived from, as the fold will actually see them.
+
+    This used to re-select the rows itself, in pandas, casting to float32. It agreed with fold
+    preparation until preparation stopped casting labels, and then the planner and the resolver
+    derived two different thresholds for one declared configuration and gave it two identities.
+    Both now come from the one selection, so they cannot drift apart again.
+    """
+    labels = training_labels_for_split(
+        base["mds"], split, train_sample_frac=base["train_sample_frac"], seed=RANDOM_SEED
+    )
     if not len(labels):
         raise ValueError(f"GBM request has no training labels for fold {split['fold']}")
     return labels
@@ -2478,6 +2481,7 @@ def _resolve_gbm_batch_candidate(
         candidate.result = cached
         return
     candidate.started_at_s = time.perf_counter()
+    candidate.started_cpu_s = cpu_seconds()
     candidate.training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
@@ -2542,6 +2546,31 @@ def _run_gbm_batch_fold(candidate: _GBMBatchCandidate, fold: dict[str, Any]) -> 
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
 
+def _record_gbm_runtime(
+    study: Study,
+    training: TrainingResult,
+    *,
+    elapsed_s: float,
+    cpu_s: float | None = None,
+    fit_s: float | None = None,
+) -> None:
+    """Record what this training run cost, against its registry row.
+
+    Wall time on its own cannot tell a run that saturated the machine from one that spent the
+    time waiting, so CPU seconds and the ratio between them go with it, and peak resident memory
+    decides whether two notebooks can share the machine. Every GBM row had these NULL, which is
+    what made the boosting families unschedulable from recorded cost.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(elapsed_s=elapsed_s, cpu_s=cpu_s, fit_s=fit_s),
+    )
+
+
 def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> None:
     if candidate.result is not None or candidate.error is not None:
         return
@@ -2594,9 +2623,14 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
         candidate.attempt.finish("completed", diagnostics)
         candidate.attempt = None
         runtime_path = curves_path.with_name("runtime.json")
-        _write_gbm_runtime_fields(
-            runtime_path,
-            elapsed_s=time.perf_counter() - candidate.started_at_s,
+        elapsed_s = time.perf_counter() - candidate.started_at_s
+        _write_gbm_runtime_fields(runtime_path, elapsed_s=elapsed_s)
+        _record_gbm_runtime(
+            study,
+            candidate.training,
+            elapsed_s=elapsed_s,
+            cpu_s=cpu_seconds() - candidate.started_cpu_s,
+            fit_s=candidate.fit_elapsed_s,
         )
         candidate.result = ModelRun(
             candidate.training,
@@ -2848,6 +2882,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     if cached is not None:
         return cached
     started = time.perf_counter()
+    started_cpu = cpu_seconds()
     computation = spec["computation"]
     training = study.results.register_training(
         spec,
@@ -2912,13 +2947,18 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     curves_path = train_dir / "learning_curves.parquet"
     if not curves_path.exists() and result["learning_curves"]:
         _write_learning_curves(curves_path, result["learning_curves"])
+    elapsed_s = time.perf_counter() - started
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
+        runtime["elapsed_s"] = elapsed_s
         temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
+    # The artifact above is not queryable, and the schedule reads the column. Both are written:
+    # a resolved request runs through here rather than through the batch path, so recording it
+    # only there left every row this path produced with a NULL elapsed_s.
+    _record_gbm_runtime(study, training, elapsed_s=elapsed_s, cpu_s=cpu_seconds() - started_cpu)
     return ModelRun(training=training, predictions=tuple(prediction_results))
 
 

@@ -58,7 +58,9 @@ __all__ = [
     "prepare_gbm_folds_from_mds",
     "prepare_raw_folds",
     "prepare_standardized_folds",
+    "split_frames",
     "standardized_fold",
+    "training_labels_for_split",
 ]
 
 # Declared behaviour of the preparation below. See the module docstring.
@@ -386,6 +388,101 @@ def _contiguous(array: np.ndarray, dtype: Any = np.float64) -> np.ndarray:
     return np.ascontiguousarray(array, dtype=dtype)
 
 
+def split_frames(mds: Any, split: dict[str, Any]) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """The training and validation rows of one fold, before anything is turned into an array.
+
+    This is the single definition of which rows a fold contains. Anything that needs to know
+    that - the design matrix, the labels, a hyperparameter derived from the labels - comes
+    through here, because two implementations of it agree only by luck. The GBM runner used to
+    derive Huber's threshold from its own pandas re-selection of the training rows, which matched
+    this one until it did not, and gave one declared configuration two training identities.
+    """
+    dataset: pl.DataFrame = mds.dataset
+    if not isinstance(dataset, pl.DataFrame):
+        raise TypeError("fold preparation requires a polars dataset")
+
+    fold_id = int(split["fold"])
+    date_col = mds.date_col
+    label_col = mds.label_col
+    date_dtype = dataset.schema[date_col]
+    val_start = split.get("val_start", split.get("test_start"))
+    val_end = split.get("val_end", split.get("test_end"))
+
+    train_df = dataset.filter(
+        (pl.col(date_col) >= _boundary(date_dtype, split["train_start"]))
+        & (pl.col(date_col) <= _boundary(date_dtype, split["train_end"]))
+    )
+    val_df = dataset.filter(
+        (pl.col(date_col) >= _boundary(date_dtype, val_start))
+        & (pl.col(date_col) <= _boundary(date_dtype, val_end))
+    )
+    if train_df.height == 0 or val_df.height == 0:
+        raise ValueError(f"fold {fold_id} is empty (train={train_df.height}, val={val_df.height})")
+
+    has_temporal = (
+        mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names
+    )
+    if has_temporal:
+        fold_temporal = pl.from_pandas(
+            mds.temporal_by_fold[mds.temporal_by_fold["fold"] == fold_id].drop(columns=["fold"])
+        ).unique(subset=list(mds.temporal_keys), keep="last")
+        for column in mds.temporal_keys:
+            if (
+                column in fold_temporal.columns
+                and fold_temporal.schema[column] != train_df.schema[column]
+            ):
+                fold_temporal = fold_temporal.cast({column: train_df.schema[column]})
+        train_df = train_df.drop(mds.temporal_feature_names).join(
+            fold_temporal, on=list(mds.temporal_keys), how="left"
+        )
+        val_df = val_df.drop(mds.temporal_feature_names).join(
+            fold_temporal, on=list(mds.temporal_keys), how="left"
+        )
+
+    label_present = pl.col(label_col).is_not_null()
+    if dataset.schema[label_col] in {pl.Float32, pl.Float64}:
+        label_present = label_present & pl.col(label_col).is_not_nan()
+    train_df = train_df.filter(label_present)
+    val_df = val_df.filter(label_present)
+    if train_df.height == 0 or val_df.height == 0:
+        raise ValueError(
+            f"fold {fold_id} has no labelled rows (train={train_df.height}, val={val_df.height})"
+        )
+    return train_df, val_df
+
+
+def _subsample_index(n_rows: int, fold_id: int, train_sample_frac: float, seed: int) -> np.ndarray:
+    """Which training rows a reduced run keeps. One definition, so every caller keeps the same."""
+    keep = max(1, int(n_rows * train_sample_frac))
+    rng = np.random.default_rng(seed + fold_id)
+    return np.sort(rng.choice(n_rows, size=keep, replace=False))
+
+
+def training_labels_for_split(
+    mds: Any,
+    split: dict[str, Any],
+    *,
+    train_sample_frac: float = 1.0,
+    seed: int | None = None,
+) -> np.ndarray:
+    """The exact training labels one fold will be fitted on, without building its design matrix.
+
+    For hyperparameters derived from the labels - Huber's threshold is the one in use - where
+    materializing the features to read the labels would cost gigabytes for a standard deviation.
+    """
+    from utils.modeling import RANDOM_SEED
+
+    if seed is None:
+        seed = RANDOM_SEED
+    train_df, _ = split_frames(mds, split)
+    labels = np.ascontiguousarray(train_df[mds.label_col].to_numpy())
+    if train_sample_frac < 1.0:
+        labels = np.ascontiguousarray(
+            labels[_subsample_index(labels.shape[0], int(split["fold"]), train_sample_frac, seed)]
+        )
+    return labels
+
+
 def prepare_raw_folds(
     mds: Any,
     splits: Sequence[dict[str, Any]],
@@ -446,49 +543,7 @@ def prepare_raw_folds(
     folds: list[RawFold] = []
     for split in splits:
         fold_id = int(split["fold"])
-        val_start = split.get("val_start", split.get("test_start"))
-        val_end = split.get("val_end", split.get("test_end"))
-
-        train_df = dataset.filter(
-            (pl.col(date_col) >= _boundary(date_dtype, split["train_start"]))
-            & (pl.col(date_col) <= _boundary(date_dtype, split["train_end"]))
-        )
-        val_df = dataset.filter(
-            (pl.col(date_col) >= _boundary(date_dtype, val_start))
-            & (pl.col(date_col) <= _boundary(date_dtype, val_end))
-        )
-        if train_df.height == 0 or val_df.height == 0:
-            raise ValueError(
-                f"fold {fold_id} is empty (train={train_df.height}, val={val_df.height})"
-            )
-
-        if has_temporal:
-            fold_temporal = pl.from_pandas(
-                mds.temporal_by_fold[mds.temporal_by_fold["fold"] == fold_id].drop(columns=["fold"])
-            ).unique(subset=list(mds.temporal_keys), keep="last")
-            for column in mds.temporal_keys:
-                if (
-                    column in fold_temporal.columns
-                    and fold_temporal.schema[column] != train_df.schema[column]
-                ):
-                    fold_temporal = fold_temporal.cast({column: train_df.schema[column]})
-            train_df = train_df.drop(mds.temporal_feature_names).join(
-                fold_temporal, on=list(mds.temporal_keys), how="left"
-            )
-            val_df = val_df.drop(mds.temporal_feature_names).join(
-                fold_temporal, on=list(mds.temporal_keys), how="left"
-            )
-
-        label_present = pl.col(label_col).is_not_null()
-        if dataset.schema[label_col] in {pl.Float32, pl.Float64}:
-            label_present = label_present & pl.col(label_col).is_not_nan()
-        train_df = train_df.filter(label_present)
-        val_df = val_df.filter(label_present)
-        if train_df.height == 0 or val_df.height == 0:
-            raise ValueError(
-                f"fold {fold_id} has no labelled rows "
-                f"(train={train_df.height}, val={val_df.height})"
-            )
+        train_df, val_df = split_frames(mds, split)
 
         # Only the design matrix has its dtype pinned. A classification label is integral and
         # coercing it to float would change what the family is asked to fit.
@@ -501,9 +556,7 @@ def prepare_raw_folds(
         # Subsample training rows only. Validation is never sampled: out-of-sample IC is always
         # computed on the full slice, so the reduction changes cost and not what is measured.
         if train_sample_frac < 1.0:
-            keep = max(1, int(X_train.shape[0] * train_sample_frac))
-            rng = np.random.default_rng(seed + fold_id)
-            index = np.sort(rng.choice(X_train.shape[0], size=keep, replace=False))
+            index = _subsample_index(X_train.shape[0], fold_id, train_sample_frac, seed)
             X_train = _contiguous(X_train[index])
             y_train = np.ascontiguousarray(y_train[index])
 
@@ -705,4 +758,9 @@ def gbm_fold(
         lookup = {value: index for index, value in enumerate(class_values)}
         fold["y_train_lgb"] = np.array([lookup[value] for value in raw.y_train], dtype=np.int32)
         fold["y_val_lgb"] = np.array([lookup[value] for value in raw.y_val], dtype=np.int32)
+    else:
+        # Always present, so the caller passes fold["y_train_lgb"] to the booster without asking
+        # what the task is. For a regression there is nothing to remap and it is the label itself.
+        fold["y_train_lgb"] = raw.y_train
+        fold["y_val_lgb"] = raw.y_val
     return fold

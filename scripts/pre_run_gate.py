@@ -237,8 +237,18 @@ def _inspect_registry(report: Report, execution, *, expected: int) -> dict[str, 
     carry it, and the extrapolated cost came out at 723 minutes because it summed their
     `elapsed_s` in place of the reduced run's.
     """
+    # Only the rows this run actually fitted. A reused row is the runner declining to recompute
+    # what is already registered, which is the behaviour we want; it has no fit to measure, and
+    # grading it fails a gate for rows that were correct to skip.
+    reused = {
+        item.get("training_hash")
+        for item in execution.diagnostics
+        if item.get("cache_hit") or (item.get("fitted_folds") == [] and item.get("reused_folds"))
+    }
     by_root: dict[Path, list[str]] = {}
     for run in execution.runs:
+        if run.training.hash in reused:
+            continue
         by_root.setdefault(Path(run.training.root), []).append(run.training.hash)
 
     rows: list[tuple] = []
@@ -257,10 +267,14 @@ def _inspect_registry(report: Report, execution, *, expected: int) -> dict[str, 
             )
 
     if not rows:
+        every_row_reused = len(reused) == len(execution.runs) and bool(execution.runs)
         report.add(
             "training rows record their runtime",
-            False,
-            f"the run produced no readable training rows under {sorted(map(str, by_root))}",
+            every_row_reused,
+            "every configuration was already registered and was reused, so this run fitted "
+            "nothing to measure"
+            if every_row_reused
+            else f"the run produced no readable training rows under {sorted(map(str, by_root))}",
         )
         return {}
 
@@ -529,8 +543,11 @@ def check_notebook_prose(report: Report, case_study: str, notebook: str | None) 
         [
             sys.executable,
             str(checkers["conformance"]),
-            "--stage",
-            notebook.split("_")[0],
+            # By what the notebook does, not the number it carries: model execution runs as
+            # 06_linear, 07_gbm and 08_tabular_dl, and resolving by number found no standard
+            # for any of them but the first.
+            "--stem",
+            notebook.split("_", 1)[-1],
             "--case-study",
             case_study,
             "--public-root",
