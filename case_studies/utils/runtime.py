@@ -1,9 +1,11 @@
 """Operational provenance and resource measurement for model runners.
 
-Nothing here enters ``_source_identity()`` or ``_gbm_source_identity()``, and no runner version
-declares its behaviour. What a run *records about itself* must be changeable without refitting the
-family, which is why the declared provenance and the resource capture live here rather than in the
-runners.
+This module is in no family's source identity: it is described by none of the declared versions
+that linear and GBM hash, and it is listed in none of the source-file digests that tabular DL,
+sequence models, latent factors and causal inference hash. What a run *records about itself* must
+be changeable without refitting a family, which is why the declared provenance and the resource
+capture live here rather than in the runners - moving any of it into a digested module would make
+every future edit to it cost a refit.
 
 Nothing in this module may influence a fitted result.
 """
