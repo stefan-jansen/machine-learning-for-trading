@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -202,7 +204,7 @@ def check_preview_run(report: Report, case_study: str, family: str, label: str) 
             configurations=len(execution.runs),
             elapsed_s=elapsed,
         )
-        measurements = _inspect_registry(report, study, expected=len(execution.runs))
+        measurements = _inspect_registry(report, execution, expected=len(execution.runs))
     except Exception:
         report.add(
             "a reduced population runs end to end",
@@ -214,34 +216,39 @@ def check_preview_run(report: Report, case_study: str, family: str, label: str) 
     return measurements
 
 
-def _inspect_registry(report: Report, study, *, expected: int) -> dict[str, Any]:
-    """Read back what the run recorded about itself."""
-    # A preview writes under its workspace's preview namespace; a workspace-isolated canonical run
-    # writes under the workspace root. Look in both rather than assume which one this was.
-    candidates = [study.root / "run_log" / "registry.db"]
-    if study.output_root is not None:
-        candidates.append(
-            study.output_root / ".preview" / study.case_study / "run_log" / "registry.db"
-        )
+def _inspect_registry(report: Report, execution, *, expected: int) -> dict[str, Any]:
+    """Read back what this run recorded about itself.
+
+    Scoped to the rows this run produced, by their training hashes. Reading every row in the
+    registry instead graded the pre-migration rows already sitting there: `cme_futures` failed
+    all three of these checks on 202 legacy rows that predate the runtime column and can never
+    carry it, and the extrapolated cost came out at 723 minutes because it summed their
+    `elapsed_s` in place of the reduced run's.
+    """
+    by_root: dict[Path, list[str]] = {}
+    for run in execution.runs:
+        by_root.setdefault(Path(run.training.root), []).append(run.training.hash)
+
     rows: list[tuple] = []
-    searched = []
-    for db_path in candidates:
-        searched.append(str(db_path))
+    for root, hashes in by_root.items():
+        db_path = root / "run_log" / "registry.db"
         if not db_path.exists():
             continue
+        placeholders = ",".join("?" * len(hashes))
         with sqlite3.connect(db_path) as db:
-            found = db.execute(
-                "SELECT training_hash, elapsed_s, runtime_json FROM training_runs"
-            ).fetchall()
-        if found:
-            rows = found
-            break
+            rows.extend(
+                db.execute(
+                    "SELECT training_hash, elapsed_s, runtime_json FROM training_runs "
+                    f"WHERE training_hash IN ({placeholders})",
+                    hashes,
+                ).fetchall()
+            )
 
     if not rows:
         report.add(
             "training rows record their runtime",
             False,
-            f"no training rows found in {searched}",
+            f"the run produced no readable training rows under {sorted(map(str, by_root))}",
         )
         return {}
 
@@ -306,6 +313,9 @@ def check_the_run_is_costed(
     study,
     requests,
     preview: dict[str, Any],
+    *,
+    family: str,
+    label: str,
 ) -> None:
     """A run nobody has costed cannot be scheduled against the machine.
 
@@ -315,13 +325,14 @@ def check_the_run_is_costed(
     """
     from case_studies.utils import linear as linear_runner
 
-    recorded = _recorded_family_cost(study)
+    recorded = _recorded_family_cost(study, family, label)
     if recorded is not None:
         report.add(
             "the canonical run is costed",
             True,
-            f"{recorded['rows']} earlier runs, median {recorded['median_s']:.1f}s each, "
-            f"projected {recorded['median_s'] * len(requests) / 60:.0f} min for "
+            f"{recorded['rows']} earlier runs ({recorded['basis']}), median "
+            f"{recorded['median_s']:.1f}s each, projected "
+            f"{recorded['median_s'] * len(requests) / 60:.0f} min for "
             f"{len(requests)} configurations",
             **recorded,
         )
@@ -358,23 +369,40 @@ def check_the_run_is_costed(
     )
 
 
-def _recorded_family_cost(study) -> dict[str, Any] | None:
-    """Median recorded runtime of earlier canonical runs of this family, if any."""
+def _recorded_family_cost(study, family: str, label: str) -> dict[str, Any] | None:
+    """Median recorded runtime of earlier canonical runs of this family and label.
+
+    Rows from the current identity version first: those were fitted on the finalized labels and
+    features and are a measurement of the run being scheduled. Pre-rebuild rows are reported
+    separately and only as a floor - they were timed against the features stage 01-05 replaced,
+    and `REBUILD-PLAN.md` section 4 measured L1 configurations moving by an order of magnitude
+    across that change.
+    """
     db_path = study.root / "run_log" / "registry.db"
     if not db_path.exists():
         return None
     with sqlite3.connect(db_path) as db:
-        rows = [
-            row[0]
-            for row in db.execute(
-                "SELECT elapsed_s FROM training_runs WHERE family = 'linear' "
-                "AND execution_tier = 'canonical' AND elapsed_s IS NOT NULL"
+        for identity_version, basis in ((3, "measured on the finalized inputs"), (None, "floor")):
+            clause = (
+                "identity_version = 3 AND label = ?"
+                if identity_version
+                else "(identity_version IS NULL OR identity_version < 3)"
             )
-        ]
-    if not rows:
-        return None
-    rows.sort()
-    return {"rows": len(rows), "median_s": rows[len(rows) // 2]}
+            params: list[Any] = [family]
+            if identity_version:
+                params.append(label)
+            rows = sorted(
+                row[0]
+                for row in db.execute(
+                    "SELECT elapsed_s FROM training_runs WHERE family = ? "
+                    "AND execution_tier = 'canonical' AND elapsed_s IS NOT NULL "
+                    f"AND {clause}",
+                    params,
+                )
+            )
+            if rows:
+                return {"rows": len(rows), "median_s": rows[len(rows) // 2], "basis": basis}
+    return None
 
 
 def check_registry_ready(report: Report, case_study: str) -> None:
@@ -417,6 +445,63 @@ def check_notebook_is_current(report: Report, case_study: str, notebook: str | N
     )
 
 
+def check_notebook_prose(report: Report, case_study: str, notebook: str | None) -> None:
+    """The notebook's prose and figure titles must pass the standard before it is executed.
+
+    Executing a notebook stamps its provenance, so a prose fix afterwards costs another run. On
+    2026-08-17 `etfs/06_linear` was run, committed and read by Stefan carrying four figure-title
+    violations - two interpolated computed values into a title and two ran past the 75-character
+    ceiling - because nothing between writing it and running it looked. The checkers live in the
+    agents repository, so this check reports a failure when it cannot find them rather than
+    passing: a gate that passes when it did not run is worse than no gate.
+    """
+    if notebook is None:
+        return
+    source = REPO_ROOT / "case_studies" / case_study / f"{notebook}.py"
+    agents_root = Path(
+        os.environ.get("ML4T_AGENTS_ROOT", Path.home() / "ml4t" / "agents")
+    ).expanduser()
+    checkers = {
+        "prose": agents_root / "scripts" / "check_notebook_prose.py",
+        "conformance": agents_root / "scripts" / "check_notebook_conformance.py",
+    }
+    missing = sorted(name for name, path in checkers.items() if not path.is_file())
+    if missing:
+        report.add(
+            "the notebook passes the prose and figure standard",
+            False,
+            f"cannot find the {', '.join(missing)} checker under {agents_root}; "
+            "set ML4T_AGENTS_ROOT",
+        )
+        return
+
+    commands = [
+        [sys.executable, str(checkers["prose"]), str(source)],
+        [
+            sys.executable,
+            str(checkers["conformance"]),
+            "--stage",
+            notebook.split("_")[0],
+            "--case-study",
+            case_study,
+            "--public-root",
+            str(REPO_ROOT),
+        ],
+    ]
+    failures = []
+    for command in commands:
+        finished = subprocess.run(command, capture_output=True, text=True, cwd=agents_root)
+        if finished.returncode != 0:
+            failures.append((finished.stdout + finished.stderr).strip().splitlines())
+    report.add(
+        "the notebook passes the prose and figure standard",
+        not failures,
+        "prose and conformance checkers report no violations"
+        if not failures
+        else "; ".join(line for block in failures for line in block[-3:]),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case-study", required=True)
@@ -438,6 +523,7 @@ def main() -> int:
 
     check_registry_ready(report, args.case_study)
     check_notebook_is_current(report, args.case_study, args.notebook)
+    check_notebook_prose(report, args.case_study, args.notebook)
 
     study = open_study(args.case_study, execution_tier="canonical")
     configs = load_model_configs(study, args.family, labels=[args.label])
@@ -457,7 +543,9 @@ def main() -> int:
     if not args.skip_preview:
         preview = check_preview_run(report, args.case_study, args.family, args.label)
         if requests:
-            check_the_run_is_costed(report, study, requests, preview)
+            check_the_run_is_costed(
+                report, study, requests, preview, family=args.family, label=args.label
+            )
 
     print()
     if report.passed:

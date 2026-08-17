@@ -120,16 +120,16 @@ declared_labels(study, "linear")
 #
 # - **Ridge** penalizes the sum of squared coefficients. It shrinks correlated coefficients
 #   towards each other and keeps every feature, at a strength set by `alpha`. The grid steps
-#   `alpha` by powers of ten from 0.001 to ten million, because the useful value depends on the
-#   scale and the collinearity of the design matrix and neither is known in advance.
+#   `alpha` by powers of ten across ten orders of magnitude, because the useful value depends on
+#   the scale and the collinearity of the design matrix and neither is known in advance.
 # - **Lasso** penalizes the sum of absolute coefficients, which drives some of them exactly to
 #   zero: it selects features rather than shrinking them. **ElasticNet** mixes the two.
 #
 # Lasso and ElasticNet are parameterized here by `alpha_frac` rather than a raw penalty. For any
 # fold there is a threshold penalty $\alpha_{\max}$ - the smallest one that zeros every
 # coefficient - which is computed from that fold's own data. `alpha_frac` is the fraction of it
-# to apply, so `alpha_frac=0.03` means the same thing on every fold, while a fixed raw penalty
-# would mean something different on each.
+# to apply, so one declared `alpha_frac` means the same thing on every fold, while a fixed raw
+# penalty would mean something different on each.
 
 # %%
 configs = load_model_configs(
@@ -345,10 +345,7 @@ fig_ic = go.Figure(
     )
 )
 fig_ic.update_layout(
-    title=(
-        f"{leader['model_class']} at {compact(leader['params'])} leads the full-coverage "
-        f"linear models at IC {leader['ic_mean']:+.3f}"
-    ),
+    title="Validation IC across the full-coverage penalty grid",
     height=500,
     width=1100,
     showlegend=False,
@@ -359,9 +356,10 @@ fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)")
 show_plotly_with_alt(
     fig_ic,
     "Bar chart of mean validation information coefficient for every full-coverage linear "
-    f"configuration, sorted descending. {leader['config_name']} is highlighted as the leader at "
-    f"IC {leader['ic_mean']:+.3f}. The Ridge configurations occupy the top of the ranking and "
-    "the L1-penalised configurations trail them.",
+    f"configuration, sorted descending. {leader['config_name']} ({compact(leader['params'])}) "
+    f"is highlighted in amber at the top of the ranking at IC {leader['ic_mean']:+.3f}. The "
+    "Ridge configurations occupy the top of the ranking and the L1-penalised configurations "
+    "trail them.",
 )
 
 # %% [markdown]
@@ -404,10 +402,7 @@ fig_alpha.add_trace(
     )
 )
 fig_alpha.update_layout(
-    title=(
-        f"Ridge IC peaks at alpha 1e{int(round(log_alpha[peak]))} and falls under "
-        "stronger shrinkage"
-    ),
+    title="Ridge IC against penalty strength, over ten orders of magnitude",
     height=500,
     width=900,
     showlegend=False,
@@ -443,8 +438,8 @@ show_plotly_with_alt(
 # it, the same table says those configurations failed on part of the sample. The general lesson
 # is that a metric averaged over a set the model itself selected is not a metric.
 #
-# **Among configurations measured on the same dates, dense shrinkage beats sparse selection
-# here.** That is what to expect when features are correlated rather than mostly irrelevant:
+# **Among configurations measured on the same dates, dense shrinkage ranks above sparse
+# selection here.** That is what to expect when features are correlated rather than mostly irrelevant:
 # there is no small subset that carries the information, so discarding features discards signal.
 # Where a design matrix is wide and genuinely sparse - a few informative columns among many
 # useless ones - the comparison usually runs the other way, which is why both penalties are in
