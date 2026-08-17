@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import subprocess
@@ -26,12 +27,17 @@ from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.folds import (
+    FOLD_PREPARATION_VERSION,
+    PREPROCESSING_ID,
+    folds_built,
+    prepare_standardized_folds,
+)
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.specs import canonical_json
+from case_studies.utils.runtime import cpu_seconds, resource_measurement
 from utils.modeling import (
     load_modeling_dataset,
-    prepare_cv_folds,
-    prepare_single_fold,
     resolve_linear_params,
 )
 
@@ -57,14 +63,20 @@ _MODEL_CLASSES = {
 _PREVIEW_FIELDS = {"folds", "max_symbols", "train_sample_frac"}
 
 
-def _module_source(module_name: str) -> Path:
-    source = importlib.import_module(module_name).__file__
-    if source is None:
-        raise RuntimeError(f"module {module_name!r} has no source file")
-    return Path(source)
+# Declared behaviour of this runner. Bump when a change here would change a fitted result: the
+# model classes it dispatches to, how a hyperparameter is derived, the fitting procedure, or what
+# is predicted. Do not bump for logging, comments, refactoring or anything a run merely records.
+LINEAR_RUNNER_VERSION = 1
 
-
-_SOURCE_FILES = (Path(__file__), _module_source("utils.modeling"))
+# Derived hyperparameters are rounded to this many significant digits before they are recorded
+# and before they are used to fit. A value like Lasso's alpha is computed from the training
+# matrix, so its last digits carry floating-point path noise rather than information: the polars
+# and pandas fold paths produced 0.004286799774493045 and 0.004286799774493049 for the same
+# configuration, which is no difference at all to the fit and two different training identities
+# to the registry. Twelve digits is far finer than any resolution the fit responds to and far
+# coarser than the noise. Rounding before the fit as well as before the hash keeps the recorded
+# identity a true description of the model that was fitted.
+DERIVED_PARAM_SIGNIFICANT_DIGITS = 12
 
 
 @dataclass(frozen=True)
@@ -102,11 +114,13 @@ class _BatchCandidate:
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
     started_at_s: float = 0.0
+    started_cpu_s: float = 0.0
     result: ModelRun | None = None
     error: Exception | None = None
 
 
 def _sha256(path: Path) -> str:
+    """Digest a fitted-state artefact. Recovery compares these; identity does not use them."""
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
@@ -114,8 +128,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _source_identity() -> dict[str, str]:
-    return {str(path.name): _sha256(path) for path in _SOURCE_FILES}
+def _source_identity() -> dict[str, int | str]:
+    """The behaviour of this runner, declared rather than fingerprinted.
+
+    This used to be the SHA-256 of ``linear.py`` and ``utils/modeling.py``, which made every
+    edit to either file - a comment, a log line, a refactoring that moved code without changing
+    it - invalidate every linear result ever registered. That is unworkable against the rule
+    that a fix which does not change a result must not force a refit, and it is why the same
+    configuration could not survive an unrelated change to a neighbouring function.
+
+    What replaces it is a declaration. ``LINEAR_RUNNER_VERSION`` is bumped when a change to this
+    module would change a fitted result; ``FOLD_PREPARATION_VERSION`` covers the shared fold
+    preparation the same way. ``tests/test_linear_identity.py`` pins the coefficients these
+    versions claim to describe and fails when they move without a bump, so the declaration is
+    checked rather than trusted.
+    """
+    return {
+        "linear_runner": LINEAR_RUNNER_VERSION,
+        "fold_preparation": FOLD_PREPARATION_VERSION,
+        "preprocessing": PREPROCESSING_ID,
+    }
 
 
 def _runtime_identity() -> dict[str, str]:
@@ -217,6 +249,18 @@ def _load_preset(config_name: str) -> dict[str, Any]:
     return config
 
 
+def _quantize_derived(value: Any) -> Any:
+    """Round a data-derived float to the digits that carry information.
+
+    See :data:`DERIVED_PARAM_SIGNIFICANT_DIGITS`. Applied before the value is recorded and
+    before it is passed to the estimator, so the identity always describes the fitted model.
+    """
+    if not isinstance(value, float) or value == 0.0 or not math.isfinite(value):
+        return value
+    magnitude = math.floor(math.log10(abs(value)))
+    return round(value, DERIVED_PARAM_SIGNIFICANT_DIGITS - 1 - magnitude)
+
+
 def _effective_params(config: dict[str, Any], overrides: dict[str, Any], folds) -> dict[str, dict]:
     merged = {**dict(config.get("params") or {}), **overrides}
     cls = _MODEL_CLASSES[config["model_class"]]
@@ -227,6 +271,7 @@ def _effective_params(config: dict[str, Any], overrides: dict[str, Any], folds) 
     effective = {}
     for fold in folds:
         resolved = resolve_linear_params(candidate, fold["X_train"], fold["y_train"])
+        resolved = {key: _quantize_derived(value) for key, value in resolved.items()}
         try:
             model = cls(**resolved)
         except TypeError as exc:
@@ -389,6 +434,81 @@ def _build_resolved_request(
     return spec, context
 
 
+# The joined dataset for the configurations currently being resolved. Every configuration of a
+# label reads the same one, and re-reading it per configuration cost 0.8s each on etfs and far
+# more on the panels, where the feature parquet is 4.2 GB and 6.8 GB rather than 140 MB.
+#
+# One entry, and it is re-validated rather than trusted. A cache that answers from what a loader
+# returned earlier is only safe while nothing that decides the loader's answer has changed, so
+# the entry records which loader produced it and what its input files looked like, and a hit that
+# cannot show both are unchanged is discarded. Skipping that check is how a run reads a dataset
+# it has already replaced.
+_INPUT_MEMO: dict[tuple[str, str, str, int], tuple[Any, Any, Any, tuple]] = {}
+
+
+def _artifact_stamp(mds: Any) -> tuple:
+    """Size and modification time of every file the dataset was built from."""
+    artifacts = (getattr(mds, "lineage_inputs", None) or {}).get("artifacts") or {}
+    stamp = []
+    for name, path in sorted(artifacts.items()):
+        try:
+            info = Path(path).stat()
+            stamp.append((name, info.st_size, info.st_mtime_ns))
+        except OSError:
+            stamp.append((name, None, None))
+    return tuple(stamp)
+
+
+def _config_stamp(study: Study) -> str:
+    """Digest of the configuration the walk-forward folds are derived from.
+
+    The artifact stamp covers the feature and label files. The fold boundaries do not come from
+    those: `setup.yaml` holds the walk-forward parameters, and editing one changes `mds.splits`
+    without touching a parquet file. Stamping by content rather than by size and modification
+    time because the edits that matter are often the same length - `train_size: 4D` to
+    `train_size: 3D` leaves both unchanged.
+    """
+    root = Path(study.root) / "config"
+    if not root.is_dir():
+        return ""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.yaml")):
+        digest.update(str(path.relative_to(root)).encode())
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"\x00unreadable")
+    return digest.hexdigest()
+
+
+def _load_inputs(study: Study, request: dict[str, Any], tier, max_symbols: int):
+    key = (study.case_study, request["label"], str(tier.value), max_symbols)
+    cached = _INPUT_MEMO.get(key)
+    if cached is not None:
+        label_ref, mds, loader, stamp = cached
+        if loader is load_modeling_dataset and stamp == (
+            _artifact_stamp(mds),
+            _config_stamp(study),
+        ):
+            return label_ref, mds
+        _INPUT_MEMO.clear()
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
+    _INPUT_MEMO.clear()
+    _INPUT_MEMO[key] = (
+        label_ref,
+        mds,
+        load_modeling_dataset,
+        (_artifact_stamp(mds), _config_stamp(study)),
+    )
+    return label_ref, mds
+
+
+def clear_input_memo() -> None:
+    """Drop the held dataset. For tests, and for freeing memory between labels."""
+    _INPUT_MEMO.clear()
+
+
 def _load_batch_base(
     study: Study,
     request: dict[str, Any],
@@ -407,8 +527,7 @@ def _load_batch_base(
     if not 0 < train_sample_frac <= 1:
         raise ValueError("train_sample_frac must be in (0, 1]")
     if inputs is None:
-        label_ref = study.labels.get(request["label"], execution_tier=tier)
-        mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=max_symbols)
+        label_ref, mds = _load_inputs(study, request, tier, max_symbols)
     else:
         label_ref, mds = inputs
     if mds.date_col != "timestamp" or not mds.entity_cols:
@@ -472,18 +591,11 @@ def _compatibility_key(request: dict[str, Any]) -> str:
 def resolve_model_request(study: Study, request: dict[str, Any]):
     base = _load_batch_base(study, request)
     mds = base["mds"]
-    folds = prepare_cv_folds(
-        mds.dataset.to_pandas(),
-        base["splits"],
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        mds.entity_cols[0],
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=base["train_sample_frac"],
-        eval_label_col=mds.eval_label_col,
+    # The same preparation the batch planner uses. When these were two implementations they
+    # disagreed by 1.4e-11 in the standardised design matrix, which was enough to move every
+    # data-derived alpha and give one declared configuration two training identities.
+    folds = prepare_standardized_folds(
+        mds, base["splits"], train_sample_frac=base["train_sample_frac"]
     )
     if len(folds) != len(base["splits"]):
         raise ValueError("linear request did not prepare every declared fold")
@@ -570,21 +682,12 @@ def reconstruct_locked_request(
         label_col=mds.label_col,
     )
     validate_locked_expected_keys(spec, expected)
-    fold = prepare_single_fold(
-        mds.dataset,
-        split,
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        entity_col,
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=1.0,
-        eval_label_col=mds.eval_label_col,
-    )
-    if fold is None:
+    # The holdout fit must be prepared exactly as the cross-validation fits were, or the model
+    # the holdout scores is not the model that was selected.
+    folds = prepare_standardized_folds(mds, [split], train_sample_frac=1.0)
+    if not folds:
         raise ValueError("locked linear holdout fold could not be prepared")
+    fold = folds[0]
 
     model = computation.get("model")
     if not isinstance(model, dict) or model.get("class") not in _MODEL_CLASSES:
@@ -726,17 +829,31 @@ def _prediction_frame(
     )
 
 
-def _write_runtime_fields(runtime_path: Path, **fields: float) -> None:
-    if not runtime_path.exists():
-        return
-    runtime = json.loads(runtime_path.read_text())
-    runtime.update(fields)
-    temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-        os.replace(temporary, runtime_path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def _record_runtime(
+    study: Study,
+    training: TrainingResult,
+    *,
+    elapsed_s: float,
+    cpu_s: float | None = None,
+    fit_s: float | None = None,
+) -> None:
+    """Record what this training run cost, against its registry row.
+
+    Wall time on its own cannot tell a run that saturated the machine from one that spent the
+    time waiting, so CPU seconds and the ratio between them go with it, and peak resident memory
+    decides whether two notebooks can share the machine. The measurement lands in the registry
+    rather than only in the run's ``runtime.json``: the artifact is compared byte for byte when
+    the same identity is registered again, and the query that schedules the next run reads the
+    column.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(elapsed_s=elapsed_s, cpu_s=cpu_s, fit_s=fit_s),
+    )
 
 
 def _fit_or_reuse_fold(
@@ -888,23 +1005,14 @@ def _fit_or_reuse_predictions(
 
 
 def _prepare_batch_fold(base: dict[str, Any], split: dict[str, Any]) -> dict[str, Any]:
-    mds = base["mds"]
-    fold = prepare_single_fold(
-        mds.dataset,
-        split,
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        mds.entity_cols[0],
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=base["train_sample_frac"],
-        eval_label_col=mds.eval_label_col,
+    fold_id = int(split["fold"])
+    folds = prepare_standardized_folds(
+        base["mds"], base["splits"], train_sample_frac=base["train_sample_frac"]
     )
-    if fold is None:
-        raise ValueError(f"linear request could not prepare fold {split['fold']}")
-    return fold
+    for fold in folds:
+        if int(fold["fold"]) == fold_id:
+            return fold
+    raise ValueError(f"linear request could not prepare fold {fold_id}")
 
 
 def _resolve_batch_candidate(
@@ -933,6 +1041,7 @@ def _resolve_batch_candidate(
         candidate.result = cached
         return
     candidate.started_at_s = time.perf_counter()
+    candidate.started_cpu_s = cpu_seconds()
     training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
@@ -1044,14 +1153,13 @@ def _finish_batch_candidate(study: Study, candidate: _BatchCandidate) -> None:
         }
         candidate.attempt.finish("completed", diagnostics)
         candidate.attempt = None
-        runtime_path = (
-            candidate.training.root
-            / "run_log"
-            / "training"
-            / candidate.training.hash
-            / "runtime.json"
+        _record_runtime(
+            study,
+            candidate.training,
+            elapsed_s=time.perf_counter() - candidate.started_at_s,
+            cpu_s=cpu_seconds() - candidate.started_cpu_s,
+            fit_s=candidate.fit_elapsed_s,
         )
-        _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - candidate.started_at_s)
         candidate.result = ModelRun(candidate.training, (prediction,), diagnostics)
     except Exception as exc:
         _fail_batch_candidate(candidate, exc)
@@ -1085,7 +1193,9 @@ def _run_batch_group(
     dependent_indices = {candidate.index for candidate in dependent}
 
     preparation_elapsed_s = 0.0
-    preparation_count = 0
+    # Folds this group actually built. Preparation is shared across every configuration and
+    # cached between runs, so counting requests would report work that did not happen.
+    built_before = folds_built()
     first_pass_needed = bool(dependent) or any(
         candidate.result is None and candidate.error is None for candidate in candidates
     )
@@ -1108,7 +1218,6 @@ def _run_batch_group(
                     _fail_batch_candidate(candidate, exc)
                 break
             preparation_elapsed_s += time.perf_counter() - started
-            preparation_count += 1
             for candidate in dependent:
                 if candidate.error is not None:
                     continue
@@ -1162,7 +1271,6 @@ def _run_batch_group(
                     _fail_batch_candidate(candidate, exc)
                 break
             preparation_elapsed_s += time.perf_counter() - started
-            preparation_count += 1
             for candidate in pending:
                 _run_batch_candidate_fold(candidate, fold)
             del fold
@@ -1180,7 +1288,7 @@ def _run_batch_group(
                 "execution_order": "fold_major",
                 "compatibility_group": group_digest,
                 "compatibility_group_size": len(candidates),
-                "base_fold_preparations": preparation_count,
+                "base_fold_preparations": folds_built() - built_before,
                 "base_fold_preparation_s": preparation_elapsed_s,
                 "candidate_fit_s": candidate.fit_elapsed_s,
                 "preparation_fraction": (preparation_elapsed_s / measured_s if measured_s else 0.0),
@@ -1349,12 +1457,12 @@ def run_resolved_request(
         return cached
 
     started = time.perf_counter()
+    started_cpu = cpu_seconds()
     training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
         runtime_provenance=context.runtime_provenance,
     )
-    train_dir = training.root / "run_log" / "training" / training.hash
     ledger = ExecutionLedger(study, training.root)
     attempt = ledger.start(training.hash)
     try:
@@ -1382,8 +1490,12 @@ def run_resolved_request(
     except Exception as exc:
         attempt.finish("failed", {"error_type": type(exc).__name__, "error": str(exc)})
         raise
-    runtime_path = train_dir / "runtime.json"
-    _write_runtime_fields(runtime_path, elapsed_s=time.perf_counter() - started)
+    _record_runtime(
+        study,
+        training,
+        elapsed_s=time.perf_counter() - started,
+        cpu_s=cpu_seconds() - started_cpu,
+    )
     return ModelRun(training=training, predictions=(prediction,), diagnostics=diagnostics)
 
 

@@ -47,6 +47,21 @@ class ModelExecution:
 
 
 @dataclass(frozen=True)
+class PreviewPopulation:
+    """What a preview run declared and then produced, verified and not registered.
+
+    A preview fits a reduced universe in a throwaway workspace, and
+    :class:`~case_studies.research.population.OfficialPopulation` refuses such a result as a
+    member so that nothing downstream can ever bind to one. The declaration is still worth making
+    and checking - it is what catches a run that produced a different set of predictions than it
+    said it would - so the preview gets this instead, with the same two fields a notebook reads.
+    """
+
+    name: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class BacktestExecution:
     results: tuple[BacktestResult, ...]
     catalog_rows: pl.DataFrame
@@ -592,3 +607,67 @@ def run_official_models(
         population=population,
         require_population_complete=True,
     )
+
+
+def run_model_population(
+    study: Study,
+    requests: Iterable[ModelRequest | ResolvedModelRequest],
+    *,
+    population_name: str,
+) -> tuple[ModelExecution, OfficialPopulation | PreviewPopulation]:
+    """Execute one model population in whichever tier its requests declare.
+
+    Both tiers declare the whole expected set of predictions before the first fit and fail if the
+    run produces a different one, which is the check most likely to catch a mistake at the end of
+    a long canonical run and therefore the one a preview must rehearse.
+
+    They differ in what the declaration is worth afterwards. A canonical run registers an
+    immutable population that downstream work binds to. A preview's is a reduced result computed
+    in a throwaway workspace, and :class:`OfficialPopulation` refuses such a member by design, so
+    the preview gets a declaration that verifies and is then discarded with its workspace.
+
+    Every model-execution notebook calls this rather than branching on the tier itself.
+    """
+    submitted = tuple(requests)
+    if not submitted:
+        raise ValueError("run_model_population requires at least one request")
+    tiers = {
+        ExecutionTier(
+            request.spec["execution_tier"]
+            if isinstance(request, ResolvedModelRequest)
+            else request.execution_tier
+        )
+        for request in submitted
+    }
+    if len(tiers) != 1:
+        raise ValueError(
+            f"one population cannot mix execution tiers: {sorted(t.value for t in tiers)}"
+        )
+    tier = tiers.pop()
+
+    if tier is ExecutionTier.CANONICAL:
+        return run_official_models(study, submitted, population_name=population_name)
+
+    if study.output_root is None:
+        raise ValueError("preview execution requires an isolated workspace")
+    for request in submitted:
+        if isinstance(request, ResolvedModelRequest):
+            # A resolved spec carries its reductions inside ``computation``, where they are part
+            # of the identity: a preview and a canonical result must never hash alike.
+            reductions = request.spec.get("computation", {}).get("preview_reductions")
+        else:
+            reductions = request.preview_reductions
+        if not reductions:
+            raise ValueError("preview execution requires every request to declare its reductions")
+
+    resolved = tuple(
+        request.resolve() if isinstance(request, ModelRequest) else request for request in submitted
+    )
+    declared = expected_prediction_hashes(resolved)
+    execution = run_models(study, requests=resolved)
+    produced = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+    if set(produced) != set(declared) or len(produced) != len(declared):
+        missing = sorted(set(declared) - set(produced))
+        extra = sorted(set(produced) - set(declared))
+        raise RuntimeError(f"model population mismatch: missing={missing}, extra={extra}")
+    return execution, PreviewPopulation(name=population_name, members=declared)

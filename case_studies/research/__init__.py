@@ -21,6 +21,7 @@ from .execution import (
     plan_backtests,
     run_backtests,
     run_locked_holdout,
+    run_model_population,
     run_models,
     run_official_model_subset,
     run_official_models,
@@ -34,7 +35,7 @@ from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy
-from .workspace import Study
+from .workspace import Study, open_study
 
 __all__ = [
     "AdapterBinding",
@@ -76,6 +77,7 @@ __all__ = [
     "get_adapter",
     "load_model_configs",
     "model_requests",
+    "open_study",
     "register_adapter",
     "registered_adapters",
     "plan_backtests",
@@ -84,6 +86,7 @@ __all__ = [
     "resolved_model_plan",
     "run_backtests",
     "run_locked_holdout",
+    "run_model_population",
     "run_models",
     "run_official_model_subset",
     "run_official_models",

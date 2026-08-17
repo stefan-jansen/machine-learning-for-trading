@@ -879,6 +879,36 @@ def research_preview_parameters(
     if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
         resolved["EXECUTION_TIER"] = "preview"
         resolved["WORKSPACE"] = str(output_dir.resolve())
+    if "PREVIEW_REDUCTIONS" in declared:
+        resolved = _collect_preview_reductions(resolved)
+    return resolved
+
+
+def _collect_preview_reductions(parameters: dict) -> dict:
+    """Fold the per-notebook reduction overrides into the single parameter that carries them.
+
+    A model notebook takes its reductions as one ``PREVIEW_REDUCTIONS`` mapping, because a
+    preview request has to declare every reduction it applies for the recorded identity to
+    describe what was actually fitted. ``overrides.yaml`` still states them one per line, the way
+    it does for every other notebook, so the translation happens here rather than in nine entries
+    that would then have to be kept agreeing with each other.
+    """
+    resolved = dict(parameters)
+    reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
+    max_folds = resolved.pop("MAX_FOLDS", None)
+    max_symbols = resolved.pop("MAX_SYMBOLS", None)
+    train_sample_frac = resolved.pop("TRAIN_SAMPLE_FRAC", None)
+    if max_folds is not None:
+        reductions.setdefault("folds", list(range(int(max_folds))))
+    if max_symbols is not None:
+        reductions.setdefault("max_symbols", int(max_symbols))
+    if train_sample_frac is not None:
+        reductions.setdefault("train_sample_frac", float(train_sample_frac))
+    # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
+    # request builder rejects it. Reducing the universe is the reduction that always applies.
+    if not reductions:
+        reductions["max_symbols"] = 5
+    resolved["PREVIEW_REDUCTIONS"] = reductions
     return resolved
 
 

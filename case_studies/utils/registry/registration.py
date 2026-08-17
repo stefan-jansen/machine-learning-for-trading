@@ -393,6 +393,70 @@ def register_training_run(
     return t_hash
 
 
+def record_training_runtime(
+    case_study: str,
+    training_hash: str,
+    *,
+    case_dir: Path | None = None,
+    measured: dict,
+) -> None:
+    """Record what a completed training run cost, against the row it produced.
+
+    A training run is registered before it is fitted, because the identity has to exist before
+    anything can be written under it. Nothing then came back to say what the fit cost, so
+    ``training_runs.elapsed_s`` was NULL on every row the current path produced while the value
+    sat in the run's ``runtime.json`` where no query looks. Scheduling the next run from recorded
+    cost - which is what ``reference/case-study-runtimes.md`` exists to do - needs the column.
+
+    ``measured`` carries the resource capture: wall seconds, CPU seconds, cores actually used and
+    peak resident memory. ``elapsed_s`` is promoted to its own column because that is what is
+    queried; the rest is merged into ``runtime_json``.
+
+    The ``runtime.json`` artifact beside the row is deliberately left alone. It records what the
+    run *was* and is compared byte for byte when the same identity is registered again, so
+    writing a measurement into it would turn a legitimate re-run into an identity conflict.
+    """
+    if not measured:
+        return
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    elapsed = measured.get("elapsed_s")
+
+    db = _open_registry(case_dir)
+    try:
+        row = db.execute(
+            "SELECT runtime_json FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no training run registered for {training_hash}")
+        try:
+            runtime = json.loads(row[0]) if row[0] else {}
+        except json.JSONDecodeError:
+            runtime = {}
+        if not isinstance(runtime, dict):
+            runtime = {}
+        # Measurements are namespaced so they cannot collide with a declared provenance field,
+        # and so a reader can tell what the run declared from what it turned out to cost.
+        resources = dict(runtime.get("resources") or {})
+        resources.update(measured)
+        runtime["resources"] = resources
+        db.execute(
+            "UPDATE training_runs SET elapsed_s = ?, runtime_json = ? WHERE training_hash = ?",
+            (
+                float(elapsed) if elapsed is not None else None,
+                canonical_json(runtime),
+                training_hash,
+            ),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def register_epoch_checkpoint(
     case_study: str,
     *,

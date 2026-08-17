@@ -116,6 +116,9 @@ class ModelingDataset:
     join_cols: list[str]
     splits: list[dict[str, Any]]
     label_buffer: str
+    # Which case study this was loaded from. Callers that persist or cache anything derived from
+    # the dataset need it, and it is not otherwise recoverable from the frame.
+    case_study_id: str = ""
     cv_config: Any = None  # WalkForwardConfig (optional, avoids hard import dep)
     task_type: str = "regression"  # "regression" or "classification"
     num_classes: int = 0  # 0 for regression, 2+ for classification
@@ -832,6 +835,7 @@ def load_modeling_dataset(
         join_cols=join_cols,
         splits=splits,
         label_buffer=label_buffer,
+        case_study_id=case_study_id,
         cv_config=cv_config,
         task_type=task_type,
         num_classes=num_classes,
