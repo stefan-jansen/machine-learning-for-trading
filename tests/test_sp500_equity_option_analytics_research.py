@@ -214,3 +214,14 @@ def test_an_empty_configuration_selection_names_itself():
     """`config_names=[]` used to be reported as the family declaring nothing."""
     with pytest.raises(ValueError, match="config_names is empty"):
         model_request_catalog("linear", labels=[PRIMARY], config_names=[])
+
+
+def test_an_empty_label_list_means_every_published_label():
+    """The asymmetry with `config_names=[]`, pinned so it stays deliberate.
+
+    A parameters cell that leaves `LABELS = []` means "all" across all nine case
+    studies, and `06_linear.py` passes `LABELS or None` to get it. An empty
+    `config_names` cannot be that idiom - it is only ever passed in code - so one
+    is widened and the other refused.
+    """
+    assert model_request_catalog("linear", labels=[]).equals(model_request_catalog("linear"))

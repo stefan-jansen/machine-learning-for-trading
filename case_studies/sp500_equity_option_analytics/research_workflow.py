@@ -54,14 +54,25 @@ def model_request_catalog(
     labels: Iterable[str] | None = None,
     config_names: Iterable[str] | None = None,
 ) -> pl.DataFrame:
-    """Return every configured label and model requested by one notebook."""
+    """Return every configured label and model requested by one notebook.
+
+    The two selection arguments treat an empty collection differently, on purpose.
+    ``labels`` comes from a notebook's parameters cell, where an empty list is the
+    established way across all nine case studies to say "every published label" -
+    `06_linear.py` passes `LABELS or None` for exactly that. ``config_names`` is
+    passed in code, never by a reader, so an empty list there cannot be that idiom
+    and is refused rather than silently widened to the whole menu.
+    """
     selected_labels = tuple(labels or published_labels())
     unknown = sorted(set(selected_labels) - set(published_labels()))
     if unknown:
         raise ValueError(f"unknown labels: {unknown}")
     selected_names = set(config_names) if config_names is not None else None
     if selected_names is not None and not selected_names:
-        raise ValueError("config_names is empty; omit it to request every declared configuration")
+        raise ValueError(
+            "config_names is empty; omit it to request every declared configuration. "
+            "An empty labels list does mean every published label - see the docstring."
+        )
     rows = []
     declared_names: set[str] = set()
     declaring_labels = []
