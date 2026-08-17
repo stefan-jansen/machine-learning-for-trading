@@ -12,15 +12,18 @@ mistyped. Selection is strict here for that reason.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 
 import polars as pl
 import yaml
 
+from case_studies.utils.registry.specs import training_hash_from_spec
 from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 
 from .contracts import ExecutionTier
+from .model_planning import ModelPlan
 from .models import ModelRequest, ResolvedModelRequest
 from .workspace import Study
 
@@ -121,6 +124,44 @@ def model_requests(
         )
         for row in catalog.select(*REQUEST_COLUMNS).iter_rows(named=True)
     )
+
+
+def planned_model_plan(plan: ModelPlan) -> pl.DataFrame:
+    """Show what each planned request will compute, without holding what it will compute it from.
+
+    This is :func:`resolved_model_plan` for a notebook that plans rather than resolves, which is
+    what a large panel must do: resolving every request to build the table holds every
+    configuration's prepared folds at once. Everything here is read out of the planned
+    specification, so the table costs one JSON parse per configuration.
+
+    It has no `eligible_entities` column, and that is the one difference. An entity count needs the
+    eligibility keys themselves, which is exactly the memory the planning path avoids. The check
+    that column existed for - a request that silently narrowed its universe - is carried by
+    `eligible_rows` and the eligibility digest, which move whenever the universe does.
+    """
+    rows = []
+    for spec_json in dict.fromkeys(member.spec_json for member in plan.members):
+        spec = json.loads(spec_json)
+        computation = spec.get("computation", spec)
+        expected = computation["expected_prediction_keys"]
+        folds = computation["cv"]["folds"]
+        rows.append(
+            {
+                "family": spec["family"],
+                "label": spec["label"],
+                "config_name": spec.get("config_name"),
+                "task": (computation.get("task") or {}).get("type", "regression"),
+                "feature_count": len(computation.get("feature_names") or []),
+                "eligible_rows": expected["n_rows"],
+                "folds": expected["n_folds"],
+                "validation_start": min(fold["val_start"] for fold in folds),
+                "validation_end": max(fold["val_end"] for fold in folds),
+                "checkpoints": len(computation["checkpoint_schedule"]),
+                "execution_tier": spec["execution_tier"],
+                "training_hash": training_hash_from_spec(spec),
+            }
+        )
+    return pl.DataFrame(rows).sort("label", "family", "config_name")
 
 
 def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl.DataFrame:

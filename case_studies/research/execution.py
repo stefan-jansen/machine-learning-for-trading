@@ -23,7 +23,7 @@ from .adapters import get_adapter
 from .catalog import _resolve_authoritative_selection
 from .contracts import ExecutionTier
 from .lifecycle import ResearchLock
-from .model_planning import plan_models
+from .model_planning import ModelPlan, plan_models
 from .models import (
     ModelRequest,
     ModelRun,
@@ -616,7 +616,7 @@ def run_official_model_subset(
 
 def run_official_models(
     study: Study,
-    requests: Iterable[ModelRequest | ResolvedModelRequest],
+    requests: ModelPlan | Iterable[ModelRequest | ResolvedModelRequest],
     *,
     population_name: str,
 ) -> tuple[ModelExecution, OfficialPopulation]:
@@ -634,11 +634,23 @@ def run_official_models(
     inside, so one fold set is live at a time instead of one per configuration. The declaration
     is unchanged: the same identities are written down before the same fits happen, and
     `pre_run_gate.py` checks that the two paths agree on them.
+
+    A notebook that already built a :class:`ModelPlan` to show what it is about to fit passes the
+    plan itself. Passing its requests instead would plan a second time, and planning a large panel
+    is not free: resolving a data-dependent penalty prepares every fold to do it.
     """
-    submitted = tuple(requests)
+    if isinstance(requests, ModelPlan):
+        if requests.study != study:
+            raise ValueError("model plan belongs to another study")
+        submitted = requests.requests
+        plan: ModelPlan | None = requests
+    else:
+        submitted = tuple(requests)
+        plan = None
     unresolved = tuple(request for request in submitted if isinstance(request, ModelRequest))
     if len(unresolved) == len(submitted):
-        plan = plan_models(study, requests=list(unresolved))
+        if plan is None:
+            plan = plan_models(study, requests=list(unresolved))
         if plan.execution_tier is not ExecutionTier.CANONICAL:
             raise ValueError("official model populations require canonical requests")
         population = plan.create_population(name=population_name)
@@ -664,7 +676,7 @@ def run_official_models(
 
 def run_model_population(
     study: Study,
-    requests: Iterable[ModelRequest | ResolvedModelRequest],
+    requests: ModelPlan | Iterable[ModelRequest | ResolvedModelRequest],
     *,
     population_name: str,
 ) -> tuple[ModelExecution, OfficialPopulation | PreviewPopulation]:
@@ -679,9 +691,16 @@ def run_model_population(
     in a throwaway workspace, and :class:`OfficialPopulation` refuses such a member by design, so
     the preview gets a declaration that verifies and is then discarded with its workspace.
 
-    Every model-execution notebook calls this rather than branching on the tier itself.
+    Every model-execution notebook calls this rather than branching on the tier itself. It takes
+    either the requests or the :class:`ModelPlan` built from them; a notebook that shows its plan
+    before running passes the plan, so the panel is planned once rather than twice.
     """
-    submitted = tuple(requests)
+    if isinstance(requests, ModelPlan):
+        if requests.study != study:
+            raise ValueError("model plan belongs to another study")
+        submitted = requests.requests
+    else:
+        submitted = tuple(requests)
     if not submitted:
         raise ValueError("run_model_population requires at least one request")
     tiers = {
@@ -699,7 +718,11 @@ def run_model_population(
     tier = tiers.pop()
 
     if tier is ExecutionTier.CANONICAL:
-        return run_official_models(study, submitted, population_name=population_name)
+        return run_official_models(
+            study,
+            requests if isinstance(requests, ModelPlan) else submitted,
+            population_name=population_name,
+        )
 
     if study.output_root is None:
         raise ValueError("preview execution requires an isolated workspace")
