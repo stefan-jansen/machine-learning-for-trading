@@ -379,44 +379,51 @@ ridge = (
     .drop_nulls("alpha")
     .sort("alpha")
 )
-log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
-ridge_ic = ridge.get_column("ic_mean").to_numpy()
-peak = int(np.argmax(ridge_ic))
+if ridge.height:
+    log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
+    ridge_ic = ridge.get_column("ic_mean").to_numpy()
+    peak = int(np.argmax(ridge_ic))
 
-fig_alpha = go.Figure(
-    go.Scatter(
-        x=log_alpha,
-        y=ridge_ic,
-        mode="lines+markers",
-        line=dict(color=COLORS["blue"], width=2),
-        marker=dict(size=8, color=COLORS["blue"]),
+    fig_alpha = go.Figure(
+        go.Scatter(
+            x=log_alpha,
+            y=ridge_ic,
+            mode="lines+markers",
+            line=dict(color=COLORS["blue"], width=2),
+            marker=dict(size=8, color=COLORS["blue"]),
+        )
     )
-)
-fig_alpha.add_trace(
-    go.Scatter(
-        x=[log_alpha[peak]],
-        y=[ridge_ic[peak]],
-        mode="markers",
-        marker=dict(size=15, color=COLORS["amber"]),
+    fig_alpha.add_trace(
+        go.Scatter(
+            x=[log_alpha[peak]],
+            y=[ridge_ic[peak]],
+            mode="markers",
+            marker=dict(size=15, color=COLORS["amber"]),
+            showlegend=False,
+        )
+    )
+    fig_alpha.update_layout(
+        title="Ridge IC against penalty strength, over ten orders of magnitude",
+        height=500,
+        width=900,
         showlegend=False,
+        margin=dict(t=70),
     )
-)
-fig_alpha.update_layout(
-    title="Ridge IC against penalty strength, over ten orders of magnitude",
-    height=500,
-    width=900,
-    showlegend=False,
-    margin=dict(t=70),
-)
-fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
-fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
-show_plotly_with_alt(
-    fig_alpha,
-    "Line chart of mean validation information coefficient against the base-ten logarithm of the "
-    "Ridge penalty. The curve is flat at weak penalties, rises through the middle of the range "
-    f"to a single peak at 1e{int(round(log_alpha[peak]))} marked in amber, then declines at the "
-    "strongest penalty.",
-)
+    fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
+    fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+    show_plotly_with_alt(
+        fig_alpha,
+        "Line chart of mean validation information coefficient against the base-ten logarithm of the "
+        "Ridge penalty. The curve is flat at weak penalties, rises through the middle of the range "
+        f"to a single peak at 1e{int(round(log_alpha[peak]))} marked in amber, then declines at the "
+        "strongest penalty.",
+    )
+else:
+    print(
+        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
+        f"Which estimators this section can show is decided by the menu at "
+        f"config/training/{LABEL}.yaml."
+    )
 
 # %% [markdown]
 # ## 5. What to notice
