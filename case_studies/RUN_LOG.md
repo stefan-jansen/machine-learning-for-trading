@@ -310,10 +310,10 @@ fails when they move without a bump.
 *Tabular deep learning, sequence models, latent factors and causal inference
 digest their source.* The SHA-256 of each of a set of files is in the identity, so
 editing any file in that set - including a change that alters nothing a model
-computes - refits the configurations it covers on the next run. The set is never
-one file and is usually several: latent factors digests fourteen, including
-`utils/modeling.py`. Read the set from the function that builds it rather than
-from a list here, which would drift:
+computes - refits the configurations it covers on the next run. Only causal
+digests a single file; the others digest several, and latent factors digests
+fourteen, including `utils/modeling.py`. Read the set from the function that
+builds it rather than from a list here, which would drift:
 
 | Family | Its digest set |
 |---|---|

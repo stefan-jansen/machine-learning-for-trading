@@ -500,7 +500,77 @@ def _open_registry(case_dir: Path) -> sqlite3.Connection:
     # Migrate existing DBs before running CREATE TABLE IF NOT EXISTS
     _migrate_registry(db)
     db.executescript(REGISTRY_SCHEMA_SQL)
+    _declare_uncertainty_columns(db)
     return db
+
+
+# Metric columns the uncertainty layer produces on every run, which the CREATE TABLE statements
+# above do not list. ``_upsert_wide_metrics`` adds an unknown metric column on first write, so
+# without this a registry's shape depended on its write history: 22 columns in ``backtest_metrics``
+# where no backtest had ever been registered and 37 where one had. Every notebook that reads a
+# confidence band then failed with ``no such column: m.sharpe_ci95_lo`` against exactly the
+# registries a reset had just created, which is where a rebuild always starts.
+#
+# Each set is what one producer returns, so a key added there is added here:
+#   backtest_metrics, backtest_fold_metrics  <- compute_backtest_uncertainty (utils/uncertainty.py)
+#   prediction_metrics                       <- the ic_/auc_ blocks in registry/metrics.py
+_BACKTEST_UNCERTAINTY_COLUMNS = (
+    "sharpe_se_lo",
+    "sharpe_ci95_lo",
+    "sharpe_ci95_hi",
+    "sortino_ci95_lo",
+    "sortino_ci95_hi",
+    "ann_return_hac_se",
+    "ann_return_ci95_lo",
+    "ann_return_ci95_hi",
+    "max_dd_ci95_lo",
+    "max_dd_ci95_hi",
+    "calmar_ci95_lo",
+    "calmar_ci95_hi",
+    "psr_pvalue",
+    "bootstrap_block_length",
+    "bootstrap_n",
+)
+
+_DECLARED_METRIC_COLUMNS: dict[str, tuple[str, ...]] = {
+    "backtest_metrics": _BACKTEST_UNCERTAINTY_COLUMNS,
+    # n_periods rides along: the fold table declares n_days, and the metric pass writes both.
+    "backtest_fold_metrics": _BACKTEST_UNCERTAINTY_COLUMNS + ("n_periods",),
+    "prediction_metrics": tuple(
+        f"{metric}_{suffix}"
+        for metric in ("ic", "auc")
+        for suffix in (
+            "mean_daily",
+            "std_daily",
+            "n_days",
+            "se_naive",
+            "naive_lo",
+            "naive_hi",
+            "se_hac",
+            "ci_lo",
+            "ci_hi",
+            "t_hac",
+            "p_hac",
+            "hac_lag",
+            "boot_lo",
+            "boot_hi",
+            "boot_block",
+        )
+    )
+    # The two producers disagree on one name apiece: an IC is signed, so what is counted is the
+    # share of days above zero, while an AUC's null is 0.5.
+    + ("ic_pct_positive", "auc_pct_above_null"),
+}
+
+
+def _declare_uncertainty_columns(db: sqlite3.Connection) -> None:
+    """Give every metric table its full column set, whether or not anything has been written."""
+    for table, columns in _DECLARED_METRIC_COLUMNS.items():
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        for column in columns:
+            if column not in existing:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" REAL')
+    db.commit()
 
 
 def _table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
