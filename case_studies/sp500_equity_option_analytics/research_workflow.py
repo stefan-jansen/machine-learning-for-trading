@@ -61,6 +61,7 @@ def model_request_catalog(
         raise ValueError(f"unknown labels: {unknown}")
     selected_names = set(config_names) if config_names is not None else None
     rows = []
+    declared_names: set[str] = set()
     case_dir = REPO_ROOT / "case_studies" / CASE_STUDY
     for label in selected_labels:
         menu = yaml.safe_load((case_dir / "config" / "training" / f"{label}.yaml").read_text())
@@ -68,16 +69,19 @@ def model_request_catalog(
             continue
         for config in load_configs(CASE_STUDY, label, family):
             name = str(config["config_name"])
+            declared_names.add(name)
             if selected_names is None or name in selected_names:
                 rows.append({"family": family, "label": label, "config_name": name})
-    if not rows:
-        raise ValueError(f"no declared requests for {family!r}")
-    catalog = pl.DataFrame(rows).unique(maintain_order=True)
+    # A misnamed configuration is diagnosed before the empty result it causes, so
+    # the message names the caller's typo rather than reporting that a family with
+    # 28 declared members has none.
     if selected_names is not None:
-        missing = sorted(selected_names - set(catalog.get_column("config_name")))
+        missing = sorted(selected_names - declared_names)
         if missing:
             raise ValueError(f"requested configurations are not declared: {missing}")
-    return catalog
+    if not rows:
+        raise ValueError(f"no declared requests for {family!r}")
+    return pl.DataFrame(rows).unique(maintain_order=True)
 
 
 def configured_model_menu() -> pl.DataFrame:
