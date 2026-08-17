@@ -60,6 +60,8 @@ def model_request_catalog(
     if unknown:
         raise ValueError(f"unknown labels: {unknown}")
     selected_names = set(config_names) if config_names is not None else None
+    if selected_names is not None and not selected_names:
+        raise ValueError("config_names is empty; omit it to request every declared configuration")
     rows = []
     declared_names: set[str] = set()
     declaring_labels = []
@@ -74,12 +76,14 @@ def model_request_catalog(
             declared_names.add(name)
             if selected_names is None or name in selected_names:
                 rows.append({"family": family, "label": label, "config_name": name})
-    # Three ways this can come back empty, and each has to name its own cause. No
-    # selected label declares the family at all; or some do and the caller named a
+    # Two reachable ways this comes back empty, and each names its own cause: no
+    # selected label declares the family, or some do and the caller named a
     # configuration none of them declares. Reporting either as the other sends a
-    # reader to the wrong place: the first version of this function blamed the
+    # reader to the wrong place - the first version of this function blamed the
     # family for a misnamed configuration, and the fix for that blamed the
-    # configuration for a label that declares no such family.
+    # configuration for a label declaring no such family. A label whose menu lists
+    # the family is skipped rather than refused when it lists a different family,
+    # which is what lets the latent-factor notebooks pass every published label.
     if not declaring_labels:
         raise ValueError(f"no declared requests for {family!r}")
     if selected_names is not None:
@@ -90,7 +94,11 @@ def model_request_catalog(
                 f"{declaring_labels}: {missing}"
             )
     if not rows:
-        raise ValueError(f"no declared requests for {family!r}")
+        # Unreachable while load_configs raises on an empty menu entry rather than
+        # returning one. Kept as a consistency check, with its own cause named.
+        raise ValueError(
+            f"{family!r} is declared for {declaring_labels} but resolved no configurations"
+        )
     return pl.DataFrame(rows).unique(maintain_order=True)
 
 

@@ -184,3 +184,33 @@ def test_an_undeclared_name_names_the_labels_it_was_checked_against():
     assert "latent_factors" in message
     assert PRIMARY in message
     assert "no_such_factor" in message
+
+
+def test_a_label_that_declares_a_different_family_is_skipped_not_refused():
+    """The pass-through the five latent-factor notebooks depend on by default.
+
+    `published_labels()` includes `fwd_dir_5d`, which declares linear and gbm but no
+    latent factors, and `11a_pca.py` passes the full list unless a parameter narrows
+    it. So the mixed case - some labels declaring the family, some not - is the
+    default production path, and tightening the skip into a refusal would break all
+    five notebooks. Only the refusal side was pinned before this.
+    """
+    catalog = model_request_catalog(
+        "latent_factors", labels=[PRIMARY, "fwd_dir_5d"], config_names=["pca"]
+    )
+    assert catalog.get_column("label").to_list() == [PRIMARY]
+    assert catalog.get_column("config_name").to_list() == ["pca"]
+
+
+def test_the_default_latent_factor_call_spans_only_the_declaring_labels():
+    """The same path as it is actually taken, with no labels argument at all."""
+    catalog = model_request_catalog("latent_factors", config_names=["pca"])
+    declaring = set(catalog.get_column("label"))
+    assert declaring == {"fwd_ret_5d", "fwd_ret_10d", "fwd_ret_risk_adj_5d"}
+    assert not declaring & {"fwd_dir_5d", "fwd_dir_10d"}
+
+
+def test_an_empty_configuration_selection_names_itself():
+    """`config_names=[]` used to be reported as the family declaring nothing."""
+    with pytest.raises(ValueError, match="config_names is empty"):
+        model_request_catalog("linear", labels=[PRIMARY], config_names=[])
