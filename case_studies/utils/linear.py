@@ -801,8 +801,16 @@ def _fold_predictions(model: Any, fold: dict[str, Any], context: LinearContext) 
     else:
         predictions = np.asarray(model.predict(fold["X_val"]), dtype=np.float64)
     fold_id = int(fold["fold"])
-    if not np.isfinite(predictions).all() or np.nanstd(predictions) <= 1e-15:
-        raise ValueError(f"linear fold {fold_id} produced non-finite or constant predictions")
+    # Non-finite predictions are a numerical failure and stop the run. Constant ones are not:
+    # a declared configuration whose penalty zeroes every coefficient on one fold predicts the
+    # intercept everywhere, which is a legitimate outcome of sweeping penalty strength and is
+    # what the grid is meant to expose. The scoring layer is already built for it - a fold with
+    # no cross-sectional variation yields no IC, the headline aggregates over the folds that
+    # produced one, and `n_folds_ic` next to `n_folds` is what makes the shortfall visible
+    # (`registry/metrics.py`). Raising here instead aborted the whole population for one
+    # degenerate member: it is how a binary label lost 28 configurations to one of them.
+    if not np.isfinite(predictions).all():
+        raise ValueError(f"linear fold {fold_id} produced non-finite predictions")
     return predictions
 
 
