@@ -264,7 +264,7 @@ Everything that can change the numbers:
 | Checkpoint schedule | A GBM registering predictions every 50 trees produces a different set of results from one registering only the last |
 | A digest of the exact (symbol, timestamp, fold) rows the run must predict, with the row and fold counts | This is the eligibility manifest, and it is what makes coverage part of identity rather than an afterthought |
 | Random seed | Two seeds are two experiments |
-| Content digests of the source files that implement the family's runner, and the versions of the numerical libraries it calls | Fitting code and library versions change results |
+| The declared version of the family's runner, of the shared fold preparation and of the preprocessing, plus the versions of the numerical libraries they call | Fitting code and library versions change results |
 | Whether the run is canonical or a preview, and every reduction a preview applies | A run on a fifth of the symbols is not the same result as a full one |
 
 ### What it deliberately leaves out
@@ -291,12 +291,18 @@ identities and register as new rows. The old rows stay exactly where they were,
 still complete and still queryable, so an experiment accumulates alongside the
 published results rather than overwriting them.
 
-**Editing a family's runner invalidates that family's cache.** The source digest
-of, say, `case_studies/utils/linear.py` is in the identity of every linear run,
-so changing that file means every linear configuration refits on the next run.
-That is intended - a change to the fitting code can change the numbers, and a
-cache that survived it would be lying - but it makes an edit to a shared runner a
-decision about compute as well as about code.
+**A runner edit refits a family only when its declared version is bumped.** What
+sits in the identity is `LINEAR_RUNNER_VERSION`, `GBM_RUNNER_VERSION` and
+`FOLD_PREPARATION_VERSION`, not a digest of the file. A comment, a log line or a
+refactoring that moves code without changing what it computes therefore leaves
+every registered result valid; only bumping the version refits the family. That
+bump is the decision about compute, and it is required whenever a change to the
+fitting code would change the numbers, because a cache that survived such a change
+would be lying. Holding the declaration honest is the job of
+`tests/test_linear_identity.py`, `tests/test_gbm_identity.py` and
+`tests/test_folds.py`: each pins the quantities its version claims to describe and
+fails when they move without a bump. Digesting the source instead was what this
+replaced, and it invalidated every result in the family on any edit at all.
 
 The two identities downstream of a training run are built from it rather than
 from scratch; the next section gives their exact composition.

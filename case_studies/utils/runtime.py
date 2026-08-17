@@ -1,9 +1,9 @@
 """Operational provenance and resource measurement for model runners.
 
-This module is deliberately outside every family's ``_SOURCE_FILES``. Those tuples hash the
-runner source into the training identity, so a change to a file listed there refits the whole
-family. What a run *records about itself* must be changeable without that consequence, which is
-why the declared provenance and the resource capture live here rather than in the runners.
+Nothing here enters ``_source_identity()`` or ``_gbm_source_identity()``, and no runner version
+declares its behaviour. What a run *records about itself* must be changeable without refitting the
+family, which is why the declared provenance and the resource capture live here rather than in the
+runners.
 
 Nothing in this module may influence a fitted result.
 """
