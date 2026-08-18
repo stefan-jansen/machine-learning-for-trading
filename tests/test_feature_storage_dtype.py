@@ -18,7 +18,7 @@ import polars as pl
 import pytest
 
 from case_studies.utils.folds import fold_cache_key, prepare_raw_folds
-from utils.modeling import feature_storage_dtype
+from utils.modeling import build_modeling_input_lineage, feature_storage_dtype
 
 DECLARED_NARROW = {"nasdaq100_microstructure"}
 EVERY_CASE_STUDY = [
@@ -178,6 +178,109 @@ class TestThePrecisionIsPartOfTheTrainingIdentity:
     def test_the_declared_precision_is_recorded_not_merely_hashed(self):
         assert self._lineage("float32")["feature_dtype"] == "float32"
 
-    def test_a_case_study_that_declared_nothing_keeps_its_existing_identity(self):
-        """The eight that did not declare must not be invalidated by the knob existing."""
-        assert self._lineage("float64")["feature_dtype"] == "float64"
+    def test_the_default_is_absent_from_the_payload_rather_than_written_as_float64(self):
+        """A key written unconditionally rehashes the eight case studies that declared nothing."""
+        assert "feature_dtype" not in self._lineage("float64")
+
+
+class TestTheKnobDidNotInvalidateTheCaseStudiesThatDeclaredNothing:
+    """The fingerprint a double-precision case study produces must be the one it always produced.
+
+    ``PRE_PRECISION_FINGERPRINT`` was not computed from a reimplementation of the payload. It is
+    what ``build_modeling_input_lineage`` at 719c9c14 - the last commit before the precision work
+    - returns for ``FIXTURE`` below. Every registered training run predates that work, so if this
+    value moves, the registry can no longer resolve any of them and every case study re-fits from
+    scratch. The first cut of this change put the key in unconditionally and did exactly that.
+    """
+
+    PRE_PRECISION_FINGERPRINT = "97738b867c03d3dbdb59994f920855d08be1d9596e72eddf5f25cb81a270b720"
+
+    FIXTURE = {
+        "feature_names": ["alpha", "beta", "gamma"],
+        "splits": [
+            {
+                "fold": 0,
+                "train_start": "2018-01-01",
+                "train_end": "2019-01-01",
+                "val_start": "2019-01-02",
+                "val_end": "2019-06-01",
+            },
+            {
+                "fold": 1,
+                "train_start": "2018-06-01",
+                "train_end": "2019-06-01",
+                "val_start": "2019-06-02",
+                "val_end": "2019-12-01",
+            },
+        ],
+        "label_buffer": "21D",
+        "task_type": "regression",
+        "eval_label_col": "fwd_ret_21d",
+        "max_symbols": 0,
+        "symbols": ["AAA", "BBB"],
+    }
+
+    @pytest.fixture
+    def artifacts(self, tmp_path):
+        path = tmp_path / "features.parquet"
+        path.write_bytes(b"deterministic bytes for the artifact digest")
+        return {"features": path}
+
+    def _fingerprint(self, artifacts, **overrides):
+        return build_modeling_input_lineage(artifacts=artifacts, **self.FIXTURE, **overrides)[
+            "fingerprint"
+        ]
+
+    def test_calling_it_the_way_every_case_study_does_reproduces_the_old_fingerprint(
+        self, artifacts
+    ):
+        assert self._fingerprint(artifacts) == self.PRE_PRECISION_FINGERPRINT
+
+    def test_declaring_double_precision_explicitly_reproduces_it_too(self, artifacts):
+        assert self._fingerprint(artifacts, feature_dtype="float64") == (
+            self.PRE_PRECISION_FINGERPRINT
+        )
+
+    def test_the_case_study_that_declared_single_precision_gets_a_new_one(self, artifacts):
+        assert self._fingerprint(artifacts, feature_dtype="float32") != (
+            self.PRE_PRECISION_FINGERPRINT
+        )
+
+
+class TestTheFoldAddressIsPreservedForTheSameReason:
+    """Fold preparation is the expensive half, and its cache is addressed the same way."""
+
+    KEY = {
+        "case_study": "etfs",
+        "label_col": "fwd_ret_21d",
+        "eval_label_col": None,
+        "feature_names": ["alpha", "beta"],
+        "splits": [
+            {
+                "fold": 0,
+                "train_start": "2018-01-01",
+                "train_end": "2019-01-01",
+                "val_start": "2019-01-02",
+                "val_end": "2019-06-01",
+            }
+        ],
+        "input_lineage": {"fingerprint": "abc123"},
+        "train_sample_frac": 1.0,
+        "seed": 42,
+    }
+
+    PRE_PRECISION_KEY = "92376ca3e260204a"
+
+    def test_the_default_addresses_the_cache_the_eight_already_wrote(self):
+        """Against what 719c9c14 produced, not against another call into the same code.
+
+        Comparing the default with an explicit ``float64`` passes whether or not the key is
+        conditional, because both go down the same branch. Only the recorded value can fail.
+        """
+        assert fold_cache_key(**self.KEY) == self.PRE_PRECISION_KEY
+
+    def test_declaring_double_precision_explicitly_addresses_it_too(self):
+        assert fold_cache_key(**self.KEY, design_dtype="float64") == self.PRE_PRECISION_KEY
+
+    def test_single_precision_addresses_a_different_one(self):
+        assert fold_cache_key(**self.KEY, design_dtype="float32") != self.PRE_PRECISION_KEY

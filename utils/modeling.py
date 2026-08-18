@@ -200,8 +200,13 @@ def build_modeling_input_lineage(
     ``feature_dtype`` is part of the identity because the artifacts are not. The parquet files
     a case study reads are unchanged by a precision declaration, so without this a result fitted
     in double precision and one fitted in single resolve to the same training identity, and the
-    registry serves the older one for a spec that asked for the other. It distinguishes the case
-    study that declared a change rather than invalidating the eight that did not.
+    registry serves the older one for a spec that asked for the other.
+
+    It is written into the payload only when it is not ``float64``. A key added unconditionally
+    changes the fingerprint of every case study, including the eight that declared nothing, and
+    would invalidate every training run already registered against them. Omitting the default
+    keeps those fingerprints exactly as they were and gives only the declaring case study a new
+    one. Any future default must be added the same way, for the same reason.
     """
     split_fields = ("fold", "train_start", "train_end", "val_start", "val_end")
 
@@ -230,8 +235,9 @@ def build_modeling_input_lineage(
         "eval_label_col": eval_label_col,
         "max_symbols": int(max_symbols),
         "symbols": sorted(symbols) if symbols else None,
-        "feature_dtype": feature_dtype,
     }
+    if feature_dtype != "float64":
+        payload["feature_dtype"] = feature_dtype
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload["fingerprint"] = hashlib.sha256(canonical.encode()).hexdigest()
     return payload

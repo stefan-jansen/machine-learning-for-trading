@@ -200,7 +200,9 @@ def fold_cache_key(
 
     The design matrix's float type is part of the address. Without it a case study that switches
     precision reads back the cache written in the other one and fits at a precision it did not
-    declare, which no error would report.
+    declare, which no error would report. It is written only when it is not ``float64``, so the
+    eight case studies that declared no precision keep the addresses they already have;
+    ``FOLD_PREPARATION_VERSION`` stays the one deliberate way to invalidate all of them.
     """
     payload = {
         "version": FOLD_PREPARATION_VERSION,
@@ -208,7 +210,6 @@ def fold_cache_key(
         "label_col": label_col,
         "eval_label_col": eval_label_col,
         "feature_names": list(feature_names),
-        "design_dtype": design_dtype,
         "splits": [
             {
                 "fold": int(split["fold"]),
@@ -223,6 +224,8 @@ def fold_cache_key(
         "train_sample_frac": float(train_sample_frac),
         "seed": int(seed),
     }
+    if design_dtype != "float64":
+        payload["design_dtype"] = design_dtype
     return hashlib.sha256(_canonical(payload).encode()).hexdigest()[:16]
 
 
