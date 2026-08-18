@@ -676,7 +676,13 @@ def prepare_gbm_folds_from_mds(
     task_type = getattr(mds, "task_type", "regression")
     class_values = getattr(mds, "class_values", None)
     # float32 is a second copy of the design matrix, so the raw folds are consumed one at a time
-    # and dropped as they are cast, holding one raw fold at the peak instead of the whole set.
+    # and dropped as they are cast. That bounds what is held AFTER this returns - one cast set
+    # rather than a cast set beside a raw one - and it does not bound the peak, because
+    # prepare_raw_folds has already built every fold before the loop starts. Measured on
+    # us_equities_panel at 2026-08-18: 20.10 GB dataset, a 31.03 GB float64 raw set, 52.56 GB
+    # peak, settling to 35.56 GB once the 15.52 GB float32 set is all that remains beside the
+    # dataset. Bounding the peak needs preparation itself to yield fold by fold, which is a
+    # change to the shared raw layer that all five families read.
     # The memo entry goes first, or it keeps the list alive through the loop.
     _RAW_MEMO.pop(key, None)
     pending = list(raw)
