@@ -137,3 +137,47 @@ class TestTheDesignMatrixIsBuiltInTheDeclaredPrecision:
         wide = prepare_raw_folds(_Dataset("float64"), _Dataset("float64").splits, use_cache=False)
         narrow = prepare_raw_folds(_Dataset("float32"), _Dataset("float32").splits, use_cache=False)
         assert narrow[0].X_train.nbytes * 2 == wide[0].X_train.nbytes
+
+
+class TestThePrecisionIsPartOfTheTrainingIdentity:
+    """The fold cache is not the only place a precision switch could go unnoticed.
+
+    The artifacts a case study reads are unchanged by a precision declaration, so if the
+    declared type is absent from the training identity, a result fitted in double precision and
+    one fitted in single address the same row: the registry serves the older fit for a spec that
+    asked for the other, and the notebook prints numbers a rerun no longer produces.
+    """
+
+    @staticmethod
+    def _lineage(feature_dtype: str) -> dict:
+        from utils.modeling import build_modeling_input_lineage
+
+        return build_modeling_input_lineage(
+            artifacts={},
+            feature_names=["a", "b"],
+            splits=[
+                {
+                    "fold": 0,
+                    "train_start": "2020-01-01",
+                    "train_end": "2020-06-01",
+                    "val_start": "2020-06-02",
+                    "val_end": "2020-07-01",
+                }
+            ],
+            label_buffer="15min",
+            task_type="regression",
+            eval_label_col=None,
+            max_symbols=0,
+            symbols=None,
+            feature_dtype=feature_dtype,
+        )
+
+    def test_the_two_precisions_do_not_share_a_training_identity(self):
+        assert self._lineage("float32")["fingerprint"] != self._lineage("float64")["fingerprint"]
+
+    def test_the_declared_precision_is_recorded_not_merely_hashed(self):
+        assert self._lineage("float32")["feature_dtype"] == "float32"
+
+    def test_a_case_study_that_declared_nothing_keeps_its_existing_identity(self):
+        """The eight that did not declare must not be invalidated by the knob existing."""
+        assert self._lineage("float64")["feature_dtype"] == "float64"

@@ -169,6 +169,7 @@ class ModelingDataset:
                 eval_label_col=self.eval_label_col,
                 max_symbols=self.lineage_inputs["max_symbols"],
                 symbols=self.lineage_inputs["symbols"],
+                feature_dtype=self.feature_dtype,
             )
         return self._input_lineage
 
@@ -192,8 +193,16 @@ def build_modeling_input_lineage(
     eval_label_col: str | None,
     max_symbols: int,
     symbols: list[str] | None,
+    feature_dtype: str = "float64",
 ) -> dict[str, Any]:
-    """Build the portable input identity carried by persisted training runs."""
+    """Build the portable input identity carried by persisted training runs.
+
+    ``feature_dtype`` is part of the identity because the artifacts are not. The parquet files
+    a case study reads are unchanged by a precision declaration, so without this a result fitted
+    in double precision and one fitted in single resolve to the same training identity, and the
+    registry serves the older one for a spec that asked for the other. It distinguishes the case
+    study that declared a change rather than invalidating the eight that did not.
+    """
     split_fields = ("fold", "train_start", "train_end", "val_start", "val_end")
 
     def _normalize(key: str, value: Any) -> str:
@@ -221,6 +230,7 @@ def build_modeling_input_lineage(
         "eval_label_col": eval_label_col,
         "max_symbols": int(max_symbols),
         "symbols": sorted(symbols) if symbols else None,
+        "feature_dtype": feature_dtype,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload["fingerprint"] = hashlib.sha256(canonical.encode()).hexdigest()
@@ -556,9 +566,13 @@ def feature_storage_dtype(case_study_id: str) -> pl.DataType:
     dataset in double precision against 5.6 GB in single, while the small case studies fit
     comfortably either way and narrowing them would move their numbers for no gain.
     """
-    from utils.paths import get_case_study_dir
+    # Read from the repository, not through ``get_case_study_dir``, which redirects to
+    # ``ML4T_OUTPUT_DIR``. Every CI job points that at a scratch directory holding no
+    # ``config/``, so going through the redirect would resolve every case study to the default
+    # and silently answer a question about what a case study declares with "nothing".
+    from utils import CASE_STUDIES_DIR
 
-    setup_path = get_case_study_dir(case_study_id) / "config" / "setup.yaml"
+    setup_path = CASE_STUDIES_DIR / case_study_id / "config" / "setup.yaml"
     if not setup_path.exists():
         return pl.Float64
     declared = (yaml.safe_load(setup_path.read_text()) or {}).get("features", {})
@@ -665,7 +679,10 @@ def load_modeling_dataset(
             temporal = temporal.with_columns([pl.col(c).cast(storage_dtype) for c in narrow])
     temporal_columns = temporal.collect_schema().names() if temporal is not None else []
 
-    labels = _read(label_path)
+    # Labels are deliberately not narrowed. ``features.storage_dtype`` covers the design
+    # matrix; the label is the target IC and every metric are measured against, and
+    # ``gbm_fold`` states that it stays float64 whatever the design matrix is cast to.
+    labels = pl.read_parquet(label_path)
 
     # Auto-detect label column (the non-ID column in the label file)
     label_col = [c for c in labels.columns if c not in ID_COLS][0]

@@ -700,8 +700,12 @@ def standardized_fold(raw: RawFold) -> dict[str, Any]:
     from sklearn.preprocessing import StandardScaler
 
     preprocessor = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
-    X_train = _contiguous(preprocessor.fit_transform(raw.X_train))
-    X_val = _contiguous(preprocessor.transform(raw.X_val))
+    # The standardised matrix keeps the precision the raw fold was built in. Pinning float64
+    # here upcast a single-precision design matrix straight back, so a case study that declared
+    # float32 paid the precision loss and still carried the wide array through the fit.
+    design_dtype = raw.X_train.dtype if raw.X_train.dtype == np.float32 else np.float64
+    X_train = _contiguous(preprocessor.fit_transform(raw.X_train), design_dtype)
+    X_val = _contiguous(preprocessor.transform(raw.X_val), design_dtype)
     # SimpleImputer drops a feature that is entirely missing across the training rows, so the
     # design matrix silently narrows while the recorded feature list still claims the full set.
     # A result fitted on different columns than it declares is worse than a failed run.
