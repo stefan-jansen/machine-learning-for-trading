@@ -614,8 +614,21 @@ if all_metrics:
 # | **Adaptive Conformal (ACI)** | Update miscoverage target online | Tracks regime shifts | Online update hyperparameter sensitivity |
 
 # %% tags=[]
+# The section below is written about ETFs: the figure title, the interpretation under the
+# coverage table and takeaway 2 all read the 2023 ETF validation fold specifically. Taking
+# whichever asset class happened to load first would caption crypto or futures intervals as
+# ETF ones for any reader who built only those, so the choice is named rather than positional.
+COMPARISON_ASSET = "ETF"
+
 if processed_datasets:
-    test_asset = list(processed_datasets.keys())[0]
+    if COMPARISON_ASSET not in processed_datasets:
+        raise RuntimeError(
+            f"the method comparison is written about {COMPARISON_ASSET} results, and only "
+            f"{sorted(processed_datasets)} loaded. Build case_studies/etfs/ features, or change "
+            f"COMPARISON_ASSET and the interpretation below together - the prose reads one "
+            f"specific fold and does not transfer."
+        )
+    test_asset = COMPARISON_ASSET
     test_data = processed_datasets[test_asset]
     comparison_fold = test_data["fold_data"][0]
 
@@ -829,7 +842,7 @@ if processed_datasets:
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     fig.suptitle(
-        "Label-mature adaptation reshapes ETF prediction intervals through time",
+        f"Label-mature adaptation reshapes {test_asset} prediction intervals through time",
         x=0.01,
         ha="left",
     )
