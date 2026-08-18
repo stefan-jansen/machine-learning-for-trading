@@ -263,12 +263,15 @@ catalog_columns = [
     "execution_tier",
     "complete",
     "ic_mean",
+    "ic_n_days",
     "training_hash",
     "prediction_hash",
 ]
 catalog_rows = execution.catalog_rows.select(
     column for column in catalog_columns if column in execution.catalog_rows.columns
 ).sort("config_name", "checkpoint_value", "prediction_hash")
+full_days = int(catalog_rows.get_column("ic_n_days").max())
+catalog_rows = catalog_rows.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
 catalog_rows
 
 # %%

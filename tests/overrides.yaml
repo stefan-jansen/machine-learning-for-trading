@@ -1906,11 +1906,19 @@ case_studies/us_equities_panel/05_evaluation:
   timeout: 300
 case_studies/us_equities_panel/06_linear:
   parameters:
+    # A reduction is only legal under the preview tier: the canonical branch refuses to
+    # declare one, and it opens the study against the published release root rather than
+    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
+    EXECUTION_TIER: preview
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/us_equities_panel/07_gbm:
   parameters:
+    # A reduction is only legal under the preview tier: the canonical branch refuses to
+    # declare one, and it opens the study against the published release root rather than
+    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
+    EXECUTION_TIER: preview
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
   timeout: 180

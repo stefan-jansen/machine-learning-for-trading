@@ -237,6 +237,15 @@ resolved_table
 # The returned Polars rows are the downstream interface. A strategy notebook can filter these rows
 # by human-readable fields and pass the selection directly to `run_backtests`; readers do not need
 # to copy registry hashes. The hashes remain visible for exact provenance and artifact inspection.
+#
+# **Read `ic_n_days` before `ic_mean`, or the table will mislead you.** The information
+# coefficient is an average of per-date rank correlations, and a date only contributes one if the
+# model's predictions vary across the panel that day. An L1 penalty large enough to zero every
+# coefficient predicts the same value for every stock, and a constant has no rank correlation with
+# anything - so those dates drop out and the configuration's IC is an average over the dates where
+# it happened to stay non-degenerate. That is not the same measurement as its neighbours', and
+# comparing the two compares different samples. `full_coverage` marks the rows measured on every
+# validation date; the rest are reporting on a subset the model selected for itself.
 
 # %% tags=["results"]
 catalog_columns = [
@@ -248,12 +257,15 @@ catalog_columns = [
     "execution_tier",
     "complete",
     "ic_mean",
+    "ic_n_days",
     "training_hash",
     "prediction_hash",
 ]
 catalog_rows = execution.catalog_rows.select(
     column for column in catalog_columns if column in execution.catalog_rows.columns
 ).sort("config_name", "prediction_hash")
+full_days = int(catalog_rows.get_column("ic_n_days").max())
+catalog_rows = catalog_rows.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
 catalog_rows
 
 # %%
