@@ -191,11 +191,16 @@ def fold_cache_key(
     input_lineage: dict[str, Any] | None,
     train_sample_frac: float,
     seed: int,
+    design_dtype: str = "float64",
 ) -> str:
     """Address a prepared fold set by everything preparation actually depends on.
 
     The model, its family and its hyperparameters are deliberately absent: two configurations that
     agree on these inputs must share the arrays, which is the whole point.
+
+    The design matrix's float type is part of the address. Without it a case study that switches
+    precision reads back the cache written in the other one and fits at a precision it did not
+    declare, which no error would report.
     """
     payload = {
         "version": FOLD_PREPARATION_VERSION,
@@ -203,6 +208,7 @@ def fold_cache_key(
         "label_col": label_col,
         "eval_label_col": eval_label_col,
         "feature_names": list(feature_names),
+        "design_dtype": design_dtype,
         "splits": [
             {
                 "fold": int(split["fold"]),
@@ -243,6 +249,7 @@ def _fold_key(
         input_lineage=lineage,
         train_sample_frac=train_sample_frac,
         seed=seed,
+        design_dtype=getattr(mds, "feature_dtype", "float64"),
     )
 
 
@@ -423,15 +430,14 @@ def split_frames(mds: Any, split: dict[str, Any]) -> tuple[pl.DataFrame, pl.Data
         mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names
     )
     if has_temporal:
-        fold_temporal = pl.from_pandas(
-            mds.temporal_by_fold[mds.temporal_by_fold["fold"] == fold_id].drop(columns=["fold"])
-        ).unique(subset=list(mds.temporal_keys), keep="last")
-        for column in mds.temporal_keys:
-            if (
-                column in fold_temporal.columns
-                and fold_temporal.schema[column] != train_df.schema[column]
-            ):
-                fold_temporal = fold_temporal.cast({column: train_df.schema[column]})
+        from utils.modeling import fold_temporal_frame
+
+        fold_temporal = fold_temporal_frame(
+            mds.temporal_by_fold,
+            fold_id,
+            temporal_keys=mds.temporal_keys,
+            schema=train_df.schema,
+        )
         train_df = train_df.drop(mds.temporal_feature_names).join(
             fold_temporal, on=list(mds.temporal_keys), how="left"
         )
@@ -540,6 +546,13 @@ def prepare_raw_folds(
     )
     id_cols = [column for column in dataset.columns if column in ID_COLS]
 
+    # The case study says what precision its design matrices are built in. Pinning float64
+    # here regardless meant a case study that declares float32 paid for the wide form and then
+    # cast back down: on nasdaq100_microstructure that is 2.9 GB per fold built to be halved.
+    design_dtype = (
+        np.float32 if getattr(mds, "feature_dtype", "float64") == "float32" else np.float64
+    )
+
     folds: list[RawFold] = []
     for split in splits:
         fold_id = int(split["fold"])
@@ -547,8 +560,8 @@ def prepare_raw_folds(
 
         # Only the design matrix has its dtype pinned. A classification label is integral and
         # coercing it to float would change what the family is asked to fit.
-        X_train = _contiguous(train_df.select(feature_names).to_numpy())
-        X_val = _contiguous(val_df.select(feature_names).to_numpy())
+        X_train = _contiguous(train_df.select(feature_names).to_numpy(), design_dtype)
+        X_val = _contiguous(val_df.select(feature_names).to_numpy(), design_dtype)
         y_train = np.ascontiguousarray(train_df[label_col].to_numpy())
         y_val = np.ascontiguousarray(val_df[label_col].to_numpy())
         y_eval = np.ascontiguousarray(val_df[eval_label_col].to_numpy()) if eval_label_col else None
@@ -557,7 +570,7 @@ def prepare_raw_folds(
         # computed on the full slice, so the reduction changes cost and not what is measured.
         if train_sample_frac < 1.0:
             index = _subsample_index(X_train.shape[0], fold_id, train_sample_frac, seed)
-            X_train = _contiguous(X_train[index])
+            X_train = _contiguous(X_train[index], design_dtype)
             y_train = np.ascontiguousarray(y_train[index])
 
         global _BUILT

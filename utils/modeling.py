@@ -25,7 +25,7 @@ import json
 import os
 import random
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -123,10 +123,17 @@ class ModelingDataset:
     task_type: str = "regression"  # "regression" or "classification"
     num_classes: int = 0  # 0 for regression, 2+ for classification
     class_values: list = field(default_factory=list)  # sorted unique values for classification
-    temporal_by_fold: pd.DataFrame | None = None  # Per-fold temporal features (has 'fold' column)
+    # Per-fold temporal features, carrying a 'fold' column. Held lazily where the loader
+    # can: on us_equities_panel this artifact is 68.7M rows, and materialising it cost
+    # 8.7 GB for the whole run when every consumer wants one fold. Reach it through
+    # ``fold_temporal_frame``, never by indexing it directly.
+    temporal_by_fold: pl.LazyFrame | pl.DataFrame | pd.DataFrame | None = None
     temporal_keys: list[str] = field(default_factory=list)  # Join keys for temporal features
     temporal_feature_names: list[str] = field(default_factory=list)  # Temporal feature column names
     temporal_artifact_splits: list[dict[str, Any]] = field(default_factory=list)
+    # The float type the design matrices are built in. Read from the case study's
+    # ``features.storage_dtype``; fold preparation honours it rather than pinning float64.
+    feature_dtype: str = "float64"
     # Continuous-return label that classification predictions are scored against.
     # None for regression labels. When set, the column lives in ``dataset`` and
     # downstream IC computation must use it instead of the binary ``label_col``.
@@ -540,6 +547,29 @@ def verify_artifact_sidecars(
     return verified
 
 
+def feature_storage_dtype(case_study_id: str) -> pl.DataType:
+    """The float type a case study stores and fits its feature matrices in.
+
+    ``float64`` unless ``features.storage_dtype`` in the case study's ``setup.yaml`` says
+    otherwise. Declared per case study because only the large panels need the narrower type:
+    ``nasdaq100_microstructure`` is 16,098,877 rows x 88 features, which is 10.9 GB of modeling
+    dataset in double precision against 5.6 GB in single, while the small case studies fit
+    comfortably either way and narrowing them would move their numbers for no gain.
+    """
+    from utils.paths import get_case_study_dir
+
+    setup_path = get_case_study_dir(case_study_id) / "config" / "setup.yaml"
+    if not setup_path.exists():
+        return pl.Float64
+    declared = (yaml.safe_load(setup_path.read_text()) or {}).get("features", {})
+    name = (declared or {}).get("storage_dtype", "float64")
+    if name not in {"float32", "float64"}:
+        raise ValueError(
+            f"{case_study_id}: features.storage_dtype must be float32 or float64, got {name!r}"
+        )
+    return pl.Float32 if name == "float32" else pl.Float64
+
+
 def load_modeling_dataset(
     case_study_id: str,
     primary_label: str,
@@ -608,15 +638,34 @@ def load_modeling_dataset(
             f"Missing prerequisites for '{case_study_id}': " + ", ".join(p for p, _ in missing)
         )
 
-    # Load artifacts
-    features = pl.read_parquet(features_path)
+    # Load artifacts. The declared storage type is applied in the scan, so a case study that
+    # fits in single precision never materialises the double-precision form on the way.
+    storage_dtype = feature_storage_dtype(case_study_id)
+
+    def _read(path: Path) -> pl.DataFrame:
+        frame = pl.scan_parquet(path)
+        if storage_dtype != pl.Float64:
+            narrow = [n for n, t in frame.collect_schema().items() if t == pl.Float64]
+            if narrow:
+                frame = frame.with_columns([pl.col(c).cast(storage_dtype) for c in narrow])
+        return frame.collect()
+
+    features = _read(features_path)
 
     temporal_path = resolve_storage_path(
         case_study_id, temporal_spec, "features/model_based.parquet"
     )
-    temporal = pl.read_parquet(temporal_path) if temporal_path.exists() else None
+    # Scanned, not read. This artifact is per-fold, so it is a multiple of the feature table:
+    # 68.7M rows on us_equities_panel against the panel's 9.9M. Every consumer wants one fold,
+    # so the fold predicate is pushed into the scan instead of the whole thing being held.
+    temporal = pl.scan_parquet(temporal_path) if temporal_path.exists() else None
+    if temporal is not None and storage_dtype != pl.Float64:
+        narrow = [n for n, t in temporal.collect_schema().items() if t == pl.Float64]
+        if narrow:
+            temporal = temporal.with_columns([pl.col(c).cast(storage_dtype) for c in narrow])
+    temporal_columns = temporal.collect_schema().names() if temporal is not None else []
 
-    labels = pl.read_parquet(label_path)
+    labels = _read(label_path)
 
     # Auto-detect label column (the non-ID column in the label file)
     label_col = [c for c in labels.columns if c not in ID_COLS][0]
@@ -629,8 +678,9 @@ def load_modeling_dataset(
     # Normalize date column names across DataFrames
     if alt_date in labels.columns and date_col not in labels.columns:
         labels = labels.rename({alt_date: date_col})
-    if temporal is not None and alt_date in temporal.columns and date_col not in temporal.columns:
+    if temporal is not None and alt_date in temporal_columns and date_col not in temporal_columns:
         temporal = temporal.rename({alt_date: date_col})
+        temporal_columns = [date_col if c == alt_date else c for c in temporal_columns]
 
     # Detect join columns
     label_keys = sorted(set(labels.columns) & ID_COLS)
@@ -654,33 +704,38 @@ def load_modeling_dataset(
     _temporal_feature_names = []
 
     if temporal is not None:
-        _temporal_keys = sorted(set(temporal.columns) & set(feature_keys))
+        temporal_schema = temporal.collect_schema()
+        _temporal_keys = sorted(set(temporal_columns) & set(feature_keys))
         casts = {
             k: features.schema[k]
             for k in _temporal_keys
-            if temporal.schema[k] != features.schema[k]
+            if temporal_schema[k] != features.schema[k]
         }
         if casts:
             temporal = temporal.cast(casts)
 
-        if "fold" in temporal.columns:
-            # Per-fold temporal features — join fold 0 as placeholder for schema,
-            # store full per-fold data for fold-aware preparation functions.
+        if "fold" in temporal_columns:
+            # Per-fold temporal features. The dataset carries one fold as a placeholder so the
+            # schema is complete; the per-fold values are substituted at fold preparation time
+            # by ``fold_temporal_frame``, which reads the fold it is asked for and no more.
             _temporal_feature_names = [
-                c for c in temporal.columns if c not in set(_temporal_keys) | {"fold"}
+                c for c in temporal_columns if c not in set(_temporal_keys) | {"fold"}
             ]
-            fold_ids = sorted(temporal["fold"].unique().to_list())
-            placeholder_fold = fold_ids[0]
-            placeholder = temporal.filter(pl.col("fold") == placeholder_fold).drop("fold")
-            placeholder_dedup = placeholder.unique(subset=_temporal_keys, keep="last")
+            fold_ids = sorted(temporal.select(pl.col("fold").unique()).collect()["fold"].to_list())
+            placeholder_dedup = (
+                temporal.filter(pl.col("fold") == fold_ids[0])
+                .drop("fold")
+                .unique(subset=_temporal_keys, keep="last")
+                .collect()
+            )
             dataset = features.join(placeholder_dedup, on=_temporal_keys, how="left", suffix="_t")
-            del placeholder, placeholder_dedup
+            del placeholder_dedup
 
-            # Convert to pandas for fold-preparation functions
-            temporal_by_fold_pd = temporal.to_pandas()
+            # Kept lazy. Materialising it here is what made a run hold every fold at once.
+            temporal_by_fold_pd = temporal
         else:
             # Legacy: single feature set, join directly
-            temporal_dedup = temporal.unique(subset=_temporal_keys, keep="last")
+            temporal_dedup = temporal.unique(subset=_temporal_keys, keep="last").collect()
             dataset = features.join(temporal_dedup, on=_temporal_keys, how="left", suffix="_t")
             del temporal_dedup
     else:
@@ -844,6 +899,7 @@ def load_modeling_dataset(
         temporal_keys=_temporal_keys,
         temporal_feature_names=_temporal_feature_names,
         temporal_artifact_splits=temporal_artifact_splits,
+        feature_dtype="float32" if storage_dtype == pl.Float32 else "float64",
         eval_label_col=eval_label_col,
         lineage_inputs={
             "artifacts": input_artifacts,
@@ -1221,10 +1277,7 @@ def validate_temporal_fold_coverage(
         dataset_dates = dataset.select(date_col).unique()[date_col].to_pandas()
     else:
         dataset_dates = dataset[date_col].drop_duplicates()
-    if isinstance(temporal_by_fold, pl.DataFrame):
-        temporal_pd = temporal_by_fold.select([date_col, "fold"]).unique().to_pandas()
-    else:
-        temporal_pd = temporal_by_fold[[date_col, "fold"]].drop_duplicates()
+    temporal_pd = temporal_fold_index(temporal_by_fold, date_col).to_pandas()
 
     dataset_index = pd.DatetimeIndex(pd.to_datetime(dataset_dates, utc=True)).unique().sort_values()
     temporal_pd = temporal_pd.copy()
@@ -1310,6 +1363,65 @@ def validate_temporal_split_geometry(
         )
 
 
+def fold_temporal_frame(
+    temporal_by_fold: Any,
+    fold_id: int,
+    *,
+    temporal_keys: Sequence[str] | None = None,
+    schema: Any = None,
+) -> pl.DataFrame:
+    """The temporal feature rows of one fold, as polars, whatever form the artifact is held in.
+
+    One definition, because selecting a fold out of the temporal artifact was written four
+    separate times - twice against pandas and twice against polars - and copies of a selection
+    rule agree only by luck. It is also the only place that decides how much of the artifact is
+    read: given a :class:`polars.LazyFrame` the fold predicate reaches the scan, so a run holds
+    one fold's rows rather than every fold's.
+
+    ``temporal_keys`` deduplicates, keeping the last row per key as the artifact writer intends.
+    ``schema`` is the frame the result will be joined to; the join keys are cast to match it,
+    because an artifact written with a different integer width joins to nothing and reports
+    itself as missing values rather than as an error.
+    """
+    if temporal_by_fold is None:
+        raise ValueError("no temporal artifact to select a fold from")
+
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        frame = temporal_by_fold.filter(pl.col("fold") == fold_id).drop("fold").collect()
+    elif isinstance(temporal_by_fold, pl.DataFrame):
+        frame = temporal_by_fold.filter(pl.col("fold") == fold_id).drop("fold")
+    else:  # pandas, for artifacts and tests that still build one eagerly
+        frame = pl.from_pandas(
+            temporal_by_fold[temporal_by_fold["fold"] == fold_id].drop(columns=["fold"])
+        )
+
+    if temporal_keys:
+        frame = frame.unique(subset=list(temporal_keys), keep="last")
+    if schema is not None:
+        casts = {
+            key: schema[key]
+            for key in (temporal_keys or [])
+            if key in frame.columns and key in schema and frame.schema[key] != schema[key]
+        }
+        if casts:
+            frame = frame.cast(casts)
+    return frame
+
+
+def temporal_fold_index(temporal_by_fold: Any, date_col: str) -> pl.DataFrame:
+    """The distinct ``(date, fold)`` pairs an artifact carries, without reading its features.
+
+    What every coverage check needs, and all it needs. Against a lazy artifact the projection
+    reaches the scan, so this costs two columns rather than the whole table.
+    """
+    columns = [date_col, "fold"]
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        return temporal_by_fold.select(columns).unique().collect()
+    if isinstance(temporal_by_fold, pl.DataFrame):
+        return temporal_by_fold.select(columns).unique()
+    return pl.from_pandas(temporal_by_fold[columns].drop_duplicates())
+
+
 def replace_temporal_columns(
     dataset_pd: pd.DataFrame,
     mask: np.ndarray,
@@ -1323,8 +1435,9 @@ def replace_temporal_columns(
     Returns a copy of the masked rows with temporal columns overwritten.
     """
     rows = dataset_pd.loc[mask].copy()
-    fold_temp = temporal_by_fold[temporal_by_fold["fold"] == fold_id].drop(columns=["fold"])
-    fold_temp = fold_temp.drop_duplicates(subset=temporal_keys, keep="last")
+    fold_temp = fold_temporal_frame(
+        temporal_by_fold, fold_id, temporal_keys=temporal_keys
+    ).to_pandas()
 
     # Drop old temporal columns and merge fold-specific ones
     rows = rows.drop(columns=temporal_feature_names, errors="ignore")
@@ -1564,15 +1677,12 @@ def prepare_single_fold(
             assert temporal_by_fold is not None
             assert temporal_keys is not None
             assert temporal_feature_names is not None
-            fold_temp_pd = temporal_by_fold[temporal_by_fold["fold"] == fold_id].drop(
-                columns=["fold"]
+            fold_temp_pl = fold_temporal_frame(
+                temporal_by_fold,
+                fold_id,
+                temporal_keys=temporal_keys,
+                schema=train_df.schema,
             )
-            fold_temp_pl = pl.from_pandas(fold_temp_pd)
-            fold_temp_pl = fold_temp_pl.unique(subset=temporal_keys, keep="last")
-            # Cast temporal keys to match dataset dtypes
-            for k in temporal_keys:
-                if k in fold_temp_pl.columns and fold_temp_pl.schema[k] != train_df.schema[k]:
-                    fold_temp_pl = fold_temp_pl.cast({k: train_df.schema[k]})
 
             for df_name in ("train_df", "val_df"):
                 df = train_df if df_name == "train_df" else val_df

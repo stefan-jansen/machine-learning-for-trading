@@ -254,6 +254,13 @@ decision:
 # in minute bars and every one of them is session-bounded: a window never spans
 # an overnight gap, so each session restarts its own warmup.
 features:
+  # Feature matrices are stored and fitted in single precision. 16,098,877 rows x 88 features
+  # in float64 is a 10.9 GB modeling dataset and a 58.9 GB peak through one gradient-boosting
+  # fold; in float32 those are 5.6 GB and 38.0 GB. LightGBM bins to uint8 regardless, and the
+  # linear families fit standardised columns where the extra mantissa carries nothing this
+  # case study can measure. Declared here rather than globally: the smaller case studies fit
+  # comfortably in double precision, and narrowing them would move their numbers for nothing.
+  storage_dtype: float32
   windows:
     fast: 5              # one fast aggregate
     decision: 15         # one decision bar at the declared bar_frequency

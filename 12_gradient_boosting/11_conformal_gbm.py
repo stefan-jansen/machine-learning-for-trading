@@ -69,7 +69,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
 warnings.filterwarnings("ignore")
 
-from utils.modeling import load_modeling_dataset
+from utils.modeling import load_modeling_dataset, temporal_fold_index
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, format_pct_axis
 
@@ -356,12 +356,12 @@ processed_datasets = {}
 for cs_id, label, display_name in ASSET_CONFIGS:
     try:
         mds = load_modeling_dataset(cs_id, label, max_symbols=MAX_SYMBOLS)
-        temporal = (
-            pl.from_pandas(mds.temporal_by_fold) if mds.temporal_by_fold is not None else None
-        )
+        temporal = mds.temporal_by_fold
         requested_splits = mds.splits[:5]
         if temporal is not None:
-            available_folds = set(temporal["fold"].unique().to_list())
+            available_folds = set(
+                temporal_fold_index(temporal, mds.date_col)["fold"].unique().to_list()
+            )
             required_folds = {int(split["fold"]) for split in requested_splits}
             if not required_folds.issubset(available_folds):
                 raise ValueError(
