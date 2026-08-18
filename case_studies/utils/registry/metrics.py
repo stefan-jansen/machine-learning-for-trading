@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,17 @@ def compute_prediction_fold_metrics(
     class_values: list | None = None,
     eval_col: str | None = None,
     label: str | None = None,
+    label_buffer: str | None = None,
+    bar_frequency: str | None = None,
 ) -> tuple[dict[str, float], dict[int, dict[str, float]]]:
     """Compute standardized metrics from a predictions DataFrame.
 
     Uses the provided ``task_type`` to decide which metrics to compute.
+
+    ``label_buffer`` and ``bar_frequency`` are what the case study declares in
+    ``setup.yaml``, and they set the HAC bandwidth for a sub-daily label, whose
+    overlap the label name alone cannot express. Without them the horizon falls
+    back to parsing the name, which reads a minute label as a monthly one.
 
     For ``task_type="classification"``, ``eval_col`` must be provided and must
     name a column holding the continuous return that the binary/categorical
@@ -196,7 +204,9 @@ def compute_prediction_fold_metrics(
     # OOS dates across folds into a single series and compute HAC SE +
     # stationary block-bootstrap CI. This is what `model_analysis` notebooks
     # use for headline IC/AUC and CIs.
-    horizon = _infer_horizon_from_label(label)
+    horizon = _horizon_from_declared_buffer(label_buffer, bar_frequency)
+    if horizon is None:
+        horizon = _infer_horizon_from_label(label)
     _entity = entity_col if entity_col and entity_col in predictions.columns else None
 
     daily_ic = cross_sectional_ic_series(
@@ -277,6 +287,66 @@ def compute_prediction_fold_metrics(
                 )
 
     return headline, fold_results
+
+
+# Case matters: `M` is a month and `min` is a minute, which is the collision that put a
+# 314-lag HAC bandwidth on a 15-minute label. A bare `m` is deliberately absent - it is
+# the one token that could mean either, and no declaration in the nine case studies uses
+# it, so refusing it costs nothing and removes the ambiguity at the source.
+_SUB_DAILY_UNITS = {
+    "min": 60.0,
+    "mins": 60.0,
+    "minute": 60.0,
+    "minutes": 60.0,
+    "T": 60.0,
+    "h": 3600.0,
+    "H": 3600.0,
+    "hour": 3600.0,
+    "hours": 3600.0,
+}
+
+
+def _duration_seconds(text: str | None) -> float | None:
+    """Seconds in a declared duration such as ``15min``, ``60_minute`` or ``8H``.
+
+    Only sub-daily units resolve. A day, a week or a month has no fixed length in
+    seconds on a trading calendar, and treating one as though it did is the mistake
+    this helper exists to avoid making.
+    """
+    if not text:
+        return None
+    import re
+
+    match = re.fullmatch(r"\s*(\d+)\s*[_-]?\s*([A-Za-z]+)\s*", str(text))
+    if match is None:
+        return None
+    unit = match.group(2)
+    seconds = _SUB_DAILY_UNITS.get(unit) or _SUB_DAILY_UNITS.get(unit.lower())
+    if seconds is None:
+        return None
+    return int(match.group(1)) * seconds
+
+
+def _horizon_from_declared_buffer(
+    label_buffer: str | None, bar_frequency: str | None
+) -> int | None:
+    """How many decision bars a sub-daily label overlaps, from what setup.yaml declares.
+
+    A label name cannot say this. ``fwd_ret_15m`` is fifteen minutes and ``fwd_ret_1m``
+    is one month, and both parse as a number followed by ``m``; reading the first as
+    months resolves a one-bar label to 315 and sets the HAC bandwidth to 314 lags on a
+    series of 15-minute bars. What disambiguates them is the buffer the case study
+    declares - ``15min`` against ``1M`` - together with the bar frequency the horizon is
+    counted in.
+
+    Returns ``None`` unless both are declared and both are sub-daily, which leaves every
+    daily, weekly and monthly label to :func:`_infer_horizon_from_label`.
+    """
+    buffer_s = _duration_seconds(label_buffer)
+    bar_s = _duration_seconds(bar_frequency)
+    if buffer_s is None or bar_s is None or bar_s <= 0:
+        return None
+    return max(1, math.ceil(buffer_s / bar_s))
 
 
 def _infer_horizon_from_label(label: str | None) -> int:
