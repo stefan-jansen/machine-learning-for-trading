@@ -662,36 +662,16 @@ def register_epoch_checkpoint(
 # ---------------------------------------------------------------------------
 
 
-def _load_setup(case_study: str) -> dict[str, Any]:
-    """The case study's setup.yaml, or an empty mapping if it cannot be read."""
-    import yaml
-
-    from utils.paths import get_case_study_dir
-
-    try:
-        path = get_case_study_dir(case_study) / "config" / "setup.yaml"
-        return yaml.safe_load(path.read_text()) or {}
-    except (OSError, ImportError, yaml.YAMLError):
-        return {}
-
-
 def _declared_label_buffer(case_study: str, label: str | None) -> str | None:
     """The holding period the case study declares for ``label``."""
     if not label:
         return None
     try:
-        from utils.artifact_specs import resolve_label_buffer
+        from utils.artifact_specs import load_setup_config, resolve_label_buffer
 
-        return resolve_label_buffer(case_study, label, _load_setup(case_study))
+        return resolve_label_buffer(case_study, label, load_setup_config(case_study))
     except Exception:  # noqa: BLE001 - a missing declaration is not a registration failure
         return None
-
-
-def _declared_bar_frequency(case_study: str) -> str | None:
-    """The decision grid the case study's predictions sit on, when it declares one."""
-    decision = _load_setup(case_study).get("decision") or {}
-    frequency = decision.get("bar_frequency")
-    return str(frequency) if frequency else None
 
 
 def register_prediction_set(
@@ -963,7 +943,6 @@ def register_prediction_set(
                 eval_col=eval_col,
                 label=resolved_label,
                 label_buffer=_declared_label_buffer(case_study, resolved_label),
-                bar_frequency=_declared_bar_frequency(case_study),
             )
             # Merge auto-computed headline with caller-provided metrics
             merged = {**headline, **(metrics or {})}

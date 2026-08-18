@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,15 @@ def compute_prediction_fold_metrics(
     eval_col: str | None = None,
     label: str | None = None,
     label_buffer: str | None = None,
-    bar_frequency: str | None = None,
 ) -> tuple[dict[str, float], dict[int, dict[str, float]]]:
     """Compute standardized metrics from a predictions DataFrame.
 
     Uses the provided ``task_type`` to decide which metrics to compute.
 
-    ``label_buffer`` and ``bar_frequency`` are what the case study declares in
-    ``setup.yaml``, and they set the HAC bandwidth for a sub-daily label, whose
-    overlap the label name alone cannot express. Without them the horizon falls
-    back to parsing the name, which reads a minute label as a monthly one.
+    ``label_buffer`` is the holding period the case study declares in ``setup.yaml``.
+    Divided by the step of the prediction timestamps, it sets the HAC bandwidth for a
+    sub-daily label, whose overlap the label name alone cannot express. Without it the
+    horizon falls back to parsing the name, which reads a minute label as a monthly one.
 
     For ``task_type="classification"``, ``eval_col`` must be provided and must
     name a column holding the continuous return that the binary/categorical
@@ -204,7 +204,9 @@ def compute_prediction_fold_metrics(
     # OOS dates across folds into a single series and compute HAC SE +
     # stationary block-bootstrap CI. This is what `model_analysis` notebooks
     # use for headline IC/AUC and CIs.
-    horizon = _horizon_from_declared_buffer(label_buffer, bar_frequency)
+    horizon = _horizon_in_observations(
+        label_buffer, predictions[date_col] if date_col in predictions.columns else None
+    )
     if horizon is None:
         horizon = _infer_horizon_from_label(label)
     _entity = entity_col if entity_col and entity_col in predictions.columns else None
@@ -327,26 +329,57 @@ def _duration_seconds(text: str | None) -> float | None:
     return int(match.group(1)) * seconds
 
 
-def _horizon_from_declared_buffer(
-    label_buffer: str | None, bar_frequency: str | None
-) -> int | None:
-    """How many decision bars a sub-daily label overlaps, from what setup.yaml declares.
+def _observation_step_seconds(dates: Any) -> float | None:
+    """Seconds between one observation of the IC series and the next.
+
+    The series is one IC per distinct decision timestamp, so its step is the thing a
+    lag count is expressed in. It is measured from the timestamps themselves rather
+    than taken from a declaration, because the two need not agree: nasdaq100 declares
+    a 15-minute rebalance cadence and registers predictions on the one-minute grid the
+    features are built on.
+
+    The modal positive gap, not the mean: an overnight or weekend gap between sessions
+    is not a step of the grid, and averaging it in would inflate the step and shrink
+    every lag that follows from it.
+    """
+    import polars as pl
+
+    if dates is None or not isinstance(dates, pl.Series):
+        return None
+    stamps = dates.drop_nulls().unique().sort()
+    if stamps.len() < 3:
+        return None
+    if stamps.dtype == pl.Date:
+        stamps = stamps.cast(pl.Datetime("us"))
+    if stamps.dtype.base_type() != pl.Datetime:
+        return None
+    gaps = stamps.diff().drop_nulls().dt.total_microseconds()
+    gaps = gaps.filter(gaps > 0)
+    if gaps.is_empty():
+        return None
+    return float(gaps.mode().min()) / 1e6
+
+
+def _horizon_in_observations(label_buffer: str | None, dates: Any) -> int | None:
+    """How many IC observations a sub-daily label's holding period covers.
 
     A label name cannot say this. ``fwd_ret_15m`` is fifteen minutes and ``fwd_ret_1m``
     is one month, and both parse as a number followed by ``m``; reading the first as
-    months resolves a one-bar label to 315 and sets the HAC bandwidth to 314 lags on a
-    series of 15-minute bars. What disambiguates them is the buffer the case study
-    declares - ``15min`` against ``1M`` - together with the bar frequency the horizon is
-    counted in.
+    months resolved a fifteen-minute label to 315 and set the HAC bandwidth to 314 lags.
+    What disambiguates them is the buffer the case study declares - ``15min`` against
+    ``1M``. Dividing it by the step of the series the lag count applies to turns a
+    duration into the overlap ``compute_ic_uncertainty`` expects.
 
-    Returns ``None`` unless both are declared and both are sub-daily, which leaves every
-    daily, weekly and monthly label to :func:`_infer_horizon_from_label`.
+    Returns ``None`` unless the buffer is sub-daily, which leaves every daily, weekly and
+    monthly label to :func:`_infer_horizon_from_label`. A day, a week and a month have no
+    fixed length in seconds on a trading calendar, so the same division cannot be made
+    for them without a calendar this function does not have.
     """
     buffer_s = _duration_seconds(label_buffer)
-    bar_s = _duration_seconds(bar_frequency)
-    if buffer_s is None or bar_s is None or bar_s <= 0:
+    step_s = _observation_step_seconds(dates)
+    if buffer_s is None or step_s is None or step_s <= 0:
         return None
-    return max(1, math.ceil(buffer_s / bar_s))
+    return max(1, math.ceil(buffer_s / step_s))
 
 
 def _infer_horizon_from_label(label: str | None) -> int:
