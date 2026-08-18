@@ -266,15 +266,18 @@ class TestTheDeclaredVersion:
     If this digest moves, preparation changed and every result fitted under the current
     ``FOLD_PREPARATION_VERSION`` describes a different computation than a rerun would produce.
     Bump the version in ``case_studies/utils/folds.py`` and update the constant below in the same
-    commit, so the registry can tell the two apart.
+    commit, so the registry can tell the two apart. ``PRE_PRECISION_KEY`` in
+    ``tests/test_feature_storage_dtype.py`` pins a fold cache key that also carries the version,
+    so it moves with the same bump and has to be re-pinned in that commit as well.
     """
 
     GOLDEN_VERSION = 1
 
     def test_the_declared_version_matches_what_this_file_pins(self) -> None:
         assert FOLD_PREPARATION_VERSION == self.GOLDEN_VERSION, (
-            "fold preparation declares a version this test does not pin; update GOLDEN_VERSION "
-            "and GOLDEN_DIGEST together"
+            "fold preparation declares a version this test does not pin; update GOLDEN_VERSION, "
+            "PINNED_PREPARATION_DIGEST, and PRE_PRECISION_KEY in "
+            "tests/test_feature_storage_dtype.py together"
         )
 
     def test_preparation_produces_the_pinned_numbers(self) -> None:

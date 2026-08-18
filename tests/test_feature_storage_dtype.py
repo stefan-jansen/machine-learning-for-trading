@@ -75,12 +75,6 @@ class TestThePrecisionIsPartOfTheFoldAddress:
     def test_the_two_precisions_address_different_fold_sets(self):
         assert self._key("float32") != self._key("float64")
 
-    def test_the_same_precision_addresses_the_same_fold_set(self):
-        assert self._key("float32") == self._key("float32")
-
-    def test_the_default_is_the_double_precision_address(self):
-        assert self._key("float64") == self._key("float64")
-
 
 class _Dataset:
     """The minimum a fold preparation needs, built by hand so no artifact is required."""
@@ -191,6 +185,10 @@ class TestTheKnobDidNotInvalidateTheCaseStudiesThatDeclaredNothing:
     - returns for ``FIXTURE`` below. Every registered training run predates that work, so if this
     value moves, the registry can no longer resolve any of them and every case study re-fits from
     scratch. The first cut of this change put the key in unconditionally and did exactly that.
+
+    Raising ``schema_version`` in the payload also moves it, and that is a deliberate
+    invalidation rather than the regression this class is named for. Re-pin the constant in the
+    same commit as the bump, or the failure reads as a defect that did not happen.
     """
 
     PRE_PRECISION_FINGERPRINT = "97738b867c03d3dbdb59994f920855d08be1d9596e72eddf5f25cb81a270b720"
@@ -270,6 +268,12 @@ class TestTheFoldAddressIsPreservedForTheSameReason:
     }
 
     PRE_PRECISION_KEY = "92376ca3e260204a"
+    """What ``fold_cache_key`` at 719c9c14 returns for ``KEY``.
+
+    ``FOLD_PREPARATION_VERSION`` is in this payload, so a deliberate bump moves this value too.
+    ``tests/test_folds.py`` names ``GOLDEN_VERSION`` and ``PINNED_PREPARATION_DIGEST`` as the
+    constants to update alongside such a bump; this is the third.
+    """
 
     def test_the_default_addresses_the_cache_the_eight_already_wrote(self):
         """Against what 719c9c14 produced, not against another call into the same code.
