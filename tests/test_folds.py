@@ -292,3 +292,66 @@ class TestTheDeclaredVersion:
 
 
 PINNED_PREPARATION_DIGEST = "f85909b147e643cb"
+
+
+class TestPreparationStreams:
+    """The generator must hand out a fold before the next one is built.
+
+    This is the property the peak memory depends on, and it is invisible to every other test
+    here: collecting the generator gives byte-identical folds either way. What separates the
+    two is *when* each is built, so that is what these assert. Under the arrangement this
+    replaced - every consumer calling `prepare_raw_folds` - the whole raw set existed before a
+    single fold was transformed, and on us_equities_panel that set was 31.03 GB of a 52.56 GB
+    peak.
+    """
+
+    def test_the_first_fold_arrives_before_the_second_is_built(self):
+        from case_studies.utils import folds as folds_module
+
+        dataset = _dataset()
+        before = folds_module._BUILT
+        stream = folds_module.iter_raw_folds(dataset, SPLITS, use_cache=False)
+
+        assert before == folds_module._BUILT, "construction started before the first next()"
+        first = next(stream)
+        assert first.fold == 0
+        assert before + 1 == folds_module._BUILT, (
+            "the whole set was built to yield one fold - the generator is not streaming"
+        )
+        second = next(stream)
+        assert second.fold == 1
+        assert before + 2 == folds_module._BUILT
+
+    def test_streaming_and_collecting_agree_exactly(self):
+        dataset = _dataset()
+        collected = prepare_raw_folds(dataset, SPLITS, use_cache=False)
+        clear_memo()
+        from case_studies.utils.folds import iter_raw_folds
+
+        streamed = list(iter_raw_folds(dataset, SPLITS, use_cache=False))
+
+        assert _digest(streamed) == _digest(collected)
+        assert [fold.fold for fold in streamed] == [fold.fold for fold in collected]
+
+    def test_the_standardising_consumer_never_holds_the_raw_set(self):
+        """One raw fold alive at a time, not `len(splits)` of them."""
+        from case_studies.utils import folds as folds_module
+
+        dataset = _dataset()
+        alive: list[int] = []
+        real = folds_module.standardized_fold
+
+        def counting(raw):
+            # `raw` plus the generator's own reference is 2; a materialised list would show the
+            # whole set reachable from the caller's frame instead.
+            alive.append(len(folds_module._RAW_MEMO))
+            return real(raw)
+
+        folds_module.standardized_fold = counting
+        try:
+            out = folds_module.prepare_standardized_folds(dataset, SPLITS, use_cache=False)
+        finally:
+            folds_module.standardized_fold = real
+
+        assert len(out) == len(SPLITS)
+        assert alive == [0, 0], "the raw set was memoised while the consumer was still reading it"

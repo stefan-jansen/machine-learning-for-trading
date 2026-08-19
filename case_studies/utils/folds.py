@@ -56,6 +56,7 @@ __all__ = [
     "holds_in_memory",
     "gbm_fold",
     "prepare_gbm_folds_from_mds",
+    "iter_raw_folds",
     "prepare_raw_folds",
     "prepare_standardized_folds",
     "split_frames",
@@ -305,36 +306,62 @@ def _write_cache(directory: Path, key: str, folds: list[RawFold]) -> None:
     columnar format round-trips those exactly where a numpy object array cannot be loaded back
     at all without enabling pickle.
     """
+    staging = _open_staging(directory)
+    records = [_write_fold(staging, raw) for raw in folds]
+    _close_staging(staging, directory, key, records)
+
+
+def _open_staging(directory: Path) -> Path:
+    """A clean partial directory to write a fold set into."""
     import shutil
 
     staging = directory.with_name(f".{directory.name}.partial")
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
-    for raw in folds:
-        paths = _fold_paths(staging, raw.fold)
-        np.savez(paths["design"], X_train=raw.X_train, X_val=raw.X_val)
-        pl.DataFrame({"y": raw.y_train}).write_parquet(paths["train"])
-        val = {"y": raw.y_val, "date": raw.dates}
-        if raw.y_eval is not None:
-            val["y_eval"] = raw.y_eval
-        if raw.entities is not None:
-            val["entity"] = raw.entities
-        pl.DataFrame(val).write_parquet(paths["val"])
-        raw.meta.write_parquet(paths["meta"])
+    return staging
+
+
+def _write_fold(staging: Path, raw: RawFold) -> dict[str, int]:
+    """Persist one fold and return only what the manifest needs to record about it.
+
+    Returning the counts rather than the fold is what lets a streaming writer forget each fold
+    as it goes: a manifest built from a list of folds pins the whole set in memory until the
+    last one is written, which is the cost this exists to avoid.
+    """
+    paths = _fold_paths(staging, raw.fold)
+    np.savez(paths["design"], X_train=raw.X_train, X_val=raw.X_val)
+    pl.DataFrame({"y": raw.y_train}).write_parquet(paths["train"])
+    val = {"y": raw.y_val, "date": raw.dates}
+    if raw.y_eval is not None:
+        val["y_eval"] = raw.y_eval
+    if raw.entities is not None:
+        val["entity"] = raw.entities
+    pl.DataFrame(val).write_parquet(paths["val"])
+    raw.meta.write_parquet(paths["meta"])
+    return {"fold": int(raw.fold), "n_train": raw.n_train, "n_val": raw.n_val}
+
+
+def _close_staging(staging: Path, directory: Path, key: str, records: list[dict[str, int]]) -> None:
     manifest = {
         "key": key,
         "version": FOLD_PREPARATION_VERSION,
-        "folds": [int(raw.fold) for raw in folds],
-        "n_train": {str(raw.fold): raw.n_train for raw in folds},
-        "n_val": {str(raw.fold): raw.n_val for raw in folds},
+        "folds": [record["fold"] for record in records],
+        "n_train": {str(record["fold"]): record["n_train"] for record in records},
+        "n_val": {str(record["fold"]): record["n_val"] for record in records},
     }
     (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
     # Rename last: a reader either sees a complete fold set or no directory at all.
     staging.rename(directory)
 
 
-def _read_cache(directory: Path) -> list[RawFold] | None:
+def _cached_fold_ids(directory: Path) -> list[int] | None:
+    """The fold ids a complete cache entry holds, or ``None`` if it is unusable.
+
+    Every path is checked before any fold is read, so a caller that reads them one at a time
+    still gets all-or-nothing: a half-written entry is rejected up front rather than part way
+    through, when some folds have already been handed out.
+    """
     manifest_path = directory / "manifest.json"
     if not manifest_path.exists():
         return None
@@ -344,27 +371,35 @@ def _read_cache(directory: Path) -> list[RawFold] | None:
         return None
     if manifest.get("version") != FOLD_PREPARATION_VERSION:
         return None
-    folds = []
-    for fold_id in manifest["folds"]:
-        paths = _fold_paths(directory, int(fold_id))
-        if not all(path.exists() for path in paths.values()):
+    fold_ids = [int(fold_id) for fold_id in manifest["folds"]]
+    for fold_id in fold_ids:
+        if not all(path.exists() for path in _fold_paths(directory, fold_id).values()):
             return None
-        val = pl.read_parquet(paths["val"])
-        with np.load(paths["design"], allow_pickle=False) as design:
-            folds.append(
-                RawFold(
-                    fold=int(fold_id),
-                    X_train=design["X_train"],
-                    y_train=pl.read_parquet(paths["train"])["y"].to_numpy(),
-                    X_val=design["X_val"],
-                    y_val=val["y"].to_numpy(),
-                    y_eval=val["y_eval"].to_numpy() if "y_eval" in val.columns else None,
-                    meta=pl.read_parquet(paths["meta"]),
-                    dates=val["date"].to_numpy(),
-                    entities=val["entity"].to_numpy() if "entity" in val.columns else None,
-                )
-            )
-    return folds
+    return fold_ids
+
+
+def _read_fold(directory: Path, fold_id: int) -> RawFold:
+    paths = _fold_paths(directory, fold_id)
+    val = pl.read_parquet(paths["val"])
+    with np.load(paths["design"], allow_pickle=False) as design:
+        return RawFold(
+            fold=fold_id,
+            X_train=design["X_train"],
+            y_train=pl.read_parquet(paths["train"])["y"].to_numpy(),
+            X_val=design["X_val"],
+            y_val=val["y"].to_numpy(),
+            y_eval=val["y_eval"].to_numpy() if "y_eval" in val.columns else None,
+            meta=pl.read_parquet(paths["meta"]),
+            dates=val["date"].to_numpy(),
+            entities=val["entity"].to_numpy() if "entity" in val.columns else None,
+        )
+
+
+def _read_cache(directory: Path) -> list[RawFold] | None:
+    fold_ids = _cached_fold_ids(directory)
+    if fold_ids is None:
+        return None
+    return [_read_fold(directory, fold_id) for fold_id in fold_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +539,50 @@ def prepare_raw_folds(
 
     Family-independent and cached. Raises if any declared fold comes out empty: a silently
     missing fold changes what a result means and must never pass unnoticed.
+
+    This is :func:`iter_raw_folds` collected into a list, and holds the whole set by
+    definition. A caller that consumes folds one at a time and drops each as it goes should
+    call the generator instead - that is what bounds the peak on a large panel.
+    """
+    from utils.modeling import RANDOM_SEED
+
+    key = _fold_key(
+        mds, splits, train_sample_frac=train_sample_frac, seed=RANDOM_SEED if seed is None else seed
+    )
+    if key in _RAW_MEMO:
+        return _RAW_MEMO[key]
+    folds = list(
+        iter_raw_folds(
+            mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
+        )
+    )
+    return _memoize(_RAW_MEMO, key, folds) if holds_in_memory(mds, splits) else folds
+
+
+def iter_raw_folds(
+    mds: Any,
+    splits: Sequence[dict[str, Any]],
+    *,
+    train_sample_frac: float = 1.0,
+    seed: int | None = None,
+    use_cache: bool = True,
+):
+    """Yield each prepared fold as it is built, holding one at a time.
+
+    The same preparation as :func:`prepare_raw_folds`, which is this collected into a list.
+
+    Why it is a generator. Every family transforms a raw fold into a second full copy of the
+    design matrix - standardised for the linear families, float32 for GBM - and both consumers
+    already drop each raw fold as they cast it. That bounds what is held *afterwards* and does
+    nothing about the peak, because the whole raw set was built before the first cast. Measured
+    on us_equities_panel 07_gbm, 2026-08-18: a 20.10 GB dataset, a 31.03 GB float64 raw set and
+    a 52.56 GB peak, settling to 35.56 GB once only the 15.52 GB float32 set remained. Feeding
+    the consumer fold by fold removes the raw set from that peak.
+
+    The disk cache is written the same way, one fold at a time into a staging directory that is
+    renamed only after the manifest lands, so an interrupted run leaves no half-set a later run
+    could read. Abandoning the generator early leaves that staging directory behind; the next
+    write removes it.
     """
     from utils.modeling import ID_COLS, RANDOM_SEED
 
@@ -514,8 +593,8 @@ def prepare_raw_folds(
 
     key = _fold_key(mds, splits, train_sample_frac=train_sample_frac, seed=seed)
     if key in _RAW_MEMO:
-        return _RAW_MEMO[key]
-    may_hold = holds_in_memory(mds, splits)
+        yield from _RAW_MEMO[key]
+        return
 
     case_study = getattr(mds, "case_study_id", "")
     # No case study means no addressable location for the artefact and no way to invalidate it,
@@ -526,9 +605,12 @@ def prepare_raw_folds(
         directory = (root / key) if root is not None else None
     stale = False
     if directory is not None and directory.exists():
-        cached = _read_cache(directory)
-        if cached is not None and len(cached) == len(splits):
-            return _memoize(_RAW_MEMO, key, cached) if may_hold else cached
+        cached_ids = _cached_fold_ids(directory)
+        if cached_ids is not None and len(cached_ids) == len(splits):
+            # Read one at a time for the same reason they are built one at a time.
+            for fold_id in cached_ids:
+                yield _read_fold(directory, fold_id)
+            return
         # An entry written by an older layout, or left incomplete, is repaired rather than
         # left to make every future run miss the cache silently.
         stale = True
@@ -556,7 +638,19 @@ def prepare_raw_folds(
         np.float32 if getattr(mds, "feature_dtype", "float64") == "float32" else np.float64
     )
 
-    folds: list[RawFold] = []
+    staging = None
+    records: list[dict[str, int]] = []
+    if directory is not None and (stale or not directory.exists()):
+        try:
+            if stale:
+                import shutil
+
+                shutil.rmtree(directory)
+            staging = _open_staging(directory)
+        except OSError:
+            # A cache that cannot be written is not a reason to fail a run.
+            staging = None
+
     for split in splits:
         fold_id = int(split["fold"])
         train_df, val_df = split_frames(mds, split)
@@ -578,31 +672,33 @@ def prepare_raw_folds(
 
         global _BUILT
         _BUILT += 1
-        folds.append(
-            RawFold(
-                fold=fold_id,
-                X_train=X_train,
-                y_train=y_train,
-                X_val=X_val,
-                y_val=y_val,
-                y_eval=y_eval,
-                meta=val_df.select(id_cols),
-                dates=val_df[date_col].to_numpy(),
-                entities=val_df[entity_col].to_numpy() if entity_col else None,
-            )
+        raw = RawFold(
+            fold=fold_id,
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            y_eval=y_eval,
+            meta=val_df.select(id_cols),
+            dates=val_df[date_col].to_numpy(),
+            entities=val_df[entity_col].to_numpy() if entity_col else None,
         )
+        if staging is not None:
+            try:
+                records.append(_write_fold(staging, raw))
+            except OSError:
+                staging = None
+        # Every local naming the fold's arrays is dropped before yielding, so a consumer that
+        # holds nothing leaves one fold alive rather than two.
+        del X_train, y_train, X_val, y_val, y_eval, train_df, val_df
+        yield raw
+        del raw
 
-    if directory is not None and (stale or not directory.exists()):
+    if staging is not None and len(records) == len(splits):
         try:
-            if stale:
-                import shutil
-
-                shutil.rmtree(directory)
-            _write_cache(directory, directory.name, folds)
+            _close_staging(staging, directory, directory.name, records)
         except OSError:
-            # A cache that cannot be written is not a reason to fail a run.
             pass
-    return _memoize(_RAW_MEMO, key, folds) if may_hold else folds
 
 
 def prepare_standardized_folds(
@@ -627,19 +723,18 @@ def prepare_standardized_folds(
     if key in _STANDARDIZED_MEMO:
         return _STANDARDIZED_MEMO[key]
     may_hold = holds_in_memory(mds, splits)
-    raw = prepare_raw_folds(
-        mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
-    )
     # The standardised arrays are a second full copy of the design matrix, and on the large
-    # panels one copy runs to tens of gigabytes. Consuming the raw folds one at a time and
-    # dropping each as it is transformed holds one raw fold at the peak instead of the whole set.
-    # The memo entry goes first, or it keeps the list alive through the loop.
+    # panels one copy runs to tens of gigabytes. Taking the raw folds from the generator means
+    # one is alive at a time on the way in as well as on the way out - `prepare_raw_folds` would
+    # build the whole raw set first, and that set was the larger half of the peak.
+    # The memo entry goes first, or it keeps the raw list alive through the loop.
     _RAW_MEMO.pop(key, None)
-    pending = list(raw)
-    del raw
-    standardized = []
-    while pending:
-        standardized.append(standardized_fold(pending.pop(0)))
+    standardized = [
+        standardized_fold(raw)
+        for raw in iter_raw_folds(
+            mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
+        )
+    ]
     return _memoize(_STANDARDIZED_MEMO, key, standardized) if may_hold else standardized
 
 
@@ -670,26 +765,22 @@ def prepare_gbm_folds_from_mds(
     if key in _GBM_MEMO:
         return _GBM_MEMO[key]
     may_hold = holds_in_memory(mds, splits)
-    raw = prepare_raw_folds(
-        mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
-    )
     task_type = getattr(mds, "task_type", "regression")
     class_values = getattr(mds, "class_values", None)
-    # float32 is a second copy of the design matrix, so the raw folds are consumed one at a time
-    # and dropped as they are cast. That bounds what is held AFTER this returns - one cast set
-    # rather than a cast set beside a raw one - and it does not bound the peak, because
-    # prepare_raw_folds has already built every fold before the loop starts. Measured on
-    # us_equities_panel at 2026-08-18: 20.10 GB dataset, a 31.03 GB float64 raw set, 52.56 GB
-    # peak, settling to 35.56 GB once the 15.52 GB float32 set is all that remains beside the
-    # dataset. Bounding the peak needs preparation itself to yield fold by fold, which is a
-    # change to the shared raw layer that all five families read.
-    # The memo entry goes first, or it keeps the list alive through the loop.
+    # float32 is a second copy of the design matrix, so raw folds are taken one at a time and
+    # dropped as they are cast. Taking them from the generator is what bounds the PEAK rather
+    # than only what is held afterwards: `prepare_raw_folds` built every fold before the first
+    # cast, so the whole raw set sat beside the growing cast set. Measured on us_equities_panel
+    # 07_gbm, 2026-08-18, under the old arrangement: a 20.10 GB dataset, a 31.03 GB float64 raw
+    # set, a 52.56 GB peak, settling to 35.56 GB once only the 15.52 GB float32 set remained.
+    # The memo entry goes first, or it keeps the raw list alive through the loop.
     _RAW_MEMO.pop(key, None)
-    pending = list(raw)
-    del raw
-    cast: list[dict[str, Any]] = []
-    while pending:
-        cast.append(gbm_fold(pending.pop(0), task_type=task_type, class_values=class_values))
+    cast = [
+        gbm_fold(raw, task_type=task_type, class_values=class_values)
+        for raw in iter_raw_folds(
+            mds, splits, train_sample_frac=train_sample_frac, seed=seed, use_cache=use_cache
+        )
+    ]
     return _memoize(_GBM_MEMO, key, cast) if may_hold else cast
 
 
