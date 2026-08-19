@@ -243,14 +243,20 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # timestamp, take every pair of one contract that went up and one that went down, and count the
 # fraction of those pairs the model ranked in the right order; average that over the validation
 # period, with one half being what a coin achieves. It is computed within each timestamp and then
-# averaged, the same shape as `ic_mean`, which is what makes the two comparable.
+# averaged, the same shape as `ic_mean`, which is what makes the two answer the same question.
+#
+# `auc_n_days` is smaller than `ic_n_days`, and the gap is structural rather than a data problem.
+# A pair needs one contract that went up and one that went down, so a timestamp on which the whole
+# cross-section moved together defines no AUC, while a rank correlation is still defined there.
+# It costs 540 of 2,189 timestamps here. `full_coverage` refers to `ic_n_days` only.
 #
 # The two together answer a question neither answers alone. This model is fitted to the size of
-# the next return; a classifier fitted to `fwd_dir_8h`, the direction cut from that same return at
-# that same horizon, is fitted only to its sign. Which formulation suits the data is not settled
-# by argument, because a squared-error fit spends its capacity on the largest returns and crypto
-# funding returns have a heavy tail. Carrying both readings on every model lets the comparison be
-# made directly.
+# the next return; a model fitted to `fwd_dir_8h`, the direction cut from that same return at that
+# same horizon, is fitted only to its sign. `LABEL` is a parameter of this notebook, so the same
+# code run against that label produces the classifier and the registry holds both. Which
+# formulation suits the data is not settled by argument, because a squared-error fit spends its
+# capacity on the largest returns and crypto funding returns have a heavy tail. Carrying both
+# readings on every model lets the comparison be made directly.
 #
 # The table is sorted by IC, and the top of it is the trap this notebook exists to describe. The
 # leading row is the maximum of 150 numbers. Reading it as the result of one experiment would
@@ -288,6 +294,7 @@ catalog.select(
     "ic_std",
     "ic_n_days",
     "auc_mean_daily",
+    "auc_n_days",
     "full_coverage",
 ).head(15)
 

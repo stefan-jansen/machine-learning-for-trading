@@ -296,14 +296,23 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # pair of one contract that went up and one that went down, and count the fraction of those pairs
 # the model ranked in the right order; average that over the validation period. One half is the
 # value a coin achieves. It is computed within each timestamp and then averaged, the same shape as
-# `ic_mean`, so the two are comparable: pooling every contract-timestamp pair into one curve
-# instead would also pay the model for the whole market moving in a direction it happened to lean.
+# `ic_mean`, so the two answer the same question: pooling every contract-timestamp pair into one
+# curve instead would also pay the model for the whole market moving in a direction it leant.
+#
+# **The two are not measured on the same timestamps, and `auc_n_days` is why.** A pair needs one
+# contract that went up and one that went down, so a timestamp on which the whole cross-section
+# moved together defines no AUC at all, while a rank correlation is still defined there. That
+# removes 540 of the 2,189 validation timestamps, a quarter of them, and they are not a random
+# quarter: they are exactly the timestamps on which the whole cross-section moved together. Read
+# the two columns together. `full_coverage` is about `ic_n_days` alone and says nothing about the
+# AUC.
 #
 # Both readings are shown because the model here is fitted to the size of the return and this one
-# is not. `fwd_dir_8h` is the direction cut from the same return at the same horizon, and it is
-# what `07_gbm` fits a classifier to. Scoring this regression against it puts the two formulations
-# on one scale, so the question of whether predicting direction is easier than predicting size can
-# be answered from measurements rather than asserted.
+# is not. `fwd_dir_8h` is the direction cut from that same return at that same horizon, and it is
+# one of the labels this case study declares. This notebook fits the return; `LABEL` is a
+# parameter, so the same notebook run against `fwd_dir_8h` fits the classifier, and the registry
+# holds both. That is what puts the two formulations on one scale, so whether predicting direction
+# is easier than predicting size can be answered from measurements rather than asserted.
 
 # %% tags=["results"]
 catalog = (
@@ -337,6 +346,7 @@ catalog.select(
     "ic_std",
     "ic_n_days",
     "auc_mean_daily",
+    "auc_n_days",
     "full_coverage",
 )
 
