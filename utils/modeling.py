@@ -444,6 +444,25 @@ def get_classification_eval_label(case_study_id: str, label: str) -> str:
     return str(mapping[label])
 
 
+def get_direction_labels(case_study_id: str, label: str) -> tuple[str, ...]:
+    """Return the classification labels cut from a given continuous-return label.
+
+    ``labels.classification_eval_label`` read backwards. It declares which continuous return
+    each classification label was derived from; inverting it says which direction labels exist
+    for a return, which is what scoring a regression model by AUC needs. No separate
+    declaration is added for the inverse - one mapping cannot disagree with itself.
+
+    Returns an empty tuple when the case study declares no classification label for this
+    return, which is the case for five of the nine.
+    """
+    from utils import CASE_STUDIES_DIR
+
+    setup_path = CASE_STUDIES_DIR / case_study_id / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    mapping = (setup.get("labels") or {}).get("classification_eval_label") or {}
+    return tuple(sorted(k for k, v in mapping.items() if v == label))
+
+
 def verify_artifact_sidecars(
     artifacts: Mapping[str, Path],
     *,

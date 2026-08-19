@@ -674,6 +674,40 @@ def _declared_label_buffer(case_study: str, label: str | None) -> str | None:
         return None
 
 
+def _sibling_direction_labels(case_study: str, case_dir, label: str | None):
+    """The binary direction label cut from ``label``, loaded, or ``(None, None)``.
+
+    Scoring a regression model by AUC needs the direction label derived from the same return,
+    which ``labels.classification_eval_label`` already declares in the other direction. A label
+    with more than two levels is skipped rather than collapsed: ``fwd_dir_8h_3c`` has a neutral
+    band, so "up" in it is "up beyond the band", a different event from the plain direction
+    label's "up", and storing the two under one column is how a distinction gets lost. Where a
+    case study declares both, the strictly binary one is used.
+
+    A missing or unreadable label is not a registration failure - the AUC is a secondary
+    reading, and the run that produced the predictions is what matters.
+    """
+    if not label:
+        return None, None
+    try:
+        import polars as pl
+
+        from utils.modeling import get_direction_labels
+
+        for name in get_direction_labels(case_study, label):
+            path = case_dir / "labels" / f"{name}.parquet"
+            if not path.exists():
+                continue
+            frame = pl.read_parquet(path)
+            if name not in frame.columns:
+                continue
+            if frame.get_column(name).drop_nulls().n_unique() == 2:
+                return frame, name
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("no sibling direction label for %s/%s: %s", case_study, label, exc)
+    return None, None
+
+
 def register_prediction_set(
     case_study: str,
     training_hash: str,
@@ -932,6 +966,11 @@ def register_prediction_set(
                     db_lookup.close()
                 except Exception:  # noqa: BLE001
                     pass
+            direction_frame, direction_name = (
+                _sibling_direction_labels(case_study, case_dir, resolved_label)
+                if task_type != "classification"
+                else (None, None)
+            )
             headline, fold_m = compute_prediction_fold_metrics(
                 predictions,
                 y_true_col=y_true_col,
@@ -943,6 +982,8 @@ def register_prediction_set(
                 eval_col=eval_col,
                 label=resolved_label,
                 label_buffer=_declared_label_buffer(case_study, resolved_label),
+                direction_labels=direction_frame,
+                direction_col=direction_name,
             )
             # Merge auto-computed headline with caller-provided metrics
             merged = {**headline, **(metrics or {})}

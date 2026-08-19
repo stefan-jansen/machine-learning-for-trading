@@ -22,6 +22,8 @@ def compute_prediction_fold_metrics(
     eval_col: str | None = None,
     label: str | None = None,
     label_buffer: str | None = None,
+    direction_labels=None,
+    direction_col: str | None = None,
 ) -> tuple[dict[str, float], dict[int, dict[str, float]]]:
     """Compute standardized metrics from a predictions DataFrame.
 
@@ -287,6 +289,29 @@ def compute_prediction_fold_metrics(
                         "auc_boot_block": auc_unc["boot_block_size"],
                     }
                 )
+
+    # The mirror of the classification path above. A classification model is scored by IC
+    # against the continuous return its label was cut from; a regression model is scored by
+    # AUC against the direction label cut from its own return. Both directions are optional -
+    # five of the nine case studies declare no classification label at all - and neither is
+    # the selection criterion, which stays validation backtest Sharpe.
+    if not is_classification and direction_labels is not None and direction_col:
+        # Never fatal. This is a secondary reading of a run whose own metrics are already
+        # computed above, so a schema surprise in a sibling label must not lose the run.
+        try:
+            headline.update(
+                compute_cross_sectional_direction_auc(
+                    predictions,
+                    direction_labels,
+                    y_score_col=y_score_col,
+                    direction_col=direction_col,
+                    date_col=date_col,
+                    entity_col=_entity,
+                    horizon=int(max(1, horizon)),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("direction AUC against %s not computed: %s", direction_col, exc)
 
     return headline, fold_results
 
@@ -685,75 +710,138 @@ def compute_classification_metrics_from_predictions(
     return headline, fold_results
 
 
-def compute_regression_vs_binary_auc(
+def compute_cross_sectional_direction_auc(
     predictions,
-    binary_labels,
+    direction_labels,
     *,
-    y_score_col: str = "prediction",
-    binary_col: str = "y_binary",
-    join_keys: tuple[str, ...] = ("symbol", "timestamp"),
+    y_score_col: str = "y_score",
+    direction_col: str,
+    date_col: str = "timestamp",
+    entity_col: str | None = "symbol",
+    horizon: int = 1,
+    min_obs: int = 5,
+    n_boot: int = 1000,
 ) -> dict[str, float]:
-    """Compute AUC of a regression score vs a sibling binary direction label.
+    """AUC of a regression score against the sibling direction label, per date.
 
-    Used for Cohort B of the AUC backfill: a regression pred-set
-    (``fwd_ret_5d``) gets an AUC computed against the matching binary
-    direction label (``fwd_dir_5d``) joined on (symbol, timestamp). The
-    regression score is treated as a ranking signal — higher score implies
-    "more likely up" — and AUC measures whether high scores rank above
-    low ones with respect to the actual direction.
+    The mirror of what ``compute_prediction_fold_metrics`` already does for a classification
+    model, which is scored by IC against the continuous return its label was cut from. Here a
+    regression model is scored by AUC against the direction label cut from *its* return, so a
+    regression and a classification model on the same horizon can be compared on both metrics.
 
-    Parameters
-    ----------
-    predictions : pl.DataFrame
-        Regression pred-set with columns including ``y_score_col`` and
-        ``join_keys``.
-    binary_labels : pl.DataFrame
-        Sibling label parquet with the binary direction column
-        ``binary_col`` ∈ {0, 1} and matching ``join_keys``.
-    y_score_col : str
-        Continuous score column in ``predictions``.
-    binary_col : str
-        Binary {0, 1} direction column in ``binary_labels``.
-    join_keys : tuple of str
-        Join keys (default ``(symbol, timestamp)``).
+    **The AUC is cross-sectional, computed within each date and then averaged**, exactly as IC
+    is. Pooling every ``(entity, date)`` row into one ROC instead measures something else: on a
+    date when most of the cross-section moved up, a high score is more likely to sit on a
+    positive outcome whatever its rank within that date, so the pooled figure pays the model
+    for the base rate moving. Measured on the classification rows that carry both, the two
+    agree to 0.0002 in ``us_firm_characteristics``, whose monthly cross-section is close to
+    balanced, and diverge in ``sp500_equity_option_analytics`` to 0.5308 pooled against 0.5063
+    cross-sectional - an edge above one half of 0.0308 against 0.0063, five times over.
 
-    Returns
-    -------
-    dict[str, float]
-        ``{"auc_roc": float, "auc_pr": float, "n_obs": int}``. Empty dict
-        if the join produces fewer than 100 rows or the binary column is
-        degenerate.
+    The score is used as a ranking signal: higher implies "more likely up". A label with more
+    than two levels is collapsed to up against not-up on ``> 0``, which is the same convention
+    the classification path already applies to an ordinal panel.
+
+    Returns the ``auc_*`` block keyed exactly as the classification path writes it, plus
+    ``direction_label`` naming the sibling it scored against, so both
+    task types populate the same columns and a query does not have to know which it is reading.
+    Returns ``{}`` when the join is too small, the label is degenerate, or fewer than three
+    dates carry a defined AUC - "not computable" is not a value.
     """
-    import numpy as np
     import polars as pl
-    from sklearn.metrics import average_precision_score, roc_auc_score
+    from ml4t.diagnostic.metrics import compute_auc_uncertainty, cross_sectional_auc_series
 
     if not isinstance(predictions, pl.DataFrame):
         predictions = pl.from_pandas(predictions)
-    if not isinstance(binary_labels, pl.DataFrame):
-        binary_labels = pl.from_pandas(binary_labels)
+    if not isinstance(direction_labels, pl.DataFrame):
+        direction_labels = pl.from_pandas(direction_labels)
 
-    join = predictions.join(
-        binary_labels.select([*join_keys, binary_col]),
-        on=list(join_keys),
-        how="inner",
+    join_keys = [date_col] + ([entity_col] if entity_col else [])
+    missing = [k for k in (*join_keys, direction_col) if k not in direction_labels.columns]
+    if missing:
+        raise KeyError(f"direction label frame is missing {missing}")
+    if y_score_col not in predictions.columns:
+        raise KeyError(f"predictions are missing {y_score_col!r}")
+
+    left = predictions.select([*join_keys, y_score_col])
+    right = direction_labels.select([*join_keys, direction_col])
+    # A label parquet keyed by calendar date meets predictions stamped `datetime[ms]`, and
+    # polars refuses that join outright rather than coercing. Narrowing the prediction stamp to
+    # its date is the direction that cannot invent precision the label never had; it is right
+    # exactly when the label is daily or coarser, which is when the dtypes differ at all. An
+    # intraday label is Datetime on both sides and nothing is cast.
+    left_dt, right_dt = left.schema[date_col], right.schema[date_col]
+    if left_dt != right_dt:
+        if right_dt == pl.Date and left_dt in (
+            pl.Datetime,
+            *(pl.Datetime(u) for u in ("ms", "us", "ns")),
+        ):
+            left = left.with_columns(pl.col(date_col).cast(pl.Date))
+        elif left_dt == pl.Date:
+            right = right.with_columns(pl.col(date_col).cast(pl.Date))
+        else:
+            raise TypeError(
+                f"cannot align join key {date_col!r}: predictions are {left_dt}, "
+                f"direction label {direction_col!r} is {right_dt}"
+            )
+
+    joined = left.join(right, on=join_keys, how="inner")
+    # An empty join is a key mismatch, not an absent label, and the two must not look alike.
+    # `us_firm_characteristics` stores a dense 1..2712 entity re-index on its prediction rows
+    # while its label parquet carries the real permno, so the keys share a dtype and overlap in
+    # nothing; a quiet `{}` there reads as "this case study declares no direction label", which
+    # is false. Say which side is which and let the caller log it.
+    if joined.height == 0:
+        raise ValueError(
+            f"no rows join predictions to {direction_col!r} on {join_keys}: "
+            f"{predictions.height:,} prediction rows and {direction_labels.height:,} label "
+            f"rows share no key. The prediction entity id is probably not the label's."
+        )
+    if joined.height < 100:
+        return {}
+
+    joined = joined.filter(
+        pl.col(y_score_col).is_finite() & pl.col(direction_col).is_not_null()
+    ).with_columns((pl.col(direction_col) > 0).cast(pl.Int8).alias("__up"))
+    if joined.height < 100:
+        return {}
+    positives = int(joined.get_column("__up").sum())
+    if positives == 0 or positives == joined.height:
+        return {}
+
+    daily = cross_sectional_auc_series(
+        joined,
+        joined,
+        pred_col=y_score_col,
+        label_col="__up",
+        date_col=date_col,
+        entity_col=entity_col,
+        min_obs=min_obs,
     )
-    if join.height < 100:
+    if not isinstance(daily, pl.DataFrame) or daily.drop_nulls("auc").height < 3:
         return {}
-    yb = join[binary_col].to_numpy().astype(float)
-    ys = join[y_score_col].to_numpy().astype(float)
-    valid = np.isfinite(ys) & np.isfinite(yb)
-    if valid.sum() < 100:
-        return {}
-    yb, ys = yb[valid], ys[valid]
-    # Coerce to {0,1}: treat positive direction as class 1.
-    yb01 = (yb > 0).astype(int)
-    if yb01.sum() == 0 or yb01.sum() == len(yb01):
-        return {}
+
+    unc = compute_auc_uncertainty(
+        daily.drop_nulls("auc").select("auc"), horizon=int(max(1, horizon)), n_boot=n_boot
+    )
     return {
-        "auc_roc": float(roc_auc_score(yb01, ys)),
-        "auc_pr": float(average_precision_score(yb01, ys)),
-        "n_obs": int(len(yb01)),
+        "auc_mean_daily": unc["mean_auc"],
+        "auc_std_daily": unc["std_auc"],
+        "auc_n_days": float(unc["n_days"]),
+        "auc_pct_above_null": unc["pct_above_null"],
+        "auc_se_naive": unc["se_naive"],
+        "auc_naive_lo": unc["ci_naive_lower"],
+        "auc_naive_hi": unc["ci_naive_upper"],
+        "auc_se_hac": unc["se_hac"],
+        "auc_ci_lo": unc["ci_hac_lower"],
+        "auc_ci_hi": unc["ci_hac_upper"],
+        "auc_t_hac": unc["t_hac"],
+        "auc_p_hac": unc["p_hac"],
+        "auc_hac_lag": float(unc["hac_lag"]),
+        "auc_boot_lo": unc["ci_boot_lower"],
+        "auc_boot_hi": unc["ci_boot_upper"],
+        "auc_boot_block": unc["boot_block_size"],
+        "direction_label": direction_col,
     }
 
 
