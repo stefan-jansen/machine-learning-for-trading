@@ -458,7 +458,18 @@ if ridge.height:
     log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
     ridge_ic = ridge.get_column("ic_mean").to_numpy()
     peak = int(np.argmax(ridge_ic))
+else:
+    print(
+        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
+        f"Which estimators this section can show is decided by the menu at "
+        f"config/training/{LABEL}.yaml."
+    )
 
+# %% [markdown]
+# The penalty grid spans ten orders of magnitude, so it is read on a log axis.
+
+# %%
+if ridge.height:
     fig_alpha = go.Figure(
         go.Scatter(
             x=log_alpha,
@@ -493,12 +504,6 @@ if ridge.height:
         "Ridge penalty, against a dashed zero line. The curve sits below zero across the grid and "
         f"rises towards zero as the penalty strengthens, reaching its maximum at "
         f"1e{int(round(log_alpha[peak]))} marked in amber.",
-    )
-else:
-    print(
-        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
-        f"Which estimators this section can show is decided by the menu at "
-        f"config/training/{LABEL}.yaml."
     )
 
 # %% [markdown]
