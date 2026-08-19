@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 from matplotlib.colors import LinearSegmentedColormap
 
+from case_studies.utils.notebook_contracts import defined_ic
 from utils.style import (
     COLOR_CYCLER,
     COLORS,
@@ -759,7 +760,7 @@ def plot_rolling_daily_ic(
     if daily_metrics is None or daily_metrics.height == 0 or "ic" not in daily_metrics.columns:
         return
 
-    df = daily_metrics.drop_nulls("ic").sort("date")
+    df = defined_ic(daily_metrics).sort("date")
     if df.height < window:
         window = max(5, df.height // 4)
 
