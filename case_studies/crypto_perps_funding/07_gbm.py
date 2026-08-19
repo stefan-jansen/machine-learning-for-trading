@@ -239,6 +239,19 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # went on to earn, correlate the two rankings, and average that correlation over the validation
 # period.
 #
+# `auc_mean_daily` reads the same predictions the way a classifier is read. At each validation
+# timestamp, take every pair of one contract that went up and one that went down, and count the
+# fraction of those pairs the model ranked in the right order; average that over the validation
+# period, with one half being what a coin achieves. It is computed within each timestamp and then
+# averaged, the same shape as `ic_mean`, which is what makes the two comparable.
+#
+# The two together answer a question neither answers alone. This model is fitted to the size of
+# the next return; a classifier fitted to `fwd_dir_8h`, the direction cut from that same return at
+# that same horizon, is fitted only to its sign. Which formulation suits the data is not settled
+# by argument, because a squared-error fit spends its capacity on the largest returns and crypto
+# funding returns have a heavy tail. Carrying both readings on every model lets the comparison be
+# made directly.
+#
 # The table is sorted by IC, and the top of it is the trap this notebook exists to describe. The
 # leading row is the maximum of 150 numbers. Reading it as the result of one experiment would
 # attribute to the model whatever the stopping point contributed, and the section below measures
@@ -253,6 +266,8 @@ catalog = execution.catalog_rows.select(
     "ic_mean",
     "ic_std",
     "ic_n_days",
+    "auc_mean_daily",
+    "auc_n_days",
     "n_folds",
     "training_hash",
     "prediction_hash",
@@ -272,6 +287,7 @@ catalog.select(
     "ic_mean",
     "ic_std",
     "ic_n_days",
+    "auc_mean_daily",
     "full_coverage",
 ).head(15)
 

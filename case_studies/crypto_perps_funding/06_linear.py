@@ -291,6 +291,19 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # no rank correlation with anything, so those timestamps would contribute nothing and the
 # configuration's IC would be an average over a smaller sample than its neighbours'.
 # `full_coverage` marks the configurations measured on all of them.
+#
+# `auc_mean_daily` reads the same predictions as a classifier would. At each timestamp, take every
+# pair of one contract that went up and one that went down, and count the fraction of those pairs
+# the model ranked in the right order; average that over the validation period. One half is the
+# value a coin achieves. It is computed within each timestamp and then averaged, the same shape as
+# `ic_mean`, so the two are comparable: pooling every contract-timestamp pair into one curve
+# instead would also pay the model for the whole market moving in a direction it happened to lean.
+#
+# Both readings are shown because the model here is fitted to the size of the return and this one
+# is not. `fwd_dir_8h` is the direction cut from the same return at the same horizon, and it is
+# what `07_gbm` fits a classifier to. Scoring this regression against it puts the two formulations
+# on one scale, so the question of whether predicting direction is easier than predicting size can
+# be answered from measurements rather than asserted.
 
 # %% tags=["results"]
 catalog = (
@@ -301,6 +314,8 @@ catalog = (
         "ic_mean",
         "ic_std",
         "ic_n_days",
+        "auc_mean_daily",
+        "auc_n_days",
         "n_folds",
         "training_hash",
         "prediction_hash",
@@ -321,6 +336,7 @@ catalog.select(
     "ic_mean",
     "ic_std",
     "ic_n_days",
+    "auc_mean_daily",
     "full_coverage",
 )
 
