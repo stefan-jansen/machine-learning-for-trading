@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "audit_generated_at": "2026-08-20T07:10:58.181350+00:00",
+  "library_commit": "e486cdf200d187573b79d88a65c09d0cf5a2a6a4",
+  "engine_commit": "88e91306bfeef4781af823ea3a8d6cd96a37f323",
+  "evidence": {
+    "correctness": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json",
+    "performance": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json",
+    "synthetic_stress": "https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json"
+  },
+  "comparison_policy": {
+    "canonical_quantum": "0.00000001",
+    "meaning": "zero numeric gap after canonical quantization, not bit identity",
+    "fill_order": "timestamp, asset, side, quantity, price, commission",
+    "valuation_coverage": "identical timestamp sets required"
+  },
+  "scope": {
+    "case_studies": ["etfs", "cme_futures", "crypto_perps_funding"],
+    "required_pairs": 8,
+    "unsupported_pairs": 7,
+    "passing_pairs": 6,
+    "real_strategy_equivalence_gate_passed": false
+  },
+  "frameworks": {
+    "vectorbt_pro": {
+      "display_name": "VectorBT Pro",
+      "version": "2026.6.27",
+      "profile": "vectorbt_strict"
+    },
+    "vectorbt_oss": {
+      "display_name": "VectorBT OSS",
+      "version": "1.1.0",
+      "profile": "vectorbt_oss_strict"
+    },
+    "backtrader": {
+      "display_name": "Backtrader",
+      "version": "1.9.78.123",
+      "profile": "backtrader_strict"
+    },
+    "zipline": {
+      "display_name": "Zipline Reloaded",
+      "version": "3.1.1",
+      "profile": "zipline_strict"
+    },
+    "lean": {
+      "display_name": "LEAN",
+      "version": "18001",
+      "profile": "lean"
+    }
+  },
+  "real_strategy_records": [
+    {
+      "case_study": "etfs",
+      "framework": "vectorbt_pro",
+      "status": "pass",
+      "input_bundle_sha256": "01f38079ce47821a5379d3769e86f4a2170b88033108153bfc0f928698e946db",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 2466,
+      "valuations": 1995,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    },
+    {
+      "case_study": "etfs",
+      "framework": "vectorbt_oss",
+      "status": "pass",
+      "input_bundle_sha256": "01f38079ce47821a5379d3769e86f4a2170b88033108153bfc0f928698e946db",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 2466,
+      "valuations": 1995,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    },
+    {
+      "case_study": "etfs",
+      "framework": "backtrader",
+      "status": "pass",
+      "input_bundle_sha256": "01f38079ce47821a5379d3769e86f4a2170b88033108153bfc0f928698e946db",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 2433,
+      "valuations": 1995,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    },
+    {
+      "case_study": "etfs",
+      "framework": "zipline",
+      "status": "pass",
+      "input_bundle_sha256": "01f38079ce47821a5379d3769e86f4a2170b88033108153bfc0f928698e946db",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 2458,
+      "valuations": 1995,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    },
+    {
+      "case_study": "etfs",
+      "framework": "lean",
+      "status": "pass",
+      "input_bundle_sha256": "01f38079ce47821a5379d3769e86f4a2170b88033108153bfc0f928698e946db",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 2457,
+      "valuations": 1995,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    },
+    {
+      "case_study": "cme_futures",
+      "framework": "vectorbt_pro",
+      "status": "fail",
+      "input_bundle_sha256": "c7191027f550ef1be0c9528dac08e7c2bf6a76c86d935f593efeb1ad8b628c39",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 3545,
+      "valuations": 1595,
+      "equity_gap": "0.00000010",
+      "terminal_gap": "0.00000007"
+    },
+    {
+      "case_study": "cme_futures",
+      "framework": "backtrader",
+      "status": "fail",
+      "input_bundle_sha256": "c7191027f550ef1be0c9528dac08e7c2bf6a76c86d935f593efeb1ad8b628c39",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 3376,
+      "valuations": 1595,
+      "equity_gap": "0.00000015",
+      "terminal_gap": "0.00000015"
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "lean",
+      "status": "pass",
+      "input_bundle_sha256": "2acee3c8542043266e6f9c0dfc9434c95b4469ef6fcaf0556efc569fc9721cdd",
+      "negative_control_detected": true,
+      "valuation_timestamps_match": true,
+      "fills": 8408,
+      "valuations": 2426,
+      "equity_gap": "0.00000000",
+      "terminal_gap": "0.00000000"
+    }
+  ],
+  "unsupported_records": [
+    {
+      "case_study": "cme_futures",
+      "framework": "vectorbt_oss",
+      "reason": "no native futures contract multiplier and margin-account model"
+    },
+    {
+      "case_study": "cme_futures",
+      "framework": "zipline",
+      "reason": "the frozen input has continuous root series but no dated contract chain or roll map"
+    },
+    {
+      "case_study": "cme_futures",
+      "framework": "lean",
+      "reason": "the frozen input has continuous root series but no dated contract chain or roll map"
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "vectorbt_pro",
+      "reason": "no native perpetual-futures funding and margin-account model"
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "vectorbt_oss",
+      "reason": "no native perpetual-futures funding and margin-account model"
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "backtrader",
+      "reason": "no native perpetual-futures funding model"
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "zipline",
+      "reason": "no crypto perpetual-futures asset and funding model"
+    }
+  ],
+  "performance_policy": {
+    "boundary": "engine call only",
+    "warmup_processes": 1,
+    "measured_processes": 10,
+    "process_isolation": true,
+    "excluded": [
+      "input loading",
+      "model inference",
+      "target construction",
+      "adapter preparation",
+      "result extraction",
+      "serialization",
+      "reporting"
+    ]
+  },
+  "performance_records": [
+    {
+      "case_study": "etfs",
+      "framework": "vectorbt_pro",
+      "framework_median_seconds": 0.2861947563942522,
+      "framework_ci95_seconds": [0.27921037294436246, 0.2934094399679452],
+      "ml4t_median_seconds": 0.4523740210570395,
+      "ml4t_ci95_seconds": [0.4447206349577755, 0.4587188399164006],
+      "framework_to_ml4t_ratio": 0.632650733845227
+    },
+    {
+      "case_study": "etfs",
+      "framework": "vectorbt_oss",
+      "framework_median_seconds": 0.17163188150152564,
+      "framework_ci95_seconds": [0.16870081704109907, 0.17631133599206805],
+      "ml4t_median_seconds": 0.45100584148894995,
+      "ml4t_ci95_seconds": [0.44795862899627537, 0.4568893755786121],
+      "framework_to_ml4t_ratio": 0.3805535665234411
+    },
+    {
+      "case_study": "etfs",
+      "framework": "backtrader",
+      "framework_median_seconds": 9.302929089521058,
+      "framework_ci95_seconds": [9.13238851702772, 9.424219395965338],
+      "ml4t_median_seconds": 0.42486516502685845,
+      "ml4t_ci95_seconds": [0.4208951089531183, 0.42991389392409474],
+      "framework_to_ml4t_ratio": 21.89619167514701
+    },
+    {
+      "case_study": "etfs",
+      "framework": "zipline",
+      "framework_median_seconds": 3.966738564078696,
+      "framework_ci95_seconds": [3.896178873954341, 4.062238205457106],
+      "ml4t_median_seconds": 0.40618716552853584,
+      "ml4t_ci95_seconds": [0.4046260970644653, 0.409877855097875],
+      "framework_to_ml4t_ratio": 9.765790011895442
+    },
+    {
+      "case_study": "etfs",
+      "framework": "lean",
+      "framework_median_seconds": 2.7540494829881936,
+      "framework_ci95_seconds": [2.7177341550122947, 2.770153336925432],
+      "ml4t_median_seconds": 0.5086132920114323,
+      "ml4t_ci95_seconds": [0.5061918235151097, 0.5143514589872211],
+      "framework_to_ml4t_ratio": 5.414820112342423
+    },
+    {
+      "case_study": "crypto_perps_funding",
+      "framework": "lean",
+      "framework_median_seconds": 2.7731760181486607,
+      "framework_ci95_seconds": [2.7098636529408395, 2.8758620645385236],
+      "ml4t_median_seconds": 0.6379554370651022,
+      "ml4t_ci95_seconds": [0.6285572075285017, 0.6524820604827255],
+      "framework_to_ml4t_ratio": 4.346974501709064
+    }
+  ],
+  "synthetic_stress": {
+    "generated_at": "2026-08-20T06:39:06.224106+00:00",
+    "assets": 250,
+    "sessions": 5040,
+    "bars": 1260000,
+    "synthetic": true,
+    "records": [
+      {
+        "framework": "vectorbt_pro",
+        "intents": 427790,
+        "fills": 390369,
+        "trades": 188549,
+        "terminal_value": 716785.408089,
+        "status": "pass"
+      },
+      {
+        "framework": "vectorbt_oss",
+        "intents": 427790,
+        "fills": 390369,
+        "trades": 188549,
+        "terminal_value": 716785.408089,
+        "status": "pass"
+      },
+      {
+        "framework": "backtrader",
+        "intents": 427790,
+        "fills": 343813,
+        "trades": 182019,
+        "terminal_value": -9166273.555954,
+        "status": "pass"
+      },
+      {
+        "framework": "zipline",
+        "intents": 427790,
+        "fills": 427696,
+        "trades": 226434,
+        "terminal_value": 10504095.9,
+        "status": "pass"
+      },
+      {
+        "framework": "lean",
+        "intents": 427790,
+        "fills": 361297,
+        "trades": 191297,
+        "terminal_value": 184538.13,
+        "status": "pass"
+      }
+    ]
+  }
+}

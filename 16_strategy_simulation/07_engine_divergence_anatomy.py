@@ -850,8 +850,8 @@ pl.DataFrame(
 #    results, specify: fill timing, share type, fill ordering, rebalance mode,
 #    and cost model. Without this, results are not reproducible.
 #
-# **Next**: the external-engine parity notebooks make the same execution knobs
-# concrete on the canonical benchmark:
+# **Next**: the external-engine audit applies these controls to frozen real-strategy inputs in
+# [`16_case_study_lean_parity`](16_case_study_lean_parity.ipynb). Framework-specific views are in
 # [`15_lean_engine_parity`](15_lean_engine_parity.ipynb),
 # [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb),
 # and [`18_vectorbt_engine_parity`](18_vectorbt_engine_parity.ipynb).
