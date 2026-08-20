@@ -256,16 +256,10 @@ fred_snapshot_hash = hashlib.sha256(fred_snapshot_path.read_bytes()).hexdigest()
 print(f"FRED snapshot covers observations through {fred_snapshot_end}")
 print(f"FRED snapshot content hash: sha256:{fred_snapshot_hash}")
 
-if "YIELD_CURVE_SLOPE" in macro_df.columns:
-    yield_curve = macro_df.select(
-        "timestamp",
-        (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope"),
-    ).drop_nulls()
-else:
-    yield_curve = macro_df.select(
-        "timestamp",
-        ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope"),
-    ).drop_nulls()
+yield_curve = macro_df.select(
+    "timestamp",
+    (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope"),
+).drop_nulls()
 
 # %%
 regime_panel = (
