@@ -55,7 +55,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.paths import get_output_dir
-from utils.style import COLORS, ml4t_diverging
+from utils.style import COLORS, ml4t_diverging, show_plotly_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2019-01-02"
@@ -115,7 +115,7 @@ evaluation_dates = [ts for ts in all_dates if ts > calibration_end]
 assert len(calibration_dates) > LOOKBACK_BARS
 assert len(evaluation_dates) > LOOKBACK_BARS
 
-# %%
+# %% tags=["results"]
 calibration_prices = prices_df.filter(pl.col("timestamp") <= calibration_end)
 evaluation_prices = prices_df.filter(pl.col("timestamp") > calibration_end)
 calibration_schedule = calibration_dates[LOOKBACK_BARS::CADENCE_BARS]
@@ -213,9 +213,15 @@ class SweepStrategy(Strategy):
 
 
 # %% [markdown]
-# The runner delegates annualization to `ml4t.backtest`. In particular, Calmar is the library's
-# CAGR divided by absolute maximum drawdown. Trade statistics and MAE/MFE inputs use only trades
-# whose status is `closed`; end-of-window marks are not completed observations.
+# The runner delegates annualization to `ml4t.backtest`: Calmar is the library's CAGR divided by
+# absolute maximum drawdown.
+#
+# Trade statistics are a separate matter. A backtest that ends while positions are open produces
+# trades in three states - closed, partly unwound, and still open - and the last two carry a PnL
+# that is a mark-to-market rather than a result. The library's `num_trades` and `win_rate` count
+# all three, which inflates the win rate with positions that have not finished losing. Everything
+# trade-level below is therefore computed over the closed trades only, which is also the population
+# the MAE/MFE analysis reads.
 
 
 # %%
@@ -238,34 +244,43 @@ def run_risk_sweep(
         config=config,
     ).run()
     closed_trades = [trade for trade in result.trades if trade.status == "closed"]
+    closed_wins = sum(1 for trade in closed_trades if trade.pnl > 0)
     return {
+        # Equity-curve metrics come from the library and are unaffected by trade bookkeeping.
         "sharpe": float(result.metrics["sharpe"]),
         "max_dd": float(result.equity.max_dd),
         "calmar": float(result.metrics["calmar"]),
         "cagr": float(result.metrics["cagr"]),
         "total_return": float(result.metrics["total_return"]),
-        "n_trades": int(result.metrics["num_trades"]),
-        "win_rate": float(result.metrics["win_rate"]),
+        # Trade-level statistics are computed over the closed trades only, matching the population
+        # the MAE/MFE analysis reads. The library's own num_trades and win_rate count every trade
+        # including the ones still open at the final bar, whose PnL is a mark rather than a result.
+        "n_trades_all": int(result.metrics["num_trades"]),
+        "n_trades": len(closed_trades),
+        "win_rate": closed_wins / len(closed_trades) if closed_trades else float("nan"),
         "trades": closed_trades,
     }
 
 
-# %%
+# %% tags=["results"]
 baseline_calibration = run_risk_sweep(
     calibration_prices,
     calibration_weights,
     initial_cash=INITIAL_CASH,
 )
-assert baseline_calibration["n_trades"] == len(baseline_calibration["trades"])
-assert baseline_calibration["trades"]
+if not baseline_calibration["trades"]:
+    raise ValueError("The calibration baseline closed no trades, so no trade statistics exist")
 
 display(
     Markdown(
         f"The calibration baseline has Sharpe **{baseline_calibration['sharpe']:.2f}**, "
         f"CAGR **{baseline_calibration['cagr']:.1%}**, maximum drawdown "
         f"**{baseline_calibration['max_dd']:.1%}**, and Calmar "
-        f"**{baseline_calibration['calmar']:.2f}** across "
-        f"**{baseline_calibration['n_trades']} closed trades**."
+        f"**{baseline_calibration['calmar']:.2f}**. Of the "
+        f"**{baseline_calibration['n_trades_all']}** positions the backtest opened, "
+        f"**{baseline_calibration['n_trades']}** closed before the window ended; the rest were "
+        "still open or only partly unwound, and every trade statistic below counts the closed "
+        "ones only."
     )
 )
 
@@ -388,7 +403,10 @@ fig.update_layout(
     ),
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Sharpe and trade count against threshold for each of the three one-dimensional sweeps, showing how each rule's parameter trades performance against how often it fires.",
+)
 
 # %%
 sweep_rows = [
@@ -559,9 +577,12 @@ fig.update_layout(
         "<br><sup>Pooled ranges make colors comparable within each metric</sup>"
     ),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of Calmar over the stop-loss by take-profit grid, with a broad region of similar values rather than a sharp optimum.",
+)
 
-# %%
+# %% tags=["results"]
 best_sl_tp_index = np.unravel_index(np.nanargmax(sl_tp_calmar), sl_tp_calmar.shape)
 best_sl_trail_index = np.unravel_index(np.nanargmax(sl_trail_calmar), sl_trail_calmar.shape)
 best_sl_tp = (sl_grid[best_sl_tp_index[0]], tp_grid[best_sl_tp_index[1]])
@@ -597,7 +618,7 @@ pl.DataFrame(grid_rows).write_parquet(OUTPUT_DIR / "stoploss_takeprofit_grid.par
 # MAE/MFE percentiles are another fitted rule. They use only closed calibration trades, so neither
 # an end-of-window mark nor any evaluation path can influence the selected stop and target.
 
-# %%
+# %% tags=["results"]
 calibration_trades = baseline_calibration["trades"]
 mae_mfe = MAEMFEAnalyzer(calibration_trades)
 suggested_sl = mae_mfe.suggest_stop_loss(percentile=90)
@@ -647,7 +668,10 @@ fig.update_layout(
     xaxis={"title": "Maximum adverse excursion", "tickformat": ".0%"},
     yaxis={"title": "Maximum favorable excursion", "tickformat": ".0%"},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of Calmar over the stop-loss by trailing-stop grid on the same colour scale as the previous one.",
+)
 
 # %% [markdown]
 # ## 5. One-Time Chronological Evaluation
@@ -696,6 +720,13 @@ comparison = pl.DataFrame(
 ).sort("calmar", descending=True)
 winner = comparison.row(0, named=True)
 baseline_evaluation = evaluation_results["No rules"]
+comparison
+
+# %% [markdown]
+# The trade columns count closed trades and the win rate is computed over those same trades, so
+# both describe the positions that actually finished. Read them alongside the equity-curve columns
+# rather than instead of them: a configuration can close few trades and still shape the curve,
+# because the rules act on positions that remain open as well.
 
 # %%
 plot_rows = comparison.sort("calmar", descending=True)
@@ -730,7 +761,10 @@ fig.update_layout(
     yaxis={"title": "Calmar ratio (CAGR / |maximum drawdown|)", "zeroline": True},
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of evaluation-window Calmar per configuration, sorted, with the highest-ranked bar highlighted. Several bars sit below zero.",
+)
 
 # %%
 pl.DataFrame(
@@ -751,7 +785,7 @@ pl.DataFrame(
 # %% [markdown]
 # ## Key Takeaways
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""
