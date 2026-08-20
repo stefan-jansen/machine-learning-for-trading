@@ -145,6 +145,9 @@ case_studies/*/exploration/
 case_studies/*/registry.db
 case_studies/*/results/
 case_studies/*/*_v1_contaminated/
+# Prepared cross-validation folds: a cache addressed by the inputs it was built from and
+# rebuilt on demand. See case_studies/utils/folds.py.
+case_studies/*/folds/
 
 # Unified registry and run artifacts — all gitignored
 # registry.db is SSOT but too large for git (43-180 MB per case study)
