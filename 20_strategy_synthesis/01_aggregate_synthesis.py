@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore")
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import compute_cost_bps
-from utils.paths import get_case_study_dir, get_chapter_dir
+from utils.paths import REPO_ROOT, get_case_study_dir, get_chapter_dir
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -2448,7 +2448,9 @@ if not variant_df.is_empty():
 )
 (OUTPUT_DIR / "all_synthesis.json").write_text(json.dumps(synthesis_dict, indent=2))
 
-print(f"\nSaved aggregated data to {OUTPUT_DIR}")
+# Relative to the repository root: an absolute path is specific to the machine
+# that ran the notebook and tells a reader nothing.
+print(f"\nSaved aggregated data to {OUTPUT_DIR.relative_to(REPO_ROOT)}")
 for f in sorted(OUTPUT_DIR.glob("*.parquet")) + sorted(OUTPUT_DIR.glob("*.json")):
     print(f"  {f.name}: {f.stat().st_size / 1024:.1f} KB")
 
