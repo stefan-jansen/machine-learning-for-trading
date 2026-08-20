@@ -356,36 +356,73 @@ def test_crypto_dml_seals_the_label_endpoint_and_hashes_current_inputs() -> None
     assert "max() + LABEL_HORIZON >= HOLDOUT_CUTOFF" in source
 
 
-def test_crypto_gbm_uses_the_configured_device_and_hashes_current_inputs() -> None:
-    """The GBM grid must honor its setup default and remain content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "07_gbm.py").read_text()
-    setup = yaml.safe_load(
-        (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
+def test_crypto_gbm_takes_its_device_from_setup_yaml() -> None:
+    """The device the boundary fits on is the one ``setup.yaml`` declares.
+
+    ``07_gbm`` no longer names a device. It calls the shared model boundary, which
+    reads ``modeling.gbm`` from the case study's own setup and lets an explicit
+    request field, and nothing else, override it. The source scan that used to
+    stand here went on passing against text the notebook had stopped containing.
+    """
+    from types import SimpleNamespace
+
+    from case_studies.utils.gbm import _gbm_execution_settings
+
+    root = REPO_ROOT / "case_studies" / "crypto_perps_funding"
+    setup = yaml.safe_load((root / "config" / "setup.yaml").read_text())
+    assert setup["modeling"]["gbm"]["device"] == "cpu"
+
+    study = SimpleNamespace(root=root)
+    assert _gbm_execution_settings(study, {})[0] == "cpu"
+    assert _gbm_execution_settings(study, {"device": "gpu"})[0] == "cuda"
+
+
+def test_crypto_folds_purge_the_24h_buffer_the_variant_label_configures() -> None:
+    """``fwd_ret_24h`` folds leave 24 hours between training and validation.
+
+    The guard this replaces read the purge out of the notebook's own source. Both
+    model notebooks now take their folds from the shared boundary, so the property
+    is checked where it is decided: the configured buffer must reach
+    ``generate_cv_splits``, and no fold may see a label whose outcome window
+    reaches into the sealed holdout.
+    """
+    import pandas as pd
+    import polars as pl
+
+    from utils.cv_splits import generate_cv_splits
+    from utils.modeling import resolve_label_buffer
+
+    case_study = "crypto_perps_funding"
+    root = REPO_ROOT / "case_studies" / case_study
+    setup = yaml.safe_load((root / "config" / "setup.yaml").read_text())
+    buffer = resolve_label_buffer(case_study, "fwd_ret_24h", setup)
+    assert buffer == "24H"
+
+    holdout_start = pd.Timestamp(setup["evaluation"]["holdout_start"])
+    horizon = pd.Timedelta(buffer.lower())  # pandas deprecated the capital unit
+    timeline = pl.DataFrame(
+        {"timestamp": pd.date_range("2019-01-01", holdout_start, freq="8h", inclusive="left")}
     )
-    configured_device = setup["modeling"]["gbm"]["device"]
-
-    assert configured_device == "cpu"
-    assert 'setup.get("modeling", {}).get("gbm", {}).get("device", "cpu")' in source
-    assert "TRAIN_DEVICE = resolve_gbm_device(TRAIN_DEVICE, _configured_device)" in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "CPU fallback" not in source
-
-
-@pytest.mark.parametrize("notebook", ["06_linear.py", "07_gbm.py"])
-def test_crypto_model_guard_uses_active_24h_label_buffer(notebook: str) -> None:
-    """Crypto model guards must purge the endpoint for the selected label horizon."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / notebook).read_text()
-    setup = yaml.safe_load(
-        (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
+    splits = generate_cv_splits(
+        timeline,
+        case_study_id=case_study,
+        label_buffer=buffer,
+        outcome_horizon=buffer,
     )
+    assert splits
 
-    assert setup["labels"]["variant_buffers"]["fwd_ret_24h"] == "24H"
-    assert "pd.Timedelta(mds.label_buffer)" in source
-    assert 'split["val_end"] + label_horizon < holdout_start' in source
-    assert 'split["val_end"] + timedelta(hours=8)' not in source
+    for split in splits:
+        train_end = pd.Timestamp(split["train_end"])
+        val_start = pd.Timestamp(split["val_start"])
+        val_end = pd.Timestamp(split["val_end"])
+        assert val_start - train_end >= horizon, (
+            f"fold {split['fold']} leaves {val_start - train_end} between training and "
+            f"validation, less than the {buffer} the label needs"
+        )
+        assert val_end + horizon <= holdout_start, (
+            f"fold {split['fold']} validates to {val_end}, whose 24-hour outcome window "
+            f"reaches past the sealed holdout start {holdout_start.date()}"
+        )
 
 
 def test_crypto_tabm_requires_cuda_and_hashes_current_inputs() -> None:

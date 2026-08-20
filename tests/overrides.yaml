@@ -1,3 +1,8 @@
+# A model-execution notebook takes its reduction through the shared boundary, which reads
+# PREVIEW_REDUCTIONS and accepts one only under EXECUTION_TIER: preview. The MAX_FOLDS and
+# MAX_SYMBOLS these blocks used to carry were left behind by that migration and reached
+# nothing, so fourteen runs named as reduced were running unreduced.
+# tests/test_pm_helpers.py::test_every_declared_parameter_reaches_its_notebook is the gate.
 02_financial_data_universe/01_us_equities_eda:
   timeout: 180
 02_financial_data_universe/02_corporate_actions:
@@ -1177,13 +1182,17 @@ case_studies/cme_futures/05_evaluation:
   timeout: 600
 case_studies/cme_futures/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/cme_futures/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   parameters:
@@ -1264,13 +1273,17 @@ case_studies/crypto_perps_funding/05_evaluation:
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   gpu: true
@@ -1355,13 +1368,17 @@ case_studies/etfs/05_evaluation:
   timeout: 300
 case_studies/etfs/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/etfs/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -1467,13 +1484,17 @@ case_studies/fx_pairs/05_evaluation:
   timeout: 300
 case_studies/fx_pairs/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/fx_pairs/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1559,8 +1580,10 @@ case_studies/nasdaq100_microstructure/05_evaluation:
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
@@ -1655,8 +1678,10 @@ case_studies/sp500_equity_option_analytics/05_evaluation:
   timeout: 300
 case_studies/sp500_equity_option_analytics/06_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
   # This case study declares modeling.gbm.device: cuda in its setup.yaml, and the
@@ -1667,8 +1692,10 @@ case_studies/sp500_equity_option_analytics/07_gbm:
   # pipeline depends on its predictions - 08 through 18 pass without it.
   gpu: true
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   parameters:
@@ -1817,8 +1844,10 @@ case_studies/sp500_options/06_linear:
   timeout: 120
 case_studies/sp500_options/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   parameters:
@@ -2026,13 +2055,17 @@ case_studies/us_firm_characteristics/04_evaluation:
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 120
 case_studies/us_firm_characteristics/06_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    EXECUTION_TIER: preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      train_sample_frac: 0.25
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
