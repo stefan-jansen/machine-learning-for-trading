@@ -51,7 +51,7 @@
 # ## Setup
 
 # %%
-"""OLS and the Inferential Toolkit — classical inference diagnostics before the prediction pivot."""
+"""OLS and the Inferential Toolkit - classical inference diagnostics before the prediction pivot."""
 
 import warnings
 
@@ -256,7 +256,7 @@ print(
 # %% [markdown]
 # ## Select a Single Training Fold
 #
-# Inference is an in-sample exercise — we fit one model on one training window
+# Inference is an in-sample exercise - we fit one model on one training window
 # and examine its properties. We use the first walk-forward fold and hold back
 # the validation set for a prediction comparison at the end.
 
@@ -323,7 +323,7 @@ print(ols_model.summary())
 # %% [markdown]
 # **Reading the summary**: The coefficients table shows many features with small
 # p-values in the `P>|t|` column, which might seem to indicate "significant" predictors.
-# But the overall $R^2$ is very low — typical for cross-sectional return prediction.
+# But the overall $R^2$ is very low - typical for cross-sectional return prediction.
 # A large sample (hundreds of thousands of observations) makes even tiny effects
 # "significant" in the statistical sense, while the economic magnitude may be
 # negligible. Note that even after removing the five exact linear combinations,
@@ -345,7 +345,7 @@ print(ols_model.summary())
 # into constant variance (Breusch-Pagan, below) and no correlation across
 # observations (residual autocorrelation, below); multicollinearity is read off
 # the design matrix via VIF. Linearity and exogeneity are assumptions about the
-# data-generating process that residuals cannot confirm — a misspecified model
+# data-generating process that residuals cannot confirm - a misspecified model
 # can produce well-behaved residuals.
 #
 # We also test normality, which is **not** a Gauss-Markov assumption. It is
@@ -367,7 +367,7 @@ print(f"F-statistic: {bp_fstat:.1f} (p = {bp_fpvalue:.2e})")
 
 if bp_pvalue < 0.05:
     print("\nResult: REJECT homoscedasticity.")
-    print("Consequence: OLS standard errors are biased — t-stats and p-values are unreliable.")
+    print("Consequence: OLS standard errors are biased - t-stats and p-values are unreliable.")
 else:
     print("\nResult: Cannot reject homoscedasticity at 5% level.")
 
@@ -523,7 +523,7 @@ vif_df.head(15)
 # that flip sign across samples.
 
 # %% [markdown]
-# ## Section 3: When Standard Errors Fail — Robust Alternatives
+# ## Section 3: When Standard Errors Fail - Robust Alternatives
 #
 # Robust standard errors address exactly one failure: non-spherical errors. The
 # point estimates are unchanged and, if linearity and exogeneity hold, they stay
@@ -574,7 +574,7 @@ ols_hc3 = sm.OLS(y_train_s, X_train_c).fit(cov_type="HC3")
 date_groups = train_meta["timestamp"].to_physical().to_numpy()
 symbol_groups = train_meta[ASSET_COL].cast(pl.Categorical).to_physical().to_numpy()
 # Driscoll-Kraay sums within each date, so it needs consecutive period codes and
-# rows already ordered by date — which is how `df` was sorted on load.
+# rows already ordered by date - which is how `df` was sorted on load.
 time_codes = np.unique(date_groups, return_inverse=True)[1]
 
 ols_cluster_date = sm.OLS(y_train_s, X_train_c).fit(
@@ -732,12 +732,12 @@ print(
 #   and autocorrelation by transforming the model
 # - **HAC (Newey-West)**: the standard correction for autocorrelation in a single
 #   time series, and the right tool once the panel is collapsed to one series per
-#   date — which is exactly what the IC calculation in the next section does
+#   date - which is exactly what the IC calculation in the next section does
 # - **Fama-MacBeth**: estimates the cross-section separately on each date and
 #   draws inference from the time series of those estimates, which sidesteps the
 #   within-date dependence rather than modelling it
 #
-# These are valuable tools for the data modeling culture — but they fix *inference*
+# These are valuable tools for the data modeling culture - but they fix *inference*
 # quality, not *prediction* quality. A coefficient with correct standard errors
 # still tells you about in-sample relationships, not out-of-sample forecasting power.
 
@@ -746,8 +746,8 @@ print(
 #
 # We now compute the one metric that matters for trading: the out-of-sample
 # Information Coefficient (IC). Because trading decisions rank assets at each
-# decision date, IC is computed cross-sectionally — Spearman rank correlation
-# between predicted and realized returns *within* each date — and then summarized
+# decision date, IC is computed cross-sectionally - Spearman rank correlation
+# between predicted and realized returns *within* each date - and then summarized
 # across the validation period via mean, IR ($\bar{IC} / \sigma_{IC}$), and a
 # t-statistic on the IC time series.
 #
@@ -866,7 +866,7 @@ show_with_alt(
 # by construction.
 #
 # **Out-of-sample**, both guarantees break. First, the coefficients were optimized
-# for the training set, not the validation set — they may amplify noise rather
+# for the training set, not the validation set - they may amplify noise rather
 # than capture signal, making $SS_{\text{res}} > SS_{\text{tot}}$ and driving
 # $R^2$ below zero. Second, the intercept was calibrated to the training-period
 # mean return. If the validation period has a different mean (as it usually does
@@ -881,15 +881,15 @@ show_with_alt(
 #
 # The IC answers a different question, and the two can disagree. IC (Spearman
 # rank correlation) is invariant to level shifts and scaling, so a model whose
-# magnitudes are badly calibrated can still rank correctly — which is why it,
+# magnitudes are badly calibrated can still rank correctly - which is why it,
 # not $R^2$, is the standard metric for cross-sectional return prediction in
 # quantitative finance. Read the IC against its HAC p-value rather than its
 # sign: this is one validation fold of one case study, and the naive statistic
 # printed beside it overstates the evidence, because it counts overlapping
 # windows as independent observations.
 #
-# None of the diagnostic tests — Breusch-Pagan, residual autocorrelation,
-# Jarque-Bera, VIF — measure out-of-sample ranking accuracy. A coefficient can be
+# None of the diagnostic tests - Breusch-Pagan, residual autocorrelation,
+# Jarque-Bera, VIF - measure out-of-sample ranking accuracy. A coefficient can be
 # statistically significant yet contribute nothing to prediction (large sample,
 # tiny effect), and vice versa. The diagnostics tell us whether our *inference*
 # about parameter values is reliable; they say nothing about whether those
@@ -897,10 +897,10 @@ show_with_alt(
 #
 # This is the core insight of Section 11.1: the inferential toolkit and the
 # predictive toolkit answer different questions. For algorithmic trading, the
-# relevant question is "does this model rank future returns accurately?" — and
+# relevant question is "does this model rank future returns accurately?" - and
 # the relevant tool is out-of-sample evaluation, not hypothesis testing.
 #
-# Section 11.2 introduces regularization — the tool that directly targets
+# Section 11.2 introduces regularization - the tool that directly targets
 # prediction quality by trading bias for variance.
 
 # %% [markdown]
@@ -929,7 +929,7 @@ show_with_alt(
 # 4. **Robust standard errors repair one failure only.** They fix the variance
 #    estimate when errors are non-spherical. They cannot rescue a model whose
 #    exogeneity or functional form is wrong, where the point estimates
-#    themselves are not consistent — and they do not improve predictions.
+#    themselves are not consistent - and they do not improve predictions.
 #
 # 5. **For prediction, we need a different approach**: regularization +
 #    out-of-sample evaluation. The next notebook introduces Ridge, LASSO,
