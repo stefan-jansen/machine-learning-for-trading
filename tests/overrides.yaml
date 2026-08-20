@@ -1,12 +1,18 @@
-# A model-execution notebook takes its reduction through the shared boundary, which reads
-# PREVIEW_REDUCTIONS and accepts one only under EXECUTION_TIER: preview. The MAX_FOLDS and
-# MAX_SYMBOLS these blocks used to carry were left behind by that migration and reached
-# nothing, so fourteen runs named as reduced were running unreduced.
-# tests/test_pm_helpers.py::test_every_declared_parameter_reaches_its_notebook is the gate.
-# No block here declares train_sample_frac. A fraction below 1.0 is what reaches
-# prepare_cv_folds' rng.choice, which draws positional indices and sorts positions
-# rather than rows (utils/modeling.py, #333). CI must not enable a known defect on
-# every run to buy a cheaper fixture; max_symbols reduces without sampling.
+# Fourteen model-execution blocks here used to declare MAX_FOLDS and MAX_SYMBOLS. The
+# notebooks moved their reduction to the shared boundary, which reads PREVIEW_REDUCTIONS,
+# so those two names reached nothing and the runs they described as reduced ran in full.
+# They now declare no parameters, which is what is true: this job runs them unreduced.
+#
+# Declaring the reduction properly is not a drop-in replacement, and the attempt is on
+# record. The boundary accepts a reduction only under EXECUTION_TIER: preview, and a
+# preview writes to a throwaway workspace and is barred from official populations - so
+# the next notebook in the same pipeline finds no predictions and the whole case-study
+# job fails downstream of the reduced stage. max_symbols: 5 also cuts the cross-section
+# hard enough that cme_futures fold 4 loses two feature columns entirely, and the
+# notebook correctly refuses. Reducing a stage whose output the next stage consumes
+# needs a canonical-tier reduction, which does not exist yet.
+# tests/test_pm_helpers.py::test_every_declared_parameter_reaches_its_notebook is the
+# gate that stops a dead parameter being declared here again.
 02_financial_data_universe/01_us_equities_eda:
   timeout: 180
 02_financial_data_universe/02_corporate_actions:
@@ -1185,16 +1191,8 @@ case_studies/cme_futures/05_evaluation:
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
 case_studies/cme_futures/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/cme_futures/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   parameters:
@@ -1274,16 +1272,8 @@ case_studies/crypto_perps_funding/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   gpu: true
@@ -1367,16 +1357,8 @@ case_studies/etfs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/etfs/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/etfs/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -1481,16 +1463,8 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/fx_pairs/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1575,10 +1549,6 @@ case_studies/nasdaq100_microstructure/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
@@ -1672,16 +1642,8 @@ case_studies/sp500_equity_option_analytics/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/06_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   parameters:
@@ -1829,10 +1791,6 @@ case_studies/sp500_options/05_evaluation:
 case_studies/sp500_options/06_linear:
   timeout: 120
 case_studies/sp500_options/07_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   parameters:
@@ -2039,16 +1997,8 @@ case_studies/us_firm_characteristics/04_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 120
 case_studies/us_firm_characteristics/06_gbm:
-  parameters:
-    EXECUTION_TIER: preview
-    PREVIEW_REDUCTIONS:
-      max_symbols: 5
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
