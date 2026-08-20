@@ -14,23 +14,39 @@
 # ---
 
 # %% [markdown]
-# # Mean-Variance Optimization
+# # Mean-variance optimization, and why its answer is so unstable
 #
 # **Environment**: `uv run` from the repository root
 #
-# This notebook demonstrates Modern Portfolio Theory (MPT) and mean-variance optimization,
-# showing how to construct efficient frontiers, find optimal portfolios, and understand
-# the practical limitations of classical MVO (the "Markowitz Curse").
+# ## Purpose
+# Markowitz's result is that for any level of risk there is a portfolio with the highest expected
+# return, and that it can be solved for from each asset's expected return and the covariance
+# between them. The solution is exact and the
+# mathematics is not in dispute. What is in dispute is whether the two inputs can be estimated well
+# enough for the answer to mean anything.
 #
-# **Learning Objectives**:
-# - Implement MVO using `scipy.optimize` to find maximum Sharpe and minimum variance portfolios
-# - Construct and visualize the efficient frontier from historical data
-# - Analyze covariance matrix condition numbers to assess estimation stability
-# - Compare optimized portfolios to heuristic baselines (equal weight, inverse vol, equal risk contribution)
+# This notebook builds the whole machinery from scratch - the feasible region, the frontier, the
+# maximum-Sharpe and minimum-variance solutions - and then does the thing that decides whether any
+# of it is useful: estimates the inputs on one period, freezes the resulting weights, and applies
+# them to a later one. Alongside it run three heuristics that need no expected-return estimate at
+# all, which is the comparison that matters.
 #
-# **Book Reference**: Chapter 17, §17.5 (Mean-Variance Optimization and the Markowitz Curse)
+# ## Learning objectives
 #
-# **Prerequisites**: ETF price data from Ch2
+# - Solve for the portfolio with the highest risk-adjusted return, and for the one with the lowest
+#   risk, under a long-only, fully-invested constraint.
+# - Draw the set of achievable risk-and-return combinations, and the curve that bounds it.
+# - Measure how sensitive the covariance matrix is to small changes in its inputs, and read that
+#   number as a warning about the optimizer's output rather than about the matrix.
+# - Estimate every input on one window, freeze the weights, and score them on a later window
+#   against baselines that estimate less.
+#
+# ## Book reference
+# Chapter 17, Section 17.5 (mean-variance optimization and the Markowitz curse).
+#
+# ## Prerequisites
+#
+# - Daily ETF prices from the canonical dataset.
 
 # %% [markdown]
 # ## The Mean-Variance Framework
@@ -63,7 +79,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     CommissionType,
@@ -180,20 +195,19 @@ print(f"Selected ETFs: {selected_symbols[:5]}...")
 # point-in-time reconstruction of the historical ETF opportunity set.
 
 # %% [markdown]
-# ### Risk-Free Rate
+# ### The hurdle rate
 #
-# We use a configurable annual scenario hurdle, not an estimate of the average
-# T-bill rate over this sample. The level matters mainly for the
-# max-Sharpe tangency portfolio; the minimum-variance allocation is independent
-# of expected returns.
+# The maximum-Sharpe portfolio is the one whose excess return per unit of risk is highest, so it
+# needs a rate to measure excess against. The value below is a scenario assumption rather than an
+# estimate of what cash actually paid over this sample, and it is a parameter so a reader can move
+# it and see what happens.
+#
+# It only affects one of the two solutions. The minimum-variance portfolio is defined without
+# reference to expected returns at all, so it does not move when the hurdle does - which is the
+# first hint of why it behaves so differently out of sample.
 
 # %%
-display(
-    Markdown(
-        f"**Scenario hurdle:** {RISK_FREE_RATE:.1%} annually. "
-        "This assumption is visible so readers can change it and rerun the analysis."
-    )
-)
+print(f"Scenario hurdle: {RISK_FREE_RATE:.1%} a year")
 
 # %% [markdown]
 # The risk-free rate affects tangency-portfolio rankings more than minimum-variance
@@ -218,7 +232,20 @@ geometry_returns_matrix = daily_returns.select(selected_symbols).to_numpy()
 periods_per_year = 252
 
 # %% [markdown]
-# ### Annualized Returns & Covariance
+# ### The two inputs, and how unequally they are estimated
+#
+# The optimizer needs an expected return per asset and a covariance between every pair. The
+# asymmetry between how well those two can be estimated is the whole subject of this notebook.
+#
+# The expected return below is a compound growth rate computed from two prices: the first and the
+# last. Every observation in between affects it only through where it leaves the endpoints. That is
+# a deliberately spare estimator and it is not unusual - a longer-horizon mean is not obviously
+# better - but it means the return vector rests on two numbers per asset.
+#
+# The covariance rests on every daily observation of every pair, thousands of them. It is estimated
+# far more precisely, and it is also the input the optimizer is *less* sensitive to. Both facts
+# point the same way: what comes out of a mean-variance optimizer is dominated by the input that is
+# known worst.
 
 
 # %%
@@ -235,7 +262,7 @@ def annualize_returns_from_prices(prices_df: pl.DataFrame, symbols: list[str]) -
     return np.array(
         [
             (last / first) ** (1 / elapsed_years) - 1
-            for first, last in zip(first_prices, last_prices, strict=False)
+            for first, last in zip(first_prices, last_prices, strict=True)
         ]
     )
 
@@ -300,15 +327,22 @@ print(f"Correlation stats: Mean={lower_tri.mean():.3f}, Std={lower_tri.std():.3f
 # protection the cross-section really provides.
 
 # %% [markdown]
-# ### Condition Number & Matrix Analysis
+# ### How much a small change in the inputs moves the answer
 #
-# The **condition number** quantifies matrix sensitivity to perturbations. For the covariance matrix:
+# Solving for optimal weights involves inverting the covariance matrix, and inversion amplifies
+# error. The condition number says by how much: it is the ratio of the largest to the smallest
+# eigenvalue, and it bounds the factor by which a relative error in the input can grow in the
+# output.
 #
 # $$\kappa(\Sigma) = \frac{\sigma_{\text{max}}}{\sigma_{\text{min}}}$$
 #
-# - **~1**: Well-conditioned (stable)
-# - **100-1000**: Moderate sensitivity
-# - **>1000**: Ill-conditioned (may need regularization)
+# A value near one means the matrix is nearly a scaled identity and inversion is harmless. A large
+# value means some direction in asset space has almost no variance in the sample, the inverse
+# divides by that near-zero number, and the optimizer takes enormous positions along it.
+#
+# What makes the number large is not the assets being risky, it is them being *redundant*: two
+# funds that move together leave a direction with almost no independent variation, and a nineteen-
+# asset universe of ETFs has many such pairs. The eigenvalue spectrum below is where to see it.
 
 # %%
 condition_number = np.linalg.cond(geometry_cov)
@@ -339,9 +373,14 @@ fig.update_layout(height=450)
 fig.show()
 
 # %% [markdown]
-# A wide eigenvalue spectrum makes the inverse covariance highly sensitive to
-# small input changes. Notebook 03 introduces shrinkage and robust estimators;
-# this notebook does not interpret the raw inverse as stable dependency evidence.
+# The spread between the largest and smallest eigenvalue on a log axis is the condition number,
+# read off a chart. The last few points are the directions in which this universe barely moves
+# independently, and they are the ones the inverse divides by.
+#
+# There is a fix and it is not in this notebook. Shrinking the sample covariance towards a simpler
+# target lifts the small eigenvalues and pulls the condition number down, at the cost of biasing
+# the estimate towards something the data did not say. `03_robust_optimization` does that and
+# measures what it buys.
 
 # %% [markdown]
 # ## Simulate Random Portfolios
@@ -963,18 +1002,19 @@ for name, weights in geometry_portfolios.items():
 
 # %%
 geometry_max_order = np.argsort(geometry_max_sharpe_weights)[::-1]
-geometry_max_top = geometry_max_order[:2]
+print("Largest holdings in the in-sample max-Sharpe solution:")
+for rank in geometry_max_order[:3]:
+    print(f"  {selected_symbols[rank]:<5} {geometry_max_sharpe_weights[rank]:.1%}")
+print(
+    f"Assets it holds at all: {int((geometry_max_sharpe_weights > 1e-4).sum())}"
+    f" of {len(selected_symbols)}"
+)
 geometry_min_top = int(np.argmax(geometry_min_vol_weights))
-display(
-    Markdown(
-        "**Computed in-sample concentration:** The max-Sharpe solution assigns "
-        f"{geometry_max_sharpe_weights[geometry_max_top[0]]:.1%} to "
-        f"{selected_symbols[geometry_max_top[0]]} and "
-        f"{geometry_max_sharpe_weights[geometry_max_top[1]]:.1%} to "
-        f"{selected_symbols[geometry_max_top[1]]}. The minimum-volatility solution assigns "
-        f"{geometry_min_vol_weights[geometry_min_top]:.1%} to "
-        f"{selected_symbols[geometry_min_top]}."
-    )
+print("Largest holding in the minimum-volatility solution:")
+print(f"  {selected_symbols[geometry_min_top]:<5} {geometry_min_vol_weights[geometry_min_top]:.1%}")
+print(
+    f"Assets it holds at all: {int((geometry_min_vol_weights > 1e-4).sum())}"
+    f" of {len(selected_symbols)}"
 )
 
 # %% [markdown]
@@ -1334,15 +1374,12 @@ bridge_table = pl.DataFrame(
 )
 bridge_table
 
-# %%
-display(
-    Markdown(
-        "Vectorized versus zero-cost engine differences come from next-bar timing and "
-        "engine mechanics. Zero-cost versus cost-aware engine differences isolate the "
-        f"configured {COMMISSION_RATE * 10_000:.0f} bp commission and "
-        f"{SLIPPAGE_RATE * 10_000:.0f} bp slippage assumptions."
-    )
-)
+# %% [markdown]
+# Three rows, two comparisons. The gap between the vectorized result and the zero-cost engine is
+# timing and engine mechanics alone: same weights, same prices, no fees on either side. The gap
+# between the zero-cost engine and the cost-aware one is the commission and slippage the settings
+# block declared, and nothing else. Reading the vectorized figure against the cost-aware one mixes
+# the two and attributes the whole difference to costs.
 
 # %%
 fig = go.Figure()
@@ -1410,7 +1447,7 @@ fig.add_scatter(
 )
 
 fig.update_layout(
-    title=f"The test portfolio loses {abs(drawdown[max_dd_idx]):.1%} at its deepest drawdown",
+    title="Losses cluster into a few deep and persistent falls",
     xaxis_title="Date",
     yaxis_title="Drawdown",
     yaxis_tickformat=".0%",
@@ -1464,20 +1501,38 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **In-sample geometry and test performance answer different questions**: The
-#    full-sample frontier illustrates concentration, while every performance comparison
-#    uses weights estimated before the declared split and frozen over the test window.
-# 2. **Heuristic baselines reduce estimation dependence**: Equal Weight, Inverse
-#    Volatility, and Equal Risk Contribution avoid relying on expected-return rankings.
-#    Their relative test performance is reported by the computed table, not assumed.
-# 3. **ERC differs from Inverse Volatility**: By accounting for correlations in risk
-#    contribution, ERC produces meaningfully different weights and risk profiles
-#    compared to simple inverse-volatility scaling.
-# 4. **Timing and costs are separate mechanisms**: The zero-cost next-bar engine
-#    identifies timing and engine effects relative to vectorized arithmetic. The
-#    cost-aware engine then isolates the configured commission and slippage assumptions.
+# 1. **The frontier is a picture of the sample, not a menu of choices.** Every point on it is where
+#    the optimizer would have put you *given* estimates drawn from the data it was shown. Drawn on
+#    the full sample it is a description; the only way to learn anything from it about the future
+#    is to estimate on one window and score on another, which is what the second half does.
+# 2. **The optimizer is most sensitive to the input estimated worst.** Expected returns come from
+#    two prices per asset; the covariance comes from thousands of observations per pair. The
+#    solution moves far more with the first, which is the whole reason maximum-Sharpe weights
+#    concentrate into a handful of names and rarely stay there.
+# 3. **A high condition number is a statement about redundancy, not about risk.** It grows when
+#    assets move together, leaving directions with almost no independent variation for the inverse
+#    to divide by. Check it before trusting an optimizer's output, not after being surprised by it.
+# 4. **Estimating less is a strategy.** Equal weight estimates nothing, inverse volatility
+#    estimates variances only, equal risk contribution estimates the covariance but no returns.
+#    Each gives up the ability to express a view in exchange for not having to hold one, and the
+#    test window is where that trade is priced.
+# 5. **Separate timing from cost when comparing an allocation to its backtest.** The gap between
+#    vectorized arithmetic and a zero-cost engine is when trades happen; the gap between that and a
+#    cost-aware engine is what they cost. Collapsing the two attributes fills to fees.
 #
-# **Next**: Continue with [`03_robust_optimization`](03_robust_optimization.ipynb) for shrinkage, robust covariance, and
-# optimization settings that improve out-of-sample behavior.
+# ### Known limitations
+#
+# - One training window and one test window on one universe. A different split date would give
+#   different weights and possibly a different ordering, and nothing here estimates how much.
+# - The expected-return vector is an endpoint-to-endpoint growth rate. It is a defensible choice
+#   and a very noisy one, and the notebook uses it partly because its noisiness is the subject.
+# - Weights are frozen across the whole test window with daily rebalancing back to target. A real
+#   allocation would re-estimate periodically, which introduces its own turnover and its own
+#   sequence of estimation errors.
+# - Long-only and fully invested throughout. Allowing shorts widens the frontier and makes the
+#   concentration problem considerably worse.
+#
+# **Next:** [`03_robust_optimization`](03_robust_optimization.ipynb) attacks the estimation problem
+# directly, with shrinkage and robust covariance estimators, and measures whether they help.
