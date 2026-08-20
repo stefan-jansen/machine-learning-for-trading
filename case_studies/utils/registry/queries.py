@@ -16,7 +16,7 @@ from ..notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
-from .specs import canonical_json
+from .specs import IDENTITY_VERSION, canonical_json
 from .store import (
     _backtest_dir,
     _case_dir,
@@ -503,8 +503,13 @@ def load_prediction_index(
             ON p.prediction_hash = m.prediction_hash
     """
     conditions = []
-    params: list[str] = []
+    params: list[str | int] = []
     exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family", for_backtest=True)
+    # A registry may hold pre-rebuild rows beside rebuild-era ones. Selecting across both
+    # generations compares models fitted under different identity rules, so a backtest must
+    # see only the current generation. Legacy rows predate the field and carry NULL.
+    conditions.append("t.identity_version = ?")
+    params.append(IDENTITY_VERSION)
     if label:
         conditions.append("t.label = ?")
         params.append(label)
