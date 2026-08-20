@@ -42,14 +42,6 @@ ALL_LABELS = ("fwd_ret_5d", "fwd_ret_21d")
 FRONT_CONTRACT_POSITION = 0
 ROLL_POLICY = "volume_rolled_multiplicative_back_adjustment"
 EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"
-MODEL_POPULATION_NAMES = (
-    "cme-linear-validation-v1",
-    "cme-gbm-validation-v1",
-    "cme-tabular-dl-validation-v1",
-    "cme-sequence-validation-v1",
-    "cme-pca-validation-v1",
-    "cme-sdf-validation-v1",
-)
 
 
 @dataclass(frozen=True)
@@ -197,36 +189,6 @@ def run_resolved_model_requests(
     return execution
 
 
-def run_official_model_catalog(
-    study: Study,
-    request_catalog: pl.DataFrame,
-    *,
-    population_name: str,
-    resolved_requests: Iterable[ResolvedModelRequest] | None = None,
-) -> tuple[ModelExecution, OfficialPopulation]:
-    """Snapshot and execute one complete canonical model population."""
-    resolved = tuple(resolved_requests or ())
-    if not resolved:
-        resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
-    if any(request.spec["execution_tier"] != "canonical" for request in resolved):
-        raise ValueError("official model populations require canonical requests")
-    expected = expected_prediction_hashes(resolved)
-    population = OfficialPopulation.create(
-        study,
-        name=population_name,
-        member_kind="prediction",
-        members=expected,
-    )
-    execution = run_resolved_model_requests(study, resolved)
-    actual = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
-    if set(actual) != set(expected) or len(actual) != len(expected):
-        missing = sorted(set(expected) - set(actual))
-        extra = sorted(set(actual) - set(expected))
-        raise RuntimeError(f"model population mismatch: missing={missing}, extra={extra}")
-    population.require_complete()
-    return execution, population
-
-
 def resolved_model_plan(resolved_requests: Iterable[ResolvedModelRequest]) -> pl.DataFrame:
     """Show the data, folds, checkpoints, and eligibility each request will use."""
     rows = []
@@ -277,25 +239,6 @@ def product_universe_table() -> pl.DataFrame:
         on="product",
         how="left",
     ).sort("sector", "product")
-
-
-def official_prediction_catalog(
-    study: Study,
-    population_names: Iterable[str],
-) -> pl.DataFrame:
-    """Return the exact complete catalog rows from declared official populations."""
-    members = []
-    for name in population_names:
-        population = OfficialPopulation.one(study, name=name)
-        if population.member_kind != "prediction":
-            raise ValueError(f"official population {name!r} does not contain predictions")
-        members.extend(population.require_complete())
-    if len(members) != len(set(members)):
-        raise ValueError("official prediction populations overlap")
-    catalog = study.predictions.table().filter(pl.col("prediction_hash").is_in(members))
-    if catalog.height != len(members) or catalog.filter(~pl.col("complete")).height:
-        raise ValueError("official prediction catalog is incomplete")
-    return catalog.sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
 
 
 def expected_prediction_hashes(resolved_requests) -> tuple[str, ...]:
@@ -746,46 +689,3 @@ def create_label_candidate_sets(
             members,
         )
     return output
-
-
-def shortlist_signal_configurations(
-    study: Study,
-    *,
-    label: str,
-    limit: int,
-) -> tuple[BacktestResult, ...]:
-    """Select the strongest signal result for each distinct model configuration."""
-    candidates = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
-    selected = []
-    configurations = set()
-    for result in candidates.ranked_validation_sharpe():
-        assert isinstance(result, BacktestResult)
-        training = result.lineage()["training_spec"]
-        key = (training["family"], training.get("config_name"))
-        if key in configurations:
-            continue
-        configurations.add(key)
-        selected.append(result)
-        if len(selected) == limit:
-            break
-    if len(selected) != limit:
-        raise ValueError(
-            f"signal population has {len(selected)} distinct configurations, expected {limit}"
-        )
-    return tuple(selected)
-
-
-def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
-    """Return the immutable union of signal and allocation validation results."""
-    signal = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
-    allocation = CandidateSet.one(study, name=f"cme-allocation-{label}-v1")
-    members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
-    return CandidateSet.create(study, f"cme-pre-overlay-{label}-v1", members)
-
-
-def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
-    """Return the selection pool across signal, allocation, and risk-overlay stages."""
-    pre_overlay = pre_overlay_candidate_set(study, label=label)
-    risk = CandidateSet.one(study, name=f"cme-risk-{label}-v1")
-    members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
-    return CandidateSet.create(study, f"cme-final-validation-{label}-v1", members)
