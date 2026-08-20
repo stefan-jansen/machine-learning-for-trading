@@ -1907,6 +1907,18 @@ if not lineage_df.is_empty():
 
 
 # %%
+def _optional_metric(db: sqlite3.Connection, table: str, column: str, alias: str) -> str:
+    """Select `table.column` when the registry has it, otherwise a NULL of the same alias.
+
+    Registries written before a metric existed simply lack its column, and a query naming one
+    aborts with `no such column` - taking every other case study down with it. Probing the schema
+    keeps a stale registry a row of missing values rather than a failed run.
+    """
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    prefix = {"backtest_metrics": "bm", "prediction_metrics": "pm"}[table]
+    return f"{prefix}.{column} AS {alias}" if column in columns else f"NULL AS {alias}"
+
+
 def query_holdout_rows():
     """Query holdout backtest results from each case study registry.
 
@@ -1966,24 +1978,29 @@ def query_holdout_rows():
 
         db = sqlite3.connect(str(db_path))
         db.row_factory = sqlite3.Row
+        optional = ", ".join(
+            [
+                _optional_metric(db, "prediction_metrics", "ic_mean_daily", "holdout_ic_daily"),
+                _optional_metric(db, "prediction_metrics", "ic_se_hac", "holdout_ic_se_hac"),
+                _optional_metric(db, "prediction_metrics", "ic_p_hac", "holdout_ic_p_hac"),
+                _optional_metric(db, "prediction_metrics", "ic_ci_lo", "holdout_ic_ci_lo"),
+                _optional_metric(db, "prediction_metrics", "ic_ci_hi", "holdout_ic_ci_hi"),
+                _optional_metric(db, "backtest_metrics", "sharpe_ci95_lo", "holdout_sharpe_ci_lo"),
+                _optional_metric(db, "backtest_metrics", "sharpe_ci95_hi", "holdout_sharpe_ci_hi"),
+                _optional_metric(db, "backtest_metrics", "psr_pvalue", "holdout_psr_p"),
+            ]
+        )
         rows = db.execute(
             f"""
             SELECT t.family, t.config_name, t.label,
                    b.backtest_hash AS holdout_backtest_hash,
                    p.prediction_hash AS holdout_prediction_hash,
                    pm.ic_mean AS holdout_ic,
-                   pm.ic_mean_daily AS holdout_ic_daily,
-                   pm.ic_se_hac AS holdout_ic_se_hac,
-                   pm.ic_p_hac AS holdout_ic_p_hac,
-                   pm.ic_ci_lo AS holdout_ic_ci_lo,
-                   pm.ic_ci_hi AS holdout_ic_ci_hi,
+                   {optional},
                    bm.sharpe AS holdout_sharpe,
-                   bm.sharpe_ci95_lo AS holdout_sharpe_ci_lo,
-                   bm.sharpe_ci95_hi AS holdout_sharpe_ci_hi,
                    bm.max_drawdown AS holdout_max_dd,
                    bm.cagr AS holdout_cagr,
-                   bm.num_trades AS holdout_num_trades,
-                   bm.psr_pvalue AS holdout_psr_p
+                   bm.num_trades AS holdout_num_trades
             FROM prediction_sets p
             JOIN training_runs t ON p.training_hash = t.training_hash
             LEFT JOIN prediction_metrics pm
@@ -2262,11 +2279,30 @@ def build_variant_rows():
     return variant_rows
 
 
+# %% [markdown]
+# The schema is declared rather than inferred. Polars reads the leading rows to guess a column's
+# type, and a registry that has no metrics yet contributes rows whose `ic` and `sharpe` are all
+# null - enough of them and the guess comes back as a null column, which then refuses the first
+# real float that arrives behind it. Declaring the types makes an empty registry contribute
+# missing values instead of breaking the frame.
+
 # %%
 variant_rows = build_variant_rows()
 
 # %%
-variant_df = pl.DataFrame(variant_rows)
+variant_df = pl.DataFrame(
+    variant_rows,
+    schema={
+        "case_study": pl.String,
+        "cs_id": pl.String,
+        "cadence": pl.String,
+        "source": pl.String,
+        "family": pl.String,
+        "ic": pl.Float64,
+        "sharpe": pl.Float64,
+        "positive_sharpe": pl.Boolean,
+    },
+)
 print(f"\n=== Variant Analysis: {len(variant_df)} variants ===")
 if not variant_df.is_empty():
     print(
