@@ -1,12 +1,17 @@
-"""The equity-option reader-facing workflow, on the branches nothing else reaches.
+"""What this case study's own workflow module covers that the shared tests do not.
 
-What is genuinely uncovered elsewhere is the **refusal** side of these guards, plus
-all of `require_declared_menu_coverage`. The notebook lane does reach the passing
-side of `require_complete_canonical_requests`, because `tests/overrides.yaml`
-leaves `11a_pca`, `11c_conditional_autoencoder`, `11d_stochastic_discount_factor`
-and `11e_supervised_autoencoder` without a reduction, so those resolve
-`ExecutionTier.CANONICAL`. A guard is only proven by the case that makes it fire,
-and no notebook run can make these fire without failing the run.
+`model_request_catalog` and `require_complete_canonical_requests` are this module's,
+and their **refusal** paths are reached nowhere else - a notebook run cannot make a
+guard fire without failing the run, and the notebook lane only ever exercises the
+passing side. `tests/overrides.yaml` leaves `11a_pca`,
+`11c_conditional_autoencoder`, `11d_stochastic_discount_factor` and
+`11e_supervised_autoencoder` without a reduction, so those do resolve
+`ExecutionTier.CANONICAL` and do reach the passing branch.
+
+The declared-menu guard itself moved to `case_studies.research` and is tested
+against all nine case studies in `tests/test_research_declared_menu_coverage.py`.
+What remains here is one test that the thin wrappers route to it correctly, since
+wiring is the only thing that can now break on this side.
 
 `load_configs` resolves the training menus through `get_case_study_dir`, which
 honours `ML4T_OUTPUT_DIR`; CI sets that workflow-wide and only the session-scoped
@@ -28,6 +33,7 @@ from case_studies.sp500_equity_option_analytics.research_workflow import (
     require_declared_menu_coverage,
 )
 
+CASE_STUDY_NAME = "sp500_equity_option_analytics"
 PRIMARY = "fwd_ret_5d"
 UNFITTED = {("deep_learning", "nlinear"): "no notebook fits it"}
 
@@ -98,73 +104,6 @@ def test_the_complete_surface_passes_canonically():
     require_complete_canonical_requests(complete, family="linear", execution_tier="canonical")
 
 
-def test_declared_menu_coverage_accepts_the_full_population():
-    unfitted = require_declared_menu_coverage(_covered(), unfitted=UNFITTED)
-    # nlinear is declared on the three return labels and fitted by no notebook.
-    assert unfitted.height == 3
-    assert set(unfitted.get_column("config_name")) == {"nlinear"}
-    assert set(unfitted.get_column("label")) == {
-        "fwd_ret_5d",
-        "fwd_ret_10d",
-        "fwd_ret_risk_adj_5d",
-    }
-    assert unfitted.get_column("reason").is_not_null().all()
-
-
-def test_a_missing_declared_model_fails_closed_and_names_itself():
-    short = _covered().filter(~((pl.col("family") == "gbm") & (pl.col("label") == "fwd_dir_5d")))
-    with pytest.raises(RuntimeError, match="omits declared models") as excinfo:
-        require_declared_menu_coverage(short, unfitted=UNFITTED)
-    # Counts cannot catch this: the message has to name the members.
-    assert "fwd_dir_5d" in str(excinfo.value)
-    assert "gbm" in str(excinfo.value)
-
-
-def test_a_population_of_the_right_size_on_the_wrong_labels_still_fails():
-    """Why coverage is compared on identity rather than on a row count."""
-    covered = _covered()
-    dropped = covered.filter(~((pl.col("family") == "gbm") & (pl.col("label") == "fwd_dir_5d")))
-    # Put the count back by duplicating a label the menu does declare, so height
-    # matches while the identities do not.
-    padded = pl.concat(
-        [
-            dropped,
-            covered.filter((pl.col("family") == "gbm") & (pl.col("label") == "fwd_dir_10d")),
-        ]
-    )
-    assert padded.height == covered.height
-    with pytest.raises(RuntimeError, match="omits declared models"):
-        require_declared_menu_coverage(padded, unfitted=UNFITTED)
-
-
-def test_a_produced_model_no_menu_declares_fails_closed():
-    extra = pl.concat(
-        [
-            _covered(),
-            pl.DataFrame(
-                {"family": ["linear"], "label": [PRIMARY], "config_name": ["ridge_a_invented"]},
-                schema={"family": pl.String, "label": pl.String, "config_name": pl.String},
-            ),
-        ]
-    )
-    with pytest.raises(RuntimeError, match="no menu declares"):
-        require_declared_menu_coverage(extra, unfitted=UNFITTED)
-
-
-def test_a_stale_exclusion_fails_closed():
-    """An exclusion must not outlive the gap it describes, or it hides the next one."""
-    with pytest.raises(ValueError, match="match no configured model"):
-        require_declared_menu_coverage(
-            _covered(), unfitted={**UNFITTED, ("gbm", "leaves_no_such"): "gone"}
-        )
-
-
-def test_an_exclusion_is_required_for_a_member_no_notebook_fits():
-    """Without the entry, the same population must fail - the guard is not decorative."""
-    with pytest.raises(RuntimeError, match="omits declared models"):
-        require_declared_menu_coverage(_covered(), unfitted={})
-
-
 def test_a_label_that_declares_no_such_family_blames_the_label_not_the_name():
     """The mirror of the defect above, which the first fix for it introduced.
 
@@ -226,3 +165,14 @@ def test_an_empty_label_list_means_every_published_label():
     code, so one is widened and the other refused.
     """
     assert model_request_catalog("linear", labels=[]).equals(model_request_catalog("linear"))
+
+
+def test_the_wrappers_route_to_the_shared_implementation():
+    """The guard itself is tested generically; this pins only the case-study binding."""
+    from case_studies.research import configured_model_menu as shared_menu
+
+    assert configured_model_menu().equals(shared_menu(CASE_STUDY_NAME))
+    unfitted = {("deep_learning", "nlinear"): "no notebook fits it"}
+    excluded = require_declared_menu_coverage(_covered(), unfitted=unfitted)
+    assert set(excluded.get_column("config_name")) == {"nlinear"}
+    assert excluded.height == 3

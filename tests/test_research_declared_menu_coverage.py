@@ -11,14 +11,16 @@ every case study needs it and the failure it prevents is identical in each.
 
 from __future__ import annotations
 
-import pathlib
-
 import polars as pl
 import pytest
 
 from case_studies.research import configured_model_menu, require_declared_menu_coverage
+from utils.paths import REPO_ROOT
 
-CASE_STUDIES = sorted(p.parts[1] for p in pathlib.Path("case_studies").glob("*/config/setup.yaml"))
+# Anchored to REPO_ROOT, not the working directory. A cwd-relative glob collects
+# nothing when pytest runs from anywhere else, and six parametrized tests then pass
+# vacuously - which is the failure this module exists to catch, one level up.
+CASE_STUDIES = sorted(p.parts[-3] for p in (REPO_ROOT / "case_studies").glob("*/config/setup.yaml"))
 IDENTITY = ["family", "label", "config_name"]
 
 
@@ -87,8 +89,13 @@ def test_the_right_height_on_the_wrong_labels_still_fails(case_study):
     if len(labels) < 2:
         pytest.skip(f"{case_study} declares one label; the swap needs two")
     dropped = declared.filter(pl.col("label") != labels[0])
-    padded = pl.concat([dropped, declared.filter(pl.col("label") == labels[1]).head(1)])
-    assert padded.height <= declared.height
+    missing = declared.height - dropped.height
+    # Restore the exact height with rows the menu does declare, so a count check
+    # would pass. They collapse under the guard's own unique(), which is the point:
+    # height is recoverable, identity is not.
+    padding = declared.filter(pl.col("label") == labels[1]).head(1)
+    padded = pl.concat([dropped, *([padding] * missing)])
+    assert padded.height == declared.height
     with pytest.raises(RuntimeError, match="omits declared models"):
         require_declared_menu_coverage(padded, case_study=case_study)
 

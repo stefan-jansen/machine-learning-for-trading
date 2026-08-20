@@ -255,7 +255,14 @@ def configured_model_menu(case_study: str, *, labels: Iterable[str] | None = Non
 
     setup = load_setup_config(case_study)
     declared = setup.get("labels") or {}
-    published = (str(declared.get("primary")), *(str(v) for v in declared.get("variants") or []))
+    primary = declared.get("primary")
+    if not primary:
+        # load_setup_config returns {} for a path that does not resolve - an
+        # ML4T_OUTPUT_DIR redirect that was never seeded, most often - and
+        # str(None) would carry that on as the literal label "None", reporting an
+        # unreadable config as a case study that declares no models.
+        raise ValueError(f"{case_study}: setup.yaml declares no primary label, or was unreadable")
+    published = (str(primary), *(str(v) for v in declared.get("variants") or []))
     selected = tuple(labels) if labels is not None else published
     unknown = sorted(set(selected) - set(published))
     if unknown:
@@ -267,7 +274,9 @@ def configured_model_menu(case_study: str, *, labels: Iterable[str] | None = Non
     for label in selected:
         menu_path = case_dir / "config" / "training" / f"{label}.yaml"
         if not menu_path.is_file():
-            continue
+            # A published label with no menu file is a broken config, not a label
+            # that declares nothing; only a family the menu omits is skipped.
+            raise ValueError(f"{case_study}: {label} is published but has no {menu_path.name}")
         menu = yaml.safe_load(menu_path.read_text()) or {}
         for family in menu:
             if family not in predictive or not menu.get(family):
