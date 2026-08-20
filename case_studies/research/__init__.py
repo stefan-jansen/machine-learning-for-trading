@@ -19,7 +19,13 @@ from .execution import (
 from .identity import ResolvedSpec
 from .labels import LabelDefinition, LabelRef
 from .lifecycle import ResearchLock
-from .model_planning import ModelPlan, PlannedModel, plan_models
+from .model_planning import (
+    ModelPlan,
+    PlannedModel,
+    configured_model_menu,
+    plan_models,
+    require_declared_menu_coverage,
+)
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
@@ -66,7 +72,9 @@ __all__ = [
     "register_adapter",
     "registered_adapters",
     "plan_backtests",
+    "configured_model_menu",
     "plan_models",
+    "require_declared_menu_coverage",
     "run_backtests",
     "run_locked_holdout",
     "run_models",

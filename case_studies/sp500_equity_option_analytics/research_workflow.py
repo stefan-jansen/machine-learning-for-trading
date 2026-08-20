@@ -17,7 +17,10 @@ from case_studies.research import (
     Study,
     run_models,
 )
-from case_studies.research.adapters import registered_adapters
+from case_studies.research import configured_model_menu as _configured_model_menu
+from case_studies.research import (
+    require_declared_menu_coverage as _require_declared_menu_coverage,
+)
 from case_studies.utils.registry import prediction_hash_from_parts
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
@@ -122,24 +125,11 @@ def model_request_catalog(
 def configured_model_menu() -> pl.DataFrame:
     """Return every predictive model the published YAML menus declare, across every label.
 
-    A family is predictive when a shared model adapter answers to its name, so
-    `causal_dml` is absent by that rule rather than by a list that could go stale.
+    Thin wrapper over the shared implementation, which is case-study generic and
+    used by every model-analysis notebook; see
+    `case_studies.research.configured_model_menu`.
     """
-    predictive = {binding.name for binding in registered_adapters("model")}
-    case_dir = REPO_ROOT / "case_studies" / CASE_STUDY
-    rows = []
-    for label in published_labels():
-        menu = yaml.safe_load((case_dir / "config" / "training" / f"{label}.yaml").read_text())
-        for family in menu:
-            if family not in predictive:
-                continue
-            for config in load_configs(CASE_STUDY, label, family):
-                rows.append(
-                    {"family": family, "label": label, "config_name": str(config["config_name"])}
-                )
-    if not rows:
-        raise ValueError("no predictive model is declared for any published label")
-    return pl.DataFrame(rows).unique(maintain_order=True)
+    return _configured_model_menu(CASE_STUDY)
 
 
 def require_declared_menu_coverage(
@@ -147,42 +137,13 @@ def require_declared_menu_coverage(
     *,
     unfitted: dict[tuple[str, str], str],
 ) -> pl.DataFrame:
-    """Fail unless the population covers every declared model on every label that declares it.
+    """Fail unless the population covers every declared model on every label declaring it.
 
-    Comparing counts passes a population of the right size built on the wrong
-    labels, so this compares `(family, label, config_name)` and names what is
-    absent. `unfitted` maps a `(family, config_name)` the case study declares but
-    no notebook fits to the reason; it applies to every label declaring that
-    model rather than enumerating the triples, and an entry that excludes nothing
-    is itself an error - a stale exclusion hides the next real gap.
+    Thin wrapper over `case_studies.research.require_declared_menu_coverage`, which
+    holds the contract and its tests. Kept so this case study's notebooks name the
+    case study once, at import, rather than at every call.
     """
-    identity = ["family", "label", "config_name"]
-    declared = configured_model_menu()
-    keys = pl.DataFrame(
-        {
-            "family": [family for family, _ in unfitted],
-            "config_name": [config for _, config in unfitted],
-            "reason": list(unfitted.values()),
-        },
-        schema={"family": pl.String, "config_name": pl.String, "reason": pl.String},
-    )
-    excluded = declared.join(keys, on=["family", "config_name"], how="inner")
-    stale = sorted(set(unfitted) - set(excluded.select("family", "config_name").iter_rows()))
-    if stale:
-        raise ValueError(f"declared-but-unfitted entries match no configured model: {stale}")
-
-    declared_rows = set(declared.select(identity).iter_rows())
-    excluded_rows = set(excluded.select(identity).iter_rows())
-    produced = set(catalog.select(identity).unique().iter_rows())
-    missing = sorted(declared_rows - produced - excluded_rows)
-    if missing:
-        raise RuntimeError(
-            f"the official population omits declared models that nothing excludes: {missing}"
-        )
-    undeclared = sorted(produced - declared_rows)
-    if undeclared:
-        raise RuntimeError(f"the official population holds models no menu declares: {undeclared}")
-    return excluded.sort(identity)
+    return _require_declared_menu_coverage(catalog, case_study=CASE_STUDY, unfitted=unfitted)
 
 
 def resolve_model_requests(
