@@ -26,7 +26,8 @@
 # - Understand why classical MVO can be fragile in practice (the "Markowitz Curse")
 # - Implement the three steps of HRP: clustering, quasi-diagonalization, recursive bisection
 # - Visualize the asset hierarchy with dendrograms
-# - Run walk-forward backtests comparing HRP to MVO and heuristic allocators
+# - Run walk-forward backtests comparing HRP to shrinkage MVO and heuristic allocators, and
+#   read the outcome when HRP ranks last
 #
 # **Book Reference**: Chapter 17, Section 17.6 (Hierarchical Risk Parity)
 #
@@ -83,10 +84,17 @@ set_global_seeds(SEED)
 fallback_count: dict[str, int] = {}
 
 # %% [markdown]
-# ## 2. The Problem: Why MVO Fails
+# ## 2. Where Mean-Variance Optimization Is Fragile
 #
-# MVO inverts a noisy covariance matrix and is acutely sensitive to estimation error,
-# which produces unstable, concentrated portfolios under regime shifts. See §17.6.
+# Mean-variance optimization inverts an estimated covariance matrix. Inversion amplifies the
+# smallest eigenvalues, which are the ones the sample estimates worst, so small errors in the
+# inputs can move the weights a long way. The fragility grows with the ratio of assets to
+# observations: with $N$ assets and $T$ periods the sample covariance is singular once $N > T$
+# and poorly conditioned well before that.
+#
+# HRP is one response - never invert. Shrinkage is another - keep inverting, but pull the
+# estimate toward a well-conditioned target first. This notebook runs both, and section 12
+# reports which one won here and why the answer depends on $N/T$. See §17.6.
 
 # %% [markdown]
 # ## 3. Data Acquisition
@@ -306,7 +314,7 @@ branch_colors = [COLORS["blue"], COLORS["copper"], COLORS["positive"], COLORS["n
 
 # Create dendrogram
 fig, ax = plt.subplots(figsize=(14, 8))
-dn = dendrogram(
+dendrogram(
     link,
     labels=[ETF_UNIVERSE.get(s, s) for s in returns.columns],
     leaf_rotation=45,
@@ -462,10 +470,7 @@ fig = px.bar(
     weights_df,
     x="Name",
     y="HRP Weight",
-    title=(
-        f"{weights_df.iloc[0]['Name']} receives {weights_df.iloc[0]['HRP Weight']:.0%} "
-        "of the static HRP portfolio"
-    ),
+    title="HRP puts most of the portfolio in the lowest-variance holding",
     color="HRP Weight",
     color_continuous_scale=[COLORS["silver_muted"], COLORS["blue"]],
 )
@@ -477,6 +482,67 @@ fig.update_layout(
     yaxis_tickformat=".0%",
 )
 fig.show()
+
+# %% [markdown]
+# ### Where That Concentration Comes From
+#
+# HRP is introduced as the answer to the concentrated portfolios that mean-variance optimization
+# produces, so a single dominant weight deserves an explanation rather than a shrug. It follows
+# from the algorithm as specified.
+#
+# Recursive bisection splits the *ordered list* in half by count at every level. It does not cut
+# the tree at the linkage's own cluster boundaries, so the halves it forms need not be the
+# clusters the dendrogram shows. Each half then receives capital inversely to its cluster
+# variance. Two splits are enough to see the effect.
+
+
+# %%
+def trace_bisection(cov: np.ndarray, sorted_idx: list[int], columns, levels: int = 2) -> None:
+    """Print the halves, their annualized cluster variances, and the resulting split share."""
+    clusters, depth = [sorted_idx], 0
+    while clusters and depth < levels:
+        next_clusters = []
+        for cluster in clusters:
+            if len(cluster) <= 1:
+                continue
+            mid = len(cluster) // 2
+            left, right = cluster[:mid], cluster[mid:]
+            left_var, right_var = cluster_variance(cov, left), cluster_variance(cov, right)
+            alpha = 1 - left_var / (left_var + right_var)
+            print(f"  split at depth {depth}:")
+            print(
+                f"    {[columns[i] for i in left]}\n"
+                f"      annualized cluster variance {left_var * 252:.4f} -> {alpha:.1%} of the branch"
+            )
+            print(
+                f"    {[columns[i] for i in right]}\n"
+                f"      annualized cluster variance {right_var * 252:.4f} -> {1 - alpha:.1%} of the branch"
+            )
+            if len(left) > 1:
+                next_clusters.append(left)
+            if len(right) > 1:
+                next_clusters.append(right)
+        clusters = next_clusters
+        depth += 1
+
+
+print("First two levels of the recursive bisection:")
+trace_bisection(returns.cov().values, get_quasi_diagonal_order(link), list(returns.columns))
+print()
+print(f"Weight in the single largest holding: {weights_df['HRP Weight'].max():.1%}")
+print(f"Weight in the three largest: {weights_df['HRP Weight'].nlargest(3).sum():.1%}")
+
+# %% [markdown]
+# The low-variance half wins both splits by a wide margin, and the shares multiply. Bonds and gold
+# end up holding most of the portfolio, and within them the lowest-volatility holding takes most
+# of what is left.
+#
+# This is inverse-variance allocation doing exactly what it is defined to do, not a bug. But it
+# means HRP is not concentration-free: it concentrates on the *low-variance* assets rather than on
+# whichever assets the covariance inverse happens to favor. Whether that is an improvement depends
+# on whether low realized variance in the estimation window is a better guide to the future than
+# the inverse covariance is - a question the walk-forward comparison below can address and this
+# static example cannot.
 
 # %% [markdown]
 # ## 8. Comparison: HRP vs Other Methods
@@ -613,15 +679,19 @@ fig.show()
 # allocator only sees information available at the rebalance date. The target
 # becomes effective on the following bar.
 
-# %%
-# We use the ETF case study's best-IC GBM walk-forward validation predictions for asset
-# selection. HRP itself only needs a covariance matrix; using real upstream
-# predictions keeps the asset-selection step aligned with the case-study story.
+# %% [markdown]
+# Asset selection uses the ETF case study's best-IC GBM walk-forward validation predictions. HRP
+# itself needs only a covariance matrix, so the predictions are not part of the allocator; they
+# decide *which* assets each allocator sizes, and every allocator sees the same selection.
+#
 # The highest-validation-IC GBM checkpoint is resolved at runtime from
-# `case_studies/etfs/run_log/registry.db`. There is no baked-in `prediction_hash`,
-# so re-running the GBM sweep automatically updates which predictions feed HRP.
-# Because the registry ranks and evaluates this comparison on validation, the result
-# demonstrates allocation behavior and is not a sealed holdout estimate.
+# `case_studies/etfs/run_log/registry.db`. No `prediction_hash` is baked in, so re-running the
+# GBM sweep changes which predictions feed the comparison without an edit here.
+#
+# The registry ranks and evaluates on validation, so what follows demonstrates allocation
+# behavior on a sample the selection step has already seen. It is not an out-of-sample estimate.
+
+# %%
 etf_case_dir = get_case_study_dir("etfs")
 etf_registry_path = etf_case_dir / "run_log" / "registry.db"
 etf_registry_sha256 = hashlib.sha256(etf_registry_path.read_bytes()).hexdigest()
@@ -910,6 +980,7 @@ for name in portfolio_returns.columns:
             "Sharpe Ratio": m["sharpe"],
             "Max Drawdown": m["max_drawdown"],
             "Calmar Ratio": m["calmar"],
+            "Avg Turnover": m["avg_turnover"],
         }
     )
 
@@ -919,7 +990,15 @@ for name in portfolio_returns.columns:
 # %%
 metrics_df = pd.DataFrame(metrics_list)
 metrics_df = metrics_df[
-    ["Method", "Annual Return", "Annual Vol", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]
+    [
+        "Method",
+        "Annual Return",
+        "Annual Vol",
+        "Sharpe Ratio",
+        "Max Drawdown",
+        "Calmar Ratio",
+        "Avg Turnover",
+    ]
 ]
 metrics_df.round(4)
 
@@ -1186,43 +1265,59 @@ else:
 # during the month.
 
 # %% [markdown]
-# ## 12. Why HRP Works in Strategy Context
+# ## 12. Reading the Result
 #
-# ### Advantages over MVO:
-#
-# 1. **No matrix inversion**: HRP uses recursive bisection instead of inverting the
-#    covariance matrix, avoiding the amplification of estimation errors.
-#
-# 2. **Respects hierarchical structure**: Markets have a natural hierarchical structure
-#    (sectors, asset classes, geographies). HRP exploits this structure.
-#
-# 3. **Potential regime robustness**: Hierarchical diversification can be less sensitive
-#    than unconstrained MVO to unstable correlations, but the result depends on whether
-#    the estimated clusters persist out of sample.
-#
-# 4. **No expected returns**: HRP is a "risk-based" allocation method that doesn't
-#    require expected return forecasts, which are notoriously difficult to estimate.
-#
-# 5. **Turnover must be measured**: Clustering can stabilize allocations, but changing
-#    signals or cluster membership can still produce substantial turnover.
-#
-# ### In Strategy Context:
-#
-# - HRP is applied to **ML-selected assets**, not the full universe
-# - Covariance is estimated on **rolling historical windows only**
-# - Prediction-based selection and risk-based sizing play distinct roles
-
-
-# %% [markdown]
-# ### Turnover Check
-
+# The comparison above is the notebook's evidence, so the first thing to do with it is to say
+# where HRP landed rather than to restate what HRP is supposed to achieve.
 
 # %%
-# Turnover comparison from actual backtests
-print("Average Monthly L1 Target Turnover (Walk-Forward Backtest):")
-for name in weights_all:
-    turnover = allocator_metrics[name]["avg_turnover"]
-    print(f"  {name}: {turnover:.2%}")
+ranked = metrics_df.sort_values("Sharpe Ratio", ascending=False).reset_index(drop=True)
+for rank, row in ranked.iterrows():
+    print(
+        f"  {rank + 1}. {row['Method']:<19} Sharpe {row['Sharpe Ratio']:>6.3f}   "
+        f"vol {row['Annual Vol']:>6.1%}   turnover {row['Avg Turnover']:>7.1%}"
+    )
+print()
+print(f"HRP rank by Sharpe: {int(ranked.index[ranked['Method'] == 'HRP'][0]) + 1} of {len(ranked)}")
+print(f"Assets: {n_assets}   estimation window: 252 days   assets selected each month: 5")
+
+# %% [markdown]
+# HRP ranks last. That is the result, and the reason for it is specific.
+#
+# The argument for HRP is that inverting a noisy covariance matrix amplifies estimation error.
+# The argument has force when the estimate is badly under-determined, which means when the number
+# of assets approaches or exceeds the number of observations. This comparison is the opposite
+# case: five selected assets estimated over 252 daily observations. At that ratio the sample
+# covariance is well conditioned, its inverse is not dominated by noise, and Ledoit-Wolf shrinkage
+# cleans up what error remains. HRP uses the correlations only to order the assets and choose the
+# splits; the weights themselves come from variances. It therefore declines to solve for the
+# covariance-optimal allocation, and here it is paying that price to avoid an ill-conditioning
+# problem that this estimate does not have.
+#
+# The turnover column refuses a second common claim. Clustering is often described as producing
+# more stable allocations; here HRP turns over more than equal weight and more than inverse
+# volatility. Most of the turnover in every row comes from the monthly re-selection of five names
+# out of fifteen, which is identical across allocators - equal weight measures that floor. What
+# each allocator adds on top of the floor is its own reshuffling, and HRP adds more than the two
+# simpler methods do.
+#
+# ### What is true regardless of the ranking
+#
+# These are properties of the algorithm, and they hold whether or not it wins a given sample:
+#
+# - It never inverts a covariance matrix, so it returns weights for any $N$ and $T$, including
+#   $N > T$ where minimum-variance optimization has no unique solution at all.
+# - It needs no expected-return forecast. Every input is second-moment.
+# - Its weights are determined by the correlation hierarchy and the variances, so they can be
+#   traced back to a specific split, as section 7 traced them.
+#
+# ### What this notebook cannot tell you
+#
+# One universe, one sample, one estimation window, and a selection step evaluated on validation
+# data. A ranking under those conditions is a fact about this run. The regime where HRP was
+# designed to help - many assets relative to observations - is not the regime tested here, so this
+# result is not evidence against HRP in that regime either.
+
 
 # %% [markdown]
 # ### Allocator Fallback Summary
@@ -1247,19 +1342,24 @@ else:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Clustering avoids global covariance inversion.** HRP replaces the inverse used by
-#    minimum-variance optimization with hierarchical ordering and recursive risk splits. It still
-#    depends on estimated correlations and variances, so it reduces rather than eliminates
-#    estimation risk.
-# 2. **The allocation comparison is conditional.** The table compares gross returns on a fixed
-#    15-ETF teaching universe using the best-IC GBM validation predictions. The ranking is useful
-#    for understanding allocation behavior, not as a sealed holdout estimate.
-# 3. **Timing and costs need separate evidence.** Targets use historical returns through each
-#    decision date and become effective on the next bar. The execution bridge then shows how
-#    commissions and slippage alter the vectorized result.
-# 4. **HRP is not universally dominant.** The displayed table determines the winner for this
-#    sample; simpler inverse-volatility or shrinkage methods can lead when the hierarchy adds
-#    little stable structure.
+# 1. **HRP replaces inversion with ordering and recursive splits.** It still depends on estimated
+#    correlations and variances, so it reduces the exposure to estimation error rather than
+#    removing it.
+# 2. **Avoiding inversion pays off when the estimate is under-determined.** With five assets and
+#    252 observations it is not, and shrinkage MVO leads this comparison. The case for HRP is
+#    strongest when the number of assets approaches or exceeds the sample length, which is a
+#    regime this notebook does not test.
+# 3. **HRP concentrates too, on the low-variance assets.** Section 7 traces a majority weight in a
+#    single bond fund to two successive inverse-variance splits. Risk-based is not the same thing
+#    as diversified.
+# 4. **Clustering did not stabilize the allocation here.** HRP turned over more than equal weight
+#    and inverse volatility, over and above the monthly re-selection every method shares.
+# 5. **The comparison is conditional in three ways.** A fixed 15-ETF ex-post universe, gross of
+#    costs in the vectorized path, and a selection signal ranked on validation data. It shows
+#    allocation behavior, not an out-of-sample estimate.
+# 6. **Timing and costs need separate evidence.** Targets use returns through each decision date
+#    and become effective on the next bar; the execution bridge shows what commissions and
+#    slippage do to the vectorized result.
 #
 # **Next**: Continue with [`09_allocator_comparison`](09_allocator_comparison.ipynb) for a
 # controlled comparison under common signal and execution assumptions.
