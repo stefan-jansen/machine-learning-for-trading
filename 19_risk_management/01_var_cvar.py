@@ -72,6 +72,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 from data import load_etfs
+from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -95,6 +96,8 @@ ROLLING_VAR_WINDOW = 21
 EWMA_LAMBDA = 0.94
 
 # %%
+OUTPUT_DIR = get_output_dir(19, "var_cvar")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 set_global_seeds(SEED)
 
 # %% [markdown]
@@ -1246,6 +1249,34 @@ display(
         "Squared returns remain a noisy volatility proxy, so small loss gaps should not be "
         "treated as economically decisive."
     )
+)
+
+# %% [markdown]
+# ## 12. Persist the Two Artifacts the Book's Figures Read
+#
+# Two figures in the printed chapter are generated from this notebook's output rather than from the
+# notebook's own charts, so those two tables are written to disk. Nothing else here is written:
+# an artifact no named consumer reads is one more thing that can go stale without anyone noticing.
+
+# %%
+var_comparison_df = pl.DataFrame(
+    {
+        "confidence": [f"{round(c * 100)}%" for c in CONFIDENCE_LEVELS] * 4,
+        "method": ["historical"] * 3
+        + ["parametric"] * 3
+        + ["cornish_fisher"] * 3
+        + ["monte_carlo"] * 3,
+        "var_pct": list(var_df["historical"])
+        + list(var_df["parametric"])
+        + list(var_df["cornish_fisher"])
+        + list(var_df["monte_carlo"]),
+    }
+)
+var_comparison_df.write_parquet(OUTPUT_DIR / "var_method_comparison.parquet")
+regime_df.write_parquet(OUTPUT_DIR / "regime_conditional_risk.parquet")
+print(
+    f"var_method_comparison.parquet   {len(var_comparison_df)} rows -> book figure 19.2\n"
+    f"regime_conditional_risk.parquet {len(regime_df)} rows -> book figure 19.3"
 )
 
 # %% tags=["results"]
