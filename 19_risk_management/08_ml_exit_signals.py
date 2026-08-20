@@ -57,7 +57,7 @@ from sklearn.metrics import roc_auc_score
 from data import load_crypto_perps
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, show_plotly_with_alt
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
@@ -1088,7 +1088,12 @@ ax_pub.set_title(outcome_title)
 ax_pub.set_ylim(0, 112)
 ax_pub.set_yticks(range(0, 101, 20))
 ax_pub.legend(loc="upper center", ncols=3, frameon=False)
-plt.show()
+show_with_alt(
+    fig_pub,
+    "Stacked bars of outcome share by signal quintile: adverse move, neutral, and strong upside. "
+    "The strong-upside share grows across the quintiles from near zero, while the adverse-move "
+    "share stays broadly flat.",
+)
 
 # %% tags=["results"]
 display(
