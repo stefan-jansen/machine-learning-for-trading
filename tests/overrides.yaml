@@ -713,6 +713,14 @@
   timeout: 300
 16_strategy_simulation/08_signal_method_comparison:
   timeout: 300
+  # The seeded prediction fixtures are short: seed_results.py replaces the
+  # shipped artifacts with a fabricated weekday grid, so the shortest symbol
+  # carries ~33 observations. A 63-observation trailing percentile cannot be
+  # computed on that, and the notebook now says so instead of returning an
+  # empty signal stream. Inject a grid the fixture can support; the production
+  # defaults in the parameters cell are unchanged and the same code runs.
+  parameters:
+    ROLLING_WINDOWS: [5, 10, 21]
 16_strategy_simulation/09_performance_reporting:
   timeout: 300
 16_strategy_simulation/10_regime_backtest_analysis:
