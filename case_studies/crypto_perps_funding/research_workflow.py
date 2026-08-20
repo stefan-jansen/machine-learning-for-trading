@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import inspect
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -194,36 +192,3 @@ def target_positions(
         .sort("timestamp", "symbol")
     )
     return result.rename({"fold_id": "fold"}) if selected_fold == ["fold_id"] else result
-
-
-def publish_exploratory_positions(
-    study: Study,
-    prediction_hash: str,
-    predictions: pl.DataFrame,
-    *,
-    long_count: int = 1,
-    short_count: int = 1,
-    cadence: str = "8h",
-) -> DecisionArtifact:
-    """Publish an immediately backtestable, non-canonical Python decision."""
-    return DecisionArtifact.publish(
-        study,
-        kind="target_positions",
-        decisions=target_positions(
-            predictions,
-            long_count=long_count,
-            short_count=short_count,
-        ),
-        prediction_hashes=[prediction_hash],
-        parameters={"long_count": long_count, "short_count": short_count, "cadence": cadence},
-        state_transition_policy=StateTransitionPolicy(
-            fold_boundary="liquidate",
-            temporal_gap="reset",
-        ),
-        canonical=False,
-    )
-
-
-def target_positions_source_digest() -> str:
-    """Return the digest used when this decision generator is promoted after replay."""
-    return hashlib.sha256(inspect.getsource(target_positions).encode()).hexdigest()
