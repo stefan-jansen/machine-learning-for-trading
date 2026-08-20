@@ -168,11 +168,16 @@ def test_an_empty_label_list_means_every_published_label():
 
 
 def test_the_wrappers_route_to_the_shared_implementation():
-    """The guard itself is tested generically; this pins only the case-study binding."""
+    """Only the case-study binding. The guard's behaviour is the shared file's to prove.
+
+    `tests/test_research_declared_menu_coverage.py` already asserts what the excluded
+    frame contains for this case study; repeating it here would be a second copy that
+    goes stale independently.
+    """
     from case_studies.research import configured_model_menu as shared_menu
+    from case_studies.research import require_declared_menu_coverage as shared_coverage
 
     assert configured_model_menu().equals(shared_menu(CASE_STUDY_NAME))
-    unfitted = {("deep_learning", "nlinear"): "no notebook fits it"}
-    excluded = require_declared_menu_coverage(_covered(), unfitted=unfitted)
-    assert set(excluded.get_column("config_name")) == {"nlinear"}
-    assert excluded.height == 3
+    assert require_declared_menu_coverage(_covered(), unfitted=UNFITTED).equals(
+        shared_coverage(_covered(), case_study=CASE_STUDY_NAME, unfitted=UNFITTED)
+    )
