@@ -67,7 +67,7 @@ from scipy.stats import norm
 
 import utils.style  # noqa: F401
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults
@@ -283,7 +283,10 @@ fig.update_layout(
     height=540,
     margin=dict(t=90, b=50),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Sample simulated price paths with the Black-Scholes delta for each overlaid on a second axis, showing delta rising toward one as a path finishes in the money and falling toward zero when it does not.",
+)
 
 # %% [markdown]
 # ## Baseline: Black-Scholes Delta Hedging
@@ -357,7 +360,7 @@ def pnl_stats(pnl, label=""):
     }
 
 
-# The strategy comparison is deferred until the sealed test split is opened.
+# The strategy comparison waits until the test split is used, at the end.
 
 # %% [markdown]
 # ## The Deep Hedger
@@ -428,9 +431,14 @@ class DeepHedger(nn.Module):
 #
 # $$\text{CVaR}_{1-q}(L) = \min_w \left[ w + \frac{1}{q} \mathbb{E}\left[(L - w)_+\right] \right]$$
 #
-# where $L = -PL_T$ and $q=0.05$ is the tail probability, corresponding to the book's 95%
-# confidence convention. The threshold $w$ is learned jointly with the hedge. This optimized OCE
-# objective is distinct from the empirical sample CVaR reported on validation and test paths.
+# where $L = -PL_T$ and $q$ is the tail probability set by `CVAR_TAIL_PROBABILITY`. The threshold
+# $w$ is learned jointly with the hedge rather than being computed from a quantile, which is what
+# makes the objective differentiable and therefore trainable.
+#
+# The number this expression minimizes is not the same as the sample CVaR reported on the
+# validation and test paths. The optimization solves for a $w$ that is optimal in expectation; the
+# reported figure is the mean of the worst outcomes actually observed. They converge as the sample
+# grows and are not interchangeable at any finite size.
 
 
 # %%
@@ -490,9 +498,14 @@ info = prepare_info(paths, STRIKE, SIGMA, N_STEPS, DT)
 print(f"Information tensor: {tuple(info.shape)} [log_moneyness, tau, vol, log_return]")
 
 # %% [markdown]
-# The seeded simulator produces independent paths. Training fits the policy, validation monitors
-# optimization and supports the exploratory cost sweep, and the final test split remains sealed
-# until the main policy is frozen. No chronological purge is needed for independent simulated paths.
+# The simulator produces independent paths, so the three splits differ only in what each is used
+# for. Training fits the policy. Validation monitors the optimization and carries the exploratory
+# cost sweep. The test paths are not touched until the main policy is fixed, and are then used
+# once.
+#
+# No purge is needed here, and it is worth being clear why: a purge exists to stop a
+# forward-looking label from reaching across a boundary in time. These paths are independent draws
+# rather than one series cut into pieces, so no such overlap exists. On real data it would.
 
 # %%
 n_train = int(TRAIN_FRACTION * N_PATHS)
@@ -509,7 +522,7 @@ payoff_validation, payoff_test = payoff[validation_idx], payoff[test_idx]
 premium_train = premium[train_idx]
 premium_validation, premium_test = premium[validation_idx], premium[test_idx]
 
-print(f"Train: {n_train:,} | Validation: {n_validation:,} | Sealed test: {n_test:,} paths")
+print(f"Train: {n_train:,} | Validation: {n_validation:,} | Test: {n_test:,} paths")
 
 # %% [markdown]
 # ## Training
@@ -641,17 +654,17 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=(
-        f"Validation tail loss moves from {validation_cvar_losses[0]:.2f} "
-        f"to {validation_cvar_losses[-1]:.2f}"
-    ),
+    title="Tail loss falls quickly and then flattens",
     xaxis_title="Training epoch",
     yaxis_title="Tail loss (PnL units, log scale)",
     yaxis_type="log",
     height=380,
     margin=dict(t=90, b=55),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Training and validation tail loss against epoch on a log scale. Both fall steeply in the first epochs and then flatten, staying close to each other throughout.",
+)
 
 # %% [markdown]
 # Significant-trade counts include opening, every rebalance, and terminal liquidation.
@@ -668,9 +681,10 @@ def mean_significant_trades(positions, threshold):
 # %% [markdown]
 # ## Transaction Cost Sensitivity
 #
-# The exploratory sweep trains a fresh policy at each cost level on the same training paths and
-# evaluates it on validation paths. Resetting initialization and minibatch order before every model
-# isolates the cost treatment from advancing random state. The sweep never opens the sealed test.
+# The sweep trains a fresh policy at each cost level on the same training paths and scores it on
+# the validation paths. Initialization and minibatch order are reset before every model, so the
+# difference between two cost levels is the cost and not where the random stream happened to be.
+# The test paths are not used here.
 
 # %%
 cost_levels = [0.0, 0.0001, 0.0005, 0.001, 0.005]
@@ -778,12 +792,15 @@ fig.update_layout(
     height=430,
     margin=dict(t=95, b=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Tail loss against cost level for freshly trained policies, rising as costs rise, with the learned policy's advantage over the delta hedge widening at the higher cost levels.",
+)
 
 # %% [markdown]
 # The computed sweep commentary distinguishes an observed endpoint change from monotonic behavior.
 
-# %%
+# %% tags=["results"]
 trade_differences = np.diff(deep_trades_by_cost)
 monotone_text = "monotone" if np.all(trade_differences <= 0) else "not monotone"
 display(
@@ -797,11 +814,16 @@ display(
 )
 
 # %% [markdown]
-# ## Results: Sealed Three-Way Comparison
+# ## Results: The Three-Way Comparison
 #
-# All model fitting and validation exploration are complete. The frozen main policy is now evaluated
-# once on the sealed test paths alongside the naked option and Black-Scholes delta hedge. This GBM
-# experiment illustrates behavior under its stated assumptions; it does not establish dominance.
+# Fitting and exploration are finished and the policy is fixed. It is now scored once on the test
+# paths, alongside an unhedged option and a Black-Scholes delta hedge charged the same costs.
+#
+# What this can establish is how the three behave on paths drawn from the model the delta hedge
+# assumes. That is the fairest possible ground for the benchmark and the least informative about
+# real markets: geometric Brownian motion has no jumps, no volatility clustering and no drift in
+# its volatility, which are the conditions under which a learned hedge would be expected to differ
+# most from a formula.
 
 # %%
 deep_positions, pnl_deep = evaluate_hedger(
@@ -821,7 +843,7 @@ print(f"SEALED_TEST_OPEN_PROOF paths={n_test} evaluations=1 post_selection=True"
 # %% [markdown]
 # The exact test metrics are generated from the result object so they cannot drift from a rerun.
 
-# %%
+# %% tags=["results"]
 result_lines = [
     "| Strategy | Mean PnL | PnL std. dev. | 95% CVaR loss |",
     "|:--|--:|--:|--:|",
@@ -867,7 +889,8 @@ for pnl_data, name, color in distribution_series:
         )
 
 # %% [markdown]
-# Zero-PnL references distinguish gains from losses; the dotted horizontal line marks the 5% tail.
+# The dashed vertical line separates gains from losses. The dotted line marks the tail the CVaR
+# objective is computed over.
 
 # %%
 for column in (1, 2):
@@ -877,16 +900,20 @@ fig.update_xaxes(title_text="Terminal PnL (currency units)")
 fig.update_yaxes(title_text="Cumulative probability", range=[0, 1], row=1, col=1)
 fig.update_yaxes(title_text="Cumulative probability", range=[0, 0.10], row=1, col=2)
 fig.update_layout(
-    title=f"{figure_winner} has the lowest sealed-test tail loss",
+    title="The lower tail is where the three strategies differ most",
     height=420,
     margin=dict(t=95, b=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Cumulative distributions of terminal profit and loss for the unhedged option, the delta hedge and the deep hedge, with the lower tail magnified in a second panel. The unhedged curve is far wider; the two hedged curves separate mainly in the tail.",
+)
 
 # %% [markdown]
-# The interpretation below is also generated from the sealed-test result object.
+# The reading below is computed from the test result rather than typed out, so it cannot drift
+# from the numbers above it.
 
-# %%
+# %% tags=["results"]
 deep_result = results[2]
 delta_result = results[1]
 mean_relation = "higher" if deep_result["mean"] > delta_result["mean"] else "lower"
@@ -894,9 +921,11 @@ dispersion_relation = "wider" if deep_result["std"] > delta_result["std"] else "
 tail_relation = "lower" if deep_result["cvar_95"] < delta_result["cvar_95"] else "higher"
 display(
     Markdown(
-        f"On the sealed test paths, the deep hedge has **{mean_relation} mean PnL**, "
-        f"a **{dispersion_relation} standard deviation**, and **{tail_relation} 95% CVaR loss** "
-        "than delta hedging. The comparison separates tail behavior from overall dispersion."
+        f"On the test paths, the deep hedge has **{mean_relation} mean PnL**, a "
+        f"**{dispersion_relation} standard deviation**, and **{tail_relation} expected shortfall** "
+        "than delta hedging. Those three can move independently: a policy trained to minimize the "
+        "tail is free to accept more dispersion elsewhere, and reporting only one of them would "
+        "hide the trade it made."
     )
 )
 
@@ -1001,18 +1030,21 @@ fig.update_layout(
     showlegend=False,
     margin=dict(t=95, b=60),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Share of steps with no significant position change, bucketed by distance from the delta benchmark. Inaction is highest when the policy sits close to the benchmark and falls as the gap widens.",
+)
 
 # %% [markdown]
 # The statement below reports the computed association, sample sizes, and its identification limit.
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"At the disclosed **{SIGNIFICANT_TRADE_THRESHOLD:.2f}-share threshold**, inaction is "
-        f"**{small_gap_inaction:.1%}** for gaps below 0.02 "
-        f"(n={inaction_df[0, 'observations']:,}) and **{large_gap_inaction:.1%}** for gaps above "
-        f"0.50 (n={inaction_df[-1, 'observations']:,}). This conditional association does not "
+        f"**{small_gap_inaction:.1%}** in the narrowest gap bucket "
+        f"(n={inaction_df[0, 'observations']:,}) and **{large_gap_inaction:.1%}** in the widest "
+        f"(n={inaction_df[-1, 'observations']:,}). This conditional association does not "
         "identify a no-transaction region. Across the full lifecycle, the deep and delta policies "
         f"average **{deep_mean_trades:.1f}** and **{delta_mean_trades:.1f}** significant trades."
     )
@@ -1021,9 +1053,17 @@ display(
 # %% [markdown]
 # ### Deployment Notes
 #
-# A production wrapper should log every policy input and emitted position, validate on strictly later
-# market data, and refit only under a governed trigger. The learned policy should remain inside hard
-# exposure, stop-loss, and daily-loss limits. The governance framework appears in Section 19.8.
+# Two things separate this from something deployable. The policy was trained on paths from a model
+# it was also benchmarked against, so nothing here tests it against the behaviour real prices show
+# and this one does not - jumps, volatility that clusters, a spread that widens exactly when the
+# hedge needs to trade. And a learned policy has no guarantees outside the states it saw: it will
+# emit a position for an input unlike anything in training, and that position is unconstrained
+# unless something outside the network constrains it.
+#
+# So a production wrapper logs every input and every emitted position, validates on market data
+# strictly later than anything it was fitted on, refits only under a stated trigger rather than on
+# a schedule, and keeps the policy inside hard exposure, stop-loss and daily-loss limits that do
+# not depend on the network agreeing. Section 19.8 covers that framework.
 
 # %%
 print(f"Paths: {N_PATHS:,} | Steps: {N_STEPS} | Cost rate: {COST_RATE}")
@@ -1032,11 +1072,49 @@ print(f"Training epochs: {N_EPOCHS} | Model params: {sum(p.numel() for p in mode
 # %% [markdown]
 # ## Key Takeaways
 #
-# - The OCE representation makes tail risk differentiable, while final reporting uses empirical CVaR
-#   on unseen paths.
-# - Transaction costs cover the complete position lifecycle, including terminal liquidation.
-# - The sealed test comparison reports what happened in this GBM experiment without generalizing to
-#   market data or claiming that a learned policy must dominate delta hedging.
-# - The conditional inaction diagnostic describes association with a delta benchmark; it does not
-#   identify an optimal no-transaction region.
-# - Deep hedging is a bridge to the policy-optimization methods developed in Chapter 21.
+# 1. **A risk measure has to be differentiable before a network can be trained on it.** CVaR as
+#    normally computed is a mean over the worst outcomes, which needs a quantile and gives no
+#    gradient. The optimized-certainty-equivalent form replaces the quantile with a threshold the
+#    optimizer solves for, which turns the same quantity into an objective. That rewriting is the
+#    step that makes the whole notebook possible.
+#
+# 2. **Report the empirical measure, not the objective's value.** The number being minimized is an
+#    expectation over a learned threshold; the number worth reporting is the mean of the worst
+#    outcomes actually observed. They converge only in the limit and quoting the first as if it
+#    were the second overstates what was achieved.
+#
+# 3. **Charge costs over the whole lifecycle, including the final liquidation.** A hedging policy
+#    that is not charged for closing its position at expiry is rewarded for carrying one, and the
+#    comparison against a benchmark that does close silently favours it.
+#
+# 4. **Train and benchmark on the same generator and the comparison is at its least informative.**
+#    These paths come from the model the delta hedge is derived under, which is the fairest ground
+#    the benchmark can be given. The conditions where a learned policy would be expected to differ -
+#    jumps, clustered volatility, spreads that widen when the hedge must trade - are all absent by
+#    construction.
+#
+# 5. **Read mean, dispersion and tail together.** A policy trained to minimize the tail may accept
+#    more variance elsewhere to get it. That is the trade it was asked to make, and reporting any
+#    one of the three alone conceals it.
+#
+# 6. **An emergent behaviour is an association until something identifies it.** The policy trades
+#    less when it sits close to the delta benchmark, which resembles the no-transaction band the
+#    theory predicts. Resembling it is not the same as being it, and nothing here separates the two.
+#
+# ### Known limitations
+#
+# - Every path is simulated from geometric Brownian motion. Real returns have fatter tails,
+#   volatility that clusters and jumps, and the policy has never seen any of them.
+# - Costs are a fixed proportional rate. Real costs rise with size and with volatility, which is
+#   precisely when a hedge trades most, so the cost model is easiest exactly where it should bite.
+# - One option, one strike, one maturity, one volatility. Nothing here says how the policy behaves
+#   as any of those change.
+# - The cost sweep trains at reduced epochs and path counts, so its levels are indicative of the
+#   direction and not comparable with the main policy's.
+# - The comparison is a single test draw. It is large, but it is one sample from one generator.
+#
+# **Next**: Chapter 21 develops the policy-optimization methods this notebook borrows from, with
+# the exploration and credit-assignment machinery a single-shot objective does not need.
+#
+# **Book reference**: Chapter 19, Section 19.7; Buehler, H., Gonon, L., Teichmann, J., and Wood, B.,
+# "Deep Hedging", *Quantitative Finance* 19(8), 1271-1291.
