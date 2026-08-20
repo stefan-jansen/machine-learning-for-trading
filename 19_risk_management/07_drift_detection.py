@@ -31,14 +31,16 @@
 # 4. Translate per-method drift scores into alert levels and a retraining
 #    recommendation via `ProductionDriftMonitor.should_retrain()`.
 #
-# **Book reference**: §19.7 (Adaptive Risk Controls) and §19.8 (Kill Switches
-# and Governance, esp. PSI thresholds 0.10 / 0.25).
+# **Book reference**: Chapter 19, Sections 19.7 and 19.8.
 #
-# **Prerequisites**: Feature engineering and distribution diagnostics from
-# Chapter 8, an `ml4t-diagnostic` install, and the canonical PSI threshold
-# rules (PSI < 0.10 stable / 0.10 <= PSI < 0.25 warning / PSI >= 0.25 critical). Note that
-# these are rules of thumb; thresholds must be calibrated per feature
-# distribution and sample-size regime before production use.
+# **Prerequisites**: Feature engineering and distribution diagnostics from Chapter 8, and an
+# `ml4t-diagnostic` install.
+#
+# The alert thresholds every section below compares against are declared in the parameters cell
+# and printed there with what each band means. They are the conventional rules of thumb and
+# nothing more: the right boundary depends on the feature's own distribution and on how many
+# observations each check has, and a threshold carried over untested will either alert constantly
+# or never.
 #
 # **Data**: Real ETF and crypto feature panels. ETF features (momentum, volatility,
 # RSI, volume ratio) come from `load_etfs` and are split by calendar window
@@ -77,7 +79,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 
 from data import load_crypto_perps, load_crypto_premium, load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides for CI
@@ -87,6 +89,32 @@ PSI_CRITICAL_THRESHOLD = 0.25
 DOMAIN_AUC_WARNING_THRESHOLD = 0.60
 DOMAIN_AUC_CRITICAL_THRESHOLD = 0.70
 DOMAIN_CV_TIME_BLOCKS = 20
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `PSI_WARNING_THRESHOLD` and `PSI_CRITICAL_THRESHOLD` are the population stability index values
+#   at which a single feature's distribution counts as having moved enough to watch, and enough to
+#   act on.
+# - `DOMAIN_AUC_WARNING_THRESHOLD` and `DOMAIN_AUC_CRITICAL_THRESHOLD` are the same two bands for
+#   the multivariate check. Half is the no-drift point, since a classifier that cannot separate the
+#   samples scores exactly that.
+# - `DOMAIN_CV_TIME_BLOCKS` is how many contiguous time blocks the domain classifier's
+#   cross-validation splits into. Splitting by block rather than at random keeps neighbouring days
+#   out of opposite folds, which would otherwise let the classifier separate the samples by
+#   memorizing a period rather than by detecting drift.
+#
+# All four thresholds are the conventional rules of thumb. Calibrate them against a period where
+# you know whether drift occurred before trusting them to page anyone.
+
+# %%
+print(
+    f"PSI       stable below {PSI_WARNING_THRESHOLD}, "
+    f"warning to {PSI_CRITICAL_THRESHOLD}, critical above\n"
+    f"Domain AUC no separation below {DOMAIN_AUC_WARNING_THRESHOLD}, "
+    f"warning to {DOMAIN_AUC_CRITICAL_THRESHOLD}, critical above\n"
+    f"Domain CV  {DOMAIN_CV_TIME_BLOCKS} contiguous time blocks"
+)
 
 # %% [markdown]
 # Reader-facing labels and policy colors live outside the Papermill parameters cell because they
@@ -589,10 +617,12 @@ print(f"Drift   (2020): {len(covariate_drift_features):,} symbol-days")
 #
 # $$PSI = \sum_{i=1}^{n} (p_i^{\text{actual}} - p_i^{\text{expected}}) \cdot \ln\left(\frac{p_i^{\text{actual}}}{p_i^{\text{expected}}}\right)$$
 #
-# ### PSI Interpretation
-# - **PSI < 0.10**: Stable under the policy threshold
-# - **0.10 ≤ PSI < 0.25**: Warning - monitor and investigate
-# - **PSI ≥ 0.25**: Critical - investigate
+# ### Reading the Index
+#
+# A PSI near zero says the two samples put the same share of their mass in every bin. It grows as
+# mass moves between bins, and because each bin contributes the movement times the log of the
+# ratio, a bin that empties or fills contributes far more than one that shifts slightly. The bands
+# the notebook alerts on are the parameters printed above.
 
 # %%
 # Compute PSI for each feature
@@ -686,7 +716,7 @@ def plot_psi_breakdown(result: PSIResult, feature_name: str):
     fig.add_trace(current_bar, row=1, col=1)
     fig.add_trace(psi_contribution_bar(result, bins), row=1, col=2)
     fig.update_layout(
-        title=f"{feature_label} carries the strongest PSI alert ({result.psi:.2f})",
+        title=f"Where {feature_label} moved between the two samples",
         barmode="group",
         showlegend=True,
         height=430,
@@ -707,7 +737,10 @@ def plot_psi_breakdown(result: PSIResult, feature_name: str):
 # Visualize feature with highest PSI
 worst_feature = max(psi_results, key=lambda x: psi_results[x].psi)
 fig = plot_psi_breakdown(psi_results[worst_feature], worst_feature)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels: reference and current distributions as grouped bars per bin, and each bin's contribution to the total index. A small number of bins account for most of the total.",
+)
 
 # %% [markdown]
 # The bar comparison confirms where the distribution moved. In production, this is the point
@@ -844,10 +877,7 @@ def plot_wasserstein_comparison(
         fig.add_trace(trace, row=1, col=2)
     normalized_distance = result.distance / result.reference_stats["std"]
     fig.update_layout(
-        title=(
-            f"{feature_label} transport spans {normalized_distance:.2f} reference "
-            "standard deviations"
-        ),
+        title=f"How far {feature_label} would have to be moved to match",
         barmode="overlay",
         height=430,
         showlegend=True,
@@ -871,7 +901,10 @@ fig = plot_wasserstein_comparison(
     wasserstein_results["volatility_20"],
     "volatility_20",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels: overlaid histograms of the two samples, and their empirical cumulative distributions. The gap between the two curves is the distance the measure reports.",
+)
 
 # %% [markdown]
 # The volatility comparison shows why transport distance is intuitive for readers: the current
@@ -890,10 +923,10 @@ fig.show()
 # ### How It Works
 # 1. Label reference data as 0, current data as 1
 # 2. Train a classifier (usually gradient boosting)
-# 3. Measure out-of-fold AUC:
-#    - **AUC < 0.60**: No policy-level separation
-#    - **0.60 ≤ AUC < 0.70**: Warning - monitor and investigate
-#    - **AUC ≥ 0.70**: Critical separation alert
+# 3. Measure out-of-fold AUC. A classifier that cannot tell the two samples apart scores one half,
+#    which is what no drift looks like. The further above one half it scores, the more the samples
+#    differ in some combination of features - which is what makes this test able to see drift that
+#    no single feature shows.
 
 # %%
 # Domain classifier for multivariate drift. DataFrames preserve real feature names.
@@ -957,8 +990,8 @@ def plot_domain_classifier_results(result: DomainClassifierResult):
     )
     fig.update_layout(
         title=(
-            f"{top_feature} contributes most to regime separation"
-            f"<br><sup>Cross-validated AUC {result.auc:.3f}; {alert_level.lower()}</sup>"
+            "Which features let a classifier tell the two samples apart"
+            "<br><sup>Split counts from the cross-validated domain classifier</sup>"
         ),
         xaxis_title="LightGBM split count",
         yaxis_title="Feature",
@@ -975,7 +1008,10 @@ def plot_domain_classifier_results(result: DomainClassifierResult):
 
 # %%
 fig = plot_domain_classifier_results(result)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A horizontal bar chart of split counts per feature from the domain classifier, showing which features it relied on to separate the two samples.",
+)
 
 # %% [markdown]
 # If one feature dominates this chart, the drift response can start with that signal. A more
@@ -1031,10 +1067,14 @@ if drift_summary.domain_classifier_result:
 #
 # Monitor feature drift across quarters for a daily equity momentum strategy.
 
+# %% [markdown]
+# ### A Real Drift Episode, Quarter by Quarter
+#
+# The last quarter of 2019 is the baseline: an ordinary market. The four quarters of 2020 that
+# follow it contain a crash, a rebound and a partial recovery, so the sequence shows drift
+# arriving and then partly reversing rather than a single before-and-after comparison.
+
 # %%
-# Slice the ETF feature panel into real calendar quarters spanning the COVID
-# regime shift. Q4 2019 is the calm baseline; Q1-Q4 2020 cover the crash,
-# rebound, and partial recovery.
 QUARTER_WINDOWS = {
     "Q4_2019": ("2019-10-01", "2020-01-01"),
     "Q1_2020": ("2020-01-01", "2020-04-01"),
@@ -1232,7 +1272,10 @@ fig.update_yaxes(
     row=2,
     col=2,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of PSI by feature and quarter on a logarithmic colour scale, with the crisis quarter far darker than the rest across every feature.",
+)
 
 # %% [markdown]
 # The dashboard turns a raw drift table into an escalation timeline. Multiple alerts within a
@@ -1296,9 +1339,15 @@ def crypto_window(start: str, end: str) -> pd.DataFrame:
     )
 
 
+# %% [markdown]
+# ### Drift That Arrives in Days Rather Than Quarters
+#
+# The ETF episode unfolded over quarters. Crypto gives a faster one: the baseline is an ordinary
+# month in early 2021, and the comparison windows walk through a second bull month, a later rally,
+# the collapse of a large stablecoin and its aftermath. A monitor calibrated to quarterly review
+# would learn about the middle window well after it mattered.
+
 # %%
-# Baseline = an early-2021 month; comparison windows walk through another bull-market month,
-# a later rally, the LUNA/UST collapse, and the post-LUNA period that preceded FTX.
 baseline_crypto = crypto_window("2021-01-01", "2021-02-01")
 regimes = {
     "Apr 2021 (Bull market)": crypto_window("2021-04-01", "2021-05-01"),
@@ -1345,10 +1394,10 @@ for period, current in regimes.items():
 
 crypto_drift_df = pd.DataFrame(crypto_drift)
 
-# %%
-# The heatmap and AUC panel retain the full diagnostic result without duplicating it as a printed
-# table. Values at or above the 0.25 PSI policy line are visible in the hover labels; the color scale is
-# logarithmic so extreme crisis values do not flatten the warning-level values.
+# %% [markdown]
+# The colour scale is logarithmic. A crisis window produces PSI values orders of magnitude above
+# the alert bands, and on a linear scale those few cells would compress every warning-level value
+# into an indistinguishable block at the bottom.
 
 # %%
 # Heatmap of PSI across features and periods
@@ -1440,7 +1489,10 @@ fig.update_xaxes(title_text="Market window", tickangle=0, row=1, col=1)
 fig.update_yaxes(title_text="Feature", row=1, col=1)
 fig.update_xaxes(title_text="Market window", tickangle=-30, row=1, col=2)
 fig.update_yaxes(title_text="Cross-validated AUC", range=[0, 1], row=1, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of PSI by crypto feature and comparison window on a logarithmic scale, with the collapse window standing out sharply from the bull-market ones.",
+)
 
 # %% [markdown]
 # The heatmap makes cross-feature timing easy to read. Instead of asking whether drift exists in
@@ -1621,31 +1673,25 @@ print(f"Reason: {reason}")
 # 3. **Warning or critical alert**: Investigate the affected features and the operating regime.
 # 4. **Retraining decision**: Require the any-N-in-lookback alert count and performance degradation.
 #
-# ### Common Pitfalls
+# ### What Goes Wrong
 #
-# 1. **Overfitting to drift**: Don't retrain too frequently
-# 2. **Ignoring concept drift**: Feature drift without performance drop may be OK
-# 3. **Small sample sizes**: Drift metrics can be noisy with few samples
-# 4. **Not tracking downstream impact**: Drift → Performance degradation is what matters
+# 1. **Retraining on every alert.** Each retrain fits the model to a shorter, more recent window,
+#    which raises its variance and guarantees the next alert arrives sooner. A drift alert is a
+#    reason to look, not a reason to refit.
+# 2. **Treating feature drift as failure.** Inputs moving does not mean the relationship between
+#    inputs and outcome moved. A model can be entirely healthy on a distribution it has never
+#    seen, and can be broken on one identical to its training data - the second is concept drift
+#    and none of these measures detects it.
+# 3. **Alerting on samples too small to carry the measure.** PSI computed over a few hundred rows
+#    moves substantially between adjacent windows with nothing behind it. The alert threshold and
+#    the window size have to be set together.
+# 4. **Monitoring the inputs and not the outcome.** Drift matters when it degrades performance.
+#    A monitor that never joins the two reports weather.
 
 # %% [markdown]
 # ### Drift Detection Quick Reference
 #
-# **PSI Thresholds**
-#
-# | PSI Range | Action |
-# |-----------|--------|
-# | < 0.10 | No PSI alert |
-# | 0.10 ≤ PSI < 0.25 | Warning; monitor closely |
-# | ≥ 0.25 | Critical alert; investigate |
-#
-# **Domain Classifier AUC**
-#
-# | AUC Range | Interpretation |
-# |-----------|----------------|
-# | < 0.60 | No policy-level multivariate separation |
-# | 0.60 ≤ AUC < 0.70 | Warning; monitor and investigate |
-# | ≥ 0.70 | Critical separation alert |
+# The alert bands for both measures are the parameters printed at the top of the notebook.
 #
 # **Action Matrix**
 #
@@ -1659,7 +1705,7 @@ print(f"Reason: {reason}")
 # %% [markdown]
 # ## Key Takeaways
 
-# %%
+# %% tags=["results"]
 etf_psi_rank = sorted(psi_results.items(), key=lambda item: item[1].psi, reverse=True)
 peak_quarter = drift_df.loc[drift_df["avg_psi"].idxmax()]
 crypto_psi_columns = [f"psi_{feature}" for feature in crypto_features]
@@ -1667,29 +1713,60 @@ crypto_peak_column = crypto_drift_df[crypto_psi_columns].max().idxmax()
 crypto_peak_feature = crypto_peak_column.removeprefix("psi_")
 crypto_peak_value = crypto_drift_df[crypto_peak_column].max()
 critical_alerts = sum(record["status"] == "CRITICAL" for record in monitor.drift_history)
-
 display(
     Markdown(
-        f"""
-1. **PSI isolates the dominant ETF shifts.** `{etf_psi_rank[0][0]}` has the largest PSI
-   ({etf_psi_rank[0][1].psi:.2f}); the reference-bin calculation also keeps small distribution
-   differences from inheriting the scale of more volatile features.
-2. **The quarterly panel distinguishes crash, rebound, and normalization.** Mean PSI peaks in
-   `{peak_quarter["quarter"]}` at {peak_quarter["avg_psi"]:.2f}. Repeated alerts within a declared
-   lookback trigger a review, not proof of concept drift.
-3. **The crypto diagnostic measures the premium index, not the funding rate.**
-   `{crypto_peak_feature}` reaches the largest PSI ({crypto_peak_value:.2f}) across the displayed
-   windows. The name preserves the economic meaning of the source field.
-4. **Thresholds require an empirical noise floor.** {critical_alerts} of
-   {len(monitor.drift_history)} comparison windows trigger the demonstration's critical rule.
-   Production calibration should use adjacent stable windows and pair feature drift with realized
-   performance before retraining.
-"""
+        f"Across the ETF features, **{etf_psi_rank[0][0]}** carries the largest PSI at "
+        f"**{etf_psi_rank[0][1].psi:.2f}**. Mean PSI across the quarterly panel peaks in "
+        f"**{peak_quarter['quarter_label']}** at **{peak_quarter['avg_psi']:.2f}**. On the crypto "
+        f"panel the "
+        f"largest single reading is **{crypto_peak_feature}** at **{crypto_peak_value:.2f}**. The "
+        f"production monitor raised **{critical_alerts} critical alerts** over its history."
     )
 )
+
+# %% [markdown]
+# 1. **Measure drift against a reference window you can defend.** Every number here is a
+#    comparison, so it inherits whatever the baseline happened to contain. A baseline drawn from a
+#    calm period makes ordinary variation look like drift; one spanning a crisis absorbs the next
+#    crisis into the reference and reports nothing.
 #
-# **Next**: `08_ml_exit_signals.ipynb` builds an entry/exit two-model
-# architecture that consumes the kind of drift signal generated here.
+# 2. **Read the bin-level breakdown, not just the index.** PSI is a sum over bins, and the same
+#    total arises from a uniform shift and from one bin emptying. Only the second is usually a data
+#    problem, and only the breakdown distinguishes them.
 #
-# **Book reference**: §19.7 (Adaptive Risk Controls), §19.8 (Kill Switches and
-# Governance - PSI thresholds 0.10 / 0.25).
+# 3. **Use a multivariate check as well as per-feature ones.** Features can each stay within their
+#    own historical range while their joint distribution moves - a correlation breaking, a
+#    combination that never previously occurred. A classifier trained to tell the two samples apart
+#    sees that; a per-feature index cannot.
+#
+# 4. **Split the domain classifier's folds by time block, not at random.** Neighbouring rows are
+#    nearly identical, so random folds let the classifier memorize periods and score well without
+#    any drift being present. That is the difference between detecting drift and detecting
+#    autocorrelation.
+#
+# 5. **Match the monitoring cadence to how fast the market being monitored moves.** The ETF
+#    episode here unfolds over quarters and the crypto one over days. A monitor reviewed monthly
+#    would have caught the first and learned about the second long after it mattered.
+#
+# 6. **Require drift and degradation before retraining.** Drift alone is a reason to investigate.
+#    Retraining on drift alone shortens the training window every time and makes the next alert
+#    more likely, which is a loop rather than a control.
+#
+# ### Known limitations
+#
+# - The alert thresholds are the conventional rules of thumb. Nothing here calibrates them against
+#   a period where it is known whether drift occurred, so they say where the convention puts the
+#   line and not where this data would.
+# - The windows on both panels are chosen by hand around episodes already known to contain drift.
+#   That is right for showing what the measures do and wrong for estimating how often they fire in
+#   ordinary conditions, which is what a production threshold has to be set against.
+# - No model performance is tracked alongside the drift. The retraining rule requires degradation
+#   as its second condition and the notebook supplies that flag rather than measuring it, so the
+#   loop from drift through performance to a decision is demonstrated, not closed.
+# - PSI depends on the binning. The reference quantiles fix it here, and a different bin count
+#   would move every value reported.
+#
+# **Next**: `08_ml_exit_signals` builds the two-model entry-and-exit architecture the exit rules in
+# `02_exit_strategies` stood in for.
+#
+# **Book reference**: Chapter 19, Sections 19.7 and 19.8.
