@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "audit_generated_at": "2026-08-20T07:10:58.181350+00:00",
-  "library_commit": "e486cdf200d187573b79d88a65c09d0cf5a2a6a4",
-  "engine_commit": "88e91306bfeef4781af823ea3a8d6cd96a37f323",
+  "audit_generated_at": "2026-08-20T09:06:23.274385+00:00",
+  "library_commit": "3e2c88fda6df1d4ebfe7f24be183f9bf0a58f84d",
+  "engine_commit": "be03e5002f16e724497d2728f7560407d0592508",
   "evidence": {
     "correctness": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json",
     "performance": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json",
@@ -15,37 +15,41 @@
     "valuation_coverage": "identical timestamp sets required"
   },
   "scope": {
-    "case_studies": ["etfs", "cme_futures", "crypto_perps_funding"],
+    "case_studies": [
+      "etfs",
+      "cme_futures",
+      "crypto_perps_funding"
+    ],
     "required_pairs": 8,
     "unsupported_pairs": 7,
     "passing_pairs": 6,
     "real_strategy_equivalence_gate_passed": false
   },
   "frameworks": {
-    "vectorbt_pro": {
-      "display_name": "VectorBT Pro",
-      "version": "2026.6.27",
-      "profile": "vectorbt_strict"
+    "backtrader": {
+      "display_name": "Backtrader",
+      "version": "1.9.78.123",
+      "profile": "backtrader_strict"
+    },
+    "lean": {
+      "display_name": "LEAN",
+      "version": "18001",
+      "profile": "lean"
     },
     "vectorbt_oss": {
       "display_name": "VectorBT OSS",
       "version": "1.1.0",
       "profile": "vectorbt_oss_strict"
     },
-    "backtrader": {
-      "display_name": "Backtrader",
-      "version": "1.9.78.123",
-      "profile": "backtrader_strict"
+    "vectorbt_pro": {
+      "display_name": "VectorBT Pro",
+      "version": "2026.6.27",
+      "profile": "vectorbt_strict"
     },
     "zipline": {
       "display_name": "Zipline Reloaded",
       "version": "3.1.1",
       "profile": "zipline_strict"
-    },
-    "lean": {
-      "display_name": "LEAN",
-      "version": "18001",
-      "profile": "lean"
     }
   },
   "real_strategy_records": [
@@ -155,12 +159,12 @@
     {
       "case_study": "cme_futures",
       "framework": "zipline",
-      "reason": "the frozen input has continuous root series but no dated contract chain or roll map"
+      "reason": "the frozen workload has continuous root series but no dated contract chain or roll map"
     },
     {
       "case_study": "cme_futures",
       "framework": "lean",
-      "reason": "the frozen input has continuous root series but no dated contract chain or roll map"
+      "reason": "the frozen workload has continuous root series but no dated contract chain or roll map"
     },
     {
       "case_study": "crypto_perps_funding",
@@ -202,56 +206,92 @@
     {
       "case_study": "etfs",
       "framework": "vectorbt_pro",
-      "framework_median_seconds": 0.2861947563942522,
-      "framework_ci95_seconds": [0.27921037294436246, 0.2934094399679452],
-      "ml4t_median_seconds": 0.4523740210570395,
-      "ml4t_ci95_seconds": [0.4447206349577755, 0.4587188399164006],
-      "framework_to_ml4t_ratio": 0.632650733845227
+      "framework_median_seconds": 0.27976898301858455,
+      "framework_ci95_seconds": [
+        0.2758680614642799,
+        0.287058602552861
+      ],
+      "ml4t_median_seconds": 0.4542928305454552,
+      "ml4t_ci95_seconds": [
+        0.4502961126854643,
+        0.4584618945373222
+      ],
+      "framework_to_ml4t_ratio": 0.6158340264420961
     },
     {
       "case_study": "etfs",
       "framework": "vectorbt_oss",
-      "framework_median_seconds": 0.17163188150152564,
-      "framework_ci95_seconds": [0.16870081704109907, 0.17631133599206805],
-      "ml4t_median_seconds": 0.45100584148894995,
-      "ml4t_ci95_seconds": [0.44795862899627537, 0.4568893755786121],
-      "framework_to_ml4t_ratio": 0.3805535665234411
+      "framework_median_seconds": 0.16672839457169175,
+      "framework_ci95_seconds": [
+        0.16406924952752888,
+        0.17135399556718767
+      ],
+      "ml4t_median_seconds": 0.45261015242431313,
+      "ml4t_ci95_seconds": [
+        0.4485807530581951,
+        0.461871269159019
+      ],
+      "framework_to_ml4t_ratio": 0.36837086768523736
     },
     {
       "case_study": "etfs",
       "framework": "backtrader",
-      "framework_median_seconds": 9.302929089521058,
-      "framework_ci95_seconds": [9.13238851702772, 9.424219395965338],
-      "ml4t_median_seconds": 0.42486516502685845,
-      "ml4t_ci95_seconds": [0.4208951089531183, 0.42991389392409474],
-      "framework_to_ml4t_ratio": 21.89619167514701
+      "framework_median_seconds": 9.076636194484308,
+      "framework_ci95_seconds": [
+        9.014371615485288,
+        9.113367220503278
+      ],
+      "ml4t_median_seconds": 0.4078356104437262,
+      "ml4t_ci95_seconds": [
+        0.4043721860507503,
+        0.4111876171082258
+      ],
+      "framework_to_ml4t_ratio": 22.25562447724686
     },
     {
       "case_study": "etfs",
       "framework": "zipline",
-      "framework_median_seconds": 3.966738564078696,
-      "framework_ci95_seconds": [3.896178873954341, 4.062238205457106],
-      "ml4t_median_seconds": 0.40618716552853584,
-      "ml4t_ci95_seconds": [0.4046260970644653, 0.409877855097875],
-      "framework_to_ml4t_ratio": 9.765790011895442
+      "framework_median_seconds": 3.6889611809747294,
+      "framework_ci95_seconds": [
+        3.667872897000052,
+        3.699779659509659
+      ],
+      "ml4t_median_seconds": 0.3958699714858085,
+      "ml4t_ci95_seconds": [
+        0.39086425001733005,
+        0.39835485606454313
+      ],
+      "framework_to_ml4t_ratio": 9.318618351195083
     },
     {
       "case_study": "etfs",
       "framework": "lean",
-      "framework_median_seconds": 2.7540494829881936,
-      "framework_ci95_seconds": [2.7177341550122947, 2.770153336925432],
-      "ml4t_median_seconds": 0.5086132920114323,
-      "ml4t_ci95_seconds": [0.5061918235151097, 0.5143514589872211],
-      "framework_to_ml4t_ratio": 5.414820112342423
+      "framework_median_seconds": 2.7436907989904284,
+      "framework_ci95_seconds": [
+        2.6604219428263605,
+        2.823786196997389
+      ],
+      "ml4t_median_seconds": 0.5116391645278782,
+      "ml4t_ci95_seconds": [
+        0.5097262139897794,
+        0.5167016058694571
+      ],
+      "framework_to_ml4t_ratio": 5.362550385528452
     },
     {
       "case_study": "crypto_perps_funding",
       "framework": "lean",
-      "framework_median_seconds": 2.7731760181486607,
-      "framework_ci95_seconds": [2.7098636529408395, 2.8758620645385236],
-      "ml4t_median_seconds": 0.6379554370651022,
-      "ml4t_ci95_seconds": [0.6285572075285017, 0.6524820604827255],
-      "framework_to_ml4t_ratio": 4.346974501709064
+      "framework_median_seconds": 2.698358874069527,
+      "framework_ci95_seconds": [
+        2.670751677476801,
+        2.795299047138542
+      ],
+      "ml4t_median_seconds": 0.6223006549989805,
+      "ml4t_ci95_seconds": [
+        0.6185157839208841,
+        0.6313712919363752
+      ],
+      "framework_to_ml4t_ratio": 4.336101613253079
     }
   ],
   "synthetic_stress": {
