@@ -3,6 +3,10 @@
 # MAX_SYMBOLS these blocks used to carry were left behind by that migration and reached
 # nothing, so fourteen runs named as reduced were running unreduced.
 # tests/test_pm_helpers.py::test_every_declared_parameter_reaches_its_notebook is the gate.
+# No block here declares train_sample_frac. A fraction below 1.0 is what reaches
+# prepare_cv_folds' rng.choice, which draws positional indices and sorts positions
+# rather than rows (utils/modeling.py, #333). CI must not enable a known defect on
+# every run to buy a cheaper fixture; max_symbols reduces without sampling.
 02_financial_data_universe/01_us_equities_eda:
   timeout: 180
 02_financial_data_universe/02_corporate_actions:
@@ -1185,14 +1189,12 @@ case_studies/cme_futures/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/cme_futures/07_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   parameters:
@@ -1276,14 +1278,12 @@ case_studies/crypto_perps_funding/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   gpu: true
@@ -1371,14 +1371,12 @@ case_studies/etfs/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/etfs/07_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -1487,14 +1485,12 @@ case_studies/fx_pairs/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/fx_pairs/07_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1583,7 +1579,6 @@ case_studies/nasdaq100_microstructure/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
@@ -1681,21 +1676,12 @@ case_studies/sp500_equity_option_analytics/06_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
-  # This case study declares modeling.gbm.device: cuda in its setup.yaml, and the
-  # notebook resolves DEVICE from there rather than from a parameter, so no
-  # override can route it to CPU. Same treatment as the us_firm GPU notebooks
-  # (#415) and the crypto training notebooks: marked GPU-only so a CPU runner
-  # skips it instead of failing on the CUDA guard. Nothing downstream in this
-  # pipeline depends on its predictions - 08 through 18 pass without it.
-  gpu: true
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   parameters:
@@ -1847,7 +1833,6 @@ case_studies/sp500_options/07_gbm:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   parameters:
@@ -2058,14 +2043,12 @@ case_studies/us_firm_characteristics/05_linear:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 120
 case_studies/us_firm_characteristics/06_gbm:
   parameters:
     EXECUTION_TIER: preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
-      train_sample_frac: 0.25
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
