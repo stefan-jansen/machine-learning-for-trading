@@ -556,7 +556,6 @@ def snapshot_official_models(
     resolved_requests: Iterable[ResolvedModelRequest],
     *,
     population_name: str,
-    supersedes: str | None = None,
 ) -> OfficialPopulation:
     """Record every expected canonical prediction identity before any member executes."""
     resolved = tuple(resolved_requests)
@@ -567,7 +566,6 @@ def snapshot_official_models(
         name=population_name,
         member_kind="prediction",
         members=expected_prediction_hashes(resolved),
-        supersedes=supersedes,
     )
 
 
@@ -621,7 +619,6 @@ def run_official_models(
     requests: ModelPlan | Iterable[ModelRequest | ResolvedModelRequest],
     *,
     population_name: str,
-    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
     """Snapshot, execute and verify one complete canonical model population.
 
@@ -656,7 +653,7 @@ def run_official_models(
             plan = plan_models(study, requests=list(unresolved))
         if plan.execution_tier is not ExecutionTier.CANONICAL:
             raise ValueError("official model populations require canonical requests")
-        population = plan.create_population(name=population_name, supersedes=supersedes)
+        population = plan.create_population(name=population_name)
         return run_official_model_subset(
             study,
             submitted,
@@ -668,9 +665,7 @@ def run_official_models(
     resolved = tuple(
         request.resolve() if isinstance(request, ModelRequest) else request for request in submitted
     )
-    population = snapshot_official_models(
-        study, resolved, population_name=population_name, supersedes=supersedes
-    )
+    population = snapshot_official_models(study, resolved, population_name=population_name)
     return run_official_model_subset(
         study,
         resolved,
@@ -684,7 +679,6 @@ def run_model_population(
     requests: ModelPlan | Iterable[ModelRequest | ResolvedModelRequest],
     *,
     population_name: str,
-    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation | PreviewPopulation]:
     """Execute one model population in whichever tier its requests declare.
 
@@ -700,14 +694,6 @@ def run_model_population(
     Every model-execution notebook calls this rather than branching on the tier itself. It takes
     either the requests or the :class:`ModelPlan` built from them; a notebook that shows its plan
     before running passes the plan, so the panel is planned once rather than twice.
-
-    ``supersedes`` names the population hash this run replaces. A population is immutable, so
-    where one already exists under ``population_name`` and the membership has changed,
-    :meth:`OfficialPopulation.create` refuses without it and names the hash required. It is a
-    value a person sets after reading the registry rather than one a notebook can derive: passing
-    it is the statement that the declared set changed on purpose. It belongs in the snapshot, so
-    supplying it registers a new population recording what it replaced rather than editing the
-    old one.
     """
     if isinstance(requests, ModelPlan):
         if requests.study != study:
@@ -736,10 +722,7 @@ def run_model_population(
             study,
             requests if isinstance(requests, ModelPlan) else submitted,
             population_name=population_name,
-            supersedes=supersedes,
         )
-    if supersedes is not None:
-        raise ValueError("a preview population supersedes nothing; it is discarded with its run")
 
     if study.output_root is None:
         raise ValueError("preview execution requires an isolated workspace")
