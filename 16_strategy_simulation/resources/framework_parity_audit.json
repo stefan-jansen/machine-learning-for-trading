@@ -1,5 +1,5 @@
 {
-  "audit_generated_at": "2026-08-21T20:34:13.353765+00:00",
+  "audit_generated_at": "2026-08-21T21:11:55.069529+00:00",
   "comparison_policy": {
     "account_money_fields": [
       "cash",
@@ -19,7 +19,7 @@
       "fx_pairs": "session date"
     }
   },
-  "engine_commit": "2491bb6479a358e25ac67306c8c6b5e0b79f699c",
+  "engine_commit": "c4b1a6b3fc4422d50840cde41ffd5d5990f2f17a",
   "engine_source_sha256": "f41accebe035368b398ca801a1affdf3d8093abe0fb0ad553bb5292c48ac728c",
   "evidence": {
     "correctness": "https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json",
@@ -27,11 +27,11 @@
     "source_artifacts": [
       {
         "path": "validation/REAL_STRATEGY_RESULTS.json",
-        "sha256": "87db59904d43c5b5bd54fe9a7bbce21c1af765a7d9a7275579b07a58ab373cae"
+        "sha256": "23f5e6c11cf8ebcfcc7e035247c9c633dac427e16580fcb5ac0e055372bf3306"
       },
       {
         "path": "validation/REAL_STRATEGY_PERFORMANCE.json",
-        "sha256": "ff4b60bab6e2bf86775c2324e364b02943bdce4ce055a960e3064a367686d8af"
+        "sha256": "bbb0f3945572e444360357fdb8d75f4ff10d85d90365d462827ba6e1e8bad27b"
       },
       {
         "path": "validation/LARGE_SCALE_RESULTS.json",
@@ -133,7 +133,7 @@
       "version": "3.1.1"
     }
   },
-  "library_commit": "48f6e962e987e3f2741ccb71e2b0b9a49f1a55eb",
+  "library_commit": "d5b1e4afc81ac75ae982cf180ea60d4ac6f0064b",
   "performance_policy": {
     "boundary": "engine call only",
     "excluded": [
@@ -156,181 +156,181 @@
       "case_study": "etfs",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.2827102178707719,
-        0.2947516608983278
+        0.28847578540444374,
+        0.3614198446739465
       ],
-      "framework_median_seconds": 0.28840632061474025,
-      "framework_to_ml4t_ratio": 0.6949276719952303,
+      "framework_median_seconds": 0.29225580720230937,
+      "framework_to_ml4t_ratio": 0.6940652756525386,
       "ml4t_ci95_seconds": [
-        0.40838477620854974,
-        0.4209405321162194
+        0.41282037599012256,
+        0.576591697987169
       ],
-      "ml4t_median_seconds": 0.41501631354913116
+      "ml4t_median_seconds": 0.4210782723966986
     },
     {
       "case_study": "etfs",
       "framework": "vectorbt_oss",
       "framework_ci95_seconds": [
-        0.16834089998155832,
-        0.17321818857453763
+        0.17324630869552493,
+        0.2349593280814588
       ],
-      "framework_median_seconds": 0.17063831724226475,
-      "framework_to_ml4t_ratio": 0.4159408506707687,
+      "framework_median_seconds": 0.1776289890985936,
+      "framework_to_ml4t_ratio": 0.4318145650186349,
       "ml4t_ci95_seconds": [
-        0.40861546201631427,
-        0.4132429964374751
+        0.4103026920929551,
+        0.42414869787171483
       ],
-      "ml4t_median_seconds": 0.41024659387767315
+      "ml4t_median_seconds": 0.4113547885790467
     },
     {
       "case_study": "etfs",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        9.310321853961796,
-        9.496686836471781
+        9.368097475497052,
+        9.547873334726319
       ],
-      "framework_median_seconds": 9.400480499723926,
-      "framework_to_ml4t_ratio": 22.270888700567752,
+      "framework_median_seconds": 9.424181156558916,
+      "framework_to_ml4t_ratio": 22.345613420960998,
       "ml4t_ci95_seconds": [
-        0.4201173430774361,
-        0.4244189290329814
+        0.4202949027530849,
+        0.4259240021929145
       ],
-      "ml4t_median_seconds": 0.4220972331240773
+      "ml4t_median_seconds": 0.4217463615350425
     },
     {
       "case_study": "etfs",
       "framework": "zipline",
       "framework_ci95_seconds": [
-        3.8579561011865735,
-        3.915713059483096
+        3.932438634801656,
+        3.9689703576732427
       ],
-      "framework_median_seconds": 3.8837080784142017,
-      "framework_to_ml4t_ratio": 9.427326426665505,
+      "framework_median_seconds": 3.955013405298814,
+      "framework_to_ml4t_ratio": 9.523748429176669,
       "ml4t_ci95_seconds": [
-        0.4071862022392452,
-        0.41366857569664717
+        0.40678976522758603,
+        0.4178313952870667
       ],
-      "ml4t_median_seconds": 0.4119628304615617
+      "ml4t_median_seconds": 0.41527907154522836
     },
     {
       "case_study": "etfs",
       "framework": "lean",
       "framework_ci95_seconds": [
-        2.761474394472316,
-        2.874966100556776
+        2.760114834178239,
+        2.87603570939973
       ],
-      "framework_median_seconds": 2.8145644192118198,
-      "framework_to_ml4t_ratio": 5.3449974592755645,
+      "framework_median_seconds": 2.82640195148997,
+      "framework_to_ml4t_ratio": 5.3275148481162775,
       "ml4t_ci95_seconds": [
-        0.5249454916920513,
-        0.5299456682987511
+        0.5276247598230839,
+        0.5357543616555631
       ],
-      "ml4t_median_seconds": 0.5265791874844581
+      "ml4t_median_seconds": 0.5305291551630944
     },
     {
       "case_study": "cme_futures",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.2998488168232143,
-        0.309536921326071
+        0.2846600250340998,
+        0.29552265210077167
       ],
-      "framework_median_seconds": 0.30399850686080754,
-      "framework_to_ml4t_ratio": 0.7365908845919015,
+      "framework_median_seconds": 0.28874702262692153,
+      "framework_to_ml4t_ratio": 0.7084598041853621,
       "ml4t_ci95_seconds": [
-        0.4096556268632412,
-        0.41750292107462883
+        0.405915146227926,
+        0.4146845890209079
       ],
-      "ml4t_median_seconds": 0.41271011251956224
+      "ml4t_median_seconds": 0.4075700850225985
     },
     {
       "case_study": "cme_futures",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        2.4952762140892446,
-        2.5577560206875205
+        2.4880768058355898,
+        2.5447541787289083
       ],
-      "framework_median_seconds": 2.512888186145574,
-      "framework_to_ml4t_ratio": 6.156604748346755,
+      "framework_median_seconds": 2.520101289032027,
+      "framework_to_ml4t_ratio": 6.064512605687949,
       "ml4t_ci95_seconds": [
-        0.40292869531549513,
-        0.4099759361706674
+        0.4061634261161089,
+        0.4256952619180083
       ],
-      "ml4t_median_seconds": 0.4081613630987704
+      "ml4t_median_seconds": 0.4155488582327962
     },
     {
       "case_study": "crypto_perps_funding",
       "framework": "lean",
       "framework_ci95_seconds": [
-        2.782534047961235,
-        3.012690710835159
+        2.8170627960935235,
+        3.0600946531631052
       ],
-      "framework_median_seconds": 2.874357816996053,
-      "framework_to_ml4t_ratio": 4.39951172714166,
+      "framework_median_seconds": 2.9539654976688325,
+      "framework_to_ml4t_ratio": 4.403559916097216,
       "ml4t_ci95_seconds": [
-        0.647351230494678,
-        0.658108206000179
+        0.6642375104129314,
+        0.6799703510478139
       ],
-      "ml4t_median_seconds": 0.6533356416039169
+      "ml4t_median_seconds": 0.6708130589686334
     },
     {
       "case_study": "fx_pairs",
       "framework": "vectorbt_pro",
       "framework_ci95_seconds": [
-        0.28317782608792186,
-        0.29206909565255046
+        0.28750781808048487,
+        0.3131138819735497
       ],
-      "framework_median_seconds": 0.28910271753557026,
-      "framework_to_ml4t_ratio": 1.9828711269898358,
+      "framework_median_seconds": 0.2904321881942451,
+      "framework_to_ml4t_ratio": 1.967098673506246,
       "ml4t_ci95_seconds": [
-        0.1448892280459404,
-        0.14759547845460474
+        0.1444422695785761,
+        0.14924310077913105
       ],
-      "ml4t_median_seconds": 0.14580005407333374
+      "ml4t_median_seconds": 0.14764495147392154
     },
     {
       "case_study": "fx_pairs",
       "framework": "vectorbt_oss",
       "framework_ci95_seconds": [
-        0.13704278483055532,
-        0.14182646735571325
+        0.1378668718971312,
+        0.14379341201856732
       ],
-      "framework_median_seconds": 0.13983486965298653,
-      "framework_to_ml4t_ratio": 0.9532944003245529,
+      "framework_median_seconds": 0.14058990101329982,
+      "framework_to_ml4t_ratio": 0.9634308361703942,
       "ml4t_ci95_seconds": [
-        0.14503559283912182,
-        0.14892709418199956
+        0.14473228203132749,
+        0.14766141306608915
       ],
-      "ml4t_median_seconds": 0.14668592368252575
+      "ml4t_median_seconds": 0.14592630392871797
     },
     {
       "case_study": "fx_pairs",
       "framework": "backtrader",
       "framework_ci95_seconds": [
-        0.4273715647868812,
-        0.4392576899845153
+        0.42471007420681417,
+        0.43551292177289724
       ],
-      "framework_median_seconds": 0.43274220754392445,
-      "framework_to_ml4t_ratio": 2.9775350202594013,
+      "framework_median_seconds": 0.4295559488236904,
+      "framework_to_ml4t_ratio": 2.9609633978949073,
       "ml4t_ci95_seconds": [
-        0.14434656803496182,
-        0.14690440008416772
+        0.1437274080235511,
+        0.1479789635632187
       ],
-      "ml4t_median_seconds": 0.14533572387881577
+      "ml4t_median_seconds": 0.14507303573191166
     },
     {
       "case_study": "fx_pairs",
       "framework": "lean",
       "framework_ci95_seconds": [
-        0.8866109470836818,
-        0.9125782269984484
+        0.8826397017110139,
+        0.9328753231093287
       ],
-      "framework_median_seconds": 0.9042534010950476,
-      "framework_to_ml4t_ratio": 5.865629207208797,
+      "framework_median_seconds": 0.9095882326364517,
+      "framework_to_ml4t_ratio": 5.867385458980778,
       "ml4t_ci95_seconds": [
-        0.15297973598353565,
-        0.1572104711085558
+        0.15304899495095015,
+        0.15713128028437495
       ],
-      "ml4t_median_seconds": 0.15416136430576444
+      "ml4t_median_seconds": 0.15502445492893457
     }
   ],
   "protocol_scope": {
