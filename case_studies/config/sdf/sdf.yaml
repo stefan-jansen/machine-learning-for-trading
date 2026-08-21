@@ -2,7 +2,7 @@ n_epochs_unc: 256
 n_epochs_moment: 64
 n_epochs_cond: 1024
 burn_in_epochs: 0
-checkpoint_epochs: [256, 512, 768, 1024, 1280]
+checkpoint_epochs: [256, 512, 768, 1024]
 beta_n_epochs: 256
 beta_checkpoint_epochs: [256]
 beta_default_checkpoint: 256

@@ -24,7 +24,18 @@ def resolve_checkpoint_epochs(
         raise ValueError(f"max_epoch must be positive; got {max_epoch}")
 
     if checkpoint_epochs is not None:
-        epochs = sorted({int(epoch) for epoch in checkpoint_epochs if 1 <= int(epoch) <= max_epoch})
+        # Refuse an out-of-range entry rather than dropping it. Silently filtering is
+        # how a schedule written in global epochs (unconditional offset plus conditional
+        # epoch) survived being consumed as conditional-relative: the one entry that
+        # exposed the mismatch was removed here, so the canonical path's ValueError from
+        # the model config was the only detector, and the preview path never saw one.
+        requested = [int(epoch) for epoch in checkpoint_epochs]
+        out_of_range = [epoch for epoch in requested if not 1 <= epoch <= max_epoch]
+        if out_of_range:
+            raise ValueError(
+                f"checkpoint_epochs entries must be within 1..{max_epoch}; got {out_of_range}"
+            )
+        epochs = sorted(set(requested))
         if not epochs:
             raise ValueError("checkpoint_epochs did not contain a valid epoch")
     elif checkpoint_interval is None or checkpoint_interval <= 0:

@@ -583,7 +583,9 @@ def test_sdf_expected_spec_includes_library_output_defaults() -> None:
         "n_epochs_unc": 256,
         "n_epochs_moment": 64,
         "n_epochs_cond": 1024,
-        "checkpoint_epochs": [256, 512, 768, 1024, 1280],
+        # Conditional-relative, as every preset in the corpus now is. The published
+        # labels below are global and unchanged by the renumbering.
+        "checkpoint_epochs": [256, 512, 768, 1024],
         "beta_n_epochs": 256,
         "beta_checkpoint_epochs": [256],
         "beta_default_checkpoint": 256,
