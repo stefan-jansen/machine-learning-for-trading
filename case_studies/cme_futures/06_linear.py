@@ -93,7 +93,8 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = ""
+POPULATION_NAME = "cme-linear-validation-v1"
+SUPERSEDES_POPULATION: str | None = None
 
 # %%
 study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -228,21 +229,18 @@ plan.select(
 # configuration that raises fails the whole call rather than publishing a population one member
 # short.
 #
-# **The population is named for the label**, because that is the set this run declares. A
-# population is immutable once written: registering a different set of members under a name that
-# already exists is refused unless the caller names the snapshot it supersedes. Sharing one name
-# across labels would therefore make the second label's run fail rather than add to the first,
-# which is exactly what it did until the name was scoped this way. Everything that finished stays
-# registered, and re-running fits only what is missing.
-
-# %% [markdown]
-# The name is built here and not in the parameters cell, because a parameterized run replaces
-# `LABEL` in a cell inserted *after* the tagged one. Composed alongside `LABEL` it would keep the
-# default label whatever the run asked for, and each label's population would overwrite the last.
+# **A population is immutable once written.** Registering a different set of members under a name
+# that already exists is refused unless the run names the snapshot it supersedes, which is what
+# `SUPERSEDES_POPULATION` is for: a value read off the registry and set deliberately, because a
+# changed declared set is a decision rather than something a notebook should infer.
+# `12_model_analysis` and `13_backtest` resolve this population by the name in
+# `MODEL_POPULATION_NAMES`, so the name is a contract with them and not a label of convenience.
+# Everything that finished stays registered, and re-running fits only what is missing.
 
 # %%
-population_name = POPULATION_NAME or f"cme_futures-linear-{LABEL}-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study, resolved, population_name=POPULATION_NAME, supersedes=SUPERSEDES_POPULATION
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
