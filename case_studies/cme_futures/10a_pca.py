@@ -14,85 +14,95 @@
 # ---
 
 # %% [markdown]
-# # PCA for CME Futures
+# # CME Futures: Principal-Component Factors
 #
-# CME futures have persistent product identifiers and a natural sector
-# structure, so PCA is the first latent-factor baseline to test.
+# PCA compresses the point-in-time feature panel into fold-scoped components. The transformer fits
+# on training rows only, and the saved fitted state is reused to transform that fold's validation
+# rows. Both return horizons are declared explicitly.
+#
+# This notebook publishes predictions and fitted-state lineage. `13_backtest` applies the common
+# validation-Sharpe selection rule.
+#
+# Prerequisites: `03_financial_features`, `04_model_based_features`, and `05_evaluation`.
 
 # %%
-"""CME futures PCA case-study run via the shared latent-factor library path."""
+"""Fit the declared CME futures PCA factor population."""
 
-import warnings
+import polars as pl
 
-from case_studies.utils.latent_factors.case_study import (
-    configured_models,
-    load_case_study_context,
-    run_case_study_model,
-    run_case_study_variants,
+from case_studies.cme_futures.research_workflow import (
+    ALL_LABELS,
+    model_request_catalog,
+    open_study,
+    product_universe_table,
+    resolve_model_requests,
+    resolved_model_plan,
+    run_official_model_catalog,
+    run_resolved_model_requests,
 )
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "cme_futures"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-N_FACTORS = 5
-N_EPOCHS = 50
-USE_CACHE = True
-FORCE_RETRAIN = False
-MAX_FOLDS = 0
-MAX_VARIANT_LABELS = -1
-RUN_VARIANTS = True
-USE_MACRO = False
-MODEL_NAME = "pca"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_REDUCTIONS: dict = {}
+
+# %% [markdown]
+# ## Declared requests
+#
+# Both return horizons use the named PCA configuration. The resolved plan shows the eligible rows,
+# folds, feature count, checkpoint schedule, and identity before fitting begins.
 
 # %%
-context = load_case_study_context(
-    CASE_STUDY_ID,
-    primary_label=PRIMARY_LABEL,
-    max_symbols=MAX_SYMBOLS,
-    max_folds=MAX_FOLDS,
-    max_variant_labels=MAX_VARIANT_LABELS,
-    use_macro=USE_MACRO,
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+requests = model_request_catalog(
+    "latent_factors",
+    labels=ALL_LABELS,
+    config_names=("pca",),
 )
-available_models = configured_models(context)
-if MODEL_NAME not in available_models:
-    raise ValueError(f"{MODEL_NAME!r} is not configured for {CASE_STUDY_ID}")
-
-print(f"Case study: {CASE_STUDY_ID}")
-print(f"Model: {MODEL_NAME}")
-print(f"Primary label: {context.primary_label}")
-print(f"Variant labels: {context.variant_labels}")
-print(f"Dataset rows: {len(context.dataset):,}")
-print(f"Features: {len(context.feature_names)}")
-print(f"Splits: {len(context.splits)}")
-
-# %%
-result = run_case_study_model(
-    context,
-    model_name=MODEL_NAME,
-    notebook="10a_pca",
-    n_factors=N_FACTORS,
-    n_epochs=N_EPOCHS,
-    use_cache=USE_CACHE,
-    force_retrain=FORCE_RETRAIN,
+resolved = resolve_model_requests(
+    study,
+    requests,
+    execution_tier=EXECUTION_TIER,
+    preview_reductions=PREVIEW_REDUCTIONS,
 )
-
-print(result["model_results"])
-print(result["fold_metrics"][MODEL_NAME])
+universe = product_universe_table()
+universe
 
 # %%
-variant_results = {}
-if RUN_VARIANTS and context.variant_labels:
-    variant_results = run_case_study_variants(
-        context,
-        model_name=MODEL_NAME,
-        notebook="10a_pca",
-        n_factors=N_FACTORS,
-        n_epochs=N_EPOCHS,
-        use_cache=USE_CACHE,
-        force_retrain=FORCE_RETRAIN,
+resolved_model_plan(resolved)
+
+# %% [markdown]
+# ## Execute and validate
+#
+# The shared latent-factor runner fits PCA inside each training fold, persists the transformer, and
+# requires the complete validation key set before publication.
+
+# %%
+if EXECUTION_TIER == "canonical":
+    execution, population = run_official_model_catalog(
+        study,
+        requests,
+        population_name="cme-pca-validation-v1",
+        resolved_requests=resolved,
     )
-    for label, variant_result in variant_results.items():
-        print(label, variant_result["model_results"])
+else:
+    if WORKSPACE is None or not PREVIEW_REDUCTIONS:
+        raise ValueError("preview execution requires WORKSPACE and PREVIEW_REDUCTIONS")
+    execution = run_resolved_model_requests(study, resolved)
+    population = None
+
+# %% tags=["results"]
+catalog = execution.catalog_rows.select(
+    "family",
+    "label",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "execution_tier",
+    "complete",
+    "training_hash",
+    "prediction_hash",
+).sort("label", "checkpoint_value")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("PCA execution returned a partial prediction")
+catalog
