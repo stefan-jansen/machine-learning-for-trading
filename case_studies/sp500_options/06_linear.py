@@ -100,7 +100,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = ""
+POPULATION_NAME = "sp500-options-linear-validation-v1"
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -237,14 +237,8 @@ plan.select(
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
 
-# %% [markdown]
-# The name is built here and not in the parameters cell, because a parameterized run replaces
-# `LABEL` in a cell inserted *after* the tagged one. Composed alongside `LABEL` it would keep the
-# default label whatever the run asked for, and each label's population would overwrite the last.
-
 # %%
-population_name = POPULATION_NAME or f"sp500_options-linear-{LABEL}-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
