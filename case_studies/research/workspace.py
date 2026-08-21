@@ -350,3 +350,56 @@ class Study:
         from .causal import CausalRequest
 
         return CausalRequest.from_request(self, request)
+
+
+def open_study(
+    case_study: str,
+    *,
+    execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
+    workspace: str | Path | None = None,
+    release_root: str | Path = REPO_ROOT,
+) -> Study:
+    """Open the study a notebook should execute against for its tier.
+
+    Canonical execution with no workspace regenerates the case study's own artifacts in place, and
+    is the production path. Canonical execution *with* a workspace is the same computation at full
+    scale writing to an isolated registry - a rehearsal that can be compared against the published
+    result without being able to damage it. Preview reads the same inputs, writes only to
+    ``workspace``, and must declare the reductions that make it cheap.
+    """
+    tier = ExecutionTier(execution_tier)
+    release_root = Path(release_root).expanduser().resolve()
+    if tier is ExecutionTier.CANONICAL:
+        if workspace is None:
+            return Study.regenerate(case_study, release_root=release_root)
+        return Study.open(case_study, workspace=workspace, release_root=release_root)
+
+    if workspace is None:
+        raise ValueError("preview execution requires an explicit workspace")
+    workspace = Path(workspace).expanduser().resolve()
+    case_dir = release_root / "case_studies" / case_study
+    generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
+    if not all(path.is_symlink() for path in generated):
+        return Study.open(case_study, workspace=workspace, release_root=release_root)
+
+    # A maintainer worktree links its generated directories to shared data, which
+    # `create_experiment` cannot copy. Read those inputs in place and redirect every write.
+    workspace.mkdir(parents=True, exist_ok=True)
+    shared_config = workspace / "config"
+    if not shared_config.exists():
+        shared_config.symlink_to(release_root / "case_studies" / "config", target_is_directory=True)
+    study = Study(
+        case_study=case_study,
+        root=case_dir,
+        release_root=release_root,
+        output_root=workspace,
+        read_only=False,
+        manifest={
+            "schema_version": 1,
+            "case_study": case_study,
+            "baseline_source_commit": _source_commit(release_root),
+            "preview_only": True,
+        },
+    )
+    study.activate(tier)
+    return study

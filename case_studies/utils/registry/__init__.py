@@ -70,9 +70,9 @@ from .maintenance import (
 from .metrics import (
     compute_backtest_fold_metrics,
     compute_classification_metrics_from_predictions,
+    compute_cross_sectional_direction_auc,
     compute_fold_metrics_from_predictions,
     compute_prediction_fold_metrics,
-    compute_regression_vs_binary_auc,
 )
 
 # --- queries ---
@@ -187,7 +187,7 @@ __all__ = [
     "compute_backtest_fold_metrics",
     "compute_fold_metrics_from_predictions",
     "compute_classification_metrics_from_predictions",
-    "compute_regression_vs_binary_auc",
+    "compute_cross_sectional_direction_auc",
     # maintenance
     "DuplicateBacktest",
     "find_semantic_backtest_duplicates",
