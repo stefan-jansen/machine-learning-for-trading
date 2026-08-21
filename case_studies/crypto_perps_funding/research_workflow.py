@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import inspect
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -222,8 +220,3 @@ def publish_exploratory_positions(
         ),
         canonical=False,
     )
-
-
-def target_positions_source_digest() -> str:
-    """Return the digest used when this decision generator is promoted after replay."""
-    return hashlib.sha256(inspect.getsource(target_positions).encode()).hexdigest()

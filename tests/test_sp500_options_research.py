@@ -207,7 +207,7 @@ def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: P
         "date_start": "2024-01-02 00:00:00",
         "date_end": "2024-01-06 00:00:00",
     }
-    with pytest.raises(ValueError, match="preview.*cannot enter"):
+    with pytest.raises(ValueError, match="preview run cannot create an official population"):
         OfficialPopulation.create(
             study,
             name="real-preview-fixture-must-not-enter",

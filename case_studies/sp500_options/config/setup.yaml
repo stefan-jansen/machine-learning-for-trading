@@ -356,7 +356,7 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    device: cpu
     max_bin: 63
 
 causal:

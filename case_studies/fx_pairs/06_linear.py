@@ -14,225 +14,470 @@
 # ---
 
 # %% [markdown]
-# # Linear Models - FX Pairs
+# # FX pairs: regularizing when the cross-section itself is dependent
 #
-# This notebook fits the published linear-model menu to cross-sectional FX return labels. Each
-# configuration uses the same finalized labels, features, and walk-forward boundaries. The shared
-# runner prepares every fold from those artifacts, fits train-only preprocessing, persists each
-# fold model, and publishes validation predictions only when their keys exactly match the expected
-# validation rows.
+# The 20 pairs in this universe are not 20 independent assets. They are quotes between eight
+# currencies, so `EUR_USD`, `GBP_USD` and `EUR_GBP` are related by an accounting identity: hold
+# the first two in the right proportions and you have the third. A dollar move shows up in every
+# pair with USD on one side, in the same direction, at the same moment.
 #
-# **Learning objectives**
+# That is a different problem from a collinear feature set, and it is worth separating the two.
+# **Collinear features** are columns of the design matrix that carry nearly the same information,
+# and this universe has those too - seven return windows, eight volatility windows, seven rolling
+# Sharpe ratios, and eight cross-sectional ranks computed from them. **A dependent cross-section**
+# is something else: the rows are linked, so ranking the pairs against each other is ranking
+# overlapping bets rather than distinct ones. A model that discovers "the dollar is strong" scores
+# well on the ranking and has found one fact, not twenty.
 #
-# - Load a published model menu and turn each entry into a visible model request.
-# - Run compatible linear configurations through one fold-major implementation.
-# - Check model persistence, fold coverage, and the catalog handoff to backtesting.
+# **Regularization** - adding a penalty on coefficient size to the fitting objective - addresses
+# the first problem directly and the second not at all. This notebook runs the penalty sweep and
+# the results are read with that distinction in mind.
 #
-# **Book reference**: Chapter 11, Section 11.2
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: `02_labels`, `03_financial_features`, and `04_model_based_features`.
+# - Read the set of models a case study has declared for a label, and say which estimator and
+#   which hyperparameters each declared name resolves to.
+# - Bind those declarations to the data on disk and check, before anything is fitted, that every
+#   configuration will be measured on the same pairs, the same dates and the same folds.
+# - Fit a population of models on walk-forward folds and publish one complete set of validation
+#   predictions per configuration.
+# - Tell apart the two things a penalty can do to a correlated feature set - shrink correlated
+#   coefficients towards each other, or select a few features and zero the rest - and read from
+#   the results which one this data rewards.
+# - Distinguish collinearity among the features from dependence among the assets being ranked,
+#   and say which one a penalty can fix.
+# - Run configurations of your own into a private copy of the run log, and have them compared on
+#   the same footing as the ones shipped here.
+#
+# **Book reference**: Chapter 11 (The ML Pipeline). Chapter 6, Section 6.7 (Search accounting and
+# run logging) introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# and [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run and one complete validation prediction set per
+# configuration, in `run_log/registry.db` and under `run_log/training/` and
+# `run_log/predictions/`, grouped under a named population.
+# [`13_backtest`](13_backtest.ipynb) reads that population, runs every member against the
+# equal-weight baseline, and selects on validation backtest Sharpe. **Selection happens there,
+# not here.** This notebook ranks configurations by information coefficient to show what
+# regularization does to a correlated feature set; that ranking decides nothing.
 
 # %%
-"""Fit and catalog the published linear FX configurations."""
+"""Fit the declared FX linear-model population on the walk-forward validation folds."""
 
+import re
+
+import numpy as np
+import plotly.graph_objects as go
 import polars as pl
-import yaml
 
-from case_studies.research import ExecutionTier, Study, plan_models
-from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    open_study,
+    resolved_model_plan,
+    run_model_population,
+)
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "fx_pairs"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-FORCE_RETRAIN = False
-PREDICTION_SPLIT = "validation"
-TRAIN_SAMPLE_FRAC = 1.0
-MAX_FOLDS = 0
-SUPERSEDES_POPULATION = ""
-
-# %% [markdown]
-# ## Select the learning tasks
-#
-# The canonical population spans every configured horizon, because the allocation and cost stages
-# select per label. An empty override therefore runs all of them; set `PRIMARY_LABEL` to one
-# horizon to reproduce just that label's population. Reductions select preview execution
-# automatically, which keeps the resulting identities out of official comparisons.
+LABEL = "fwd_ret_1d"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+CONFIG_NAMES: list[str] = []
+POPULATION_NAME = "fx_pairs-linear-validation-v1"
 
 # %%
-case_dir = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-labels = (
-    [PRIMARY_LABEL]
-    if PRIMARY_LABEL
-    else [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
-)
-
-if PREDICTION_SPLIT != "validation":
-    raise ValueError("model selection uses validation predictions; holdout runs start from a lock")
-if FORCE_RETRAIN:
-    raise ValueError("identical requests reuse valid folds; change the request to create new work")
-if not 0 < TRAIN_SAMPLE_FRAC <= 1:
-    raise ValueError("TRAIN_SAMPLE_FRAC must be in (0, 1]")
-
-reductions = {
-    **({"folds": list(range(MAX_FOLDS))} if MAX_FOLDS else {}),
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-    **({"train_sample_frac": TRAIN_SAMPLE_FRAC} if TRAIN_SAMPLE_FRAC < 1 else {}),
-}
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
-study = Study.regenerate(CASE_STUDY_ID)
-
-print(f"Labels: {', '.join(labels)}")
-print(f"Execution tier: {tier.value}")
-print(f"Configured folds: {MAX_FOLDS if MAX_FOLDS else 'all'}")
-print(f"Configured symbols: {MAX_SYMBOLS if MAX_SYMBOLS else 'all'}")
+study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# ## Build visible model requests
+# ## 1. Which label, and which models
 #
-# The YAML menu defines the published configurations. Every request below records the complete
-# resolved estimator, preprocessing, cross-validation boundaries, input digests, and runtime
-# identity before fitting starts.
+# A label is the thing being predicted. This case study defines three in `config/setup.yaml`:
+# `fwd_ret_1d`, the return over the trading day after the decision date, and `fwd_ret_5d` and
+# `fwd_ret_21d` over longer horizons. The one-day label is the primary one - the horizon the
+# strategy chapters trade - and the other two are variants, kept so the effect of the prediction
+# horizon can be examined separately.
+#
+# **This notebook fits one label per run.** `LABEL` above selects it, and every choice below
+# follows from that one setting, because each label has its own training menu at
+# `config/training/{label}.yaml`. The menu lists, family by family, the named configurations to
+# fit for that label. A label with no menu file has nothing declared and nothing to fit; these
+# are the ones that declare linear models.
 
 # %%
-menu = [
-    (label, config)
-    for label in labels
-    for config in load_configs(CASE_STUDY_ID, label, family="linear")
-]
-requests = [
-    study.model(
-        family="linear",
-        label=label,
-        config_name=config["config_name"],
-        execution_tier=tier,
-        preview_reductions=reductions,
-        overrides={},
-    )
-    for label, config in menu
-]
-
-request_table = pl.DataFrame(
-    {
-        "family": [request.family for request in requests],
-        "config_name": [request.config_name for request in requests],
-        "label": [request.label for request in requests],
-        "execution_tier": [request.execution_tier.value for request in requests],
-    }
-)
-request_table
+declared_labels(study, "linear")
 
 # %% [markdown]
-# ## Resolve every identity before fitting
+# Each name in the menu resolves to a preset file in the shared directory
+# `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
+# frame below is the menu for `LABEL`, with each name resolved to the estimator class it names
+# and the arguments that class is constructed with. To change what runs, edit the menu or the
+# presets rather than this notebook.
 #
-# Planning resolves the complete estimator, preprocessing, fold boundaries, and checkpoint schedule
-# of each request without fitting anything. The resulting training and prediction identities are the
-# population this notebook owes, so a configuration that later fails is a missing member rather than
-# a shorter result.
+# The grid covers the two shapes a penalty can take:
+#
+# - **Ridge** penalizes the sum of squared coefficients. It shrinks correlated coefficients
+#   towards each other and keeps every feature, at a strength set by `alpha`. The grid steps
+#   `alpha` by powers of ten across ten orders of magnitude, because the useful value depends on
+#   the scale and the collinearity of the design matrix and neither is known in advance.
+# - **Lasso** penalizes the sum of absolute coefficients, which drives some of them exactly to
+#   zero: it selects features rather than shrinking them. **ElasticNet** mixes the two.
+#
+# Lasso and ElasticNet are parameterized here by `alpha_frac` rather than a raw penalty. For any
+# fold there is a threshold penalty $\alpha_{\max}$ - the smallest one that zeros every
+# coefficient - which is computed from that fold's own data. `alpha_frac` is the fraction of it
+# to apply, so one declared `alpha_frac` means the same thing on every fold, while a fixed raw
+# penalty would mean something different on each.
 
-# %% tags=["results"]
-plan = plan_models(study, requests=requests)
-plan_table = pl.DataFrame(
-    {
-        "label": [member.label for member in plan.members],
-        "config_name": [member.config_name for member in plan.members],
-        "checkpoint_kind": [member.checkpoint_kind for member in plan.members],
-        "training_hash": [member.training_hash for member in plan.members],
-        "prediction_hash": [member.prediction_hash for member in plan.members],
-    }
+# %%
+configs = load_model_configs(
+    study,
+    "linear",
+    labels=[LABEL],
+    config_names=CONFIG_NAMES or None,
 )
-if len(plan.expected_training_hashes) != len(requests):
-    raise RuntimeError("each linear configuration must plan exactly one training identity")
-
-configured = {(label, config["config_name"]) for label, config in menu}
-planned = {(member.label, member.config_name) for member in plan.members}
-if planned != configured:
-    raise RuntimeError(
-        "the plan does not match the configured linear menu; "
-        f"missing {sorted(configured - planned)}, unexpected {sorted(planned - configured)}"
-    )
-plan_table
+configs
 
 # %% [markdown]
-# ## Record the official population, then fit
+# ## 2. Binding the declarations to the data
 #
-# The population is written before the first fit, so an interrupted or failed run leaves a member
-# that `require_complete` reports as missing. Compatible requests share base-fold preparation, and
-# each configuration keeps its own fitted state, training identity, and validation prediction
-# identity.
-
-# %% [markdown]
-# ### Replacing an earlier population
+# A menu entry says which estimator to fit. It does not say which feature columns exist today,
+# where the walk-forward folds fall, or which pair-date pairs have both a feature row and a
+# label. **Resolving** a request is the step that goes and finds all of that: it reads the label
+# and feature files, computes the fold boundaries from the walk-forward parameters in
+# `config/setup.yaml`, works out the exact set of rows each fit is expected to predict, and turns
+# any data-dependent hyperparameter into the number it will actually use - each fold's own
+# $\alpha_{\max}$ times `alpha_frac`, in the case of Lasso.
 #
-# The population is written before the first fit, so an interrupted run leaves a snapshot behind
-# with no artifacts under it. Re-running is silent while the identities are unchanged, because an
-# identical snapshot resolves to the same hash. Once the identities move, the registry refuses to
-# overwrite the earlier snapshot and names it. Set `SUPERSEDES_POPULATION` to that hash to declare
-# which snapshot this one replaces. It is deliberately a value a reader supplies, because the
-# lineage is part of what the new population is and not a formality to be filled in automatically.
-# The value is coerced to text because a population hash is a string, and an all-digit hash supplied
-# through papermill's typed `-p` arrives as an integer that would never match the stored value.
+# Resolving reads the inputs and fits nothing, so the plan below can be inspected before any
+# computation starts. The three things to check in it:
+#
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row.** They are
+#   the width of the design matrix, the number of currency pairs, and the number of pair-date
+#   pairs to be predicted. Every configuration here reads the same feature matrix, so a row that
+#   differs is a configuration being measured on a different sample from its neighbours, and its
+#   results are not comparable with theirs.
+# - **`folds` is the same everywhere**, and equals the number of walk-forward splits
+#   `05_evaluation` established.
+# - **`validation_start` and `validation_end` bracket the development sample.** The held-out tail
+#   must not appear here: it is scored once, at the end of the case study, and any of it visible
+#   in this window would mean it had been used to choose something.
+#
+# Each row also carries a `training_hash`: the identity of that computation, derived from
+# everything that can change its result. [`RUN_LOG.md`](../RUN_LOG.md#identity) sets out what goes
+# into one and what follows from it.
 
-# %% tags=["results"]
-population = (
-    plan.create_population(
-        name=f"{CASE_STUDY_ID}:{'+'.join(labels)}:linear",
-        supersedes=str(SUPERSEDES_POPULATION) or None,
-    )
-    if tier is ExecutionTier.CANONICAL
-    else None
+# %%
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    preview_reductions=PREVIEW_REDUCTIONS,
 )
+resolved = tuple(request.resolve() for request in requests)
 
-execution = plan.run()
-if len(execution.runs) != len(requests):
-    raise RuntimeError("the linear runner did not return every requested configuration")
-
-catalog = execution.catalog_rows.sort("label", "config_name", "checkpoint_value")
-if set(catalog.get_column("prediction_hash")) != set(plan.expected_prediction_hashes):
-    raise RuntimeError("the published catalog differs from the population planned before fitting")
-if catalog.filter(~pl.col("complete")).height:
-    raise RuntimeError("partial prediction sets cannot pass to backtesting")
-if catalog.get_column("prediction_hash").n_unique() != catalog.height:
-    raise RuntimeError("prediction identities must be unique")
-
-catalog.select(
-    "family",
+plan = resolved_model_plan(resolved)
+plan.select(
     "config_name",
-    "label",
-    "checkpoint_kind",
-    "complete",
-    "ic_mean",
-    "ic_t",
-    "training_hash",
-    "prediction_hash",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "validation_start",
+    "validation_end",
 )
 
 # %% [markdown]
-# ## Verify restart and downstream handoff
+# ## 3. Fitting the population
 #
-# Reopening the study reconstructs the same catalog from the registry. Backtest notebooks receive
-# selected catalog rows directly, so readers do not copy hashes between stages.
+# `run_model_population` fits every resolved request. For one request it walks the folds, and on
+# each one:
+#
+# 1. takes the rows inside that fold's training window,
+# 2. fills missing feature values with the training window's median for that column, then
+#    standardizes each column to zero mean and unit variance - both fitted on training rows only
+#    and then applied to the validation rows, so nothing from the validation window reaches the
+#    fit,
+# 3. fits the estimator with that fold's resolved parameters,
+# 4. predicts the fold's validation rows.
+#
+# The fold predictions are concatenated into one series covering the whole validation period,
+# which is what a walk-forward prediction set is: each date predicted by a model that saw only
+# data before it. The run then writes a `training_runs` row and the fitted coefficients, a
+# `prediction_sets` row and the predictions themselves, and the metrics computed from them. It
+# does this per configuration rather than once at the end, so an interruption costs the
+# configuration in flight and nothing else.
+#
+# Every case study that fits linear models calls this same runner, which is what makes their
+# results comparable. Unlike gradient boosting or a neural network, a linear model has no
+# intermediate states worth scoring: there is one fit and therefore one checkpoint per
+# configuration, and no learning curve to plot.
+#
+# **What the call publishes is a population**: a named, immutable list of the prediction sets it
+# is going to produce. The list is computed from the resolved specifications before the first fit
+# and written down, and afterwards every member must exist and be complete. That is what makes
+# the downstream comparison well defined - `13_backtest` backtests this population, not whatever
+# predictions happen to be in the registry - and it is why a configuration that raises fails the
+# whole call rather than publishing a population one member short. Everything that finished stays
+# registered, and re-running fits only what is missing.
+
+# %%
+execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+print(f"population {population.name}: {len(population.members)} prediction sets")
+
+# %% [markdown]
+# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the
+# registry already holds the matching rows, and the runner returns the stored result rather than
+# fitting again - so re-running this notebook unchanged costs the time it takes to read the data.
+#
+# ### Running configurations of your own
+#
+# The published run log is read-only. To add runs, open the study against a workspace, which
+# holds its own registry and artifacts and reads the same labels and features:
+#
+# ```python
+# study = open_study("fx_pairs", workspace="~/ml4t-experiments")
+# configs = load_model_configs(
+#     study, "linear", labels=["fwd_ret_1d"], config_names=["ols", "ridge_a1.0", "ridge_a3.0"]
+# )
+# requests = model_requests(study, configs)
+# resolved = tuple(request.resolve() for request in requests)
+# execution, population = run_model_population(study, resolved, population_name="my-linear-v1")
+# ```
+#
+# `CONFIG_NAMES` fits a subset of what the menu already declares; a name the menu does not
+# declare raises rather than quietly fitting fewer models than you asked for. To fit something
+# new, add a preset at `case_studies/config/ridge/ridge_a3.0.yaml` and list `ridge_a3.0` under
+# `linear:` in the label's menu. Editing an existing preset changes that configuration's
+# identity, so its result registers as a new row beside the old one instead of replacing it.
+#
+# Give the run its own `population_name`: a name refers to one set of members permanently, and
+# reusing it for a different set raises. Everything downstream reads the registry rather than the
+# notebook, so predictions produced this way are selected and backtested on the same footing as
+# the ones shipped here, inside your workspace.
+# [`RUN_LOG.md`](../RUN_LOG.md#running-your-own-configurations) covers the rest, including how to
+# rehearse on a reduced universe first.
+
+# %% [markdown]
+# ## 4. What came out
+#
+# One row per configuration, read back from the registry. `ic_mean` is the **information
+# coefficient**: on each validation date, rank the pairs by the model's prediction, rank them by
+# the return they went on to earn, correlate the two rankings, and average that daily correlation
+# over the validation period. It measures whether the model ranks pairs correctly, on a scale
+# where zero is no relationship, positive means the ranking points the right way, and negative
+# means it points the wrong way.
+#
+# `ic_n_days` is how many validation dates produced a defined correlation, and it is not a
+# footnote. A model whose coefficients collapse to one or two features predicts nearly the same
+# value for every pair on some dates; a constant has no rank correlation with anything, so those
+# dates contribute nothing. Its `ic_mean` would then be an average over fewer dates than its
+# neighbours', chosen by where it happened to stay non-degenerate, and comparing it with theirs
+# would compare two different samples. `full_coverage` marks the configurations measured on all
+# of them - the column is there so you can see whether that happened, not because it always does.
 
 # %% tags=["results"]
-reopened = Study.regenerate(CASE_STUDY_ID)
-reloaded = reopened.predictions.table(include_preview=tier is ExecutionTier.PREVIEW).filter(
-    pl.col("prediction_hash").is_in(catalog.get_column("prediction_hash").to_list())
+catalog = (
+    execution.catalog_rows.select(
+        "config_name",
+        "label",
+        "complete",
+        "ic_mean",
+        "ic_std",
+        "ic_n_days",
+        "n_folds",
+        "training_hash",
+        "prediction_hash",
+    )
+    .sort("ic_mean", descending=True)
+    .join(configs.select("config_name", "model_class", "params"), on="config_name", how="left")
 )
-if set(reloaded.get_column("prediction_hash")) != set(catalog.get_column("prediction_hash")):
-    raise RuntimeError("the catalog did not recover every linear prediction after restart")
 
-if population is not None:
-    population.require_complete()
-    print(f"Official prediction population: {population.hash}")
-else:
-    print("Preview rows are available only with include_preview=True and are not official members.")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("linear execution returned a partial prediction set")
+
+full_days = int(catalog.get_column("ic_n_days").max())
+catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+catalog.select(
+    "config_name",
+    "model_class",
+    "params",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "full_coverage",
+)
 
 # %% [markdown]
-# ## Key takeaways
+# ### How the penalty grid ranks
 #
-# - One request records one linear configuration on one label, and its complete computation.
-# - Planning resolves every identity first, so the population is fixed before any model fits.
-# - Compatible configurations share fold preparation without sharing fitted preprocessing or models.
-# - Only complete validation prediction rows pass to the backtest stage.
+# Only the configurations measured on all `full_days` validation dates are charted. Any
+# partial-coverage ones are in the table above with `full_coverage` false, and are left out here
+# because their IC would be an average over a different set of dates. The zero line is the
+# reference that matters: a bar below it is a model whose ranking pointed the wrong way out of
+# sample.
+
+
+# %%
+def compact(params: str) -> str:
+    """Render declared parameters for a label: `alpha=1000000.0` reads as `alpha=1e+06`."""
+    return re.sub(r"\d+\.?\d*(?:[eE][+-]?\d+)?", lambda m: f"{float(m.group()):g}", params)
+
+
+full = catalog.filter("full_coverage")
+leader = full.row(0, named=True)
+
+fig_ic = go.Figure(
+    go.Bar(
+        x=full.get_column("config_name").to_list(),
+        y=full.get_column("ic_mean").to_list(),
+        marker_color=[
+            COLORS["amber"] if name == leader["config_name"] else COLORS["blue"]
+            for name in full.get_column("config_name")
+        ],
+        text=[f"{value:+.3f}" for value in full.get_column("ic_mean")],
+        textposition="outside",
+        cliponaxis=False,
+    )
+)
+fig_ic.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig_ic.update_layout(
+    title="Validation IC across the full-coverage penalty grid",
+    height=500,
+    width=1100,
+    showlegend=False,
+    margin=dict(t=70),
+)
+fig_ic.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
+fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+show_plotly_with_alt(
+    fig_ic,
+    "Bar chart of mean validation information coefficient for every full-coverage linear "
+    f"configuration, sorted descending, against a dashed zero line. {leader['config_name']} "
+    f"({compact(leader['params'])}) is highlighted in amber at the top of the ranking at IC "
+    f"{leader['ic_mean']:+.3f}. The configurations span both sides of zero.",
+)
+
+# %% [markdown]
+# ### What shrinkage does on its own
+#
+# The bar chart mixes three estimators. Tracing IC across the Ridge penalty alone isolates the
+# effect of shrinkage, with the estimator, the features and the folds all held fixed and only
+# `alpha` moving. The alpha is read from each configuration's declared parameters rather than
+# parsed out of its name, so the curve plots what was fitted.
+
+# %%
+ridge = (
+    catalog.filter(pl.col("model_class") == "Ridge")
+    .with_columns(
+        alpha=pl.col("params").str.extract(r"alpha=([0-9.eE+-]+)").cast(pl.Float64),
+    )
+    .drop_nulls("alpha")
+    .sort("alpha")
+)
+if ridge.height:
+    log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
+    ridge_ic = ridge.get_column("ic_mean").to_numpy()
+    peak = int(np.argmax(ridge_ic))
+
+    fig_alpha = go.Figure(
+        go.Scatter(
+            x=log_alpha,
+            y=ridge_ic,
+            mode="lines+markers",
+            line=dict(color=COLORS["blue"], width=2),
+            marker=dict(size=8, color=COLORS["blue"]),
+        )
+    )
+    fig_alpha.add_trace(
+        go.Scatter(
+            x=[log_alpha[peak]],
+            y=[ridge_ic[peak]],
+            mode="markers",
+            marker=dict(size=15, color=COLORS["amber"]),
+            showlegend=False,
+        )
+    )
+    fig_alpha.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+    fig_alpha.update_layout(
+        title="Ridge IC against penalty strength, over ten orders of magnitude",
+        height=500,
+        width=900,
+        showlegend=False,
+        margin=dict(t=70),
+    )
+    fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
+    fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+    show_plotly_with_alt(
+        fig_alpha,
+        "Line chart of mean validation information coefficient against the base-ten logarithm of the "
+        "Ridge penalty, against a dashed zero line. The curve starts below zero at weak penalties, "
+        f"rises through zero as the penalty strengthens to a maximum at 1e{int(round(log_alpha[peak]))} "
+        "marked in amber, then eases back.",
+    )
+else:
+    print(
+        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
+        f"Which estimators this section can show is decided by the menu at "
+        f"config/training/{LABEL}.yaml."
+    )
+
+# %% [markdown]
+# ## 5. What to notice
+#
+# **Shrinkage moves this fit from the wrong side of zero to the right side of it.** The
+# unregularized fit and the weakly penalized Ridge configurations rank the cross-section
+# backwards; the ranking crosses zero somewhere in the middle of the penalty range and reaches its
+# maximum well up the grid. That shape has a clear reading. The design matrix lets an unpenalized
+# fit chase relationships in the training window that reverse out of it, and a negative
+# out-of-sample IC is what a reversed relationship looks like. Each order of magnitude of penalty
+# removes more of that, and what is left at the top of the curve is small and positive.
+#
+# **Small and positive is the honest description.** Nothing in this grid reaches an information
+# coefficient of the size a working equity cross-sectional signal posts, and the spread between
+# the top of the grid and the bottom is itself a few thousandths. A notebook that reported only
+# the top row would be describing the least bad member of a narrow set; the comparison that
+# matters is against zero, and the margin above it is thin.
+#
+# **Every configuration scored every date, and that is worth noticing.** In case studies whose
+# feature sets are more redundant, the most aggressive L1 settings zero all but a couple of
+# columns, predict a near-constant value on some dates and drop out of the average there, so their
+# IC is measured on a smaller sample than their neighbours'. That did not happen here: the
+# coverage column is uniform across the grid, so every number in the table is an average over the
+# same dates and the ranking can be read directly.
+#
+# **A penalty cannot fix a dependent cross-section.** The `alpha` sweep addresses collinearity
+# among the columns of the design matrix. It does nothing about the fact that the rows being
+# ranked are 20 quotes among eight currencies: a prediction that ranks every USD pair the same way
+# on a given day is one bet expressed 20 times, and a rank correlation counts it 20 times. That is
+# a property of the universe rather than of the model, it is not visible in an IC, and it is why
+# `13_backtest` puts these predictions through a portfolio rather than reading the ranking as a
+# result.
+#
+# **None of this selects anything.** IC measures whether predictions rank pairs correctly, not
+# whether a strategy trading them makes money after costs and turnover. Those are different
+# questions and a configuration can win the first while losing the second: a signal that ranks
+# well but reorders the portfolio at every rebalance can lose its edge to trading costs.
+# Selection is on validation backtest Sharpe over the population this notebook just published,
+# and it happens in [`13_backtest`](13_backtest.ipynb).
+#
+# **Known limitations.** The IC here is an average of daily rank correlations, and at a one-day
+# horizon the overlap problem that longer labels create does not arise - but the dependence among
+# the pairs does, and it inflates the effective sample in the opposite direction from what a naive
+# standard error assumes. The grid is a one-dimensional sweep of penalty strength at fixed
+# features and fixed folds, so it says nothing about interactions between the penalty and either.
+# And every number here is measured on the validation folds, which have been read many times over
+# by the time a case study reaches this notebook.
+#
+# **Next**: [`07_gbm`](07_gbm.ipynb) asks whether gradient boosting finds structure a linear model
+# cannot represent at all - in particular whether the carry and momentum columns interact, which a
+# linear model can only see if someone multiplies them together first.

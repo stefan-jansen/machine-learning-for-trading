@@ -26,11 +26,15 @@ that idea for the nine case studies.
 
 - The configuration flow from a case study definition down to a single
   hyperparameter set, and how that flow becomes a hash.
+- What goes into an identity, what is deliberately left out, and what follows
+  from that when you re-run a notebook or change a configuration.
 - The three-level entity model (training run → prediction set → backtest run)
   and the causal-runs side table.
 - The filesystem layout under `run_log/`.
-- The full SQL schema of `registry.db` — eight tables, every column, every type.
+- The SQL schema of the eight tables a reader queries directly.
 - How to query the run log from a notebook.
+- How a model notebook writes to the run log, and how to run configurations of
+  your own into a copy of it.
 - How precomputed run logs are distributed as release artifacts so readers can
   run downstream analysis without retraining.
 
@@ -52,11 +56,12 @@ case_studies/config/{model_type}/...    Preset YAMLs: hyperparameters for
                                         each named config
     │
     ▼
-build_training_spec()                   Spec builder: merges preset with case-
-                                        study context into a flat dict
+request.resolve()                       Resolver: binds the preset to the label
+                                        and feature files on disk, the fold
+                                        dates, and the rows the fit must predict
     │
     ▼
-SHA-256(canonical_json(spec))[:12]      Content-addressed hash → registry row
+SHA-256(canonical_json(identity))[:12]  Content-addressed hash → registry row
 ```
 
 ### Layer 1: case study setup (`config/setup.yaml`)
@@ -208,36 +213,124 @@ params:
 
 ### Resolving the three layers
 
-`utils.modeling.load_configs()` walks the menu, loads each preset, and enriches
-it with derived metadata:
+The three configuration layers describe a computation; they do not yet determine
+one. `ridge_a1.0` names an estimator and a penalty, but says nothing about which
+feature columns exist today, where the walk-forward folds fall, or which
+symbol-date pairs have both a feature row and a label. **Resolving** a request is
+the step that goes and finds all of that:
 
 ```python
-from utils.modeling import load_configs
+from case_studies.research import load_model_configs, model_requests, open_study
 
-configs = load_configs("etfs", "fwd_ret_21d", family="gbm")
-# Returns 15 dicts: config_name, family, library, params, ...
+study = open_study("etfs")
+configs = load_model_configs(study, "linear", labels=["fwd_ret_21d"])
+requests = model_requests(study, configs)
+resolved = tuple(request.resolve() for request in requests)
 ```
 
-`registry.build_training_spec()` then merges a preset with case-study context
-(label, fold count, runtime parameters) into a flat dict. The hash of that
-dict's canonical JSON is the run's identity:
+`load_model_configs` walks the menu, loads each preset, and returns the declared
+population as a Polars frame. `model_requests` turns each row into a request.
+`resolve()` reads the label and feature files, computes the fold boundaries from
+the case study's walk-forward parameters, works out the rows the fit is expected
+to predict, and substitutes any hyperparameter that is defined relative to the
+data - a penalty expressed as a fraction of a fold-specific quantity becomes the
+actual number used on each fold. The result is a **resolved specification**: a
+complete, self-contained description of one computation, with nothing left to
+look up.
 
-```python
-from case_studies.utils.registry import build_training_spec
+Resolving is a read of the inputs and costs seconds. Nothing is fitted and
+nothing is written, so a notebook can resolve its whole population and show the
+reader what each member will do before any of it runs.
 
-spec = build_training_spec(
-    family="gbm",
-    config_name="leaves_15_huber",
-    label="fwd_ret_21d",
-    n_folds=8,
-    max_bin=63,
-    seed=42,
-)
-training_hash = compute_hash(canonical_json(spec))  # → "3040ebdc3ea4"
-```
+## Identity
 
-`canonical_json` sorts keys and removes whitespace, so logically identical specs
-always produce identical hashes regardless of dict ordering.
+The hash of a resolved specification's canonical JSON is the run's identity.
+`canonical_json` sorts keys and strips whitespace, so two specifications that
+describe the same computation hash identically regardless of how they were
+built.
+
+### What the identity is computed from
+
+Everything that can change the numbers:
+
+| In the identity | Why it belongs there |
+|---|---|
+| Label name and the content digest of the label file | Relabeling the same symbols changes what the model is fitting |
+| Feature file digests and the exact list of feature columns | Adding, dropping or rebuilding a feature changes the design matrix |
+| Task type and, for classification, the class values | The same features and label can be fitted as regression or as classification |
+| Every fold's train and validation start and end date | Two runs on different windows are different experiments |
+| Estimator class and the parameters it was constructed with, per fold | A data-dependent penalty resolves to a different number on each fold, and each of those numbers is recorded |
+| Preprocessing: the imputer and the scaler, with their settings | Median imputation and mean imputation give different fits |
+| Checkpoint schedule | A GBM registering predictions every 50 trees produces a different set of results from one registering only the last |
+| A digest of the exact (symbol, timestamp, fold) rows the run must predict, with the row and fold counts | This is the eligibility manifest, and it is what makes coverage part of identity rather than an afterthought |
+| Random seed | Two seeds are two experiments |
+| What the family's runner computes - a declared version for linear and GBM, a content digest of the source files for the other four - plus the versions of the numerical libraries it calls | Fitting code and library versions change results |
+| Whether the run is canonical or a preview, and every reduction a preview applies | A run on a fifth of the symbols is not the same result as a full one |
+
+### What it deliberately leaves out
+
+Which notebook launched the run, the git commit of the repository at the time,
+when the row was written, and how long the fit took. These are stored beside the
+row as provenance and are visible in the registry, but they are not hashed. Two
+runs that differ only in these are the same result, and the run log should say so
+rather than accumulate a second copy every time a notebook is re-run from a new
+commit.
+
+### What follows from it
+
+**Re-running a notebook is cheap.** Every identity is re-derived from the inputs,
+the registry already holds those rows, and the runner returns the stored result
+instead of fitting again. An interrupted sweep resumes where it stopped, and the
+cost of an interruption is the one configuration that was in flight. This is also
+true one level down: a fit that completed folds 0 through 4 before failing
+reuses those five folds and fits only the rest.
+
+**Changing a configuration adds a result, it does not replace one.** Edit a
+preset, add a feature, move a fold boundary, and the affected runs resolve to new
+identities and register as new rows. The old rows stay exactly where they were,
+still complete and still queryable, so an experiment accumulates alongside the
+published results rather than overwriting them.
+
+**What an edit to a runner costs depends on which runner.** Two schemes are in
+use, and they differ in what a change to the fitting code does to the results
+already registered.
+
+*Linear and GBM declare a version.* `LINEAR_RUNNER_VERSION`,
+`GBM_RUNNER_VERSION`, `FOLD_PREPARATION_VERSION` for the shared fold preparation,
+and `PREPROCESSING_ID` / `GBM_PREPROCESSING_ID` for the cast applied to a fold are
+what enter the identity. A comment, a log line or a refactoring that moves code
+without changing what it computes therefore leaves every registered result valid,
+and only bumping the version refits the family. The bump is the decision about
+compute, and it is required whenever the change would move the numbers, because a
+cache that survived such a change would be lying. What holds the declaration
+honest is `tests/test_linear_identity.py`, `tests/test_gbm_identity.py` and
+`tests/test_folds.py`: each pins the quantities its version claims to describe and
+fails when they move without a bump.
+
+*Tabular deep learning, sequence models, latent factors and causal inference
+digest their source.* The SHA-256 of each of a set of files is in the identity, so
+editing any file in that set - including a change that alters nothing a model
+computes - refits the configurations it covers on the next run. Only causal
+digests a single file; the others digest several, and latent factors digests
+fourteen, including `utils/modeling.py`. Read the set from the function that
+builds it rather than from a list here, which would drift:
+
+| Family | Its digest set |
+|---|---|
+| Tabular DL | `_tabm_source_identity` in `case_studies/utils/tabular_dl.py` |
+| Sequence models | `_sequence_source_identity` in `case_studies/utils/deep_learning.py` |
+| Latent factors | `_source_identity` in `case_studies/utils/latent_factors/adapter.py` |
+| Causal | `_causal_source_identity` in `case_studies/utils/causal.py` |
+
+Sequence models are the one case where the blast radius is narrower than the
+family: the set includes the selected architecture's own module, so editing that
+refits only the configurations that select it. Everywhere else, an edit inside the
+set refits the whole family, and is a decision about compute as well as about
+code. The declared-version scheme replaced this for linear and GBM first because
+those two are re-run most often; the remaining four have not been converted.
+
+The two identities downstream of a training run are built from it rather than
+from scratch; the next section gives their exact composition.
 
 ## The three-level entity model
 
@@ -275,10 +368,20 @@ its own backtest run.
 ### Hash computation in detail
 
 ```python
-training_hash   = SHA256(canonical_json(spec))[:12]
-prediction_hash = SHA256(f"{training_hash}|{checkpoint_value}|{split}")[:12]
-backtest_hash   = SHA256(f"{prediction_hash}|{canonical_json(strategy_spec)}")[:12]
+training_hash   = SHA256(canonical_json(training_identity))[:12]
+prediction_hash = SHA256(canonical_json({
+    "training_hash": ..., "split": ..., "checkpoint_kind": ...,
+    "checkpoint_value": ..., "identity_version": ...,
+}))[:12]
+backtest_hash   = SHA256(canonical_json({
+    "prediction_hash": ..., "strategy": strategy_spec, "identity_version": ...,
+}))[:12]
 ```
+
+`identity_version` is part of every hash, so a change to what an identity is
+computed from is itself versioned: results registered under an earlier scheme
+stay readable and stay distinguishable from results registered under the current
+one, instead of silently colliding with them.
 
 The hash space is 12 hex characters (48 bits, ≈ 2.8 × 10¹⁴ values), well above
 the working set in any single case study. Collisions are not a practical concern
@@ -306,7 +409,7 @@ case_studies/{case_study}/
 │   ├── training/{label}.yaml             Training menu per label
 │   └── cv/cv_config.json                 Walk-forward parameters
 └── run_log/
-    ├── registry.db                       SQLite index (eight tables)
+    ├── registry.db                       SQLite index
     ├── training/{training_hash}/
     │   ├── spec.json                     Canonical training spec (identity)
     │   └── coefficients.parquet | model.pt | ...   Family-specific weights
@@ -339,8 +442,13 @@ The shapes that matter most to readers:
 
 ## Database schema
 
-`registry.db` has eight tables. All nine case studies share an identical schema,
-with one intentional exception noted below.
+The eight tables below are the ones a reader queries: the runs, the predictions
+they produced, and the metrics computed from them. `registry.db` holds fourteen
+more that the interface maintains on the notebook's behalf - the official
+populations, the per-attempt execution ledger that makes an interrupted fit
+resumable, the candidate sets and decision artifacts Chapters 16 to 19 write, and
+the lock that permits the holdout to be scored once. All nine case studies share
+an identical schema, with one intentional exception noted below.
 
 ### `training_runs`
 
@@ -385,6 +493,7 @@ Headline metrics aggregated across walk-forward folds, one row per prediction se
 | `ic_t`               | REAL | Diagnostic fold-level t, `ic_mean / (ic_std / √n_folds_ic)`. **NULL when undefined** — fewer than two folds with an IC, or no dispersion across them. Read `ic_t_hac` for inference: it is the HAC t on the daily IC series and comes with `ic_ci_lo` / `ic_ci_hi` |
 | `n_folds`            | REAL | Number of folds present in the prediction set              |
 | `n_folds_ic`         | REAL | Number of those folds that produced a defined IC. Below `n_folds` means partial coverage: some fold scored constant and contributes to no IC statistic |
+| `ic_n_days`          | REAL | Number of validation **dates** that produced a defined cross-sectional IC, the same coverage question at daily resolution. Below the maximum across a population means the row's `ic_mean` is averaged over a smaller and self-selected set of dates, and is not comparable to a full-coverage one. Written alongside the daily-IC uncertainty columns (`ic_se_hac`, `ic_ci_lo`, `ic_ci_hi`, `ic_t_hac`) when at least three dates define an IC |
 | `pct_positive`       | REAL | Fraction of the folds with a defined IC whose IC > 0       |
 | `task_type`          | TEXT | `'regression'` or `'classification'`                       |
 | `accuracy`           | REAL | Classification: accuracy at threshold (NULL for regression) |
@@ -533,41 +642,99 @@ ic_df = load_model_ic(case_studies=["etfs"], split="validation")
 cls_df = load_classification_metrics(case_studies=["etfs"], split="validation")
 ```
 
-## How notebooks write to the run log
+## How a model notebook writes to the run log
 
-Every Chapter 11-15 model notebook follows the same pattern:
+Every notebook that fits a declared model population uses the same five calls,
+whatever the family:
 
 ```python
-mds = load_modeling_dataset(CASE_STUDY_ID, label_col)
-configs = load_configs(CASE_STUDY_ID, label_col, family="gbm")
+from case_studies.research import (
+    load_model_configs, model_requests, open_study,
+    resolved_model_plan, run_model_population,
+)
 
-for cfg in configs:
-    spec = build_training_spec(
-        cfg["family"], cfg["config_name"], label_col,
-        n_folds=len(mds.splits),
-        max_bin=MAX_BIN,
-    )
-    training_hash = register_training_run(
-        CASE_STUDY_ID, spec=spec, entry_point=NOTEBOOK_NAME,
-    )
-
-    for checkpoint, predictions in train_model(cfg, mds):
-        register_prediction_set(
-            CASE_STUDY_ID, training_hash,
-            checkpoint_value=checkpoint,
-            predictions=predictions,
-        )
+study = open_study("etfs")                                    # which copy to write to
+configs = load_model_configs(study, "linear", labels=["fwd_ret_21d"])
+requests = model_requests(study, configs)
+resolved = tuple(request.resolve() for request in requests)   # bind to data, folds, rows
+resolved_model_plan(resolved)                                 # inspect before running
+execution, population = run_model_population(
+    study, resolved, population_name="etfs-linear-validation-v1"
+)
 ```
 
-The same shape — load configs, build spec, register run, train, register
-predictions — applies across linear, GBM, tabular DL, deep learning, and latent
-factor families. Causal DML notebooks use `register_causal_run` instead.
-Backtest notebooks read prediction sets and call `register_backtest_run`.
+`run_model_population` fits each resolved request in turn. For one request it
+fits every fold, concatenates the fold predictions, writes a `training_runs` row
+and the fitted coefficients or weights under `training/{hash}/`, writes a
+`prediction_sets` row and `predictions/{hash}/predictions.parquet`, and computes
+the metrics that go into `prediction_metrics` and `fold_metrics`. It does this
+per configuration, not once at the end, so an interrupted run keeps everything
+that had already finished.
 
-A registration call is **idempotent**: if the hash already exists, the call
-returns the existing hash without overwriting. This is what enables sweeps to
-be resumed after an interruption — a notebook can be re-run end-to-end and
-will only train and score the configurations that have not yet completed.
+`execution.catalog_rows` returns those registry rows as a Polars frame, which is
+what the notebook displays. `execution.diagnostics` says, per configuration,
+whether it was fitted or served from the registry, and which folds were reused.
+
+### Populations
+
+A **population** is a named, immutable list of prediction identities. The
+identities can be computed from the resolved specifications alone, so
+`run_model_population` writes the whole list down *before* the first fit, and
+checks afterwards that exactly those predictions exist and are complete.
+
+That check is what makes a downstream comparison well defined. Chapter 16
+backtests a population, not "whatever predictions happen to be in the registry",
+so a sweep that half-finished cannot be silently compared against one that ran to
+completion. If a configuration raises, the call raises: nothing is published
+under the population name, the configurations that did finish stay registered,
+and re-running fits only what is missing.
+
+A population name refers to one set of members forever. Running a different set
+of configurations under a name that already exists raises rather than redefining
+what the name means.
+
+## Running your own configurations
+
+The installed run log is read-only. To add runs, write to a copy: a workspace
+holds its own `registry.db` and its own artifacts, reads the same labels and
+features, and cannot touch the published copy.
+
+```python
+study = open_study("etfs", workspace="~/ml4t-experiments")
+```
+
+From there, four changes, in increasing order of how much they change:
+
+1. **Fit a subset of what is already declared.** Pass
+   `config_names=["ols", "ridge_a1.0"]` to `load_model_configs`. A name the
+   label's training menu does not declare raises, rather than quietly fitting a
+   smaller population than you asked for.
+2. **Add a configuration.** Write a preset at
+   `case_studies/config/{model_type}/{name}.yaml` holding the hyperparameters,
+   and add `{name}` to the family's list in
+   `case_studies/{case_study}/config/training/{label}.yaml`. `family` and
+   `library` come from the directory, so a file in `config/lgb/` is a LightGBM
+   configuration by construction.
+3. **Change an existing configuration.** Edit its preset. The resolved
+   specification changes, so the result registers under a new hash beside the old
+   one.
+4. **Fit a different label.** Each label has its own training menu; a label with
+   no menu file has no declared population for any family.
+
+Give your run its own `population_name`. Everything downstream reads the
+registry rather than the notebook, so predictions produced this way participate
+in the same selection and backtesting as the published ones, inside your
+workspace.
+
+For a cheap rehearsal, open the study with `execution_tier="preview"` and declare
+what makes it cheap - `preview_reductions={"max_symbols": 20,
+"train_sample_frac": 0.25}`. A preview writes under `.preview/` in the workspace
+and is barred from populations, so a reduced run cannot be mistaken for a full
+one.
+
+The command-line route to the same thing, including how to produce the
+`features/` and `labels/` a model stage needs, is
+[Experimenting Without Changing the Release Baseline](../docs/running-notebooks.md#experimenting-without-changing-the-release-baseline).
 
 ## Scale
 
