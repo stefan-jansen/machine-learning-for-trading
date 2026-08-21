@@ -135,6 +135,20 @@ def registry_path(case_study: str) -> Path:
     return _cs_dir(case_study) / case_study / "run_log" / "registry.db"
 
 
+def _has_column(db_path: Path, table: str, column: str) -> bool:
+    """Whether ``table`` in this registry carries ``column``.
+
+    The metrics tables are widened as new metrics appear, so which columns a registry has
+    depends on when it was last written and which task types it holds. Naming an absent column
+    in a SELECT is a hard error, not a null.
+    """
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            return any(row[1] == column for row in db.execute(f"PRAGMA table_info({table})"))
+    except sqlite3.Error:
+        return False
+
+
 def _query(db_path: Path, sql: str, params: tuple = ()) -> pl.DataFrame:
     """Execute SQL on a registry and return a Polars DataFrame."""
     if not db_path.exists():
@@ -296,9 +310,17 @@ def load_classification_metrics(
 ) -> pl.DataFrame:
     """Load classification metrics (AUC-ROC, accuracy, etc.) from registries.
 
+    ``auc`` is the cross-sectional AUC - computed within each date and then averaged, the same
+    shape as IC - and it is what the rows are ordered by. ``auc_roc`` is carried alongside it
+    unchanged: that one pools every ``(entity, date)`` row in a fold into a single ROC, so it
+    also rewards a model for the base rate moving through time. The two agree to 0.0002 in
+    ``us_firm_characteristics``, whose monthly cross-section is close to balanced, and part
+    company in ``sp500_equity_option_analytics`` at 0.5308 pooled against 0.5063
+    cross-sectional. Ranking on the pooled figure was ranking partly on the calendar.
+
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
-        ic_mean, auc_roc, accuracy, balanced_accuracy, log_loss, brier_score, auc_pr
+        ic_mean, auc, auc_roc, accuracy, balanced_accuracy, log_loss, brier_score, auc_pr
     """
     if isinstance(families, str):
         families = [families]
@@ -319,6 +341,13 @@ def load_classification_metrics(
 
         params.append(split)
 
+        # A registry written before the cross-sectional block existed has no such column, and
+        # naming it in the SELECT is an error rather than a null. Fall back to the pooled value
+        # under the same output name so the caller reads one column either way.
+        has_daily = _has_column(db_path, "prediction_metrics", "auc_mean_daily")
+        auc_select = "pm.auc_mean_daily AS auc" if has_daily else "pm.auc_roc AS auc"
+        auc_order = "pm.auc_mean_daily" if has_daily else "pm.auc_roc"
+
         sql = f"""
             SELECT
                 t.family,
@@ -326,6 +355,7 @@ def load_classification_metrics(
                 t.label,
                 p.split,
                 pm.ic_mean,
+                {auc_select},
                 pm.auc_roc,
                 pm.accuracy,
                 pm.balanced_accuracy,
@@ -339,7 +369,7 @@ def load_classification_metrics(
             WHERE 1=1 {family_clause}
               AND p.split = ?
               AND pm.task_type = 'classification'
-            ORDER BY pm.auc_roc DESC NULLS LAST
+            ORDER BY {auc_order} DESC NULLS LAST
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:

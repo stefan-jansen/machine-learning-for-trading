@@ -393,6 +393,70 @@ def register_training_run(
     return t_hash
 
 
+def record_training_runtime(
+    case_study: str,
+    training_hash: str,
+    *,
+    case_dir: Path | None = None,
+    measured: dict,
+) -> None:
+    """Record what a completed training run cost, against the row it produced.
+
+    A training run is registered before it is fitted, because the identity has to exist before
+    anything can be written under it. Nothing then came back to say what the fit cost, so
+    ``training_runs.elapsed_s`` was NULL on every row the current path produced while the value
+    sat in the run's ``runtime.json`` where no query looks. Scheduling the next run from recorded
+    cost - which is what ``reference/case-study-runtimes.md`` exists to do - needs the column.
+
+    ``measured`` carries the resource capture: wall seconds, CPU seconds, cores actually used and
+    peak resident memory. ``elapsed_s`` is promoted to its own column because that is what is
+    queried; the rest is merged into ``runtime_json``.
+
+    The ``runtime.json`` artifact beside the row is deliberately left alone. It records what the
+    run *was* and is compared byte for byte when the same identity is registered again, so
+    writing a measurement into it would turn a legitimate re-run into an identity conflict.
+    """
+    if not measured:
+        return
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    elapsed = measured.get("elapsed_s")
+
+    db = _open_registry(case_dir)
+    try:
+        row = db.execute(
+            "SELECT runtime_json FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"no training run registered for {training_hash}")
+        try:
+            runtime = json.loads(row[0]) if row[0] else {}
+        except json.JSONDecodeError:
+            runtime = {}
+        if not isinstance(runtime, dict):
+            runtime = {}
+        # Measurements are namespaced so they cannot collide with a declared provenance field,
+        # and so a reader can tell what the run declared from what it turned out to cost.
+        resources = dict(runtime.get("resources") or {})
+        resources.update(measured)
+        runtime["resources"] = resources
+        db.execute(
+            "UPDATE training_runs SET elapsed_s = ?, runtime_json = ? WHERE training_hash = ?",
+            (
+                float(elapsed) if elapsed is not None else None,
+                canonical_json(runtime),
+                training_hash,
+            ),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def register_epoch_checkpoint(
     case_study: str,
     *,
@@ -596,6 +660,52 @@ def register_epoch_checkpoint(
 # ---------------------------------------------------------------------------
 # Registration: Prediction Sets
 # ---------------------------------------------------------------------------
+
+
+def _declared_label_buffer(case_study: str, label: str | None) -> str | None:
+    """The holding period the case study declares for ``label``."""
+    if not label:
+        return None
+    try:
+        from utils.artifact_specs import load_setup_config, resolve_label_buffer
+
+        return resolve_label_buffer(case_study, label, load_setup_config(case_study))
+    except Exception:  # noqa: BLE001 - a missing declaration is not a registration failure
+        return None
+
+
+def _sibling_direction_labels(case_study: str, case_dir, label: str | None):
+    """The binary direction label cut from ``label``, loaded, or ``(None, None)``.
+
+    Scoring a regression model by AUC needs the direction label derived from the same return,
+    which ``labels.classification_eval_label`` already declares in the other direction. A label
+    with more than two levels is skipped rather than collapsed: ``fwd_dir_8h_3c`` has a neutral
+    band, so "up" in it is "up beyond the band", a different event from the plain direction
+    label's "up", and storing the two under one column is how a distinction gets lost. Where a
+    case study declares both, the strictly binary one is used.
+
+    A missing or unreadable label is not a registration failure - the AUC is a secondary
+    reading, and the run that produced the predictions is what matters.
+    """
+    if not label:
+        return None, None
+    try:
+        import polars as pl
+
+        from utils.modeling import get_direction_labels
+
+        for name in get_direction_labels(case_study, label):
+            path = case_dir / "labels" / f"{name}.parquet"
+            if not path.exists():
+                continue
+            frame = pl.read_parquet(path)
+            if name not in frame.columns:
+                continue
+            if frame.get_column(name).drop_nulls().n_unique() == 2:
+                return frame, name
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("no sibling direction label for %s/%s: %s", case_study, label, exc)
+    return None, None
 
 
 def register_prediction_set(
@@ -856,6 +966,11 @@ def register_prediction_set(
                     db_lookup.close()
                 except Exception:  # noqa: BLE001
                     pass
+            direction_frame, direction_name = (
+                _sibling_direction_labels(case_study, case_dir, resolved_label)
+                if task_type != "classification"
+                else (None, None)
+            )
             headline, fold_m = compute_prediction_fold_metrics(
                 predictions,
                 y_true_col=y_true_col,
@@ -866,6 +981,9 @@ def register_prediction_set(
                 class_values=class_values,
                 eval_col=eval_col,
                 label=resolved_label,
+                label_buffer=_declared_label_buffer(case_study, resolved_label),
+                direction_labels=direction_frame,
+                direction_col=direction_name,
             )
             # Merge auto-computed headline with caller-provided metrics
             merged = {**headline, **(metrics or {})}
