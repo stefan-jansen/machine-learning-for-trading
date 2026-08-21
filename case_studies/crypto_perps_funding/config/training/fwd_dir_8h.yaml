@@ -10,7 +10,11 @@ linear:
 - logistic_l2_C1.0
 - logistic_l2_C10.0
 - logistic_l2_C100.0
-- logistic_l1_C0.001
+# logistic_l1_C0.001 zeroes every coefficient on this label, so the fit succeeds and then
+# predicts a constant, which cannot become a valid prediction set. Measured at 5, 12 and all
+# symbols on fold 0 (4,963 / 12,031 / 18,542 rows) - it is the penalty strength, not the sample
+# size. The released registry agrees: this is the one logistic config with no published run for
+# fwd_dir_8h, while fwd_dir_8h_3c keeps it because it is well conditioned there.
 - logistic_l1_C0.01
 - logistic_l1_C0.1
 - logistic_l1_C1.0
