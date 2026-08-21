@@ -1308,18 +1308,17 @@ case_studies/crypto_perps_funding/13_backtest:
   timeout: 600
 case_studies/crypto_perps_funding/14_portfolio_management:
   parameters:
-    # MAX_SYMBOLS is a pre-migration name; the allocation candidate set is built from the frozen
-    # baseline population, and N_BASELINE_SURVIVORS is the knob that bounds it.
-    N_BASELINE_SURVIVORS: 3
+    MAX_SYMBOLS: 5
   timeout: 300
 case_studies/crypto_perps_funding/15_costs:
-  # MAX_SYMBOLS is a pre-migration name this notebook no longer reads, and it declares nothing
-  # else that narrows the run; the fixture is the reduction.
-  timeout: 300
+  parameters:
+    MAX_SYMBOLS: 5
+  timeout: 600
 case_studies/crypto_perps_funding/16_risk_management:
-  # MAX_RISK_VARIANTS is a pre-migration name this notebook no longer reads; the overlay grid comes
-  # from the frozen allocation population.
-  timeout: 300
+  parameters:
+    MAX_RISK_VARIANTS: 3
+    MAX_SYMBOLS: 5
+  timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
   skip: true
   skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction — same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
