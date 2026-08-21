@@ -16,15 +16,14 @@
 # %% [markdown]
 # # Real-Strategy Cross-Framework Audit
 #
-# This notebook reports the current framework comparison on three production-selected case-study
-# strategies: ETF allocation, CME futures, and crypto perpetual futures with funding. Every engine
-# in a required pair receives the same content-addressed market data and frozen model-derived
-# targets. Unsupported pairs are disclosed instead of being approximated with a different asset or
-# accounting model.
+# This notebook reports the current framework comparison on ETF allocation, CME futures, crypto
+# perpetual futures with funding, and foreign exchange. Every engine in a required pair receives
+# the same content-addressed market data and frozen model-derived targets. Unsupported pairs are
+# disclosed instead of being approximated with a different asset or accounting model.
 #
-# The result is narrower than universal framework equivalence. Six of eight supported pairs pass.
-# The two CME comparisons reproduce every fill but fail the equity and terminal-value checks at the
-# audit's `1e-8` canonical quantum.
+# The result is narrower than universal framework equivalence. It tests a shared target-replay
+# protocol on real historical inputs. Transaction costs and position rules are disabled on both
+# sides, so the audit does not reproduce each case study's complete production result.
 #
 # **Learning objectives**
 #
@@ -53,13 +52,13 @@ from utils.paths import get_chapter_dir
 # Production defaults - Papermill injects overrides after this cell
 ROUND_SECONDS = 3
 
-# %%
+# %% tags=["results"]
 AUDIT_PATH = get_chapter_dir(16) / "resources" / "framework_parity_audit.json"
 audit = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
 
-assert audit["schema_version"] == 1
-assert audit["scope"]["required_pairs"] == 8
-assert audit["scope"]["unsupported_pairs"] == 7
+assert audit["schema_version"] == 2
+assert audit["scope"]["required_pairs"] == 12
+assert audit["scope"]["unsupported_pairs"] == 8
 
 FRAMEWORK_NAMES = {
     key: f"{value['display_name']} {value['version']}" for key, value in audit["frameworks"].items()
@@ -68,6 +67,7 @@ CASE_NAMES = {
     "etfs": "ETF allocation",
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
+    "fx_pairs": "FX allocation (USD-quoted pairs)",
 }
 
 display(
@@ -88,12 +88,13 @@ display(
 #
 # - the complete sorted fill stream matches on timestamp, asset, side, quantity, price, and commission;
 # - the engines expose the same valuation timestamp set;
-# - every valuation and the terminal value have zero gap after `1e-8` quantization; and
-# - a negative control that changes the first fill price by exactly `1e-8` is detected.
+# - each account value and terminal value round to the same cent; and
+# - a negative control that changes the first fill price by one unit at the fill-record precision is
+#   detected.
 #
 # "Exact" does not mean bit-identical floating-point state.
 
-# %%
+# %% tags=["results"]
 bundle_table = (
     pl.DataFrame(audit["real_strategy_records"])
     .select("case_study", "input_bundle_sha256")
@@ -114,7 +115,7 @@ display(bundle_table)
 # %% [markdown]
 # ## 2. Current correctness result
 
-# %%
+# %% tags=["results"]
 results = (
     pl.DataFrame(audit["real_strategy_records"])
     .with_columns(
@@ -129,35 +130,32 @@ results = (
         "valuations",
         "valuation_timestamps_match",
         "equity_gap",
+        "equity_raw_gap",
         "terminal_gap",
+        "terminal_raw_gap",
         "negative_control_detected",
     )
     .sort("strategy", "engine")
 )
 
 passing = results.filter(pl.col("status") == "pass").height
-assert passing == audit["scope"]["passing_pairs"] == 6
+assert passing == audit["scope"]["required_pairs"] == 12
 assert results["valuation_timestamps_match"].all()
 assert results["negative_control_detected"].all()
 
 display(results)
 
-# %%
+# %% tags=["results"]
 display(
-    Markdown(
-        f"**Result:** {passing}/{results.height} supported pairs pass. The broad real-strategy "
-        "equivalence gate remains **failed** because both CME rows exceed the exact comparison "
-        "quantum on equity and terminal value."
-    )
+    Markdown(f"**Result:** {passing}/{results.height} required pairs pass the comparison contract.")
 )
 
 # %% [markdown]
-# All five ETF engines match ML4T Backtest across thousands of fills and 1,995 valuations. LEAN also
-# matches the crypto-perpetual strategy across 8,408 fills and 2,426 hourly valuations, including
-# native funding settlements. The CME comparisons have identical fill streams and timestamp
-# coverage, but their maximum equity gaps are `0.00000010` for VectorBT Pro and `0.00000015` for
-# Backtrader. Those rows fail because the audit does not replace an exact gate with an economic
-# tolerance.
+# The fill stream retains eight-decimal precision. Account values use cent precision because they
+# represent monetary balances. The raw equity and terminal gaps remain in the audit resource, so a
+# reader can distinguish exact arithmetic agreement from agreement at the monetary comparison unit.
+# The foreign-exchange rows use only USD-quoted pairs from the frozen target stream, which gives
+# every required engine the same native USD valuation basis.
 
 # %% [markdown]
 # ## 3. Unsupported pairs
@@ -167,7 +165,7 @@ display(
 # continuous root series but no dated contract chain or roll map, so it is not a valid LEAN or
 # Zipline futures input.
 
-# %%
+# %% tags=["results"]
 unsupported = (
     pl.DataFrame(audit["unsupported_records"])
     .with_columns(
@@ -191,7 +189,7 @@ display(unsupported)
 # inference, target construction, adapter preparation, output extraction, serialization, and
 # reporting.
 
-# %%
+# %% tags=["results"]
 performance = (
     pl.DataFrame(audit["performance_records"])
     .with_columns(
@@ -213,7 +211,7 @@ performance = (
 )
 display(performance)
 
-# %%
+# %% tags=["results"]
 plot_data = performance.to_pandas()
 labels = [f"{row.strategy}\n{row.engine}" for row in plot_data.itertuples()]
 y = list(range(len(plot_data)))
@@ -240,9 +238,8 @@ plt.show()
 # %% [markdown]
 # ## 5. What the evidence supports
 #
-# The current evidence supports exact ETF equivalence for all five engines and exact
-# crypto-perpetual equivalence for LEAN under the named profiles and frozen inputs. It does not
-# support a universal equivalence claim because the CME equity paths still fail, and it says nothing
-# about unsupported asset-framework combinations. The separate synthetic scenario and 250-asset
-# stress suites test convention coverage and scale after this real-strategy result; they do not
-# replace it.
+# The evidence supports the named target-replay comparisons under the pinned engines, profiles, and
+# frozen inputs. It says nothing about unsupported asset-framework combinations or about the
+# production transaction-cost and position-rule overlays that the protocol disables. The separate
+# synthetic scenario and stress suites test convention coverage and scale; they do not replace the
+# real-data comparisons.

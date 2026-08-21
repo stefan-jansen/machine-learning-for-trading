@@ -46,7 +46,7 @@ from utils.paths import get_chapter_dir
 # Production defaults - Papermill injects overrides after this cell
 ROUND_SECONDS = 3
 
-# %%
+# %% tags=["results"]
 AUDIT_PATH = get_chapter_dir(16) / "resources" / "framework_parity_audit.json"
 audit = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
 lean = audit["frameworks"]["lean"]
@@ -55,18 +55,20 @@ CASE_NAMES = {
     "etfs": "ETF allocation",
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
+    "fx_pairs": "FX allocation (USD-quoted pairs)",
 }
 
+# %% tags=["results"]
 display(Markdown(f"**Pinned engine:** {LEAN_NAME} with ML4T profile `{lean['profile']}`"))
 
 # %% [markdown]
 # ## 1. Supported real strategies
 #
-# LEAN is required for the ETF and crypto-perpetual strategies. The CME row is unsupported for this
-# particular frozen bundle: it contains continuous root prices but lacks the dated contract chain
-# and roll map needed to construct a native LEAN futures subscription.
+# LEAN is required for the ETF, crypto-perpetual, and USD-quoted foreign-exchange workloads. The CME
+# row is unsupported for this particular frozen bundle: it contains continuous root prices but lacks
+# the dated contract chain and roll map needed to construct a native LEAN futures subscription.
 
-# %%
+# %% tags=["results"]
 lean_results = (
     pl.DataFrame(audit["real_strategy_records"])
     .filter(pl.col("framework") == "lean")
@@ -78,19 +80,21 @@ lean_results = (
         "valuations",
         "valuation_timestamps_match",
         "equity_gap",
+        "equity_raw_gap",
         "terminal_gap",
+        "terminal_raw_gap",
         "negative_control_detected",
     )
 )
 
-assert lean_results.height == 2
-assert lean_results["status"].to_list() == ["pass", "pass"]
+assert lean_results.height == 3
+assert lean_results["status"].to_list() == ["pass", "pass", "pass"]
 assert lean_results["valuation_timestamps_match"].all()
 assert lean_results["negative_control_detected"].all()
 
 display(lean_results)
 
-# %%
+# %% tags=["results"]
 lean_unsupported = (
     pl.DataFrame(audit["unsupported_records"])
     .filter(pl.col("framework") == "lean")
@@ -100,9 +104,9 @@ lean_unsupported = (
 display(lean_unsupported)
 
 # %% [markdown]
-# The ETF row matches 2,457 fills, 1,995 valuations, cash, and terminal value. The crypto row matches
-# 8,408 fills and 2,426 hourly valuations under LEAN's Binance futures and funding model. The audit
-# does not convert the continuous CME roots into a different instrument merely to add a LEAN row.
+# The table reports the complete fill and valuation counts for each supported workload. LEAN uses
+# native equity, crypto-future, and foreign-exchange securities. The audit does not convert the
+# continuous CME roots into a different instrument merely to add a LEAN row.
 
 # %% [markdown]
 # ## 2. Engine-only timing
@@ -111,7 +115,7 @@ display(lean_unsupported)
 # process-isolated samples are used. Input loading, model inference, target construction, adapter
 # preparation, result extraction, and reporting are outside the timed region.
 
-# %%
+# %% tags=["results"]
 lean_timing = (
     pl.DataFrame(audit["performance_records"])
     .filter(pl.col("framework") == "lean")
@@ -126,13 +130,13 @@ lean_timing = (
 display(lean_timing)
 
 # %% [markdown]
-# ML4T is faster on both measured rows on this machine. The result applies to these pinned versions,
-# bundles, and engine boundaries; it is not a general LEAN performance claim.
+# The timing result applies to these pinned versions, bundles, and engine boundaries. It is not a
+# general LEAN performance claim.
 
 # %% [markdown]
 # ## 3. Synthetic stress remains diagnostic
 
-# %%
+# %% tags=["results"]
 lean_stress = (
     pl.DataFrame(audit["synthetic_stress"]["records"])
     .filter(pl.col("framework") == "lean")
@@ -141,6 +145,5 @@ lean_stress = (
 display(lean_stress)
 
 # %% [markdown]
-# The retained LEAN stress row covers 250 assets, 5,040 sessions, and 1.26 million bars. ML4T exactly
-# reproduces LEAN's result for that synthetic target-order workload. It tests scale and the calibrated
-# LEAN profile; the ETF and crypto rows above provide the real-strategy evidence.
+# The retained stress row tests scale and the calibrated LEAN profile on generated inputs. The
+# supported rows above provide the real-data evidence.

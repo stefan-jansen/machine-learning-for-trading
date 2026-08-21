@@ -23,7 +23,7 @@
 # **Learning objectives**
 #
 # - Compare Backtrader and Zipline against ML4T on supported real strategies
-# - See why exact fills do not by themselves establish full equity-path parity
+# - Apply a monetary comparison unit to account values without weakening fill comparison
 # - Interpret the measured engine-only runtime boundary
 # - Use synthetic stress evidence as a secondary conformance result
 #
@@ -58,12 +58,13 @@ CASE_NAMES = {
     "etfs": "ETF allocation",
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
+    "fx_pairs": "FX allocation (USD-quoted pairs)",
 }
 
 # %% [markdown]
 # ## 1. Required comparisons
 
-# %%
+# %% tags=["results"]
 results = (
     pl.DataFrame(audit["real_strategy_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -79,27 +80,29 @@ results = (
         "valuations",
         "valuation_timestamps_match",
         "equity_gap",
+        "equity_raw_gap",
         "terminal_gap",
+        "terminal_raw_gap",
     )
     .sort("strategy", "engine")
 )
 
-assert results.height == 3
-assert results.filter(pl.col("status") == "pass").height == 2
+assert results.height == 4
+assert results.filter(pl.col("status") == "pass").height == 4
 assert results["valuation_timestamps_match"].all()
 
 display(results)
 
 # %% [markdown]
-# Backtrader and Zipline both match the ETF strategy exactly. Backtrader also reproduces every CME
-# fill, but its equity and terminal value differ by `0.00000015`, so that row fails the exact gate.
-# Zipline has no required CME row because the frozen continuous-root input lacks a native dated
-# contract chain and roll map.
+# Backtrader and Zipline both participate in the ETF comparison. Backtrader also participates in the
+# CME and USD-quoted foreign-exchange comparisons. The fill stream is compared at eight-decimal
+# precision, while account values must round to the same cent. Zipline has no required CME or spot-FX
+# row because the frozen inputs do not map to its native asset models.
 
 # %% [markdown]
 # ## 2. Unsupported asset models
 
-# %%
+# %% tags=["results"]
 unsupported = (
     pl.DataFrame(audit["unsupported_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -119,33 +122,33 @@ display(unsupported)
 # %% [markdown]
 # ## 3. Engine-only timing
 #
-# Timing is retained only for correctness-passing rows. The Backtrader CME failure is therefore not
-# timed for publication.
+# Timing is retained only for correctness-passing rows and covers the engine call only.
 
-# %%
+# %% tags=["results"]
 timing = (
     pl.DataFrame(audit["performance_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
     .with_columns(
+        pl.col("case_study").replace_strict(CASE_NAMES).alias("strategy"),
         pl.col("framework").replace_strict(FRAMEWORK_NAMES).alias("engine"),
         pl.col("framework_median_seconds").round(ROUND_SECONDS).alias("external_seconds"),
         pl.col("ml4t_median_seconds").round(ROUND_SECONDS).alias("ml4t_seconds"),
         pl.col("framework_to_ml4t_ratio").round(2).alias("external_div_ml4t"),
     )
-    .select("engine", "external_seconds", "ml4t_seconds", "external_div_ml4t")
+    .select("strategy", "engine", "external_seconds", "ml4t_seconds", "external_div_ml4t")
 )
 
-assert timing.height == 2
+assert timing.height == 4
 display(timing)
 
 # %% [markdown]
-# On the ETF strategy, ML4T's median engine call is lower than Backtrader's and Zipline's. The timer
-# excludes data and adapter preparation, and these ratios should not be applied to other strategies.
+# The timer excludes data and adapter preparation. The ratios should not be applied to other
+# strategies or machines.
 
 # %% [markdown]
 # ## 4. Synthetic stress evidence
 
-# %%
+# %% tags=["results"]
 stress = (
     pl.DataFrame(audit["synthetic_stress"]["records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -156,6 +159,6 @@ display(stress)
 
 # %% [markdown]
 # Both synthetic stress rows pass against their matching ML4T profiles. Their terminal values differ
-# from each other because the profiles reproduce different framework conventions. The test is pairwise:
-# ML4T versus Backtrader and ML4T versus Zipline, not Backtrader versus Zipline. The workload tests
-# scale and event conventions, while the ETF and CME rows above determine the real-strategy claim.
+# because the profiles reproduce different framework conventions. The test is pairwise: ML4T versus
+# Backtrader and ML4T versus Zipline. The workload tests scale and event conventions, while the
+# required rows above determine the real-data comparison.

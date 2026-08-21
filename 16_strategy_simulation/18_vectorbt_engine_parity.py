@@ -17,13 +17,13 @@
 # # VectorBT Pro and OSS on Current Case-Study Strategies
 #
 # This notebook reports the VectorBT Pro and VectorBT OSS rows from the current real-strategy audit.
-# The current ETF strategy and all required synthetic scenarios match exactly. The remaining
-# real-strategy failure is the CME equity path under VectorBT Pro.
+# Required comparisons use ETF, CME futures, and USD-quoted foreign-exchange target streams where
+# the pinned VectorBT edition supports the asset and accounting contract.
 #
 # **Learning objectives**
 #
-# - Compare VectorBT Pro and OSS with ML4T on the supported ETF strategy
-# - Distinguish exact fill parity from a small equity-path residual
+# - Compare VectorBT Pro and OSS with ML4T on supported real-data workloads
+# - Distinguish fill precision from the monetary unit used for account values
 # - Understand why VectorBT OSS is not used for the CME futures contract
 # - Read engine-only runtime evidence without treating it as a universal ranking
 #
@@ -58,12 +58,13 @@ CASE_NAMES = {
     "etfs": "ETF allocation",
     "cme_futures": "CME futures",
     "crypto_perps_funding": "Crypto perpetual funding",
+    "fx_pairs": "FX allocation (USD-quoted pairs)",
 }
 
 # %% [markdown]
 # ## 1. Required comparisons
 
-# %%
+# %% tags=["results"]
 results = (
     pl.DataFrame(audit["real_strategy_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -79,26 +80,28 @@ results = (
         "valuations",
         "valuation_timestamps_match",
         "equity_gap",
+        "equity_raw_gap",
         "terminal_gap",
+        "terminal_raw_gap",
     )
     .sort("strategy", "engine")
 )
 
-assert results.height == 3
-assert results.filter(pl.col("status") == "pass").height == 2
+assert results.height == 5
+assert results.filter(pl.col("status") == "pass").height == 5
 assert results["valuation_timestamps_match"].all()
 
 display(results)
 
 # %% [markdown]
-# Both VectorBT editions reproduce the ETF strategy exactly across 2,466 fills and 1,995 valuations.
-# VectorBT Pro reproduces all 3,545 CME fills, but the maximum equity gap is `0.00000010` and the
-# terminal gap is `0.00000007`; the row therefore fails the `1e-8` gate.
+# Both VectorBT editions participate in the ETF and USD-quoted foreign-exchange comparisons.
+# VectorBT Pro also supplies contract multipliers and futures-style leverage for the CME comparison.
+# Fill records retain eight-decimal precision; account monetary values must round to the same cent.
 
 # %% [markdown]
 # ## 2. Unsupported asset models
 
-# %%
+# %% tags=["results"]
 unsupported = (
     pl.DataFrame(audit["unsupported_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -118,33 +121,34 @@ display(unsupported)
 # %% [markdown]
 # ## 3. Engine-only timing
 #
-# Only the two correctness-passing ETF rows are timed for publication.
+# Each correctness-passing VectorBT row has an engine-only timing record.
 
-# %%
+# %% tags=["results"]
 timing = (
     pl.DataFrame(audit["performance_records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
     .with_columns(
+        pl.col("case_study").replace_strict(CASE_NAMES).alias("strategy"),
         pl.col("framework").replace_strict(FRAMEWORK_NAMES).alias("engine"),
         pl.col("framework_median_seconds").round(ROUND_SECONDS).alias("vectorbt_seconds"),
         pl.col("ml4t_median_seconds").round(ROUND_SECONDS).alias("ml4t_seconds"),
         pl.col("framework_to_ml4t_ratio").round(2).alias("vectorbt_div_ml4t"),
     )
-    .select("engine", "vectorbt_seconds", "ml4t_seconds", "vectorbt_div_ml4t")
+    .select("strategy", "engine", "vectorbt_seconds", "ml4t_seconds", "vectorbt_div_ml4t")
 )
 
-assert timing.height == 2
+assert timing.height == 5
 display(timing)
 
 # %% [markdown]
-# Both VectorBT editions have lower median engine-call time on the ETF workload. The measured region
-# excludes data loading, target construction, adapter preparation, and output extraction. The result
-# does not establish the same ratio for other datasets or strategy mechanics.
+# The measured region excludes data loading, target construction, adapter preparation, and output
+# extraction. The observed ratios do not establish the same relationship for other datasets,
+# strategy mechanics, or machines.
 
 # %% [markdown]
 # ## 4. Synthetic stress evidence
 
-# %%
+# %% tags=["results"]
 stress = (
     pl.DataFrame(audit["synthetic_stress"]["records"])
     .filter(pl.col("framework").is_in(FRAMEWORKS))
@@ -154,6 +158,6 @@ stress = (
 display(stress)
 
 # %% [markdown]
-# VectorBT Pro and OSS both pass the 250-asset, 1.26-million-bar synthetic stress comparison against
-# their matching ML4T profiles. This establishes scale conformance for the fixed target-order recipe.
-# It does not overturn the CME real-strategy failure or create support for the excluded asset models.
+# VectorBT Pro and OSS both pass the generated stress comparison against their matching ML4T
+# profiles. This establishes scale conformance for the fixed target-order recipe. It does not create
+# support for the excluded asset models.
