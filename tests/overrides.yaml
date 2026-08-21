@@ -1218,8 +1218,17 @@ case_studies/cme_futures/10b_stochastic_discount_factor:
   skip: true
   skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
 case_studies/cme_futures/11_causal_dml:
-  # CV_FOLDS, MAX_SAMPLES, MAX_SYMBOLS and N_PLACEBO are pre-migration names this notebook no
-  # longer reads; it plans through the shared catalog. The CI fixture is the reduction.
+  parameters:
+    # The DML resolver requires every one of its four preview fields, not merely a non-empty
+    # mapping, because omitting max_samples would resolve the full population under a preview
+    # tier - an uncapped preview. The pre-migration names CV_FOLDS, MAX_SAMPLES, MAX_SYMBOLS and
+    # N_PLACEBO reached nothing once this notebook moved to PREVIEW_REDUCTIONS; their values are
+    # carried across here, where they arrive.
+    PREVIEW_REDUCTIONS:
+      max_samples: 5000
+      max_symbols: 5
+      n_folds: 2
+      n_placebo: 10
   timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
