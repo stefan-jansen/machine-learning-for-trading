@@ -95,7 +95,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "fx_pairs-gbm-validation-v1"
+POPULATION_NAME = ""
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -203,7 +203,11 @@ plan.select(
 # complete, which is what makes the downstream comparison well defined.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+# `POPULATION_NAME` is derived here rather than in the parameters cell above, because a
+# parameterized run replaces `LABEL` in a cell inserted *after* that one: a name built up
+# there would carry the default label into every other label's run.
+population_name = POPULATION_NAME or f"fx_pairs-gbm-{LABEL}-validation-v1"
+execution, population = run_model_population(study, resolved, population_name=population_name)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
