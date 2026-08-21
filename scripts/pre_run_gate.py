@@ -224,6 +224,19 @@ def check_preview_run(report: Report, case_study: str, family: str, label: str) 
             traceback.format_exc(limit=6).strip().splitlines()[-1],
         )
     finally:
+        # Activating the preview tier pointed ML4T_OUTPUT_DIR at this throwaway workspace. Restore
+        # the canonical activation before the workspace is removed: every check that runs after
+        # this one resolves its paths through that variable, and the cost extrapolation reads the
+        # modeling dataset, so leaving it pointed at a deleted directory fails the gate on exactly
+        # the branch that exists to serve a family with no recorded cost.
+        try:
+            open_study(case_study).activate()
+        except Exception:
+            report.add(
+                "the canonical study is restored after the preview",
+                False,
+                traceback.format_exc(limit=6).strip().splitlines()[-1],
+            )
         shutil.rmtree(workspace, ignore_errors=True)
     return measurements
 
