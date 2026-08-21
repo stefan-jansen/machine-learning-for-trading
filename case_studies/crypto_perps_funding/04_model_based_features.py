@@ -100,7 +100,7 @@ from utils.artifact_specs import (
     resolve_label_horizon,
 )
 from utils.cv_splits import generate_cv_splits, load_evaluation_config
-from utils.modeling import load_modeling_dataset
+from utils.modeling import load_modeling_dataset, temporal_fold_index
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, FIGSIZE, add_message_title, show_with_alt
@@ -1109,9 +1109,9 @@ print(f"Wrote features/model_based.parquet, {record['n_rows']:,} rows, digest {r
 # %%
 assembled = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, symbols=symbols)
 assert set(assembled.temporal_feature_names) == EXPECTED_TEMPORAL
-assert sorted(assembled.temporal_by_fold["fold"].unique()) == sorted(
-    fold["fold"] for fold in active_folds
-)
+assert sorted(
+    temporal_fold_index(assembled.temporal_by_fold, assembled.date_col)["fold"].unique().to_list()
+) == sorted(fold["fold"] for fold in active_folds)
 assert assembled.label_col == label_col
 assert len(assembled.feature_names) == len(financial_feature_cols) + len(EXPECTED_TEMPORAL)
 

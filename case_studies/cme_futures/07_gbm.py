@@ -14,373 +14,458 @@
 # ---
 
 # %% [markdown]
-# # CME Futures: GBM Regularization Grid Search
+# # CME futures: capacity, loss function, and when to stop adding trees
 #
-# With 30 products across 7 sectors, CME futures have natural groupings that
-# tree splits can exploit: energy products cluster differently from rates,
-# and carry signals interact with sector-specific seasonality. The grid
-# searches 15 configurations (5 leaf-count profiles x 3 objectives) to test
-# whether deeper trees capture these sector interactions.
+# [`06_linear`](06_linear.ipynb) fitted a penalty grid to these 69 features and found no
+# cross-sectional edge to regularize. A linear model can only represent a relationship it is given
+# in the right shape: it sees an interaction between carry and momentum only because someone
+# multiplied those columns together and named the product. Gradient boosting has no such
+# restriction. It builds a sequence of shallow trees, each fitted to what the ones before it got
+# wrong, and a tree splits on one feature inside a region defined by others - so an interaction is
+# something it can find rather than something it must be handed.
 #
-# **Learning Objectives**:
-# - Test whether deeper trees (63 leaves) capture sector-specific carry interactions
-# - Compare loss functions (MSE, MAE, Huber) for heavy-tailed commodity returns
-# - Track IC learning curves to identify overfitting vs underfitting regimes
-# - Rank configs by out-of-sample IC to locate the capacity sweet spot (leaf count x loss)
+# That freedom is the whole question. A model that can represent anything can also fit noise, and
+# with 30 products and 69 features there is plenty to fit. Three dials control how far it goes,
+# and this notebook varies all three:
 #
-# **Book Reference**: Chapter 12, Section 12.2 (GBM Libraries)
+# - **Capacity**, set by `num_leaves`: how many regions one tree may carve the feature space into.
+#   Seven leaves can express a handful of conditions; 63 can express a fine partition that may
+#   describe the training window and nothing beyond it.
+# - **The loss function**, which decides what "got wrong" means. This matters more here than in an
+#   equity universe. Commodity returns are heavy-tailed, and squared error weights an observation
+#   by the square of its error, so a single extreme move can carry hundreds of times the weight of
+#   a typical one. Absolute error and Huber loss do not, which makes the comparison between the
+#   three objectives a comparison of how much the tails are allowed to steer the fit.
+# - **When to stop**, set by the number of trees. Unlike a linear fit, a boosted model has a
+#   meaningful state at every iteration, so this notebook scores each configuration at ten points
+#   along its own training run rather than only at the end.
 #
-# **Prerequisites**: `03_financial_features.py`, `04_model_based_features.py`, [`05_evaluation`](05_evaluation.ipynb)
+# The third dial is the one that changes how results must be read. **A checkpoint is part of a
+# configuration, not a detail of how it was fitted.** Scoring 15 declared configurations at ten
+# checkpoints each produces 150 candidate models, and treating that as 15 candidates while quietly
+# keeping each one's best iteration would be reporting the maximum of ten numbers as though it
+# were one.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Read a declared gradient boosting grid and say what each configuration varies.
+# - Explain why a boosted model produces one result per checkpoint while a linear model produces
+#   one result in total, and what that implies for counting candidates.
+# - Read a learning curve of out-of-sample information coefficient against tree count, and tell
+#   apart a model still learning from one that has begun fitting the training window.
+# - Say why the choice of loss function is a statement about the label's tails, and relate that to
+#   what a rank-based metric rewards.
+# - Recognise that picking each configuration's best checkpoint after seeing the results is a
+#   selection decision, and locate where selection is actually made.
+#
+# **Book reference**: Chapter 12, Section 12.2 (GBM libraries) and Section 12.3 (how to tune a
+# boosted model). Chapter 6, Section 6.7 (Search accounting and run logging) introduces the run
+# log this notebook writes to.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds, and
+# [`06_linear`](06_linear.ipynb) fitted the linear population this one is compared against.
+#
+# **What it writes**: one training run per configuration and one complete validation prediction
+# set per configuration and checkpoint, in `run_log/registry.db` and under `run_log/training/` and
+# `run_log/predictions/`, grouped under a named population.
+# [`13_backtest`](13_backtest.ipynb) reads that population and selects on validation backtest
+# Sharpe. **Selection happens there, not here.**
 
 # %%
-"""GBM Grid Search — config-driven regularization profiles × loss functions."""
-
-import warnings
+"""Fit the declared CME futures gradient boosting population on the walk-forward folds."""
 
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-import yaml
 
-import utils.style as style
-from case_studies.utils.gbm import (
-    prepare_gbm_folds,
-    register_gbm_result,
-    train_gbm_config,
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    open_study,
+    resolved_model_plan,
+    run_model_population,
 )
-from case_studies.utils.registry import (
-    build_training_spec,
-    get_training_dir,
-    load_prediction_metrics,
-    load_prediction_sets,
-    training_hash_from_spec,
-    training_run_status,
-)
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "cme_futures"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-MAX_FOLDS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows per fold (val is never sampled). Use for memory-constrained runs on large datasets.
+LABEL = "fwd_ret_5d"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+CONFIG_NAMES: list[str] = []
+POPULATION_NAME = "cme_futures-gbm-validation-v1"
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-
-# Device: read from setup.yaml, fall back to GPU detection
-gbm_config = setup.get("modeling", {}).get("gbm", {})
-DEVICE = gbm_config.get("device", "cuda")
-MAX_BIN = 63  # GPU default
-import torch
-
-if DEVICE != "cpu" and not torch.cuda.is_available():
-    DEVICE, MAX_BIN = "cpu", 255
-
-print(f"Case study: {CASE_STUDY_ID} | Device: {DEVICE} | max_bin: {MAX_BIN}")
+study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# ## 1. Load Data and Model Configs
+# ## 1. Which label, and which models
 #
-# GBM configs are defined in `config/training/{label}.yaml` under the `gbm:` key.
-# Each config references a preset in `config/lgb/` with the complete
-# LightGBM parameter set. To modify the grid, edit the label config file.
+# The label is the same one the linear notebook used: `fwd_ret_5d`, the total return over the five
+# trading days after the decision date. Keeping it fixed is what makes the two populations
+# comparable - the families differ, the target does not.
 
 # %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits[: MAX_FOLDS or None]
-
-print(f"Dataset: {len(dataset):,} rows × {len(feature_names)} features")
-print(f"Label: {label_col} | Task: {mds.task_type} | Folds: {len(splits)}")
-
-# %%
-configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, family="gbm")
-
-print(f"\n{len(configs)} configs × {len(splits)} folds\n")
-for cfg in configs:
-    leaves = cfg["params"].get("num_leaves", 31)
-    obj = cfg["params"].get("objective", "regression")
-    n_trees = cfg.get("max_iterations", 500)
-    print(f"  {cfg['config_name']:25s}  leaves={leaves:3d}  obj={obj}  trees={n_trees}")
+declared_labels(study, "gbm")
 
 # %% [markdown]
-# ## 2. Prepare CV Folds
+# The menu at `config/training/{label}.yaml` lists 15 named configurations under `gbm:`, and each
+# resolves to a preset in `case_studies/config/lgb/`. The grid is a product of two axes:
 #
-# GBM folds use float32 (LightGBM native precision) and skip
-# imputation/scaling — gradient boosting handles missing values natively.
+# - **Five capacity profiles.** `default` uses the library's own leaf count; the rest fix it at 7,
+#   15, 31 and 63. Leaf count is the direct control on how finely one tree may partition the
+#   feature space, and it is the dial that decides whether sector-specific behaviour can be
+#   expressed at all.
+# - **Three objectives.** `mse` minimizes squared error, `mae` absolute error, and `huber` behaves
+#   like squared error for small residuals and like absolute error beyond a threshold derived from
+#   each fold's own label spread.
+#
+# Every configuration runs the same number of boosting iterations with the same learning rate, so
+# the grid isolates capacity and loss rather than confounding them with training length.
 
 # %%
-dataset_pd = dataset.to_pandas()
-fold_data = prepare_gbm_folds(
-    dataset_pd,
-    splits,
-    feature_names,
-    label_col,
-    date_col,
-    entity_col,
-    task_type=mds.task_type,
-    class_values=mds.class_values,
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
-    train_sample_frac=TRAIN_SAMPLE_FRAC,
+configs = load_model_configs(
+    study,
+    "gbm",
+    labels=[LABEL],
+    config_names=CONFIG_NAMES or None,
+)
+configs
+
+# %% [markdown]
+# ## 2. Binding the declarations to the data
+#
+# Resolving reads the label and feature files, computes the fold boundaries, works out the exact
+# rows each fit must predict, and turns any data-dependent parameter into the number it will use.
+# Huber's threshold is one of those: it is a fraction of the training labels' standard deviation,
+# so it is a different number on every fold and is resolved from that fold's own data.
+#
+# Nothing is fitted here, so the plan can be inspected first. Four things to check:
+#
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row.** A row that
+#   differs is a configuration measured on a different sample from its neighbours.
+# - **`folds` is the same everywhere**, and equals the number of walk-forward splits.
+# - **`validation_start` and `validation_end` bracket the development sample**, with none of the
+#   held-out tail visible.
+# - **`checkpoints` is where this differs from the linear plan.** It is the number of training
+#   states each configuration will publish predictions for. Multiply it by the number of rows to
+#   get the number of candidate models this notebook is about to create.
+
+# %%
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+resolved = tuple(request.resolve() for request in requests)
+
+plan = resolved_model_plan(resolved)
+plan.select(
+    "config_name",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "checkpoints",
+    "validation_start",
+    "validation_end",
 )
 
-for f in fold_data:
-    print(f"  Fold {f['fold']}: train={f['n_train']:,}  val={f['n_val']:,}")
-
 # %% [markdown]
-# ## 3. Train All Configs
+# ## 3. Fitting the population
 #
-# For each config, train one LightGBM model per fold to `max_iterations` trees.
-# Cross-sectional IC is evaluated at checkpoints (every 50 iterations) to
-# detect overfitting — configs that peak early and decay indicate too much capacity.
+# `run_model_population` fits every resolved request. For one request it walks the folds, and on
+# each one:
+#
+# 1. takes the rows inside that fold's training window,
+# 2. casts the design matrix to the precision LightGBM works in and leaves missing values in
+#    place - a tree routes a missing value down its own branch, so imputing a median here would
+#    hand the model an observation nobody made,
+# 3. fits the declared number of boosting iterations,
+# 4. predicts the fold's validation rows at each checkpoint, using only the trees built up to that
+#    iteration.
+#
+# Step 4 is what makes one fit produce many results. The fold predictions are concatenated into
+# one series per checkpoint covering the whole validation period, and each becomes its own
+# registered prediction set with its own identity.
+#
+# Preparation happens once per fold and is shared by every configuration, because slicing the
+# window and cleaning the rows depends on the data and not on the model. The run walks folds on
+# the outside and configurations on the inside for the same reason: one prepared fold is held at a
+# time rather than the whole set.
+#
+# **What the call publishes is a population**: a named, immutable list of the prediction sets it
+# will produce, written down before the first fit. Afterwards every member must exist and be
+# complete, which is what makes the downstream comparison well defined.
 
 # %%
-results = []
-for cfg in configs:
-    # Pre-compute registry training dir so boosters go directly there
-    spec = build_training_spec(
-        cfg["family"],
-        cfg["config_name"],
-        label_col,
-        n_folds=len(fold_data),
-        max_bin=MAX_BIN,
-        checkpoint_interval=cfg.get("checkpoint_interval", 50),
-        train_sample_frac=TRAIN_SAMPLE_FRAC,
-    )
-    train_dir = get_training_dir(CASE_STUDY_ID, spec)
+execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
 
-    # Skip if this config's hash is already complete (unless FORCE_RETRAIN)
-    _status = training_run_status(CASE_STUDY_ID, spec)
-    _training_hash = training_hash_from_spec(spec)
-    _split_rows = load_prediction_sets(
-        CASE_STUDY_ID,
-        training_hash=_training_hash,
-        split=PREDICTION_SPLIT,
-    )
-    _split_complete = not _split_rows.is_empty()
-    if _status.complete and _split_complete and not FORCE_RETRAIN:
-        # Already trained + registered: rebuild a minimal result from the
-        # registry so the grid + learning-curve sections render on a
-        # fully-cached checkout. (A bare `continue` here drops the config
-        # from `results`, printing an empty grid when every config is
-        # registered.) best_ic is the authoritative registered value;
-        # best_iter and the curves come from learning_curves.parquet.
-        _pred_hash = _split_rows["prediction_hash"][0]
-        _metrics = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=_pred_hash)
-        _best_ic = float(_metrics["ic_mean"][0]) if not _metrics.is_empty() else float("nan")
-        _curves = []
-        _lc_path = train_dir / "learning_curves.parquet"
-        if _lc_path.exists():
-            _curves = pl.read_parquet(_lc_path).to_dicts()
-        _best_iter = 0
-        if _curves:
-            _best_iter = int(max(_curves, key=lambda c: c["ic_mean"])["iteration"])
-        print(
-            f"  {cfg['config_name']:25s}  iter={_best_iter:4d}  IC={_best_ic:+.4f}  "
-            f"(cached, {_status.summary()})"
+print(f"{len(execution.runs)} configurations fitted")
+print(f"population {population.name}: {len(population.members)} prediction sets")
+
+# %% [markdown]
+# Re-running this notebook unchanged costs the time it takes to read the data. Every identity is
+# re-derived from the inputs, the registry already holds the matching rows, and the runner returns
+# the stored result rather than fitting again.
+#
+# ### Running configurations of your own
+#
+# The published run log is read-only. To add runs, open the study against a workspace, which holds
+# its own registry and artifacts and reads the same labels and features:
+#
+# ```python
+# study = open_study("cme_futures", workspace="~/ml4t-experiments")
+# configs = load_model_configs(
+#     study, "gbm", labels=["fwd_ret_5d"], config_names=["leaves_15_huber", "leaves_31_huber"]
+# )
+# requests = model_requests(study, configs)
+# resolved = tuple(request.resolve() for request in requests)
+# execution, population = run_model_population(study, resolved, population_name="my-gbm-v1")
+# ```
+#
+# `CONFIG_NAMES` fits a subset of what the menu declares. To fit something new, add a preset at
+# `case_studies/config/lgb/leaves_127_huber.yaml` and list `leaves_127_huber` under `gbm:` in the
+# label's menu. Editing an existing preset changes that configuration's identity, so its result
+# registers as a new row beside the old one rather than replacing it.
+# [`RUN_LOG.md`](../RUN_LOG.md#running-your-own-configurations) covers the rest.
+
+# %% [markdown]
+# ## 4. What came out
+#
+# One row per configuration and checkpoint. `ic_mean` is the **information coefficient**: on each
+# validation date, rank the products by the model's prediction, rank them by the return they went
+# on to earn, correlate the two rankings, and average that daily correlation over the validation
+# period.
+#
+# The table is sorted by IC, and the top of it is the trap this notebook exists to describe. The
+# leading row is the maximum of 150 numbers. Reading it as the result of one experiment would
+# attribute to the model whatever the stopping point contributed, and the section below measures
+# how large that contribution is before anything is concluded from the ranking.
+
+# %% tags=["results"]
+catalog = execution.catalog_rows.select(
+    "config_name",
+    "label",
+    "complete",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "n_folds",
+    "training_hash",
+    "prediction_hash",
+).sort("ic_mean", descending=True)
+
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("gbm execution returned a partial prediction set")
+
+full_days = int(catalog.get_column("ic_n_days").max())
+catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+
+print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
+print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each")
+catalog.select(
+    "config_name",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "full_coverage",
+).head(15)
+
+# %% [markdown]
+# ### What more trees do
+#
+# Each line traces one configuration's out-of-sample IC as trees are added to it. This is the
+# figure the checkpoint dimension exists to produce, and it separates two things a single
+# end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the model was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# without trend around zero never had anything to learn in the first place, and its highest point
+# is wherever the noise happened to peak. The difference matters, because both produce a
+# respectable-looking maximum.
+
+# %%
+curves = catalog.filter("full_coverage").sort("config_name", "checkpoint_value")
+objectives = {"mse": COLORS["blue"], "mae": COLORS["amber"], "huber": COLORS["copper"]}
+
+
+def objective_of(name: str) -> str:
+    """Read the loss function out of a declared configuration name."""
+    return next((key for key in objectives if name.endswith(key)), "mse")
+
+
+fig_curves = go.Figure()
+for config_name in curves.get_column("config_name").unique(maintain_order=True):
+    series = curves.filter(pl.col("config_name") == config_name)
+    fig_curves.add_trace(
+        go.Scatter(
+            x=series.get_column("checkpoint_value").to_list(),
+            y=series.get_column("ic_mean").to_list(),
+            mode="lines",
+            name=config_name,
+            line=dict(color=objectives[objective_of(config_name)], width=1.5),
+            opacity=0.75,
         )
-        results.append(
-            {
-                "config_name": cfg["config_name"],
-                "best_iter": _best_iter,
-                "best_ic": _best_ic,
-                "elapsed_s": 0.0,
-                "learning_curves": _curves,
-                "cached": True,
-            }
-        )
-        continue
-    if _status.complete and not _split_complete:
-        print(f"  {cfg['config_name']:25s}  RETRAIN — missing {PREDICTION_SPLIT} predictions")
-    elif _status.partial:
-        print(f"  {cfg['config_name']:25s}  RETRAIN — partial state: {_status.summary()}")
-
-    result = train_gbm_config(
-        cfg,
-        fold_data,
-        feature_names=feature_names,
-        device=DEVICE,
-        max_bin=MAX_BIN,
-        entity_col=entity_col,
-        date_col=date_col,
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-        save_dir=train_dir,
     )
-    results.append(result)
-    print(
-        f"  {result['config_name']:25s}  iter={result['best_iter']:4d}  "
-        f"IC={result['best_ic']:+.4f}  ({result['elapsed_s']:.0f}s)"
-    )
-
-    # Register immediately after training — incremental save protects against
-    # interruption losing work on large sweeps.
-    register_gbm_result(
-        CASE_STUDY_ID,
-        result,
-        cfg,
-        label_col,
-        n_folds=len(fold_data),
-        max_bin=MAX_BIN,
-        entry_point="07_gbm",
-        date_col=date_col,
-        entity_col=entity_col,
-        train_sample_frac=TRAIN_SAMPLE_FRAC,
-        prediction_split=PREDICTION_SPLIT,
-    )
-# %% [markdown]
-# ## 4. Grid Results
-#
-# All configs ranked by peak IC (best checkpoint). Every config's
-# best-checkpoint validation predictions are registered (Section 3); the
-# cross-stage backtest sweep — not a single-IC pick here — chooses the carrier
-# downstream, so the `*` marks the IC leader for reference, not the final winner.
-
-# %%
-results.sort(key=lambda r: r["best_ic"], reverse=True)
-best = results[0] if results else None
-
-print(f"{'Config':25s}  {'Iter':>5s}  {'IC':>8s}  {'Time':>6s}")
-print("-" * 50)
-for r in results:
-    marker = " *" if r is best else ""
-    print(
-        f"  {r['config_name']:25s}  {r['best_iter']:5d}  {r['best_ic']:+.4f}  {r['elapsed_s']:5.0f}s{marker}"
-    )
-
-if best:
-    print(f"\nBest: {best['config_name']} @ {best['best_iter']} trees (IC={best['best_ic']:+.4f})")
-
-# %%
-# Grid IC as a chart: one bar per config, hue by loss function, sorted so the
-# leader sits on top. The dashed line at zero is the credibility reference —
-# a validation IC whose sign is not distinguishable from zero carries no
-# standalone edge (the HAC intervals live in 12_model_analysis).
-_LOSS_HUE = {
-    "mse": style.COLORS["blue"],
-    "mae": style.COLORS["amber"],
-    "huber": style.COLORS["copper"],
-}
-
-
-def _loss_of(name: str) -> str:
-    return next((loss for loss in _LOSS_HUE if name.endswith(loss)), "mse")
-
-
-if results:
-    _ranked = sorted(results, key=lambda r: r["best_ic"])  # ascending -> best on top
-    _names = [r["config_name"] for r in _ranked]
-    _ics = [r["best_ic"] for r in _ranked]
-    _losses = [_loss_of(n) for n in _names]
-
-    fig = go.Figure()
-    for loss, hue in _LOSS_HUE.items():
-        idx = [i for i, ls in enumerate(_losses) if ls == loss]
-        if not idx:
-            continue
-        fig.add_bar(
-            x=[_ics[i] for i in idx],
-            y=[_names[i] for i in idx],
-            orientation="h",
-            marker_color=hue,
-            name=loss.upper(),
-            text=[f"{_ics[i]:+.4f}" for i in idx],
-            textposition="outside",
-            cliponaxis=False,
-        )
-    fig.add_vline(x=0.0, line=dict(color=style.COLORS["neutral"], dash="dash"))
-    # One IC per config, so category "total" == the config's own IC: sort the
-    # whole grid globally (leader on top) while keeping the 3 loss legend hues.
-    fig.update_yaxes(categoryorder="total ascending")
-    fig.update_layout(
-        template="ml4t",
-        title=(
-            f"Mid-depth trees lead the GBM grid: {best['config_name']} tops "
-            f"validation IC at {best['best_ic']:+.4f} on {label_col}"
-        ),
-        xaxis_title=f"Validation cross-sectional IC ({label_col})",
-        yaxis_title="GBM config",
-        legend_title="Loss",
-        legend=dict(x=0.98, y=0.03, xanchor="right", yanchor="bottom"),
-        margin=dict(l=120),
-        height=520,
-    )
-    # Headroom on the right so the outside value labels are not clipped.
-    fig.update_xaxes(range=[0, max(_ics) * 1.18])
-    fig.show()
+fig_curves.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig_curves.update_layout(
+    title="Validation IC against boosting iteration, by loss function",
+    height=550,
+    width=1000,
+    margin=dict(t=70),
+    legend=dict(font=dict(size=9)),
+)
+fig_curves.update_xaxes(title_text="Boosting iterations (trees kept)")
+fig_curves.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+show_plotly_with_alt(
+    fig_curves,
+    "Line chart of mean validation information coefficient against boosting iteration, one line "
+    "per configuration, coloured by loss function: blue for squared error, amber for absolute "
+    "error, copper for Huber. A dashed line marks zero. Every line sits above zero across the "
+    "whole range, and they wander up and down rather than rising to a common peak and falling "
+    "away, so the spread between configurations is visible from the first checkpoint onwards "
+    "while no single stopping point stands out across them.",
+)
 
 # %% [markdown]
-# ## 5. Learning Curves
+# ### Whether the loss function is what separates them
 #
-# IC at checkpoints (every 50 iterations) for each config. Configs that peak
-# early and decay indicate overfitting; those that plateau show good regularization.
+# The curves are coloured by objective because that is the axis with a mechanism behind it. If
+# heavy tails are steering the squared-error fits, the three colours should separate, and they
+# should separate more as trees are added, since each additional tree is fitted to the residuals
+# the previous ones left.
+#
+# The chart below drops the checkpoint dimension by taking each configuration's final state, so
+# every configuration is compared at the same amount of training. That is the comparison that does
+# not require choosing anything after the fact.
 
 # %%
-all_curves = pl.DataFrame([c for r in results for c in r["learning_curves"]])
-if all_curves.height > 0:
-    checkpoints = sorted(all_curves["iteration"].unique().to_list())
-    display_cps = [cp for cp in [50, 100, 200, 300, 500] if cp in checkpoints]
+final_iteration = int(catalog.get_column("checkpoint_value").max())
+final = (
+    catalog.filter(pl.col("checkpoint_value") == final_iteration)
+    .filter("full_coverage")
+    .with_columns(objective=pl.col("config_name").map_elements(objective_of, return_dtype=pl.Utf8))
+    .sort("ic_mean", descending=True)
+)
 
-    print(f"{'Config':25s}", end="")
-    for cp in display_cps:
-        print(f" {cp:>7d}", end="")
-    print()
-
-    for r in results:
-        cfg_data = all_curves.filter(pl.col("config") == r["config_name"])
-        print(f"  {r['config_name']:25s}", end="")
-        for cp in display_cps:
-            row = cfg_data.filter(pl.col("iteration") == cp)
-            if row.height > 0:
-                print(f" {row['ic_mean'][0]:+7.4f}", end="")
-            else:
-                print(f" {'N/A':>7s}", end="")
-        print()
+fig_obj = go.Figure(
+    go.Bar(
+        x=final.get_column("config_name").to_list(),
+        y=final.get_column("ic_mean").to_list(),
+        marker_color=[objectives[value] for value in final.get_column("objective")],
+        text=[f"{value:+.3f}" for value in final.get_column("ic_mean")],
+        textposition="outside",
+        cliponaxis=False,
+    )
+)
+fig_obj.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig_obj.update_layout(
+    title="Validation IC at the final iteration, coloured by loss function",
+    height=500,
+    width=1000,
+    showlegend=False,
+    margin=dict(t=70),
+)
+fig_obj.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
+fig_obj.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+show_plotly_with_alt(
+    fig_obj,
+    "Bar chart of mean validation information coefficient for every full-coverage configuration "
+    "at its final boosting iteration, sorted descending and coloured by loss function, against a "
+    "dashed zero line. Every bar is above the line. Copper Huber bars cluster towards the left "
+    "of the ranking and blue squared-error bars towards the right, with amber absolute-error "
+    "bars spread across both ends, so the ordering by loss function is a tendency rather than a "
+    "clean separation.",
+)
 
 # %% [markdown]
-# ## 6. Registration Complete
+# ### How much the checkpoint moves a configuration
 #
-# Each config was registered immediately after training (see Section 3).
-# This protects against interruption — all completed configs are already
-# persisted in `run_log/registry.db`.
+# One number per configuration: the range its IC covers across its own ten checkpoints. This is
+# the quantity that decides whether choosing a stopping point is a decision worth making carefully
+# or one being made by noise. A configuration whose IC varies more across its own training run
+# than the configurations vary among themselves is one where the checkpoint, not the model, is
+# doing the ranking.
 
 # %%
-print(f"All {len(results)} configs registered.")
-# %%
+spread = (
+    curves.group_by("config_name")
+    .agg(
+        ic_min=pl.col("ic_mean").min(),
+        ic_max=pl.col("ic_mean").max(),
+        ic_final=pl.col("ic_mean").filter(pl.col("checkpoint_value") == final_iteration).first(),
+    )
+    .with_columns(checkpoint_range=pl.col("ic_max") - pl.col("ic_min"))
+    .sort("checkpoint_range", descending=True)
+)
+across_configs = float(final.get_column("ic_mean").max() - final.get_column("ic_mean").min())
+print(f"IC range across configurations at the final iteration: {across_configs:.4f}")
+print(
+    f"median IC range within one configuration: {spread.get_column('checkpoint_range').median():.4f}"
+)
+spread
 
 # %% [markdown]
-# ## 7. Key Takeaways
+# ## 5. What to notice
 #
-# The GBM grid clusters most configurations between +0.013 and +0.025 IC on
-# `fwd_ret_5d`, with the highest-IC config `leaves_31_mse` at IC +0.0252
-# (HAC 95% CI [-0.002, +0.053], $t_{HAC}=1.80$; see
-# [`12_model_analysis`](12_model_analysis.ipynb)). The interval still includes
-# zero, so no GBM config clears the credibility line at this sample size on the
-# primary label. Neither leaf count nor loss orders the grid cleanly: the top
-# cluster (+0.023 to +0.025) mixes 15-, 31-, and 63-leaf profiles and both MSE
-# and MAE, and the IC spread across all 15 configs is small relative to the HAC
-# uncertainty. On a 30-product cross-section the trees have little stable
-# non-linear structure to separate, so the IC ranking is noisy and a single
-# best-by-IC pick is not robust. GBM's value therefore resolves at the strategy
-# stage rather than at IC alone: in [`13_backtest`](13_backtest.ipynb) the
-# cross-stage sweep — ranking by Sharpe, not IC — carries `gbm/leaves_7_huber`
-# on `fwd_ret_5d` (a low-but-positive IC of +0.0146) to the validation Sharpe
-# lead (1.26), a result the sealed holdout confirms in
-# [`17_strategy_analysis`](17_strategy_analysis.ipynb) (Sharpe 1.14).
+# **Every configuration ranks the cross-section the right way, which the linear grid did not.**
+# The penalty sweep in `06_linear` sat around zero at its strongest and below it elsewhere; here
+# all fifteen configurations are positive at the end of training, and the weakest of them is
+# above the strongest full-coverage linear fit. Something in this data is available to a model
+# that can split on one feature inside a region defined by another, and is not available to a
+# weighted sum of the columns. The two hand-built interaction terms in the feature set,
+# `carry_mom_composite` and `carry_mom_interaction`, exist because someone had to name that
+# structure for the linear model; the trees are finding more of it than was named.
+#
+# **The loss function orders the results, and the mechanism is the label's tails.** Huber leads,
+# absolute error follows, squared error trails, which is the order the tails predict. Squared
+# error weights an observation by the square of its error, so the largest commodity moves dominate
+# what each successive tree is fitted to, while the information coefficient is a rank correlation
+# and cares about order rather than magnitude. Effort spent getting the extremes right buys
+# nothing on this metric. The separation is a tendency and not a clean split - the objectives
+# overlap, and capacity moves results by a comparable amount - but the direction is the one the
+# mechanism implies, and it is the same mechanism that makes a winsorized label score differently
+# from a raw one. **An objective is a claim about which errors matter, and it is worth choosing to
+# match the metric the result will be judged on.**
+#
+# **The checkpoint moves the answer about half as much as the model does.** Across the fifteen
+# configurations at fixed training length the IC spans a range; within a single configuration,
+# across its own ten checkpoints, the median range is about half of that. So the stopping point is
+# not a detail - it is a second dial of comparable size to the first. And the peaks do not agree
+# with each other: a third of the configurations reach their highest IC at the first checkpoint,
+# the rest scatter across the range with no common turning point. That is what a peak located by
+# noise looks like, and it is the reason the honest comparison is the fixed-iteration chart rather
+# than each configuration's best moment. Reporting the leading row of the table would be reporting
+# the maximum of 150 numbers as though it were one.
+#
+# **The capacity axis does not produce the textbook shape.** The usual reason to sweep leaf count
+# is to find where out-of-sample performance turns over, and here it does not turn over cleanly:
+# the deepest and shallowest settings both appear near the top and near the bottom depending on
+# the objective they are paired with. Capacity and loss interact, and a one-dimensional reading of
+# either axis on its own will find a pattern that the other axis explains.
+#
+# **None of this selects anything.** IC measures whether predictions rank products correctly, not
+# whether a strategy trading them makes money after costs and turnover. A positive IC at this
+# magnitude is not by itself a tradeable edge, and turnover on a five-day horizon is exactly where
+# a small ranking advantage is lost. Selection is on validation backtest Sharpe over the
+# population just published, and it happens in [`13_backtest`](13_backtest.ipynb), where the
+# checkpoint is part of what is selected.
+#
+# **Known limitations.** The IC is an average of daily rank correlations with no adjustment for
+# the serial dependence overlapping five-day returns create, so it is a diagnostic rather than a
+# test, and it does not carry an interval that would say whether these configurations differ from
+# each other. The grid varies capacity and loss at a fixed learning rate, so it says nothing about
+# trading one against another. And every number here is measured on validation folds that have
+# been read many times over by the time a case study reaches this notebook.
+#
+# **Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) asks the same question of a neural network
+# built for tabular data, which represents interactions in a third way again. The useful thing to
+# watch there is whether it recovers the same structure the trees found, and whether it prefers
+# the same loss functions for the same reason.

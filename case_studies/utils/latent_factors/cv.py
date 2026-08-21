@@ -502,9 +502,7 @@ def run_latent_factor_cv(
     temporal_feature_assembly = TEMPORAL_FEATURE_ASSEMBLY if has_fold_temporal else None
     temporal_feature_digest = (
         _frame_digest(
-            pl.from_pandas(
-                temporal_by_fold.loc[:, ["fold", *temporal_keys, *temporal_feature_names]]
-            )
+            _temporal_digest_frame(temporal_by_fold, temporal_keys, temporal_feature_names)
         )
         if has_fold_temporal
         else None
@@ -1259,20 +1257,13 @@ def _replace_fold_temporal_features(
     fold_id: int,
 ) -> pl.DataFrame:
     """Replace the schema-placeholder columns with one fold's learned features."""
-    fold_temporal_pd = temporal_by_fold.loc[temporal_by_fold["fold"] == fold_id].drop(
-        columns=["fold"]
-    )
-    if fold_temporal_pd.empty:
-        raise ValueError(f"No temporal features found for fold {fold_id}")
+    from utils.modeling import fold_temporal_frame
 
-    fold_temporal = pl.from_pandas(fold_temporal_pd)
-    casts = {
-        key: dataset.schema[key]
-        for key in temporal_keys
-        if fold_temporal.schema[key] != dataset.schema[key]
-    }
-    if casts:
-        fold_temporal = fold_temporal.cast(casts)
+    fold_temporal = fold_temporal_frame(
+        temporal_by_fold, fold_id, temporal_keys=temporal_keys, schema=dataset.schema
+    )
+    if fold_temporal.is_empty():
+        raise ValueError(f"No temporal features found for fold {fold_id}")
     fold_temporal = fold_temporal.unique(subset=temporal_keys, keep="last")
 
     missing = sorted(set(temporal_feature_names) - set(fold_temporal.columns))
@@ -1315,6 +1306,24 @@ def _to_naive_timestamp(value: Any) -> pd.Timestamp:
     if ts.tz is not None:
         ts = ts.tz_convert("UTC").tz_localize(None)
     return ts
+
+
+def _temporal_digest_frame(
+    temporal_by_fold: Any,
+    temporal_keys: list[str],
+    temporal_feature_names: list[str],
+) -> pl.DataFrame:
+    """The columns the temporal digest covers, projected out of whatever form is held.
+
+    The one consumer that spans every fold rather than selecting one, so it is also the only
+    place the whole artifact is read - and it reads the hashed columns alone, not the table.
+    """
+    columns = ["fold", *temporal_keys, *temporal_feature_names]
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        return temporal_by_fold.select(columns).collect()
+    if isinstance(temporal_by_fold, pl.DataFrame):
+        return temporal_by_fold.select(columns)
+    return pl.from_pandas(temporal_by_fold.loc[:, columns])
 
 
 def _resolve_metric_policy(
