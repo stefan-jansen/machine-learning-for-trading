@@ -231,10 +231,12 @@ plan.select(
 # which is exactly what it did until the name was scoped this way. Everything that finished stays
 # registered, and re-running fits only what is missing.
 
+# %% [markdown]
+# The name is built here and not in the parameters cell, because a parameterized run replaces
+# `LABEL` in a cell inserted *after* the tagged one. Composed alongside `LABEL` it would keep the
+# default label whatever the run asked for, and each label's population would overwrite the last.
+
 # %%
-# `POPULATION_NAME` is derived here rather than in the parameters cell above, because a
-# parameterized run replaces `LABEL` in a cell inserted *after* that one: a name built up
-# there would carry the default label into every other label's run.
 population_name = POPULATION_NAME or f"fx_pairs-linear-{LABEL}-validation-v1"
 execution, population = run_model_population(study, resolved, population_name=population_name)
 

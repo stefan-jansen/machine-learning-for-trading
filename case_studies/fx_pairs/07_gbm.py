@@ -202,10 +202,12 @@ plan.select(
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
 
+# %% [markdown]
+# The name is built here and not in the parameters cell, because a parameterized run replaces
+# `LABEL` in a cell inserted *after* the tagged one. Composed alongside `LABEL` it would keep the
+# default label whatever the run asked for, and each label's population would overwrite the last.
+
 # %%
-# `POPULATION_NAME` is derived here rather than in the parameters cell above, because a
-# parameterized run replaces `LABEL` in a cell inserted *after* that one: a name built up
-# there would carry the default label into every other label's run.
 population_name = POPULATION_NAME or f"fx_pairs-gbm-{LABEL}-validation-v1"
 execution, population = run_model_population(study, resolved, population_name=population_name)
 
