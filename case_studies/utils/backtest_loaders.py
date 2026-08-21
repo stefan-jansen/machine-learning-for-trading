@@ -183,6 +183,45 @@ def load_contract_specs_from_yaml(yaml_path: Path | None = None):
     return specs
 
 
+def load_futures_market_contract(products: list[str]) -> dict:
+    """Resolve the reader-visible roll and expiry contract for CME products."""
+    repo_root = Path(__file__).resolve().parents[2]
+    market_config = yaml.safe_load(
+        (repo_root / "data" / "futures" / "market" / "config.yaml").read_text()
+    )
+    product_specs = yaml.safe_load(
+        (repo_root / "data" / "futures" / "market" / "futures_specs.yaml").read_text()
+    )["products"]
+    if market_config.get("roll_type") != "v":
+        raise ValueError("CME backtesting requires the volume-rolled continuous series")
+    missing = sorted(set(products) - set(product_specs))
+    if missing:
+        raise ValueError(f"CME products have no expiry specification: {missing}")
+    expiry = {}
+    for product in sorted(set(products)):
+        spec = product_specs[product]
+        if not spec.get("expiry_rule") or not spec.get("contract_months"):
+            raise ValueError(f"{product} has an incomplete expiry specification")
+        expiry[product] = {
+            "contract_months": list(spec["contract_months"]),
+            "expiry_rule": str(spec["expiry_rule"]),
+        }
+    return {
+        "entity_key": "product",
+        "contract_position": 0,
+        "roll": {
+            "type": "volume",
+            "decision_information": "previous_session_volume",
+            "adjustment": "multiplicative_ratio",
+            "price_identity": "adj_close=raw_close*cum_ratio",
+        },
+        "expiry": {
+            "engine_behavior": "continuous_front_contract_has_no_delivery_event",
+            "products": expiry,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Prediction loading
 # ---------------------------------------------------------------------------

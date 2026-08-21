@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import copy
 import math
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -189,7 +191,13 @@ def _predictions_dir(
     return resolved_case_dir / "run_log" / "predictions" / prediction_hash
 
 
-def _write_widths(path: Path, new_widths: pl.DataFrame, alpha: float) -> None:
+def _write_widths(
+    path: Path,
+    new_widths: pl.DataFrame,
+    alpha: float,
+    *,
+    immutable: bool = False,
+) -> None:
     """Persist widths to ``path``, merging by alpha.
 
     If ``path`` already exists, rows with the same ``alpha`` are dropped and
@@ -206,6 +214,8 @@ def _write_widths(path: Path, new_widths: pl.DataFrame, alpha: float) -> None:
         try:
             existing = pl.read_parquet(path)
         except (pl.exceptions.ComputeError, pl.exceptions.NoDataError, OSError, EOFError):
+            if immutable:
+                raise ValueError(f"locked conformal artifact is unreadable: {path}") from None
             # A zero-byte or missing-magic-bytes file from a half-finished
             # concurrent write surfaces as NoDataError/OSError, not just
             # ComputeError — treat any unreadable file as "no prior widths".
@@ -223,9 +233,22 @@ def _write_widths(path: Path, new_widths: pl.DataFrame, alpha: float) -> None:
                 )
             # Float equality on alpha is fine here: we write Float64 and read
             # back Float64; both sides round-trip bit-identically through parquet.
+            same_alpha = existing.filter(pl.col("alpha") == alpha)
+            if immutable and not same_alpha.is_empty():
+                from case_studies.utils.artifact_digest import value_digest
+
+                if value_digest(same_alpha) != value_digest(new_widths):
+                    raise ValueError(f"locked conformal artifact conflicts with {path}")
+                return
             keep = existing.filter(pl.col("alpha") != alpha)
             merged = pl.concat([keep, new_widths], how="diagonal_relaxed")
-    merged.write_parquet(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        merged.write_parquet(temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def compute_conformal_widths(
@@ -388,6 +411,7 @@ def compute_holdout_conformal_widths(
     min_calibration_n: int = DEFAULT_MIN_CALIBRATION_N,
     embargo_steps: int = 0,
     write: bool = True,
+    immutable: bool = False,
 ) -> pl.DataFrame:
     """Pooled per-symbol split-conformal widths for the holdout window.
 
@@ -546,7 +570,7 @@ def compute_holdout_conformal_widths(
 
     if write:
         out = ho_dir / "conformal_widths.parquet"
-        _write_widths(out, widths, alpha)
+        _write_widths(out, widths, alpha, immutable=immutable)
 
     return widths
 

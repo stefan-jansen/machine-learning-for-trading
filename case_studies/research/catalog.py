@@ -20,11 +20,24 @@ _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
     "ic_t",
+    # Validation dates that produced a defined cross-sectional IC. A configuration whose
+    # predictions collapse to near-constant on some folds yields no IC on those dates, so its
+    # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.
+    # Ranking without this column reports the partial-coverage artifact as the leader.
+    "ic_n_days",
     "n_folds",
     "pct_positive",
     "accuracy",
     "balanced_accuracy",
+    # `auc_roc` pools every (entity, date) row in a fold into one ROC, so it pays a model for
+    # the base rate moving through the year as well as for ranking within a date.
+    # `auc_mean_daily` is the cross-sectional reading, computed within each date and averaged,
+    # which is the same shape as `ic_mean` and the one to compare against it. Both are carried:
+    # they agree where the cross-section is balanced and diverge where it is not.
     "auc_roc",
+    "auc_mean_daily",
+    "auc_n_days",
+    "auc_t_hac",
     "auc_pr",
     "log_loss",
     "brier_score",

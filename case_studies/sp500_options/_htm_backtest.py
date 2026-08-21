@@ -28,13 +28,12 @@ so at steady state 5 cohorts are open simultaneously. Each cohort is sized at
 ``1/n_roll`` of capital so the book is fully invested.
 
 Inputs:
-- ``labels/contract_returns.parquet`` — one row per (feature_date, symbol, strike,
+- ``labels/contract_returns.parquet`` - one row per (feature_date, symbol, strike,
   expiration) with entry call/put mid, bid, ask and expiration date.
-- ``labels/hedge_path.parquet`` — per-cohort per-holding-day call_delta, put_delta,
-  instr_delta, underlying_price.
 - Raw daily option chain at ``data/equities/market/sp500/options_straddles_raw/year=YYYY.parquet``
-  for tracking same-contract mids through the holding period. This is the
-  reader-distributed slim — a lifecycle-preserving superset of every contract
+  for tracking same-contract quotes, deltas, underlying prices, and settlement
+  inputs through expiration. This is the reader-distributed slim dataset, a
+  lifecycle-preserving superset of every contract
   the ATM-band candidate filter (DTE 25-35, |delta| 0.35-0.65, converged IV,
   bid >= 0.01, relative spread <= 0.30) ever picks, with every daily observation
   from first listing through expiration. Backtest results are byte-identical
@@ -47,8 +46,12 @@ backtest.
 
 from __future__ import annotations
 
+import hashlib
 import math
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -65,6 +68,101 @@ DELTA_THRESHOLD_DEFAULT = 0.10  # setup.yaml hedging_protocol.delta_threshold
 HEDGE_SPREAD_BPS_DEFAULT = 0.5  # 0.5 bps of hedge-trade notional
 EQUITY_COMMISSION_PER_SHARE_DEFAULT = 0.0035  # USD / share, IBKR Pro Tiered top
 OPTION_COMMISSION_PER_CONTRACT_DEFAULT = 1.00  # USD / contract incl. exchange/clearing/regulatory
+OPTION_CONTRACT_MULTIPLIER_DEFAULT = 100
+
+
+def option_accounting_parameters(signal: dict[str, Any]) -> dict[str, Any]:
+    """Resolve every identity-bearing input used by the specialized option engine."""
+    import yaml
+
+    from utils.paths import get_case_study_dir
+
+    setup_path = get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    costs = setup["costs"]["components"]
+    exit_at_max_days = signal.get("exit_at_max_days")
+    if exit_at_max_days is not None:
+        exit_at_max_days = int(exit_at_max_days)
+        if exit_at_max_days < 1:
+            raise ValueError("exit_at_max_days must be positive")
+    n_roll = int(signal.get("n_roll", N_ROLL_DEFAULT))
+    if n_roll < 1:
+        raise ValueError("n_roll must be positive")
+    option_spread_fraction = float(signal.get("option_spread_fraction", 1.0))
+    if not 0 <= option_spread_fraction <= 1:
+        raise ValueError("option_spread_fraction must be between zero and one")
+    delta_threshold = float(setup["hedging_protocol"]["delta_threshold"])
+    if delta_threshold < 0:
+        raise ValueError("delta_threshold cannot be negative")
+    return {
+        "schema_version": 1,
+        "n_roll": n_roll,
+        "portfolio_sizing": "equal_premium_within_cohort_and_fixed_cohort_fraction",
+        "delta_hedge": True,
+        "delta_threshold": delta_threshold,
+        "hedge_spread_bps": float(costs["hedge_spread"]["estimate_bps_of_notional"]),
+        "equity_commission_per_share": float(costs["commission"]["equity_per_share"]),
+        "option_commission_per_contract": float(costs["commission"]["option_per_contract"]),
+        "option_contract_multiplier": OPTION_CONTRACT_MULTIPLIER_DEFAULT,
+        "option_spread_fraction": option_spread_fraction,
+        "exit_at_max_days": exit_at_max_days,
+        "entry_quote": "bid_for_short_call_and_put",
+        "daily_mark": "paired_midpoint",
+        "settlement": (
+            "cash_intrinsic_at_expiration"
+            if exit_at_max_days is None
+            else "ask_for_buy_to_close_at_holding_limit"
+        ),
+        "hedge_liquidation": "final_observation_close",
+    }
+
+
+def option_data_paths() -> tuple[Path, Path]:
+    """Resolve the canonical option artifact and raw lifecycle roots."""
+    from utils import ML4T_DATA_PATH
+    from utils.paths import get_case_study_dir
+
+    labels_dir = get_case_study_dir(CASE_STUDY_ID) / "labels"
+    raw_options_dir = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "options_straddles_raw"
+    if not (labels_dir / "contract_returns.parquet").is_file():
+        raise FileNotFoundError("sp500_options contract_returns.parquet is missing")
+    if not raw_options_dir.is_dir():
+        raise FileNotFoundError(f"raw option lifecycle directory is missing: {raw_options_dir}")
+    return labels_dir, raw_options_dir
+
+
+@lru_cache(maxsize=64)
+def _file_sha256(path_string: str, size: int, modified_ns: int) -> str:
+    del size, modified_ns
+    digest = hashlib.sha256()
+    with Path(path_string).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _digest_file(path: Path) -> str:
+    stat = path.stat()
+    return _file_sha256(str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+
+
+def option_contract_source_identity(labels_dir: Path) -> str:
+    """Return the exact contract-selection artifact identity."""
+    contract_returns = labels_dir / "contract_returns.parquet"
+    if not contract_returns.is_file():
+        raise FileNotFoundError(f"option contract artifact is missing: {contract_returns}")
+    return _digest_file(contract_returns)
+
+
+def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str, Any]:
+    """Bind the specialized engine to exact contract and lifecycle files."""
+    raw_files = sorted(raw_options_dir.glob("year=*.parquet"))
+    if not raw_files:
+        raise FileNotFoundError(f"raw option lifecycle directory is empty: {raw_options_dir}")
+    return {
+        "contract_returns": option_contract_source_identity(labels_dir),
+        "raw_lifecycle": {path.name: _digest_file(path) for path in raw_files},
+    }
 
 
 def _select_cohorts(
@@ -123,7 +221,7 @@ def _select_cohorts(
             f"equal_weight_top_k, score_weighted_top_k, cross_sectional_percentile."
         )
 
-    cr = contract_returns.filter(pl.col("exit_found_10d")).select(
+    cr = contract_returns.select(
         pl.col("feature_date").alias("timestamp"),
         "symbol",
         "strike",
@@ -137,7 +235,43 @@ def _select_cohorts(
         "entry_put_bid",
         "entry_put_ask",
     )
+    if cr.n_unique(["timestamp", "symbol"]) != cr.height:
+        raise ValueError("contract-return rows are not unique by decision timestamp and symbol")
+    invalid_contracts = cr.filter(
+        pl.any_horizontal(
+            [
+                pl.col(column).is_null()
+                for column in (
+                    "strike",
+                    "expiration",
+                    "entry_date",
+                    "entry_straddle_mid",
+                    "entry_call_mid",
+                    "entry_call_bid",
+                    "entry_call_ask",
+                    "entry_put_mid",
+                    "entry_put_bid",
+                    "entry_put_ask",
+                )
+            ]
+        )
+    )
+    if not invalid_contracts.is_empty():
+        cr = cr.join(
+            invalid_contracts.select("timestamp", "symbol"),
+            on=["timestamp", "symbol"],
+            how="anti",
+        )
     cohorts = ranked.join(cr, on=["timestamp", "symbol"], how="inner")
+    missing = ranked.join(
+        cohorts.select("timestamp", "symbol"),
+        on=["timestamp", "symbol"],
+        how="anti",
+    )
+    if not missing.is_empty():
+        raise ValueError(
+            f"selected option decisions have no complete entry contract: {missing.height} rows"
+        )
 
     if method == "score_weighted_top_k":
         cohorts = (
@@ -169,26 +303,26 @@ def _select_cohorts(
     return cohorts
 
 
-def _load_daily_contract_mids(
+def _load_option_lifecycle(
     cohorts: pl.DataFrame,
     raw_options_dir: Path,
 ) -> pl.DataFrame:
-    """Pull daily call_mid + put_mid + underlying_price for every contract in
-    cohorts, for every trading day in the union of cohorts' holding windows.
-
-    Returns [date, symbol, strike, expiration, instr_mid, underlying_price].
-    """
+    """Load paired option quotes, deltas, and explicit cash settlement through expiry."""
     contracts = cohorts.select(["symbol", "strike", "expiration"]).unique()
     entry_min = cohorts["entry_date"].min()
     exp_max = cohorts["expiration"].max()
+    if not isinstance(entry_min, (date, datetime)) or not isinstance(exp_max, (date, datetime)):
+        raise TypeError("option cohort entry and expiration columns must contain dates")
     years = list(range(entry_min.year, exp_max.year + 1))
     parts = []
+    calendars = []
+    symbols = cohorts.get_column("symbol").unique().to_list()
     for year in years:
         parquet_path = raw_options_dir / f"year={year}.parquet"
         if not parquet_path.exists():
             continue
         raw = pl.scan_parquet(parquet_path)
-        filt = (
+        selected = (
             raw.select(
                 [
                     "date",
@@ -199,17 +333,44 @@ def _load_daily_contract_mids(
                     "mid_price",
                     "bid",
                     "ask",
+                    "delta",
                     "underlying_price",
                 ]
             )
-            .filter(pl.col("mid_price") > 0)
+            .filter(pl.col("symbol").is_in(symbols))
+            .filter(pl.col("date").is_between(entry_min, exp_max, closed="both"))
+            .join(contracts.lazy(), on=["symbol", "strike", "expiration"], how="semi")
             .collect()
         )
-        matched = filt.join(contracts, on=["symbol", "strike", "expiration"], how="semi")
-        parts.append(matched)
+        calendar = (
+            raw.select("date")
+            .filter(pl.col("date").is_between(entry_min, exp_max, closed="both"))
+            .unique()
+            .collect()
+        )
+        parts.append(selected)
+        calendars.append(calendar)
     if not parts:
         raise FileNotFoundError(f"No raw option data in {raw_options_dir}")
     raw_lookup = pl.concat(parts)
+    key_columns = ["date", "symbol", "strike", "expiration", "call_put"]
+    if raw_lookup.n_unique(key_columns) != raw_lookup.height:
+        raise ValueError("raw option lifecycle contains duplicate contract-leg dates")
+    required_values = ["mid_price", "bid", "ask", "delta", "underlying_price"]
+    invalid = raw_lookup.filter(
+        pl.any_horizontal(
+            [
+                pl.col(column).is_null() | ~pl.col(column).cast(pl.Float64).is_finite()
+                for column in required_values
+            ]
+        )
+        | (pl.col("mid_price") < 0)
+        | (pl.col("bid") < 0)
+        | (pl.col("ask") < pl.col("bid"))
+        | (pl.col("underlying_price") <= 0)
+    )
+    if not invalid.is_empty():
+        raise ValueError(f"raw option lifecycle contains {invalid.height} invalid quote rows")
     calls = raw_lookup.filter(pl.col("call_put") == "C").select(
         [
             "date",
@@ -219,6 +380,7 @@ def _load_daily_contract_mids(
             pl.col("mid_price").alias("call_mid"),
             pl.col("bid").alias("call_bid"),
             pl.col("ask").alias("call_ask"),
+            pl.col("delta").alias("call_delta"),
             "underlying_price",
         ]
     )
@@ -231,10 +393,24 @@ def _load_daily_contract_mids(
             pl.col("mid_price").alias("put_mid"),
             pl.col("bid").alias("put_bid"),
             pl.col("ask").alias("put_ask"),
+            pl.col("delta").alias("put_delta"),
+            pl.col("underlying_price").alias("put_underlying_price"),
         ]
     )
-    mids = (
+    lifecycle = (
         calls.join(puts, on=["date", "symbol", "strike", "expiration"], how="inner")
+        .with_columns(
+            cash_settled=pl.col("date") == pl.col("expiration"),
+            instr_delta=pl.col("call_delta") + pl.col("put_delta"),
+        )
+        .with_columns(
+            call_mid=pl.when(pl.col("cash_settled"))
+            .then((pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0))
+            .otherwise(pl.col("call_mid")),
+            put_mid=pl.when(pl.col("cash_settled"))
+            .then((pl.col("strike") - pl.col("underlying_price")).clip(lower_bound=0.0))
+            .otherwise(pl.col("put_mid")),
+        )
         .with_columns(instr_mid=pl.col("call_mid") + pl.col("put_mid"))
         .select(
             [
@@ -249,39 +425,93 @@ def _load_daily_contract_mids(
                 "put_mid",
                 "put_bid",
                 "put_ask",
+                "call_delta",
+                "put_delta",
+                "instr_delta",
                 "underlying_price",
+                "put_underlying_price",
+                "cash_settled",
             ]
         )
     )
-    return mids
+    if lifecycle.filter(
+        (pl.col("underlying_price") - pl.col("put_underlying_price")).abs() > 1e-10
+    ).height:
+        raise ValueError("call and put rows disagree on the underlying settlement price")
+
+    cohort_keys = cohorts.select(
+        pl.col("timestamp").alias("cohort_feature_date"),
+        "symbol",
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_call_mid",
+        "entry_put_mid",
+    ).unique()
+    calendar = pl.concat(calendars).unique()
+    expected = (
+        cohort_keys.join(calendar, how="cross")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .select(
+            "cohort_feature_date",
+            "symbol",
+            "strike",
+            "expiration",
+            "entry_date",
+            "date",
+        )
+    )
+    observed = (
+        cohort_keys.join(lifecycle, on=["symbol", "strike", "expiration"], how="inner")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .select(expected.columns)
+    )
+    missing = expected.join(observed, on=expected.columns, how="anti")
+    if not missing.is_empty():
+        raise ValueError(f"selected option contracts are missing {missing.height} lifecycle dates")
+    endpoints = cohort_keys.join(
+        lifecycle, on=["symbol", "strike", "expiration"], how="inner"
+    ).filter(pl.col("date") == pl.col("entry_date"))
+    if endpoints.height != cohort_keys.height:
+        raise ValueError("selected option contracts do not all have an entry observation")
+    if endpoints.filter(
+        ((pl.col("call_mid") - pl.col("entry_call_mid")).abs() > 1e-10)
+        | ((pl.col("put_mid") - pl.col("entry_put_mid")).abs() > 1e-10)
+    ).height:
+        raise ValueError("contract-return entry quotes disagree with the raw option lifecycle")
+    expiry_keys = cohort_keys.select("cohort_feature_date", "symbol", "strike", "expiration").join(
+        lifecycle.filter(pl.col("cash_settled")).select("symbol", "strike", "expiration"),
+        on=["symbol", "strike", "expiration"],
+        how="semi",
+    )
+    if expiry_keys.height != cohort_keys.height:
+        raise ValueError("selected option contracts do not all have cash-settlement inputs")
+    return lifecycle.drop("put_underlying_price").sort(["symbol", "strike", "expiration", "date"])
+
+
+_load_daily_contract_mids = _load_option_lifecycle
 
 
 def _compute_cohort_daily_pnl(
     cohorts: pl.DataFrame,
     contract_mids: pl.DataFrame,
-    hedge_path: pl.DataFrame,
     *,
     delta_hedge: bool,
     hedge_spread_bps: float,
     equity_commission_per_share: float,
     option_commission_per_contract: float,
+    option_contract_multiplier: int = OPTION_CONTRACT_MULTIPLIER_DEFAULT,
     delta_threshold: float,
     exit_at_max_days: int | None = None,
+    option_spread_fraction: float = 1.0,
 ) -> pl.DataFrame:
-    """Per (cohort, contract, day) premium P&L + hedge P&L (with costs).
-
-    When ``exit_at_max_days`` is None (default), each cohort is held to expiry
-    and settles at intrinsic — no exit bid-ask. When set (e.g. 10), cohorts are
-    closed at t + ``exit_at_max_days`` trading days and the full round-trip is
-    charged: entry half-spread on both legs on day 1 PLUS exit half-spread on
-    both legs on the final holding day. This is the "naive" rung of the cost-
-    mitigation cascade — same strategy, same delta hedge, but no expiry
-    settlement benefit.
-
-    Returns [cohort_feature_date, symbol, strike, expiration, date,
-             premium_pnl_norm, hedge_pnl_norm, hedge_cost_norm,
-             entry_cost_norm, exit_cost_norm].
-    """
+    """Compute daily option and retained-hedge P&L for every selected contract."""
+    if not 0 <= option_spread_fraction <= 1:
+        raise ValueError("option_spread_fraction must be between zero and one")
+    if delta_threshold < 0:
+        raise ValueError("delta_threshold cannot be negative")
+    if option_contract_multiplier < 1:
+        raise ValueError("option_contract_multiplier must be positive")
     cohort_keys = cohorts.select(
         [
             pl.col("timestamp").alias("cohort_feature_date"),
@@ -304,6 +534,26 @@ def _compute_cohort_daily_pnl(
         .filter(pl.col("date") <= pl.col("expiration"))
         .sort(["cohort_feature_date", "symbol", "strike", "expiration", "date"])
     )
+    partition = ["cohort_feature_date", "symbol", "strike", "expiration"]
+    expected_cohorts = cohort_keys.n_unique(partition)
+    if daily.n_unique(partition) != expected_cohorts:
+        raise ValueError("option lifecycle silently dropped one or more selected cohorts")
+    entry_coverage = daily.group_by(partition).agg(pl.col("date").min().alias("first_date"))
+    if (
+        entry_coverage.join(cohort_keys.select(*partition, "entry_date"), on=partition, how="left")
+        .filter(pl.col("first_date") != pl.col("entry_date"))
+        .height
+    ):
+        raise ValueError("option lifecycle does not begin on every selected entry date")
+    if exit_at_max_days is None:
+        settlement_coverage = daily.group_by(partition).agg(
+            pl.col("date").max().alias("last_date"),
+            pl.col("cash_settled").last().alias("cash_settled"),
+        )
+        if settlement_coverage.filter(
+            (pl.col("last_date") != pl.col("expiration")) | ~pl.col("cash_settled")
+        ).height:
+            raise ValueError("option lifecycle does not cash-settle every selected contract")
 
     # Round-trip mode: cap the holding window at entry + exit_at_max_days
     # trading days (day 1 = entry, so we keep ranks 1 .. exit_at_max_days+1).
@@ -314,92 +564,66 @@ def _compute_cohort_daily_pnl(
         )
         daily = daily.filter(pl.col("_pre_rank") <= int(exit_at_max_days) + 1).drop("_pre_rank")
 
-    partition = ["cohort_feature_date", "symbol", "strike", "expiration"]
-
-    # Premium leg: −(mid_d − mid_{d−1}) / entry_mid (short straddle P&L)
     daily = daily.with_columns(
         dmid=pl.col("instr_mid") - pl.col("instr_mid").shift(1).over(partition),
         dS=pl.col("underlying_price") - pl.col("underlying_price").shift(1).over(partition),
         _day_rank=pl.col("date").rank("ordinal").over(partition),
+        _last_rank=pl.len().over(partition),
     )
     daily = daily.with_columns(
         premium_pnl_norm=(-pl.col("dmid") / pl.col("entry_straddle_mid")).fill_null(0.0),
     )
-
-    # Hedge leg from hedge_path.instr_delta (pre-computed call_delta + put_delta)
-    if delta_hedge:
-        hedge = (
-            hedge_path.select(
-                pl.col("feature_date").alias("cohort_feature_date"),
-                "symbol",
-                "strike",
-                "expiration",
-                pl.col("holding_date").alias("date"),
-                "instr_delta",
+    day_rank = daily.get_column("_day_rank").to_numpy()
+    last_rank = daily.get_column("_last_rank").to_numpy()
+    deltas = daily.get_column("instr_delta").cast(pl.Float64).to_numpy()
+    underlying_moves = daily.get_column("dS").fill_null(0.0).cast(pl.Float64).to_numpy()
+    entry_mids = daily.get_column("entry_straddle_mid").cast(pl.Float64).to_numpy()
+    underlying_prices = daily.get_column("underlying_price").cast(pl.Float64).to_numpy()
+    hedge_positions = np.zeros(daily.height, dtype=np.float64)
+    hedge_trades = np.zeros(daily.height, dtype=np.float64)
+    hedge_pnl = np.zeros(daily.height, dtype=np.float64)
+    hedge_cost = np.zeros(daily.height, dtype=np.float64)
+    retained_position = 0.0
+    hedge_spread_rate = hedge_spread_bps / 10_000.0
+    for index in range(daily.height):
+        if day_rank[index] == 1:
+            retained_position = 0.0
+        hedge_pnl[index] = retained_position * underlying_moves[index] / entry_mids[index]
+        if delta_hedge:
+            final_observation = day_rank[index] == last_rank[index]
+            if final_observation:
+                next_position = 0.0
+            elif abs(deltas[index] - retained_position) > delta_threshold:
+                next_position = deltas[index]
+            else:
+                next_position = retained_position
+            trade = next_position - retained_position
+            hedge_trades[index] = trade
+            retained_position = next_position
+            hedge_cost[index] = (
+                abs(trade)
+                * (underlying_prices[index] * hedge_spread_rate + equity_commission_per_share)
+                / entry_mids[index]
             )
-            .sort(["cohort_feature_date", "symbol", "strike", "expiration", "date"])
-            .with_columns(delta_lag=pl.col("instr_delta").shift(1).over(partition))
-        )
-        daily = daily.join(
-            hedge.select(
-                [
-                    "cohort_feature_date",
-                    "symbol",
-                    "strike",
-                    "expiration",
-                    "date",
-                    "instr_delta",
-                    "delta_lag",
-                ]
-            ),
-            on=["cohort_feature_date", "symbol", "strike", "expiration", "date"],
-            how="left",
-        )
-        # Hedge P&L from carry: held delta_lag shares into today's dS
-        daily = daily.with_columns(
-            hedge_pnl_norm=(
-                pl.col("delta_lag").fill_null(0.0) * pl.col("dS") / pl.col("entry_straddle_mid")
-            ).fill_null(0.0),
-        )
-        # Hedge transaction cost: applied on days where |delta_change| > threshold.
-        # Trade size (shares) = |dδ| × 100. Per-trade cost per straddle =
-        # trade_shares × (S × spread_rate + commission_per_share). Normalized by
-        # entry straddle $ notional (entry_mid × 100), the 100 factor cancels.
-        hedge_spread_rate = hedge_spread_bps / 10_000.0
-        daily = daily.with_columns(
-            _delta_change=(pl.col("instr_delta") - pl.col("delta_lag")).abs().fill_null(0.0),
-        ).with_columns(
-            _hedge_triggered=pl.col("_delta_change") > delta_threshold,
-        )
-        daily = daily.with_columns(
-            hedge_cost_norm=(
-                pl.when(pl.col("_hedge_triggered"))
-                .then(
-                    pl.col("_delta_change")
-                    * (pl.col("underlying_price") * hedge_spread_rate + equity_commission_per_share)
-                    / pl.col("entry_straddle_mid")
-                )
-                .otherwise(0.0)
-            ).fill_null(0.0),
-        )
-    else:
-        daily = daily.with_columns(
-            hedge_pnl_norm=pl.lit(0.0),
-            hedge_cost_norm=pl.lit(0.0),
-        )
+        hedge_positions[index] = retained_position
+    daily = daily.with_columns(
+        pl.Series("hedge_position", hedge_positions),
+        pl.Series("hedge_trade", hedge_trades),
+        pl.Series("hedge_pnl_norm", hedge_pnl),
+        pl.Series("hedge_cost_norm", hedge_cost),
+    )
 
-    # Entry option cost (day_rank == 1 only): bid-ask half-spread on both legs
-    # plus per-contract commission on both legs. A straddle = 1 call contract +
-    # 1 put contract, each covering 100 shares (multiplier cancels with the
-    # *100 in the dollar-to-norm scaling of the commission term).
     daily = daily.with_columns(
         entry_cost_norm=(
             pl.when(pl.col("_day_rank") == 1)
             .then(
                 (
-                    (pl.col("entry_call_mid") - pl.col("entry_call_bid"))
-                    + (pl.col("entry_put_mid") - pl.col("entry_put_bid"))
-                    + (2.0 * option_commission_per_contract / 100.0)
+                    option_spread_fraction
+                    * (
+                        (pl.col("entry_call_mid") - pl.col("entry_call_bid"))
+                        + (pl.col("entry_put_mid") - pl.col("entry_put_bid"))
+                    )
+                    + (2.0 * option_commission_per_contract / option_contract_multiplier)
                 )
                 / pl.col("entry_straddle_mid")
             )
@@ -407,24 +631,18 @@ def _compute_cohort_daily_pnl(
         ).fill_null(0.0),
     )
 
-    # Exit option cost (round-trip mode only, charged on the last held day):
-    # we buy back the short straddle by crossing to the ask on both legs.
-    # Half-spread on ask side = (ask - mid); plus per-contract commission on
-    # both legs (entry commission already covers the entry leg, this is the
-    # second leg of the round trip).
     if exit_at_max_days is not None:
-        partition = ["cohort_feature_date", "symbol", "strike", "expiration"]
-        daily = daily.with_columns(
-            _last_rank=pl.col("_day_rank").max().over(partition),
-        )
         daily = daily.with_columns(
             exit_cost_norm=(
                 pl.when(pl.col("_day_rank") == pl.col("_last_rank"))
                 .then(
                     (
-                        (pl.col("call_ask") - pl.col("call_mid"))
-                        + (pl.col("put_ask") - pl.col("put_mid"))
-                        + (2.0 * option_commission_per_contract / 100.0)
+                        option_spread_fraction
+                        * (
+                            (pl.col("call_ask") - pl.col("call_mid"))
+                            + (pl.col("put_ask") - pl.col("put_mid"))
+                        )
+                        + (2.0 * option_commission_per_contract / option_contract_multiplier)
                     )
                     / pl.col("entry_straddle_mid")
                 )
@@ -443,6 +661,9 @@ def _compute_cohort_daily_pnl(
             "entry_date",
             "date",
             "weight",
+            "cash_settled",
+            "hedge_position",
+            "hedge_trade",
             "premium_pnl_norm",
             "hedge_pnl_norm",
             "hedge_cost_norm",
@@ -622,14 +843,11 @@ def _apply_cohort_allocator(
     date_min = preds["timestamp"].min()
     date_max = preds["timestamp"].max()
     # Backfill window for covariance estimation: 2× the longest lookback used.
-    if hasattr(date_min, "replace"):
-        # Pull ~1 year prior to earliest cohort to ensure rolling-window coverage.
-        backfill_days = max(vol_window, lookback) * 2
-        from datetime import timedelta
-
-        panel_start = date_min - timedelta(days=backfill_days + 30)
-    else:
-        panel_start = date_min
+    if not isinstance(date_min, (date, datetime)) or not isinstance(date_max, (date, datetime)):
+        raise TypeError("option allocation timestamps must contain dates")
+    # Pull ~1 year prior to earliest cohort to ensure rolling-window coverage.
+    backfill_days = max(vol_window, lookback) * 2
+    panel_start = date_min - timedelta(days=backfill_days + 30)
 
     prices = _load_underlying_price_panel(raw_options_dir, symbols, panel_start, date_max)
     if prices.is_empty():
@@ -648,9 +866,8 @@ def _apply_cohort_allocator(
     if prices["timestamp"].dtype != preds["timestamp"].dtype:
         prices = prices.cast({"timestamp": preds["timestamp"].dtype})
 
-    top_k_for_alloc = max(
-        int(allocation_spec.get("top_k", 0)), preds.group_by("timestamp").len()["len"].max() or 0
-    )
+    max_cohort_size = cast(int, preds.group_by("timestamp").len()["len"].max())
+    top_k_for_alloc = max(int(allocation_spec.get("top_k", 0)), max_cohort_size)
 
     if method == "inverse_vol":
         weights = compute_inverse_vol_weights(
@@ -738,8 +955,12 @@ def run_htm_daily_mtm(
     hedge_spread_bps: float = HEDGE_SPREAD_BPS_DEFAULT,
     equity_commission_per_share: float = EQUITY_COMMISSION_PER_SHARE_DEFAULT,
     option_commission_per_contract: float = OPTION_COMMISSION_PER_CONTRACT_DEFAULT,
+    option_contract_multiplier: int = OPTION_CONTRACT_MULTIPLIER_DEFAULT,
     exit_at_max_days: int | None = None,
     allocation_spec: dict | None = None,
+    decisions: pl.DataFrame | None = None,
+    option_lifecycle: pl.DataFrame | None = None,
+    option_spread_fraction: float = 1.0,
 ) -> dict:
     """Run the HTM daily-MTM short-straddle backtest and return a result dict.
 
@@ -756,17 +977,38 @@ def run_htm_daily_mtm(
         n_periods, win_rate, mean_daily_return
     """
     assert case_study == CASE_STUDY_ID, f"htm_daily_mtm is sp500_options only, got {case_study!r}"
+    if n_roll < 1:
+        raise ValueError("n_roll must be positive")
 
-    contract_returns = pl.read_parquet(labels_dir / "contract_returns.parquet")
-    hedge_path = pl.read_parquet(labels_dir / "hedge_path.parquet")
-
-    cohorts = _select_cohorts(
-        predictions,
-        contract_returns,
-        method=method,
-        top_k=top_k,
-        percentile=percentile,
-    )
+    if decisions is None:
+        contract_returns = pl.read_parquet(labels_dir / "contract_returns.parquet")
+        cohorts = _select_cohorts(
+            predictions,
+            contract_returns,
+            method=method,
+            top_k=top_k,
+            percentile=percentile,
+        )
+    else:
+        required = {
+            "timestamp",
+            "symbol",
+            "strike",
+            "expiration",
+            "entry_date",
+            "entry_straddle_mid",
+            "entry_call_mid",
+            "entry_call_bid",
+            "entry_call_ask",
+            "entry_put_mid",
+            "entry_put_bid",
+            "entry_put_ask",
+            "weight",
+        }
+        missing = required - set(decisions.columns)
+        if missing:
+            raise ValueError(f"typed option decisions are missing columns: {sorted(missing)}")
+        cohorts = decisions
     if cohorts.is_empty():
         raise ValueError("No cohorts selected from predictions")
 
@@ -777,21 +1019,26 @@ def run_htm_daily_mtm(
     # entry date is a separate allocation problem — we delegate to the
     # standard `case_studies.utils.allocation` helpers, which already
     # implement covariance-shrinkage MVO, hierarchical risk parity, etc.
-    if allocation_spec:
+    if allocation_spec and decisions is None:
         cohorts = _apply_cohort_allocator(cohorts, raw_options_dir, allocation_spec)
 
-    contract_mids = _load_daily_contract_mids(cohorts, raw_options_dir)
+    contract_mids = (
+        option_lifecycle
+        if option_lifecycle is not None
+        else _load_option_lifecycle(cohorts, raw_options_dir)
+    )
 
     daily_cohort = _compute_cohort_daily_pnl(
         cohorts,
         contract_mids,
-        hedge_path,
         delta_hedge=delta_hedge,
         hedge_spread_bps=hedge_spread_bps,
         equity_commission_per_share=equity_commission_per_share,
         option_commission_per_contract=option_commission_per_contract,
+        option_contract_multiplier=option_contract_multiplier,
         delta_threshold=delta_threshold,
         exit_at_max_days=exit_at_max_days,
+        option_spread_fraction=option_spread_fraction,
     )
 
     port = _aggregate_portfolio(daily_cohort, n_roll=n_roll)

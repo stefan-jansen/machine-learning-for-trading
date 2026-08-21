@@ -75,7 +75,7 @@ from case_studies.utils.feature_engineering import (
     quantile_profile,
 )
 from utils.cv_splits import load_evaluation_config
-from utils.modeling import load_modeling_dataset
+from utils.modeling import fold_temporal_frame, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, add_message_title, show_with_alt
 
@@ -161,19 +161,20 @@ assert mds.temporal_by_fold is not None
 
 symbols = mds.dataset["symbol"].unique().to_list()
 base_frame = mds.dataset.select([*JOIN_COLS, *financial_cols, mds.label_col])
-temporal_by_fold = pl.from_pandas(mds.temporal_by_fold).filter(pl.col("symbol").is_in(symbols))
+# Selected one fold at a time inside the loop, so the artifact is never held whole.
 
 validation_frames = []
 for split in mds.splits:
     base = base_frame.filter(
         pl.col("timestamp").is_between(split["val_start"], split["val_end"], closed="both")
     )
-    fold_temporal = temporal_by_fold.filter(pl.col("fold") == split["fold"]).select(
-        [*JOIN_COLS, *temporal_cols]
+    fold_temporal = (
+        fold_temporal_frame(mds.temporal_by_fold, int(split["fold"]))
+        .filter(pl.col("symbol").is_in(symbols))
+        .select([*JOIN_COLS, *temporal_cols])
+        .with_columns(pl.col("timestamp").cast(base.schema["timestamp"]))
+        .unique(subset=JOIN_COLS)
     )
-    fold_temporal = fold_temporal.with_columns(
-        pl.col("timestamp").cast(base.schema["timestamp"])
-    ).unique(subset=JOIN_COLS)
     frame = base.join(fold_temporal, on=JOIN_COLS, how="left").with_columns(
         pl.lit(split["fold"]).alias("cv_fold")
     )

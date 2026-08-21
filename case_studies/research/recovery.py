@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -24,10 +25,30 @@ def _sha256(path: Path) -> str:
 
 
 def _relative(root: Path, path: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(root.resolve()))
-    except ValueError as exc:
-        raise ValueError(f"completed-fold artifact is outside the study root: {path}") from exc
+    """Return the artifact's path within the study's own address space.
+
+    Deliberately does not resolve symlinks. A study whose ``run_log`` is a symlink into
+    a shared artifact store resolves its artifacts out of the study root, so resolving
+    rejects a file that is inside the study as the study addresses it. A study whose
+    ``run_log`` is a real directory - one driven through ``ML4T_OUTPUT_DIR`` - never
+    leaves the root and never saw this, which is the whole of why it survived earlier
+    runs. The trigger is the layout, not the execution tier.
+
+    Resolving was also wrong for the value's purpose. The result is a study-relative
+    label: ``reusable_fold`` compares it against the stored row, and where it is joined
+    back to open the artifact - ``scripts/prove_cme_futures_interface.py`` does exactly
+    this - it is joined onto the study root, so it has to address the artifact the way
+    the study does. A resolved label does not survive that join, and it silently
+    depends on where the symlink pointed when it was written, so re-pointing the store
+    would stop a completed fold from matching and re-run work that was already done.
+
+    ``..`` is still normalized away, without following symlinks, so a path that climbs
+    out of the study root is rejected rather than recorded as a label containing ``..``.
+    """
+    relative = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+    if relative == os.pardir or relative.startswith(f"{os.pardir}{os.sep}"):
+        raise ValueError(f"completed-fold artifact is outside the study root: {path}")
+    return relative
 
 
 @dataclass(frozen=True)
@@ -74,6 +95,22 @@ class ExecutionLedger:
         finally:
             db.close()
         return ExecutionAttempt(self.study, self.root, attempt_id, scientific_identity)
+
+    def fold_completion_exists(
+        self,
+        *,
+        training_hash: str,
+        candidate_identity: str,
+        fold_id: int,
+    ) -> bool:
+        db_path = self.root / "run_log" / "registry.db"
+        with sqlite3.connect(db_path) as db:
+            row = db.execute(
+                "SELECT 1 FROM candidate_fold_completions WHERE training_hash = ? "
+                "AND candidate_identity = ? AND fold_id = ?",
+                (training_hash, candidate_identity, fold_id),
+            ).fetchone()
+        return row is not None
 
     def reusable_fold(
         self,

@@ -12,11 +12,23 @@ from __future__ import annotations
 
 import os
 
-# Pin OpenMP threading before sklearn imports. HistGradientBoostingRegressor
-# uses OMP-parallel histogram construction whose floating-point reduction order
-# is non-deterministic across threads. With OMP_NUM_THREADS=1 the placebo loop
-# is bit-reproducible across runs at the same seed/spec/data.
+# HistGradientBoostingRegressor uses OMP-parallel histogram construction whose
+# floating-point reduction order is non-deterministic across threads, so the placebo
+# loop is only bit-reproducible at a fixed thread count.
+#
+# Setting OMP_NUM_THREADS here does NOT achieve that on its own. Every notebook imports
+# case_studies.research (and through it sklearn) before this module, so the OpenMP and
+# OpenBLAS runtimes have already read the variable by the time this line runs: measured
+# with threadpoolctl, the notebook import order leaves the openmp pool at 16 and openblas
+# at 24 despite os.environ reporting 1. The env pin is kept because it does work when this
+# module is imported first, but DML_THREAD_LIMIT below is the mechanism that holds, and the
+# limit is recorded in the resolved specification so two runs at different counts cannot
+# share an identity.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+# Fixed rather than derived from the host: a value like -1 varies with the machine, so a
+# result would not be identity-stable across the readers' hardware.
+DML_THREAD_LIMIT = 1
 
 import hashlib
 import importlib.metadata
@@ -34,6 +46,7 @@ import statsmodels.api as sm
 from scipy import stats
 from sklearn.ensemble import HistGradientBoostingRegressor
 from statsmodels.regression.linear_model import OLS
+from threadpoolctl import threadpool_limits
 
 from utils.modeling import RANDOM_SEED, seed_everything
 
@@ -63,23 +76,79 @@ class DMLResearchContext:
     runtime_provenance: dict[str, Any]
 
 
-def embargo_from_buffer(label_buffer: str, *, periods_per_year: int | None = None) -> int:
+def observation_step(frame: Any, date_col: str = "timestamp") -> pd.Timedelta:
+    """Measure the spacing between consecutive decision times in *frame*.
+
+    Returns the most common gap between distinct sorted values of ``date_col``,
+    which is the observation grid the panel is actually recorded on. Sessions,
+    weekends and holidays introduce larger gaps; taking the mode rather than the
+    minimum or the mean makes those irrelevant.
+
+    Accepts a Polars or pandas frame, or anything exposing the column through
+    ``__getitem__``.
+    """
+    column = frame[date_col]
+    values = pd.Series(column.to_list() if hasattr(column, "to_list") else list(column))
+    stamps = pd.to_datetime(values).drop_duplicates().sort_values()
+    if len(stamps) < 2:
+        raise ValueError(f"{date_col!r} has fewer than two distinct values; no grid to measure")
+    gaps = stamps.diff().dropna()
+    return pd.Timedelta(gaps.mode().iloc[0])
+
+
+def embargo_from_buffer(
+    label_buffer: str,
+    *,
+    periods_per_year: int | None = None,
+    observed_step: str | pd.Timedelta | None = None,
+) -> int:
     """Convert a label buffer string to an integer embargo period count.
 
-    Supports all pandas duration units (D, H/h, M, T/min).
-    Returns the number of observation periods to skip between train and test.
+    The embargo is counted in *observation periods*, so converting a duration
+    into one requires knowing how long an observation period is. Pass
+    ``observed_step`` — from :func:`observation_step` on the frame being
+    analysed — and the conversion is exact: the number of periods spanning the
+    buffer, rounded up, at least one.
 
-    Bar-frequency assumptions baked into the conversion:
-    - D: one period per `value` days (e.g. "5D" → 5)
-    - H/h: the buffer is interpreted as the bar cadence; the result is the
-      number of `value`-hour bars in one trading day (24 // value), so "8H"
-      → 3 bars (a one-day embargo on 8-hour bars)
-    - M: `value` monthly groups when `periods_per_year=12`, otherwise
-      `value` months × 21 trading days
-    - T/min: the buffer is the cadence; the result is the bars in 15 minutes
-      (`value` // 15), assuming 15-minute base bars
+    Without ``observed_step`` the conversion falls back to a fixed assumption
+    about bar size per unit, which is correct only when that assumption holds:
+
+    - D: one period per ``value`` days, correct on a daily grid
+    - H/h: the number of ``value``-hour bars in one day, so "8H" gives a
+      one-day embargo on 8-hour bars
+    - M: ``value`` monthly groups when ``periods_per_year=12``, else
+      ``value`` months x 21 trading days
+    - T/min: the number of ``value``-minute spans in 15 minutes, which assumes
+      the panel is recorded in 15-minute bars
+
+    That last assumption is the one that bites, because it is wrong by exactly
+    the ratio between the assumed bar and the real one, and nothing in the result
+    shows it. A "15min" buffer resolves to a single period whatever the panel is
+    recorded at, so on a one-minute grid it yields a one-minute embargo against a
+    fifteen-minute label. Pass ``observed_step`` on any sub-daily panel rather
+    than relying on the declared bar size, which can disagree with the artifacts.
+
+    A month buffer has no fixed length and is rejected when ``observed_step`` is
+    supplied; use the ``periods_per_year`` branch for it.
     """
+    import math
     import re
+
+    if observed_step is not None:
+        step = pd.Timedelta(observed_step)
+        if step <= pd.Timedelta(0):
+            raise ValueError(f"observed_step must be positive, got {observed_step!r}")
+        # pandas deprecated the uppercase hour alias; the buffers are authored by
+        # hand in setup.yaml and still use it.
+        normalized = re.sub(r"(?<=\d)H\b", "h", label_buffer.strip())
+        if re.match(r"\d+\s*M\b", normalized):
+            raise ValueError(
+                f"A month buffer ({label_buffer!r}) has no fixed length, so it cannot be "
+                f"divided by an observation step. Use the periods_per_year branch by "
+                f"omitting observed_step."
+            )
+        span = pd.Timedelta(normalized)
+        return max(1, math.ceil(span / step))
 
     match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
     if not match:
@@ -255,6 +324,7 @@ def manual_dml_timeseries(
     hac_maxlags: int | None = None,
     horizon: int | None = None,
     groups: np.ndarray | None = None,
+    thread_limit: int = DML_THREAD_LIMIT,
 ) -> dict:
     """Walk-forward DML with embargo for temporal data.
 
@@ -303,132 +373,138 @@ def manual_dml_timeseries(
         n_obs, n_periods, hac_maxlags, covariance_type. If return_residuals:
         also Y_res, T_res.
     """
-    seed_everything(RANDOM_SEED)
+    # Pinned here, where the nuisance models are actually fitted, so that every caller is
+    # covered: run_dml_analysis, the six case-study DML stages that call it directly, and
+    # the chapter-15 notebooks that call this function themselves and rely on the default
+    # HistGradientBoostingRegressor. The module-level OMP_NUM_THREADS setdefault does not
+    # bind for any of them, because sklearn is imported first.
+    with threadpool_limits(limits=thread_limit):
+        seed_everything(RANDOM_SEED)
 
-    n = len(Y)
+        n = len(Y)
 
-    # Initialize residual arrays
-    Y_res = np.full(n, np.nan)
-    T_res = np.full(n, np.nan)
+        # Initialize residual arrays
+        Y_res = np.full(n, np.nan)
+        T_res = np.full(n, np.nan)
 
-    folds = _walk_forward_indices(n, n_folds, embargo, groups=groups)
+        folds = _walk_forward_indices(n, n_folds, embargo, groups=groups)
 
-    for train_idx, test_idx in folds:
-        if len(test_idx) == 0:
-            continue
+        for train_idx, test_idx in folds:
+            if len(test_idx) == 0:
+                continue
 
-        if len(train_idx) < 50 or len(test_idx) < 10:
-            continue
+            if len(train_idx) < 50 or len(test_idx) < 10:
+                continue
 
-        # Fit nuisance models on training data (clone to avoid mutation)
-        from sklearn.base import clone
+            # Fit nuisance models on training data (clone to avoid mutation)
+            from sklearn.base import clone
 
-        _default_y = HistGradientBoostingRegressor(max_iter=50, max_depth=3, random_state=42)
-        _default_t = HistGradientBoostingRegressor(max_iter=50, max_depth=3, random_state=42)
-        my = clone(model_y) if model_y is not None else _default_y
-        mt = clone(model_t) if model_t is not None else _default_t
+            _default_y = HistGradientBoostingRegressor(max_iter=50, max_depth=3, random_state=42)
+            _default_t = HistGradientBoostingRegressor(max_iter=50, max_depth=3, random_state=42)
+            my = clone(model_y) if model_y is not None else _default_y
+            mt = clone(model_t) if model_t is not None else _default_t
 
-        my.fit(X[train_idx], Y[train_idx])
-        mt.fit(X[train_idx], T[train_idx])
+            my.fit(X[train_idx], Y[train_idx])
+            mt.fit(X[train_idx], T[train_idx])
 
-        Y_res[test_idx] = Y[test_idx] - my.predict(X[test_idx])
-        T_res[test_idx] = T[test_idx] - mt.predict(X[test_idx])
+            Y_res[test_idx] = Y[test_idx] - my.predict(X[test_idx])
+            T_res[test_idx] = T[test_idx] - mt.predict(X[test_idx])
 
-    # Drop observations without residuals
-    valid = ~np.isnan(Y_res) & ~np.isnan(T_res)
-    Y_v = Y_res[valid]
-    T_v = T_res[valid]
-    n_valid = len(Y_v)
-    valid_groups = np.asarray(groups)[valid] if groups is not None else None
-    n_periods = len(np.unique(valid_groups)) if valid_groups is not None else n_valid
+        # Drop observations without residuals
+        valid = ~np.isnan(Y_res) & ~np.isnan(T_res)
+        Y_v = Y_res[valid]
+        T_v = T_res[valid]
+        n_valid = len(Y_v)
+        valid_groups = np.asarray(groups)[valid] if groups is not None else None
+        n_periods = len(np.unique(valid_groups)) if valid_groups is not None else n_valid
 
-    empty = {
-        "theta": np.nan,
-        "se_iid": np.nan,
-        "se_hac": np.nan,
-        "t_stat_iid": np.nan,
-        "t_stat_hac": np.nan,
-        "p_value_hac": np.nan,
-        "n_obs": n_valid,
-        "n_periods": n_periods,
-        "hac_maxlags": 0,
-        "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
-    }
-    if n_valid < 50:
+        empty = {
+            "theta": np.nan,
+            "se_iid": np.nan,
+            "se_hac": np.nan,
+            "t_stat_iid": np.nan,
+            "t_stat_hac": np.nan,
+            "p_value_hac": np.nan,
+            "n_obs": n_valid,
+            "n_periods": n_periods,
+            "hac_maxlags": 0,
+            "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
+        }
+        if n_valid < 50:
+            if return_residuals:
+                empty["Y_res"] = Y_res
+                empty["T_res"] = T_res
+            return empty
+
+        # Final stage: Y_res = alpha + theta * T_res + epsilon
+        # Must include intercept: cross-fitting residuals may have non-zero mean
+        # when training data varies across folds (expanding window).
+        if hac_maxlags is None:
+            auto = max(1, int(n_periods ** (1 / 3)))
+            # Overlapping h-period labels need L >= h-1; the cube-root rule is
+            # horizon-blind and under-lags long-horizon overlapping returns.
+            hac_maxlags = max(horizon - 1, auto) if horizon else auto
+            hac_maxlags = min(hac_maxlags, max(1, n_periods // 2))
+
+        T_const = sm.add_constant(T_v)
+        ols_iid = OLS(Y_v, T_const).fit()
+        theta = ols_iid.params[1]
+
+        # HC0 standard error
+        se_iid = np.sqrt(ols_iid.cov_HC0[1, 1])
+
+        # Serial-correlation-robust standard error with frequency-adaptive bandwidth.
+        # Panel rows share decision times, so ordinary row-wise Newey-West treats
+        # cross-sectional observations as extra time periods and understates risk.
+        # Driscoll-Kraay aggregates the score by decision time and remains robust to
+        # general cross-sectional dependence.
+        se_hac = se_iid
+        try:
+            if valid_groups is not None:
+                time_codes = pd.factorize(valid_groups, sort=False)[0]
+                robust = ols_iid.get_robustcov_results(
+                    cov_type="hac-groupsum",
+                    time=time_codes,
+                    maxlags=hac_maxlags,
+                    use_correction="hac",
+                    df_correction=False,
+                )
+            else:
+                robust = ols_iid.get_robustcov_results(
+                    cov_type="HAC",
+                    maxlags=hac_maxlags,
+                    use_correction=True,
+                )
+            cov = robust.cov_params()
+            se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
+        except Exception:
+            pass  # Fall back to HC0 standard errors on numerical failure
+
+        t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
+        p_value_hac = (
+            2 * stats.t.sf(abs(t_stat_hac), df=max(n_periods - 2, 1))
+            if not np.isnan(t_stat_hac)
+            else np.nan
+        )
+
+        result = {
+            "theta": theta,
+            "se_iid": se_iid,
+            "se_hac": se_hac,
+            "t_stat_iid": theta / se_iid if se_iid > 0 else np.nan,
+            "t_stat_hac": t_stat_hac,
+            "p_value_hac": p_value_hac,
+            "n_obs": n_valid,
+            "n_periods": n_periods,
+            "hac_maxlags": hac_maxlags,
+            "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
+        }
+
         if return_residuals:
-            empty["Y_res"] = Y_res
-            empty["T_res"] = T_res
-        return empty
+            result["Y_res"] = Y_res
+            result["T_res"] = T_res
 
-    # Final stage: Y_res = alpha + theta * T_res + epsilon
-    # Must include intercept: cross-fitting residuals may have non-zero mean
-    # when training data varies across folds (expanding window).
-    if hac_maxlags is None:
-        auto = max(1, int(n_periods ** (1 / 3)))
-        # Overlapping h-period labels need L >= h-1; the cube-root rule is
-        # horizon-blind and under-lags long-horizon overlapping returns.
-        hac_maxlags = max(horizon - 1, auto) if horizon else auto
-        hac_maxlags = min(hac_maxlags, max(1, n_periods // 2))
-
-    T_const = sm.add_constant(T_v)
-    ols_iid = OLS(Y_v, T_const).fit()
-    theta = ols_iid.params[1]
-
-    # HC0 standard error
-    se_iid = np.sqrt(ols_iid.cov_HC0[1, 1])
-
-    # Serial-correlation-robust standard error with frequency-adaptive bandwidth.
-    # Panel rows share decision times, so ordinary row-wise Newey-West treats
-    # cross-sectional observations as extra time periods and understates risk.
-    # Driscoll-Kraay aggregates the score by decision time and remains robust to
-    # general cross-sectional dependence.
-    se_hac = se_iid
-    try:
-        if valid_groups is not None:
-            time_codes = pd.factorize(valid_groups, sort=False)[0]
-            robust = ols_iid.get_robustcov_results(
-                cov_type="hac-groupsum",
-                time=time_codes,
-                maxlags=hac_maxlags,
-                use_correction="hac",
-                df_correction=False,
-            )
-        else:
-            robust = ols_iid.get_robustcov_results(
-                cov_type="HAC",
-                maxlags=hac_maxlags,
-                use_correction=True,
-            )
-        cov = robust.cov_params()
-        se_hac = np.sqrt(cov.iloc[1, 1] if hasattr(cov, "iloc") else cov[1, 1])
-    except Exception:
-        pass  # Fall back to HC0 standard errors on numerical failure
-
-    t_stat_hac = theta / se_hac if se_hac > 0 else np.nan
-    p_value_hac = (
-        2 * stats.t.sf(abs(t_stat_hac), df=max(n_periods - 2, 1))
-        if not np.isnan(t_stat_hac)
-        else np.nan
-    )
-
-    result = {
-        "theta": theta,
-        "se_iid": se_iid,
-        "se_hac": se_hac,
-        "t_stat_iid": theta / se_iid if se_iid > 0 else np.nan,
-        "t_stat_hac": t_stat_hac,
-        "p_value_hac": p_value_hac,
-        "n_obs": n_valid,
-        "n_periods": n_periods,
-        "hac_maxlags": hac_maxlags,
-        "covariance_type": "driscoll_kraay" if groups is not None else "newey_west",
-    }
-
-    if return_residuals:
-        result["Y_res"] = Y_res
-        result["T_res"] = T_res
-
-    return result
+        return result
 
 
 REFUTATION_ALPHA = 0.05
@@ -479,6 +555,7 @@ def run_dml_analysis(
     model_y=None,
     model_t=None,
     expected_step: str | pd.Timedelta | None = None,
+    thread_limit: int = DML_THREAD_LIMIT,
 ) -> dict:
     """Full DML analysis pipeline: naive OLS, DML, and refutation tests.
 
@@ -529,135 +606,144 @@ def run_dml_analysis(
         empirical_p, placebo_mean, placebo_std, placebo_effects,
         refutation_class), p_value_hac, hac_maxlags, and n_obs.
     """
-    # Input validation
-    time_col, entity_col = _resolve_panel_columns(df, time_col, entity_col)
-    n = len(df)
-    min_rows = (n_folds + 1) * 50 + n_folds * embargo
-    if n < min_rows:
-        raise ValueError(
-            f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
-        )
-    if df[treatment_col].std() < 1e-10:
-        raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
-    if df[outcome_col].std() < 1e-10:
-        raise ValueError(f"Outcome '{outcome_col}' has near-zero variance")
+    # Also wrapped here, not only inside manual_dml_timeseries. The naive-OLS comparison
+    # below runs np.linalg.lstsq after that call returns, and LAPACK's dgelsd reaches
+    # threaded BLAS on a tall design - so naive_effect, and confounding_bias_pct which is a
+    # difference between it and the pinned theta, would otherwise vary with the ambient
+    # pool while the spec records deterministic_reduction: True. The inner context nests
+    # harmlessly and still covers callers that use manual_dml_timeseries directly.
+    with threadpool_limits(limits=thread_limit):
+        # Input validation
+        time_col, entity_col = _resolve_panel_columns(df, time_col, entity_col)
+        n = len(df)
+        min_rows = (n_folds + 1) * 50 + n_folds * embargo
+        if n < min_rows:
+            raise ValueError(
+                f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
+            )
+        if df[treatment_col].std() < 1e-10:
+            raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
+        if df[outcome_col].std() < 1e-10:
+            raise ValueError(f"Outcome '{outcome_col}' has near-zero variance")
 
-    if hac_maxlags is None and horizon is None:
-        import warnings
+        if hac_maxlags is None and horizon is None:
+            import warnings
 
-        warnings.warn(
-            "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
-            "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
-            "under-lags overlapping labels of horizon >= ~10 and overstates the "
-            "t-statistic. Pass horizon=embargo_from_buffer(mds.label_buffer).",
-            stacklevel=2,
-        )
+            warnings.warn(
+                "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
+                "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
+                "under-lags overlapping labels of horizon >= ~10 and overstates the "
+                "t-statistic. Pass horizon=embargo_from_buffer(mds.label_buffer).",
+                stacklevel=2,
+            )
 
-    _dml_started_at = datetime.now(UTC).isoformat()
-    _dml_t0 = time.perf_counter()
+        _dml_started_at = datetime.now(UTC).isoformat()
+        _dml_t0 = time.perf_counter()
 
-    rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(seed)
 
-    T = df[treatment_col].values
-    Y = df[outcome_col].values
-    X = df[confounder_cols].values
-    groups = df[time_col].values if time_col is not None else None
-    units = df[entity_col].values if entity_col is not None else None
+        T = df[treatment_col].values
+        Y = df[outcome_col].values
+        X = df[confounder_cols].values
+        groups = df[time_col].values if time_col is not None else None
+        units = df[entity_col].values if entity_col is not None else None
 
-    # DML estimate
-    dml = manual_dml_timeseries(
-        Y,
-        T,
-        X,
-        n_folds=n_folds,
-        embargo=embargo,
-        return_residuals=True,
-        hac_maxlags=hac_maxlags,
-        horizon=horizon,
-        groups=groups,
-        model_y=model_y,
-        model_t=model_t,
-    )
-
-    # Compare the adjusted estimate with naive OLS on the exact second-stage
-    # population. Earlier walk-forward dates have no out-of-fold residuals and
-    # cannot enter only one side of the comparison.
-    valid = np.isfinite(dml["Y_res"]) & np.isfinite(dml["T_res"])
-    naive_n_obs = int(valid.sum())
-    T_const = np.column_stack([np.ones(naive_n_obs), T[valid]])
-    naive_coef = np.linalg.lstsq(T_const, Y[valid], rcond=None)[0]
-    naive_effect = naive_coef[1]
-
-    # Confounding bias
-    dml_effect = dml["theta"]
-    bias = naive_effect - dml_effect
-    bias_pct = bias / abs(dml_effect) * 100 if dml_effect != 0 else 0.0
-
-    # Block permutation refutation
-    placebo_effects = []
-    placebo_n_obs = []
-    for _ in range(n_placebo):
-        T_perm = block_permute(
-            T,
-            block_size,
-            rng=rng,
-            groups=groups,
-            units=units,
-            expected_step=expected_step,
-        )
-        perm_result = manual_dml_timeseries(
+        # DML estimate
+        dml = manual_dml_timeseries(
             Y,
-            T_perm,
+            T,
             X,
             n_folds=n_folds,
             embargo=embargo,
+            return_residuals=True,
             hac_maxlags=hac_maxlags,
             horizon=horizon,
             groups=groups,
             model_y=model_y,
             model_t=model_t,
+            thread_limit=thread_limit,
         )
-        if not np.isnan(perm_result["theta"]):
-            if perm_result["n_obs"] != dml["n_obs"]:
-                raise RuntimeError(
-                    "Observed and placebo DML statistics use different second-stage samples"
-                )
-            placebo_effects.append(perm_result["theta"])
-            placebo_n_obs.append(int(perm_result["n_obs"]))
 
-    refutation = {}
-    if len(placebo_effects) >= 10:
-        placebo_arr = np.array(placebo_effects)
-        p_mean = np.mean(placebo_arr)
-        p_std = np.std(placebo_arr)
-        z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
-        emp_p = float(np.mean(np.abs(placebo_arr) >= np.abs(dml_effect)))
-        ref_class = classify_refutation(emp_p)
-        refutation = {
-            "z_score": z,
-            "empirical_p": emp_p,
-            "placebo_mean": p_mean,
-            "placebo_std": p_std,
-            "n_successful": len(placebo_effects),
-            "n_folds": n_folds,
-            "placebo_n_obs": placebo_n_obs,
-            "placebo_effects": placebo_effects,
-            "refutation_class": ref_class,
+        # Compare the adjusted estimate with naive OLS on the exact second-stage
+        # population. Earlier walk-forward dates have no out-of-fold residuals and
+        # cannot enter only one side of the comparison.
+        valid = np.isfinite(dml["Y_res"]) & np.isfinite(dml["T_res"])
+        naive_n_obs = int(valid.sum())
+        T_const = np.column_stack([np.ones(naive_n_obs), T[valid]])
+        naive_coef = np.linalg.lstsq(T_const, Y[valid], rcond=None)[0]
+        naive_effect = naive_coef[1]
+
+        # Confounding bias
+        dml_effect = dml["theta"]
+        bias = naive_effect - dml_effect
+        bias_pct = bias / abs(dml_effect) * 100 if dml_effect != 0 else 0.0
+
+        # Block permutation refutation
+        placebo_effects = []
+        placebo_n_obs = []
+        for _ in range(n_placebo):
+            T_perm = block_permute(
+                T,
+                block_size,
+                rng=rng,
+                groups=groups,
+                units=units,
+                expected_step=expected_step,
+            )
+            perm_result = manual_dml_timeseries(
+                Y,
+                T_perm,
+                X,
+                n_folds=n_folds,
+                embargo=embargo,
+                hac_maxlags=hac_maxlags,
+                horizon=horizon,
+                groups=groups,
+                model_y=model_y,
+                model_t=model_t,
+                thread_limit=thread_limit,
+            )
+            if not np.isnan(perm_result["theta"]):
+                if perm_result["n_obs"] != dml["n_obs"]:
+                    raise RuntimeError(
+                        "Observed and placebo DML statistics use different second-stage samples"
+                    )
+                placebo_effects.append(perm_result["theta"])
+                placebo_n_obs.append(int(perm_result["n_obs"]))
+
+        refutation = {}
+        if len(placebo_effects) >= 10:
+            placebo_arr = np.array(placebo_effects)
+            p_mean = np.mean(placebo_arr)
+            p_std = np.std(placebo_arr)
+            z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
+            emp_p = float(np.mean(np.abs(placebo_arr) >= np.abs(dml_effect)))
+            ref_class = classify_refutation(emp_p)
+            refutation = {
+                "z_score": z,
+                "empirical_p": emp_p,
+                "placebo_mean": p_mean,
+                "placebo_std": p_std,
+                "n_successful": len(placebo_effects),
+                "n_folds": n_folds,
+                "placebo_n_obs": placebo_n_obs,
+                "placebo_effects": placebo_effects,
+                "refutation_class": ref_class,
+            }
+
+        return {
+            "naive_effect": naive_effect,
+            "naive_n_obs": naive_n_obs,
+            "dml_result": dml,
+            "confounding_bias": bias,
+            "confounding_bias_pct": bias_pct,
+            "refutation": refutation,
+            "p_value_hac": dml.get("p_value_hac", np.nan),
+            "hac_maxlags": dml.get("hac_maxlags", 0),
+            "n_obs": len(df),
+            "started_at": _dml_started_at,
+            "elapsed_s": time.perf_counter() - _dml_t0,
         }
-
-    return {
-        "naive_effect": naive_effect,
-        "naive_n_obs": naive_n_obs,
-        "dml_result": dml,
-        "confounding_bias": bias,
-        "confounding_bias_pct": bias_pct,
-        "refutation": refutation,
-        "p_value_hac": dml.get("p_value_hac", np.nan),
-        "hac_maxlags": dml.get("hac_maxlags", 0),
-        "n_obs": len(df),
-        "started_at": _dml_started_at,
-        "elapsed_s": time.perf_counter() - _dml_t0,
-    }
 
 
 def format_dml_summary(results: dict) -> str:
@@ -786,6 +872,16 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     unknown_reductions = set(reductions) - _DML_PREVIEW_FIELDS
     if unknown_reductions:
         raise ValueError(f"unsupported DML preview reductions: {sorted(unknown_reductions)}")
+    # Every field, not merely a non-empty dict. This path no longer falls back to the shared
+    # preset's max_samples, so a preview that omits it would silently resolve the full
+    # population - an uncapped preview, which is the opposite of what the tier is for.
+    if tier is ExecutionTier.PREVIEW:
+        missing_reductions = _DML_PREVIEW_FIELDS - set(reductions)
+        if missing_reductions:
+            raise ValueError(
+                "preview causal requests must declare every reduction; missing "
+                f"{sorted(missing_reductions)}"
+            )
     allowed_overrides = {"nuisance_params"}
     unknown_overrides = set(request["overrides"]) - allowed_overrides
     if unknown_overrides:
@@ -799,8 +895,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         label_ref.name,
         max_symbols=int(reductions.get("max_symbols", 0)),
     )
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("DML runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("DML runner requires timestamp and an entity key")
+    if mds.entity_cols[0] not in {"product", "symbol"}:
+        raise ValueError(f"DML runner does not support entity key {mds.entity_cols[0]!r}")
     configs = {
         config["config_name"]: config
         for config in load_configs(study.case_study, label_ref.name, "causal_dml")
@@ -809,7 +907,6 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         config = configs[request["config_name"]]
     except KeyError as error:
         raise ValueError(f"unknown DML configuration {request['config_name']!r}") from error
-
     setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text()) or {}
     causal = setup.get("causal") or {}
     treatment = str(causal["treatment"])
@@ -817,7 +914,12 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     seed = int(config.get("seed", RANDOM_SEED))
     n_folds = int(reductions.get("n_folds", config.get("n_folds", 5)))
     n_placebo = int(reductions.get("n_placebo", config.get("n_placebo", 100)))
-    max_samples = int(reductions.get("max_samples", config.get("max_samples", 0)))
+    # The shared preset still declares max_samples for the six case-study DML stages that have
+    # not migrated to this path and read it as their own default. This path ignores it: a
+    # canonical run uses the full declared population, and a reduction reaches it only through
+    # preview_reductions, which research/causal.py refuses for a canonical request. So the
+    # preset cannot cap a canonical sample, and the resolved spec records max_samples: 0.
+    max_samples = int(reductions.get("max_samples", 0))
     if n_folds < 2 or n_placebo < 0 or max_samples < 0:
         raise ValueError("DML folds, placebos, and sample cap are invalid")
 
@@ -847,7 +949,16 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(analysis, mds.date_col)
     horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
-    embargo = embargo_from_buffer(mds.label_buffer)
+    # The cadence is already measured on the frame being analysed, so the embargo
+    # is counted against it rather than against an assumed bar size. Leaving the
+    # fallback here would make the embargo short by the ratio between the two on
+    # any panel whose real cadence differs from its declared one, while the
+    # horizon computed on the line above stayed right. A month buffer has no
+    # fixed length and keeps the calendar branch.
+    try:
+        embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
+    except ValueError:
+        embargo = embargo_from_buffer(mds.label_buffer)
     nuisance_params = _resolve_nuisance_params(config, request["overrides"], seed)
     key_frame = analysis.select(mds.entity_cols[0], mds.date_col)
     if key_frame.n_unique([mds.entity_cols[0], mds.date_col]) != key_frame.height:
@@ -875,6 +986,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             "class": "sklearn.ensemble.HistGradientBoostingRegressor",
             "implementation": "scikit-learn",
             "nuisance_params": nuisance_params,
+        },
+        "numerics": {
+            "thread_limit": DML_THREAD_LIMIT,
+            "deterministic_reduction": True,
         },
         "refutation": {
             "method": "within_symbol_contiguous_block_permutation",
@@ -953,6 +1068,9 @@ def run_resolved_causal_request(
 
     nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)
     nuisance_t = HistGradientBoostingRegressor(**context.nuisance_params)
+    thread_limit = int(
+        spec["computation"].get("numerics", {}).get("thread_limit", DML_THREAD_LIMIT)
+    )
     results = run_dml_analysis(
         context.analysis,
         context.treatment_col,
@@ -969,6 +1087,7 @@ def run_resolved_causal_request(
         model_y=nuisance_y,
         model_t=nuisance_t,
         expected_step=context.expected_step,
+        thread_limit=thread_limit,
     )
     dml = results["dml_result"]
     if not all(math.isfinite(float(dml[name])) for name in ("theta", "se_hac")):

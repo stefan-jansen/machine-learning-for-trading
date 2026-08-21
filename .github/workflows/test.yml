@@ -553,6 +553,10 @@ jobs:
             tests/test_cv_result_assembly.py \
             tests/test_ipca_production_config.py \
             tests/test_registry_cleanup.py \
+            tests/test_registry_metric_schema.py \
+            tests/test_registry_metric_horizon.py \
+            tests/test_temporal_artifact_is_read_by_fold.py \
+            tests/test_feature_storage_dtype.py \
             tests/test_sp500_options_evaluation_fold_alignment.py \
             tests/test_variant_fold_geometry.py \
             tests/test_artifact_sidecar_verification.py \

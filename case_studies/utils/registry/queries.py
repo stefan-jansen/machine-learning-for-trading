@@ -16,7 +16,7 @@ from ..notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
-from .specs import canonical_json
+from .specs import IDENTITY_VERSION, canonical_json
 from .store import (
     _backtest_dir,
     _case_dir,
@@ -459,6 +459,20 @@ def load_all_prediction_metrics():
 # ---------------------------------------------------------------------------
 
 
+def _spans_identity_generations(case_dir: Path) -> bool:
+    """True when ``training_runs`` holds rows from more than one identity generation.
+
+    A NULL ``identity_version`` is a generation, not an absence: it is what a row written
+    before the field existed carries. So is a store with no such column at all. One
+    generation, whichever it is, is not something a query can select across.
+    """
+    try:
+        versions = _query_table(case_dir, "SELECT DISTINCT identity_version FROM training_runs", ())
+    except sqlite3.OperationalError:
+        return False
+    return versions.height > 1
+
+
 def load_prediction_index(
     case_study: str,
     *,
@@ -503,8 +517,20 @@ def load_prediction_index(
             ON p.prediction_hash = m.prediction_hash
     """
     conditions = []
-    params: list[str] = []
+    params: list[str | int] = []
     exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family", for_backtest=True)
+    # A registry may hold pre-rebuild rows beside rebuild-era ones. Selecting across both
+    # generations compares models fitted under different identity rules, so a backtest must
+    # see only the current generation. Legacy rows predate the field and carry NULL.
+    #
+    # Applied only when the store actually spans generations. The guard is against selecting
+    # ACROSS them, and a store holding one cannot. Filtering unconditionally emptied every
+    # registry whose rows predate the field - including CI's seeded fixture, whose
+    # training_runs has no identity_version column at all - and took three case-study jobs
+    # from green to "No predictions found" in the backtest downstream of the model stage.
+    if _spans_identity_generations(case_dir):
+        conditions.append("t.identity_version = ?")
+        params.append(IDENTITY_VERSION)
     if label:
         conditions.append("t.label = ?")
         params.append(label)
