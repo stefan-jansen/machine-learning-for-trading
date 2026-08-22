@@ -49,8 +49,8 @@
 #   predictions per configuration.
 # - Say what a feature set of option-implied quantities is a forecast of, and why that is not the
 #   same thing as the quantity this notebook asks it to rank.
-# - Read a grid in which no configuration clears zero, and say what that is and is not evidence
-#   for.
+# - Read a grid that sits entirely on one side of zero on one label and entirely on the other
+#   side on another, and say what that is and is not evidence for.
 # - Run configurations of your own into a private copy of the run log, and have them compared on
 #   the same footing as the ones shipped here.
 #
@@ -333,6 +333,7 @@ catalog = (
         "ic_std",
         "ic_n_days",
         "auc_mean_daily",
+        "direction_label",
         "n_folds",
         "training_hash",
         "prediction_hash",
@@ -375,17 +376,27 @@ catalog.select(
 # ### What the grid does on each label
 #
 # The frame below is the comparison this notebook exists to make, and it is only available because
-# every declared label was fitted in one run. The features are the same, the folds are the same,
-# and the estimators are the same; the only thing that changes down the rows is what is being
-# predicted.
+# every declared label was fitted in one run. The features are the same and the folds are the
+# same throughout. The grid is the same across the three regression labels, which share one menu
+# of 28 configurations, so down those three rows the only thing that changes is what is being
+# predicted. The two `fwd_dir_*` labels declare their own menu of 10 classifiers, because a
+# ridge regression has nothing to say about a binary outcome; read those rows against each other
+# and against their own regression sibling, not as two more members of the same sweep. The
+# `configurations` column is what tells them apart.
 #
 # Read `n_positive` against `configurations`. A label where the whole grid sits on one side of zero
 # is saying something about the label; a label where the grid straddles zero is saying that the
 # spread across configurations is larger than anything the features contribute.
 #
-# The two `fwd_dir_*` labels are the classification form of the same forward window, and carry
-# `auc_mean_daily` as well: the within-date reading of how well the predicted probability
-# separates the classes. It is null on the regression labels, which have no classes to separate.
+# Every row can carry `auc_mean_daily`, the within-date reading of how well a score separates
+# the stocks that went up from those that did not, and `direction_label` says what it was scored
+# against. A classification row scores its own label and leaves that column null. A regression
+# row has no classes of its own, so its predicted return is scored as a ranking signal against a
+# declared direction sibling: `fwd_ret_5d` against `fwd_dir_5d`, `fwd_ret_10d` against
+# `fwd_dir_10d`. That makes a regression row and its sibling classification row comparable on
+# one number - the same dates, the same outcome, two ways of getting at it. `fwd_ret_risk_adj_5d`
+# declares no direction sibling, so it carries no AUC at all; null there means not computed, not
+# zero.
 
 # %% tags=["results"]
 by_label = (
@@ -399,6 +410,7 @@ by_label = (
         worst_ic=pl.col("ic_mean").min(),
         n_positive=(pl.col("ic_mean") > 0).sum(),
         best_auc_daily=pl.col("auc_mean_daily").max(),
+        auc_scored_against=pl.col("direction_label").drop_nulls().first(),
     )
     .sort("best_ic", descending=True)
 )
@@ -407,8 +419,8 @@ by_label
 # %% [markdown]
 # ### How the penalty grid ranks
 #
-# One panel per label, sharing a vertical scale so the labels are compared rather than each one
-# rescaled to fill its own panel. Only configurations measured on all of their label's dates are
+# One panel per label on one shared vertical scale, so the labels are compared rather than
+# each one rescaled to fill its own panel. Only configurations measured on all of their label's dates are
 # charted. The zero line is the reference that matters: a bar below it is a model whose ranking
 # pointed the wrong way out of sample.
 #
@@ -430,11 +442,13 @@ config_order = (
     .to_list()
 )
 
+# `shared_yaxes` matches axes across columns, so with one column it does nothing and each
+# panel would be rescaled to fill itself. Matching every row to the first is what puts the
+# labels on one vertical scale, which is what stacking them is for.
 fig_ic = make_subplots(
     rows=len(panel_labels),
     cols=1,
     shared_xaxes=True,
-    shared_yaxes=True,
     vertical_spacing=0.04,
     subplot_titles=[
         f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
@@ -469,6 +483,8 @@ for row, label in enumerate(panel_labels, start=1):
         y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
     )
     fig_ic.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    if row > 1:
+        fig_ic.update_yaxes(matches="y", row=row, col=1)
 fig_ic.update_xaxes(
     title_text=f"Configuration, ordered by rank on {panel_labels[0]}",
     tickangle=-45,
@@ -488,15 +504,30 @@ side_text = "; ".join(
     f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
     for row in by_label.sort("label").iter_rows(named=True)
 )
+# Whether the panels overlap is also a fact about the frame. Stating a magnitude - "the spread
+# within a panel is small next to the gap between panels" - is the thing that goes stale on the
+# next run, so the two quantities are read and compared here.
+leader = by_label.sort("best_ic", descending=True).row(0, named=True)
+rest_best = by_label.filter(pl.col("label") != leader["label"]).get_column("best_ic").max()
+separation_text = (
+    f"the panels do not overlap: {leader['label']}'s weakest configuration scores "
+    f"{leader['worst_ic']:.4f}, above the {rest_best:.4f} that is the best any other label "
+    "reaches"
+    if leader["worst_ic"] > rest_best
+    else (
+        f"the panels overlap: {leader['label']} leads on its best configuration "
+        f"({leader['best_ic']:.4f}) but its weakest ({leader['worst_ic']:.4f}) falls inside "
+        f"the range other labels reach, whose best is {rest_best:.4f}"
+    )
+)
 show_plotly_with_alt(
     fig_ic,
     "Bar charts of mean validation information coefficient for every full-coverage linear "
     "configuration, one panel per declared label sharing a vertical scale, each panel's highest "
     "bar in amber and the rest in dark navy, with a dashed zero line across each. The bars are "
     "held in the primary label's ranking order in every panel, so a panel that does not descend "
-    f"is a label that orders the grid differently. Counted from the frame: {side_text}. The "
-    "spread within any one panel is a few thousandths, far smaller than the difference between "
-    "panels.",
+    f"is a label that orders the grid differently. Counted from the frame: {side_text}. Read "
+    f"off the same frame, {separation_text}.",
 )
 
 # %% [markdown]
@@ -516,7 +547,22 @@ ridge = (
     .sort("label", "alpha")
 )
 if ridge.height:
-    line_colors = [COLORS["blue"], COLORS["copper"], COLORS["slate"], COLORS["amber"]]
+    # One colour per label, and amber is not among them: the peak marker is amber, so a line
+    # drawn in it would swallow its own ring. Wrapping a short palette would give two labels
+    # the same colour and two identical legend swatches, so this raises instead.
+    line_colors = [
+        COLORS["blue"],
+        COLORS["copper"],
+        COLORS["positive"],
+        COLORS["negative"],
+        COLORS["slate"],
+        COLORS["recede"],
+    ]
+    if len(panel_labels) > len(line_colors):
+        raise ValueError(
+            f"{len(panel_labels)} labels declared but only {len(line_colors)} distinct line "
+            "colours; add colours rather than letting two labels share one"
+        )
     fig_alpha = go.Figure()
     for index, label in enumerate(panel_labels):
         series = ridge.filter(pl.col("label") == label)
@@ -525,7 +571,7 @@ if ridge.height:
         log_alpha = np.log10(series.get_column("alpha").to_numpy())
         values = series.get_column("ic_mean").to_numpy()
         peak = int(np.argmax(values))
-        color = line_colors[index % len(line_colors)]
+        color = line_colors[index]
         fig_alpha.add_trace(
             go.Scatter(
                 x=log_alpha,
@@ -555,13 +601,41 @@ if ridge.height:
     )
     fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
     fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+    # Whether the label or the penalty dominates is the claim this figure is here to support,
+    # so it is measured rather than described: the widest sweep any one line covers, against
+    # the narrowest vertical gap between two lines at a penalty they both carry.
+    sweep_span = float(
+        ridge.group_by("label")
+        .agg(span=pl.col("ic_mean").max() - pl.col("ic_mean").min())
+        .get_column("span")
+        .max()
+    )
+    shared_alpha = (
+        ridge.group_by("alpha")
+        .agg(
+            n_labels=pl.col("label").n_unique(),
+            spread=pl.col("ic_mean").sort().diff().abs().min(),
+        )
+        .filter(pl.col("n_labels") > 1)
+    )
+    gap = float(shared_alpha.get_column("spread").min()) if shared_alpha.height else float("nan")
+    dominance = (
+        f"the closest two lines come at any shared penalty is {gap:.4f}, wider than the "
+        f"{sweep_span:.4f} the most penalty-sensitive line covers over the whole sweep, so the "
+        "label a line belongs to matters more than where on the line it sits"
+        if gap > sweep_span
+        else (
+            f"the most penalty-sensitive line covers {sweep_span:.4f} across the sweep while "
+            f"the closest two lines come within {gap:.4f} of each other, so the penalty moves "
+            "a line by as much as the label separates them"
+        )
+    )
     show_plotly_with_alt(
         fig_alpha,
         "Line chart of mean validation information coefficient against the base-ten logarithm of "
         "the Ridge penalty, one line per label over ten orders of magnitude, each line's highest "
-        "point ringed in amber, against a dashed zero line. The lines are separated from each "
-        "other by more than any of them moves across the penalty range, so the label a line "
-        "belongs to matters more than where on the line it sits.",
+        "point ringed in amber, against a dashed zero line, and no two lines sharing a colour. "
+        f"Measured from the frame: {dominance}.",
     )
 else:
     print(
@@ -573,12 +647,18 @@ else:
 # %% [markdown]
 # ## 5. What to notice
 #
-# **What is being predicted decides the result here, and the penalty does not.** The panels are
-# separated from each other by more than the grid moves inside any one of them: a sweep over ten
-# orders of magnitude of Ridge penalty moves the metric less than swapping the label does. When
-# that is the shape of the evidence, tuning the penalty is not the experiment worth running. The
-# top row of a grid sorted across labels reports which label was easiest, dressed as a model
-# comparison, so the table below is grouped by label and never sorted across them.
+# **What is being predicted decides which side of zero the grid sits on; the penalty does not.**
+# `fwd_ret_risk_adj_5d` has every one of its configurations above zero and `fwd_ret_5d` has none
+# of them there, and the two share a menu, a feature set and a fold schedule. Nothing inside the
+# grid produces a separation of that kind: the alt text under the penalty sweep measures how far
+# the most penalty-sensitive line moves against how close two lines ever come, and the sign of a
+# label's whole grid is not something ten orders of magnitude of shrinkage reverses. What this
+# does not say is that the gap between labels exceeds the spread inside every one of them: read
+# `best_ic` against `worst_ic` in `by_label` and the leading label's own grid is wider than the
+# distance from it to the next label. The claim is about which side of zero, not about
+# magnitude. The top row of a grid sorted across labels
+# reports which label was easiest, dressed as a model comparison, so the table below is grouped
+# by label and never sorted across them.
 #
 # **These features are a forecast of dispersion, not of direction, and the labels test that
 # directly.** That is a property of what an option price is. Implied volatility says how wide the

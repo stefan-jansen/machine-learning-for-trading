@@ -38,13 +38,15 @@
 #   returns have tails, and the metric here is a rank correlation, so the two do not want the same
 #   thing from a fit.
 # - **When to stop**, set by the number of trees. A boosted model has a meaningful state at every
-#   iteration, so each configuration is scored at ten points along its own training run. Fifteen
-#   declared configurations at ten checkpoints is 150 candidate models, and **a checkpoint is part
-#   of a configuration rather than a detail of how it was fitted.**
+#   iteration, so each configuration is scored at ten points along its own training run, and **a
+#   checkpoint is part of a configuration rather than a detail of how it was fitted.** Each of the
+#   three regression labels declares fifteen configurations, which is 150 candidates apiece; the
+#   two classification labels declare five, which is 50 apiece.
 #
 # Two folds, one of which validates on 2020. The usable history of this option analytics dataset is
-# short, so the walk-forward schedule `05_evaluation` set has few and wide windows, and 150
-# candidates judged on two of them is the arithmetic to keep in view while reading the table.
+# short, so the walk-forward schedule `05_evaluation` set has few and wide windows, and a few
+# hundred candidates judged on two of them is the arithmetic to keep in view while reading the
+# table.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -107,11 +109,13 @@ study = open_study(
 )
 
 # %% [markdown]
-# ## 1. Which label, and which models
+# ## 1. Which labels, and which models
 #
-# The label is the same one the linear notebook used: `fwd_ret_5d`, the stock's total return over
-# the five trading days after the decision date. Keeping it fixed is what makes the two
-# populations comparable - the families differ, the target does not.
+# The labels are the ones the linear notebook used, and fitting the same set is what makes the two
+# populations comparable: the families differ, the targets do not. `fwd_ret_5d` is the stock's
+# total return over the five trading days after the decision date; `fwd_ret_10d` is the same over
+# ten; `fwd_ret_risk_adj_5d` divides the five-day return by a measure of its own dispersion; and
+# the two `fwd_dir_*` labels are the sign of the five- and ten-day returns.
 
 # %%
 declared_labels(study, "gbm")
@@ -297,6 +301,7 @@ catalog = execution.catalog_rows.select(
     "ic_std",
     "ic_n_days",
     "auc_mean_daily",
+    "direction_label",
     "n_folds",
     "training_hash",
     "prediction_hash",
@@ -334,13 +339,21 @@ catalog.select(
 # ### What the grid does on each label
 #
 # The frame below is the comparison this notebook can make only because every declared label was
-# fitted in one run. The features are the same, the folds are the same and the grid is the same;
-# what changes down the rows is what is being predicted.
+# fitted in one run. The features are the same and the folds are the same throughout. The grid is
+# the same across the three regression labels, which share one menu of fifteen configurations, so
+# down those three rows the only thing that changes is what is being predicted. The two
+# `fwd_dir_*` labels declare their own menu of five, because a squared-error objective has
+# nothing to say about a binary outcome; read those rows against each other and against their own
+# regression sibling rather than as two more members of one sweep. `configurations` and
+# `candidates` are what tell them apart.
 #
-# The two `fwd_dir_*` labels are the classification form of the same forward windows and carry
-# `auc_mean_daily` as well - the within-date reading of how well the predicted probability
-# separates the classes. It is null on the regression labels, which have no classes to separate.
-# `ic_mean` is defined for both, which is what puts every label on one axis.
+# `ic_mean` is defined for every row, which is what puts every label on one axis. `auc_mean_daily`
+# can be too, and `direction_label` says what it was scored against: a classification row scores
+# its own label and leaves that column null, while a regression row has no classes of its own and
+# is scored as a ranking signal against a declared direction sibling - `fwd_ret_5d` against
+# `fwd_dir_5d`, `fwd_ret_10d` against `fwd_dir_10d`. A regression row and its sibling are
+# therefore comparable on that one number. `fwd_ret_risk_adj_5d` declares no sibling and carries
+# no AUC; null there means not computed, not zero.
 
 # %% tags=["results"]
 by_label = (
@@ -355,6 +368,7 @@ by_label = (
         worst_ic=pl.col("ic_mean").min(),
         n_positive=(pl.col("ic_mean") > 0).sum(),
         best_auc_daily=pl.col("auc_mean_daily").max(),
+        auc_scored_against=pl.col("direction_label").drop_nulls().first(),
     )
     .sort("best_ic", descending=True)
 )
@@ -489,11 +503,13 @@ config_order = (
     .to_list()
 )
 
+# `shared_yaxes` matches axes across columns, so with one column it does nothing and each
+# panel would be rescaled to fill itself. Matching every row to the first is what puts the
+# labels on one vertical scale, which is what stacking them is for.
 fig_obj = make_subplots(
     rows=len(panel_labels),
     cols=1,
     shared_xaxes=True,
-    shared_yaxes=True,
     vertical_spacing=0.04,
     subplot_titles=[
         f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
@@ -526,6 +542,8 @@ for row, label in enumerate(panel_labels, start=1):
         y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
     )
     fig_obj.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    if row > 1:
+        fig_obj.update_yaxes(matches="y", row=row, col=1)
 fig_obj.update_xaxes(
     title_text=f"Configuration, ordered by rank on {order_label}",
     tickangle=-45,
@@ -533,18 +551,32 @@ fig_obj.update_xaxes(
     col=1,
 )
 fig_obj.update_layout(
-    title="The label moves the grid further than the loss function does",
+    title="Which side of zero the grid sits on is set by the label, not by the loss function",
     height=260 * len(panel_labels),
     width=1000,
     margin=dict(t=90),
 )
+# `side_text` counts every checkpoint; this chart shows one, so it gets its own count rather
+# than borrowing a number taken over a larger set.
+final_side_text = "; ".join(
+    f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
+    for row in (
+        final.group_by("label")
+        .agg(
+            configurations=pl.len(),
+            n_positive=(pl.col("ic_mean") > 0).sum(),
+        )
+        .sort("label")
+        .iter_rows(named=True)
+    )
+)
 show_plotly_with_alt(
     fig_obj,
     "Bar charts of mean validation information coefficient at the final boosting iteration, one "
-    "panel per label sharing a vertical scale, bars coloured by loss function and held in the "
-    "primary label's ranking order in every panel. Within a panel the colours are interleaved "
-    "across the ranking rather than grouped, so the loss function does not order the grid; the "
-    "panels sit at visibly different heights, so the label does. Each panel carries a dashed zero "
+    "panel per label on one shared vertical scale, bars coloured by loss function and held in "
+    "the primary label's ranking order in every panel. Within a panel the colours are "
+    "interleaved across the ranking rather than grouped, so the loss function does not order the "
+    f"grid. Counted at this checkpoint: {final_side_text}. Each panel carries a dashed zero "
     "line.",
 )
 
@@ -595,12 +627,16 @@ checkpoint_vs_grid
 # ranking is still a real ordering of registered candidates - `14_backtest` selects over all of
 # them - but it is not evidence that one configuration is better than another.
 #
-# **The label moves the results further than anything this grid varies.** Capacity from seven
-# leaves to sixty-three, three objectives, ten stopping points: all of it moves the metric less
-# than swapping what is being predicted. That is the finding the multi-label run makes available,
-# and it is the same shape the linear notebook found, which matters - two model families with very
-# different representational power agree about which target the features rank, and that points at
-# the target rather than at either model.
+# **The label decides how much of the grid clears zero; the grid itself does not.** Read
+# `n_positive` against `candidates` in `by_label`: the three regression labels share a menu, a
+# feature set and a fold schedule, and the share of their candidates that clears zero is not
+# the same. What moves is which target the ranking is asked about. This is not a claim that
+# the labels are further apart than the grid is wide: read `best_ic` against `worst_ic` in the
+# same frame and one regression label's own candidates span more than the leading candidates
+# span across all five labels. Both readings come off the same frame and they say different
+# things - the grid is where the magnitude lives, the label is where the sign lives. The linear notebook reaches the same place, which matters - two model families with very
+# different representational power agree about which target these features rank, and that points
+# at the target rather than at either model.
 #
 # **These features forecast dispersion rather than direction, and the label set tests it.** Implied
 # volatility says how wide the market expects the distribution to be, skew how asymmetric, the term
