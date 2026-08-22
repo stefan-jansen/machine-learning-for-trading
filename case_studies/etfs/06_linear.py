@@ -69,24 +69,28 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
+    primary_label,
     resolved_model_plan,
     run_model_population,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "fwd_ret_21d"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "etfs-linear-validation-v1"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -100,11 +104,18 @@ study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or
 # chapters trade - and the five-day label is a variant, kept so the effect of the prediction
 # horizon can be examined separately.
 #
-# **This notebook fits one label per run.** `LABEL` above selects it, and every choice below
-# follows from that one setting, because each label has its own training menu at
-# `config/training/{label}.yaml`. The menu lists, family by family, the named configurations to
-# fit for that label. A label with no menu file has nothing declared and nothing to fit; these
-# are the ones that declare linear models.
+# **This notebook fits every declared label.** Each has its own training menu at
+# `config/training/{label}.yaml`, listing family by family the named configurations to fit for
+# that label, and the notebook fits the union of them. A label with no menu file has nothing
+# declared and nothing to fit; the labels below are the ones that declare linear models.
+#
+# Fitting both in one run is what puts the horizons side by side at all. It does not make them
+# one controlled experiment: each label carries its own purge buffer in `config/setup.yaml`,
+# `21D` against `5D`, so the fold boundaries and the eligible rows differ too, and the comparison
+# below is between two label-specific protocols rather than one protocol at two horizons. Running
+# one label at a time leaves even that comparison to be assembled by hand from two runs, and
+# until it is assembled the variant is declared and never fitted. `LABELS` restricts the run to a
+# subset when you want one, and defaults to everything the menus declare.
 
 # %%
 declared_labels(study, "linear")
@@ -112,9 +123,9 @@ declared_labels(study, "linear")
 # %% [markdown]
 # Each name in the menu resolves to a preset file in the shared directory
 # `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
-# frame below is the menu for `LABEL`, with each name resolved to the estimator class it names
-# and the arguments that class is constructed with. To change what runs, edit the menu or the
-# presets rather than this notebook.
+# frame below is the menu for every label above, with each name resolved to the estimator class
+# it names and the arguments that class is constructed with. To change what runs, edit the menu
+# or the presets rather than this notebook.
 #
 # The grid covers the two shapes a penalty can take:
 #
@@ -135,10 +146,26 @@ declared_labels(study, "linear")
 configs = load_model_configs(
     study,
     "linear",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name: on a fresh workspace it would otherwise register an
+# incomplete snapshot under the canonical one, and where the full population already exists the
+# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
+# either knob, and says so here rather than several cells later in a message about hashes.
+
+# %%
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        f"complete declared catalog, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -222,9 +249,25 @@ plan.select(
 # predictions happen to be in the registry - and it is why a configuration that raises fails the
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set
+# of prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it
+# supersedes. That lineage is the only record of which generation is which.
+#
+# The default name is the contract with the notebooks downstream - `11_model_analysis` and
+# `12_backtest` resolve this population by name - rather than a label of convenience, which is
+# why a run that narrows the member set has to pass its own.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+population_name = POPULATION_NAME or "etfs-linear-validation-v1"
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
@@ -281,6 +324,13 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # neighbours', chosen by where it happened to stay non-degenerate, and comparing it with theirs
 # compares two different samples. `full_coverage` marks the configurations measured on all of
 # them.
+#
+# **Coverage is judged within a label, not across them.** The two horizons do not have the same
+# number of scorable validation dates to begin with: a 21-day label runs out of forward window
+# earlier than a five-day label does, so it has fewer dates before any model is fitted. Comparing
+# every configuration against one global maximum would mark the entire 21-day grid incomplete for
+# a reason that has nothing to do with the models. The reference is each label's own maximum, and
+# `full_coverage` then means what it says: measured on every date that label offers.
 
 # %% tags=["results"]
 catalog = (
@@ -295,16 +345,22 @@ catalog = (
         "training_hash",
         "prediction_hash",
     )
-    .sort("ic_mean", descending=True)
-    .join(configs.select("config_name", "model_class", "params"), on="config_name", how="left")
+    .sort(["label", "ic_mean"], descending=[False, True])
+    .join(
+        configs.select("config_name", "label", "model_class", "params"),
+        on=["config_name", "label"],
+        how="left",
+    )
 )
 
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("linear execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
 catalog.select(
+    "label",
     "config_name",
     "model_class",
     "params",
@@ -315,11 +371,59 @@ catalog.select(
 )
 
 # %% [markdown]
+# The configurations left out of the charts below, with the number of dates each was measured on
+# against its label's maximum. An empty frame means every configuration scored every date its
+# label offered.
+
+# %% tags=["results"]
+catalog.with_columns(label_dates=pl.col("ic_n_days").max().over("label")).filter(
+    ~pl.col("full_coverage")
+).select("label", "config_name", "model_class", "ic_mean", "ic_n_days", "label_dates")
+
+# %% [markdown]
+# ### What each horizon reached
+#
+# One row per label, over the configurations that horizon actually charted. It is the frame the
+# horizon comparison below is read from, so the numbers quoted there are these and not a
+# different subset: `best_ic` is the highest full-coverage result at that horizon, which differs
+# from the highest result overall whenever a partial-coverage configuration scores higher on
+# fewer dates.
+
+# %% tags=["results"]
+horizons = (
+    catalog.filter("full_coverage")
+    .group_by("label")
+    .agg(
+        charted=pl.len(),
+        scorable_dates=pl.col("ic_n_days").max(),
+        best_config=pl.col("config_name").sort_by("ic_mean", descending=True).first(),
+        best_ic=pl.col("ic_mean").max(),
+        worst_ic=pl.col("ic_mean").min(),
+        above_zero=(pl.col("ic_mean") > 0).sum(),
+    )
+    .sort("label")
+)
+horizons
+
+# %% [markdown]
 # ### How the penalty grid ranks
 #
-# Only the configurations measured on all `full_days` validation dates are charted. The
-# partial-coverage ones are in the table above with `full_coverage` false, and are left out here
-# because their IC is an average over a different set of dates.
+# One panel per label, so the same grid can be read at each horizon. Only the configurations
+# measured on all of their own label's validation dates are charted; any partial-coverage ones
+# are in the table above with `full_coverage` false, and are left out here because their IC would
+# be an average over a different set of dates. The zero line is the reference that matters: a bar
+# below it is a model whose ranking pointed the wrong way out of sample.
+#
+# **Each panel has its own vertical scale**, because the horizons do not produce ICs of the same
+# size and a shared scale would flatten the smaller panel to a line. Read a panel for the shape
+# of its ranking, and the numbers rather than the bar heights when comparing panels.
+#
+# **The configurations are in the same order in both panels**, that order being their ranking on
+# the primary label. Sorting each panel independently would put a different configuration at each
+# left edge and make the panels look alike whatever the numbers did. Held in one order, a panel
+# that slopes down from left to right is a horizon that ranks the grid the way the primary label
+# does, and a panel that does not is one where the penalty that works at one horizon does not
+# work at another.
 
 
 # %%
@@ -328,39 +432,117 @@ def compact(params: str) -> str:
     return re.sub(r"\d+\.?\d*(?:[eE][+-]?\d+)?", lambda m: f"{float(m.group()):g}", params)
 
 
+primary = primary_label(study)
 full = catalog.filter("full_coverage")
-leader = full.row(0, named=True)
+charted = sorted(set(full.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels
+# by whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in charted] + [
+    label for label in charted if label != primary
+]
+order_label = panel_labels[0]
+config_order = (
+    full.filter(pl.col("label") == order_label)
+    .sort("ic_mean", descending=True)
+    .get_column("config_name")
+    .to_list()
+)
+leader = full.sort("ic_mean", descending=True).row(0, named=True)
 
-fig_ic = go.Figure(
-    go.Bar(
-        x=full.get_column("config_name").to_list(),
-        y=full.get_column("ic_mean").to_list(),
-        marker_color=[
-            COLORS["amber"] if name == leader["config_name"] else COLORS["blue"]
-            for name in full.get_column("config_name")
-        ],
-        text=[f"{value:+.3f}" for value in full.get_column("ic_mean")],
-        textposition="outside",
-        cliponaxis=False,
+fig_ic = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.05,
+    subplot_titles=[
+        f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
+    ],
+)
+for row, label in enumerate(panel_labels, start=1):
+    panel = full.filter(pl.col("label") == label)
+    fig_ic.add_trace(
+        go.Bar(
+            x=panel.get_column("config_name").to_list(),
+            y=panel.get_column("ic_mean").to_list(),
+            marker_color=[
+                COLORS["amber"]
+                if (name, label) == (leader["config_name"], leader["label"])
+                else COLORS["blue"]
+                for name in panel.get_column("config_name")
+            ],
+        ),
+        row=row,
+        col=1,
     )
+    fig_ic.add_hline(
+        y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+    fig_ic.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+fig_ic.update_xaxes(
+    categoryorder="array",
+    categoryarray=config_order,
+    tickangle=-45,
+    title_text=f"Configuration (ordered by validation IC on {order_label})",
+    row=len(panel_labels),
+    col=1,
 )
 fig_ic.update_layout(
-    title="Validation IC across the full-coverage penalty grid",
-    height=500,
+    title="Validation IC across the full-coverage penalty grid, by label",
+    height=320 * len(panel_labels),
     width=1100,
     showlegend=False,
-    margin=dict(t=70),
+    margin=dict(t=90),
 )
-fig_ic.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
-fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+# The spans are computed rather than described, so the alt text cannot drift from the figure.
+panel_ic = {
+    label: full.filter(pl.col("label") == label).get_column("ic_mean") for label in panel_labels
+}
+panel_spans = ", ".join(
+    f"{label} from {panel_ic[label].min():+.3f} to {panel_ic[label].max():+.3f}"
+    for label in panel_labels
+)
 show_plotly_with_alt(
     fig_ic,
-    "Bar chart of mean validation information coefficient for every full-coverage linear "
-    f"configuration, sorted descending. {leader['config_name']} ({compact(leader['params'])}) "
-    f"is highlighted in amber at the top of the ranking at IC {leader['ic_mean']:+.3f}. The "
-    "Ridge configurations occupy the top of the ranking and the L1-penalised configurations "
-    "trail them.",
+    "Stacked bar charts of mean validation information coefficient across the linear penalty "
+    "grid, one panel per label and the configurations in the same order in each, that order "
+    f"being their ranking on {order_label}. Each panel carries a dashed zero line and its own "
+    f"vertical scale, spanning {panel_spans}. The highest bar anywhere is "
+    f"{leader['config_name']} ({compact(leader['params'])}) on {leader['label']} at IC "
+    f"{leader['ic_mean']:+.3f}, highlighted in amber.",
 )
+
+# %% [markdown]
+# ### Whether the ranking transfers between horizons
+#
+# The panels are held in one order so the question can be asked, and this answers it with a
+# number rather than an impression: the rank correlation between two labels' orderings of the
+# configurations they both charted. One would mean the horizons agree on the whole grid, zero
+# that the ordering at one horizon says nothing about the other.
+
+
+# %% tags=["results"]
+def rank_transfer(label_a: str, label_b: str) -> dict:
+    """Rank correlation between two labels' orderings, over what both of them charted."""
+    pair = (
+        full.filter(pl.col("label").is_in([label_a, label_b]))
+        .select("label", "config_name", "ic_mean")
+        .pivot(on="label", index="config_name", values="ic_mean")
+        .drop_nulls()
+    )
+    return {
+        "label_a": label_a,
+        "label_b": label_b,
+        "configurations": pair.height,
+        "rank_correlation": pair.select(
+            pl.corr(pl.col(label_a).rank(), pl.col(label_b).rank())
+        ).item(),
+    }
+
+
+transfer = pl.DataFrame(
+    [rank_transfer(a, b) for index, a in enumerate(panel_labels) for b in panel_labels[index + 1 :]]
+)
+transfer
 
 # %% [markdown]
 # ### What shrinkage does on its own
@@ -369,6 +551,10 @@ show_plotly_with_alt(
 # effect of shrinkage, with the estimator, the features and the folds all held fixed and only
 # `alpha` moving. The alpha is read from each configuration's declared parameters rather than
 # parsed out of its name, so the curve plots what was fitted.
+#
+# One curve per label puts both horizons on one pair of axes, which is the comparison fitting
+# them together exists to make: whether the penalty that helps most is the same strength at each
+# horizon, and whether the curve has the same shape at all.
 
 # %%
 ridge = (
@@ -377,52 +563,94 @@ ridge = (
         alpha=pl.col("params").str.extract(r"alpha=([0-9.eE+-]+)").cast(pl.Float64),
     )
     .drop_nulls("alpha")
-    .sort("alpha")
+    .sort("label", "alpha")
 )
 if ridge.height:
-    log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
-    ridge_ic = ridge.get_column("ic_mean").to_numpy()
-    peak = int(np.argmax(ridge_ic))
-
-    fig_alpha = go.Figure(
-        go.Scatter(
-            x=log_alpha,
-            y=ridge_ic,
-            mode="lines+markers",
-            line=dict(color=COLORS["blue"], width=2),
-            marker=dict(size=8, color=COLORS["blue"]),
+    ridge_labels = [label for label in panel_labels if label in set(ridge.get_column("label"))]
+    # One colour per label. Wrapping a short palette would give two labels the same colour and
+    # two identical legend swatches, so this raises instead.
+    curve_colors = [
+        COLORS["blue"],
+        COLORS["copper"],
+        COLORS["amber"],
+        COLORS["positive"],
+        COLORS["negative"],
+        COLORS["slate"],
+    ]
+    if len(ridge_labels) > len(curve_colors):
+        raise ValueError(
+            f"{len(ridge_labels)} labels carry a Ridge sweep but only {len(curve_colors)} "
+            "distinct line colours; add colours rather than letting two labels share one"
         )
-    )
-    fig_alpha.add_trace(
-        go.Scatter(
-            x=[log_alpha[peak]],
-            y=[ridge_ic[peak]],
-            mode="markers",
-            marker=dict(size=15, color=COLORS["amber"]),
-            showlegend=False,
+    fig_alpha = go.Figure()
+    peaks = {}
+    for index, label in enumerate(ridge_labels):
+        series = ridge.filter(pl.col("label") == label)
+        log_alpha = np.log10(series.get_column("alpha").to_numpy())
+        ridge_ic = series.get_column("ic_mean").to_numpy()
+        peak = int(np.argmax(ridge_ic))
+        peaks[label] = (float(log_alpha[peak]), float(ridge_ic[peak]))
+        fig_alpha.add_trace(
+            go.Scatter(
+                x=log_alpha,
+                y=ridge_ic,
+                mode="lines+markers",
+                name=label,
+                line=dict(color=curve_colors[index], width=2),
+                marker=dict(size=7, color=curve_colors[index]),
+            )
         )
-    )
+        fig_alpha.add_trace(
+            go.Scatter(
+                x=[log_alpha[peak]],
+                y=[ridge_ic[peak]],
+                mode="markers",
+                marker=dict(
+                    size=15,
+                    color=curve_colors[index],
+                    line=dict(width=2, color=COLORS["neutral"]),
+                ),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    fig_alpha.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
     fig_alpha.update_layout(
-        title="Ridge IC against penalty strength, over ten orders of magnitude",
-        height=500,
+        title="Ridge IC against penalty strength, over ten orders of magnitude, by label",
+        height=520,
         width=900,
-        showlegend=False,
         margin=dict(t=70),
+        legend=dict(title_text="Label"),
     )
     fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
     fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+    peak_text = ", ".join(
+        f"{label} at 1e{int(round(peaks[label][0]))} (IC {peaks[label][1]:+.3f})"
+        for label in ridge_labels
+    )
+    # Where the curves sit relative to zero is read off the fitted values rather than asserted,
+    # so the description cannot drift from the run that produced the figure.
+    sides = {
+        label: ridge.filter(pl.col("label") == label).get_column("ic_mean")
+        for label in ridge_labels
+    }
+    if all((values > 0).all() for values in sides.values()):
+        placement = "Every line sits above zero across the grid"
+    elif all((values < 0).all() for values in sides.values()):
+        placement = "Every line sits below zero across the grid"
+    else:
+        placement = "The lines cross zero within the grid"
     show_plotly_with_alt(
         fig_alpha,
-        "Line chart of mean validation information coefficient against the base-ten logarithm of the "
-        "Ridge penalty. The curve is flat at weak penalties, rises through the middle of the range "
-        f"to a single peak at 1e{int(round(log_alpha[peak]))} marked in amber, then declines at the "
-        "strongest penalty.",
+        "Line chart of mean validation information coefficient against the base-ten logarithm of "
+        "the Ridge penalty, one line per label, against a dashed zero line. "
+        f"{placement}. The peak on each line is ringed: {peak_text}.",
     )
 else:
     print(
-        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
-        f"Which estimators this section can show is decided by the menu at "
-        f"config/training/{LABEL}.yaml."
+        "No declared label declares Ridge configurations, so there is no penalty sweep to trace. "
+        "Which estimators this section can show is decided by the menus at "
+        "config/training/*.yaml."
     )
 
 # %% [markdown]
