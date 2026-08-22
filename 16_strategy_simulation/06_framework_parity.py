@@ -341,7 +341,11 @@ equity_ml4t = pd.Series(
 portfolio_returns_ml4t = equity_ml4t.pct_change().dropna()
 
 print(f"Sequential account, ending equity: ${equity_ml4t.iloc[-1]:,.0f}")
-print(f"Trades filled: {len(results_ml4t['trades']):,}")
+# results["trades"] is not a fill count: the engine appends a Trade only when a position
+# is closed, flipped or scaled DOWN, so opens and scale-ups are absent from it. num_fills
+# is the count of fills. Both are printed because they answer different questions.
+print(f"Fills: {results_ml4t['num_fills']:,}")
+print(f"Round trips and reductions recorded: {len(results_ml4t['trades']):,}")
 
 # %% [markdown]
 # Align both return streams before computing any comparison statistic. This
@@ -533,18 +537,20 @@ fig.show()
 #
 # | | Array arithmetic | Sequential engine |
 # |---|---|---|
-# | How often it trades | Only where the weight matrix changes: 78 dates, because the target moves when the momentum selection or the risk-on flag does | `on_data` calls `rebalance_to_weights` on all 3,522 sessions, so a rebalance is attempted daily whether the target moved or not |
+# | How often it trades | Only where the weight matrix changes, because a target that has not moved generates no trade | `on_data` calls `rebalance_to_weights` on every session, whether the target moved or not; the counts below the table say how many of those attempts reached the market |
 # | When a target is acted on | Immediately, as the weight in force over the next close-to-close return | An order placed on that bar, filled on the next one |
 # | What price it gets | The close, implicitly, because that is what the return is measured between | The next bar's open, moved against the order by the slippage rate |
 # | What the cost is charged on | The change in the target, whether or not a trade could have been made | The notional actually filled |
 # | What the account holds | A weight, which can be any real number | Whole shares, bought with the cash on hand |
 #
 # The first row is the largest and the least visible. The weight matrix built in section 3 moves on
-# 78 dates. The engine attempts a rebalance on all 3,522 sessions and 3,258 fills result - fewer
-# than one per session, because most attempts round to no share change, but still forty times the
-# number of dates on which anything about the target moved. The engine's daily restoration is not
-# correcting a signal - the target has not moved - it is correcting the drift that whole shares and
-# price movement introduce between rebalance dates, and it pays commission and slippage each time.
+# a few dozen dates; the engine attempts a rebalance on every session in the sample. The counts
+# printed below the table say how many of those attempts reached the market and how many fills they
+# produced: the large majority of sessions trade, against the few dozen on which the target moved
+# at all. That gap is the whole of this row.
+# Those extra trades are not acting on a signal, because the target has not moved. They correct the
+# drift that whole shares and price movement introduce between the dates it does move, and each one
+# pays commission and slippage.
 #
 # The last row is the one that is easy to miss for a different reason. An account that has to buy
 # whole shares with a finite cash balance cannot sit exactly on its target, and the residual is not
@@ -561,7 +567,8 @@ _weight_change_dates = int((weights.diff().fillna(weights).abs().sum(axis=1) > 0
 print(f"Sessions in the panel:                  {len(close_prices):,}")
 print(f"Dates the weight matrix changes:        {_weight_change_dates:,}")
 print(f"Rebalances the engine attempted:        {len(close_prices):,}")
-print(f"Fills those attempts produced:          {len(results_ml4t['trades']):,}")
+print(f"Of those, ones that produced a trade:   {results_ml4t['num_rebalance_events']:,}")
+print(f"Fills:                                  {results_ml4t['num_fills']:,}")
 print(f"Turnover charged on the array side:     {executed_turnover.sum():.1f}x portfolio value")
 
 # %% [markdown]
