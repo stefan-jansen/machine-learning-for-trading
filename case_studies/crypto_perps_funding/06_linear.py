@@ -327,10 +327,12 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 #
 # **Coverage is judged within a label, not across them.** The labels do not offer the same number
 # of scorable timestamps to begin with: `fwd_ret_24h` spans three funding intervals per
-# observation and so runs out of forward window earlier than `fwd_ret_8h`, and the two direction
-# labels drop the timestamps on which no contract changed sign. Comparing every configuration
-# against one global maximum would mark whole labels incomplete for reasons that have nothing to
-# do with the models. The reference is each label's own maximum.
+# observation and so runs out of forward window earlier than `fwd_ret_8h`. Comparing every
+# configuration against one global maximum would mark that whole label incomplete for a reason
+# that has nothing to do with the models. The reference is each label's own maximum. The direction
+# labels are unaffected - their IC is computed against the continuous return rather than the
+# binary coding, so they offer the same timestamps `fwd_ret_8h` does. What the constant-direction
+# timestamps cost is AUC coverage, which the next paragraph covers.
 #
 # `auc_mean_daily` reads the same predictions as a classifier would. At each timestamp, take every
 # pair of one contract that went up and one that went down, and count the fraction of those pairs
@@ -569,6 +571,10 @@ for row in l1.iter_rows(named=True):
     dominant.append(first["feature_names"][int(np.argmax(magnitudes[0]))] if counts[0] else "none")
 
 l1 = l1.with_columns(surviving_features=pl.Series(surviving), dominant_feature=pl.Series(dominant))
+# Every distinct feature the grid ever puts the largest coefficient on. The frame below is 32 rows
+# and renders ten of them, so a claim about what every penalty keeps has to be shown as the set
+# rather than left for a reader to check against elided rows.
+print(f"dominant features across the L1 grid: {sorted(set(l1.get_column('dominant_feature')))}")
 l1.select(
     "label",
     "config_name",
@@ -591,7 +597,7 @@ path_traces = [
     if l1.filter((pl.col("label") == label) & (pl.col("model_class") == model_class)).height
 ]
 fig_path = go.Figure()
-for index, (label, model_class) in enumerate(path_traces):
+for label, model_class in path_traces:
     series = l1.filter((pl.col("label") == label) & (pl.col("model_class") == model_class)).sort(
         "alpha_frac"
     )
@@ -602,11 +608,11 @@ for index, (label, model_class) in enumerate(path_traces):
             mode="lines+markers",
             name=f"{label} · {model_class}",
             line=dict(
-                color=path_colors[index // 2 % len(path_colors)],
+                color=path_colors[panel_labels.index(label) % len(path_colors)],
                 width=2,
                 dash="solid" if model_class == "Lasso" else "dot",
             ),
-            marker=dict(size=8, color=path_colors[index // 2 % len(path_colors)]),
+            marker=dict(size=8, color=path_colors[panel_labels.index(label) % len(path_colors)]),
         )
     )
 fig_path.update_layout(
@@ -677,11 +683,11 @@ show_plotly_with_alt(
 # different places on two labels, because $\alpha_{\max}$ is computed from each fold's own data
 # and the two labels do not have the same one.
 #
-# **The column it keeps is not a premium column.** Read `dominant_feature` down the L1 frame: at
-# every penalty on both return labels the largest coefficient belongs to a volatility estimate
-# rather than to any of the many measurements of the premium, and on `fwd_ret_8h` it is the only
-# coefficient left at the aggressive end. Read against the framing at the top, that is the
-# informative part. The premium block is wide but internally
+# **The column it keeps is not a premium column.** The line printed above the L1 frame is the set
+# of features the grid ever puts its largest coefficient on, across every penalty and both return
+# labels, and it has one member: a volatility estimate, not any of the many measurements of the
+# premium. On `fwd_ret_8h` it is the only coefficient left at the aggressive end. Read against the
+# framing at the top, that is the informative part. The premium block is wide but internally
 # redundant, so no single member of it stands out as a column, and a penalty that has to choose
 # exactly one goes elsewhere. Ridge, which spreads weight across the block instead of choosing
 # within it, does not face that choice and does not show the same reduction.
