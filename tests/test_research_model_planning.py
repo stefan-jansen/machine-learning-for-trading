@@ -249,7 +249,9 @@ def test_run_official_models_given_a_plan_does_not_plan_a_second_time(monkeypatc
 
     monkeypatch.setattr(execution, "plan_models", refuse)
     monkeypatch.setattr(
-        execution.ModelPlan, "create_population", lambda self, *, name: SimpleNamespace(name=name)
+        execution.ModelPlan,
+        "create_population",
+        lambda self, *, name, supersedes=None: SimpleNamespace(name=name, supersedes=supersedes),
     )
     forwarded = {}
 
@@ -260,9 +262,14 @@ def test_run_official_models_given_a_plan_does_not_plan_a_second_time(monkeypatc
 
     monkeypatch.setattr(execution, "run_official_model_subset", capture)
 
-    _, population = execution.run_official_models(study, plan, population_name="p")
+    _, population = execution.run_official_models(
+        study, plan, population_name="p", supersedes="0ff1ce"
+    )
 
     assert population.name == "p"
+    # The plan path has to carry the lineage too. A refit under a corrected parameter is a changed
+    # population under an existing name, and the registry refuses that write without it.
+    assert population.supersedes == "0ff1ce"
     assert forwarded["expected"] == plan.expected_prediction_hashes
     # Unresolved, so run_models takes the fold-major batch path instead of holding one prepared
     # fold set per configuration - the failure the planning path exists to prevent.
