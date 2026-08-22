@@ -74,6 +74,29 @@ def test_production_parameters_allow_only_full_run_cache_bypasses():
     assert not production_parameters({"USE_CACHE": True})
 
 
+def test_an_identity_bearing_override_is_production() -> None:
+    """A canonical run may be required to carry a parameter.
+
+    research/population.py refuses a re-run into a changed population unless it names
+    the population it supersedes, and that value is set deliberately by a person. Such
+    a run is production: the override adds a declaration rather than removing work.
+    """
+    assert production_parameters({"SUPERSEDES_POPULATION": "342446006141"})
+    assert production_parameters({"SUPERSEDES_POPULATION": "342446006141", "FORCE_RETRAIN": True})
+
+
+def test_waiving_the_value_check_does_not_admit_a_reduced_run() -> None:
+    """The waiver is per name, not a general relaxation.
+
+    Only the value of an identity-bearing override goes unchecked - its correctness is
+    enforced where it is consumed. A name that is not on the list is still not
+    production, including alongside one that is.
+    """
+    assert not production_parameters({"SUPERSEDES_POPULATION": "abc", "MAX_SYMBOLS": 8})
+    assert not production_parameters({"SUPERSEDES_POPULATION": "abc", "FORCE_RETRAIN": False})
+    assert not production_parameters({"SUPERSEDES_ARTIFACT": "abc"})
+
+
 def test_numeric_and_string_bools_are_the_same_override() -> None:
     """``1`` from a JSON declaration and ``"1"`` from ``papermill -p`` are one run."""
     assert production_parameters({"FORCE_REBACKTEST": 1})

@@ -786,3 +786,23 @@ def test_gbm_registration_uses_the_lookup_spec_and_iteration_checkpoint(
     assert captured["prediction"]["checkpoint_value"] == 100
     assert captured["prediction"]["checkpoint_kind"] == "iteration"
     assert captured["prediction"]["eval_col"] == "eval_actual"
+
+
+def test_crypto_gbm_takes_its_device_from_setup_yaml() -> None:
+    """The device the boundary fits on is the one ``setup.yaml`` declares.
+
+    ``07_gbm`` no longer names a device. It calls the shared model boundary, which
+    reads ``modeling.gbm`` from the case study's own setup and lets an explicit
+    request field, and nothing else, override it. The guard this replaces lived in
+    ``test_holdout_boundary.py`` and grepped the notebook's source, so it went on
+    passing against text the notebook had stopped containing.
+    """
+    from types import SimpleNamespace
+
+    root = REPO_ROOT / "case_studies" / "crypto_perps_funding"
+    setup = yaml.safe_load((root / "config" / "setup.yaml").read_text())
+    assert setup["modeling"]["gbm"]["device"] == "cpu"
+
+    study = SimpleNamespace(root=root)
+    assert gbm._gbm_execution_settings(study, {})[0] == "cpu"
+    assert gbm._gbm_execution_settings(study, {"device": "gpu"})[0] == "cuda"

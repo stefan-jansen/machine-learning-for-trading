@@ -525,6 +525,8 @@ def test_sequence_publishes_predictions_under_the_expected_key_names(entity) -> 
         entity_col=entity,
         expected_keys=expected_keys,
         label_col="fwd_ret_1d",
+        prediction_split="validation",
+        published_checkpoints=None,
     )
     published = []
 

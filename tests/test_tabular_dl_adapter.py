@@ -390,6 +390,8 @@ def test_tabm_publishes_predictions_under_the_expected_key_names(monkeypatch, en
         class_values=(),
         eval_label_col=None,
         label_col="fwd_ret_1d",
+        prediction_split="validation",
+        published_checkpoints=None,
     )
     published = []
 

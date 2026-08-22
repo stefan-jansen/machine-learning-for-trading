@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
-from case_studies.research import DecisionArtifact, OfficialPopulation, Study
+from case_studies.research import (
+    DecisionArtifact,
+    OfficialPopulation,
+    ResolvedModelRequest,
+    Study,
+)
 from case_studies.sp500_options._htm_backtest import (
     _compute_cohort_daily_pnl,
     _load_option_lifecycle,
@@ -14,7 +20,10 @@ from case_studies.sp500_options._htm_backtest import (
     run_htm_daily_mtm,
 )
 from case_studies.sp500_options.research_workflow import (
+    model_request_catalog,
+    open_study,
     publish_short_straddle_decisions,
+    resolved_model_plan,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -48,10 +57,19 @@ def _study(tmp_path: Path) -> Study:
     )
 
 
-def _prediction(study: Study):
-    spec = _resolved_spec()
+def _prediction(
+    study: Study,
+    *,
+    execution_tier: str = "canonical",
+    alpha: float = 1.0,
+):
+    spec = _resolved_spec(alpha=alpha)
     spec["label"] = "ret_to_expiry"
-    training = study.results.register_training(spec)
+    spec["execution_tier"] = execution_tier
+    if execution_tier == "preview":
+        spec["computation"]["preview_reductions"] = {"test_rows": 1}
+        study.activate("preview")
+    training = study.results.register_training(spec, execution_tier=execution_tier)
     frame = pl.DataFrame(
         {
             "symbol": ["A"],
@@ -69,6 +87,52 @@ def _prediction(study: Study):
         predictions=frame,
         expected_keys=frame.select("symbol", "timestamp", "fold"),
     )
+
+
+def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    expected = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "timestamp": [datetime(2024, 1, 5), datetime(2024, 1, 5)],
+            "fold": [0, 0],
+        }
+    )
+    spec = {
+        "identity_version": 2,
+        "execution_tier": "preview",
+        "family": "deep_learning",
+        "label": "ret_to_expiry",
+        "seed": 42,
+        "config_name": "nlinear",
+        "task": {"type": "regression", "class_values": []},
+        "feature_names": ["feature_a", "feature_b"],
+        "checkpoint_schedule": [{"kind": "epoch", "value": 5}],
+        "preview_reductions": {"max_symbols": 2},
+    }
+    request = ResolvedModelRequest(
+        study,
+        "deep_learning",
+        spec,
+        SimpleNamespace(expected_keys=expected),
+    )
+
+    plan = resolved_model_plan((request,))
+
+    assert plan.select(
+        "family", "config_name", "feature_count", "eligible_entities", "checkpoints"
+    ).row(0) == ("deep_learning", "nlinear", 2, 2, 1)
+
+
+def test_preview_study_activates_before_model_catalog_resolution(tmp_path: Path) -> None:
+    study = open_study(execution_tier="preview", workspace=tmp_path)
+
+    catalog = model_request_catalog("linear", config_names=["ridge_a1.0"])
+
+    assert study.output_root == tmp_path
+    assert catalog.to_dicts() == [
+        {"family": "linear", "label": "ret_to_expiry", "config_name": "ridge_a1.0"}
+    ]
 
 
 def _contract_returns() -> pl.DataFrame:
@@ -207,7 +271,7 @@ def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: P
         "date_start": "2024-01-02 00:00:00",
         "date_end": "2024-01-06 00:00:00",
     }
-    with pytest.raises(ValueError, match="preview.*cannot enter"):
+    with pytest.raises(ValueError, match="preview run cannot create an official population"):
         OfficialPopulation.create(
             study,
             name="real-preview-fixture-must-not-enter",
@@ -414,6 +478,10 @@ def test_reader_boundary_publishes_contracts_consumed_by_strategy(
     declared_inputs = canonical.spec["source_identity"]["declared_inputs"]
     assert declared_inputs["option_contract_returns"]
     assert "option_sources" not in declared_inputs
+    assert canonical.spec["source_identity"]["holdout_replay"] == {
+        "version": 1,
+        "function": "resolve_short_straddle_decisions",
+    }
 
 
 def test_typed_decision_runs_through_registered_option_backtest_path(
@@ -469,6 +537,137 @@ def test_typed_decision_runs_through_registered_option_backtest_path(
     assert spec["options_accounting"]["option_commission_per_contract"] == pytest.approx(0.65)
     assert spec["options_accounting"]["equity_commission_per_share"] == pytest.approx(0.005)
     assert spec["options_accounting"]["option_contract_multiplier"] == 100
+
+
+def test_preview_option_requests_resolve_preview_catalog_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.sp500_options import _htm_backtest, research_workflow
+    from case_studies.utils import cv_window
+
+    study = _study(tmp_path)
+    prediction = _prediction(study, execution_tier="preview")
+    labels_dir = study.root / "labels"
+    raw_dir = tmp_path / "raw"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    _write_raw_options(raw_dir)
+    monkeypatch.setattr(research_workflow, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(_htm_backtest, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(cv_window, "canonical_window", lambda *args, **kwargs: None)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    signal = {"method": "equal_weight_top_k", "top_k": 1}
+    decisions = research_workflow.resolve_short_straddle_decisions(
+        prediction,
+        prices=prices,
+        signal=signal,
+    )
+    monkeypatch.setattr(research_workflow, "load_backtest_prices_for", lambda *a, **k: prices)
+    monkeypatch.setattr(
+        research_workflow,
+        "_clean_replay_digests",
+        lambda *_args, **_kwargs: {"preview-top-1": value_digest(decisions)},
+    )
+    requests = strategy_request_frame(
+        [
+            {
+                "request_name": "preview-top-1",
+                "prediction_hash": prediction.hash,
+                "label": "ret_to_expiry",
+                "signal": signal,
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+            }
+        ]
+    )
+
+    execution = run_official_backtest_requests(study, requests, population_name=None)
+
+    assert execution.population is None
+    assert len(execution.results) == 1
+    assert execution.results[0].execution_tier == "preview"
+    assert execution.catalog_rows.item(0, "prediction_hash") == prediction.hash
+
+
+def test_option_request_fanout_preserves_each_prediction_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.sp500_options import _htm_backtest, research_workflow
+    from case_studies.utils import cv_window
+
+    study = _study(tmp_path)
+    predictions = (
+        _prediction(study, execution_tier="preview", alpha=1.0),
+        _prediction(study, execution_tier="preview", alpha=2.0),
+    )
+    labels_dir = study.root / "labels"
+    raw_dir = tmp_path / "raw"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    _write_raw_options(raw_dir)
+    monkeypatch.setattr(research_workflow, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(_htm_backtest, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(cv_window, "canonical_window", lambda *args, **kwargs: None)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    signal = {"method": "equal_weight_top_k", "top_k": 1}
+    digest = value_digest(
+        research_workflow.resolve_short_straddle_decisions(
+            predictions[0],
+            prices=prices,
+            signal=signal,
+        )
+    )
+    monkeypatch.setattr(research_workflow, "load_backtest_prices_for", lambda *a, **k: prices)
+    monkeypatch.setattr(
+        research_workflow,
+        "_clean_replay_digests",
+        lambda *_args, **_kwargs: {"first": digest, "second": digest},
+    )
+    requests = strategy_request_frame(
+        [
+            {
+                "request_name": name,
+                "prediction_hash": prediction.hash,
+                "label": "ret_to_expiry",
+                "signal": signal,
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+            }
+            for name, prediction in zip(("first", "second"), predictions, strict=True)
+        ]
+    )
+
+    execution = run_official_backtest_requests(study, requests, population_name=None)
+
+    assert len(execution.results) == 2
+    assert len({result.hash for result in execution.results}) == 2
+    assert {result.registry_record()["prediction_hash"] for result in execution.results} == {
+        prediction.hash for prediction in predictions
+    }
 
 
 def test_unsupported_option_overrides_fail_before_backtesting(

@@ -20,6 +20,7 @@ from tests.pm_helpers import (
     get_record_mode,
     get_reruns,
     get_tier,
+    injected_parameters,
     missing_required_env,
     research_preview_parameters,
     unusable_parameters,
@@ -1049,3 +1050,47 @@ def test_notebook_worker_caps_the_same_pools(tmp_path: Path, monkeypatch) -> Non
     )
 
     assert seen == dict.fromkeys(pm_helpers.KERNEL_THREAD_CAPS, pm_helpers.KERNEL_THREAD_CAP)
+
+
+def test_injected_parameters_drops_preview_reductions_on_a_canonical_run() -> None:
+    """A canonical run must not carry a preview-only parameter.
+
+    ``tests/generate_intermediates.py`` reads the same override entries with
+    ``research_preview=False``. The DML request builder rejects a canonical request that
+    declares reductions, so injecting them there fails at request construction.
+    """
+    declared = {"PREVIEW_REDUCTIONS": {"max_samples": 5000}, "MAX_SYMBOLS": 5}
+    resolved = injected_parameters(
+        Path("case_studies/cme_futures/11_causal_dml.py"),
+        declared,
+        None,
+        research_preview=False,
+    )
+    assert resolved == {"MAX_SYMBOLS": 5}
+    assert declared["PREVIEW_REDUCTIONS"] == {"max_samples": 5000}
+
+
+def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
+    parameters = {"MAX_SYMBOLS": 5, "TOP_K": 2}
+    assert (
+        injected_parameters(
+            Path("case_studies/cme_futures/13_backtest.py"),
+            parameters,
+            None,
+            research_preview=False,
+        )
+        == parameters
+    )
+
+
+def test_injected_parameters_keeps_preview_reductions_under_the_preview_tier(
+    tmp_path: Path,
+) -> None:
+    resolved = injected_parameters(
+        REPO_ROOT / "case_studies/cme_futures/11_causal_dml.py",
+        {"PREVIEW_REDUCTIONS": {"max_samples": 5000, "n_folds": 2}},
+        tmp_path,
+        research_preview=True,
+    )
+    assert resolved["PREVIEW_REDUCTIONS"]["max_samples"] == 5000
+    assert resolved["EXECUTION_TIER"] == "preview"

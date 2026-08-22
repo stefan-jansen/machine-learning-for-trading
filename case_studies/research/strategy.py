@@ -18,8 +18,12 @@ from case_studies.utils.backtest_loaders import (
     load_contract_specs_from_yaml,
     load_futures_market_contract,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
-from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.backtest_presets import (
+    build_backtest_spec,
+    serializable_backtest_spec,
+    strategy_view,
+)
+from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.conformal import (
     compute_holdout_conformal_widths,
     ensure_conformal_calibration_identity,
@@ -57,25 +61,42 @@ def _cadence_delta(value: str) -> timedelta:
     return timedelta(**{keyword: amount})
 
 
+def _last_at_or_before(timestamps: pl.Series, moment: object) -> object | None:
+    """The weight row in force at a moment on the observation grid."""
+    earlier = timestamps.filter(timestamps <= moment)
+    return earlier[-1] if earlier.len() else None
+
+
 def apply_state_transition_policy(
     weights: pl.DataFrame,
     *,
     policy: dict[str, str],
     cadence: str | None,
     price_keys: pl.DataFrame | None = None,
+    timeline: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Preserve targets while making fold and temporal state resets executable."""
+    """Preserve targets while making fold and temporal state resets executable.
+
+    `cadence` describes the timeline the policy is written against - the observation grid, not
+    the weight frame. For a decision artifact the two coincide, so `timeline` defaults to the
+    weights' own timestamps. For generated weights they do not: `precompute_weights` thins to
+    the non-overlapping rebalance schedule, so a label with `rebalance_step` 3 yields weights
+    24h apart under a declared 8h cadence and every ordinary rebalance would read as a gap.
+    Callers in that position pass the observation timeline explicitly.
+    """
     required = {"symbol", "timestamp", "weight"}
     missing = required - set(weights.columns)
     if missing:
         raise ValueError(f"decision weights are missing columns: {sorted(missing)}")
     if weights.is_empty():
         return weights
-    fold_column = "fold" if "fold" in weights.columns else None
+    source = weights if timeline is None else timeline
+    fold_column = "fold" if "fold" in source.columns else None
     timeline_columns = ["timestamp", *([fold_column] if fold_column else [])]
-    timeline = weights.select(*timeline_columns).unique().sort("timestamp")
+    timeline = source.select(*timeline_columns).unique().sort("timestamp")
     if fold_column and timeline.n_unique("timestamp") != timeline.height:
         raise ValueError("each decision timestamp must belong to exactly one fold")
+    weight_timestamps = weights.get_column("timestamp").unique().sort()
 
     temporal_action = policy.get("temporal_gap", "continue")
     expected = None
@@ -86,32 +107,75 @@ def apply_state_transition_policy(
 
     transition_at: set[object] = set()
     flat_frames: list[pl.DataFrame] = []
+    # A fold boundary and a temporal gap can resolve to the same off-grid moment. The on-grid
+    # path dedupes through `transition_at`; without this the flat-row path would append the row
+    # twice and `_target_weights_by_timestamp` rejects duplicate (symbol, timestamp) pairs, so
+    # the reset would abort the backtest instead of executing.
+    flat_moments: set[object] = set()
     price_timestamps = (
         set(price_keys.get_column("timestamp").unique().to_list())
         if price_keys is not None
         else set()
     )
+    weight_moments = set(weight_timestamps.to_list())
+
+    def _flat_row_at(moment: object, carried_from: object) -> pl.DataFrame:
+        return weights.filter(pl.col("timestamp") == carried_from).with_columns(
+            pl.lit(moment).cast(weights.schema["timestamp"]).alias("timestamp"),
+            pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
+        )
+
+    def _mark(moment: object, *, previous_moment: object, reason: str) -> None:
+        """Mark a declared reset at the moment it is declared for.
+
+        If the moment is on the weight grid, marking the row is enough. If it is not - which
+        happens whenever the weight frame is thinned relative to the observation grid - a
+        zero-weight row is inserted at that exact moment, carrying the position that was in
+        force. Snapping the mark forward to the next weight row instead would carry the old
+        state across the boundary and then collapse the liquidation into an ordinary rebalance
+        on the same bar, paying a round trip for no change in exposure.
+        """
+        if moment in weight_moments:
+            transition_at.add(moment)
+            return
+        held_at = _last_at_or_before(weight_timestamps, previous_moment)
+        if held_at is None or moment not in price_timestamps:
+            raise ValueError(
+                f"declared {reason} at {moment} cannot be represented on the weight grid"
+            )
+        if moment in flat_moments:
+            return
+        flat_moments.add(moment)
+        flat_frames.append(_flat_row_at(moment, held_at))
+
     rows = timeline.iter_rows(named=True)
     previous = next(rows, None)
     for current in rows:
         assert previous is not None
         fold_changed = fold_column is not None and current[fold_column] != previous[fold_column]
         if fold_changed and policy.get("fold_boundary", "continue") != "continue":
-            transition_at.add(current["timestamp"])
+            _mark(current["timestamp"], previous_moment=previous["timestamp"], reason="fold reset")
         if expected is not None and current["timestamp"] - previous["timestamp"] > expected:
             first_missing = previous["timestamp"] + expected
-            if first_missing in price_timestamps:
-                flat_frames.append(
-                    weights.filter(pl.col("timestamp") == previous["timestamp"]).with_columns(
-                        pl.lit(first_missing).cast(weights.schema["timestamp"]).alias("timestamp"),
-                        pl.lit(0.0).cast(weights.schema["weight"]).alias("weight"),
-                    )
-                )
+            held_at = _last_at_or_before(weight_timestamps, previous["timestamp"])
+            if first_missing in price_timestamps and held_at is not None:
+                if first_missing not in flat_moments:
+                    flat_moments.add(first_missing)
+                    flat_frames.append(_flat_row_at(first_missing, held_at))
             else:
-                transition_at.add(current["timestamp"])
+                _mark(
+                    current["timestamp"],
+                    previous_moment=previous["timestamp"],
+                    reason="temporal-gap reset",
+                )
         previous = current
+    transition_values = pl.Series(
+        "_transition_timestamp",
+        list(transition_at),
+        dtype=weights.schema["timestamp"],
+    )
     result = weights.with_columns(
-        pl.col("timestamp").is_in(list(transition_at)).alias("_state_transition")
+        pl.col("timestamp").is_in(transition_values.implode()).alias("_state_transition")
     )
     if flat_frames:
         result = pl.concat(
@@ -506,6 +570,57 @@ class Strategy:
             selected.append("_state_transition")
         return weights.select(*selected)
 
+    def _risk_state_weights(
+        self,
+        predictions: pl.DataFrame,
+        prices: pl.DataFrame,
+        strategy_spec: dict[str, Any],
+    ) -> pl.DataFrame | None:
+        risk = strategy_view(strategy_spec).get("risk") or {}
+        policy = risk.get("state_transition_policy")
+        if policy is None or self.decision is not None:
+            return None
+        if not isinstance(policy, dict):
+            raise TypeError("risk state-transition policy must be a mapping")
+        from .decisions import StateTransitionPolicy
+
+        policy = asdict(StateTransitionPolicy(**policy))
+        cadence = risk.get("state_transition_cadence")
+        if cadence is None:
+            raise ValueError("risk state-transition policy requires an explicit cadence")
+        weights = precompute_weights(
+            predictions,
+            strategy_spec,
+            prices,
+            label=self.label,
+            case_study=self.study.case_study,
+            prediction_hash=self.prediction.hash,
+        )
+        fold_columns = [column for column in ("fold", "fold_id") if column in predictions.columns]
+        if len(fold_columns) != 1:
+            raise ValueError("stateful strategy predictions require exactly one fold column")
+        fold_map = predictions.select("timestamp", fold_columns[0]).unique()
+        if fold_map.get_column("timestamp").n_unique() != fold_map.height:
+            raise ValueError("each stateful strategy timestamp must belong to exactly one fold")
+        if fold_columns[0] == "fold_id":
+            fold_map = fold_map.rename({"fold_id": "fold"})
+        fold_map = fold_map.with_columns(pl.col("timestamp").cast(weights.schema["timestamp"]))
+        weights = weights.join(fold_map, on="timestamp", how="left", validate="m:1")
+        if weights.get_column("fold").null_count():
+            raise ValueError("stateful strategy weights contain timestamps without a fold")
+        return apply_state_transition_policy(
+            weights,
+            policy=policy,
+            cadence=str(cadence),
+            price_keys=prices.select("symbol", "timestamp")
+            .unique()
+            .with_columns(pl.col("timestamp").cast(weights.schema["timestamp"])),
+            # The declared cadence describes the observation grid. precompute_weights thins to
+            # the rebalance schedule, so for a label with rebalance_step > 1 the weight frame is
+            # coarser than the cadence and every ordinary rebalance would read as a gap.
+            timeline=fold_map.sort("timestamp"),
+        )
+
     def identity(self, *, prices: pl.DataFrame | None = None) -> str:
         spec = self.resolve(prices=prices)
         return backtest_hash_from_parts(self.prediction.hash, spec, identity_version=2)
@@ -554,13 +669,16 @@ class Strategy:
             )
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
+        decision_weights = self._decision_weights(resolved_prices)
+        if decision_weights is None:
+            decision_weights = self._risk_state_weights(predictions, resolved_prices, spec)
         result = run_backtest(
             self.study.case_study,
             self.prediction.hash,
             spec,
             prices=resolved_prices,
             predictions=predictions,
-            precomputed_weights=self._decision_weights(resolved_prices),
+            precomputed_weights=decision_weights,
             funding_rates=self._funding_rates(resolved_prices),
             label=self.label,
             initial_cash=float(spec["backtest_config"]["cash"]["initial"]),
