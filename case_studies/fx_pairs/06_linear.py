@@ -120,20 +120,6 @@ study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPAC
 # %%
 declared_labels(study, "linear")
 
-# %% [markdown]
-# A run that narrows `LABELS` fits a different set of members than the canonical population
-# declares, and a population is immutable once written, so it must publish under its own name.
-# Asking for that here rather than at the run is the difference between a message naming the
-# parameter and a refusal from the registry several cells later.
-
-# %%
-declared = declared_labels(study, "linear")
-fitted_labels = tuple(LABELS) or declared
-if set(fitted_labels) != set(declared) and not POPULATION_NAME:
-    raise ValueError(
-        f"LABELS={list(fitted_labels)} is a subset of what the menus declare, so this run cannot "
-        "publish the canonical population; pass POPULATION_NAME to give it its own"
-    )
 
 # %% [markdown]
 # Each name in the menu resolves to a preset file in the shared directory
@@ -161,10 +147,25 @@ if set(fitted_labels) != set(declared) and not POPULATION_NAME:
 configs = load_model_configs(
     study,
     "linear",
-    labels=fitted_labels,
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name: on a fresh workspace it would otherwise register an
+# incomplete snapshot under the canonical one, and where the full population already exists the
+# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
+# either knob, and says so here rather than several cells later in a message about hashes.
+
+# %%
+if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
+        "the canonical population; pass POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -361,6 +362,16 @@ catalog.select(
 )
 
 # %% [markdown]
+# The configurations left out of the charts below, with the number of dates each was measured on
+# against its label's maximum. An empty frame means every configuration scored every date its
+# label offered.
+
+# %% tags=["results"]
+catalog.with_columns(label_dates=pl.col("ic_n_days").max().over("label")).filter(
+    ~pl.col("full_coverage")
+).select("label", "config_name", "model_class", "ic_mean", "ic_n_days", "label_dates")
+
+# %% [markdown]
 # ### What each horizon reached
 #
 # One row per label, over the configurations that horizon actually charted. It is the frame the
@@ -475,8 +486,8 @@ fig_ic.update_layout(
 )
 show_plotly_with_alt(
     fig_ic,
-    f"Three stacked bar charts of mean validation information coefficient across the linear "
-    f"penalty grid, one panel per label and the configurations in the same order in each, that "
+    f"Stacked bar charts of mean validation information coefficient across the linear penalty "
+    f"grid, one panel per label and the configurations in the same order in each, that "
     f"order being their ranking on {order_label}. Each panel carries a dashed zero line. The "
     f"highest "
     f"bar anywhere is {leader['config_name']} ({compact(leader['params'])}) on {leader['label']} "
@@ -619,17 +630,22 @@ else:
 # stronger evidence for that mechanism than one label showing it, because the three do not share
 # a target: only the features and the folds are common to them.
 #
-# **The horizon changes the size of the result by more than the penalty does.** Read `best_ic`
-# down the horizons frame: the best full-coverage configuration at 21 days reaches several times
-# what the best one at one day reaches, from the same features, the same folds and the same
-# universe. The one-day horizon is the one the strategy chapters trade, so the case study leads
-# with its weakest label. That is worth knowing before reading any later number, and it is a
-# property of the horizon rather than of anything chosen here.
+# **The best result a horizon reaches rises several-fold with the horizon.** Read `best_ic` down
+# the horizons frame: the best full-coverage configuration at 21 days reaches several times what
+# the best one at one day reaches, from the same features, the same folds and the same universe.
+# `above_zero` moves the same way. The one-day horizon is the one the strategy chapters trade, so
+# the case study leads with its weakest label. That is worth knowing before reading any later
+# number, and it is a property of the horizon rather than of anything chosen here.
 #
-# The comparison is between full-coverage configurations on both sides. At five days the two
-# most aggressive L1 settings post a higher IC than any charted configuration does, on 1,543 of
-# the label's 2,059 dates rather than all of them, and taking that number as the horizon's
-# result would compare a selected subsample against two full ones.
+# It does not follow that the horizon matters more than the penalty. On the frame's own numbers
+# the 21-day grid spans a wider range from `worst_ic` to `best_ic` than separates the best 21-day
+# configuration from the best one-day configuration. Both choices move the result by more than
+# the result itself is worth, which is the reading to take rather than a ranking between them.
+#
+# The comparison is between full-coverage configurations on both sides. At five days the two most
+# aggressive L1 settings post a higher IC than any charted configuration does, on the smaller
+# number of dates the partial-coverage frame above reports, and taking that number as the
+# horizon's result would compare a selected subsample against two full ones.
 #
 # **The horizons agree on the direction and disagree on the detail.** The first panel descends
 # by construction, since it defines the order; the point is what the other two do under that

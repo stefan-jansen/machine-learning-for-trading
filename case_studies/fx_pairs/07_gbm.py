@@ -114,20 +114,6 @@ study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPAC
 # %%
 declared_labels(study, "gbm")
 
-# %% [markdown]
-# A run that narrows `LABELS` fits a different set of members than the canonical population
-# declares, and a population is immutable once written, so it must publish under its own name.
-# Asking for that here rather than at the run is the difference between a message naming the
-# parameter and a refusal from the registry several cells later.
-
-# %%
-declared = declared_labels(study, "gbm")
-fitted_labels = tuple(LABELS) or declared
-if set(fitted_labels) != set(declared) and not POPULATION_NAME:
-    raise ValueError(
-        f"LABELS={list(fitted_labels)} is a subset of what the menus declare, so this run cannot "
-        "publish the canonical population; pass POPULATION_NAME to give it its own"
-    )
 
 # %% [markdown]
 # Each label's menu at `config/training/{label}.yaml` lists 15 named configurations under `gbm:`,
@@ -149,10 +135,25 @@ if set(fitted_labels) != set(declared) and not POPULATION_NAME:
 configs = load_model_configs(
     study,
     "gbm",
-    labels=fitted_labels,
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name: on a fresh workspace it would otherwise register an
+# incomplete snapshot under the canonical one, and where the full population already exists the
+# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
+# either knob, and says so here rather than several cells later in a message about hashes.
+
+# %%
+if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
+        "the canonical population; pass POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -390,15 +391,16 @@ fig_curves.update_layout(
 )
 show_plotly_with_alt(
     fig_curves,
-    "Three stacked line charts of mean validation information coefficient against boosting "
-    "iteration, one panel per label, with one line per configuration coloured by loss function: "
+    "Stacked line charts of mean validation information coefficient against boosting iteration, "
+    "one panel per label, with one line per configuration coloured by loss function: "
     "blue for squared error, amber for absolute error, copper for Huber. Each panel carries a "
     "dashed zero line. The lines start spread out at fifty trees and cross each other repeatedly "
     "rather than rising to a common peak and falling away. In the one-day and 21-day panels the "
     "band drifts downwards as trees are added; in the five-day panel it stays where it started. "
-    "A few one-day curves are above the zero line at the earliest checkpoints and none is by the "
-    "last. In every panel the blue squared-error lines end lowest, though they are not lowest "
-    "throughout: one of them starts at the top of the 21-day panel.",
+    "A few one-day curves are above the zero line at the earliest checkpoints and two are still "
+    "above it at the last. Averaged over its five configurations the blue squared-error group "
+    "ends lowest in every panel, but individual blue lines are not: one starts at the top of the "
+    "21-day panel and another ends above zero there.",
 )
 
 # %% [markdown]
@@ -506,7 +508,7 @@ fig_obj.update_layout(
 )
 show_plotly_with_alt(
     fig_obj,
-    "Three stacked bar charts of mean validation information coefficient at the final boosting "
+    "Stacked bar charts of mean validation information coefficient at the final boosting "
     "iteration, one panel per label, coloured by loss function: blue for squared error, amber for "
     "absolute error, copper for Huber. The configurations are in the same order in each panel, "
     f"that order being their ranking on {order_label}, and each panel carries a dashed zero "
@@ -551,23 +553,28 @@ objective_summary
 #
 # The label artifact on disk runs to the end of the data, holdout included. Measuring across all
 # of it would put a statistic computed partly on sealed outcomes into a validation-stage
-# notebook, so the rows are cut at `validation_end` - the same development boundary the fits
-# above were resolved against, taken from the plan rather than re-derived.
+# notebook, so each label's rows are cut at its own `validation_end` - the same development
+# boundary its fits were resolved against, taken from the plan rather than re-derived. The
+# boundaries differ by label, and `development_end` in the frame below is where each one falls.
 
 # %% tags=["results"]
-development_end = plan.get_column("validation_end").max()
+# Each label has its own development boundary, because a longer forward window has to stop
+# earlier to keep its outcome inside the development period. One global maximum would cut the
+# 21-day label at the one-day label's date and leave decision dates whose forward window ends
+# inside the holdout.
+development_end = dict(plan.group_by("label").agg(pl.col("validation_end").max()).iter_rows())
 tails = pl.DataFrame(
     [
         {
             "label": label,
-            "development_end": development_end,
+            "development_end": development_end[label],
             "rows": measured.height,
             "excess_kurtosis": measured.get_column(label).kurtosis(),
         }
         for label in panel_labels
         for measured in [
             pl.read_parquet(study.labels.get(label).path)
-            .filter(pl.col("timestamp") <= development_end)
+            .filter(pl.col("timestamp") <= development_end[label])
             .drop_nulls(label)
         ]
     ]
@@ -636,11 +643,17 @@ spread.group_by("label", maintain_order=True).head(5)
 #
 # **More trees do not help, and at two of the three horizons they hurt.** The `trees_effect` frame
 # is the measurement: at one day and 21 days the median configuration ends below where it started
-# and two thirds of them end lower, while at five days the median configuration ends where it started, to
-# five decimal places. What no horizon shows is the shape of a model still learning - a rise to a peak and a fall
-# away. Roughly half the configurations peak at an interior checkpoint at every horizon, which is
-# what scattering ten noisy readings along an axis produces, not what an optimum produces. There
-# is nothing here for a stopping rule to find.
+# and two thirds of them end lower, while at five days the median configuration ends where it
+# started, to five decimal places. What no horizon shows is the shape of a model still learning -
+# a rise to a peak and a fall away.
+#
+# `interior_peaks` is worth reading against the right baseline. With ten checkpoints and no trend
+# at all, the best of ten readings falls on one of the eight interior positions four times out of
+# five, so scattered noise would put about twelve of fifteen configurations there. Seven, eight
+# and eight is well under that: the peaks sit at the ends more often than noise would put them,
+# which is what a drifting curve does rather than what an optimum does. Taken with the median
+# change, the reading is that these curves trend rather than turn, and there is nothing here for
+# a stopping rule to find.
 #
 # **Squared error is last at every horizon; which of the other two leads is not stable.** Read
 # `objective_summary`: by mean IC at the final iteration, `mse` is bottom of all three labels and
