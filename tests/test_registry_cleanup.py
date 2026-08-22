@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -166,3 +167,79 @@ def test_non_finite_fold_is_rejected_before_registry_or_artifact_write(
         assert db.execute("SELECT COUNT(*) FROM prediction_sets").fetchone()[0] == 0
     predictions_dir = tmp_path / "run_log" / "predictions"
     assert not predictions_dir.exists() or not any(predictions_dir.iterdir())
+
+
+def _seed_prediction_store(case_dir: Path, rows: list[tuple[str, int | None]]) -> None:
+    """Write a minimal training_runs/prediction_sets pair, one row per (hash, identity).
+
+    ``identity`` of None writes NULL, which is what a row created before the field
+    existed carries.
+    """
+    db_path = case_dir / "run_log" / "registry.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    pred_dir = case_dir / "run_log" / "predictions"
+    db = sqlite3.connect(db_path)
+    db.executescript(
+        """
+        CREATE TABLE training_runs (
+            training_hash TEXT PRIMARY KEY, family TEXT NOT NULL, label TEXT NOT NULL,
+            config_name TEXT, spec_json TEXT, created_at TEXT NOT NULL,
+            git_commit TEXT, entry_point TEXT, identity_version INTEGER
+        );
+        CREATE TABLE prediction_sets (
+            prediction_hash TEXT PRIMARY KEY,
+            training_hash TEXT NOT NULL REFERENCES training_runs(training_hash),
+            checkpoint_value INTEGER, checkpoint_kind TEXT,
+            split TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE prediction_metrics (
+            prediction_hash TEXT PRIMARY KEY, computed_at TEXT, ic_mean REAL
+        );
+        CREATE TABLE fold_metrics (
+            prediction_hash TEXT NOT NULL, fold INTEGER NOT NULL, ic REAL
+        );
+        """
+    )
+    for t_hash, identity in rows:
+        p_hash = f"pred_{t_hash}"
+        db.execute(
+            "INSERT INTO training_runs VALUES (?,?,?,?,?,?,?,?,?)",
+            (t_hash, "linear", "fwd_ret_1m", t_hash, "{}", "2026-01-01", "c", "e", identity),
+        )
+        db.execute(
+            "INSERT INTO prediction_sets VALUES (?,?,?,?,?,?)",
+            (p_hash, t_hash, 100, "final", "validation", "2026-01-01"),
+        )
+        db.execute("INSERT INTO prediction_metrics VALUES (?,?,?)", (p_hash, "2026-01-01", 0.01))
+        target = pred_dir / p_hash
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "predictions.parquet").write_bytes(b"")
+    db.commit()
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected", "why"),
+    [
+        ([("a", None), ("b", None)], 2, "one generation, all pre-field"),
+        ([("a", 3), ("b", 3)], 2, "one generation, all current"),
+        ([("a", 3), ("b", None)], 1, "two generations, only the current one survives"),
+    ],
+)
+def test_the_identity_filter_applies_only_when_the_store_spans_generations(
+    tmp_path: Path, rows: list[tuple[str, int | None]], expected: int, why: str
+) -> None:
+    """A store holding one generation is not something a query can select across.
+
+    The filter exists to stop a backtest comparing models fitted under different identity
+    rules. Applied unconditionally it instead empties every registry whose rows predate the
+    field, which is every seeded fixture and every reader's existing run log: three
+    case-study CI jobs went from green to "No predictions found" in the backtest downstream
+    of the model stage, and no reader would have got a different answer.
+    """
+    from case_studies.utils.registry import queries
+
+    case_dir = tmp_path / "somecase"
+    _seed_prediction_store(case_dir, rows)
+    df = queries.load_prediction_index("somecase", case_dir=case_dir)
+    assert df.height == expected, why

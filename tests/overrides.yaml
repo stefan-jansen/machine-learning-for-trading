@@ -1,3 +1,18 @@
+# Fourteen model-execution blocks here used to declare MAX_FOLDS and MAX_SYMBOLS. The
+# notebooks moved their reduction to the shared boundary, which reads PREVIEW_REDUCTIONS,
+# so those two names reached nothing and the runs they described as reduced ran in full.
+# They now declare no parameters, which is what is true: this job runs them unreduced.
+#
+# Declaring the reduction properly is not a drop-in replacement, and the attempt is on
+# record. The boundary accepts a reduction only under EXECUTION_TIER: preview, and a
+# preview writes to a throwaway workspace and is barred from official populations - so
+# the next notebook in the same pipeline finds no predictions and the whole case-study
+# job fails downstream of the reduced stage. max_symbols: 5 also cuts the cross-section
+# hard enough that cme_futures fold 4 loses two feature columns entirely, and the
+# notebook correctly refuses. Reducing a stage whose output the next stage consumes
+# needs a canonical-tier reduction, which does not exist yet.
+# tests/test_pm_helpers.py::test_every_declared_parameter_reaches_its_notebook is the
+# gate that stops a dead parameter being declared here again.
 02_financial_data_universe/01_us_equities_eda:
   timeout: 180
 02_financial_data_universe/02_corporate_actions:
@@ -1176,30 +1191,27 @@ case_studies/cme_futures/05_evaluation:
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
 case_studies/cme_futures/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/cme_futures/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
-  parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+  gpu: true
+    # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
+    # This notebook plans through the shared catalog and reads none of them, so setting them
+    # reduced nothing while the override file said it had. Its only scale control is
+    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
+    # populations and so fails the next notebook in the pipeline. The CI fixture is the
+    # reduction here.
+  timeout: 300
 case_studies/cme_futures/09_dl_lstm:
-  parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+  gpu: true
+    # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
+    # This notebook plans through the shared catalog and reads none of them, so setting them
+    # reduced nothing while the override file said it had. Its only scale control is
+    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
+    # populations and so fails the next notebook in the pipeline. The CI fixture is the
+    # reduction here.
+  timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
 case_studies/cme_futures/10b_stochastic_discount_factor:
@@ -1207,11 +1219,17 @@ case_studies/cme_futures/10b_stochastic_discount_factor:
   skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
 case_studies/cme_futures/11_causal_dml:
   parameters:
-    CV_FOLDS: 2
-    MAX_SAMPLES: 5000
-    MAX_SYMBOLS: 5
-    N_PLACEBO: 10
-  timeout: 120
+    # The DML resolver requires every one of its four preview fields, not merely a non-empty
+    # mapping, because omitting max_samples would resolve the full population under a preview
+    # tier - an uncapped preview. The pre-migration names CV_FOLDS, MAX_SAMPLES, MAX_SYMBOLS and
+    # N_PLACEBO reached nothing once this notebook moved to PREVIEW_REDUCTIONS; their values are
+    # carried across here, where they arrive.
+    PREVIEW_REDUCTIONS:
+      max_samples: 5000
+      max_symbols: 5
+      n_folds: 2
+      n_placebo: 10
+  timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
 case_studies/cme_futures/13_backtest:
@@ -1263,48 +1281,43 @@ case_studies/crypto_perps_funding/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/crypto_perps_funding/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/crypto_perps_funding/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/crypto_perps_funding/08_tabular_dl:
   gpu: true
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration knobs. This notebook
+    # now plans through the shared catalog and reads none of them, so setting them reduced nothing
+    # and CI ran the full population believing it had not. LABELS is what it reads.
+    LABELS:
+    - fwd_ret_8h
   timeout: 180
 case_studies/crypto_perps_funding/09_dl_lstm:
   gpu: true
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    LABELS:
+    - fwd_ret_8h
   timeout: 180
 case_studies/crypto_perps_funding/10_dl_tcn:
   gpu: true
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    LABELS:
+    - fwd_ret_8h
   timeout: 180
 case_studies/crypto_perps_funding/11_causal_dml:
   parameters:
-    CV_FOLDS: 2
-    MAX_SAMPLES: 5000
-    MAX_SYMBOLS: 5
-    N_PLACEBO: 10
-  timeout: 120
+    # The DML resolver requires every one of its four preview fields, not merely a non-empty
+    # mapping: omitting max_samples would resolve the full population under a preview tier. The
+    # pre-migration names CV_FOLDS, MAX_SAMPLES, MAX_SYMBOLS and N_PLACEBO reached nothing once
+    # this notebook moved to PREVIEW_REDUCTIONS; their values are carried across here.
+    LABEL: fwd_ret_8h
+    PREVIEW_REDUCTIONS:
+      max_samples: 5000
+      max_symbols: 5
+      n_folds: 2
+      n_placebo: 10
+  timeout: 300
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
 case_studies/crypto_perps_funding/13_backtest:
@@ -1354,14 +1367,8 @@ case_studies/etfs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/etfs/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/etfs/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/etfs/08_tabular_dl:
   parameters:
@@ -1466,14 +1473,8 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/fx_pairs/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1558,9 +1559,6 @@ case_studies/nasdaq100_microstructure/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
@@ -1654,21 +1652,8 @@ case_studies/sp500_equity_option_analytics/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/06_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/sp500_equity_option_analytics/07_gbm:
-  # This case study declares modeling.gbm.device: cuda in its setup.yaml, and the
-  # notebook resolves DEVICE from there rather than from a parameter, so no
-  # override can route it to CPU. Same treatment as the us_firm GPU notebooks
-  # (#415) and the crypto training notebooks: marked GPU-only so a CPU runner
-  # skips it instead of failing on the CUDA guard. Nothing downstream in this
-  # pipeline depends on its predictions - 08 through 18 pass without it.
-  gpu: true
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
   parameters:
@@ -1816,9 +1801,6 @@ case_studies/sp500_options/05_evaluation:
 case_studies/sp500_options/06_linear:
   timeout: 120
 case_studies/sp500_options/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   parameters:
@@ -1906,11 +1888,19 @@ case_studies/us_equities_panel/05_evaluation:
   timeout: 300
 case_studies/us_equities_panel/06_linear:
   parameters:
+    # A reduction is only legal under the preview tier: the canonical branch refuses to
+    # declare one, and it opens the study against the published release root rather than
+    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
+    EXECUTION_TIER: preview
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
   timeout: 120
 case_studies/us_equities_panel/07_gbm:
   parameters:
+    # A reduction is only legal under the preview tier: the canonical branch refuses to
+    # declare one, and it opens the study against the published release root rather than
+    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
+    EXECUTION_TIER: preview
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
   timeout: 180
@@ -2017,14 +2007,8 @@ case_studies/us_firm_characteristics/04_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 120
 case_studies/us_firm_characteristics/06_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device

@@ -2,6 +2,9 @@
 
 # Environment and secrets
 .env
+.env.*
+# .env.example is tracked and documents the variables; keep it out of the sweep above.
+!.env.example
 .env.local
 .env.*.local
 
@@ -133,18 +136,35 @@ tests/notebook_catalog.db
 # from the wrong cwd can drop an empty one at this repo root. Never track it.
 test_status.db
 
-# Pipeline artifacts (case study outputs — generated, not tracked)
+# Pipeline artifacts (case study outputs - generated, not tracked)
+#
+# Each name is listed twice, with and without the trailing slash, and both forms are
+# needed. The slashed form matches a directory; a symlink to a directory is a symlink,
+# not a directory, so it does not match. Several of these arrive as symlinks to a shared
+# artifact store outside the repository, and without the bare form git offers to commit
+# an absolute machine-specific path.
 case_studies/*/features/
+case_studies/*/features
 case_studies/*/labels/
+case_studies/*/labels
 case_studies/*/models/
+case_studies/*/models
 case_studies/*/synthesis/
+case_studies/*/synthesis
 case_studies/*/backtest/
+case_studies/*/backtest
 case_studies/*/strategy/
+case_studies/*/strategy
 case_studies/*/evaluation/
+case_studies/*/evaluation
 case_studies/*/exploration/
+case_studies/*/exploration
 case_studies/*/registry.db
 case_studies/*/results/
 case_studies/*/*_v1_contaminated/
+# Prepared cross-validation folds: a cache addressed by the inputs it was built from and
+# rebuilt on demand. See case_studies/utils/folds.py.
+case_studies/*/folds/
 
 # Unified registry and run artifacts — all gitignored
 # registry.db is SSOT but too large for git (43-180 MB per case study)

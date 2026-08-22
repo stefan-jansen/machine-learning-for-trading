@@ -14,1146 +14,602 @@
 # ---
 
 # %% [markdown]
-# # Linear Models - S&P 500 Equity Straddles
+# # Short straddles: when the loss you minimize is not the metric you are judged on
 #
-# S&P 500 equity options give the widest cross-section in the book: individual
-# equity straddles carrying 52 features (47 financial features from
-# `03_financial_features`, 4 GARCH/SV features from `04_model_based_features`,
-# and calendar days to expiry from `02_labels`).
-# The label is the return to expiry (`ret_to_expiry`), and the prediction problem is
-# which stocks' options are mispriced relative to realized volatility. Linear models
-# test whether systematic variance-risk-premium (VRP) patterns are detectable with
-# simple regularized regression before the non-linear models that follow.
+# The position in this case study is a short at-the-money straddle with about a month to expiry:
+# sell the call and the put, collect both premiums, and keep what is left when the options expire.
+# It is the canonical short-volatility trade, and its payoff is asymmetric in a way that matters
+# for everything below. **The most it can earn is the premium it collected, so the return has a
+# hard ceiling. What it can lose has no bound at all, because the underlying can move as far as it
+# likes.** In this sample the position finishes ahead more often than not, with a typical winning
+# outcome a fraction of the premium and the worst outcomes many multiples of it.
 #
-# **Learning Objectives**:
-# - Quantify linear predictability of return-to-expiry from IV and VRP features
-# - Compare L1 (Lasso) vs L2 (Ridge) regularization on a dense, correlated feature set
-# - Assess fold stability across the two walk-forward validation folds
-# - Generate backtesting-ready predictions for downstream Ch16 simulation
+# That shape sets up the pedagogical question this notebook exists to answer. A linear regression
+# fits by **minimizing squared error**: it chooses coefficients that make its predicted return as
+# close as possible to the realized one, and an observation twice as far away counts four times as
+# much. The metric this notebook reports is the **information coefficient**, a rank correlation:
+# it asks only whether the positions were put in the right order, and treats a loss of twenty
+# percent and a loss of nine thousand percent as adjacent. On a symmetric, well-behaved target
+# those two agree closely enough that the distinction is academic. On this one they do not, and
+# section 5 reads the results in that light.
 #
-# **Book Reference**: Chapter 11, Section 11.2 (Regularized Linear Models)
+# The features describe the position and the volatility surface it is written on: the greeks, the
+# implied volatility and its momentum, realized volatility at five horizons, the variance risk
+# premium at five more, the bid-ask spread, and how far the strike sits from spot. Many of them
+# are near-duplicates of one another, so the penalty sweep has the same job here as in every other
+# case study. **Regularization** adds a penalty on coefficient size to the fitting objective, and
+# how much to apply is an empirical question this notebook answers by trying ten orders of
+# magnitude of it.
 #
-# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) (47 features), [`04_model_based_features`](04_model_based_features.ipynb) (4 GARCH/SV features)
+# Two folds, validating on 2019 and 2020. The second is a year in which a short-volatility
+# position experienced the event it exists to be paid for.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Read the set of models a case study has declared for a label, and say which estimator and
+#   which hyperparameters each declared name resolves to.
+# - Bind those declarations to the data on disk and check, before anything is fitted, that every
+#   configuration will be measured on the same positions, the same dates and the same folds.
+# - Fit a population of models on walk-forward folds and publish one complete set of validation
+#   predictions per configuration.
+# - Describe the payoff of a short option position and say why squared-error loss and a rank
+#   correlation can disagree about the same model.
+# - Recognise when a modelling result is telling you about the target rather than about the
+#   features.
+# - Run configurations of your own into a private copy of the run log, and have them compared on
+#   the same footing as the ones shipped here.
+#
+# **Book reference**: Chapter 11 (The ML Pipeline). Chapter 6, Section 6.7 (Search accounting and
+# run logging) introduces the run log this notebook writes to.
+#
+# **Prerequisites**: [`02_labels`](02_labels.ipynb) has constructed the straddle returns,
+# [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# and [`05_evaluation`](05_evaluation.ipynb) has established the walk-forward folds.
+#
+# **What it writes**: one training run and one complete validation prediction set per
+# configuration, in `run_log/registry.db` and under `run_log/training/` and
+# `run_log/predictions/`, grouped under a named population.
+# [`12_backtest`](12_backtest.ipynb) reads that population, runs every member against the
+# equal-weight baseline, and selects on validation backtest Sharpe. **Selection happens there,
+# not here.** This notebook ranks configurations by information coefficient to show what
+# regularization does to this feature set; that ranking decides nothing.
 
 # %%
-"""Linear Models - walk-forward cross-validation."""
+"""Fit the declared short-straddle linear-model population on the walk-forward folds."""
 
-import hashlib
-import os
-import time
-import warnings
-from datetime import UTC, datetime
-from pathlib import Path
+import re
 
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
-import yaml
-from IPython.display import Markdown, display
-from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_series
-from scipy.stats import norm
-from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
 
-# %%
-from case_studies.utils.registry import (
-    build_training_spec,
-    load_prediction_metrics,
-    load_prediction_sets,
-    prediction_hash_from_parts,
-    register_prediction_set,
-    register_training_run,
-    training_hash_from_spec,
-    training_run_status,
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    narrows_declared_catalog,
+    open_study,
+    primary_label,
+    resolved_model_plan,
+    run_model_population,
 )
-from utils.artifact_specs import load_feature_spec, load_label_spec, resolve_storage_path
-from utils.cv_splits import generate_cv_splits
-from utils.modeling import (
-    ConfigError,
-    load_configs,
-    load_modeling_dataset,
-    prepare_cv_folds,
-    resolve_linear_params,
-)
-from utils.paths import get_case_study_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
+
+# %% tags=["parameters"]
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+CONFIG_NAMES: list[str] = []
+POPULATION_NAME = ""
 
 # %%
-SEED = 42
-CASE_STUDY_ID = "sp500_options"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-TRAINING_IDENTITY_VERSION = "sp500-options-linear-v3"
-TRAIN_SAMPLE_FRAC = 1.0  # <1.0 subsamples training rows per fold (val is never sampled). Use for memory-constrained runs on large datasets.
-MAX_FOLDS = 0
-IC_DEPENDENCE_SESSIONS = 21
-IC_HAC_LAG = IC_DEPENDENCE_SESSIONS - 1
-IC_UNCERTAINTY_ALIASES = {
-    "mean_ic": "ic_mean_daily",
-    "std_ic": "ic_std_daily",
-    "n_days": "ic_n_days",
-    "pct_positive": "ic_pct_positive",
-    "se_naive": "ic_se_naive",
-    "ci_naive_lower": "ic_naive_lo",
-    "ci_naive_upper": "ic_naive_hi",
-    "se_hac": "ic_se_hac",
-    "ci_hac_lower": "ic_ci_lo",
-    "ci_hac_upper": "ic_ci_hi",
-    "t_hac": "ic_t_hac",
-    "p_hac": "ic_p_hac",
-    "hac_lag": "ic_hac_lag",
-    "ci_boot_lower": "ic_boot_lo",
-    "ci_boot_upper": "ic_boot_hi",
-    "boot_block_size": "ic_boot_block",
-}
-
-warnings.filterwarnings("ignore")
-set_global_seeds(SEED)
-
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-if not PRIMARY_LABEL:
-    setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-    PRIMARY_LABEL = setup["labels"]["primary"]
+study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# During preservation runs, the frozen registry remains read-only. The output
-# tree must be a real directory hierarchy, not a symlink or hard-link alias to
-# any canonical registry path.
-
-
-# %%
-def _same_inode(left: Path, right: Path) -> bool:
-    """Return whether two existing paths address the same filesystem object."""
-    return left.exists() and right.exists() and os.path.samefile(left, right)
-
-
-# %%
-def _assert_isolated_path(path: Path, root: Path, canonical: Path) -> None:
-    """Reject symlink, escape, and hard-link aliases for one write path."""
-    if path.is_symlink():
-        raise RuntimeError(f"Isolated write path is a symlink: {path.name}")
-    resolved = path.resolve()
-    if resolved != root and root not in resolved.parents:
-        raise RuntimeError(f"Isolated write path resolves outside ML4T_OUTPUT_DIR: {path.name}")
-    if path.is_file() and path.stat().st_nlink > 1:
-        raise RuntimeError(f"Isolated regular file has multiple hard links: {path.name}")
-    if _same_inode(path, canonical):
-        raise RuntimeError(f"Isolated write path aliases the canonical registry: {path.name}")
-
-
-# %%
-def _require_isolated_registry(case_dir: Path) -> None:
-    """Fail closed when a preservation run could reach the frozen registry."""
-    if os.environ.get("ML4T_PRESERVE_REGISTRY") != "1":
-        return
-    output_root = os.environ.get("ML4T_OUTPUT_DIR")
-    if not output_root:
-        raise RuntimeError("Preservation runs require ML4T_OUTPUT_DIR")
-    expected = Path(output_root).absolute() / CASE_STUDY_ID
-    if case_dir.absolute() != expected or case_dir.is_symlink():
-        raise RuntimeError("Case-study output is not a real isolated directory")
-    canonical = Path(
-        os.environ.get(
-            "ML4T_CANONICAL_CASE_DIR",
-            Path.home() / "ml4t/code/case_studies" / CASE_STUDY_ID,
-        )
-    ).resolve()
-    if _same_inode(case_dir, canonical):
-        raise RuntimeError("Case-study output aliases the canonical case directory")
-    run_log = case_dir / "run_log"
-    _assert_isolated_path(run_log, expected, canonical / "run_log")
-    run_log.mkdir(parents=True, exist_ok=True)
-    for name in ("training", "predictions"):
-        child = run_log / name
-        _assert_isolated_path(child, run_log, canonical / "run_log" / name)
-        child.mkdir(exist_ok=True)
-    for child in run_log.rglob("*"):
-        relative = child.relative_to(run_log)
-        _assert_isolated_path(child, run_log, canonical / "run_log" / relative)
-        if _same_inode(child, canonical / "run_log/registry.db"):
-            raise RuntimeError(f"Isolated write path aliases canonical registry inode: {relative}")
-
-
-# %%
-_require_isolated_registry(CASE_DIR)
-
-# %% [markdown]
-# ## 1. Load Data and Model Configs
+# ## 1. Which label, and which models
 #
-# Model configurations are defined in `config/training/{label}.yaml`. Each entry
-# references a preset in `config/` - a complete specification of
-# the sklearn class and its constructor parameters. To modify the grid,
-# edit the label config file: comment out presets or add new ones.
+# A label is the thing being predicted. This case study puts one label in its sweep:
+# `ret_to_expiry`, the return the short straddle earns from the decision date to the option's
+# expiry. Unlike the equity case studies there is no choice of horizon here, because the horizon
+# is a property of the instrument rather than of the experiment - the position runs until the
+# contracts expire, which in this universe is between three and five weeks out.
+#
+# **This notebook fits every label the sweep declares**, which here is that one. The set comes
+# from `labels.primary` and `labels.variants` in `config/setup.yaml`, and `variants` is empty.
+# `LABELS` above restricts the run to a subset when you want one.
+#
+# **`config/training/` holds five menus, and four of them are not in the sweep.** `fwd_ret_5d`,
+# `fwd_ret_10d`, `fwd_ret_dh_5d` and `fwd_ret_dh_10d` are fixed-horizon labels that
+# [`02_labels`](02_labels.ipynb) still writes, because
+# [`03_financial_features`](03_financial_features.ipynb),
+# [`05_evaluation`](05_evaluation.ipynb) and [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) read
+# them, and their menus were left in place when they were dropped from the sweep. What a menu
+# says is what to fit *for* a label; what `setup.yaml` says is which labels the sweep fits. The
+# cell below is the second of those, and it prints a one-element tuple.
+
+# %%
+declared_labels(study, "linear")
 
 # %% [markdown]
-# The temporal artifact is keyed by both security and estimator fold. These
-# guards reject ambiguous keys before any preprocessing can turn a missing or
-# misassigned estimate into a plausible imputed value.
-
-
-# %%
-def _validate_temporal_keys(
-    temporal: pl.DataFrame,
-    date_col: str,
-    entity_col: str,
-    temporal_features: list[str],
-) -> None:
-    """Reject incomplete or ambiguous fold-specific temporal keys."""
-    keys = [date_col, entity_col, "fold"]
-    missing = set(keys + temporal_features).difference(temporal.columns)
-    if missing:
-        raise ValueError(f"Temporal artifact is missing columns: {sorted(missing)}")
-    null_keys = temporal.select(pl.any_horizontal([pl.col(key).is_null() for key in keys])).sum()[
-        0, 0
-    ]
-    if null_keys:
-        raise ValueError(f"Temporal artifact has {null_keys} rows with null keys")
-    duplicates = temporal.group_by(keys).len().filter(pl.col("len") > 1).height
-    if duplicates:
-        raise ValueError(f"Temporal artifact has {duplicates} duplicate fold-specific keys")
-
-
-# %% [markdown]
-# Fold numbering is part of the statistical contract. The canonical splitter
-# numbers the most recent validation window as fold 0 and steps backward. The
-# holdout estimator (`fold=-1`) is never a cross-validation input.
-
+# Each name in the menu resolves to a preset file in the shared directory
+# `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
+# frame below is the menu for every label above, with each name resolved to the estimator class
+# it names and the arguments that class is constructed with. To change what runs, edit the menu or the
+# presets rather than this notebook.
+#
+# The grid covers the two shapes a penalty can take:
+#
+# - **Ridge** penalizes the sum of squared coefficients. It shrinks correlated coefficients
+#   towards each other and keeps every feature, at a strength set by `alpha`. The grid steps
+#   `alpha` by powers of ten across ten orders of magnitude, because the useful value depends on
+#   the scale and the collinearity of the design matrix and neither is known in advance.
+# - **Lasso** penalizes the sum of absolute coefficients, which drives some of them exactly to
+#   zero: it selects features rather than shrinking them. **ElasticNet** mixes the two.
+#
+# Lasso and ElasticNet are parameterized here by `alpha_frac` rather than a raw penalty. For any
+# fold there is a threshold penalty $\alpha_{\max}$ - the smallest one that zeros every
+# coefficient - which is computed from that fold's own data. `alpha_frac` is the fraction of it
+# to apply, so one declared `alpha_frac` means the same thing on every fold, while a fixed raw
+# penalty would mean something different on each.
 
 # %%
-def _validate_cv_splits(cv_splits: list[dict], holdout_start: str) -> None:
-    """Reject inverted, overlapping, or holdout-contaminated CV windows."""
-    fold_ids = [int(split["fold"]) for split in cv_splits]
-    if fold_ids != list(range(len(cv_splits))):
-        raise ValueError(f"Canonical CV fold IDs must be 0..N-1, got {fold_ids}")
-    holdout = pd.Timestamp(holdout_start)
-    for split in cv_splits:
-        train_end = pd.Timestamp(split["train_end"])
-        val_start = pd.Timestamp(split["val_start"])
-        val_end = pd.Timestamp(split["val_end"])
-        if train_end >= val_start:
-            raise ValueError(f"Fold {split['fold']} training overlaps validation")
-        if val_end >= holdout:
-            raise ValueError(f"Fold {split['fold']} reaches the sealed holdout")
-
-
-# %% [markdown]
-# Return-to-expiry labels are known only on the option expiry date. A 2020
-# decision whose expiry falls in 2021 therefore uses holdout information and is
-# excluded from model selection even though its feature timestamp is pre-holdout.
-
-
-# %%
-def _seal_label_endpoints(
-    dataset: pl.DataFrame,
-    date_col: str,
-    holdout_start: str,
-) -> pl.DataFrame:
-    """Keep only rows whose full label endpoint precedes the holdout."""
-    if "dte_calendar" not in dataset.columns:
-        raise ValueError("Return-to-expiry labels require dte_calendar")
-    if dataset["dte_calendar"].null_count():
-        raise ValueError("Return-to-expiry labels have null expiry horizons")
-    holdout = pd.Timestamp(holdout_start).date()
-    sealed = dataset.with_columns(
-        (pl.col(date_col) + pl.duration(days=pl.col("dte_calendar"))).alias("_label_end")
-    )
-    if sealed.filter(pl.col("dte_calendar") < 0).height:
-        raise ValueError("Return-to-expiry labels have negative expiry horizons")
-    return sealed.filter(pl.col("_label_end") < holdout).drop("_label_end")
-
-
-# %% [markdown]
-# Each available temporal estimate is joined on `timestamp`, `symbol`, and
-# `fold`, so an estimator fitted for another window cannot enter the split.
-# Symbols without enough return history may lack an estimate; at least 95%
-# row coverage is required before train-only imputation handles those gaps.
-
-
-# %%
-def _align_temporal_fold(
-    base: pl.DataFrame,
-    temporal: pl.DataFrame,
-    split: dict,
-    date_col: str,
-    entity_col: str,
-    temporal_features: list[str],
-) -> pl.DataFrame:
-    """Join one estimator fold to its exact training and validation rows."""
-    fold_id = int(split["fold"])
-    if fold_id < 0:
-        raise ValueError("Holdout temporal estimates cannot enter cross-validation")
-    bounds = {
-        name: pd.Timestamp(split[name]).date() if base.schema[date_col] == pl.Date else split[name]
-        for name in ("train_start", "train_end", "val_start", "val_end")
-    }
-    train = pl.col(date_col).is_between(bounds["train_start"], bounds["train_end"], closed="both")
-    val = pl.col(date_col).is_between(bounds["val_start"], bounds["val_end"], closed="both")
-    rows = base.filter(train | val).with_columns(pl.lit(fold_id).alias("fold"))
-    keys = [date_col, entity_col, "fold"]
-    estimates = temporal.filter(pl.col("fold") == fold_id).select(
-        [*keys, *temporal_features, pl.lit(1).alias("_temporal_match")]
-    )
-    aligned = rows.join(estimates, on=keys, how="left", validate="1:1")
-    coverage = 1.0 - (missing := aligned["_temporal_match"].null_count()) / len(aligned)
-    message = f"Fold {fold_id} is missing {missing} temporal row matches ({coverage:.1%} coverage)"
-    if coverage < 0.95:
-        raise ValueError(message)
-    if missing:
-        print(f"  {message}; train-only imputation will fill unavailable estimates")
-    invalid = aligned.filter(pl.col("_temporal_match").is_not_null()).select(
-        pl.any_horizontal(
-            [pl.col(name).is_null() | pl.col(name).is_infinite() for name in temporal_features]
-        ).sum()
-    )[0, 0]
-    if invalid:
-        raise ValueError(f"Fold {fold_id} has {invalid} null or nonfinite temporal rows")
-    return aligned.drop("_temporal_match")
-
-
-# %% [markdown]
-# Completeness is defined by the endpoint-sealed validation design, not by the
-# best coverage any model happens to produce. The expected key and IC-date sets
-# are derived once from the prepared folds and become fixed validation oracles.
-
-
-# %%
-def _expected_prediction_contract(
-    prepared_folds: list[dict],
-    join_cols: list[str],
-    date_col: str,
-    entity_col: str,
-) -> tuple[pl.DataFrame, set]:
-    """Build exact validation keys and eligible IC dates from prepared folds."""
-    frames = []
-    for fold in prepared_folds:
-        if not np.isfinite(fold["y_val"]).all():
-            raise ValueError(f"Fold {fold['fold']} has nonfinite validation labels")
-        frame = pl.from_pandas(fold["meta"][join_cols]).with_columns(
-            pl.lit(int(fold["fold"])).alias("fold"),
-            pl.Series("actual", fold["y_val"]),
-        )
-        frames.append(frame)
-    keys = [*join_cols, "fold"]
-    expected = pl.concat(frames).sort(keys)
-    if expected.select(pl.any_horizontal([pl.col(key).is_null() for key in keys])).sum()[0, 0]:
-        raise ValueError("Expected validation keys contain nulls")
-    if expected.group_by(keys).len().filter(pl.col("len") > 1).height:
-        raise ValueError("Expected validation keys are not unique")
-    eligible_dates = set(
-        expected.group_by(date_col)
-        .agg(pl.col(entity_col).n_unique().alias("n_entities"))
-        .filter(pl.col("n_entities") >= 5)[date_col]
-        .to_list()
-    )
-    if not eligible_dates:
-        raise ValueError("Expected validation design has no eligible IC dates")
-    return expected, eligible_dates
-
-
-# %%
-def _validate_actual_values(
-    predictions: pl.DataFrame,
-    expected: pl.DataFrame,
-    keys: list[str],
-) -> None:
-    """Require cached targets to match the endpoint-sealed labels."""
-    expected_actual = expected.select([*keys, pl.col("actual").alias("_expected_actual")])
-    actual_check = predictions.select([*keys, "actual"]).join(expected_actual, on=keys, how="left")
-    if not np.allclose(
-        actual_check["actual"].to_numpy(),
-        actual_check["_expected_actual"].to_numpy(),
-        rtol=1e-12,
-        atol=1e-12,
-    ):
-        raise ValueError("Cached actual values differ from endpoint-sealed labels")
-
-
-# %%
-def _validate_prediction_keys(
-    predictions: pl.DataFrame,
-    expected: pl.DataFrame,
-    join_cols: list[str],
-) -> pl.DataFrame:
-    """Require exact, unique, finite prediction coverage."""
-    keys = [*join_cols, "fold"]
-    required = set(keys + ["prediction", "actual"])
-    missing = required.difference(predictions.columns)
-    if missing:
-        raise ValueError(f"Predictions are missing columns: {sorted(missing)}")
-    casts = {
-        key: expected.schema[key] for key in keys if predictions.schema[key] != expected.schema[key]
-    }
-    if casts:
-        predictions = predictions.cast(casts)
-    nulls = predictions.select(
-        pl.any_horizontal([pl.col(name).is_null() for name in required]).sum()
-    )[0, 0]
-    nonfinite = predictions.select(
-        pl.any_horizontal([pl.col(name).is_infinite() for name in ("prediction", "actual")]).sum()
-    )[0, 0]
-    if nulls or nonfinite:
-        raise ValueError(f"Predictions contain {nulls} null and {nonfinite} nonfinite rows")
-    if predictions.group_by(keys).len().filter(pl.col("len") > 1).height:
-        raise ValueError("Prediction keys are not unique")
-    actual_keys = predictions.select(keys)
-    missing_keys = expected.join(actual_keys, on=keys, how="anti").height
-    extra_keys = actual_keys.join(expected, on=keys, how="anti").height
-    if missing_keys or extra_keys:
-        raise ValueError(f"Prediction coverage differs: missing={missing_keys}, extra={extra_keys}")
-    _validate_actual_values(predictions, expected, keys)
-    return predictions.sort(keys)
-
-
-# %%
-def _compute_complete_daily_ic(
-    predictions: pl.DataFrame,
-    expected_dates: set,
-    date_col: str,
-    entity_col: str,
-) -> dict[str, float | int]:
-    """Compute daily IC only when every expected date yields a finite value."""
-    ordered = predictions.sort([date_col, entity_col])
-    daily = cross_sectional_ic_series(
-        ordered,
-        ordered,
-        pred_col="prediction",
-        ret_col="actual",
-        date_col=date_col,
-        entity_col=entity_col,
-        method="spearman",
-        min_obs=5,
-    ).sort(date_col)
-    complete_daily = daily.drop_nulls("ic").filter(pl.col("ic").is_finite())
-    actual_dates = set(complete_daily[date_col].to_list())
-    if actual_dates != expected_dates:
-        missing = len(expected_dates - actual_dates)
-        extra = len(actual_dates - expected_dates)
-        raise ValueError(f"Daily IC coverage differs: missing={missing}, extra={extra}")
-    values = complete_daily["ic"].to_numpy()
-    return {
-        "ic_mean": float(np.mean(values)),
-        "ic_std": float(np.std(values, ddof=1)),
-        "ic_n_days": int(len(values)),
-    }
-
-
-# %% [markdown]
-# The endpoint purge uses 35 calendar days, while inference follows the
-# observed 21-session median holding period established upstream. Newey-West
-# therefore uses 20 lags; the two horizons protect different contracts.
-
-
-# %%
-def _compute_ic_uncertainty_metrics(
-    predictions: pl.DataFrame | pd.DataFrame,
-    expected_dates: set,
-    date_col: str,
-    entity_col: str,
-) -> dict[str, float | int]:
-    """Compute daily-IC uncertainty under the 21-session dependence contract."""
-    frame = predictions if isinstance(predictions, pl.DataFrame) else pl.from_pandas(predictions)
-    daily = cross_sectional_ic_series(
-        frame.sort([date_col, entity_col]),
-        frame.sort([date_col, entity_col]),
-        pred_col="prediction",
-        ret_col="actual",
-        date_col=date_col,
-        entity_col=entity_col,
-        method="spearman",
-        min_obs=5,
-    ).sort(date_col)
-    complete = daily.drop_nulls("ic").filter(pl.col("ic").is_finite())
-    if set(complete[date_col].to_list()) != expected_dates:
-        raise ValueError("Uncertainty daily-IC dates differ from the validation contract")
-    values = compute_ic_uncertainty(
-        complete.select("ic"), horizon=IC_DEPENDENCE_SESSIONS, n_boot=1000
-    )
-    if int(values["hac_lag"]) != IC_HAC_LAG:
-        raise ValueError("Daily-IC uncertainty did not use the required 20 HAC lags")
-    critical = float(norm.ppf(0.975))
-    values["ci_hac_lower"] = values["mean_ic"] - critical * values["se_hac"]
-    values["ci_hac_upper"] = values["mean_ic"] + critical * values["se_hac"]
-    values["p_hac"] = float(2 * norm.sf(abs(values["t_hac"])))
-    return {target: values[source] for source, target in IC_UNCERTAINTY_ALIASES.items()}
-
-
-# %%
-def _modeling_artifact_paths(case_study_id: str, label: str) -> dict[str, Path]:
-    """Resolve the three exact parquet inputs consumed by the modeling loader."""
-    financial = load_feature_spec(case_study_id, "financial")
-    temporal = load_feature_spec(case_study_id, "model_based")
-    label_spec = load_label_spec(case_study_id, label)
-    return {
-        "financial": resolve_storage_path(case_study_id, financial, "features/financial.parquet"),
-        "model_based": resolve_storage_path(
-            case_study_id, temporal, "features/model_based.parquet"
-        ),
-        "label": resolve_storage_path(case_study_id, label_spec, f"labels/{label}.parquet"),
-    }
-
-
-# %%
-def _artifact_identity(paths: dict[str, Path]) -> dict[str, dict[str, int | str]]:
-    """Hash exact input bytes and reject files that change while being read."""
-    identity = {}
-    for name, path in sorted(paths.items()):
-        before = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        after = path.stat()
-        before_state = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        after_state = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        if before_state != after_state:
-            raise RuntimeError(f"Input artifact changed while hashing: {name}")
-        identity[name] = {"sha256": digest.hexdigest(), "size_bytes": after.st_size}
-    return identity
-
-
-# %%
-def _evaluation_identity(
-    cv_splits: list[dict], holdout_start: str, holdout_end: str, label_buffer: str
-) -> dict:
-    """Serialize every boundary that determines the validation design."""
-    keys = ("train_start", "train_end", "val_start", "val_end")
-    bounds = [
-        {"fold": int(split["fold"]), **{key: pd.Timestamp(split[key]).isoformat() for key in keys}}
-        for split in cv_splits
-    ]
-    return {
-        "label_buffer": str(label_buffer),
-        "holdout_start": pd.Timestamp(holdout_start).isoformat(),
-        "holdout_end": pd.Timestamp(holdout_end).isoformat(),
-        "splits": bounds,
-    }
-
-
-# %%
-def _bind_training_identity(spec: dict, artifacts: dict, evaluation: dict, version: str) -> dict:
-    """Bind a registry spec to exact data bytes and evaluation boundaries."""
-    enriched = dict(spec)
-    enriched["input_identity"] = {
-        "version": version,
-        "artifacts": artifacts,
-        "evaluation": evaluation,
-    }
-    return enriched
-
-
-# %%
-ARTIFACT_PATHS = _modeling_artifact_paths(CASE_STUDY_ID, PRIMARY_LABEL)
-ARTIFACT_HASHES = _artifact_identity(ARTIFACT_PATHS)
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-if _artifact_identity(ARTIFACT_PATHS) != ARTIFACT_HASHES:
-    raise RuntimeError("Modeling artifacts changed while loading")
-
-raw_dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else None
-if entity_col is None:
-    raise ValueError("S&P 500 options modeling requires a cross-sectional entity key")
-canonical_splits = generate_cv_splits(
-    raw_dataset,
-    case_study_id=CASE_STUDY_ID,
-    label_buffer=mds.label_buffer,
-    date_col=date_col,
+configs = load_model_configs(
+    study,
+    "linear",
+    labels=LABELS or None,
+    config_names=CONFIG_NAMES or None,
 )
-_validate_cv_splits(canonical_splits, setup["evaluation"]["holdout_start"])
-splits = canonical_splits[: MAX_FOLDS or None]
-dataset = _seal_label_endpoints(
-    raw_dataset,
-    date_col,
-    setup["evaluation"]["holdout_start"],
+configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name. Comparing the loaded rows against the complete
+# declared catalog catches either knob, and says so here rather than several cells later in a
+# message about hashes.
+
+# %%
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        f"complete declared catalog, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# ## 2. Binding the declarations to the data
+#
+# A menu entry says which estimator to fit. It does not say which feature columns exist today,
+# where the walk-forward folds fall, or which position-date pairs have both a feature row and a
+# label. **Resolving** a request is the step that goes and finds all of that: it reads the label
+# and feature files, computes the fold boundaries from the walk-forward parameters in
+# `config/setup.yaml`, works out the exact set of rows each fit is expected to predict, and turns
+# any data-dependent hyperparameter into the number it will actually use - each fold's own
+# $\alpha_{\max}$ times `alpha_frac`, in the case of Lasso.
+#
+# Resolving reads the inputs and fits nothing, so the plan below can be inspected before any
+# computation starts. The three things to check in it:
+#
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row.** They are
+#   the width of the design matrix, the number of underlyings with a tradable straddle, and the
+#   number of position-date pairs to be predicted. Every configuration here reads the same feature
+#   matrix, so a row that differs is a configuration being measured on a different sample from its
+#   neighbours, and its results are not comparable with theirs.
+# - **`folds` is the same everywhere**, and equals the number of walk-forward splits
+#   `05_evaluation` established.
+# - **`validation_start` and `validation_end` bracket the development sample.** The held-out tail
+#   must not appear here: it is scored once, at the end of the case study, and any of it visible
+#   in this window would mean it had been used to choose something.
+#
+# Each row also carries a `training_hash`: the identity of that computation, derived from
+# everything that can change its result. [`RUN_LOG.md`](../RUN_LOG.md#identity) sets out what goes
+# into one and what follows from it.
+
+# %%
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+resolved = tuple(request.resolve() for request in requests)
+
+plan = resolved_model_plan(resolved)
+plan.select(
+    "config_name",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "validation_start",
+    "validation_end",
 )
 
-print(f"Dataset: {len(dataset):,} rows × {len(feature_names)} features")
-print(f"Label: {label_col} | Task: {mds.task_type} | Folds: {len(splits)}")
+# %% [markdown]
+# ## 3. Fitting the population
+#
+# `run_model_population` fits every resolved request. For one request it walks the folds, and on
+# each one:
+#
+# 1. takes the rows inside that fold's training window,
+# 2. fills missing feature values with the training window's median for that column, then
+#    standardizes each column to zero mean and unit variance - both fitted on training rows only
+#    and then applied to the validation rows, so nothing from the validation window reaches the
+#    fit,
+# 3. fits the estimator with that fold's resolved parameters,
+# 4. predicts the fold's validation rows.
+#
+# The fold predictions are concatenated into one series covering the whole validation period,
+# which is what a walk-forward prediction set is: each date predicted by a model that saw only
+# data before it. The run then writes a `training_runs` row and the fitted coefficients, a
+# `prediction_sets` row and the predictions themselves, and the metrics computed from them. It
+# does this per configuration rather than once at the end, so an interruption costs the
+# configuration in flight and nothing else.
+#
+# Every case study that fits linear models calls this same runner, which is what makes their
+# results comparable. Unlike gradient boosting or a neural network, a linear model has no
+# intermediate states worth scoring: there is one fit and therefore one checkpoint per
+# configuration, and no learning curve to plot.
+#
+# **What the call publishes is a population**: a named, immutable list of the prediction sets it
+# is going to produce. The list is computed from the resolved specifications before the first fit
+# and written down, and afterwards every member must exist and be complete. That is what makes
+# the downstream comparison well defined - `12_backtest` backtests this population, not whatever
+# predictions happen to be in the registry - and it is why a configuration that raises fails the
+# whole call rather than publishing a population one member short. Everything that finished stays
+# registered, and re-running fits only what is missing.
 
 # %%
-configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, family="linear")
+# `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
+# the contract with them and not a label of convenience. A run that narrows the member set
+# has to pass its own.
+population_name = POPULATION_NAME or "sp500-options-linear-validation-v1"
+execution, population = run_model_population(study, resolved, population_name=population_name)
 
-print(f"{len(configs)} configs × {len(splits)} folds = {len(configs) * len(splits)} fits")
-config_table = pl.DataFrame(
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+print(f"population {population.name}: {len(population.members)} prediction sets")
+
+# %% [markdown]
+# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the
+# registry already holds the matching rows, and the runner returns the stored result rather than
+# fitting again - so re-running this notebook unchanged costs the time it takes to read the data.
+#
+# ### Running configurations of your own
+#
+# The published run log is read-only. To add runs, open the study against a workspace, which
+# holds its own registry and artifacts and reads the same labels and features:
+#
+# ```python
+# study = open_study("sp500_options", workspace="~/ml4t-experiments")
+# configs = load_model_configs(
+#     study, "linear", labels=["ret_to_expiry"], config_names=["ols", "ridge_a1.0", "ridge_a3.0"]
+# )
+# requests = model_requests(study, configs)
+# resolved = tuple(request.resolve() for request in requests)
+# execution, population = run_model_population(study, resolved, population_name="my-linear-v1")
+# ```
+#
+# `CONFIG_NAMES` fits a subset of what the menu already declares; a name the menu does not
+# declare raises rather than quietly fitting fewer models than you asked for. To fit something
+# new, add a preset at `case_studies/config/ridge/ridge_a3.0.yaml` and list `ridge_a3.0` under
+# `linear:` in the label's menu. Editing an existing preset changes that configuration's
+# identity, so its result registers as a new row beside the old one instead of replacing it.
+#
+# Give the run its own `population_name`: a name refers to one set of members permanently, and
+# reusing it for a different set raises. Everything downstream reads the registry rather than the
+# notebook, so predictions produced this way are selected and backtested on the same footing as
+# the ones shipped here, inside your workspace.
+# [`RUN_LOG.md`](../RUN_LOG.md#running-your-own-configurations) covers the rest, including how to
+# rehearse on a reduced universe first.
+
+# %% [markdown]
+# ## 4. What the target looks like
+#
+# Before the model results, the target itself, because the shape of this distribution is what the
+# results below turn on. Each observation is one straddle held to expiry. The counts are drawn on
+# a logarithmic axis, because the left tail is thousands of times rarer than the mode and a
+# linear count axis would flatten it to nothing.
+#
+# **Measured on the development sample only.** The label artifact on disk runs to the end of the
+# data, holdout included, and `02_labels` says so: the files carry the sealed sessions and no
+# diagnostic reads them. Describing the target across all of it would put a statistic computed
+# partly on sealed outcomes into a validation-stage notebook, so the rows are cut at the
+# development boundary the fits above were resolved against, taken from the plan rather than
+# re-derived from `setup.yaml`.
+#
+# Two features of it matter. There is a hard ceiling: the most a short straddle can earn is the
+# premium it collected, so nothing exceeds a return of one. There is no floor: a large enough move
+# in the underlying costs a multiple of the premium, and the worst observations in this sample are
+# many multiples. The result is a distribution whose typical outcome is a modest gain and whose
+# mean is dragged below zero by a small number of very large losses.
+
+# %% tags=["results"]
+# The label the strategy trades, read from `setup.yaml` rather than from a constant here, so
+# this section describes the same target the sweep publishes against.
+primary = primary_label(study)
+development_end = plan.get_column("validation_end").max()
+label_values = (
+    study.labels.get(primary, execution_tier=EXECUTION_TIER)
+    .load()
+    .filter(pl.col("timestamp") <= development_end)
+    .get_column(primary)
+    .drop_nulls()
+    .to_numpy()
+)
+print(f"{len(label_values):,} straddles resolved on or before {development_end}")
+
+summary = pl.DataFrame(
     {
-        "configuration": [cfg["config_name"] for cfg in configs],
-        "model": [cfg["model_class"] for cfg in configs],
-        "parameters": [
-            ", ".join(f"{key}={value}" for key, value in cfg["params"].items()) or "defaults"
-            for cfg in configs
+        "statistic": ["minimum", "median", "mean", "maximum", "share positive", "share below -1"],
+        "value": [
+            float(label_values.min()),
+            float(np.median(label_values)),
+            float(label_values.mean()),
+            float(label_values.max()),
+            float((label_values > 0).mean()),
+            float((label_values < -1).mean()),
         ],
     }
 )
-config_table
-
-# %% [markdown]
-# ## 2. Prepare CV Folds
-#
-# Each fold first receives the temporal estimates fitted for that exact window.
-# Fold identity stays in the join key for both training and validation rows.
-# Only then does train-only median imputation and standardization fit on the
-# training slice and transform validation.
+summary
 
 # %%
-if mds.temporal_by_fold is None or not mds.temporal_feature_names:
-    raise ValueError("Fold-specific temporal features are required")
-temporal = pl.from_pandas(mds.temporal_by_fold)
-_validate_temporal_keys(temporal, date_col, entity_col, mds.temporal_feature_names)
-key_casts = {
-    key: dataset.schema[key]
-    for key in (date_col, entity_col)
-    if temporal.schema[key] != dataset.schema[key]
-}
-if key_casts:
-    temporal = temporal.cast(key_casts)
-
-base_dataset = dataset.drop(mds.temporal_feature_names)
-folds = []
-for split in splits:
-    aligned = _align_temporal_fold(
-        base_dataset,
-        temporal,
-        split,
-        date_col,
-        entity_col,
-        mds.temporal_feature_names,
+fig_label = go.Figure(
+    go.Histogram(
+        x=label_values,
+        nbinsx=120,
+        marker_color=COLORS["blue"],
     )
-    prepared = prepare_cv_folds(
-        aligned.to_pandas(),
-        [split],
-        feature_names,
-        label_col,
-        date_col,
-        entity_col,
-        train_sample_frac=TRAIN_SAMPLE_FRAC,
-    )
-    if len(prepared) != 1:
-        raise ValueError(f"Fold {split['fold']} did not produce exactly one prepared split")
-    folds.extend(prepared)
-
-for f in folds:
-    print(f"  Fold {f['fold']}: train={f['n_train']:,}  val={f['n_val']:,}")
-
-# %%
-expected_prediction_keys, expected_ic_dates = _expected_prediction_contract(
-    folds,
-    mds.join_cols,
-    date_col,
-    entity_col,
 )
-expected_ic_days = len(expected_ic_dates)
-print(
-    f"Complete validation coverage: {len(expected_prediction_keys):,} keys, {expected_ic_days} dates"
+fig_label.add_vline(x=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig_label.update_layout(
+    title="A short straddle is capped above and unbounded below",
+    height=460,
+    width=900,
+    showlegend=False,
+    margin=dict(t=70),
+    bargap=0.02,
+)
+fig_label.update_xaxes(title_text="Return to expiry", type="linear")
+fig_label.update_yaxes(title_text="Positions", type="log")
+show_plotly_with_alt(
+    fig_label,
+    "Histogram of the short straddle's return to expiry on a logarithmic count axis. The mass "
+    "sits between a small loss and a return of one, with a hard edge at one and a long thin tail "
+    "of losses extending far to the left of a dashed line at zero.",
 )
 
 # %% [markdown]
-# ## 3. Walk-Forward Cross-Validation
+# ## 5. What the models produced
 #
-# For each configuration, fit the model on each training fold and predict
-# the validation fold. Cross-sectional IC (Spearman rank correlation per
-# date, averaged) measures predictive quality.
+# One row per configuration, read back from the registry. `ic_mean` is the **information
+# coefficient**: on each validation date, rank the positions by the model's prediction, rank them
+# by the return they went on to earn, correlate the two rankings, and average that correlation
+# over the validation period. It measures whether the model ranks positions correctly, on a scale
+# where zero is no relationship, positive means the ranking points the right way, and negative
+# means it points the wrong way.
+#
+# `ic_n_days` is how many validation dates produced a defined correlation. A model whose
+# coefficients collapse to one or two features predicts nearly the same value for every position
+# on some dates, and a constant has no rank correlation with anything, so those dates would
+# contribute nothing. `full_coverage` marks the configurations measured on all of them.
 
-# %%
-MODEL_CLASSES = {
-    "LinearRegression": LinearRegression,
-    "Ridge": Ridge,
-    "Lasso": Lasso,
-    "ElasticNet": ElasticNet,
-    "LogisticRegression": LogisticRegression,
-}
-
-
-# %% [markdown]
-# Cache reuse is an exact reproduction path. A registry row is insufficient:
-# its hash, physical parquet, complete keys, daily IC dates, and stored daily
-# metrics must all agree with the current validation contract.
-
-
-# %%
-def _training_spec(cfg: dict) -> dict:
-    """Build the exact registry specification for one configuration."""
-    base = build_training_spec(
-        cfg["family"],
-        cfg["config_name"],
-        label_col,
-        n_folds=len(folds),
-        train_sample_frac=TRAIN_SAMPLE_FRAC,
-    )
-    evaluation = _evaluation_identity(
-        splits,
-        setup["evaluation"]["holdout_start"],
-        setup["evaluation"]["holdout_end"],
-        mds.label_buffer,
-    )
-    artifact_hashes = ARTIFACT_HASHES
-    return _bind_training_identity(
-        base,
-        artifact_hashes,
-        evaluation,
-        TRAINING_IDENTITY_VERSION,
-    )
-
-
-# %%
-def _prediction_cache_path(prediction_hash: str) -> Path:
-    """Resolve and recheck one physical prediction artifact."""
-    path = CASE_DIR / "run_log/predictions" / prediction_hash / "predictions.parquet"
-    if os.environ.get("ML4T_PRESERVE_REGISTRY") == "1":
-        canonical = Path(
-            os.environ.get(
-                "ML4T_CANONICAL_CASE_DIR",
-                Path.home() / "ml4t/code/case_studies" / CASE_STUDY_ID,
-            )
-        ).resolve()
-        relative = path.relative_to(CASE_DIR / "run_log")
-        _assert_isolated_path(path, CASE_DIR / "run_log", canonical / "run_log" / relative)
-    return path
-
-
-# %%
-def _validate_cached_metrics(prediction_hash: str, recomputed: dict) -> None:
-    """Require one finite daily-metric row matching the physical predictions."""
-    metrics = load_prediction_metrics(CASE_STUDY_ID, prediction_hash=prediction_hash)
-    numeric = {
-        "ic_mean_daily",
-        "ic_std_daily",
+# %% tags=["results"]
+catalog = (
+    execution.catalog_rows.select(
+        "config_name",
+        "label",
+        "complete",
+        "ic_mean",
+        "ic_std",
         "ic_n_days",
-        "ic_se_hac",
-        "ic_ci_lo",
-        "ic_ci_hi",
-        "ic_t_hac",
-        "ic_p_hac",
-        "ic_hac_lag",
-    }
-    required = numeric | {"prediction_hash"}
-    if metrics.height != 1 or not required.issubset(metrics.columns):
-        raise ValueError("cache has no unique complete daily-metric row")
-    if metrics["prediction_hash"][0] != prediction_hash:
-        raise ValueError("cache metric row has the wrong prediction hash")
-    values = metrics.select(sorted(numeric)).row(0, named=True)
-    if not all(np.isfinite(float(value)) for value in values.values()):
-        raise ValueError("cache has nonfinite daily metrics")
-    if not np.isclose(float(values["ic_n_days"]), expected_ic_days):
-        raise ValueError("cache daily metric count differs from the validation contract")
-    if int(values["ic_hac_lag"]) != IC_HAC_LAG:
-        raise ValueError("cache HAC lag differs from the 21-session dependence contract")
-    for name in numeric:
-        current_name = {"ic_mean_daily": "ic_mean", "ic_std_daily": "ic_std"}.get(name, name)
-        stored, current = values[name], recomputed[current_name]
-        if not np.isclose(float(stored), float(current), rtol=1e-12, atol=1e-12):
-            raise ValueError(f"cache {name} differs from physical predictions")
-
-
-# %%
-def _read_cached_result(cfg: dict, spec: dict, status) -> dict | None:
-    """Return a fully validated cache hit, or None when retraining is required."""
-    if FORCE_RETRAIN or not status.complete:
-        return None
-    training_hash = training_hash_from_spec(spec)
-    rows = load_prediction_sets(CASE_STUDY_ID, training_hash=training_hash, split=PREDICTION_SPLIT)
-    if rows.is_empty():
-        return None
-    if rows.height != 1:
-        raise ValueError(f"{cfg['config_name']}: cache has {rows.height} validation rows")
-    row = rows.row(0, named=True)
-    if row.get("training_hash") != training_hash or row.get("split") != PREDICTION_SPLIT:
-        raise ValueError(f"{cfg['config_name']}: cache hash or split mismatch")
-    prediction_hash = row.get("prediction_hash")
-    if not prediction_hash:
-        raise ValueError(f"{cfg['config_name']}: cache has no prediction hash")
-    if row.get("checkpoint_value") is not None or row.get("checkpoint_kind") not in (None, "final"):
-        raise ValueError(f"{cfg['config_name']}: cache is not the final checkpoint")
-    if prediction_hash != prediction_hash_from_parts(training_hash, None, PREDICTION_SPLIT):
-        raise ValueError(f"{cfg['config_name']}: cache prediction hash is forged")
-    path = _prediction_cache_path(str(prediction_hash))
-    if not path.is_file():
-        return None
-    predictions = pl.read_parquet(path)
-    predictions = _validate_prediction_keys(predictions, expected_prediction_keys, mds.join_cols)
-    summary = _compute_complete_daily_ic(predictions, expected_ic_dates, date_col, entity_col)
-    uncertainty = _compute_ic_uncertainty_metrics(
-        predictions, expected_ic_dates, date_col, entity_col
+        "n_folds",
+        "training_hash",
+        "prediction_hash",
     )
-    _validate_cached_metrics(str(prediction_hash), {**summary, **uncertainty})
-    return {
-        "config": cfg,
-        "training_hash": training_hash,
-        "predictions": predictions.to_pandas(),
-        **summary,
-        "cached": True,
-    }
-
-
-# %% [markdown]
-# Fresh training follows the same physical prediction contract as cache reuse.
-# Coefficients and validation rows are accumulated fold by fold, then the exact
-# combined daily IC series is recomputed once for ranking.
-
-
-# %%
-def _coefficient_rows(model, cfg: dict, fold_id: int) -> list[dict]:
-    """Return feature and intercept coefficients for one fitted fold."""
-    if not hasattr(model, "coef_"):
-        return []
-    coefficients = model.coef_.ravel() if model.coef_.ndim > 1 else model.coef_
-    rows = [
-        {
-            "config_name": cfg["config_name"],
-            "fold": fold_id,
-            "feature": feature,
-            "coefficient": float(value),
-        }
-        for feature, value in zip(feature_names, coefficients, strict=False)
-    ]
-    intercept = model.intercept_ if np.isscalar(model.intercept_) else model.intercept_[0]
-    rows.append(
-        {
-            "config_name": cfg["config_name"],
-            "fold": fold_id,
-            "feature": "_intercept_",
-            "coefficient": float(intercept),
-        }
+    .sort(["label", "ic_mean"], descending=[False, True])
+    .join(
+        configs.select("config_name", "label", "model_class", "params"),
+        on=["config_name", "label"],
+        how="left",
     )
-    return rows
+)
 
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("linear execution returned a partial prediction set")
 
-# %%
-def _fit_fold(cfg: dict, model_class, fold: dict) -> tuple[pd.DataFrame, list[dict]] | None:
-    """Fit and predict one fold; return None for an all-zero model."""
-    try:
-        params = resolve_linear_params(cfg, fold["X_train"], fold["y_train"])
-        model = model_class(**params)
-    except TypeError as error:
-        raise ConfigError(f"Cannot create {cfg['config_name']}: {error}") from error
-    model.fit(fold["X_train"], fold["y_train"])
-    if hasattr(model, "coef_") and np.all(model.coef_ == 0):
-        return None
-    if mds.task_type == "classification" and hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(fold["X_val"])
-        prediction = probabilities @ np.array(sorted(mds.class_values), dtype=np.float64)
-    else:
-        prediction = model.predict(fold["X_val"])
-    frame = fold["meta"][mds.join_cols].copy()
-    frame["fold"] = fold["fold"]
-    frame["prediction"] = prediction
-    frame["actual"] = fold["y_val"]
-    return frame, _coefficient_rows(model, cfg, int(fold["fold"]))
-
-
-# %%
-def _fit_config(cfg: dict, model_class) -> dict:
-    """Train one configuration and validate its complete prediction panel."""
-    started_at = datetime.now(UTC).isoformat()
-    start = time.perf_counter()
-    prediction_frames = []
-    coefficient_rows = []
-    for fold in folds:
-        fitted = _fit_fold(cfg, model_class, fold)
-        if fitted is None:
-            return {
-                "config": cfg,
-                "predictions": pd.DataFrame(),
-                "degenerate": True,
-                "started_at": started_at,
-                "elapsed_s": time.perf_counter() - start,
-            }
-        fold_predictions, fold_coefficients = fitted
-        prediction_frames.append(fold_predictions)
-        coefficient_rows.extend(fold_coefficients)
-    predictions = pd.concat(prediction_frames, ignore_index=True).sort_values(
-        [date_col, entity_col]
+# Coverage is judged against each label's own maximum. The sweep declares one label today, so
+# this is the same number either way; it is written per label because adding a variant to
+# `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason
+# that has nothing to do with the models.
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+# The charts below are one panel, which is only right while the sweep is one label. A variant
+# added to `setup.yaml` has to be faceted the way `fx_pairs` and `cme_futures` facet theirs,
+# rather than silently pooled into one ranking.
+if catalog.get_column("label").n_unique() > 1:
+    raise NotImplementedError(
+        "this notebook charts one label; facet the figures before adding a sweep variant"
     )
-    prediction_pl = pl.from_pandas(predictions)
-    prediction_pl = _validate_prediction_keys(
-        prediction_pl, expected_prediction_keys, mds.join_cols
-    )
-    summary = _compute_complete_daily_ic(prediction_pl, expected_ic_dates, date_col, entity_col)
-    return {
-        "config": cfg,
-        "predictions": predictions,
-        "coefficients": coefficient_rows,
-        "degenerate": False,
-        "started_at": started_at,
-        "elapsed_s": time.perf_counter() - start,
-        **summary,
-    }
-
-
-# %%
-results = []
-for cfg in configs:
-    model_class = MODEL_CLASSES.get(cfg["model_class"])
-    if model_class is None:
-        raise ConfigError(f"Unknown model class for {cfg['config_name']}: {cfg['model_class']}")
-    spec = _training_spec(cfg)
-    status = training_run_status(CASE_STUDY_ID, spec)
-    try:
-        result = _read_cached_result(cfg, spec, status)
-    except (OSError, ValueError) as error:
-        print(f"  {cfg['config_name']:25s}  RETRAIN - {error}")
-        result = None
-    if result is None:
-        if status.partial:
-            print(f"  {cfg['config_name']:25s}  RETRAIN - {status.summary()}")
-        result = _fit_config(cfg, model_class)
-    result["training_hash"] = training_hash_from_spec(spec)
-    result["training_spec"] = spec
-    results.append(result)
-    if result.get("degenerate"):
-        print(f"  {cfg['config_name']:25s}  SKIP - all coefficients zero")
-    else:
-        source = "cached" if result.get("cached") else f"{result['elapsed_s']:.1f}s"
-        print(
-            f"  {cfg['config_name']:25s}  IC={result['ic_mean']:+.4f} ± "
-            f"{result['ic_std']:.4f}  ({expected_ic_days} dates, {source})"
-        )
-
-# %% [markdown]
-# ## 4. Results Summary
-#
-# Rank every complete config by mean daily cross-sectional IC across the combined
-# validation timeline. The two figures below then isolate the two regularization
-# axes: the full ranking and the Ridge penalty sweep.
-
-# %%
-active = [r for r in results if not r.get("degenerate")]
-degenerate = [r for r in results if r.get("degenerate")]
-expected_names = [cfg["config_name"] for cfg in configs]
-result_names = [result["config"]["config_name"] for result in results]
-if result_names != expected_names:
-    raise ValueError("Results do not cover every expected configuration in order")
-expected_hashes = [training_hash_from_spec(_training_spec(cfg)) for cfg in configs]
-result_hashes = [result["training_hash"] for result in results]
-if result_hashes != expected_hashes:
-    raise ValueError("Results do not match every expected training hash")
-complete = [r for r in active if r["ic_n_days"] == expected_ic_days]
-incomplete = [r for r in active if r["ic_n_days"] != expected_ic_days]
-if incomplete:
-    names = [result["config"]["config_name"] for result in incomplete]
-    raise ValueError(f"Incomplete validation coverage for configs: {names}")
-if not complete:
-    raise ValueError("No complete nondegenerate linear configuration")
-complete.sort(key=lambda r: r["ic_mean"], reverse=True)
-
-if degenerate:
-    print(f"Skipped {len(degenerate)} degenerate configs with all coefficients equal to zero")
-
-best = complete[0]
-print(
-    f"Best full-coverage config: {best['config']['config_name']} "
-    f"(daily IC={best['ic_mean']:+.4f}, {best['ic_n_days']} dates)"
+catalog.select(
+    "config_name",
+    "model_class",
+    "params",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "full_coverage",
 )
 
 # %% [markdown]
-# ### IC ranking across the linear grid
+# ### How the penalty grid ranks
 #
-# The bar chart ranks every complete configuration by measured validation IC.
-# Color encodes the IC sign, while the highlighted bar identifies the current
-# leader without assuming which model family or sign will win.
+# Only the configurations measured on all `full_days` validation dates are charted. The zero line
+# is the reference that matters: a bar below it is a model whose ranking pointed the wrong way out
+# of sample.
+
 
 # %%
-_SUP = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+def compact(params: str) -> str:
+    """Render declared parameters for a label: `alpha=1000000.0` reads as `alpha=1e+06`."""
+    return re.sub(r"\d+\.?\d*(?:[eE][+-]?\d+)?", lambda m: f"{float(m.group()):g}", params)
 
 
-def _pretty_config(name):
-    """Human-readable label for a config; renders ridge alpha as a power of ten."""
-    if name.startswith("ridge_a"):
-        alpha = float(name.split("_a")[1])
-        exp = int(round(np.log10(alpha)))
-        return f"Ridge α=10{str(exp).translate(_SUP)}"
-    return name
+full = catalog.filter("full_coverage")
+leader = full.row(0, named=True)
 
-
-# %% [markdown]
-# The measured leader is highlighted while the remaining bars retain sign-based color.
-
-# %%
-_names = [r["config"]["config_name"] for r in complete]
-_ics = [r["ic_mean"] for r in complete]
-_leader = best["config"]["config_name"]
-_lead_ic = best["ic_mean"]
-_bar_colors = [
-    COLORS["amber"] if n == _leader else (COLORS["blue"] if ic >= 0 else COLORS["negative"])
-    for n, ic in zip(_names, _ics, strict=False)
-]
 fig_ic = go.Figure(
     go.Bar(
-        x=_names,
-        y=_ics,
-        marker_color=_bar_colors,
-        text=[f"{v:+.3f}" for v in _ics],
+        x=full.get_column("config_name").to_list(),
+        y=full.get_column("ic_mean").to_list(),
+        marker_color=[
+            COLORS["amber"] if name == leader["config_name"] else COLORS["blue"]
+            for name in full.get_column("config_name")
+        ],
+        text=[f"{value:+.3f}" for value in full.get_column("ic_mean")],
         textposition="outside",
         cliponaxis=False,
     )
 )
+fig_ic.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig_ic.update_layout(
-    title=f"{_pretty_config(_leader)} leads the complete linear grid at IC {_lead_ic:+.3f}",
-    template="ml4t",
-    height=520,
+    title="Validation IC across the full-coverage penalty grid",
+    height=500,
     width=1100,
     showlegend=False,
-    margin=dict(t=90, b=140),
+    margin=dict(t=70),
 )
 fig_ic.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
-fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)", zeroline=True)
-fig_ic.show()
+fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+show_plotly_with_alt(
+    fig_ic,
+    "Bar chart of mean validation information coefficient for every full-coverage linear "
+    f"configuration, sorted descending, against a dashed zero line. {leader['config_name']} "
+    f"({compact(leader['params'])}) is highlighted in amber at the top of the ranking at IC "
+    f"{leader['ic_mean']:+.3f}. Every bar falls below the zero line.",
+)
 
 # %% [markdown]
-# ### Ridge regularization sweep
+# ### What shrinkage does on its own
 #
-# The Ridge curve isolates how the measured validation IC changes with penalty
-# strength. Its title is derived from the current points, including whether the
-# path is increasing, decreasing, or non-monotonic.
+# The bar chart mixes three estimators. Tracing IC across the Ridge penalty alone isolates the
+# effect of shrinkage, with the estimator, the features and the folds all held fixed and only
+# `alpha` moving. The alpha is read from each configuration's declared parameters rather than
+# parsed out of its name, so the curve plots what was fitted.
 
 # %%
-_ridge = sorted(
-    (float(r["config"]["config_name"].split("_a")[1]), r["ic_mean"])
-    for r in complete
-    if r["config"]["config_name"].startswith("ridge_a")
-)
-_logalpha = [np.log10(a) for a, _ in _ridge]
-_ridge_ic = [ic for _, ic in _ridge]
-_peak_i = int(np.argmax(_ridge_ic)) if _ridge_ic else 0
-
-# %%
-fig_alpha = go.Figure(
-    go.Scatter(
-        x=_logalpha,
-        y=_ridge_ic,
-        mode="lines+markers",
-        line=dict(color=COLORS["blue"], width=2),
-        marker=dict(size=8, color=COLORS["blue"]),
-        name="Ridge IC",
+ridge = (
+    catalog.filter(pl.col("model_class") == "Ridge")
+    .with_columns(
+        alpha=pl.col("params").str.extract(r"alpha=([0-9.eE+-]+)").cast(pl.Float64),
     )
+    .drop_nulls("alpha")
+    .sort("alpha")
 )
-if _ridge_ic:
+if ridge.height:
+    log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
+    ridge_ic = ridge.get_column("ic_mean").to_numpy()
+    peak = int(np.argmax(ridge_ic))
+else:
+    print(
+        "No declared label declares Ridge configurations, so there is no penalty sweep to trace. "
+        "Which estimators this section can show is decided by the menus at "
+        "config/training/*.yaml."
+    )
+
+# %% [markdown]
+# The penalty grid spans ten orders of magnitude, so it is read on a log axis.
+
+# %%
+if ridge.height:
+    fig_alpha = go.Figure(
+        go.Scatter(
+            x=log_alpha,
+            y=ridge_ic,
+            mode="lines+markers",
+            line=dict(color=COLORS["blue"], width=2),
+            marker=dict(size=8, color=COLORS["blue"]),
+        )
+    )
     fig_alpha.add_trace(
         go.Scatter(
-            x=[_logalpha[_peak_i]],
-            y=[_ridge_ic[_peak_i]],
+            x=[log_alpha[peak]],
+            y=[ridge_ic[peak]],
             mode="markers",
             marker=dict(size=15, color=COLORS["amber"]),
             showlegend=False,
         )
     )
-_peak_exp = int(round(_logalpha[_peak_i])) if _ridge_ic else 0
-
-# %%
-_ridge_steps = np.diff(_ridge_ic)
-if np.all(_ridge_steps >= 0):
-    _ridge_title = (
-        f"Ridge IC rises with shrinkage and peaks at α=10{str(_peak_exp).translate(_SUP)}"
+    fig_alpha.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+    fig_alpha.update_layout(
+        title="Ridge IC against penalty strength, over ten orders of magnitude",
+        height=500,
+        width=900,
+        showlegend=False,
+        margin=dict(t=70),
     )
-elif np.all(_ridge_steps <= 0):
-    _ridge_title = (
-        f"Ridge IC falls with shrinkage and peaks at α=10{str(_peak_exp).translate(_SUP)}"
+    fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
+    fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+    show_plotly_with_alt(
+        fig_alpha,
+        "Line chart of mean validation information coefficient against the base-ten logarithm of the "
+        "Ridge penalty, against a dashed zero line. The curve sits below zero across the grid and "
+        f"rises towards zero as the penalty strengthens, reaching its maximum at "
+        f"1e{int(round(log_alpha[peak]))} marked in amber.",
     )
-else:
-    _ridge_title = f"Ridge IC is non-monotonic and peaks at α=10{str(_peak_exp).translate(_SUP)}"
-fig_alpha.update_layout(
-    title=_ridge_title,
-    template="ml4t",
-    height=500,
-    width=900,
-    showlegend=False,
-    margin=dict(t=70),
-)
-fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)")
-fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)", zeroline=True)
-fig_alpha.show()
 
 # %% [markdown]
-# ## 5. Register Results
+# ## 6. What to notice
 #
-# Each config is registered in the unified registry with its predictions,
-# IC metrics, and full provenance (training hash = SHA256 of config + label
-# + features + folds). Identical configs produce the same hash - re-running
-# updates rather than duplicates.
-
-
-# %%
-def _registration_metrics(result: dict) -> dict[str, float | int]:
-    """Combine point estimates with the explicit 21-session uncertainty pack."""
-    return {
-        "ic_mean": result["ic_mean"],
-        "ic_std": result["ic_std"],
-        "ic_n_days": result["ic_n_days"],
-        **_compute_ic_uncertainty_metrics(
-            result["predictions"], expected_ic_dates, date_col, entity_col
-        ),
-    }
-
-
-# %%
-def _register_result(result: dict) -> None:
-    if result.get("cached"):
-        return
-    cfg = result["config"]
-    spec = result["training_spec"]
-    if training_hash_from_spec(spec) != result["training_hash"]:
-        raise ValueError(f"{cfg['config_name']}: training identity changed before registration")
-    _require_isolated_registry(CASE_DIR)
-    t_hash = register_training_run(
-        CASE_STUDY_ID,
-        spec=spec,
-        entry_point="06_linear",
-        started_at=result.get("started_at"),
-        elapsed_s=result.get("elapsed_s"),
-    )
-    train_dir = CASE_DIR / "run_log/training" / t_hash
-    coefs = result.get("coefficients", [])
-    if coefs:
-        _require_isolated_registry(CASE_DIR)
-        pd.DataFrame(coefs).to_parquet(train_dir / "coefficients.parquet", index=False)
-    _require_isolated_registry(CASE_DIR)
-    prediction_hash = register_prediction_set(
-        CASE_STUDY_ID,
-        t_hash,
-        split=PREDICTION_SPLIT,
-        predictions=result["predictions"],
-        task_type=mds.task_type,
-        class_values=mds.class_values or None,
-        metrics=_registration_metrics(result),
-    )
-    if prediction_hash != prediction_hash_from_parts(t_hash, None, PREDICTION_SPLIT):
-        raise ValueError(f"{cfg['config_name']}: registry returned a forged prediction hash")
-    print(f"  registered {cfg['config_name']:25s}  IC={result['ic_mean']:+.4f}")
-
-
-# %%
-for result in complete:
-    _register_result(result)
-
-# %% [markdown]
-# ## 6. Key Takeaways
+# **No configuration clears zero, and the strongest shrinkage comes closest to it.** The Ridge
+# curve rises towards zero as the penalty grows, which is the shape you get when the penalty's
+# only remaining job is to undo what the unpenalized fit learned. A sufficiently penalized linear
+# model predicts a constant, a constant has no rank correlation with anything, and zero is the
+# value this curve is climbing towards. When that is the direction of improvement, the fit has no
+# ranking to defend.
 #
-# The closing summary is generated from the complete current validation results so
-# its winner, sign, and regularization comparison cannot preserve a stale run.
-
-# %%
-_positive = sum(result["ic_mean"] > 0 for result in complete)
-_direction = "positive" if _lead_ic > 0 else "negative" if _lead_ic < 0 else "zero"
-_summary = f"""
-### Measured linear-model result
-
-- **Leader:** `{_leader}` reaches daily IC **{_lead_ic:+.4f}** across **{expected_ic_days}** dates,
-  so the leading validation association is **{_direction}**.
-- **Breadth:** **{_positive}/{len(complete)}** complete configurations have positive IC; the range
-  runs from **{complete[-1]["ic_mean"]:+.4f}** to **{_lead_ic:+.4f}**.
-- **Ridge path:** {_ridge_title.rstrip(".")}; the measured peak IC is
-  **{_ridge_ic[_peak_i]:+.4f}**.
-- **Next test:** gradient boosting evaluates whether interactions among IV, VRP, and realized
-  volatility improve on this measured linear benchmark.
-"""
-display(Markdown(_summary))
-
-# %% [markdown]
+# **The target explains more of this than the features do.** Return the histogram in section 4.
+# Least squares chooses coefficients to minimize the average squared distance between the
+# predicted return and the realized one, so a position that lost nine thousand percent contributes
+# about two hundred thousand times as much to the objective as one that lost twenty percent. The
+# fit is therefore almost entirely a description of the left tail: it is trying to say which
+# straddles blow up. The information coefficient asks a different question - were the positions in
+# the right order - and in that question the catastrophe and the mild loss are neighbours. Two
+# reasonable-looking choices, squared-error loss and rank correlation, are here measuring nearly
+# disjoint things, and the grid is the evidence of how far apart they can get.
 #
-# **Next**: `07_gbm.py` tests gradient boosting across a 15-config grid (tree depth ×
-# loss) to evaluate non-linear feature interactions.
+# **This is a property of the instrument, not a modelling mistake.** A short option position is
+# capped above and unbounded below because that is what selling insurance is. The target could be
+# transformed - winsorized, ranked, or replaced by a loss function that does not square the
+# residual - and each of those is a different experiment with a different meaning, not a fix to be
+# applied silently. What the linear stage establishes is that the untransformed target and a
+# squared-error fit do not combine into a ranking model, which is worth knowing before more
+# expressive families are pointed at the same pair.
+#
+# **Two folds, and one of them is 2020.** A short-volatility position experienced in that year
+# precisely the event it exists to be compensated for. Half the validation evidence therefore
+# comes from the part of the distribution that dominates the fitting objective, and with two folds
+# there is no way to separate a weak feature set from an unrepresentative window.
+#
+# **None of this selects anything.** IC measures whether predictions rank positions correctly, not
+# whether a strategy trading them makes money after costs. Those come apart further here than
+# anywhere else in this book: a short straddle earns its premium whether or not the ranking was
+# right, and the bid-ask spread on a monthly option is wide enough to decide the outcome on its
+# own. Selection is on validation backtest Sharpe over the population this notebook just
+# published, and it happens in [`12_backtest`](12_backtest.ipynb).
+#
+# **Known limitations.** The IC is an average of per-date rank correlations with no adjustment for
+# the overlap that month-long holding periods create. The grid is a one-dimensional sweep of
+# penalty strength at fixed features and fixed folds. And every number here is measured on the
+# validation folds, which have been read many times over by the time a case study reaches this
+# notebook.
+#
+# **Next**: [`07_gbm`](07_gbm.ipynb) fits gradient boosting to the same target. It inherits the
+# squared-error objective and therefore the same exposure to the left tail, so the comparison to
+# watch is not whether it ranks better but whether its extra flexibility goes into describing the
+# tail more finely - which would help the loss and not the ranking at all.

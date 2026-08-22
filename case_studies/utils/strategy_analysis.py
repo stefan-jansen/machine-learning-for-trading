@@ -169,7 +169,19 @@ def select_holdout_self_backtest(
     ``val_rank1_self`` pair (written against the canonical lineage's
     holdout hash) goes unfound by the reader.
 
-    Returns ``None`` when no matching holdout backtest exists.
+    The checkpoint is part of the model configuration, so the replay is
+    pinned to the validation prediction set's own ``checkpoint_value`` and
+    ``checkpoint_kind`` as well as its ``training_hash``. One trained model
+    registers one prediction set per declared checkpoint, and the strategy
+    spec is identical across them, so ``training_hash`` alone leaves several
+    indistinguishable holdout candidates. Resolving those by holdout Sharpe -
+    which the previous ``ORDER BY bm.sharpe DESC`` did - reads the holdout to
+    choose among configurations, the one thing
+    ``reference/CASE_STUDY_PIPELINE.md`` §6 forbids outright. Exposure is a
+    function of how many checkpoints per configuration a case study advances.
+
+    Returns ``None`` when no matching holdout backtest exists. Raises when the
+    pinned lineage is still ambiguous, rather than picking one.
     """
     import sqlite3
 
@@ -187,30 +199,47 @@ def select_holdout_self_backtest(
         val_strategy = json.loads(val_spec_json).get("strategy", {})
 
         train_row = db.execute(
-            "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
+            """
+            SELECT training_hash, checkpoint_value, checkpoint_kind
+            FROM prediction_sets WHERE prediction_hash = ?
+            """,
             (val_pred_hash,),
         ).fetchone()
         if train_row is None:
             return None
-        training_hash = train_row[0]
+        training_hash, checkpoint_value, checkpoint_kind = train_row
 
+        # ``IS`` is SQLite's null-safe equality: a configuration with no
+        # checkpoint dimension stores NULL on both sides and must still match,
+        # while ``=`` would drop it.
         candidates = db.execute(
             """
             SELECT b.backtest_hash, b.spec_json
             FROM backtest_runs b
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
-            LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
-            WHERE p.training_hash = ? AND p.split = 'holdout'
-            ORDER BY bm.sharpe DESC NULLS LAST
+            WHERE p.training_hash = ?
+              AND p.split = 'holdout'
+              AND p.checkpoint_value IS ?
+              AND p.checkpoint_kind IS ?
+            ORDER BY b.backtest_hash
             """,
-            (training_hash,),
+            (training_hash, checkpoint_value, checkpoint_kind),
         ).fetchall()
 
-    for bh, spec_json in candidates:
-        candidate_strategy = json.loads(spec_json).get("strategy", {})
-        if candidate_strategy == val_strategy:
-            return bh
-    return None
+    matched = [
+        bh
+        for bh, spec_json in candidates
+        if json.loads(spec_json).get("strategy", {}) == val_strategy
+    ]
+    if not matched:
+        return None
+    if len(set(matched)) > 1:
+        raise ValueError(
+            f"holdout replay for {val_backtest_hash} is ambiguous: "
+            f"{sorted(set(matched))} share training_hash {training_hash}, "
+            f"checkpoint {checkpoint_kind}={checkpoint_value} and one strategy spec"
+        )
+    return matched[0]
 
 
 def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:

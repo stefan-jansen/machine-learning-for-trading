@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
+import sqlite3
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -42,9 +44,17 @@ ALL_LABELS = ("fwd_ret_5d", "fwd_ret_21d")
 FRONT_CONTRACT_POSITION = 0
 ROLL_POLICY = "volume_rolled_multiplicative_back_adjustment"
 EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"
+# The result-protocol fields that differ between the two return horizons, and the axis the
+# final cross-horizon comparison therefore spans.
+HORIZON_DEPENDENT_PROTOCOL_FIELDS = ("cv", "feature_artifacts", "label_artifact")
+# Every name here has to be one a notebook actually registers: `official_prediction_catalog`
+# resolves each with `OfficialPopulation.one`, which raises on a name that does not exist, so a
+# name declared and never written stops `12_model_analysis` rather than being ignored. The first
+# two carry the case-study id, which is what the other eight case studies do; the remaining four
+# keep the abbreviation their producers still use, and move when 08, 09, 10a and 10b are next run.
 MODEL_POPULATION_NAMES = (
-    "cme-linear-validation-v1",
-    "cme-gbm-validation-v1",
+    "cme_futures-linear-validation-v1",
+    "cme_futures-gbm-validation-v1",
     "cme-tabular-dl-validation-v1",
     "cme-sequence-validation-v1",
     "cme-pca-validation-v1",
@@ -203,8 +213,17 @@ def run_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
-    """Snapshot and execute one complete canonical model population."""
+    """Snapshot and execute one complete canonical model population.
+
+    ``supersedes`` names the population hash this run replaces, and it is a value a person
+    sets after reading the registry rather than one the notebook can derive. It belongs in
+    the snapshot, so passing it changes the population identity: a re-run that supplies it
+    is registering a new population that records what it replaced, not re-registering the
+    old one. Where a population already exists under this name and the membership has
+    changed, ``OfficialPopulation.create`` refuses without it and names the hash required.
+    """
     resolved = tuple(resolved_requests or ())
     if not resolved:
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
@@ -216,6 +235,7 @@ def run_official_model_catalog(
         name=population_name,
         member_kind="prediction",
         members=expected,
+        supersedes=supersedes,
     )
     execution = run_resolved_model_requests(study, resolved)
     actual = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
@@ -789,3 +809,98 @@ def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     risk = CandidateSet.one(study, name=f"cme-risk-{label}-v1")
     members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
     return CandidateSet.create(study, f"cme-final-validation-{label}-v1", members)
+
+
+def final_selection_candidate_set(study: Study) -> CandidateSet:
+    """Return the one immutable pool the case-study configuration is selected from.
+
+    The funnel runs per label through the risk overlay. The object of selection is one
+    case-study configuration, so the per-label pools are compared as a single set and the
+    label comes from the row that wins rather than being fixed in advance.
+
+    The return horizon is the axis the comparison spans, and naming it is what makes the
+    comparison legible: the two pools carry different label artifacts, different derived
+    features and a different purge interval. Everything else must match, and the candidate
+    set refuses a member whose split or execution tier disagrees.
+    """
+    members = []
+    for label in ALL_LABELS:
+        pool = final_validation_candidate_set(study, label=label)
+        members.extend(Result.open(study, value) for value in pool.members)
+    return CandidateSet.create(
+        study,
+        "cme-final-selection-v1",
+        members,
+        comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
+    )
+
+
+def selection_catalog(study: Study, candidates: CandidateSet) -> pl.DataFrame:
+    """Return the registered catalog rows for one immutable selection pool."""
+    table = study.backtests.table().filter(pl.col("backtest_hash").is_in(candidates.members))
+    if table.height != len(candidates.members):
+        raise ValueError("the backtest catalog does not describe every candidate")
+    return table.select(
+        "label",
+        "family",
+        "config_name",
+        "checkpoint_kind",
+        "checkpoint_value",
+        "stage",
+        "signal_method",
+        "allocation_method",
+        "risk_method",
+        "sharpe",
+        "max_drawdown",
+        "num_trades",
+        "avg_turnover",
+        "complete",
+        "training_hash",
+        "prediction_hash",
+        "backtest_hash",
+    ).sort("sharpe", "backtest_hash", descending=[True, False])
+
+
+def holdout_evidence(study: Study) -> pl.DataFrame:
+    """Return the research lock and the one holdout evaluation it authorizes, if any.
+
+    The lock is what makes the holdout usable once: it records the candidate set, the
+    selected validation backtest and the retraining contract before any holdout artifact
+    exists. Reading it here is how the analysis shows which configuration the holdout ran
+    on without being able to choose a different one.
+    """
+    database = study.root / "run_log" / "registry.db"
+    if not database.is_file():
+        return pl.DataFrame()
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+        names = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        if "research_locks" not in names:
+            return pl.DataFrame()
+        rows = db.execute(
+            "SELECT l.lock_hash, l.state, l.lock_json, e.holdout_training_hash, "
+            "e.holdout_prediction_hash, e.holdout_backtest_hash, e.evaluated_at "
+            "FROM research_locks l "
+            "LEFT JOIN holdout_evaluations e ON e.lock_hash = l.lock_hash"
+        ).fetchall()
+    records = []
+    for lock_hash, state, lock_json, training, prediction, backtest, evaluated_at in rows:
+        lock = json.loads(lock_json)
+        records.append(
+            {
+                "lock_hash": lock_hash,
+                "state": state,
+                "label": lock.get("label"),
+                "checkpoint_kind": lock.get("checkpoint_kind"),
+                "checkpoint_value": lock.get("checkpoint_value"),
+                "candidate_set_hash": lock.get("candidate_set_hash"),
+                "validation_backtest_hash": lock.get("validation_backtest_hash"),
+                "holdout_training_hash": training,
+                "holdout_prediction_hash": prediction,
+                "holdout_backtest_hash": backtest,
+                "evaluated_at": evaluated_at,
+            }
+        )
+    return pl.DataFrame(records)
