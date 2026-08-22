@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -811,3 +812,36 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
     )
 
     assert seen["supersedes"] is None
+
+
+def test_every_declared_model_population_is_published_by_a_notebook() -> None:
+    """The contract must name only populations a notebook actually registers.
+
+    `12_model_analysis` and `13_backtest` resolve every entry of
+    `MODEL_POPULATION_NAMES` with `OfficialPopulation.one`, which raises on a name that
+    does not exist. A name declared here and written nowhere therefore stops those two
+    notebooks on a clean registry, and nothing catches it until they run - which is how
+    the linear and GBM entries drifted from their producers three times over.
+
+    Reading the literals is the point: the name is the whole contract between the
+    producer and the consumer, and it is the literal that has drifted every time.
+    """
+    notebooks = sorted(
+        (Path(__file__).parent.parent / "case_studies" / "cme_futures").glob("[0-9]*.py")
+    )
+    assert notebooks, "no CME notebooks found"
+    published = {
+        name
+        for notebook in notebooks
+        for name in re.findall(
+            # `population_name="..."` in a call, and `population_name = POPULATION_NAME or "..."`
+            # at module level, which is how 06 and 07 leave the name overridable.
+            r'population_name\s*=\s*(?:POPULATION_NAME\s+or\s+)?"([^"]+)"',
+            notebook.read_text(),
+        )
+    }
+    declared = set(research_workflow.MODEL_POPULATION_NAMES)
+    assert not declared - published, (
+        f"MODEL_POPULATION_NAMES declares populations no notebook publishes: "
+        f"{sorted(declared - published)}"
+    )
