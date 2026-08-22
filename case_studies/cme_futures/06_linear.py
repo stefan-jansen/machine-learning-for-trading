@@ -627,13 +627,13 @@ else:
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Almost nothing in the grid clears zero, and what does is L1.** Two of the 24 charted
-# configurations at five days and four of the 26 at 21 days post a positive information
-# coefficient. Every one of the six is a Lasso or an ElasticNet at `alpha_frac` 0.5 or 0.7 - a
-# penalty strong enough to zero most of the columns outright. No Ridge configuration clears zero
-# at either horizon: the best Ridge result is -0.001 at five days and -0.015 at 21. The
-# comparison that matters is against zero rather than against the rest of the grid, and on that
-# comparison most of this grid fails.
+# **Almost nothing in the grid clears zero, and what does is L1.** Read `n_positive` against
+# `configurations` in the horizons frame: a handful at each horizon, out of two dozen charted.
+# Every one of them is a Lasso or an ElasticNet at `alpha_frac=0.5` or `alpha_frac=0.7` - a
+# penalty strong enough to zero most of the columns outright. No Ridge configuration clears
+# zero at either horizon; filter the catalog on `model_class` to see it. The comparison that
+# matters is against zero rather than against the rest of the grid, and on that comparison most
+# of this grid fails.
 #
 # **Shrinkage and selection do different things here, and only one of them helps.** The Ridge
 # curve has the same shape at both horizons: flat and negative at weak penalties, rising towards
@@ -650,12 +650,13 @@ else:
 # has families.
 #
 # **The charted gap between the horizons is large, and most of it is the coverage filter.** Read
-# `best_ic` down the horizons frame and 21 days is at 0.041 against 0.003 at five, which is
-# fifteen-fold. That number does not survive inspection. The five-day configurations that would
-# be nearest the top - the `alpha_frac=0.7` pair at 0.013, and `0.85` at 0.017 - are the ones the
-# coverage filter removes, while the 0.7 pair is full-coverage at 21 days and is exactly what
-# leads there. Compared like against like the gap is nearer threefold, and it is a comparison
-# between two configurations that are not measured on the same set of dates.
+# `best_ic` down the horizons frame and 21 days is an order of magnitude above five. That
+# reading does not survive inspection. The five-day configurations that would be nearest the
+# top - the `alpha_frac=0.7` pair, and `alpha_frac=0.85` - are the ones the coverage filter
+# removes, and their raw ICs are in the partial-coverage frame below; the `alpha_frac=0.7` pair
+# is full-coverage at 21 days and is exactly what leads there. Compared like against like the
+# gap is a small multiple, and it is a comparison between two configurations that are not
+# measured on the same set of dates.
 #
 # **What the gap is not is a clean property of the horizon.** The two labels do not share a
 # protocol: their purge buffers are `5D` and `21D`, which is why the plan frame shows different
@@ -665,24 +666,24 @@ else:
 # only through L1.** The 21-day Ridge curve is the worse of the two, so shrinkage is not carrying
 # any of it. `07_gbm` fits the same two labels and settles how far this reading generalises.
 #
-# **The horizons agree on the ordering while disagreeing on the level.** The rank correlation
-# between the two orderings is 0.81 over the 24 configurations both charted, and `best_config`
-# names a different one at each - `enet_f0.5` at five days, `lasso_f0.7` at 21. So the broad
-# direction transfers: strong L1 beats weak L1 beats Ridge beats no penalty, at both horizons.
-# What does not transfer is how far up the scale that ordering reaches. This is the one
-# horizon comparison the coverage filter does not distort, because it is computed over exactly
-# the configurations both panels charted.
+# **The horizons agree on the ordering while disagreeing on the level.** `rank_agreement` in
+# the horizons frame is high over the configurations both panels charted, while `best_config`
+# names a different one at each. So the broad direction transfers: strong L1, then weak L1,
+# then Ridge, then no penalty, in that order at both horizons. What does not transfer is how
+# far up the scale that ordering reaches. This is the one horizon comparison the coverage
+# filter does not distort, because it is computed over exactly the configurations both panels
+# charted.
 #
 # **Read the ranking with the coverage column or it will mislead you, and read it per label.**
-# The partial-coverage frame holds six rows. `alpha_frac=0.85` is missing from both panels: it
-# zeros all but a couple of features on some folds, predicts a near-constant value on those
-# dates, and contributes no correlation there - 1,011 of 1,269 dates at 21 days and 1,027 of
-# 1,285 at five. Its raw IC of 0.023 at 21 days would place it third in that panel if it were
-# charted, on a sample it selected by going degenerate everywhere else, and a metric averaged
-# over a set the model itself chose is not a metric. **At five days `alpha_frac=0.7` goes the
-# same way** and is excluded on the same 1,027 dates, at a raw IC of 0.013. The same pair is
-# full-coverage at 21 days and leads that panel. So the exclusion is asymmetric between the
-# horizons, and the next paragraph is where that matters.
+# `alpha_frac=0.85` is missing from both panels: it zeros all but a couple of features on some
+# folds, predicts a near-constant value on those dates, and contributes no correlation there,
+# which the partial-coverage frame shows as an `ic_n_days` well short of its label's full
+# count. Its raw IC at 21 days would place it near the top of that panel if it were charted, on
+# a sample it selected by going degenerate everywhere else, and a metric averaged over a set
+# the model itself chose is not a metric. **At five days `alpha_frac=0.7` goes the same way**
+# and is excluded on the same dates. The same pair is full-coverage at 21 days and leads that
+# panel. So the exclusion is asymmetric between the horizons, and the next paragraph is where
+# that matters.
 #
 # **A cross-sectional ranking may still be the wrong question for this universe.** The features
 # here describe each product against its own history - carry against its own z-score, momentum
