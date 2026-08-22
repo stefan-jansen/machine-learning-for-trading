@@ -99,6 +99,21 @@ def test_population_refuses_to_mix_execution_tiers(study: Study) -> None:
         run_model_population(study, [*canonical, *preview], population_name="mixed")
 
 
+def test_a_preview_cannot_supersede_a_snapshot(study: Study) -> None:
+    """A preview population is discarded with its workspace, so it has no lineage to extend."""
+    catalog = load_model_configs(study, "linear", labels=["fwd_ret_21d"], config_names=["ols"])
+    preview = model_requests(
+        study,
+        catalog,
+        execution_tier="preview",
+        preview_reductions={"max_folds": 1},
+    )
+    with pytest.raises(ValueError, match="cannot supersede"):
+        run_model_population(
+            study, preview, population_name="linear-preview", supersedes="6f061b802c3f"
+        )
+
+
 @pytest.mark.parametrize(
     "case_study",
     [
