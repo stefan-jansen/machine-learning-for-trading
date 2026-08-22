@@ -92,29 +92,32 @@ from case_studies.research import (
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "ret_to_expiry"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "sp500-options-gbm-validation-v1"
+POPULATION_NAME = ""
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
-# ## 1. Which label, and which models
+# ## 1. Which labels, and which models
 #
-# The label is the same one the linear notebook used: `ret_to_expiry`, the return the short
-# straddle earns from the decision date to expiry. Keeping it fixed is what makes the two
-# populations comparable - the families differ, the target does not.
+# The labels are the same set the linear notebook fitted - the ones `config/setup.yaml` puts in
+# the sweep, which here is `ret_to_expiry` alone: the return the short straddle earns from the
+# decision date to expiry. Keeping the set fixed is what makes the two populations comparable;
+# the families differ, the targets do not. `06_linear` says why `config/training/` holds five
+# menus when the sweep declares one label.
 
 # %%
 declared_labels(study, "gbm")
 
 # %% [markdown]
-# The menu at `config/training/{label}.yaml` lists 15 named configurations under `gbm:`, and each
-# resolves to a preset in `case_studies/config/lgb/`. The grid is a product of two axes:
+# Each declared label's menu at `config/training/{label}.yaml` lists 15 named configurations
+# under `gbm:`, and each resolves to a preset in `case_studies/config/lgb/`. The grid is a
+# product of two axes:
 #
 # - **Five capacity profiles.** `default` uses the library's own leaf count; the rest fix it at 7,
 #   15, 31 and 63. Leaf count is the direct control on how finely one tree may partition the
@@ -131,10 +134,23 @@ declared_labels(study, "gbm")
 configs = load_model_configs(
     study,
     "gbm",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name, and this says so here rather than several cells
+# later in a message about hashes.
+
+# %%
+if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
+        "the canonical population; pass POPULATION_NAME to give it its own"
+    )
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -204,7 +220,11 @@ plan.select(
 # complete, which is what makes the downstream comparison well defined.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+# `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
+# the contract with them and not a label of convenience. A run that narrows the member set
+# has to pass its own.
+population_name = POPULATION_NAME or "sp500-options-gbm-validation-v1"
+execution, population = run_model_population(study, resolved, population_name=population_name)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
@@ -265,8 +285,20 @@ catalog = execution.catalog_rows.select(
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("gbm execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+# Coverage is judged against each label's own maximum. The sweep declares one label today, so
+# this is the same number either way; it is written per label because adding a variant to
+# `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason
+# that has nothing to do with the models.
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+# The charts below are one panel, which is only right while the sweep is one label. A variant
+# added to `setup.yaml` has to be faceted the way `fx_pairs` and `cme_futures` facet theirs,
+# rather than silently pooled into one ranking.
+if catalog.get_column("label").n_unique() > 1:
+    raise NotImplementedError(
+        "this notebook charts one label; facet the figures before adding a sweep variant"
+    )
 
 print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each")
