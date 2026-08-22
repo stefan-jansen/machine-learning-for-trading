@@ -912,6 +912,28 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     return resolved
 
 
+def injected_parameters(
+    py_path: Path,
+    parameters: dict | None,
+    output_dir: Path | None,
+    *,
+    research_preview: bool,
+) -> dict | None:
+    """Return what Papermill should inject, given the tier this run declares.
+
+    ``PREVIEW_REDUCTIONS`` only means anything under the preview tier, and the request
+    builders reject it outright on a canonical one. An override file declares it once and
+    both paths read that file: ``tests/generate_intermediates.py`` passes the same entry
+    with ``research_preview=False``, so leaving it in fails at request construction
+    instead of reducing anything.
+    """
+    if research_preview:
+        return research_preview_parameters(py_path, parameters, output_dir)
+    if parameters and "PREVIEW_REDUCTIONS" in parameters:
+        return {k: v for k, v in parameters.items() if k != "PREVIEW_REDUCTIONS"}
+    return parameters
+
+
 def run_notebook(
     py_path: Path,
     parameters: dict | None = None,
@@ -956,8 +978,9 @@ def run_notebook(
 
     start = time.time()
     nb_name = py_path.stem
-    if research_preview:
-        parameters = research_preview_parameters(py_path, parameters, output_dir)
+    parameters = injected_parameters(
+        py_path, parameters, output_dir, research_preview=research_preview
+    )
 
     def _log(msg: str) -> None:
         if log_path:
