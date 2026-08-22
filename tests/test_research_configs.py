@@ -16,6 +16,7 @@ from case_studies.research import (
     load_model_configs,
     model_requests,
     run_model_population,
+    sweep_labels,
 )
 
 
@@ -95,3 +96,49 @@ def test_population_refuses_to_mix_execution_tiers(study: Study) -> None:
     )
     with pytest.raises(ValueError, match="mix execution tiers"):
         run_model_population(study, [*canonical, *preview], population_name="mixed")
+
+
+@pytest.mark.parametrize(
+    "case_study",
+    [
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "fx_pairs",
+        "nasdaq100_microstructure",
+        "sp500_equity_option_analytics",
+        "sp500_options",
+        "us_equities_panel",
+        "us_firm_characteristics",
+    ],
+)
+@pytest.mark.parametrize("family", ["linear", "gbm", "tabular_dl", "deep_learning"])
+def test_declared_labels_never_leaves_the_sweep(case_study: str, family: str) -> None:
+    """A label the sweep does not fit must not reach a notebook that fits every declared label.
+
+    `config/setup.yaml` says which labels the sweep fits; a training menu says what to fit for a
+    label. `sp500_options` keeps full menus for four fixed-horizon labels that `02_labels` writes
+    for the diagnostic notebooks and that `setup.yaml` dropped from the sweep, so a menu-driven
+    default would fit 140 linear configurations instead of 28 and publish four out-of-sweep
+    labels into the population `12_backtest` selects over.
+    """
+    opened = Study.open(case_study)
+    in_sweep = set(sweep_labels(opened))
+    try:
+        labels = declared_labels(opened, family)
+    except ValueError:
+        return  # no sweep label declares this family, which is a legitimate answer
+    assert set(labels) <= in_sweep, (
+        f"{case_study} {family}: declared_labels returned labels outside the sweep: "
+        f"{sorted(set(labels) - in_sweep)}"
+    )
+    assert labels, f"{case_study} {family}: declared_labels returned nothing"
+
+
+def test_sp500_options_fits_only_the_label_its_sweep_declares() -> None:
+    """The case that forced the rule, pinned so a menu edit cannot quietly restore it."""
+    opened = Study.open("sp500_options")
+    assert sweep_labels(opened) == ("ret_to_expiry",)
+    assert declared_labels(opened, "linear") == ("ret_to_expiry",)
+    assert load_model_configs(opened, "linear").height == 28
+    assert set(load_model_configs(opened, "gbm").get_column("label")) == {"ret_to_expiry"}
