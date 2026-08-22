@@ -35,6 +35,7 @@
 """Fit and catalog the published TabM FX configurations."""
 
 import polars as pl
+import torch
 import yaml
 
 from case_studies.research import ExecutionTier, Study, plan_models
@@ -51,7 +52,7 @@ FORCE_RETRAIN = False
 PREDICTION_SPLIT = "validation"
 N_EPOCHS = 0
 BATCH_SIZE = 0
-DEVICE = "cuda"
+DEVICE = ""
 SEED = 42
 
 # %% [markdown]
@@ -86,7 +87,13 @@ study = Study.regenerate(CASE_STUDY_ID)
 
 print(f"Labels: {', '.join(labels)}")
 print(f"Execution tier: {tier.value}")
-print(f"Device: {DEVICE}")
+# An empty DEVICE resolves to what the machine has. The runners refuse "cuda" on a host without
+# it rather than falling back silently - which is the right contract for a run whose results get
+# registered - so a hardcoded "cuda" default made the notebook unrunnable for any reader without
+# an NVIDIA card, and unrunnable on a CPU CI runner. Resolving here keeps the refusal for anyone
+# who asks for "cuda" explicitly, and prints what was chosen so a run never leaves it implicit.
+device = DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Device: {device}")
 
 # %% [markdown]
 # ## Build the published requests
@@ -96,7 +103,7 @@ print(f"Device: {DEVICE}")
 
 # %%
 overrides = {
-    "device": DEVICE,
+    "device": device,
     **({"batch_size": BATCH_SIZE} if BATCH_SIZE else {}),
 }
 menu = [
@@ -120,7 +127,7 @@ pl.DataFrame(
     {
         "config_name": [request.config_name for request in requests],
         "label": [request.label for request in requests],
-        "device": [DEVICE] * len(requests),
+        "device": [device] * len(requests),
         "execution_tier": [request.execution_tier.value for request in requests],
     }
 )
