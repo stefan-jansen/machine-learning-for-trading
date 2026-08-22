@@ -153,6 +153,7 @@ for col in ohlcv_cols:
 # Create MultiIndex columns similar to yfinance output
 raw_data = pd.concat(raw_data_dict, axis=1)
 raw_data = raw_data.ffill().dropna()
+raw_data.index = pd.to_datetime(raw_data.index, utc=True)
 
 # Update SYMBOLS to only include available symbols
 available_symbols = [s for s in SYMBOLS if s in raw_data["Close"].columns]

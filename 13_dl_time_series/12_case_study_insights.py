@@ -63,8 +63,8 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 
 # %%
-# The registry helpers enforce exact snapshot identity, complete day/fold
-# coverage, and exact artifact lineage before comparisons are assembled.
+# Every comparison below ranks only configurations that covered the same folds
+# and the same number of days, so a shorter evaluation window cannot win.
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     DATASET_META,
@@ -72,18 +72,20 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
 )
 from case_studies.utils.insight_chapter import (
-    collect_complete_checkpoint_fold_trajectories,
-    collect_complete_fold_ic_per_cs,
-    collect_complete_grid_per_cs,
-    collect_complete_multi_label_per_cs,
-    collect_complete_rank1_per_cs,
+    RegistrySelectionError,
+    collect_checkpoint_fold_trajectories,
+    collect_fold_ic_per_cs,
+    collect_grid_per_cs,
+    collect_multi_label_per_cs,
+    collect_rank1_per_cs,
+    compare_ic_on_shared_timestamps,
     conformal_coverage_for_selected_prediction,
     plot_cross_cs_forest,
     plot_multi_label_horizon,
     plot_per_fold_violin,
-    require_registry_sha256,
 )
 from case_studies.utils.model_analysis import (
+    load_daily_metrics_series,
     load_metrics_from_registry,
 )
 from utils.reproducibility import set_global_seeds
@@ -96,53 +98,10 @@ SEED = 42
 FAMILY = "deep_learning"
 TABULAR_BASELINES = ("linear", "gbm", "tabular_dl")
 CONFORMAL_LEVEL = 0.90
-REGISTRY_SNAPSHOT = "2026-07-22-v3.1-map-r3"
-REGISTRY_MAP_SHA256 = "9bb3fd027d12a650cda72ac09773bb0985d638a59c457c3c08680a0c3d22c909"
-REGISTRY_SHA256_PINS = {
-    "etfs": "771c02b3db7047b9c6e25c60c18d8b3b02dfc4ade2cb6b791b40f6b410f29509",
-    "crypto_perps_funding": "c7c1e67f8fe4476d7631061e61ce89de1a521606a7c0ff807ba1dcdad23fc485",
-    "nasdaq100_microstructure": "9154d213dd1020fbeb2f64213a82bb8b44b8c20d4ed14db842ab735b2b275bd0",
-    "sp500_equity_option_analytics": "953e580467ae704a6b05e6fbbd03599bf799eb6ac084455d8a4bdcb8dcf62164",
-    "us_firm_characteristics": "d50310f512ce0c95edbb9b0c31ae0501a4b0246c0618a02bab4ba6e7fd80015d",
-    "fx_pairs": "1d0e4ef26766ef6857c562438fb3eced253111ae3fe3777895af98cc79ce8f9d",
-    "cme_futures": "58b408c9e9ec008606c04b8bc68b0ef3865c9f14b7ba064af2b378adb45794dc",
-    "sp500_options": "395ed2debf0ad736a9736c3936cbfc1a9dd28cc54eb23acfb97c8017c094958a",
-    "us_equities_panel": "3175eca6747ebc5e3fc886576e94aef755de9e8a8eeb16d3d967f7f74793a39e",
-}
-REGISTRY_VERSION_STATUS = {
-    "cme_futures": "accepted_sdf_temporal_corrected",
-    "crypto_perps_funding": "accepted",
-    "etfs": "accepted_pre_ipca",
-    "fx_pairs": "accepted",
-    "nasdaq100_microstructure": "provisional_snapshot_20260722T182456",
-    "sp500_equity_option_analytics": "accepted_v3.1_garch_corrected",
-    "sp500_options": "accepted_current_r8_gpu",
-    "us_equities_panel": "provisional_snapshot_20260720T222537",
-    "us_firm_characteristics": "accepted",
-}
-REGISTRY_FOREIGN_KEY_DEBT: dict[str, int] = {}
 
 # %%
 set_global_seeds(SEED)
 
-# %%
-registry_rows = []
-for cs in CASE_STUDY_IDS:
-    expected = REGISTRY_SHA256_PINS[cs]
-    observed = require_registry_sha256(cs, expected)
-    registry_rows.append(
-        {
-            "case_study": SHORT_NAMES[cs],
-            "registry_snapshot": REGISTRY_SNAPSHOT,
-            "registry_map_sha256": REGISTRY_MAP_SHA256,
-            "registry_sha256": observed,
-            "publication_status": REGISTRY_VERSION_STATUS[cs],
-            "foreign_key_violations": REGISTRY_FOREIGN_KEY_DEBT.get(cs, 0),
-        }
-    )
-registry_provenance = pl.DataFrame(registry_rows)
-print("Read-only provenance for the pinned teaching registry map:")
-registry_provenance
 
 # %% [markdown]
 # **Architecture helper**: maps registry `config_name` values to the display
@@ -175,11 +134,9 @@ ARCH_CLASS = {
     "PatchTST": "attention",
 }
 
-dl_grid = collect_complete_grid_per_cs(
+dl_grid = collect_grid_per_cs(
     CASE_STUDY_IDS,
     FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
-    allow_missing=True,
 )
 
 
@@ -277,7 +234,7 @@ missing_dl = [
 ]
 display(
     Markdown(
-        f"**Computed coverage ({REGISTRY_SNAPSHOT}).** "
+        "**Computed coverage.** "
         f"{dl_grid['case_study'].n_unique()} of {len(CASE_STUDY_IDS)} case studies have a "
         f"complete DL candidate; missing: {', '.join(missing_dl) or 'none'}."
     )
@@ -293,11 +250,9 @@ architecture_coverage
 # markers indicate the CI overlaps zero.
 
 # %%
-dl_rank1 = collect_complete_rank1_per_cs(
+dl_rank1 = collect_rank1_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
-    allow_missing=True,
 )
 dl_rank1_display = dl_rank1.with_columns(
     architecture=pl.col("config_name").map_elements(architecture, return_dtype=pl.Utf8),
@@ -454,7 +409,7 @@ architecture_count_text = ", ".join(
 display(
     Markdown(
         f"**Computed architecture counts.** {architecture_count_text}. Counts describe the "
-        "pinned point-estimate leaders; they do not establish superiority across panels."
+        "point-estimate leaders; they do not establish superiority across panels."
     )
 )
 
@@ -467,7 +422,7 @@ display(
 # optimization landscape is benign across the budget.
 
 # %%
-checkpoint_folds = collect_complete_checkpoint_fold_trajectories(dl_rank1)
+checkpoint_folds = collect_checkpoint_fold_trajectories(dl_rank1)
 ckpt_df = (
     checkpoint_folds.group_by(["short_name", "config_name", "checkpoint_value"])
     .agg(
@@ -547,7 +502,7 @@ display(Markdown(f"**Computed checkpoint peaks.** Selected median-IC peaks occur
 # headline IC.
 
 # %%
-dl_fold = collect_complete_fold_ic_per_cs(dl_rank1)
+dl_fold = collect_fold_ic_per_cs(dl_rank1)
 dl_fold_summary = (
     dl_fold.group_by(["case_study", "short_name"])
     .agg(
@@ -600,9 +555,16 @@ display(
 
 # %%
 conformal_rows = []
+conformal_unavailable = []
 for selected in dl_rank1.iter_rows(named=True):
     cs = selected["case_study"]
-    df = conformal_coverage_for_selected_prediction(selected)
+    try:
+        df = conformal_coverage_for_selected_prediction(selected)
+    except RegistrySelectionError as error:
+        if "fewer than 30 rows" not in str(error):
+            raise
+        conformal_unavailable.append(SHORT_NAMES[cs])
+        continue
     sub = df.filter(pl.col("nominal_level") == CONFORMAL_LEVEL)
     if sub.is_empty():
         continue
@@ -620,7 +582,10 @@ for selected in dl_rank1.iter_rows(named=True):
     )
 
 conformal_df = pl.DataFrame(conformal_rows).sort("short_name")
-print(f"Cross-fitted OOF calibration at the {CONFORMAL_LEVEL:.0%} nominal level:")
+print(
+    f"Cross-fitted OOF calibration at the {CONFORMAL_LEVEL:.0%} nominal level; "
+    f"insufficient rows: {', '.join(conformal_unavailable) or 'none'}"
+)
 conformal_df.select(
     "short_name",
     "architecture",
@@ -680,7 +645,6 @@ def plot_conformal_coverage(conformal_df: pl.DataFrame) -> plt.Figure:
     ax.set_title(f"Cross-fitted OOF calibration exposes scale drift at {CONFORMAL_LEVEL:.0%}")
     ax.legend(loc="lower right", frameon=False, fontsize=9)
     fig.colorbar(sc, ax=ax, fraction=0.045, pad=0.04, label="Absolute coverage gap")
-    fig.tight_layout()
     return fig
 
 
@@ -711,18 +675,16 @@ if not conformal_df.is_empty():
 #
 # The DL family enters a contested space - for every case study it is
 # compared to the highest-IC tabular configuration across linear, GBM, and
-# TabM. Two descriptive views compare full-coverage daily-IC point estimates.
-# Each family's chronological daily series retains its own HAC interval; the
-# notebook does not infer uncertainty from a small set of fold summaries.
+# TabM. The selected models are rescored over the exact intersection of their
+# evaluation timestamps. The notebook does not infer uncertainty from a small set of
+# fold summaries.
 
 
 # %%
 def family_rank1_collect(family: str) -> pl.DataFrame:
-    df = collect_complete_rank1_per_cs(
+    df = collect_rank1_per_cs(
         CASE_STUDY_IDS,
         family=family,
-        approved_registry_sha256=REGISTRY_SHA256_PINS,
-        allow_missing=True,
     )
     if df.is_empty():
         return pl.DataFrame()
@@ -769,31 +731,35 @@ def dl_tabular_delta(cs: str) -> dict | None:
         return None
     best_fam = max(family_rows, key=lambda family: family_rows[family][f"{family}_ic"])
     best_row = family_rows[best_fam]
-    best_baseline_ic = best_row[f"{best_fam}_ic"]
+    dl_daily = load_daily_metrics_series(cs, selected_dl["prediction_hash"])
+    baseline_daily = load_daily_metrics_series(cs, best_row["prediction_hash"])
+    if dl_daily.is_empty() or baseline_daily.is_empty():
+        return None
+    matched = compare_ic_on_shared_timestamps(dl_daily, baseline_daily)
     return {
         "case_study": cs,
         "short_name": SHORT_NAMES[cs],
         "dl_arch": architecture(selected_dl["config_name"]),
-        "dl_ic": selected_dl["ic_mean_daily"],
+        "dl_ic": matched["left_ic"],
         "dl_prediction_hash": selected_dl["prediction_hash"],
-        "dl_days": selected_dl["ic_n_days"],
         "best_baseline_family": best_fam,
-        "best_baseline_ic": best_baseline_ic,
+        "best_baseline_ic": matched["right_ic"],
         "baseline_prediction_hash": best_row["prediction_hash"],
-        "baseline_days": best_row["ic_n_days"],
-        "delta": selected_dl["ic_mean_daily"] - best_baseline_ic,
+        "matched_timestamps": matched["n_timestamps"],
+        "delta": matched["left_ic"] - matched["right_ic"],
     }
 
 
 # %% [markdown]
-# The comparison uses complete-coverage rows from each family and remains a
-# point-estimate diagnostic, not paired-fold inference.
+# The comparison selects complete-coverage rows from each family, then
+# computes both point estimates from their shared evaluation timestamps. The
+# table does not estimate uncertainty for the difference between models.
 
 # %%
 delta_rows = [entry for cs in CASE_STUDY_IDS if (entry := dl_tabular_delta(cs)) is not None]
 
 delta_df = pl.DataFrame(delta_rows).sort("delta", descending=True)
-print("DL minus highest-IC full-coverage tabular baseline (descriptive, primary label):")
+print("DL minus highest-IC full-coverage tabular baseline on shared timestamps (primary label):")
 delta_df.select(
     "short_name",
     "dl_arch",
@@ -801,8 +767,7 @@ delta_df.select(
     pl.col("dl_ic").round(4).alias("dl"),
     pl.col("best_baseline_ic").round(4).alias("base"),
     pl.col("delta").round(4),
-    "dl_days",
-    "baseline_days",
+    "matched_timestamps",
     "dl_prediction_hash",
     "baseline_prediction_hash",
 )
@@ -858,9 +823,9 @@ def format_scatter_axes(ax: plt.Axes, xs: np.ndarray, ys: np.ndarray) -> None:
     ax.plot([lo, hi], [lo, hi], color=COLORS["neutral"], linestyle="--")
     ax.axhline(0, color=COLORS["silver_muted"], linewidth=0.5)
     ax.axvline(0, color=COLORS["silver_muted"], linewidth=0.5)
-    ax.set_xlabel("Highest-IC tabular baseline (max of Linear, GBM, TabM)")
-    ax.set_ylabel("Highest-IC DL configuration")
-    ax.set_title("DL vs highest-IC tabular baseline at the primary label")
+    ax.set_xlabel("Selected tabular baseline IC on shared timestamps")
+    ax.set_ylabel("Selected DL IC on shared timestamps")
+    ax.set_title("DL vs highest-IC tabular baseline on shared timestamps")
 
 
 # %% [markdown]
@@ -933,8 +898,7 @@ for r in delta_df.iter_rows(named=True):
             "dl_arch": r["dl_arch"],
             "dl_ic": r["dl_ic"],
             "delta": r["delta"],
-            "dl_days": r["dl_days"],
-            "baseline_days": r["baseline_days"],
+            "matched_timestamps": r["matched_timestamps"],
         }
     )
 
@@ -949,16 +913,15 @@ diagnostic_df.select(
     pl.col("tab_ic").round(4).alias("tab_ic"),
     pl.col("dl_ic").round(4).alias("dl_ic"),
     pl.col("delta").round(4).alias("delta"),
-    "dl_days",
-    "baseline_days",
+    "matched_timestamps",
 )
 
 # %%
 display(
     Markdown(
-        f"**Computed baseline comparison.** DL has the higher full-coverage point estimate "
-        f"in {n_above} of {delta_df.height} comparable case studies. The conclusion is "
-        "descriptive until a daily-series difference estimator is registered and verified."
+        f"**Computed baseline comparison.** DL has the higher shared-timestamp point estimate "
+        f"in {n_above} of {delta_df.height} comparable case studies. The table does not test "
+        "whether these differences are statistically distinguishable."
     )
 )
 
@@ -986,11 +949,10 @@ def regression_labels(cs: str) -> list[str]:
 # Only complete registered labels enter the horizon census and figure.
 
 # %%
-dl_horizon = collect_complete_multi_label_per_cs(
+dl_horizon = collect_multi_label_per_cs(
     CASE_STUDY_IDS,
     family=FAMILY,
     labels=regression_labels,
-    approved_registry_sha256=REGISTRY_SHA256_PINS,
 )
 print(
     f"DL multi-label horizon coverage: {dl_horizon.height} (CS, label) cells "
@@ -1147,7 +1109,7 @@ class_count_text = ", ".join(
 )
 display(
     Markdown(
-        f"**Computed architecture-class counts.** {class_count_text}. These are pinned "
+        f"**Computed architecture-class counts.** {class_count_text}. These are "
         "point-estimate counts, not cross-case superiority estimates."
     )
 )
@@ -1155,8 +1117,8 @@ display(
 # %% [markdown]
 # ## Cross-CS Key Takeaways
 #
-# The synthesis below is computed from exact selected prediction hashes,
-# complete day/fold panels, and pinned registry identities.
+# The synthesis below is computed from the selected prediction hashes and their
+# complete fold panels.
 
 # %%
 largest_dl_delta = delta_df.row(0, named=True)
@@ -1169,11 +1131,7 @@ display(
         f"{delta_df.height} comparisons with the strongest tabular family.\n"
         f"- The largest DL-minus-tabular point estimate is {largest_dl_delta['short_name']} "
         f"at {largest_dl_delta['delta']:+.4f}; the comparison remains descriptive without a "
-        "registered daily paired-difference estimator.\n"
-        "- NASDAQ-100 uses provisional snapshot status "
-        f"`{REGISTRY_VERSION_STATUS['nasdaq100_microstructure']}` with "
-        f"{REGISTRY_FOREIGN_KEY_DEBT.get('nasdaq100_microstructure', 0)} recorded foreign-key "
-        "violations.\n\n"
+        "registered daily paired-difference estimator.\n\n"
         "**Next**: Ch14 adds latent-factor models on panels that satisfy the dimensionality "
         "gate; Ch15 layers causal effects on top of the predictive stack."
     )

@@ -502,9 +502,7 @@ def run_latent_factor_cv(
     temporal_feature_assembly = TEMPORAL_FEATURE_ASSEMBLY if has_fold_temporal else None
     temporal_feature_digest = (
         _frame_digest(
-            pl.from_pandas(
-                temporal_by_fold.loc[:, ["fold", *temporal_keys, *temporal_feature_names]]
-            )
+            _temporal_digest_frame(temporal_by_fold, temporal_keys, temporal_feature_names)
         )
         if has_fold_temporal
         else None
@@ -636,28 +634,51 @@ def run_latent_factor_cv(
         ):
             preds_df = pl.read_parquet(model_dir / "predictions.parquet")
             metrics_df = pl.read_parquet(model_dir / "fold_metrics.parquet")
-            best_epoch, mean_ic = _select_reporting_epoch(
-                metrics_df,
-                checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
-                reporting_epoch=metric_policy["reporting_epoch"],
+            expected_cache_checkpoints = set(
+                _expected_latent_checkpoints(
+                    model_name,
+                    n_epochs=n_epochs,
+                    model_kwargs=model_kwargs.get(model_name, {}),
+                    include_internal_aliases=checkpoint_surface == "fitted_state",
+                )
             )
-            model_results.append(
-                {
-                    "model_name": model_name,
-                    "mean_ic": round(mean_ic, 4),
-                    "best_epoch": best_epoch,
-                    "n_folds": int(metrics_df["fold_id"].n_unique())
-                    if metrics_df.height > 0
-                    else 0,
-                    "elapsed_s": 0.0,
-                    "started_at": None,
-                }
+            expected_cache_surface = {
+                (int(split["fold"]), checkpoint)
+                for split in splits
+                for checkpoint in expected_cache_checkpoints
+            }
+            cached_prediction_surface = set(
+                preds_df.select("fold_id", "epoch").unique().iter_rows()
             )
-            all_predictions[model_name] = preds_df
-            fold_metrics[model_name] = metrics_df
-            all_extras[model_name] = []
-            log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
-            continue
+            cached_metric_surface = set(metrics_df.select("fold_id", "epoch").unique().iter_rows())
+            if (
+                cached_prediction_surface != expected_cache_surface
+                or cached_metric_surface != expected_cache_surface
+            ):
+                log(f"  {model_name}: cache checkpoint surface mismatch, retraining")
+            else:
+                best_epoch, mean_ic = _select_reporting_epoch(
+                    metrics_df,
+                    checkpoint_selection_policy=metric_policy["checkpoint_selection_policy"],
+                    reporting_epoch=metric_policy["reporting_epoch"],
+                )
+                model_results.append(
+                    {
+                        "model_name": model_name,
+                        "mean_ic": round(mean_ic, 4),
+                        "best_epoch": best_epoch,
+                        "n_folds": int(metrics_df["fold_id"].n_unique())
+                        if metrics_df.height > 0
+                        else 0,
+                        "elapsed_s": 0.0,
+                        "started_at": None,
+                    }
+                )
+                all_predictions[model_name] = preds_df
+                fold_metrics[model_name] = metrics_df
+                all_extras[model_name] = []
+                log(f"  {model_name}: loaded cache (best IC={mean_ic:+.4f})")
+                continue
 
         active_models.append(model_name)
         started_at[model_name] = datetime.now(UTC).isoformat()
@@ -1236,20 +1257,13 @@ def _replace_fold_temporal_features(
     fold_id: int,
 ) -> pl.DataFrame:
     """Replace the schema-placeholder columns with one fold's learned features."""
-    fold_temporal_pd = temporal_by_fold.loc[temporal_by_fold["fold"] == fold_id].drop(
-        columns=["fold"]
-    )
-    if fold_temporal_pd.empty:
-        raise ValueError(f"No temporal features found for fold {fold_id}")
+    from utils.modeling import fold_temporal_frame
 
-    fold_temporal = pl.from_pandas(fold_temporal_pd)
-    casts = {
-        key: dataset.schema[key]
-        for key in temporal_keys
-        if fold_temporal.schema[key] != dataset.schema[key]
-    }
-    if casts:
-        fold_temporal = fold_temporal.cast(casts)
+    fold_temporal = fold_temporal_frame(
+        temporal_by_fold, fold_id, temporal_keys=temporal_keys, schema=dataset.schema
+    )
+    if fold_temporal.is_empty():
+        raise ValueError(f"No temporal features found for fold {fold_id}")
     fold_temporal = fold_temporal.unique(subset=temporal_keys, keep="last")
 
     missing = sorted(set(temporal_feature_names) - set(fold_temporal.columns))
@@ -1292,6 +1306,24 @@ def _to_naive_timestamp(value: Any) -> pd.Timestamp:
     if ts.tz is not None:
         ts = ts.tz_convert("UTC").tz_localize(None)
     return ts
+
+
+def _temporal_digest_frame(
+    temporal_by_fold: Any,
+    temporal_keys: list[str],
+    temporal_feature_names: list[str],
+) -> pl.DataFrame:
+    """The columns the temporal digest covers, projected out of whatever form is held.
+
+    The one consumer that spans every fold rather than selecting one, so it is also the only
+    place the whole artifact is read - and it reads the hashed columns alone, not the table.
+    """
+    columns = ["fold", *temporal_keys, *temporal_feature_names]
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        return temporal_by_fold.select(columns).collect()
+    if isinstance(temporal_by_fold, pl.DataFrame):
+        return temporal_by_fold.select(columns)
+    return pl.from_pandas(temporal_by_fold.loc[:, columns])
 
 
 def _resolve_metric_policy(

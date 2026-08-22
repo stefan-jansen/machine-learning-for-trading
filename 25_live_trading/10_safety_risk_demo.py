@@ -66,13 +66,14 @@
 import logging
 import sys
 import warnings
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from async_utils import run_async
 from ml4t.backtest.types import Order, OrderSide, OrderStatus, OrderType, Position
 from ml4t.live import LiveRiskConfig, RiskLimitError, SafeBroker, VirtualPortfolio
+from ml4t.live.protocols import ExecutionCapability
 
 from utils.paths import get_output_dir
 
@@ -132,6 +133,13 @@ class MockBrokerQueries:
         return self._connected
 
     @property
+    def execution_capabilities(self):
+        return frozenset({ExecutionCapability.LIMIT})
+
+    def assert_paper_trading(self) -> None:
+        return None
+
+    @property
     def positions(self) -> dict[str, Position]:
         return self._positions.copy()
 
@@ -189,7 +197,7 @@ def make_filled_order(
         status=OrderStatus.FILLED,
         filled_quantity=quantity,
         filled_price=price,
-        filled_at=datetime.now(),
+        filled_at=datetime.now(UTC),
     )
 
 
@@ -215,7 +223,7 @@ def apply_mock_fill(broker: Any, order: Order) -> None:
             asset=asset,
             quantity=signed_qty,
             entry_price=price,
-            entry_time=datetime.now(),
+            entry_time=datetime.now(UTC),
             current_price=price,
         )
     transaction = quantity * price
@@ -335,6 +343,7 @@ broker = MockBroker()
 run_async_demo(broker.connect())
 
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_order_shares=50,  # Max 50 shares per order
     max_order_value=5_000.0,  # Max $5,000 per order
     state_file=state_file,
@@ -356,10 +365,16 @@ run_demo(
 print("\n3. Order exceeds value limit (10 shares @ $600 = $6,000):")
 # First set a price by creating a position
 broker._positions["TSLA"] = Position(
-    asset="TSLA", quantity=1, entry_price=600.0, entry_time=datetime.now(), current_price=600.0
+    asset="TSLA",
+    quantity=1,
+    entry_price=600.0,
+    entry_time=datetime.now(UTC),
+    current_price=600.0,
 )
 run_demo(
-    safe_broker.submit_order_async("TSLA", 10, OrderSide.BUY, limit_price=600.0),
+    safe_broker.submit_order_async(
+        "TSLA", 10, OrderSide.BUY, order_type=OrderType.LIMIT, limit_price=600.0
+    ),
     expect_error=True,
 )
 
@@ -387,6 +402,7 @@ broker = MockBroker()
 run_async_demo(broker.connect())
 
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_position_value=100_000.0,
     max_position_shares=100,
     max_total_exposure=200_000.0,
@@ -413,6 +429,7 @@ state_file = _temporary_state_path()
 broker = MockBroker()
 run_async_demo(broker.connect())
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_position_value=10_000.0,
     max_position_shares=200,
     max_total_exposure=200_000.0,
@@ -425,7 +442,9 @@ safe_broker.record_market_snapshot("MSFT", 150.0)
 
 print("\n3. Position-value cap: 100 MSFT @ $150 would be $15,000:")
 run_demo(
-    safe_broker.submit_order_async("MSFT", 100, OrderSide.BUY, limit_price=150.0),
+    safe_broker.submit_order_async(
+        "MSFT", 100, OrderSide.BUY, order_type=OrderType.LIMIT, limit_price=150.0
+    ),
     expect_error=True,
 )
 
@@ -437,6 +456,7 @@ state_file = _temporary_state_path()
 broker = MockBroker()
 run_async_demo(broker.connect())
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_position_value=20_000.0,
     max_position_shares=200,
     max_total_exposure=15_000.0,
@@ -480,6 +500,7 @@ broker = MockBroker()
 run_async_demo(broker.connect())
 
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_orders_per_minute=RATE_LIMIT_PER_MINUTE,
     max_order_value=50_000.0,
     max_position_value=100_000.0,
@@ -523,6 +544,7 @@ run_async_demo(broker.connect())
 
 # Only allow specific ETFs
 config = LiveRiskConfig(
+    execution_mode="paper",
     allowed_assets={"SPY", "QQQ", "IWM"},  # Whitelist
     max_order_value=50_000.0,
     max_position_value=100_000.0,
@@ -553,6 +575,7 @@ broker = MockBroker()
 run_async_demo(broker.connect())
 
 config = LiveRiskConfig(
+    execution_mode="paper",
     blocked_assets={"TSLA", "GME", "AMC"},  # Blacklist volatile stocks
     max_order_value=50_000.0,
     max_position_value=100_000.0,
@@ -594,6 +617,7 @@ broker = MockBroker()
 run_async_demo(broker.connect())
 
 config = LiveRiskConfig(
+    execution_mode="paper",
     max_order_value=50_000.0,
     max_position_value=100_000.0,
     dedup_window_seconds=0.0,  # Disable for demo
@@ -622,17 +646,20 @@ run_demo(
 
 # %%
 print("\n4. Checking state persistence...")
+safe_broker.close_persistence()
 new_safe_broker = SafeBroker(MockBroker(), config)
 print(f"   Kill switch still active: {new_safe_broker._state.kill_switch_activated}")
 print(f"   Reason: {new_safe_broker._state.kill_switch_reason}")
 assert new_safe_broker._state.kill_switch_activated
 
 print("\n5. Disabling kill switch (manual recovery):")
-safe_broker.disable_kill_switch()
+new_safe_broker.disable_kill_switch()
 print("   Kill switch disabled!")
 
 print("\n6. Trading after recovery:")
-_ = run_demo(safe_broker.submit_order_async("AAPL", 10, OrderSide.BUY))
+new_safe_broker.record_market_snapshot("AAPL", 100.0)
+_ = run_demo(new_safe_broker.submit_order_async("AAPL", 10, OrderSide.BUY))
+new_safe_broker.close_persistence()
 
 # %% [markdown]
 # **Finding**: The kill switch persists across SafeBroker instances, so an emergency halt survives process
@@ -771,7 +798,12 @@ assert portfolio.account_value == 103_000.0
 
 # %%
 for managed_path in MANAGED_STATE_PATHS:
-    managed_path.unlink(missing_ok=True)
+    for candidate in (
+        managed_path,
+        managed_path.with_name(f"{managed_path.name}.lock"),
+        managed_path.with_name(f"{managed_path.name}.head"),
+    ):
+        candidate.unlink(missing_ok=True)
 
 unexpected_state_files = list(STATE_DIR.iterdir())
 assert not unexpected_state_files, f"Temporary state residue: {unexpected_state_files}"

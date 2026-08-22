@@ -100,7 +100,7 @@ def write_darts_checkpoint(
     return path
 
 
-def load_darts_checkpoint(path: Path):
+def load_darts_checkpoint(path: Path, *, device: str = "cpu"):
     """Load a Darts checkpoint after both persisted files pass their digests."""
     model_path, weights_path, sidecar_path = _darts_checkpoint_files(Path(path))
     if not all(item.is_file() for item in (model_path, weights_path, sidecar_path)):
@@ -120,7 +120,7 @@ def load_darts_checkpoint(path: Path):
         raise ValueError(f"unsupported Darts architecture at {model_path}")
     model = model_cls.load(
         str(model_path),
-        pl_trainer_kwargs=_trainer_kwargs("cpu"),
+        pl_trainer_kwargs=_trainer_kwargs(device),
         weights_only=False,
     )
     return model, record["metadata"]
@@ -378,9 +378,19 @@ def darts_training_identity(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         cfg, _parse_label_horizon(label_col)
     )
+    target_mode = str(cfg.get("params", {}).get("darts_target", "one_period_return"))
+    base_target_data_spec = (
+        {
+            "delay_periods": output_chunk_length,
+            "kind": "lagged_label",
+            "label": label_col,
+        }
+        if target_mode == "lagged_label"
+        else darts_base_target_identity(case_study)
+    )
     return {
         "batch_size": cfg.get("batch_size", 2048),
-        "base_target_data_spec": darts_base_target_identity(case_study),
+        "base_target_data_spec": base_target_data_spec,
         "input_chunk_length": input_chunk_length,
         "input_data_spec": input_data_spec,
         "lookback": cfg.get("params", {}).get("lookback", input_chunk_length),
@@ -440,9 +450,11 @@ def _build_darts_model(
     params = dict(cfg.get("params", {}))
     arch = params.pop("architecture")
     model_cls = NBEATSModel if arch == "nbeats" else TSMixerModel
+    params.pop("decision_cadence", None)
     params.pop("lookback", None)
     params.pop("darts_input_chunk_length", None)
     params.pop("darts_output_chunk_length", None)
+    params.pop("darts_target", None)
     params.pop("input_chunk_length", None)
     params.pop("output_chunk_length", None)
     params["input_chunk_length"] = input_chunk_length
@@ -624,6 +636,54 @@ def _panel_identity_columns(dataset_pd: pd.DataFrame, entity_col: str) -> list[s
     return identity_cols
 
 
+def _attach_darts_target(
+    dataset_pd: pd.DataFrame,
+    *,
+    case_study: str,
+    date_col: str,
+    entity_col: str,
+    label_col: str,
+    config: dict[str, Any],
+) -> pd.DataFrame:
+    params = config.get("params", {})
+    mode = str(params.get("darts_target", "one_period_return"))
+    if mode == "one_period_return":
+        if params.get("decision_cadence") is not None:
+            raise ValueError("cadence-selected Darts runs require an explicit cadence-aware target")
+        return _attach_base_target(dataset_pd, case_study, date_col)
+    if mode != "lagged_label":
+        raise ValueError(f"unsupported Darts target mode {mode!r}")
+    _, output_chunk_length = _resolve_chunk_lengths(config, _parse_label_horizon(label_col))
+    if output_chunk_length != 2:
+        raise ValueError("lagged-label Darts targets require a two-period forecast")
+    if _DARTS_PERIOD_COL not in dataset_pd.columns:
+        raise ValueError("lagged-label Darts targets require expected-period identity")
+    if label_col not in dataset_pd.columns:
+        raise ValueError(f"lagged-label Darts target is missing {label_col!r}")
+
+    result = dataset_pd.copy()
+    result[date_col] = pd.to_datetime(result[date_col])
+    identity_cols = _panel_identity_columns(result, entity_col)
+    result = result.sort_values([*identity_cols, date_col], kind="stable")
+    segment_col = "_darts_target_segment"
+    if segment_col in result.columns:
+        raise ValueError(f"Darts dataset contains reserved column {segment_col!r}")
+    result[segment_col] = (
+        result.groupby(identity_cols, sort=False)[_DARTS_PERIOD_COL]
+        .diff()
+        .ne(1)
+        .groupby([result[column] for column in identity_cols])
+        .cumsum()
+    )
+    target = result.groupby([*identity_cols, segment_col], sort=False)[label_col].shift(
+        output_chunk_length
+    )
+    if (target.dropna() <= -1.0).any():
+        raise ValueError("lagged-label Darts targets require returns greater than -1")
+    result[BASE_TARGET_COL] = np.log1p(target)
+    return result.drop(columns=segment_col)
+
+
 def darts_validation_keys(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -634,6 +694,7 @@ def darts_validation_keys(
     date_col: str,
     entity_col: str,
     case_study: str,
+    calendar_id: str | None = None,
     temporal_by_fold=None,
     temporal_keys: list[str] | None = None,
     temporal_feature_names: list[str] | None = None,
@@ -642,14 +703,23 @@ def darts_validation_keys(
     input_chunk_length, output_chunk_length = _resolve_chunk_lengths(
         config, _parse_label_horizon(label_col)
     )
-    from utils.cv_splits import make_walk_forward_config
+    if calendar_id is None:
+        from utils.cv_splits import make_walk_forward_config
 
-    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
+        calendar_id = make_walk_forward_config(case_study, date_col=date_col).calendar_id
     dataset_pd = _attach_expected_periods(
-        dataset_pd,
+        dataset_pd.copy(),
         date_col=date_col,
-        calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
+        calendar_id=calendar_id,
         case_study=case_study,
+    )
+    dataset_pd = _attach_darts_target(
+        dataset_pd,
+        case_study=case_study,
+        date_col=date_col,
+        entity_col=entity_col,
+        label_col=label_col,
+        config=config,
     )
     identity_cols = _panel_identity_columns(dataset_pd, entity_col)
     frames: list[pl.DataFrame] = []
@@ -833,6 +903,7 @@ def _predict_fold(
     date_col: str,
     entity_col: str,
     output_chunk_length: int,
+    forecast_reduction: str = "compound_path",
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
@@ -873,12 +944,18 @@ def _predict_fold(
             if not np.isfinite(state.y_true[base_pos]):
                 continue
             score_path = forecast.values(copy=False).reshape(-1).astype(np.float64, copy=False)
+            if forecast_reduction == "terminal":
+                y_score = float(np.expm1(score_path[-1]))
+            elif forecast_reduction == "compound_path":
+                y_score = float(np.expm1(score_path.sum()))
+            else:
+                raise ValueError(f"unsupported Darts forecast reduction {forecast_reduction!r}")
             rows.append(
                 {
                     date_col: pd.Timestamp(state.dates[base_pos]),
                     **state.identity,
                     "y_true": float(state.y_true[base_pos]),
-                    "y_score": float(np.expm1(score_path.sum())),
+                    "y_score": y_score,
                     "fold_id": fold_id,
                 }
             )
@@ -939,11 +1016,10 @@ def run_darts_cv(
         return params or None
 
     label_horizon = _parse_label_horizon(label_col)
-    dataset_pd = _attach_base_target(dataset_pd.copy(), case_study, date_col)
     from utils.cv_splits import make_walk_forward_config
 
     dataset_pd = _attach_expected_periods(
-        dataset_pd,
+        dataset_pd.copy(),
         date_col=date_col,
         calendar_id=make_walk_forward_config(case_study, date_col=date_col).calendar_id,
         case_study=case_study,
@@ -954,10 +1030,31 @@ def run_darts_cv(
     training_log: list[dict[str, Any]] = []
     prediction_frames: list[pl.DataFrame] = []
     has_fold_temporal = temporal_by_fold is not None and temporal_keys and temporal_feature_names
+    one_period_dataset: pd.DataFrame | None = None
 
     for cfg in configs:
         config_name = cfg["config_name"]
         params = cfg.get("params", {})
+        if params.get("darts_target", "one_period_return") == "one_period_return":
+            if one_period_dataset is None:
+                one_period_dataset = _attach_darts_target(
+                    dataset_pd,
+                    case_study=case_study,
+                    date_col=date_col,
+                    entity_col=entity_col,
+                    label_col=label_col,
+                    config=cfg,
+                )
+            config_dataset = one_period_dataset
+        else:
+            config_dataset = _attach_darts_target(
+                dataset_pd,
+                case_study=case_study,
+                date_col=date_col,
+                entity_col=entity_col,
+                label_col=label_col,
+                config=cfg,
+            )
         input_chunk_length, output_chunk_length = _resolve_chunk_lengths(cfg, label_horizon)
         cfg_seed = int(cfg.get("seed", RANDOM_SEED))
         n_epochs = int(cfg.get("n_epochs", 100))
@@ -978,7 +1075,7 @@ def run_darts_cv(
             seed_everything(fold_seed)
             fold_dataset = (
                 _overlay_fold_temporal_features(
-                    dataset_pd,
+                    config_dataset,
                     split,
                     date_col,
                     temporal_by_fold,
@@ -986,7 +1083,7 @@ def run_darts_cv(
                     temporal_feature_names,
                 )
                 if has_fold_temporal
-                else dataset_pd
+                else config_dataset
             )
             fold_series = _prepare_fold_series(
                 fold_dataset,
@@ -1095,6 +1192,11 @@ def run_darts_cv(
                     date_col,
                     entity_col,
                     output_chunk_length,
+                    forecast_reduction=(
+                        "terminal"
+                        if params.get("darts_target") == "lagged_label"
+                        else "compound_path"
+                    ),
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:

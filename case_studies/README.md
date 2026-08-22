@@ -49,12 +49,20 @@ case_studies/{id}/
 +-- labels/                    # Generated learning targets (gitignored)
 +-- features/                  # Generated financial and temporal features
 +-- evaluation/                # Generated feature diagnostics
++-- benchmark/                 # Tracked equal-weight market return series and metadata
 +-- run_log/                   # Downloaded or generated result state
 |   +-- registry.db            # Result and provenance source of truth
 |   +-- training/{hash}/       # Specs, coefficients, boosters, checkpoints
 |   +-- predictions/{hash}/    # Stored prediction arrays
 |   +-- backtest/{hash}/       # Returns, trades, weights, and configs
 ```
+
+The strategy-analysis notebooks read `benchmark/` as a release input. Each parquet contains an
+equal-weight reference return series for one label. Most use the cross-sectional mean of
+close-to-close returns; the US firm-characteristics benchmarks use the cross-sectional mean of the
+label. The matching JSON states the method, coverage, validation and holdout windows, and
+annualized summary statistics. Files remain label-specific because coverage can differ by label,
+even when two labels use the same underlying reference series.
 
 ## Reproducibility
 

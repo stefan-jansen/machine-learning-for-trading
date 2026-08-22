@@ -107,6 +107,7 @@ def test_all_cached_dl_runner_returns_registered_result(
     result = deep_learning.run_dl_cv(
         pd.DataFrame(),
         [{"fold": 0}],
+        device="cpu",
         n_features=1,
         **common,
     )

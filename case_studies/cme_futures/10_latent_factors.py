@@ -14,35 +14,29 @@
 # ---
 
 # %% [markdown]
-# # Latent Factor Model Suite for CME Futures
+# # CME Futures: Latent-Factor Requests
 #
-# The CME futures case study now runs its latent-factor models in separate
-# notebooks:
+# The latent-factor stage contains two declared configurations. `10a_pca` fits principal components
+# within each training fold. `10b_stochastic_discount_factor` estimates the neural stochastic
+# discount factor within the same fold contract. Neither notebook selects by IC.
 #
-# - `10a_pca`
-# - `10b_stochastic_discount_factor`
-#
-# Cross-model comparison remains in `12_model_analysis`.
+# This index exposes the complete request population without launching either computation. The two
+# execution notebooks publish disjoint official populations that `13_backtest` later combines with
+# the other predictive families.
 
 # %%
-"""Latent factor notebook index for the CME futures case study."""
+"""Show the declared CME futures latent-factor requests."""
 
-import warnings
-
-from case_studies.utils.analytics import load_best_ic_per_family
-
-warnings.filterwarnings("ignore")
-
-# %% tags=["parameters"]
-CASE_STUDY_ID = "cme_futures"
-
-# %%
-best = load_best_ic_per_family(
-    families=["latent_factors"],
-    case_studies=[CASE_STUDY_ID],
+from case_studies.cme_futures.research_workflow import (
+    ALL_LABELS,
+    model_request_catalog,
+    product_universe_table,
 )
 
-if best.is_empty():
-    print("No latent-factor results are registered yet for this case study.")
-else:
-    print(best)
+# %%
+requests = model_request_catalog("latent_factors", labels=ALL_LABELS)
+universe = product_universe_table()
+universe
+
+# %%
+requests.sort("label", "config_name")

@@ -334,12 +334,13 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
+    device: cpu
+    max_bin: 63
   latent_factors:
     persistent_entities: true
     model_kwargs:
       sdf:
-        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        checkpoint_epochs: [256, 512, 768, 1024]  # conditional-relative; publishes global 256..1280
         beta_checkpoint_epochs: [256]
         beta_default_checkpoint: 256
 

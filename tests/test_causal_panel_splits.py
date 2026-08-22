@@ -10,6 +10,7 @@ from case_studies.utils.causal import (
     block_permute,
     embargo_from_buffer,
     manual_dml_timeseries,
+    observation_step,
     run_dml_analysis,
 )
 
@@ -52,6 +53,68 @@ def test_panel_walk_forward_keeps_dates_whole_and_embargoes_dates() -> None:
 
 def test_monthly_label_buffer_is_one_monthly_decision_group() -> None:
     assert embargo_from_buffer("1M", periods_per_year=12) == 1
+
+
+def test_observation_step_measures_the_grid_and_ignores_session_gaps() -> None:
+    """The mode is the bar size; overnight and weekend gaps are outliers."""
+    session_one = pd.date_range("2021-01-04 09:30", periods=390, freq="1min")
+    session_two = pd.date_range("2021-01-05 09:30", periods=390, freq="1min")
+    frame = pd.DataFrame({"timestamp": session_one.append(session_two)})
+
+    assert observation_step(frame) == pd.Timedelta("1min")
+
+
+def test_observation_step_reads_a_polars_frame() -> None:
+    import polars as pl
+
+    frame = pl.DataFrame({"timestamp": pd.date_range("2021-01-04", periods=10, freq="1D")})
+
+    assert observation_step(frame) == pd.Timedelta("1D")
+
+
+def test_embargo_counts_label_horizons_on_the_observed_grid() -> None:
+    """A 15-minute label on a one-minute panel embargoes 15 periods, not one."""
+    assert embargo_from_buffer("15min", observed_step=pd.Timedelta("1min")) == 15
+    assert embargo_from_buffer("15min", observed_step="15min") == 1
+    assert embargo_from_buffer("8H", observed_step=pd.Timedelta("8h")) == 1
+    assert embargo_from_buffer("21D", observed_step=pd.Timedelta("1D")) == 21
+
+
+def test_embargo_without_an_observed_step_assumes_a_bar_size() -> None:
+    """The fallback is wrong by the ratio between the assumed bar and the real one.
+
+    It pins the assumption rather than blessing the answer: "15min" resolves to
+    one period whatever the panel is recorded at, which is right on a 15-minute
+    grid and wrong by fifteen on a one-minute grid.
+    """
+    assert embargo_from_buffer("15min") == 1
+    assert embargo_from_buffer("15min", observed_step=pd.Timedelta("15min")) == 1
+    assert embargo_from_buffer("15min", observed_step=pd.Timedelta("1min")) == 15
+
+
+def test_embargo_rejects_a_month_buffer_against_an_observation_step() -> None:
+    """A month has no fixed length, so it cannot be divided by a bar size."""
+    assert embargo_from_buffer("1M", periods_per_year=12) == 1
+    try:
+        embargo_from_buffer("1M", observed_step=pd.Timedelta("1D"))
+    except ValueError as error:
+        assert "month" in str(error).lower()
+    else:
+        raise AssertionError("a month buffer must not resolve against an observation step")
+
+
+def test_embargo_rounds_a_partial_period_up() -> None:
+    """Half a period of gap is not a gap; the label still resolves inside it."""
+    assert embargo_from_buffer("10min", observed_step=pd.Timedelta("4min")) == 3
+
+
+def test_embargo_rejects_a_nonpositive_observed_step() -> None:
+    try:
+        embargo_from_buffer("15min", observed_step=pd.Timedelta(0))
+    except ValueError as error:
+        assert "positive" in str(error)
+    else:
+        raise AssertionError("a zero-length grid step must not resolve to an embargo")
 
 
 def test_panel_walk_forward_rejects_unsorted_groups() -> None:

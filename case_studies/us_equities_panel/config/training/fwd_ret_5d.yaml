@@ -39,6 +39,7 @@ deep_learning:
 - nlinear
 - lstm_h64
 - tsmixer
+- nbeats_weekly
 tabular_dl:
 - tabm_s
 - tabm_m

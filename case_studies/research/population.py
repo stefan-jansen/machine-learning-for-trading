@@ -14,6 +14,29 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def _refuse_preview_activation() -> None:
+    """A population is written to the canonical registry whatever tier is active.
+
+    That is correct - a population is canonical by definition - but it means a preview run that
+    reaches this code writes into the shared registry rather than its own workspace. The member
+    check below cannot catch it: a population is snapshotted *before* its members are fitted, so
+    every lookup misses and every member passes. On 2026-08-16 a preview notebook test left a
+    28-member population in the canonical etfs registry that way, and the next canonical run was
+    refused because a population of that name already existed with different members.
+
+    Callers guard this too. This is the guard that does not depend on remembering.
+    """
+    import os
+    from pathlib import Path
+
+    active = os.environ.get("ML4T_OUTPUT_DIR")
+    if active and Path(active).name == ".preview":
+        raise ValueError(
+            "a preview run cannot create an official population: it would be written to the "
+            "canonical registry"
+        )
+
+
 @dataclass(frozen=True)
 class OfficialPopulation:
     study: Study
@@ -34,6 +57,7 @@ class OfficialPopulation:
         supersedes: str | None = None,
     ) -> OfficialPopulation:
         study.require_writable()
+        _refuse_preview_activation()
         if member_kind not in {"training", "prediction", "backtest"}:
             raise ValueError("official population member_kind is not supported")
         normalized = tuple(dict.fromkeys(str(member) for member in members))
@@ -44,9 +68,21 @@ class OfficialPopulation:
                 result = Result.open(study, member_hash, include_preview=True)
             except KeyError:
                 continue
+            if result.kind != member_kind:
+                raise ValueError(
+                    f"official population member {member_hash} has kind {result.kind}, "
+                    f"not {member_kind}"
+                )
             if result.execution_tier == "preview":
                 raise ValueError(
                     f"preview result {member_hash} cannot enter an official population"
+                )
+            if (
+                member_kind == "backtest"
+                and (result.spec().get("decision_artifact") or {}).get("canonical") is False
+            ):
+                raise ValueError(
+                    f"exploratory decision backtest {member_hash} cannot enter an official population"
                 )
         snapshot = {
             "schema_version": 1,
@@ -102,6 +138,21 @@ class OfficialPopulation:
         finally:
             db.close()
         return cls(study, population_hash, name, member_kind, normalized, supersedes)
+
+    @classmethod
+    def one(cls, study: Study, *, name: str) -> OfficialPopulation:
+        """Resolve one immutable population by name without a hash handoff."""
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            rows = db.execute(
+                "SELECT population_hash FROM official_populations WHERE name = ? "
+                "ORDER BY population_hash",
+                (name,),
+            ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(
+                f"official population name {name!r} resolved to {len(rows)} identities"
+            )
+        return cls.open(study, rows[0][0])
 
     @classmethod
     def open(cls, study: Study, population_hash: str) -> OfficialPopulation:

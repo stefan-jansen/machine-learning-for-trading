@@ -176,6 +176,7 @@ def main() -> None:
             output_dir=output_dir,
             data_dir=data_dir,
             extra_env=extra_env,
+            research_preview=True,
         )
     elapsed = time.perf_counter() - started
 

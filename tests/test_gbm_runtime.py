@@ -111,6 +111,12 @@ def test_runtime_params_reject_unknown_device() -> None:
         gbm.lightgbm_runtime_params("tpu")
 
 
+def test_runtime_override_is_optional_and_normalizes_gpu_alias() -> None:
+    assert gbm.resolve_gbm_device("", "cpu") == "cpu"
+    assert gbm.resolve_gbm_device("cuda", "cpu") == "cuda"
+    assert gbm.resolve_gbm_device(None, "gpu") == "cuda"
+
+
 def test_execution_config_keeps_numerical_parameters_independent_of_device() -> None:
     cpu = gbm.resolve_gbm_execution_config({"device": "cpu", "max_bin": 63, "num_threads": 8})
     cuda = gbm.resolve_gbm_execution_config({"device": "cuda", "max_bin": 63, "num_threads": 8})
@@ -134,6 +140,28 @@ def test_us_firm_gbm_defaults_use_the_reproducible_reader_backend() -> None:
         gbm.GBM_DEFAULT_MAX_BIN,
         gbm.DEFAULT_GBM_CPU_THREADS,
     )
+
+
+def test_every_case_study_gbm_setup_resolves_the_shared_execution_contract() -> None:
+    resolved = {}
+    for setup_path in sorted((REPO_ROOT / "case_studies").glob("*/config/setup.yaml")):
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        gbm_config = (setup.get("modeling") or {}).get("gbm")
+        if gbm_config is not None:
+            resolved[setup_path.parents[1].name] = gbm.resolve_gbm_execution_config(gbm_config)
+
+    assert set(resolved) == {
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "fx_pairs",
+        "nasdaq100_microstructure",
+        "sp500_equity_option_analytics",
+        "sp500_options",
+        "us_equities_panel",
+        "us_firm_characteristics",
+    }
+    assert {max_bin for _, max_bin, _ in resolved.values()} == {gbm.GBM_DEFAULT_MAX_BIN}
 
 
 def test_prepare_gbm_folds_keeps_continuous_classification_target() -> None:
@@ -758,3 +786,23 @@ def test_gbm_registration_uses_the_lookup_spec_and_iteration_checkpoint(
     assert captured["prediction"]["checkpoint_value"] == 100
     assert captured["prediction"]["checkpoint_kind"] == "iteration"
     assert captured["prediction"]["eval_col"] == "eval_actual"
+
+
+def test_crypto_gbm_takes_its_device_from_setup_yaml() -> None:
+    """The device the boundary fits on is the one ``setup.yaml`` declares.
+
+    ``07_gbm`` no longer names a device. It calls the shared model boundary, which
+    reads ``modeling.gbm`` from the case study's own setup and lets an explicit
+    request field, and nothing else, override it. The guard this replaces lived in
+    ``test_holdout_boundary.py`` and grepped the notebook's source, so it went on
+    passing against text the notebook had stopped containing.
+    """
+    from types import SimpleNamespace
+
+    root = REPO_ROOT / "case_studies" / "crypto_perps_funding"
+    setup = yaml.safe_load((root / "config" / "setup.yaml").read_text())
+    assert setup["modeling"]["gbm"]["device"] == "cpu"
+
+    study = SimpleNamespace(root=root)
+    assert gbm._gbm_execution_settings(study, {})[0] == "cpu"
+    assert gbm._gbm_execution_settings(study, {"device": "gpu"})[0] == "cuda"

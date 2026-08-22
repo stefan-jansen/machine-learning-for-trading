@@ -4,8 +4,11 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import polars as pl
 
 from case_studies.utils.registry import register_prediction_set, register_training_run
 from case_studies.utils.registry.specs import (
@@ -14,6 +17,26 @@ from case_studies.utils.registry.specs import (
 )
 
 from .contracts import ExecutionTier
+
+# Digest verification reads the artifact off disk, and `complete` is evaluated in loops
+# over whole populations - CandidateSet.members and OfficialPopulation both re-check
+# every member, and members is a property, so an unmemoized check re-reads two parquet
+# files per member on every access. Published artifacts are immutable, and the key
+# carries size and nanosecond mtime, so a file that is replaced misses the cache.
+_VERIFIED_ARTIFACT_DIGESTS: dict[tuple[str, int, int], str] = {}
+
+
+def _verified_digest(path: Path, load) -> str:
+    from case_studies.utils.artifact_digest import value_digest
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    digest = _VERIFIED_ARTIFACT_DIGESTS.get(key)
+    if digest is None:
+        digest = value_digest(load())
+        _VERIFIED_ARTIFACT_DIGESTS[key] = digest
+    return digest
+
 
 if TYPE_CHECKING:
     from .workspace import Study
@@ -280,9 +303,36 @@ class Result:
 
 @dataclass(frozen=True)
 class TrainingResult(Result):
+    def fitted_states(self) -> list[Any]:
+        """The per-fold fitted state this run stored, in fold order.
+
+        A run writes what its family needs to reproduce a prediction without refitting, and the
+        shape is the family's own: the linear runner stores a mapping with `model`,
+        `preprocessor` and `feature_names`. This returns those objects unchanged rather than
+        interpreting them, because a caller that asks for fitted state already knows which family
+        it asked about. It is the supported way to read them - the layout under
+        `run_log/training/<hash>/models/` is an implementation detail, and a notebook that opens
+        those files itself is asserting something the registry has not been asked to confirm.
+        """
+        import joblib
+
+        models = self.root / "run_log" / "training" / self.hash / "models"
+        paths = sorted(models.glob("fold_*.joblib"))
+        if not paths:
+            raise FileNotFoundError(
+                f"training run {self.hash} stored no fitted state under {models}"
+            )
+        return [joblib.load(path) for path in paths]
+
     @property
     def complete(self) -> bool:
         if self.identity_version not in SUPPORTED_IDENTITY_VERSIONS or not self.spec():
+            return False
+        spec_path = self.root / "run_log" / "training" / self.hash / "spec.json"
+        try:
+            if json.loads(spec_path.read_text()) != self.spec():
+                return False
+        except (OSError, json.JSONDecodeError):
             return False
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             tables = {
@@ -344,6 +394,8 @@ class PredictionResult(Result):
 
     @property
     def complete(self) -> bool:
+        from case_studies.utils.artifact_digest import value_digest
+
         coverage = self.coverage()
         prediction_file = self.root / "run_log" / "predictions" / self.hash / "predictions.parquet"
         if (
@@ -353,6 +405,20 @@ class PredictionResult(Result):
             or not prediction_file.is_file()
         ):
             return False
+        # artifact_digest arrived as a nullable column on an existing table, so rows
+        # registered before it exists carry NULL and there is nothing to compare
+        # against. register_prediction_set reads that NULL as "legacy, backfill it"
+        # rather than as a conflict; completeness has to agree, or every prediction in
+        # a pre-existing registry reports incomplete and Lifecycle.lock refuses a
+        # backtest whose artifacts are all present. Rows written since always carry a
+        # digest and are held to it.
+        recorded_digest = coverage.get("artifact_digest")
+        if recorded_digest:
+            try:
+                if _verified_digest(prediction_file, self.load) != recorded_digest:
+                    return False
+            except (OSError, ValueError, pl.exceptions.PolarsError):
+                return False
         with closing(sqlite3.connect(self.root / "run_log" / "registry.db")) as db:
             headline = db.execute(
                 "SELECT 1 FROM prediction_metrics WHERE prediction_hash = ?", (self.hash,)
@@ -373,7 +439,17 @@ class PredictionResult(Result):
 class BacktestResult(Result):
     @property
     def complete(self) -> bool:
+        from case_studies.utils.artifact_digest import value_digest
+
         record = self.registry_record()
+        spec_path = self.root / "run_log" / "backtest" / self.hash / "spec.json"
+        try:
+            stored_spec = json.loads(spec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        stored_spec.pop("_runtime_backtest_config", None)
+        if stored_spec != self.spec():
+            return False
         prediction = Result.open(
             self.study,
             record["prediction_hash"],
@@ -386,7 +462,32 @@ class BacktestResult(Result):
             metrics = db.execute(
                 "SELECT 1 FROM backtest_metrics WHERE backtest_hash = ?", (self.hash,)
             ).fetchone()
-        return returns.is_file() and metrics is not None
+        # As with prediction_coverage.artifact_digest, artifact_digests_json is NULL on
+        # every backtest_runs row that predates the column. Treat that as "nothing
+        # recorded to verify" and fall back to requiring the returns file, rather than
+        # reporting every pre-existing backtest incomplete.
+        recorded_digests = record.get("artifact_digests_json")
+        if not recorded_digests:
+            return metrics is not None and returns.is_file()
+        try:
+            artifact_digests = json.loads(recorded_digests)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if (
+            not isinstance(artifact_digests, dict)
+            or "daily_returns.parquet" not in artifact_digests
+        ):
+            return False
+        for filename, expected_digest in artifact_digests.items():
+            path = returns.parent / filename
+            try:
+                if not path.is_file():
+                    return False
+                if _verified_digest(path, partial(pl.read_parquet, path)) != expected_digest:
+                    return False
+            except (OSError, ValueError, pl.exceptions.PolarsError):
+                return False
+        return metrics is not None
 
 
 class ResultsCatalog:

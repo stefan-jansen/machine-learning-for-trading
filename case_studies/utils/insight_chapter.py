@@ -54,6 +54,37 @@ class RegistrySelectionError(ValueError):
     """Raised when registry candidates cannot support a comparable rank-one selection."""
 
 
+def compare_ic_on_shared_timestamps(
+    left: pl.DataFrame,
+    right: pl.DataFrame,
+) -> dict[str, float | int]:
+    """Average two IC series over their exact evaluation-timestamp intersection."""
+    required = {"date", "ic"}
+    for name, frame in (("left", left), ("right", right)):
+        missing = required - set(frame.columns)
+        if missing:
+            raise RegistrySelectionError(f"{name} daily IC is missing {sorted(missing)}")
+
+    def _daily(frame: pl.DataFrame, value_name: str) -> pl.DataFrame:
+        return (
+            frame.select("date", "ic")
+            .drop_nulls()
+            .with_columns(pl.col("date").cast(pl.Datetime("ns")))
+            .filter(pl.col("ic").is_finite())
+            .group_by("date")
+            .agg(pl.col("ic").mean().alias(value_name))
+        )
+
+    shared = _daily(left, "left_ic").join(_daily(right, "right_ic"), on="date", how="inner")
+    if shared.is_empty():
+        raise RegistrySelectionError("IC series have no shared evaluation timestamps")
+    return {
+        "left_ic": float(shared["left_ic"].mean()),
+        "right_ic": float(shared["right_ic"].mean()),
+        "n_timestamps": shared.height,
+    }
+
+
 def _resolve_label(case_study: str, label_resolver: LabelResolver | None) -> str:
     if label_resolver is None:
         return PRIMARY_LABELS[case_study]

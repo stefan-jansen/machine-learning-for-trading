@@ -40,15 +40,23 @@ class StateTransitionPolicy:
             raise ValueError(f"state transitions must be one of {sorted(allowed)}")
 
 
+def _decision_entity_key(decisions: pl.DataFrame) -> str:
+    entity_keys = [column for column in ("symbol", "product") if column in decisions.columns]
+    if len(entity_keys) != 1:
+        raise ValueError("decision artifacts require exactly one entity key: symbol or product")
+    return entity_keys[0]
+
+
 def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     value_column = {
         "target_weights": "weight",
         "target_positions": "position",
         "orders": "quantity",
+        "short_straddles": "weight",
     }.get(kind)
     if value_column is None:
         raise ValueError("unsupported decision artifact kind")
-    keys = ("symbol", "timestamp")
+    keys = (_decision_entity_key(decisions), "timestamp")
     required = {*keys, value_column}
     missing = required - set(decisions.columns)
     if missing:
@@ -61,10 +69,59 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     values = selected.get_column(value_column).cast(pl.Float64)
     if any(not math.isfinite(value) for value in values):
         raise ValueError("decision artifact values must be finite")
+    fold_columns = [column for column in ("fold", "fold_id") if column in decisions.columns]
+    if len(fold_columns) > 1:
+        raise ValueError("decision artifacts cannot contain both fold and fold_id")
+    if fold_columns and decisions.get_column(fold_columns[0]).null_count():
+        raise ValueError("decision artifact fold values cannot be null")
+    if kind == "short_straddles":
+        contract_columns = {
+            "strike",
+            "expiration",
+            "entry_date",
+            "entry_straddle_mid",
+            "entry_call_mid",
+            "entry_call_bid",
+            "entry_call_ask",
+            "entry_put_mid",
+            "entry_put_bid",
+            "entry_put_ask",
+        }
+        missing_contract = contract_columns - set(decisions.columns)
+        if missing_contract:
+            raise ValueError(
+                f"short-straddle decisions are missing columns: {sorted(missing_contract)}"
+            )
+        if decisions.select(*sorted(contract_columns)).null_count().sum_horizontal().item():
+            raise ValueError("short-straddle decisions cannot contain null contract fields")
+        invalid_dates = decisions.filter(
+            (pl.col("entry_date").cast(pl.Date) <= pl.col("timestamp").cast(pl.Date))
+            | (pl.col("expiration").cast(pl.Date) < pl.col("entry_date").cast(pl.Date))
+        )
+        if not invalid_dates.is_empty():
+            raise ValueError("short-straddle entry and expiration dates are invalid")
+        if decisions.filter(
+            (pl.col("strike") <= 0)
+            | (pl.col("entry_straddle_mid") <= 0)
+            | (pl.col("entry_call_mid") <= 0)
+            | (pl.col("entry_put_mid") <= 0)
+            | (pl.col("entry_call_bid") < 0)
+            | (pl.col("entry_put_bid") < 0)
+            | (pl.col("entry_call_ask") < pl.col("entry_call_bid"))
+            | (pl.col("entry_put_ask") < pl.col("entry_put_bid"))
+            | (pl.col("weight") <= 0)
+        ).height:
+            raise ValueError("short-straddle decisions contain invalid quotes, strike, or weight")
+        weight_sums = decisions.group_by("timestamp").agg(pl.col("weight").sum().alias("weight"))
+        if weight_sums.filter((pl.col("weight") - 1.0).abs() > 1e-10).height:
+            raise ValueError("short-straddle weights must sum to one per decision timestamp")
     return keys
 
 
-def _validate_promotion(source_identity: dict[str, Any]) -> None:
+def _validate_promotion(
+    source_identity: dict[str, Any],
+    prediction_hashes: tuple[str, ...],
+) -> None:
     required = {
         "module",
         "source_digest",
@@ -81,6 +138,13 @@ def _validate_promotion(source_identity: dict[str, Any]) -> None:
         raise ValueError("canonical decision promotion source module is not importable")
     if not source_identity["declared_inputs"]:
         raise ValueError("canonical decision promotion requires declared immutable inputs")
+    declared = source_identity["declared_inputs"]
+    if not isinstance(declared, dict) or declared.get("prediction_hashes") != list(
+        prediction_hashes
+    ):
+        raise ValueError(
+            "canonical decision promotion must disclose the exact prediction_hashes input"
+        )
     determinism = source_identity["determinism"]
     if not isinstance(determinism, dict) or not (
         determinism.get("deterministic") or determinism.get("seed") is not None
@@ -123,15 +187,25 @@ class DecisionArtifact:
         lineage = tuple(dict.fromkeys(prediction_hashes))
         if not lineage or len(lineage) != len(prediction_hashes):
             raise ValueError("decision prediction lineage must be non-empty and unique")
+        prediction_results = []
         for prediction_hash in lineage:
             result = Result.open(study, prediction_hash, include_preview=not canonical)
             if not isinstance(result, PredictionResult):
                 raise ValueError(f"decision lineage {prediction_hash!r} is not a prediction")
-            if canonical and (result.identity_version != IDENTITY_VERSION or not result.complete):
+            if canonical and (
+                result.identity_version != IDENTITY_VERSION
+                or not result.complete
+                or result.execution_tier != "canonical"
+            ):
                 raise ValueError("canonical decision lineage requires current complete predictions")
+            prediction_results.append(result)
+        tiers = {result.execution_tier for result in prediction_results}
+        if len(tiers) != 1:
+            raise ValueError("decision lineage cannot mix canonical and preview predictions")
+        execution_tier = tiers.pop()
         normalized_source = canonical_value(source_identity or {})
         if canonical:
-            _validate_promotion(normalized_source)
+            _validate_promotion(normalized_source, lineage)
         normalized_decisions = decisions.sort(list(key_columns))
         spec = {
             "schema_version": 1,
@@ -145,16 +219,18 @@ class DecisionArtifact:
             "decision_keys": list(key_columns),
             "artifact_digest": value_digest(normalized_decisions),
             "canonical": canonical,
+            "execution_tier": execution_tier,
         }
         if canonical and normalized_source["clean_replay_digest"] != spec["artifact_digest"]:
             raise ValueError("canonical decision clean replay does not match the artifact digest")
         decision_hash = compute_hash(canonical_json(spec))
-        artifact_dir = study.root / "run_log" / "decisions" / decision_hash
+        storage_root = study.storage_root(execution_tier)
+        artifact_dir = storage_root / "run_log" / "decisions" / decision_hash
         artifact = artifact_dir / "decisions.parquet"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         temporary = artifact_dir / f".decisions.{uuid.uuid4().hex}.tmp"
         normalized_decisions.write_parquet(temporary)
-        db = _open_registry(study.root)
+        db = _open_registry(storage_root)
         created_artifact = False
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -190,13 +266,15 @@ class DecisionArtifact:
         finally:
             temporary.unlink(missing_ok=True)
             db.close()
-        return cls(study, decision_hash, kind, spec, canonical, study.root)
+        return cls(study, decision_hash, kind, spec, canonical, storage_root)
 
     @classmethod
     def open(cls, study: Study, decision_hash: str) -> DecisionArtifact:
         roots = [study.root]
         if study.release_case_root != study.root:
             roots.append(study.release_case_root)
+        if study.output_root is not None:
+            roots.append(study.output_root / ".preview" / study.case_study)
         for root in roots:
             db_path = root / "run_log" / "registry.db"
             if not db_path.is_file():

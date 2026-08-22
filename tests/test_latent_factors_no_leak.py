@@ -583,7 +583,9 @@ def test_sdf_expected_spec_includes_library_output_defaults() -> None:
         "n_epochs_unc": 256,
         "n_epochs_moment": 64,
         "n_epochs_cond": 1024,
-        "checkpoint_epochs": [256, 512, 768, 1024, 1280],
+        # Conditional-relative, as every preset in the corpus now is. The published
+        # labels below are global and unchanged by the renumbering.
+        "checkpoint_epochs": [256, 512, 768, 1024],
         "beta_n_epochs": 256,
         "beta_checkpoint_epochs": [256],
         "beta_default_checkpoint": 256,
@@ -762,7 +764,12 @@ def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
         "num_threads": 1,
     }
 
-    fresh = cv.run_latent_factor_cv(**kwargs, use_cache=False)
+    fitted_state = cv.run_latent_factor_cv(
+        **kwargs,
+        use_cache=False,
+        checkpoint_surface="fitted_state",
+    )
+    fresh = cv.run_latent_factor_cv(**kwargs, use_cache=True)
     cached = cv.run_latent_factor_cv(**kwargs, use_cache=True)
 
     fresh_predictions = fresh["all_predictions"]["cae"].sort(
@@ -774,10 +781,97 @@ def test_legacy_fresh_and_cached_outputs_share_physical_checkpoint_surface(
     fresh_metrics = fresh["fold_metrics"]["cae"].sort("epoch", "fold_id")
     cached_metrics = cached["fold_metrics"]["cae"].sort("epoch", "fold_id")
 
+    assert fitted_state["all_predictions"]["cae"].get_column("epoch").unique().sort().to_list() == [
+        0,
+        5,
+    ]
     assert fresh_predictions.get_column("epoch").unique().to_list() == [5]
     assert fresh_metrics.get_column("epoch").unique().to_list() == [5]
     assert fresh_predictions.equals(cached_predictions)
     assert fresh_metrics.equals(cached_metrics)
+
+
+def test_filesystem_cache_requires_each_checkpoint_for_each_fold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from case_studies.utils.latent_factors import cv
+
+    dates = pl.date_range(datetime(2020, 1, 1), datetime(2020, 1, 25), "1d", eager=True)
+    dataset = pl.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "symbol": f"S{symbol}",
+                "value": float(symbol + date_index / 100),
+                "return": float(symbol + date_index / 100),
+            }
+            for date_index, timestamp in enumerate(dates)
+            for symbol in range(6)
+        ]
+    )
+    splits = [
+        {
+            "fold": 0,
+            "train_start": dates[0],
+            "train_end": dates[14],
+            "val_start": dates[15],
+            "val_end": dates[19],
+        },
+        {
+            "fold": 1,
+            "train_start": dates[0],
+            "train_end": dates[19],
+            "val_start": dates[20],
+            "val_end": dates[24],
+        },
+    ]
+    fit_calls = 0
+
+    def fake_cae(chars_train, returns_train, chars_val, returns_val, **_kwargs):
+        nonlocal fit_calls
+        del chars_train, returns_train, returns_val
+        fit_calls += 1
+        physical = chars_val[..., 0]
+        return {0: physical - 1.0, 5: physical}, {"checkpoint_epochs": [0, 5]}
+
+    monkeypatch.setitem(cv._MODEL_RUNNERS, "cae", fake_cae)
+    cache_dir = tmp_path / "cache"
+    kwargs = {
+        "panel_data": None,
+        "splits": splits,
+        "models": ["cae"],
+        "n_factors": 1,
+        "n_epochs": 5,
+        "model_kwargs": {"cae": {"checkpoint_interval": 5}},
+        "save_dir": cache_dir,
+        "dataset": dataset,
+        "feature_names": ["value"],
+        "label_col": "return",
+        "device": "cpu",
+        "num_threads": 1,
+        "checkpoint_surface": "fitted_state",
+    }
+
+    cv.run_latent_factor_cv(**kwargs, use_cache=False)
+    assert fit_calls == 2
+
+    for filename in ("predictions.parquet", "fold_metrics.parquet"):
+        path = cache_dir / "cae" / filename
+        corrupted = pl.read_parquet(path).filter(
+            ~((pl.col("fold_id") == 1) & (pl.col("epoch") == 5))
+        )
+        corrupted.write_parquet(path)
+
+    result = cv.run_latent_factor_cv(**kwargs, use_cache=True)
+
+    assert fit_calls == 4
+    assert set(result["fold_metrics"]["cae"].select("fold_id", "epoch").unique().iter_rows()) == {
+        (0, 0),
+        (0, 5),
+        (1, 0),
+        (1, 5),
+    }
 
 
 @pytest.mark.gpu

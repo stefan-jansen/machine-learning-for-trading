@@ -172,6 +172,7 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: cpu
+    max_bin: 63
   latent_factors:
     persistent_entities: true
     # Down-tune the SDF schedule on this large-N CS so training time stays
@@ -187,7 +188,7 @@ modeling:
         n_epochs_moment: 32
         n_epochs_cond: 512
         burn_in_epochs: 32
-        checkpoint_epochs: [128, 256, 384, 512, 640]
+        checkpoint_epochs: [128, 256, 384, 512]  # conditional-relative; publishes global 128..640
         beta_checkpoint_epochs: [256]
         beta_default_checkpoint: 256
 

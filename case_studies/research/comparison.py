@@ -7,6 +7,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
+
 from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.registry.store import _git_hash, _open_registry, _utc_now
 
@@ -49,6 +51,11 @@ class CandidateSet:
             raise ValueError("preview results cannot enter a canonical candidate set")
         if any(not member.complete for member in resolved):
             raise ValueError("partial results cannot enter a candidate set")
+        if member_kind == "backtest" and any(
+            (member.spec().get("decision_artifact") or {}).get("canonical") is False
+            for member in resolved
+        ):
+            raise ValueError("exploratory decision backtests cannot enter a candidate set")
         ordered = tuple(sorted(resolved, key=lambda member: member.hash))
         protocols = [member.protocol() for member in ordered]
         if any(protocol["split"] != "validation" for protocol in protocols):
@@ -114,6 +121,18 @@ class CandidateSet:
         return cls(study, set_hash, name, member_kind, member_hashes, contract)
 
     @classmethod
+    def one(cls, study: Study, *, name: str) -> CandidateSet:
+        """Resolve one immutable set by its reader-facing name without a hash handoff."""
+        with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+            rows = db.execute(
+                "SELECT set_hash FROM candidate_sets WHERE name = ? ORDER BY set_hash",
+                (name,),
+            ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(f"candidate set name {name!r} resolved to {len(rows)} identities")
+        return cls.open(study, rows[0][0])
+
+    @classmethod
     def open(cls, study: Study, set_hash: str) -> CandidateSet:
         db_path = study.root / "run_log" / "registry.db"
         with closing(sqlite3.connect(db_path)) as db:
@@ -145,28 +164,33 @@ class CandidateSet:
 
     def best_validation_sharpe(self) -> Result:
         """Select deterministically within this immutable backtest set."""
+        hashes = self._ranked_validation_hashes()
+        return Result.open(self.study, hashes[0])
+
+    def ranked_validation_sharpe(self, *, limit: int | None = None) -> tuple[Result, ...]:
+        """Return complete members ordered by validation Sharpe and identity tie-break."""
+        if limit is not None and limit < 1:
+            raise ValueError("validation Sharpe ranking limit must be positive")
+        hashes = self._ranked_validation_hashes()
+        selected = hashes[:limit] if limit is not None else hashes
+        return tuple(Result.open(self.study, result_hash) for result_hash in selected)
+
+    def _ranked_validation_hashes(self) -> tuple[str, ...]:
         if self.member_kind != "backtest":
-            raise ValueError("validation Sharpe selection requires backtest members")
-        placeholders = ",".join("?" for _ in self.members)
-        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
-            rows = db.execute(
-                f"""
-                SELECT m.backtest_hash, m.sharpe
-                FROM backtest_metrics m
-                JOIN backtest_runs b ON b.backtest_hash = m.backtest_hash
-                JOIN prediction_sets p ON p.prediction_hash = b.prediction_hash
-                JOIN prediction_coverage c ON c.prediction_hash = p.prediction_hash
-                JOIN training_runs t ON t.training_hash = p.training_hash
-                WHERE m.backtest_hash IN ({placeholders})
-                  AND p.split = 'validation'
-                  AND c.status = 'complete'
-                  AND t.execution_tier = 'canonical'
-                  AND b.stage IN ('signal', 'allocation', 'risk_overlay')
-                  AND m.sharpe IS NOT NULL
-                ORDER BY m.sharpe DESC, m.backtest_hash ASC
-                """,
-                self.members,
-            ).fetchall()
-        if len(rows) != len(self.members):
+            raise ValueError("validation Sharpe ranking requires backtest members")
+        rows = (
+            self.study.backtests.table()
+            .filter(
+                pl.col("backtest_hash").is_in(self.members)
+                & (pl.col("split") == "validation")
+                & (pl.col("execution_tier") == "canonical")
+                & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
+                & pl.col("sharpe").is_not_null()
+            )
+            .sort("sharpe", "backtest_hash", descending=[True, False])
+        )
+        if rows.height != len(self.members):
             raise ValueError("candidate set contains an ineligible selection member")
-        return Result.open(self.study, rows[0][0])
+        if any(not Result.open(self.study, member_hash).complete for member_hash in self.members):
+            raise ValueError("candidate set contains an incomplete selection member")
+        return tuple(rows.get_column("backtest_hash"))

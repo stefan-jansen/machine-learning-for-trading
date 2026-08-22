@@ -42,6 +42,7 @@ import yaml
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
 from case_studies.utils.registry import model_source
 from case_studies.utils.signals import build_target_weights
+from case_studies.utils.sp500_price_lineage import adjustment_scale, continuous_adjusted_panel
 from utils.artifact_specs import resolve_market_runtime, resolve_market_semantics
 from utils.paths import get_case_study_dir
 
@@ -181,6 +182,45 @@ def load_contract_specs_from_yaml(yaml_path: Path | None = None):
             margin_pct=margin_pct,
         )
     return specs
+
+
+def load_futures_market_contract(products: list[str]) -> dict:
+    """Resolve the reader-visible roll and expiry contract for CME products."""
+    repo_root = Path(__file__).resolve().parents[2]
+    market_config = yaml.safe_load(
+        (repo_root / "data" / "futures" / "market" / "config.yaml").read_text()
+    )
+    product_specs = yaml.safe_load(
+        (repo_root / "data" / "futures" / "market" / "futures_specs.yaml").read_text()
+    )["products"]
+    if market_config.get("roll_type") != "v":
+        raise ValueError("CME backtesting requires the volume-rolled continuous series")
+    missing = sorted(set(products) - set(product_specs))
+    if missing:
+        raise ValueError(f"CME products have no expiry specification: {missing}")
+    expiry = {}
+    for product in sorted(set(products)):
+        spec = product_specs[product]
+        if not spec.get("expiry_rule") or not spec.get("contract_months"):
+            raise ValueError(f"{product} has an incomplete expiry specification")
+        expiry[product] = {
+            "contract_months": list(spec["contract_months"]),
+            "expiry_rule": str(spec["expiry_rule"]),
+        }
+    return {
+        "entity_key": "product",
+        "contract_position": 0,
+        "roll": {
+            "type": "volume",
+            "decision_information": "previous_session_volume",
+            "adjustment": "multiplicative_ratio",
+            "price_identity": "adj_close=raw_close*cum_ratio",
+        },
+        "expiry": {
+            "engine_behavior": "continuous_front_contract_has_no_delivery_event",
+            "products": expiry,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +661,13 @@ _PRICE_CONFIG = {
         "close_col": "close",
         "ohlcv": True,
         "loader": "sp500_daily_bars",
+        # Backtest fills ride the same split- and dividend-adjusted series that
+        # 02_labels builds every label from (``close * adj_factor`` within a
+        # ``sec_id``). On the printed close 92 sessions in 2017-2021 carry a move
+        # above 30% that is a corporate action rather than a price change - GE
+        # +677% on its 1-for-8 reverse split, NVDA -75% and NEE -75% on 4-for-1
+        # subdivisions - and each one books as P&L.
+        "price_lineage": "sp500_daily_bars",
         "drop_cols": [
             "sec_id",
             "adj_factor",
@@ -706,6 +753,29 @@ _PRICE_CONFIG = {
         ],
     },
 }
+
+
+@cache
+def _sp500_daily_bars_scale() -> pl.DataFrame:
+    """Resolve the back-adjustment scale once, over the complete bar history.
+
+    The panel handed to the rule is already narrowed by the ``start_date`` /
+    ``end_date`` pushdown, and the scale must not be: it depends on every segment
+    a ticker has and on which row is its last, so deriving it from the window
+    would make the same session's price depend on the query that asked for it.
+    """
+    from data import load_sp500_daily_bars
+
+    return adjustment_scale(load_sp500_daily_bars())
+
+
+def _sp500_daily_bars_lineage(df: pl.DataFrame) -> pl.DataFrame:
+    return continuous_adjusted_panel(df, scale=_sp500_daily_bars_scale())
+
+
+# Named price-lineage rules a panel spec may request, applied before any column
+# the rule reads can be dropped.
+_PRICE_LINEAGE = {"sp500_daily_bars": _sp500_daily_bars_lineage}
 
 
 def _load_via_canonical(
@@ -890,6 +960,10 @@ def load_backtest_prices(
                         end_lit = end_lit.dt.replace_time_zone(tz)
                     lf = lf.filter(pl.col(ts_col) < end_lit + pl.duration(days=1))
         df = lf.collect()
+
+    # Resolve the price lineage before drop_cols removes what the rule reads
+    if "price_lineage" in config:
+        df = _PRICE_LINEAGE[config["price_lineage"]](df)
 
     # Drop unwanted columns
     drop = [c for c in config.get("drop_cols", []) if c in df.columns]

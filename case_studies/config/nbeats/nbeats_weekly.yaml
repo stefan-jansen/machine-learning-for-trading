@@ -1,0 +1,14 @@
+batch_size: 2048
+checkpoint_interval: 5
+n_epochs: 50
+params:
+  architecture: nbeats
+  decision_cadence: weekly_friday
+  darts_input_chunk_length: 12
+  darts_output_chunk_length: 2
+  darts_target: lagged_label
+  dropout: 0.1
+  hidden_size: 128
+  lookback: 12
+  n_blocks: 3
+  n_layers: 4

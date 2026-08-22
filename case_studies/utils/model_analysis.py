@@ -277,22 +277,77 @@ def best_model_per_family_fast(
     metrics: pl.DataFrame,
     *,
     ic_col: str = "ic_mean_daily",
+    coverage_col: str = "ic_n_days",
+    require_full_coverage: bool = True,
 ) -> pl.DataFrame:
-    """Find the best (config, checkpoint) per family from pre-computed metrics.
+    """Find the representative (config, checkpoint) per family from stored metrics.
 
-    Much faster than select_best_per_family() which recomputes IC from raw predictions.
+    The representative stands in for its family in every comparison downstream, so
+    it has to have been scored over the same period as the rows it will be compared
+    against. A prediction set that failed partway still leaves rows in the registry,
+    and its score is an average over the decision days it managed rather than the
+    days it was asked for. Those scores are frequently the highest ones, because a
+    shorter window is an easier window.
+
+    Rows are therefore restricted to the maximum ``coverage_col`` observed within
+    each ``(family, label)`` before the highest score is taken. Restricting per
+    label rather than globally keeps labels with genuinely different histories
+    comparable within themselves.
+
+    Exact ties on ``ic_col`` resolve on ``prediction_hash`` so the same registry
+    returns the same representative on every machine and every re-run.
+
+    Set ``require_full_coverage=False`` for a diagnostic view of every scored row,
+    which is not a basis for comparing one family against another.
     """
     if metrics.height == 0:
         return metrics
     if ic_col not in metrics.columns:
         raise ValueError(f"Selection metric {ic_col!r} is not present")
 
+    eligible = metrics.filter(pl.col(ic_col).is_not_null())
+
+    if require_full_coverage:
+        if coverage_col not in eligible.columns:
+            raise ValueError(
+                f"Coverage column {coverage_col!r} is not present, so no representative "
+                f"can be shown to cover the same period as the rows it is compared "
+                f"against. Backfill it, or pass require_full_coverage=False and treat "
+                f"the result as a diagnostic rather than a comparison."
+            )
+        group_keys = ["family", "label"] if "label" in eligible.columns else ["family"]
+        covered = eligible.filter(
+            pl.col(coverage_col).is_not_null()
+            & (pl.col(coverage_col) == pl.col(coverage_col).max().over(group_keys))
+        )
+
+        # A group whose rows all carry a null coverage count cannot be shown to
+        # span the same days as any other, and the filter above removes it
+        # entirely. Checking at the granularity the filter groups on matters: a
+        # family with one label backfilled and another not would survive a
+        # family-level check while the unbacked label vanished, and because the
+        # representative is taken across labels that silent drop can change which
+        # configuration represents the family.
+        def _groups(frame: pl.DataFrame) -> set[tuple]:
+            return set(map(tuple, frame.select(group_keys).unique().rows()))
+
+        lost = sorted(_groups(eligible) - _groups(covered))
+        if lost:
+            named = ", ".join("/".join(str(part) for part in group) for group in lost)
+            raise ValueError(
+                f"No prediction set carries {coverage_col!r} for {named}, so those rows "
+                f"cannot be compared against the ones that do. Backfill the column for "
+                f"those runs, or pass require_full_coverage=False and treat the whole "
+                f"result as a diagnostic rather than a comparison."
+            )
+        eligible = covered
+
+    tie_break = ["prediction_hash"] if "prediction_hash" in eligible.columns else []
     return (
-        metrics.filter(pl.col(ic_col).is_not_null())
-        .sort(ic_col, descending=True)
+        eligible.sort([ic_col, *tie_break], descending=[True, *[False] * len(tie_break)])
         .group_by("family")
         .first()
-        .sort(ic_col, descending=True)
+        .sort([ic_col, "family"], descending=[True, False])
     )
 
 
@@ -1142,18 +1197,50 @@ def load_daily_metrics_series(
     case_study_id: str,
     prediction_hash: str,
 ) -> pl.DataFrame:
-    """Load the per-fold daily IC (and AUC if present) parquet for one prediction set.
+    """Load or compute the per-fold daily IC series for one prediction set.
 
-    Returns the frame at `run_log/predictions/{hash}/daily_metrics.parquet`
-    (shipped with the downloaded case-study artifacts). Use this for
-    rolling-IC plots and re-running the bootstrap on the daily series
-    without re-touching raw predictions. Empty DataFrame if missing.
+    Prefer `daily_metrics.parquet` when present. Older registered predictions
+    may lack that derived artifact, so compute the same series from their raw
+    validation predictions without writing into the registry. Returns an empty
+    frame only when neither artifact is available.
     """
     case_dir = get_case_study_dir(case_study_id)
     path = case_dir / "run_log" / "predictions" / prediction_hash / "daily_metrics.parquet"
-    if not path.exists():
+    if path.exists():
+        return pl.read_parquet(path)
+
+    predictions = load_predictions(
+        case_study_id,
+        prediction_hash=prediction_hash,
+        split="validation",
+    )
+    if predictions.is_empty():
         return pl.DataFrame()
-    return pl.read_parquet(path)
+
+    from ml4t.diagnostic.metrics import cross_sectional_ic_series
+
+    entity_col = next(
+        (column for column in ("symbol", "product") if column in predictions.columns),
+        None,
+    )
+    join_columns = ["timestamp", *([entity_col] if entity_col else [])]
+    fold_series = []
+    for fold_id in predictions["fold_id"].unique().drop_nulls().sort().to_list():
+        fold = predictions.filter(pl.col("fold_id") == fold_id)
+        series = cross_sectional_ic_series(
+            fold.select(*join_columns, "y_score"),
+            fold.select(*join_columns, "y_true"),
+            pred_col="y_score",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col=entity_col,
+            method="spearman",
+            min_obs=5,
+        )
+        fold_series.append(
+            series.rename({"timestamp": "date"}).with_columns(fold_id=pl.lit(fold_id))
+        )
+    return pl.concat(fold_series) if fold_series else pl.DataFrame()
 
 
 def indistinguishable_groups(
