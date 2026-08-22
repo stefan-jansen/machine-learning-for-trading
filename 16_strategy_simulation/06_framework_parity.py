@@ -546,9 +546,10 @@ fig.show()
 #
 # The first row is the largest and the least visible, and the easy way to state it is wrong. It is
 # not that the engine trades and the array form does not. `(weights.shift(1) * returns).sum(axis=1)`
-# re-applies the full target on every one of the 3,522 sessions, so the array account is silently
-# restored to its weights daily too - prices move, the implied holdings drift, and the next line of
-# the formula puts them back. What differs is the bill. `cost_drag` is built from `weights.diff()`,
+# re-applies the full target on every session after the first - `weights.shift(1).fillna(0)` leaves
+# the array account holding nothing on the opening session - so it is silently restored to its
+# weights daily too: prices move, the implied holdings drift, and the next line of the formula puts
+# them back. What differs is the bill. `cost_drag` is built from `weights.diff()`,
 # so the array side is charged only on the 78 dates printed below, where the target itself moves.
 #
 # The engine cannot do that. Restoring the target means sending orders, and its counts below show
