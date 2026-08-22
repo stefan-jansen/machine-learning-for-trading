@@ -494,3 +494,74 @@ def test_a_stamped_blob_this_repo_does_not_have_is_stale(tmp_path, monkeypatch) 
     py = tmp_path / "nb.py"
     py.write_text("fig = build()\n", encoding="utf-8")
     assert not notebook_provenance.alt_text_only_drift("0" * 40, py, _notebook([]))
+
+
+def test_prose_edit_beside_a_computed_alt_is_not_stale(tmp_path, monkeypatch) -> None:
+    """Eight case studies write the leading configuration into their alt with an f-string.
+
+    That alt is not knowable from the source, so it cannot be compared against what the
+    output carries. Requiring the comparison anyway made the counts disagree and failed
+    the notebook, so the carve-out never applied to the notebooks that read their figures
+    off the frame - the ones it was written for.
+    """
+    old = (
+        "# %% [markdown]\n# the grid spans 0.032 to 0.0008\n\n"
+        "# %%\nfig = build()\n"
+        'show_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n'
+    )
+    new = (
+        "# %% [markdown]\n# read best_ic against worst_ic in the frame\n\n"
+        "# %%\nfig = build()\n"
+        'show_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n'
+    )
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {"image/png": {"alt": "the leader is ridge at +0.032"}},
+            }
+        ],
+    }
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_editing_the_literal_part_of_a_computed_alt_is_stale(tmp_path, monkeypatch) -> None:
+    """A computed alt is not blanked, so its literal parts stay in the compared AST dump."""
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader}")\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {"image/png": {"alt": "the winner is ridge"}},
+            }
+        ],
+    }
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_a_computed_alt_the_output_does_not_carry_is_stale(tmp_path, monkeypatch) -> None:
+    """An alt added since execution: the image is there and no alt metadata is."""
+    old = '# %% [markdown]\n# one\n\n# %%\nfig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n'
+    new = '# %% [markdown]\n# two\n\n# %%\nfig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n'
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {},
+            }
+        ],
+    }
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))

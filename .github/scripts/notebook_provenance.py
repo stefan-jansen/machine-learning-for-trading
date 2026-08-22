@@ -355,11 +355,20 @@ def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     return [(m, k, "".join(b)) for m, k, b in cells]
 
 
-def _blank_alts(code: str) -> tuple[str, list[str]] | None:
-    """(*code* with each alt literal replaced by a placeholder, the literals in source order).
+def _blank_alts(code: str) -> tuple[str, list[str | None]] | None:
+    """(*code* with each alt literal replaced by a placeholder, the alts in source order).
 
     None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
     byte offset, and replaces from the end so earlier spans keep their offsets.
+
+    An alt built with an f-string is reported as ``None`` rather than skipped. Its text
+    is not knowable from the source, so it cannot be compared against what the outputs
+    carry - but for the same reason it is not blanked either, so it stays in the AST dump
+    and any edit to it is caught as ordinary source drift. Dropping such a call from the
+    list instead would misalign every later position against the carried alts, and
+    omitting it entirely made the counts disagree and failed the whole notebook: eight
+    case studies write the leading configuration into their alt with an f-string, so the
+    carve-out never applied to the notebooks that read their figures off the frame.
     """
     try:
         tree = ast.parse(code)
@@ -370,29 +379,32 @@ def _blank_alts(code: str) -> tuple[str, list[str]] | None:
     for line in data.splitlines(keepends=True):
         line_start.append(line_start[-1] + len(line))
 
-    found: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str | None]] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and _alt_call_name(node.func) in ALT_FUNCS
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
         ):
             arg = node.args[1]
             if arg.end_lineno is None or arg.end_col_offset is None:
                 return None
+            literal = (
+                arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+            )
             found.append(
                 (
                     line_start[arg.lineno - 1] + arg.col_offset,
                     line_start[arg.end_lineno - 1] + arg.end_col_offset,
-                    arg.value,
+                    literal,
                 )
             )
     # ast.walk is breadth-first, not source order; the outputs it is compared against
     # are in source order.
-    found.sort()
-    for begin, finish, _ in reversed(found):
+    found.sort(key=lambda item: item[:2])
+    for begin, finish, literal in reversed(found):
+        if literal is None:
+            continue  # not blanked, so an edit to it stays visible in the AST dump
         data = data[:begin] + b'"<alt>"' + data[finish:]
     return data.decode("utf-8"), [alt for _, _, alt in found]
 
@@ -527,10 +539,18 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
             for out in cell.get("outputs", [])
             if "image/png" in out.get("data", {})
         ]
-        if len(blanked[1]) != len(carried) or any(
-            a != c for a, c in zip(blanked[1], carried, strict=True)
-        ):
+        if len(blanked[1]) != len(carried):
             return False
+        for a, c in zip(blanked[1], carried, strict=True):
+            if a is None:
+                # A computed alt. Its literal parts are in the AST dump the first half
+                # compared, so a change to them is already stale; what is left to require
+                # is that the output carries an alt at all, which is what catches an alt
+                # call added since the notebook was executed.
+                if not c:
+                    return False
+            elif a != c:
+                return False
     return True
 
 
