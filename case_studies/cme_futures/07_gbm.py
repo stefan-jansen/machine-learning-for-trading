@@ -521,7 +521,7 @@ show_plotly_with_alt(
     f"their ranking on {order_label}, and each panel carries a dashed zero line. Every bar in the "
     "five-day panel rises above the line, from 0.026 down to 0.006, led by four copper Huber bars "
     "and a gold one. Every bar in the 21-day panel hangs below it, and the two longest there are "
-    "navy squared-error bars near -0.042 that sit mid-order in the panel above.",
+    "navy squared-error bars near -0.042 that sit seventh and thirteenth in the panel above.",
 )
 
 # %% [markdown]
