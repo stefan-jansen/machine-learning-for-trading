@@ -116,11 +116,11 @@ study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKS
 #
 # Fitting both in one run is what puts the horizons side by side at all. It does not make them
 # one controlled experiment: each label carries its own purge buffer in `config/setup.yaml`, `5D`
-# against `21D`, so the folds and the eligible samples differ too, and the comparison below is
-# between two label-specific protocols rather than one protocol at two horizons. Running one
-# label at a time leaves even that comparison to be assembled by hand from two runs, and until it
-# is assembled the variant is declared and never fitted. `LABELS` restricts the run to a subset
-# when you want one, and defaults to everything the menus declare.
+# against `21D`, so the fold boundaries and the eligible samples differ too, and the comparison
+# below is between two label-specific protocols rather than one protocol at two horizons. Running
+# one label at a time leaves even that comparison to be assembled by hand from two runs, and
+# until it is assembled the variant is declared and never fitted. `LABELS` restricts the run to a
+# subset when you want one, and defaults to everything the menus declare.
 
 # %%
 declared_labels(study, "linear")
