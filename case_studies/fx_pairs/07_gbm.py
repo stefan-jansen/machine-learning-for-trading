@@ -108,8 +108,8 @@ study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPAC
 # The labels are the same ones the linear notebook fitted, and for the same reason: the two
 # families are compared on identical targets, folds and features, so what separates their results
 # is the family. Fitting all three horizons here rather than one also carries the linear
-# notebook's finding forward to be checked - that the size of the result depends more on the
-# prediction horizon than on anything chosen within a family.
+# notebook's finding forward to be checked - that both the best result a grid reaches and the
+# number of configurations above zero rise with the prediction horizon.
 
 # %%
 declared_labels(study, "gbm")
@@ -647,13 +647,17 @@ spread.group_by("label", maintain_order=True).head(5)
 # started, to five decimal places. What no horizon shows is the shape of a model still learning -
 # a rise to a peak and a fall away.
 #
-# `interior_peaks` is worth reading against the right baseline. With ten checkpoints and no trend
-# at all, the best of ten readings falls on one of the eight interior positions four times out of
-# five, so scattered noise would put about twelve of fifteen configurations there. Seven, eight
-# and eight is well under that: the peaks sit at the ends more often than noise would put them,
-# which is what a drifting curve does rather than what an optimum does. Taken with the median
-# change, the reading is that these curves trend rather than turn, and there is nothing here for
-# a stopping rule to find.
+# `interior_peaks` counts how many configurations reach their best IC somewhere other than the
+# first or last checkpoint, and it is reported rather than argued from. The ten readings behind
+# one configuration are not ten independent measurements: checkpoint *k+1* is the same model with
+# more trees, so a configuration's path is strongly serially correlated, and the position of the
+# maximum of such a path piles up at the two ends even when there is no trend whatever. Without
+# knowing what that baseline is for these paths, seven, eight and eight of fifteen is a
+# description and not evidence either way.
+#
+# What does carry the conclusion is the drift: two thirds of configurations end below where they
+# started at one day and at 21 days, and the median change is zero at five. There is nothing here
+# for a stopping rule to find.
 #
 # **Squared error is last at every horizon; which of the other two leads is not stable.** Read
 # `objective_summary`: by mean IC at the final iteration, `mse` is bottom of all three labels and
