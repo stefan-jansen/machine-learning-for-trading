@@ -427,6 +427,7 @@ catalog = (
         "ic_std",
         "ic_n_days",
         "auc_mean_daily",
+        "direction_label",
         "n_folds",
         "training_hash",
         "prediction_hash",
@@ -467,15 +468,22 @@ catalog.select(
 # %% [markdown]
 # ### The same grid, on each target
 #
-# This frame is the experiment. The features are the same, the folds are the same and the twenty-
-# eight configurations are the same; the only thing that changes down the rows is what is being
-# predicted. `n_positive` against `configurations` is the column to read: a label where the whole
-# grid sits on one side of zero is telling you about the target, not about the penalty.
+# This frame is the experiment. The features are the same and the folds are the same throughout,
+# and the two regression targets share one menu of twenty-eight configurations, so between those
+# two rows the only thing that changes is what is being predicted. `fwd_class_1m` declares its
+# own thirteen classifiers, because a ridge regression has nothing to say about a binary
+# outcome; read that row against the other two rather than as a third member of one sweep, and
+# read `configurations` to see which is which. `n_positive` against `configurations` is what
+# carries the finding: a target where the whole grid sits on one side of zero is telling you
+# about the target, not about the penalty.
 #
-# `fwd_class_1m` is the classification form of the same forward month and carries
-# `auc_mean_daily` as well - the within-month reading of how well the predicted probability
-# separates the classes. It is null on the regression labels, which have no classes to separate.
-# `ic_mean` is defined for all three, which is what puts them on one axis.
+# `ic_mean` is defined for all three, which is what puts them on one axis. `auc_monthly` can be
+# too, and `auc_scored_against` says what it was scored against: `fwd_class_1m` scores its own
+# label and leaves that column null, while `fwd_ret_1m` has no classes of its own and is scored
+# as a ranking signal against `fwd_class_1m`, the declared direction sibling of the same forward
+# month. Those two rows are therefore comparable on that one number - the same months, the same
+# outcome, a regression and a classifier reaching for it two ways. `fwd_ret_1m_win` declares no
+# sibling and carries no AUC; null there means not computed, not zero.
 
 # %% tags=["results"]
 by_label = (
@@ -489,6 +497,7 @@ by_label = (
         worst_ic=pl.col("ic_mean").min(),
         n_positive=(pl.col("ic_mean") > 0).sum(),
         best_auc_monthly=pl.col("auc_mean_daily").max(),
+        auc_scored_against=pl.col("direction_label").drop_nulls().first(),
     )
     .sort("best_ic", descending=True)
 )
@@ -497,7 +506,8 @@ by_label
 # %% [markdown]
 # ### How the penalty grid ranks
 #
-# One panel per label, sharing a vertical scale so the targets are compared rather than each one
+# One panel per label on one shared vertical scale, so the targets are compared rather than each
+# one
 # rescaled to fill its own panel. Only configurations measured on all of their label's months are
 # charted. The zero line is the reference that matters: a bar below it is a model whose ranking
 # pointed the wrong way out of sample.
@@ -520,11 +530,13 @@ config_order = (
     .to_list()
 )
 
+# `shared_yaxes` matches axes across columns, so with one column it does nothing and each
+# panel would be rescaled to fill itself. Matching every row to the first is what puts the
+# targets on one vertical scale, which is what stacking them is for.
 fig_ic = make_subplots(
     rows=len(panel_labels),
     cols=1,
     shared_xaxes=True,
-    shared_yaxes=True,
     vertical_spacing=0.05,
     subplot_titles=[
         f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
@@ -559,6 +571,8 @@ for row, label in enumerate(panel_labels, start=1):
         y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
     )
     fig_ic.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    if row > 1:
+        fig_ic.update_yaxes(matches="y", row=row, col=1)
 fig_ic.update_xaxes(
     title_text=f"Configuration, ordered by rank on {panel_labels[0]}",
     tickangle=-45,
@@ -577,13 +591,34 @@ side_text = "; ".join(
     f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
     for row in by_label.sort("label").iter_rows(named=True)
 )
+# Whether the panels overlap is also a fact about the frame, and "the spread inside a panel is
+# small next to the distance between panels" is the kind of magnitude claim that goes stale on
+# the next run. Each label covers [worst_ic, best_ic]; this asks whether any two of those
+# intervals meet.
+ranges = by_label.sort("best_ic").select("label", "worst_ic", "best_ic").rows(named=True)
+touching = [
+    (lower, upper)
+    for lower, upper in zip(ranges, ranges[1:], strict=False)
+    if upper["worst_ic"] <= lower["best_ic"]
+]
+separation_text = (
+    "no two labels' grids overlap: each label's weakest configuration still beats the best of "
+    "every label below it"
+    if not touching
+    else "; ".join(
+        f"{upper['label']} and {lower['label']} overlap between "
+        f"{upper['worst_ic']:.4f} and {lower['best_ic']:.4f}"
+        for lower, upper in touching
+    )
+)
 show_plotly_with_alt(
     fig_ic,
     "Bar charts of mean validation information coefficient for every full-coverage linear "
-    "configuration, one panel per declared label sharing a vertical scale, each panel's highest "
+    "configuration, one panel per declared label on one shared vertical scale, each panel's "
+    "highest "
     "bar in amber and the rest in dark navy, with a dashed zero line across each. The bars are "
     "held in the primary label's ranking order in every panel. Counted from the frame: "
-    f"{side_text}. The spread within any one panel is small next to the distance between panels.",
+    f"{side_text}. Read off the same frame, {separation_text}.",
 )
 
 # %% [markdown]

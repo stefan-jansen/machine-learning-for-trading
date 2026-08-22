@@ -53,9 +53,10 @@
 #   iteration, so each configuration is scored at ten points along its own training run.
 #
 # That last one changes how the results must be read. **A checkpoint is part of a configuration,
-# not a detail of how it was fitted.** Scoring 15 declared configurations at ten checkpoints each
-# produces 150 candidate models, and treating that as 15 candidates while quietly keeping each
-# one's best iteration would be reporting the maximum of ten numbers as though it were one.
+# not a detail of how it was fitted.** Each of the two regression targets declares 15
+# configurations, which is 150 candidate models apiece; `fwd_class_1m` declares 5, which is 50.
+# Treating a target's 150 as 15 while quietly keeping each one's best iteration would be
+# reporting the maximum of ten numbers as though it were one.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -129,12 +130,14 @@ study = open_study(
 declared_labels(study, "gbm")
 
 # %% [markdown]
-# The menu lists 15 named configurations under `gbm:`, and each resolves to a preset in
-# `case_studies/config/lgb/`. The grid is a product of two axes: five capacity profiles -
-# `default` uses the library's own leaf count and the rest fix it at 7, 15, 31 and 63 - crossed
-# with the three objectives described above. Every configuration runs the same number of boosting
-# iterations at the same learning rate, so the grid isolates capacity and loss rather than
-# confounding them with training length.
+# Each regression target's menu lists 15 named configurations under `gbm:`, and each resolves to
+# a preset in `case_studies/config/lgb/`. That grid is a product of two axes: five capacity
+# profiles - `default` uses the library's own leaf count and the rest fix it at 7, 15, 31 and
+# 63 - crossed with the three objectives described above. Every configuration runs the same
+# number of boosting iterations at the same learning rate, so the grid isolates capacity and
+# loss rather than confounding them with training length. `fwd_class_1m` declares the same five
+# capacity profiles against a binary objective, because none of the three regression losses
+# applies to a class label; its menu is smaller by construction, not by omission.
 
 # %%
 configs = load_model_configs(
@@ -293,6 +296,7 @@ catalog = execution.catalog_rows.select(
     "ic_std",
     "ic_n_days",
     "auc_mean_daily",
+    "direction_label",
     "n_folds",
     "training_hash",
     "prediction_hash",
@@ -329,11 +333,19 @@ catalog.select(
 # %% [markdown]
 # ### The same grid, on each target
 #
-# The features are the same, the folds are the same and the grid is the same; what changes down
-# the rows is what is being predicted. `fwd_class_1m` is the classification form of the same
-# forward month and carries `auc_mean_daily` as well - the within-month reading of how well the
-# predicted probability separates the classes. It is null on the regression targets, which have no
-# classes to separate. `ic_mean` is defined for all three, which is what puts them on one axis.
+# The features are the same and the folds are the same throughout, and the two regression targets
+# share one menu of fifteen configurations, so between those two rows the only thing that
+# changes is what is being predicted. `fwd_class_1m` declares its own five, because a
+# squared-error objective has nothing to say about a binary outcome; read that row against the
+# other two rather than as a third member of one sweep, and read `configurations` to see which
+# is which.
+#
+# `ic_mean` is defined for all three, which is what puts them on one axis. `auc_monthly` can be
+# too, and `auc_scored_against` says what it was scored against: `fwd_class_1m` scores its own
+# label and leaves that column null, while `fwd_ret_1m` has no classes of its own and is scored
+# as a ranking signal against `fwd_class_1m`, the declared direction sibling of the same forward
+# month. Those two rows are therefore comparable on that one number. `fwd_ret_1m_win` declares
+# no sibling and carries no AUC; null there means not computed, not zero.
 
 # %% tags=["results"]
 by_label = (
@@ -347,6 +359,7 @@ by_label = (
         best_ic=pl.col("ic_mean").max(),
         worst_ic=pl.col("ic_mean").min(),
         best_auc_monthly=pl.col("auc_mean_daily").max(),
+        auc_scored_against=pl.col("direction_label").drop_nulls().first(),
     )
     .sort("best_ic", descending=True)
 )
@@ -387,11 +400,13 @@ def objective_of(name: str) -> str:
     return match
 
 
+# `shared_yaxes` matches axes across columns, so with one column it does nothing and each
+# panel would be rescaled to fill itself. Matching every row to the first is what puts the
+# targets on one vertical scale, which is what stacking them is for.
 fig_curves = make_subplots(
     rows=len(panel_labels),
     cols=1,
     shared_xaxes=True,
-    shared_yaxes=True,
     vertical_spacing=0.05,
     subplot_titles=[
         f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
@@ -429,6 +444,8 @@ for row, label in enumerate(panel_labels, start=1):
         y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
     )
     fig_curves.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    if row > 1:
+        fig_curves.update_yaxes(matches="y", row=row, col=1)
 fig_curves.update_xaxes(title_text="Boosting iterations (trees kept)", row=len(panel_labels), col=1)
 fig_curves.update_layout(
     title="Robust losses have the ranking early; squared error climbs toward it",
@@ -464,7 +481,8 @@ show_plotly_with_alt(
     "Line charts of mean validation information coefficient against boosting iteration, one line "
     "per configuration, coloured by loss function: dark navy for squared error, gold for absolute "
     "error, copper for Huber, slate for the binary objective the classification target declares. "
-    "One panel per label, sharing both axes, each with a dashed zero line. Counted from the "
+    "One panel per label on one shared pair of axes, each with a dashed zero line. Counted from "
+    "the "
     f"frame, the configurations whose highest point is their last checkpoint are {climb_text}. "
     "The gold and copper lines sit above the navy ones in both regression panels.",
 )
@@ -492,11 +510,13 @@ config_order = (
     .to_list()
 )
 
+# `shared_yaxes` matches axes across columns, so with one column it does nothing and each
+# panel would be rescaled to fill itself. Matching every row to the first is what puts the
+# targets on one vertical scale, which is what stacking them is for.
 fig_obj = make_subplots(
     rows=len(panel_labels),
     cols=1,
     shared_xaxes=True,
-    shared_yaxes=True,
     vertical_spacing=0.05,
     subplot_titles=[
         f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
@@ -529,6 +549,8 @@ for row, label in enumerate(panel_labels, start=1):
         y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
     )
     fig_obj.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    if row > 1:
+        fig_obj.update_yaxes(matches="y", row=row, col=1)
 fig_obj.update_xaxes(
     title_text=f"Configuration, ordered by rank on {order_label}",
     tickangle=-45,
@@ -544,7 +566,8 @@ fig_obj.update_layout(
 show_plotly_with_alt(
     fig_obj,
     "Bar charts of mean validation information coefficient at the final boosting iteration, one "
-    "panel per label sharing a vertical scale, bars coloured by loss function and held in the "
+    "panel per label on one shared vertical scale, bars coloured by loss function and held in "
+    "the "
     "primary target's ranking order in every panel. In both regression panels the gold and copper "
     "bars group together above the navy ones rather than interleaving, and within each colour "
     "group the bars are of similar height across the five leaf counts. Each panel carries a "
