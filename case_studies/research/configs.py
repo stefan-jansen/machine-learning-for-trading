@@ -37,6 +37,11 @@ def _format_params(params: dict | None) -> str:
     return ", ".join(f"{key}={value}" for key, value in params.items())
 
 
+def _setup_labels(study: Study) -> dict:
+    setup_path = get_case_study_dir(study.case_study) / "config" / "setup.yaml"
+    return (yaml.safe_load(setup_path.read_text()) or {}).get("labels") or {}
+
+
 def primary_label(study: Study) -> str:
     """The label the case study trades, as ``config/setup.yaml`` declares it.
 
@@ -44,27 +49,70 @@ def primary_label(study: Study) -> str:
     primary is the horizon the strategy chapters trade. Reading it here rather than re-parsing
     ``setup.yaml`` in each notebook keeps the answer the same everywhere it is asked.
     """
-    setup_path = get_case_study_dir(study.case_study) / "config" / "setup.yaml"
-    labels = (yaml.safe_load(setup_path.read_text()) or {}).get("labels") or {}
-    name = labels.get("primary")
+    name = _setup_labels(study).get("primary")
     if not name:
-        raise ValueError(f"{study.case_study} declares no labels.primary in {setup_path}")
+        raise ValueError(f"{study.case_study} declares no labels.primary in setup.yaml")
     return str(name)
 
 
+def sweep_labels(study: Study) -> tuple[str, ...]:
+    """The labels the sweep fits: ``labels.primary`` then ``labels.variants``, in that order."""
+    labels = _setup_labels(study)
+    primary = labels.get("primary")
+    if not primary:
+        raise ValueError(f"{study.case_study} declares no labels.primary in setup.yaml")
+    ordered = [str(primary)]
+    ordered += [str(name) for name in (labels.get("variants") or []) if str(name) != primary]
+    return tuple(ordered)
+
+
 def declared_labels(study: Study, family: str) -> tuple[str, ...]:
-    """Every label whose training menu declares ``family``, in menu-file order."""
+    """The sweep labels whose training menu declares ``family``, in menu-file order.
+
+    Two files have a say and they mean different things. ``config/setup.yaml`` says which labels
+    the sweep fits; a training menu says what to fit *for* a label. Reading the menu directory
+    alone conflated them: ``sp500_options`` keeps full menus for four fixed-horizon labels that
+    ``02_labels`` writes for ``03_financial_features``, ``05_evaluation`` and ``90_ic_diagnostic``
+    to read, and that ``setup.yaml`` dropped from the sweep on 2026-05-17. A notebook fitting
+    every declared label would have fitted 140 linear configurations instead of 28, and published
+    four out-of-sweep labels' predictions into the population ``12_backtest`` selects over.
+
+    The other eight case studies declare exactly the labels their menus do, so the membership is
+    unchanged there. The order stays menu-file order rather than moving to ``setup.yaml`` order:
+    a population's hash is computed over its members as an ordered list, so re-ordering would
+    give every already-published population a new identity and make its next run demand a
+    ``supersedes``. A sweep label whose menu does not declare ``family`` is skipped rather than
+    raising - not every label declares every family.
+    """
     menu_dir = get_case_study_dir(study.case_study) / "config" / "training"
     if not menu_dir.is_dir():
         raise FileNotFoundError(f"{study.case_study} has no training menus: {menu_dir}")
+    in_sweep = set(sweep_labels(study))
     labels = []
     for path in sorted(menu_dir.glob("*.yaml")):
+        if path.stem not in in_sweep:
+            continue
         menu = yaml.safe_load(path.read_text()) or {}
         if menu.get(family):
             labels.append(path.stem)
     if not labels:
-        raise ValueError(f"no training menu in {menu_dir} declares {family!r}")
+        raise ValueError(f"no sweep label of {study.case_study} declares {family!r} in {menu_dir}")
     return tuple(labels)
+
+
+def narrows_declared_catalog(study: Study, family: str, configs: pl.DataFrame) -> bool:
+    """Whether ``configs`` is less than the complete declared ``family`` catalog.
+
+    A run that narrows the member set declares a different population from the canonical one and
+    must publish under its own name. Comparing row counts is not enough: ``sp500_options`` keeps
+    four out-of-sweep menus with exactly the 28 linear and 15 GBM configurations the canonical
+    menu has, so ``LABELS=["fwd_ret_5d"]`` would match on count while declaring an entirely
+    different set of members. The comparison is therefore over ``(label, config_name)`` pairs.
+    """
+    declared = load_model_configs(study, family)
+    return set(zip(configs["label"], configs["config_name"], strict=True)) != set(
+        zip(declared["label"], declared["config_name"], strict=True)
+    )
 
 
 def load_model_configs(
