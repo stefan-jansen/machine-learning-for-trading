@@ -231,8 +231,12 @@ if NEED_TRAINING:
 
 # %% tags=[]
 if NEED_TRAINING:
-    # Independent masker assumes feature independence → SHAP = coef * (x - mean)
-    masker = shap.maskers.Independent(X_train)
+    # Independent masker assumes feature independence → SHAP = coef * (x - mean).
+    # max_samples defaults to 100, which would make that mean a 100-row subsample and
+    # leave the closed-form check below disagreeing in the third decimal. The whole
+    # point of the section is that linear SHAP is exact given the true background
+    # expectation, so the background is the full training set.
+    masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
     explainer = shap.LinearExplainer(model, masker)
     explanation = explainer(X_test)
     shap_values = explanation.values
@@ -548,7 +552,6 @@ top_idx_dep = FEATURE_COLS.index(dep_feature)
 color_feature = importance["feature"][1] if len(importance) > 1 else dep_feature
 color_idx = FEATURE_COLS.index(color_feature)
 
-plt.figure(figsize=(8, 5))
 shap.plots.scatter(
     explanation[:, top_idx_dep],
     color=explanation[:, color_idx],
@@ -804,9 +807,11 @@ print(f"95th percentile: {np.percentile(max_frac, 95):.1%}")
 # %% [markdown] tags=[]
 # Compare the flagged count with the mean and 95th-percentile shares printed
 # above. A threshold that flags nothing is telling you the threshold is wrong
-# for this model, not that the risk is absent: Ridge on standardized features
-# spreads attribution by construction, so the share any single feature can reach
-# is bounded well below what a tree model can reach. Where the counts come back
+# for this model, not that the risk is absent: on this panel this fitted Ridge
+# puts a mean of 19% and a 95th percentile of 31% on its largest single feature,
+# so a cut at 60% could not fire. That is what these coefficients on this data
+# do, not something the penalty guarantees - a single large coefficient can
+# still dominate a row's attribution. Where the counts come back
 # empty, either raise the aggregation to the top three features or compare the
 # distribution against another model rather than against a fixed cut.
 # In a fold dominated by a regime change, the same diagnostic can flip and
@@ -935,10 +940,19 @@ top_boot = importance["feature"].head(TOP_K_BOOT).to_list()
 top_boot_idx = [FEATURE_COLS.index(f) for f in top_boot]
 n_test = shap_values.shape[0]
 
+# Resample DATES, not rows. Roughly a hundred ETFs quote on each date and adjacent
+# dates share overlapping 21-session feature windows, so drawing rows independently
+# treats one date's cross-section as a hundred independent observations and returns
+# an interval several times too narrow.
+boot_sessions = np.unique(dates_test)
+session_rows = [np.flatnonzero(dates_test == d) for d in boot_sessions]
+n_sessions = len(boot_sessions)
+
 rng = np.random.default_rng(RANDOM_SEED)
 boot_means = np.empty((N_BOOT, TOP_K_BOOT), dtype=float)
 for b in range(N_BOOT):
-    sample = rng.integers(0, n_test, n_test)
+    drawn = rng.integers(0, n_sessions, n_sessions)
+    sample = np.concatenate([session_rows[i] for i in drawn])
     boot_means[b] = np.mean(np.abs(shap_values[sample][:, top_boot_idx]), axis=0)
 
 boot_lo = np.percentile(boot_means, 2.5, axis=0)
@@ -982,14 +996,40 @@ show_with_alt(
     "drawn as a horizontal error bar.",
 )
 
+# %% tags=[]
+lead_col = 0
+diff_draws = boot_means[:, lead_col][:, None] - boot_means[:, 1:]
+diff_lo = np.percentile(diff_draws, 2.5, axis=0)
+diff_hi = np.percentile(diff_draws, 97.5, axis=0)
+
+ranking = pl.DataFrame(
+    {
+        "against": top_boot[1:],
+        "mean_gap": point_estimate[lead_col] - point_estimate[1:],
+        "gap_p2.5": diff_lo,
+        "gap_p97.5": diff_hi,
+        "outranks": diff_lo > 0,
+    }
+)
+print(
+    f"{top_boot[lead_col]} outranks {int(ranking['outranks'].sum())} of "
+    f"{ranking.height} other leading features on this fold, at 95%."
+)
+ranking
+
 # %% [markdown] tags=[]
-# **Interpretation**: a top feature whose bootstrap interval excludes the point
-# estimate of a lower-ranked feature is genuinely *more important on this fold*,
-# because finite-sample noise alone cannot explain the gap. Features whose
-# intervals overlap with several neighbours have brittle rankings; they may
-# trade rank order across bootstrap replicates and should not be treated as
-# uniquely "the most important" feature. This is the within-fold complement
-# to the across-fold stability chart above.
+# **Interpretation**: each interval says how much that feature's own mean
+# $|\phi_j|$ moves when the sessions are redrawn. It does not say whether one
+# feature outranks another. Reading one feature's interval against a second
+# feature's point estimate compares two different quantities, and the two move
+# together across replicates - a session that lifts one lifts the other - so the
+# comparison ignores exactly the correlation that decides the question.
+#
+# The cell below asks it directly, by bootstrapping the *difference* between the
+# leading feature's mean $|\phi_j|$ and each other feature's, on the same redrawn
+# sessions. A ranking is claimed only where that difference interval excludes
+# zero. This is the within-fold complement to the across-fold stability chart
+# above.
 
 # %% [markdown] tags=[]
 # ## Key Takeaways

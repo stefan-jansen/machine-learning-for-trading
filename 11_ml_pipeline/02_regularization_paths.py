@@ -427,6 +427,11 @@ if NEED_TRAINING:
     lam = np.log(2.0) / HALF_LIFE_SESSIONS
     weights = np.exp(-lam * age_in_sessions)
     n_eff_sw = weights.sum()
+    # Normalize to mean one before fitting. sklearn scales rows by sqrt(w) and does
+    # not renormalize, so the weighted objective is sum(w_i * resid_i^2) + alpha*||b||^2:
+    # with a mean weight near 0.19 the same alpha is roughly five times the penalty
+    # relative to the data term, and the IC gap below would be that, not the recency bet.
+    weights = weights * (n_train_sw / weights.sum())
 
     dates_te_sw = dates_np[te_last]
     symbols_te_sw = symbols_np[te_last]
@@ -770,13 +775,13 @@ if NEED_TRAINING:
 # the standard deviation of that IC, which says how much the number depends on
 # which fold you look at.
 #
-# One caveat governs the whole table, and it is the reason `04_nested_cv_hpo`
+# One caveat governs the whole comparison, and it is the reason `04_nested_cv_hpo`
 # exists. The alpha for each penalized model was chosen by taking the highest mean
 # IC over these same validation folds, and the score reported here is that same
 # highest mean IC. A number picked as the maximum of a sweep is biased upward by
 # the picking: some of it is the penalty helping, and some of it is the luck of
 # whichever alpha happened to suit these folds. Nothing here is held back to
-# measure the difference, so read the table as a comparison of methods under a
+# measure the difference, so read the chart as a comparison of methods under a
 # tuning budget, not as an estimate of what any of them would score on data
 # nobody selected on. Nested cross-validation, in `04_nested_cv_hpo`, is what
 # separates the two.
