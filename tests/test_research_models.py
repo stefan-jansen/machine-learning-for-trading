@@ -1010,14 +1010,17 @@ def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
 
     folds_module.clear_memo()
     built: list[tuple[int, float]] = []
-    original = folds_module.prepare_raw_folds
+    # `iter_raw_folds`, not `prepare_raw_folds`: preparation streams, and the list-collecting
+    # wrapper is what nothing on the execution path calls. Observing the wrapper recorded an
+    # empty list and asserted against it, which is a test that cannot fail.
+    original = folds_module.iter_raw_folds
 
     def observed(mds, splits, *, train_sample_frac=1.0, **kwargs):
-        prepared = original(mds, splits, train_sample_frac=train_sample_frac, **kwargs)
-        built.extend((int(fold.fold), float(train_sample_frac)) for fold in prepared)
-        return prepared
+        for fold in original(mds, splits, train_sample_frac=train_sample_frac, **kwargs):
+            built.append((int(fold.fold), float(train_sample_frac)))
+            yield fold
 
-    monkeypatch.setattr(folds_module, "prepare_raw_folds", observed)
+    monkeypatch.setattr(folds_module, "iter_raw_folds", observed)
     return built
 
 
