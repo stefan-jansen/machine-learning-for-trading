@@ -1010,14 +1010,17 @@ def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
 
     folds_module.clear_memo()
     built: list[tuple[int, float]] = []
-    original = folds_module.prepare_raw_folds
+    original = folds_module.iter_raw_folds
 
+    # `iter_raw_folds`, not `prepare_raw_folds`: the batch paths stream folds so that only one is
+    # alive at a time, and `prepare_raw_folds` is now the list() wrapper no consumer calls.
+    # Observing the wrapper recorded nothing while the run underneath prepared every fold.
     def observed(mds, splits, *, train_sample_frac=1.0, **kwargs):
-        prepared = original(mds, splits, train_sample_frac=train_sample_frac, **kwargs)
-        built.extend((int(fold.fold), float(train_sample_frac)) for fold in prepared)
-        return prepared
+        for fold in original(mds, splits, train_sample_frac=train_sample_frac, **kwargs):
+            built.append((int(fold.fold), float(train_sample_frac)))
+            yield fold
 
-    monkeypatch.setattr(folds_module, "prepare_raw_folds", observed)
+    monkeypatch.setattr(folds_module, "iter_raw_folds", observed)
     return built
 
 
