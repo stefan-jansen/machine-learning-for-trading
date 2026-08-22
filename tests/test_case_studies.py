@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.awaiting_rebuild import unmet_reason
 from tests.pm_helpers import (
     current_test_tier,
     get_overrides,
@@ -111,6 +112,13 @@ def test_case_study_pipeline(
     if overrides.get("skip"):
         reason = overrides.get("skip_reason", "marked skip in overrides")
         pytest.skip(f"Skipped: {reason}")
+
+    # Inputs the rebuild has not produced yet. Unlike `skip`, this is checked against the
+    # registry every run and stops applying the moment the input exists, so it cannot outlive
+    # its reason; tests/test_awaiting_rebuild.py fails the build on a declaration that has.
+    if declaration := overrides.get("awaiting_rebuild"):
+        if reason := unmet_reason(declaration):
+            pytest.skip(f"{reason} (#{declaration['issue']})")
 
     # Credentials the notebook cannot run without.
     if absent := missing_required_env(overrides):
