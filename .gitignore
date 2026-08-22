@@ -2,6 +2,7 @@
 
 # Environment and secrets
 .env
+.env.*
 .env.local
 .env.*.local
 
