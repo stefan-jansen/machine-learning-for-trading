@@ -2920,3 +2920,15 @@ def test_published_logistic_presets_resolve_to_the_model_their_name_claims() -> 
         if sum(sig == signature for sig in effective.values()) > 1
     }
     assert not duplicates, f"published logistic presets resolve to one model: {duplicates}"
+
+
+def test_peak_rss_is_read_in_the_unit_the_platform_reports(monkeypatch) -> None:
+    """Linux reports ru_maxrss in kilobytes and macOS in bytes; the same reading is not both."""
+    from case_studies.utils import runtime
+
+    monkeypatch.setattr(runtime, "sys", type("_S", (), {"platform": "linux"}))
+    on_linux = runtime.peak_rss_bytes()
+    monkeypatch.setattr(runtime, "sys", type("_S", (), {"platform": "darwin"}))
+    on_macos = runtime.peak_rss_bytes()
+
+    assert on_linux == on_macos * 1024

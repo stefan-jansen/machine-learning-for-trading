@@ -312,9 +312,9 @@ def test_cpu_training_repeats_bit_exactly() -> None:
 def test_max_bin_changes_the_fitted_model() -> None:
     """max_bin is not cosmetic: it must be declared, never inherited from a device branch.
 
-    Every published GBM number was produced with max_bin=63 (recorded inside the saved
-    boosters). Swapping to LightGBM's 255 default silently moves every result, so this
-    pins the empirical consequence that
+    Changing it moves every fitted result, which is why the correction from 63 to 255
+    supersedes the populations fitted before it rather than adding to them. This pins the
+    empirical consequence that
     ``test_gbm_training_identity_covers_every_declared_numerical_input`` pins for the hash.
     """
     n_dates, n_entities, n_features = 60, 20, 6
