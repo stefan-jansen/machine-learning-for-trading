@@ -342,10 +342,11 @@ portfolio_returns_ml4t = equity_ml4t.pct_change().dropna()
 
 print(f"Sequential account, ending equity: ${equity_ml4t.iloc[-1]:,.0f}")
 # results["trades"] is not a fill count: the engine appends a Trade only when a position
-# is closed, flipped or scaled DOWN, so opens and scale-ups are absent from it. num_fills
-# is the count of fills. Both are printed because they answer different questions.
+# is closed, flipped or scaled DOWN, plus every position still open on the last session,
+# marked to market. Opens and scale-ups are absent from it. num_fills is the count of
+# fills. Both are printed because they answer different questions.
 print(f"Fills: {results_ml4t['num_fills']:,}")
-print(f"Round trips and reductions recorded: {len(results_ml4t['trades']):,}")
+print(f"Closed, reduced or still-open positions: {len(results_ml4t['trades']):,}")
 
 # %% [markdown]
 # Align both return streams before computing any comparison statistic. This
@@ -537,20 +538,23 @@ fig.show()
 #
 # | | Array arithmetic | Sequential engine |
 # |---|---|---|
-# | How often it trades | Only where the weight matrix changes, because a target that has not moved generates no trade | `on_data` calls `rebalance_to_weights` on every session, whether the target moved or not; the counts below the table say how many of those attempts reached the market |
+# | What repositioning costs | The target is re-applied every session for free, and turnover is charged only where the weight matrix changes | Every repositioning is a real order: `on_data` calls `rebalance_to_weights` on every session and each resulting trade pays commission and slippage |
 # | When a target is acted on | Immediately, as the weight in force over the next close-to-close return | An order placed on that bar, filled on the next one |
 # | What price it gets | The close, implicitly, because that is what the return is measured between | The next bar's open, moved against the order by the slippage rate |
 # | What the cost is charged on | The change in the target, whether or not a trade could have been made | The notional actually filled |
 # | What the account holds | A weight, which can be any real number | Whole shares, bought with the cash on hand |
 #
-# The first row is the largest and the least visible. The weight matrix built in section 3 moves on
-# a few dozen dates; the engine attempts a rebalance on every session in the sample. The counts
-# printed below the table say how many of those attempts reached the market and how many fills they
-# produced: the large majority of sessions trade, against the few dozen on which the target moved
-# at all. That gap is the whole of this row.
-# Those extra trades are not acting on a signal, because the target has not moved. They correct the
-# drift that whole shares and price movement introduce between the dates it does move, and each one
-# pays commission and slippage.
+# The first row is the largest and the least visible, and the easy way to state it is wrong. It is
+# not that the engine trades and the array form does not. `(weights.shift(1) * returns).sum(axis=1)`
+# re-applies the full target on every one of the 3,522 sessions, so the array account is silently
+# restored to its weights daily too - prices move, the implied holdings drift, and the next line of
+# the formula puts them back. What differs is the bill. `cost_drag` is built from `weights.diff()`,
+# so the array side is charged only on the 78 dates printed below, where the target itself moves.
+#
+# The engine cannot do that. Restoring the target means sending orders, and its counts below show
+# the price of the same repositioning: 2,911 of those 3,522 attempted rebalances reach the market
+# and produce 6,518 fills, every one paying commission and slippage. Both models reposition daily.
+# Only one of them pays for it, and that is what this row costs.
 #
 # The last row is the one that is easy to miss for a different reason. An account that has to buy
 # whole shares with a finite cash balance cannot sit exactly on its target, and the residual is not
