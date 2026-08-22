@@ -401,7 +401,7 @@ def _blank_alts(code: str) -> tuple[str, list[str | None]] | None:
             )
     # ast.walk is breadth-first, not source order; the outputs it is compared against
     # are in source order.
-    found.sort()
+    found.sort(key=lambda item: item[:2])
     for begin, finish, literal in reversed(found):
         if literal is None:
             continue  # not blanked, so an edit to it stays visible in the AST dump

@@ -639,7 +639,7 @@ show_plotly_with_alt(
 #
 # **For a penalized linear model, direction is a far easier target than size, and the gap is not
 # small.** Read
-# `best_ic` and `n_positive` down the label frame. On `fwd_ret_8h` the leading configuration
+# `best_ic` and `above_zero` down the `labels_reached` frame. On `fwd_ret_8h` the leading configuration
 # reaches a fraction of a thousandth and most of the grid sits below zero; on `fwd_dir_8h`,
 # which is the sign of that same return at that same horizon, it reaches an order of magnitude
 # more and the whole grid is above zero. The three-class cut behaves the same way. These are

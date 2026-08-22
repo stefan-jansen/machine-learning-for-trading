@@ -678,7 +678,7 @@ spread.group_by("label", maintain_order=True).head(5)
 #
 # **At the traded horizon every configuration ranks the cross-section the right way, which the
 # linear grid did not.** Every five-day configuration is positive at the end of training - read
-# `n_positive` against `configurations` in the horizons frame - and the weakest of them is a
+# `above_zero` against `configurations` in the horizons frame - and the weakest of them is a
 # multiple of the leading full-coverage linear result at that horizon. Something in this data
 # is available to a model that can split on one
 # feature inside a region defined by another, and is not available to a weighted sum of the

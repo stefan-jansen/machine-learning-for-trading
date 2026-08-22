@@ -627,8 +627,8 @@ else:
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Almost nothing in the grid clears zero, and what does is L1.** Read `n_positive` against
-# `configurations` in the horizons frame: a handful at each horizon, out of two dozen charted.
+# **Almost nothing in the grid clears zero, and what does is L1.** Read `above_zero` against
+# `charted` in the horizons frame: a handful at each horizon, out of two dozen charted.
 # Every one of them is a Lasso or an ElasticNet at `alpha_frac=0.5` or `alpha_frac=0.7` - a
 # penalty strong enough to zero most of the columns outright. No Ridge configuration clears
 # zero at either horizon; filter the catalog on `model_class` to see it. The comparison that
@@ -653,7 +653,7 @@ else:
 # `best_ic` down the horizons frame and 21 days is an order of magnitude above five. That
 # reading does not survive inspection. The five-day configurations that would be nearest the
 # top - the `alpha_frac=0.7` pair, and `alpha_frac=0.85` - are the ones the coverage filter
-# removes, and their raw ICs are in the partial-coverage frame below; the `alpha_frac=0.7` pair
+# removes, and their raw ICs are in the partial-coverage frame above; the `alpha_frac=0.7` pair
 # is full-coverage at 21 days and is exactly what leads there. Compared like against like the
 # gap is a small multiple, and it is a comparison between two configurations that are not
 # measured on the same set of dates.
@@ -666,8 +666,8 @@ else:
 # only through L1.** The 21-day Ridge curve is the worse of the two, so shrinkage is not carrying
 # any of it. `07_gbm` fits the same two labels and settles how far this reading generalises.
 #
-# **The horizons agree on the ordering while disagreeing on the level.** `rank_agreement` in
-# the horizons frame is high over the configurations both panels charted, while `best_config`
+# **The horizons agree on the ordering while disagreeing on the level.** `rank_correlation` in
+# the `transfer` frame is high over the configurations both panels charted, while `best_config`
 # names a different one at each. So the broad direction transfers: strong L1, then weak L1,
 # then Ridge, then no penalty, in that order at both horizons. What does not transfer is how
 # far up the scale that ordering reaches. This is the one horizon comparison the coverage
