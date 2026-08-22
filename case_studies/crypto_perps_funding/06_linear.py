@@ -554,7 +554,14 @@ def per_feature_magnitude(model) -> np.ndarray:
 
 surviving, dominant = [], []
 for row in l1.iter_rows(named=True):
-    states = Result.open(study, row["training_hash"]).fitted_states()
+    # A preview run's fitted states live in the preview namespace, and Result.open searches only
+    # the canonical ones unless asked. While this notebook fitted one label the miss was hidden:
+    # the primary label's canonical results ship with the release, so a preview lookup found them
+    # there. The variant labels have no released results, so a preview run raised on the first of
+    # them.
+    states = Result.open(
+        study, row["training_hash"], include_preview=EXECUTION_TIER == "preview"
+    ).fitted_states()
     magnitudes = [per_feature_magnitude(state["model"]) for state in states]
     counts = [int(np.count_nonzero(values)) for values in magnitudes]
     surviving.append(sum(counts) / len(counts))
