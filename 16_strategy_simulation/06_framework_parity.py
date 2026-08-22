@@ -528,22 +528,37 @@ fig.show()
 # %% [markdown]
 # ## 8. What is still different between the two runs
 #
-# Cost per dollar traded is matched. Four things are not, and each one is a modelling assumption
+# Cost per dollar traded is matched. Five things are not, and each one is a modelling assumption
 # somebody made rather than a property of a library.
 #
 # | | Array arithmetic | Sequential engine |
 # |---|---|---|
+# | How often it trades | On the dates the weight matrix changes: 77 in this sample, because the target moves only when the momentum selection or the risk-on flag does | Every session: `on_data` calls `rebalance_to_weights` on every bar, so the account is restored to its target daily. 3,258 fills |
 # | When a target is acted on | Immediately, as the weight in force over the next close-to-close return | An order placed on that bar, filled on the next one |
 # | What price it gets | The close, implicitly, because that is what the return is measured between | The next bar's open, moved against the order by the slippage rate |
 # | What the cost is charged on | The change in the target, whether or not a trade could have been made | The notional actually filled |
 # | What the account holds | A weight, which can be any real number | Whole shares, bought with the cash on hand |
 #
-# The last row is the one that is easy to miss. An account that has to buy whole shares with a
-# finite cash balance cannot sit exactly on its target, and the residual is not centred on zero:
-# rounding down is the only direction that always fits.
+# The first row is the largest and the least visible. The weight matrix built in section 3 moves on
+# 77 dates; the engine books 3,258 fills against it, forty times as many, and the counts printed
+# below the table are how you would find that out. The engine's daily restoration is not
+# correcting a signal - the target has not moved - it is correcting the drift that whole shares and
+# price movement introduce between rebalance dates, and it pays commission and slippage each time.
 #
-# These four act together here, and this notebook does not separate them.
+# The last row is the one that is easy to miss for a different reason. An account that has to buy
+# whole shares with a finite cash balance cannot sit exactly on its target, and the residual is not
+# centred on zero: rounding down is the only direction that always fits. That is what generates the
+# drift the first row then pays to correct.
+#
+# These five act together here, and this notebook does not separate them.
 # `07_engine_divergence_anatomy` changes one at a time and measures each.
+
+# %% [markdown]
+# %%
+_weight_change_dates = int((weights.diff().abs().sum(axis=1) > 0).sum())
+print(f"Dates the weight matrix changes:        {_weight_change_dates:,}")
+print(f"Fills the sequential engine booked:     {len(results_ml4t['trades']):,}")
+print(f"Turnover charged on the array side:     {executed_turnover.sum():.1f}x portfolio value")
 
 # %% [markdown]
 # ## 9. Which one to reach for

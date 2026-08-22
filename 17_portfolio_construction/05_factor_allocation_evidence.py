@@ -693,7 +693,16 @@ if bab is not None:
 
 # %%
 stats_df = pd.DataFrame(factor_stats).T
+stats_df["significant_conventional"] = stats_df["t_stat"] > CONVENTIONAL_T_THRESHOLD
 stats_df["significant_harvey"] = stats_df["t_stat"] > DISCOVERY_T_THRESHOLD
+print(
+    f"Clear the conventional bar of {CONVENTIONAL_T_THRESHOLD}: "
+    f"{int(stats_df['significant_conventional'].sum())} of {len(stats_df)} factors"
+)
+print(
+    f"Clear the Harvey bar of {DISCOVERY_T_THRESHOLD}:       "
+    f"{int(stats_df['significant_harvey'].sum())} of {len(stats_df)} factors"
+)
 factor_order = ["Mkt-RF", "MOM", "HML", "RMW", "CMA", "QMJ", "BAB", "SMB"]
 factor_order = [f for f in factor_order if f in factor_stats]
 
@@ -720,11 +729,17 @@ fig.add_trace(
     )
 )
 fig.add_hline(y=DISCOVERY_T_THRESHOLD, line_dash="dash", line_color=COLORS["amber"], line_width=2)
+fig.add_hline(
+    y=CONVENTIONAL_T_THRESHOLD, line_dash="dot", line_color=COLORS["neutral"], line_width=2
+)
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 
 fig.update_layout(
     title=(
-        "Raising the evidence bar removes most of the published factors"
+        f"Raising the bar from {CONVENTIONAL_T_THRESHOLD:.0f} to "
+        f"{DISCOVERY_T_THRESHOLD:.0f} disqualifies "
+        f"{int(stats_df['significant_conventional'].sum() - stats_df['significant_harvey'].sum())}"
+        " of these factors"
         "<br><sup>Newey-West t-statistics on mean monthly returns; the dashed line is the "
         "multiple-testing threshold, not the conventional one; histories differ by factor</sup>"
     ),
@@ -1339,8 +1354,11 @@ print(f"Crisis windows in which trend following was positive: {tsmom_positive} o
 #    hold outside the sample it was measured on.
 # 2. **The bar for believing a published factor is higher than the bar for publishing one.**
 #    Hundreds of candidates have been tested and the surviving ones were selected for clearing a
-#    threshold, so judging them against the threshold they were selected on is circular. Raising it
-#    removes most of them, which is the finding rather than a failure of the data.
+#    threshold, so judging them against the threshold they were selected on is circular. Of the
+#    eight measured here, seven clear the conventional bar of 2.0 and five clear Harvey's 3.0, so
+#    raising it disqualifies two - a smaller effect than the literature-wide claim, and expected,
+#    because these eight are the most-replicated factors in the field rather than a random draw
+#    from what has been published. The counts are printed above the chart.
 # 3. **A long history is not the same as strong evidence.** Every series here is current-vintage
 #    published research, revisable and backfillable by its provider, and none of it is net of
 #    financing, turnover or the capacity limits a real allocation would meet.

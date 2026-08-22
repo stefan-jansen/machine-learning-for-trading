@@ -57,6 +57,7 @@ import plotly.graph_objects as go
 import polars as pl
 from _etf_baseline import (
     DEFAULT_FEES,
+    INITIAL_CASH,
     annualized_turnover,
     break_even_cost_bp,
     load_panel,
@@ -260,8 +261,12 @@ print(f"Drag the simulator actually charged: {realized_drag_pct:.2f}% per year")
 
 # %%
 result_net = results_by_cost[fee_bp]
-gross_pnl_dollars = float(result_gross.equity.iloc[-1] - result_gross.equity.iloc[0])
-net_pnl_dollars = float(result_net.equity.iloc[-1] - result_net.equity.iloc[0])
+# From INITIAL_CASH, not from each run's first CLOSING equity: that first close already
+# contains a session's return and, in the net run, the opening commission, so measuring
+# from it gives the two runs different bases and drops the difference into
+# path_effect_dollars, which is the reconciling residual and so cannot report it.
+gross_pnl_dollars = float(result_gross.equity.iloc[-1]) - INITIAL_CASH
+net_pnl_dollars = float(result_net.equity.iloc[-1]) - INITIAL_CASH
 commission_dollars = float((result_net.trades_dollar * DEFAULT_FEES).sum())
 path_effect_dollars = gross_pnl_dollars - commission_dollars - net_pnl_dollars
 assert np.isclose(gross_pnl_dollars - commission_dollars - path_effect_dollars, net_pnl_dollars)

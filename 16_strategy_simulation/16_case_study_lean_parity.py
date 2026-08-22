@@ -361,6 +361,16 @@ def build_live_payload(rows: list[dict], skipped: list[tuple[str, str]]) -> dict
 
 selected_case_studies = parse_case_studies(CASE_STUDIES, MAX_CASE_STUDIES)
 if RUN_LIVE:
+    # prereq_df is computed above and was never read. Without a LEAN checkout
+    # LEAN_WORKSPACE is None, and run_case_study_pair divides it by a string - a
+    # TypeError, which is not in the tuple caught below, so a clean clone setting
+    # RUN_LIVE=True died on an operand-type message instead of the prerequisite
+    # list this notebook promises. 17_ and 18_ both guard the same path this way.
+    if not bool(prereq_df["ready"].all()):
+        raise RuntimeError(
+            "Live rerun requested with missing prerequisites: "
+            + ", ".join(prereq_df.filter(~pl.col("ready"))["requirement"].to_list())
+        )
     skipped: list[tuple[str, str]] = []
     live_rows: list[dict] = []
     for case_study in selected_case_studies:

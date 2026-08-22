@@ -500,7 +500,10 @@ for col in cumulative.columns:
 final_growth = cumulative.iloc[-1]
 growth_leader = str(final_growth.idxmax())
 fig.update_layout(
-    title="Five allocations of one universe, all weights frozen before the window",
+    title=(
+        f"{len(cumulative.columns)} allocations of one universe, "
+        "all weights frozen before the window"
+    ),
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=500,

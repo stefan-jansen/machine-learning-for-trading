@@ -780,10 +780,15 @@ equal_weights = np.full(len(assets), 1 / len(assets))
 portfolio_returns["Equal Weight"] = test_matrix @ equal_weights
 portfolio_gross["Equal Weight"] = float(np.abs(equal_weights).sum())
 
-print("Gross exposure, and what a total loss would take, with no cap applied:")
+# 1/gross is the threshold only if every position moves against the book by the same
+# percentage on the same day - every long down that much and every short up that much.
+# It is not a market move: net exposure is far smaller than gross, so a uniform decline
+# of this size does not empty the account. It is the worst case the leverage admits.
+print("Gross exposure, and the simultaneous adverse move on every position that would")
+print("wipe the account out, with no cap applied:")
 for name, gross in portfolio_gross.items():
     ruin_move = 1.0 / gross
-    print(f"  {name:<14} {gross:6.2f}x gross    wiped out by a {ruin_move:.2%} adverse move")
+    print(f"  {name:<14} {gross:6.2f}x gross    wiped out by {ruin_move:.2%} against every leg")
 
 # %% [markdown]
 # ### Performance Comparison with ml4t-diagnostic
@@ -949,8 +954,11 @@ print(
 # carrying more than forty times that capital in gross positions - which is the same thing the
 # `max_dd` column says when it reads exactly -1.0. The chart's vertical axis is logarithmic, so a
 # fall of that size still looks like a line on the page; the number is what says the account is
-# gone. No broker holds a position through it, and the arithmetic says why: at that gross exposure
-# a two-percent adverse move in the net direction is the whole account.
+# gone. No broker holds a position through it, and the arithmetic above says why: at that gross
+# exposure it takes only 2.15% against every leg at once - every long down that much and every
+# short up that much - to empty the account. That is a worst case rather than a market move, since
+# net exposure is a fraction of gross and a uniform decline does not do it; what matters is that
+# 46x leverage puts the worst case within a single ordinary session.
 #
 # Halving the fraction does not rescue it. Half-Kelly bottoms at 0.13x with a 99.2% drawdown, and
 # only at a quarter does the worst point stay above 0.76x. What separates them is not the sign of

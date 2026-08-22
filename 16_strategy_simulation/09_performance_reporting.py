@@ -858,12 +858,18 @@ else:
     print("Break-even cost is undefined: gross P&L or traded notional is not positive.")
 
 # %% [markdown]
-# The margin is the answer to "how much more expensive could execution have been before this
-# strategy stopped making money", and it is the number to compare against a broker's actual
-# schedule before trading anything.
+# **On this run the margin does not exist.** Gross P&L is not positive, so there is no cost at
+# which the path breaks even: it did not make money at zero cost either, and the table prints both
+# figures as NaN. Nothing below is a reading of this run's numbers; it is what the margin means
+# where there is one, kept because the quantity is worth understanding before the next run produces
+# it.
 #
-# It holds the trade path fixed, which is the assumption that limits it. A strategy paying more per
-# trade would trade differently: some entries would no longer clear their own cost, positions would
+# Where gross P&L is positive, the margin answers "how much more expensive could execution have
+# been before this strategy stopped making money", and it is the number to compare against a
+# broker's actual schedule before trading anything.
+#
+# It holds the trade path fixed, which is the assumption that limits it even then. A strategy
+# paying more per trade would trade differently: some entries would no longer clear their own cost, positions would
 # be held longer, and the sequence of fills would diverge from this one. The margin is therefore an
 # upper bound on tolerance, not a forecast of behaviour at a higher cost. It also contains no market
 # impact - the slippage here is a fixed rate that does not grow with order size, which Chapter 18
