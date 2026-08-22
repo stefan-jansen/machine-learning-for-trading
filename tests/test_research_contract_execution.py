@@ -14,12 +14,14 @@ from case_studies.research import (
     EligibilityManifest,
     OfficialPopulation,
     PredictionResult,
+    ResolvedModelRequest,
     Result,
     StateTransitionPolicy,
     Study,
     plan_backtests,
     run_backtests,
     run_models,
+    snapshot_official_models,
 )
 from case_studies.utils import linear
 from case_studies.utils.registry import metrics as registry_metrics
@@ -982,6 +984,67 @@ def test_official_population_cannot_silently_omit_failed_member(tmp_path: Path) 
     )
     assert replacement.require_complete() == (complete,)
     assert OfficialPopulation.open(study, snapshot.hash).members == (complete, missing)
+
+
+def test_refit_under_a_changed_parameter_needs_the_snapshot_it_replaces(tmp_path: Path) -> None:
+    """A population is prediction identities, so a changed estimator parameter replaces it.
+
+    This is the `max_bin` refit: the configuration menu is untouched and every member name is the
+    same, but each prediction hashes differently, so the same population name now describes a
+    different set. Without naming what it replaces the second snapshot is refused, and the lineage
+    that says which run produced which predictions would not exist.
+    """
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    first = snapshot_official_models(study, [request(1.0)], population_name="gbm-validation-v1")
+    (before,) = first.members
+
+    second_members = snapshot_official_models(
+        study, [request(2.0)], population_name="other-name"
+    ).members
+    assert second_members != first.members, "a changed parameter must move the prediction identity"
+
+    with pytest.raises(ValueError, match="supersedes"):
+        snapshot_official_models(study, [request(2.0)], population_name="gbm-validation-v1")
+
+    replacement = snapshot_official_models(
+        study,
+        [request(2.0)],
+        population_name="gbm-validation-v1",
+        supersedes=first.hash,
+    )
+    assert replacement.members == second_members
+    assert replacement.hash != first.hash
+    assert OfficialPopulation.open(study, first.hash).members == (before,)
+
+
+def test_resolving_a_population_by_name_returns_the_generation_in_force(tmp_path: Path) -> None:
+    """Downstream notebooks ask by name, so superseding must not make the name ambiguous."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    first = snapshot_official_models(study, [request(1.0)], population_name="gbm-v1")
+    assert OfficialPopulation.one(study, name="gbm-v1").hash == first.hash
+
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="gbm-v1", supersedes=first.hash
+    )
+    assert OfficialPopulation.one(study, name="gbm-v1").hash == second.hash
+    assert OfficialPopulation.open(study, first.hash).members == first.members
+
+    third = snapshot_official_models(
+        study, [request(3.0)], population_name="gbm-v1", supersedes=second.hash
+    )
+    assert OfficialPopulation.one(study, name="gbm-v1").hash == third.hash
 
 
 def test_interrupted_linear_run_reuses_completed_fold_on_retry(tmp_path: Path, monkeypatch) -> None:
