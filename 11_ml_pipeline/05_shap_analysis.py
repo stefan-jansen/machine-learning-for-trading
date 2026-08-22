@@ -233,7 +233,7 @@ if NEED_TRAINING:
 if NEED_TRAINING:
     # Independent masker assumes feature independence → SHAP = coef * (x - mean).
     # max_samples defaults to 100, which would make that mean a 100-row subsample and
-    # leave the closed-form check below disagreeing in the third decimal. The whole
+    # leave the closed-form check below disagreeing in the second decimal. The whole
     # point of the section is that linear SHAP is exact given the true background
     # expectation, so the background is the full training set.
     masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
@@ -335,7 +335,10 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
 
-    masker = shap.maskers.Independent(X_train)
+    # Same background as the NEED_TRAINING block above: the library default of 100
+    # rows would put this branch's attributions a hundredth away from the closed form
+    # the verify cell checks, and this branch also writes shap_arrays.npz.
+    masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
     explainer = shap.LinearExplainer(model, masker)
     explanation = explainer(X_test)
     shap_values = explanation.values

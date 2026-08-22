@@ -462,6 +462,11 @@ if NEED_TRAINING:
         "n_eff": n_eff_sw,
         "ic_uw": ic_uw,
         "ic_w": ic_w,
+        # Stamps which formula n_eff came from. A cache written before the Kish
+        # change carries all the other keys with a plain sum-of-weights n_eff, so
+        # key presence alone cannot tell the two apart and the reader would be
+        # shown 19% of the fold where this notebook computes 37%.
+        "n_eff_kind": "kish",
     }
 
 # %% tags=[]
@@ -469,14 +474,11 @@ if not NEED_TRAINING:
     sample_weight_results = joblib.load(RESULTS_PATH).get("sample_weight_results", {})
     # A cache written before n_sessions and half_life were recorded would KeyError
     # below. Treat it as absent so the reader gets the RETRAIN message instead.
-    if not sample_weight_results.keys() >= {
-        "n_train",
-        "n_sessions",
-        "half_life",
-        "n_eff",
-        "ic_uw",
-        "ic_w",
-    }:
+    if (
+        not sample_weight_results.keys()
+        >= {"n_train", "n_sessions", "half_life", "n_eff", "ic_uw", "ic_w"}
+        or sample_weight_results.get("n_eff_kind") != "kish"
+    ):
         sample_weight_results = {}
 
 if sample_weight_results:
