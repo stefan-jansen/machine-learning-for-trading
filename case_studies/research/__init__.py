@@ -7,6 +7,7 @@ from .configs import (
     load_model_configs,
     model_requests,
     planned_model_plan,
+    primary_label,
     resolved_model_plan,
 )
 from .contracts import ExecutionTier, LifecycleState
@@ -85,6 +86,7 @@ __all__ = [
     "plan_models",
     "expected_prediction_hashes",
     "planned_model_plan",
+    "primary_label",
     "resolved_model_plan",
     "run_backtests",
     "run_locked_holdout",
