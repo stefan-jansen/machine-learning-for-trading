@@ -88,6 +88,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -126,7 +127,7 @@ study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WOR
 # [`05_evaluation`](05_evaluation.ipynb) and [`90_ic_diagnostic`](90_ic_diagnostic.ipynb) read
 # them, and their menus were left in place when they were dropped from the sweep. What a menu
 # says is what to fit *for* a label; what `setup.yaml` says is which labels the sweep fits. The
-# frame below is the second of those, and it is one row.
+# cell below is the second of those, and it prints a one-element tuple.
 
 # %%
 declared_labels(study, "linear")
@@ -170,10 +171,11 @@ configs
 # message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        f"complete declared catalog, so it cannot publish the canonical population; pass "
+        f"POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -308,9 +310,16 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # ## 4. What the target looks like
 #
 # Before the model results, the target itself, because the shape of this distribution is what the
-# results below turn on. Each observation is one straddle held to expiry. The histogram is drawn
-# on a symmetric-log scale, because a linear axis wide enough to show the left tail would compress
-# everything else into a single bar.
+# results below turn on. Each observation is one straddle held to expiry. The counts are drawn on
+# a logarithmic axis, because the left tail is thousands of times rarer than the mode and a
+# linear count axis would flatten it to nothing.
+#
+# **Measured on the development sample only.** The label artifact on disk runs to the end of the
+# data, holdout included, and `02_labels` says so: the files carry the sealed sessions and no
+# diagnostic reads them. Describing the target across all of it would put a statistic computed
+# partly on sealed outcomes into a validation-stage notebook, so the rows are cut at the
+# development boundary the fits above were resolved against, taken from the plan rather than
+# re-derived from `setup.yaml`.
 #
 # Two features of it matter. There is a hard ceiling: the most a short straddle can earn is the
 # premium it collected, so nothing exceeds a return of one. There is no floor: a large enough move
@@ -322,13 +331,16 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # The label the strategy trades, read from `setup.yaml` rather than from a constant here, so
 # this section describes the same target the sweep publishes against.
 primary = primary_label(study)
+development_end = plan.get_column("validation_end").max()
 label_values = (
     study.labels.get(primary, execution_tier=EXECUTION_TIER)
     .load()
+    .filter(pl.col("timestamp") <= development_end)
     .get_column(primary)
     .drop_nulls()
     .to_numpy()
 )
+print(f"{len(label_values):,} straddles resolved on or before {development_end}")
 
 summary = pl.DataFrame(
     {

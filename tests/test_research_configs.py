@@ -15,6 +15,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     run_model_population,
     sweep_labels,
 )
@@ -142,3 +143,26 @@ def test_sp500_options_fits_only_the_label_its_sweep_declares() -> None:
     assert declared_labels(opened, "linear") == ("ret_to_expiry",)
     assert load_model_configs(opened, "linear").height == 28
     assert set(load_model_configs(opened, "gbm").get_column("label")) == {"ret_to_expiry"}
+
+
+def test_narrows_declared_catalog_catches_an_equal_sized_other_population() -> None:
+    """Row counts are not enough to tell the canonical catalog from a different one.
+
+    `sp500_options` keeps four out-of-sweep menus with exactly the 28 linear configurations the
+    canonical menu has, so a count comparison passes `LABELS=["fwd_ret_5d"]` through and lets a
+    run publish an entirely different member set under the canonical population name.
+    """
+    opened = Study.open("sp500_options")
+    complete = load_model_configs(opened, "linear")
+    other = load_model_configs(opened, "linear", labels=["fwd_ret_5d"])
+    assert other.height == complete.height, "the fixture for this test needs equal sizes"
+    assert not narrows_declared_catalog(opened, "linear", complete)
+    assert narrows_declared_catalog(opened, "linear", other)
+
+
+def test_narrows_declared_catalog_catches_a_configuration_subset() -> None:
+    opened = Study.open("etfs")
+    complete = load_model_configs(opened, "linear")
+    subset = load_model_configs(opened, "linear", config_names=["ols"])
+    assert not narrows_declared_catalog(opened, "linear", complete)
+    assert narrows_declared_catalog(opened, "linear", subset)

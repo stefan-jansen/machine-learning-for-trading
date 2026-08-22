@@ -100,6 +100,21 @@ def declared_labels(study: Study, family: str) -> tuple[str, ...]:
     return tuple(labels)
 
 
+def narrows_declared_catalog(study: Study, family: str, configs: pl.DataFrame) -> bool:
+    """Whether ``configs`` is less than the complete declared ``family`` catalog.
+
+    A run that narrows the member set declares a different population from the canonical one and
+    must publish under its own name. Comparing row counts is not enough: ``sp500_options`` keeps
+    four out-of-sweep menus with exactly the 28 linear and 15 GBM configurations the canonical
+    menu has, so ``LABELS=["fwd_ret_5d"]`` would match on count while declaring an entirely
+    different set of members. The comparison is therefore over ``(label, config_name)`` pairs.
+    """
+    declared = load_model_configs(study, family)
+    return set(zip(configs["label"], configs["config_name"], strict=True)) != set(
+        zip(declared["label"], declared["config_name"], strict=True)
+    )
+
+
 def load_model_configs(
     study: Study,
     family: str,
