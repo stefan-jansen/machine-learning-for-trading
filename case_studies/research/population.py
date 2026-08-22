@@ -141,18 +141,30 @@ class OfficialPopulation:
 
     @classmethod
     def one(cls, study: Study, *, name: str) -> OfficialPopulation:
-        """Resolve one immutable population by name without a hash handoff."""
+        """Resolve the current immutable population by name, without a hash handoff.
+
+        A name accumulates a snapshot per generation: refitting the same configurations under a
+        corrected estimator parameter produces different prediction identities, so the second run
+        supersedes the first rather than replacing it. Every earlier snapshot stays readable by
+        hash, which is what makes the lineage worth writing down, but a caller asking by name
+        wants the generation in force. That is the one snapshot in the chain that nothing
+        supersedes; two of those under a single name means the chain forked and no answer is
+        defensible.
+        """
         with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
             rows = db.execute(
-                "SELECT population_hash FROM official_populations WHERE name = ? "
-                "ORDER BY population_hash",
+                "SELECT population_hash, supersedes_hash FROM official_populations "
+                "WHERE name = ? ORDER BY population_hash",
                 (name,),
             ).fetchall()
-        if len(rows) != 1:
+        superseded = {row[1] for row in rows if row[1] is not None}
+        current = [row[0] for row in rows if row[0] not in superseded]
+        if len(current) != 1:
             raise ValueError(
-                f"official population name {name!r} resolved to {len(rows)} identities"
+                f"official population name {name!r} resolved to {len(current)} current "
+                f"identities among {len(rows)} snapshots"
             )
-        return cls.open(study, rows[0][0])
+        return cls.open(study, current[0])
 
     @classmethod
     def open(cls, study: Study, population_hash: str) -> OfficialPopulation:
