@@ -93,7 +93,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "cme_futures-linear-validation-v1"
+POPULATION_NAME = ""
 
 # %%
 study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -224,14 +224,25 @@ plan.select(
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # is going to produce. The list is computed from the resolved specifications before the first fit
-# and written down, and afterwards every member must exist and be complete. That is what makes
-# the downstream comparison well defined - `13_backtest` backtests this population, not whatever
-# predictions happen to be in the registry - and it is why a configuration that raises fails the
-# whole call rather than publishing a population one member short. Everything that finished stays
+# and written down, and afterwards every member must exist and be complete. It is why a
+# configuration that raises fails the whole call rather than publishing a population one member
+# short.
+#
+# **The population is named for the label**, because that is the set this run declares. A
+# population is immutable once written: registering a different set of members under a name that
+# already exists is refused unless the caller names the snapshot it supersedes. Sharing one name
+# across labels would therefore make the second label's run fail rather than add to the first,
+# which is exactly what it did until the name was scoped this way. Everything that finished stays
 # registered, and re-running fits only what is missing.
 
+# %% [markdown]
+# The name is built here and not in the parameters cell, because a parameterized run replaces
+# `LABEL` in a cell inserted *after* the tagged one. Composed alongside `LABEL` it would keep the
+# default label whatever the run asked for, and each label's population would overwrite the last.
+
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+population_name = POPULATION_NAME or f"cme_futures-linear-{LABEL}-validation-v1"
+execution, population = run_model_population(study, resolved, population_name=population_name)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)

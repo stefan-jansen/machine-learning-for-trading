@@ -20,7 +20,9 @@ from case_studies.sp500_options.research_workflow import (
     open_study,
     publish_short_straddle_decisions,
     resolve_short_straddle_decisions,
+    run_official_backtest_requests,
     selected_prediction,
+    strategy_request_frame,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -224,11 +226,27 @@ def main() -> None:
     )
     if not typed["daily_returns"].equals(direct["daily_returns"]):
         raise RuntimeError("typed and direct option returns differ")
-    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
-    result = strategy.run(prices=prices, option_lifecycle=lifecycle)
-    replay = strategy.run(prices=prices, option_lifecycle=lifecycle)
+    requests = strategy_request_frame(
+        [
+            {
+                "request_name": "reduced-liquid-option-proof",
+                "prediction_hash": prediction.hash,
+                "label": "ret_to_expiry",
+                "signal": signal,
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+            }
+        ]
+    )
+    execution = run_official_backtest_requests(study, requests, population_name=None)
+    replay_execution = run_official_backtest_requests(study, requests, population_name=None)
+    result = execution.results[0]
+    replay = replay_execution.results[0]
     if replay.hash != result.hash:
         raise RuntimeError("option backtest replay changed identity")
+    if execution.catalog_rows.item(0, "decision_hash") != decision.hash:
+        raise RuntimeError("reader-facing option execution changed the decision identity")
     try:
         OfficialPopulation.create(
             study,
