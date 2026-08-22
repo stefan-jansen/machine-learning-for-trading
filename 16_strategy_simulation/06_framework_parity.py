@@ -549,8 +549,9 @@ fig.show()
 # re-applies the full target on every session after the first - `weights.shift(1).fillna(0)` leaves
 # the array account holding nothing on the opening session - so it is silently restored to its
 # weights daily too: prices move, the implied holdings drift, and the next line of the formula puts
-# them back. What differs is the bill. `cost_drag` is built from `weights.diff()`,
-# so the array side is charged only on the 78 dates printed below, where the target itself moves.
+# them back. What differs is the bill. `cost_drag` is built from `weights.diff()` and carries the
+# same one-session lag, so the array side is charged only on the 78 target changes printed below,
+# each billed on the session the new target takes effect and starts earning.
 #
 # The engine cannot do that. Restoring the target means sending orders, and its counts below show
 # the price of the same repositioning: 2,911 of those 3,522 attempted rebalances reach the market
