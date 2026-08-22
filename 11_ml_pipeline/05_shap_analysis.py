@@ -307,6 +307,8 @@ if not NEED_TRAINING:
     shap_values = _cached["shap_values"]
     expected_value = _cached["expected_value"]
     fold_importance = _cached.get("fold_importance")
+    # Read before the dict goes: the staleness cell below cannot reach _cached.
+    _cached_background = _cached.get("background")
     del _cached
 
     # Reconstruct Explanation - joblib caches arrays, not SHAP objects
@@ -329,7 +331,7 @@ if not NEED_TRAINING:
 # %% tags=[]
 _cache_fold_stale = fold_importance is not None and len(fold_importance) < len(cv_splits)
 _cache_data_stale = len(y_pred) != len(test_idx) or X_test.shape[0] != len(test_idx)
-_cache_background_stale = not NEED_TRAINING and _cached.get("background") != "full"
+_cache_background_stale = not NEED_TRAINING and _cached_background != "full"
 if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale or _cache_background_stale):
     print(
         "Cached SHAP artifacts are stale (fold count, data vintage or background "
