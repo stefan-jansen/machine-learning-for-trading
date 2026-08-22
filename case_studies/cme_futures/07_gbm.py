@@ -168,11 +168,19 @@ if configs.height < load_model_configs(study, "gbm").height and not POPULATION_N
 #
 # Nothing is fitted here, so the plan can be inspected first. Four things to check:
 #
-# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row.** A row that
-#   differs is a configuration measured on a different sample from its neighbours.
-# - **`folds` is the same everywhere**, and equals the number of walk-forward splits.
+# **Read the checks within a label, not across the whole frame.** Each label has its own purge
+# buffer in `config/setup.yaml` - `5D` for the primary and `21D` for the variant - so the two
+# horizons resolve to different fold boundaries and different eligible samples, and `label` is the
+# first column for that reason.
+#
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row of the same
+#   label.** A row that differs from its own label's neighbours is a configuration measured on a
+#   different sample from theirs. Between labels they differ by construction.
+# - **`folds` is the same everywhere**, and equals the number of walk-forward splits. This one
+#   does hold across labels.
 # - **`validation_start` and `validation_end` bracket the development sample**, with none of the
-#   held-out tail visible.
+#   held-out tail visible. `validation_end` falls earlier for the 21-day label, because a longer
+#   forward window has to stop earlier to keep its outcome inside the development period.
 # - **`checkpoints` is where this differs from the linear plan.** It is the number of training
 #   states each configuration will publish predictions for. Multiply it by the number of rows to
 #   get the number of candidate models this notebook is about to create.
@@ -188,6 +196,7 @@ resolved = tuple(request.resolve() for request in requests)
 
 plan = resolved_model_plan(resolved)
 plan.select(
+    "label",
     "config_name",
     "feature_count",
     "eligible_entities",
@@ -396,14 +405,29 @@ fig_curves.update_layout(
     margin=dict(t=90),
     legend=dict(title_text="Loss function"),
 )
+# How many lines dip below zero at some checkpoint is a fact about the frame, so the alt text
+# reads it rather than asserting it: two five-day configurations touch a fraction of a thousandth
+# below zero at their earliest checkpoints, and describing the panel as uniformly positive would
+# be a claim the data refutes.
+dip_text = " and ".join(
+    f"{row['below']} of {row['total']} in the {row['label']} panel"
+    for row in curves.group_by("label")
+    .agg(
+        total=pl.col("config_name").n_unique(),
+        below=pl.col("config_name").filter(pl.col("ic_mean") < 0).n_unique(),
+    )
+    .sort("label")
+    .iter_rows(named=True)
+)
 show_plotly_with_alt(
     fig_curves,
     "Line charts of mean validation information coefficient against boosting iteration, one line "
     "per configuration, coloured by loss function: dark navy for squared error, gold for absolute "
-    "error, copper for Huber. Each panel carries a dashed zero line. In the five-day panel every "
-    "line stays above the line across the whole range, with the copper Huber lines running "
-    "highest and the navy squared-error lines lowest. In the 21-day panel every line is below it "
-    "from 100 trees on, and the two lowest navy lines sit near -0.04 throughout. The lines wander "
+    "error, copper for Huber. Each panel carries a dashed zero line. The five-day panel sits "
+    "almost entirely above that line, with the copper Huber lines running highest and the navy "
+    "squared-error lines lowest; the 21-day panel sits below it, and its two lowest navy lines "
+    "run near -0.04 throughout. Counted from the underlying frame, the lines that dip below zero "
+    f"at some checkpoint are {dip_text}. The lines wander "
     "up and down rather than rising to a common peak and falling away, so no single stopping "
     "point stands out in either panel.",
 )
@@ -661,15 +685,21 @@ spread.group_by("label", maintain_order=True).head(5)
 # `carry_mom_interaction`, exist because someone had to name that structure for the linear model;
 # the trees are finding more of it than was named.
 #
-# **The horizons reverse between the two families, which is what fitting both labels here was for.**
-# `06_linear` reached 0.041 at 21 days against 0.003 at five, and this grid does the opposite:
-# 0.026 at five days with all fifteen configurations above zero, and *nothing* above zero at 21,
-# where the best is -0.006 and the worst -0.042. A property of the horizon would have moved both
-# families the same way. This rules that out: what each family can represent decides which horizon
-# it reads, and the 21-day advantage in the linear notebook belongs to strong L1 on that label
-# rather than to the 21-day label itself. It also means neither notebook's horizon ranking can be
-# carried into the other, and that the case study trades the horizon that suits the family that
-# works on it.
+# **The horizons reverse between the two families, which is what fitting both labels here was
+# for.** The linear grid did better at 21 days than at five - by how much depends on how the
+# coverage filter is handled, and `06_linear` works that through - while this grid does the
+# opposite outright: 0.026 at five days with all fifteen configurations above zero, and *nothing*
+# above zero at 21, where the best is -0.006 and the worst -0.042. The direction of the reversal
+# does not depend on any of the qualifications the linear comparison needs, which is what makes
+# it the durable finding here. What each family can represent decides which horizon it reads. So
+# neither notebook's horizon ranking carries into the other, and the strong-L1 advantage at 21
+# days in the linear notebook is a fact about that family on that label rather than about the
+# label.
+#
+# It does not follow that five days is the better horizon. The two labels are fitted under
+# different purge buffers, so they resolve different folds and different samples, and a
+# comparison across them is between two label-specific protocols. What is being compared cleanly
+# is the two *families* on each label, and there the answer is unambiguous at both.
 #
 # **Squared error is last at both horizons; the rest of the ordering is not stable.** At five days
 # the ordering is the textbook one - Huber 0.019 mean, absolute error 0.015, squared error 0.014 -
