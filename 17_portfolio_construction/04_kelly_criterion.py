@@ -793,7 +793,9 @@ dates = test_returns["timestamp"]
 comparison_metrics = []
 
 for name, pf_ret in portfolio_returns.items():
-    minimum_wealth_multiple = float(np.min(1 + pf_ret))
+    # The lowest the cumulative wealth path reaches, not the worst single period: the
+    # section reads the growth chart off this number, and a chart is a path.
+    minimum_wealth_multiple = float(np.min(np.cumprod(1 + pf_ret)))
     if minimum_wealth_multiple <= 0:
         raise ValueError(f"{name} reaches nonpositive wealth in the test window")
     pa = PortfolioAnalysis(
@@ -938,15 +940,21 @@ print(f"Gross exposure the training estimates ask for: {np.abs(kelly_allocation)
 print(f"At a quarter of that:                          {portfolio_gross['25% Kelly']:.1f}x")
 print(
     "Lowest point of the full-Kelly wealth path:    "
-    f"{full_kelly_row['min_wealth_multiple']:.2f}x the starting capital"
+    f"{full_kelly_row['min_wealth_multiple']:.3g}x the starting capital"
 )
 
 # %% [markdown]
-# The last line is the one that decides how to read the growth chart above it. The full-Kelly path
-# fell to a tenth of its starting value at its worst point, while carrying more than forty times its
-# capital in gross positions. No account holds that: a broker liquidates a leveraged position long
-# before it loses ninety percent, and the arithmetic says why - at that gross exposure a two-percent
-# adverse move in the net direction is the whole account.
+# The last line is the one that decides how to read the growth chart above it. At its worst point
+# the full-Kelly path is down to about one ten-millionth of the capital it started with, while
+# carrying more than forty times that capital in gross positions - which is the same thing the
+# `max_dd` column says when it reads exactly -1.0. The chart's vertical axis is logarithmic, so a
+# fall of that size still looks like a line on the page; the number is what says the account is
+# gone. No broker holds a position through it, and the arithmetic says why: at that gross exposure
+# a two-percent adverse move in the net direction is the whole account.
+#
+# Halving the fraction does not rescue it. Half-Kelly bottoms at 0.13x with a 99.2% drawdown, and
+# only at a quarter does the worst point stay above 0.76x. What separates them is not the sign of
+# the estimates but how much leverage is taken on the strength of them.
 #
 # So the curves are not a track record. They are what the formula's answer would have produced given
 # borrowing that is unlimited, free of interest, and never called, and the value of computing them
