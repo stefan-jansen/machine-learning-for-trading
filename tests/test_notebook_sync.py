@@ -565,3 +565,41 @@ def test_a_computed_alt_the_output_does_not_carry_is_stale(tmp_path, monkeypatch
         ],
     }
     assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_every_row_the_scan_returns_is_one_of_the_files_it_was_given() -> None:
+    """The gate must answer for the files it is given, not for the working tree.
+
+    `check_all` scanning everything is what let one session's dirty notebook block
+    every unrelated commit in a shared worktree. This is the contract that fixes it,
+    and it holds whatever state the tree is in: no category may name a notebook
+    outside `only`. Nothing unstaged can reach main, so the narrower scan gives up
+    no protection.
+    """
+    everything = check_all()
+    all_rows = sorted({r for category in everything for r in category})
+    assert all_rows, "no notebook in this tree for the scan to report on"
+
+    chosen = {all_rows[0]}
+    for category in check_all(only=chosen):
+        assert set(category) <= chosen
+
+    excluded = set(all_rows[1:])
+    if excluded:
+        for category in check_all(only=excluded):
+            assert all_rows[0] not in category
+
+
+def test_the_paired_py_selects_its_notebook() -> None:
+    """pre-commit stages the `.py`, so naming it has to reach the `.ipynb` beside it."""
+    everything = check_all()
+    all_rows = sorted({r for category in everything for r in category})
+    assert all_rows, "no notebook in this tree for the scan to report on"
+    nb = all_rows[0]
+    by_py = check_all(only={nb.removesuffix(".ipynb") + ".py"})
+    assert sorted({r for category in by_py for r in category}) == [nb]
+
+
+def test_an_empty_restriction_still_scans_everything() -> None:
+    """`only=None` is the whole tree, which is what CI calls and must not change."""
+    assert check_all(only=None) == check_all()
