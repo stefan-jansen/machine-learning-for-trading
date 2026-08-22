@@ -397,10 +397,16 @@ ridge_summary
 # belongs to.
 #
 # The decay rate is set below as a half-life: the number of sessions after which
-# an observation counts half as much as today's. The effective sample size
-# $N_{\text{eff}} = \sum w_t$ turns that rate into the quantity that decides
-# whether the trade is worth making, which is how many rows the fit is
-# effectively left with. We compare a single Ridge fit with and without weighting
+# an observation counts half as much as today's. The effective sample size turns
+# that rate into the quantity that decides whether the trade is worth making,
+# which is how many rows the fit is effectively left with. It is Kish's,
+#
+# $$N_{\text{eff}} = \frac{\bigl(\sum w_t\bigr)^2}{\sum w_t^2}$$
+#
+# rather than $\sum w_t$, because only this form is unchanged when every weight
+# is multiplied by a constant. That matters here: the weights are rescaled to
+# mean one before fitting, so $\sum w_t$ would answer for a vector the fit does
+# not use and would report the full sample every time. We compare a single Ridge fit with and without weighting
 # on the last fold.
 
 # %% tags=[]
@@ -426,7 +432,9 @@ if NEED_TRAINING:
     )
     lam = np.log(2.0) / HALF_LIFE_SESSIONS
     weights = np.exp(-lam * age_in_sessions)
-    n_eff_sw = weights.sum()
+    # Kish, not weights.sum(): the rescaling below multiplies every weight by a
+    # constant, which leaves this unchanged and would send a plain sum to n_train.
+    n_eff_sw = float(weights.sum() ** 2 / (weights**2).sum())
     # Normalize to mean one before fitting. sklearn scales rows by sqrt(w) and does
     # not renormalize, so the weighted objective is sum(w_i * resid_i^2) + alpha*||b||^2:
     # with a mean weight near 0.19 the same alpha is roughly five times the penalty
@@ -459,6 +467,17 @@ if NEED_TRAINING:
 # %% tags=[]
 if not NEED_TRAINING:
     sample_weight_results = joblib.load(RESULTS_PATH).get("sample_weight_results", {})
+    # A cache written before n_sessions and half_life were recorded would KeyError
+    # below. Treat it as absent so the reader gets the RETRAIN message instead.
+    if not sample_weight_results.keys() >= {
+        "n_train",
+        "n_sessions",
+        "half_life",
+        "n_eff",
+        "ic_uw",
+        "ic_w",
+    }:
+        sample_weight_results = {}
 
 if sample_weight_results:
     print(f"Training rows: {sample_weight_results['n_train']:,}")
