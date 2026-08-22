@@ -303,6 +303,27 @@ class Result:
 
 @dataclass(frozen=True)
 class TrainingResult(Result):
+    def fitted_states(self) -> list[Any]:
+        """The per-fold fitted state this run stored, in fold order.
+
+        A run writes what its family needs to reproduce a prediction without refitting, and the
+        shape is the family's own: the linear runner stores a mapping with `model`,
+        `preprocessor` and `feature_names`. This returns those objects unchanged rather than
+        interpreting them, because a caller that asks for fitted state already knows which family
+        it asked about. It is the supported way to read them - the layout under
+        `run_log/training/<hash>/models/` is an implementation detail, and a notebook that opens
+        those files itself is asserting something the registry has not been asked to confirm.
+        """
+        import joblib
+
+        models = self.root / "run_log" / "training" / self.hash / "models"
+        paths = sorted(models.glob("fold_*.joblib"))
+        if not paths:
+            raise FileNotFoundError(
+                f"training run {self.hash} stored no fitted state under {models}"
+            )
+        return [joblib.load(path) for path in paths]
+
     @property
     def complete(self) -> bool:
         if self.identity_version not in SUPPORTED_IDENTITY_VERSIONS or not self.spec():

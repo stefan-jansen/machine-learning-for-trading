@@ -54,7 +54,7 @@ dependencies = [
     # detectors accept a date-typed timestamp column, and get_metadata() no longer lets a
     # null in the provider block erase the timestamp an update just wrote.
     "ml4t-data>=0.1.2",
-    "ml4t-diagnostic>=0.1.1",
+    "ml4t-diagnostic>=0.1.2",
     "ml4t-engineer>=0.1.3",
     "ml4t-backtest>=0.1.3",
     "ml4t-live>=0.1.0",

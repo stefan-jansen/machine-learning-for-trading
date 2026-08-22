@@ -382,7 +382,7 @@ def _holdout_lineage_for(
     *,
     label_restriction: frozenset[str] | None,
     rung: dict | None,
-    prefer_training_hash: str | None = None,
+    prefer_prediction_hash: str | None = None,
 ) -> dict | None:
     """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
     for the highest-Sharpe holdout backtest registered in this case study,
@@ -429,28 +429,49 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
-        # Same-lineage preference: when the caller knows the validation rank-1's
-        # training_hash, prefer a holdout that shares it — pins val→holdout
-        # decay to the same trained model rather than a same-spec but
-        # different-lineage holdout that happens to have a higher Sharpe.
-        if prefer_training_hash is not None:
-            row = db.execute(
-                f"""
-                SELECT t.family, t.config_name, t.label,
-                       p.prediction_hash, b.backtest_hash
-                FROM prediction_sets p
-                JOIN training_runs t ON p.training_hash = t.training_hash
-                JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
-                                     AND b.stage IN ('signal','allocation','risk_overlay','holdout')
-                JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
-                WHERE {where_sql} AND p.training_hash = ?
-                ORDER BY bm.sharpe DESC NULLS LAST
-                LIMIT 1
+        # Same-lineage preference: given the validation rank-1's own prediction
+        # set, prefer a holdout sharing its trained model AND its checkpoint.
+        # Both are read from that one row here rather than accepted as separate
+        # arguments, because a caller that passes the training hash and forgets
+        # the checkpoint reintroduces the defect while looking correct.
+        #
+        # The checkpoint has to be pinned because a trained model registers one
+        # prediction set per declared checkpoint and they share a strategy spec,
+        # so the training hash alone leaves one indistinguishable candidate per
+        # checkpoint. This branch writes the hash the ``val_rank1_self`` pair is
+        # stored under and ``select_holdout_self_backtest`` reads it back, so the
+        # two must agree. Ordering by ``backtest_hash`` rather than by Sharpe
+        # keeps the choice off holdout performance either way.
+        if prefer_prediction_hash is not None:
+            carrier = db.execute(
+                """
+                SELECT training_hash, checkpoint_value, checkpoint_kind
+                FROM prediction_sets WHERE prediction_hash = ?
                 """,
-                params + [prefer_training_hash],
+                (prefer_prediction_hash,),
             ).fetchone()
-            if row:
-                return dict(row)
+            if carrier is not None:
+                row = db.execute(
+                    f"""
+                    SELECT t.family, t.config_name, t.label,
+                           p.prediction_hash, b.backtest_hash
+                    FROM prediction_sets p
+                    JOIN training_runs t ON p.training_hash = t.training_hash
+                    JOIN backtest_runs b ON p.prediction_hash = b.prediction_hash
+                                         AND b.stage IN
+                                             ('signal','allocation','risk_overlay','holdout')
+                    JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
+                    WHERE {where_sql}
+                      AND p.training_hash = ?
+                      AND p.checkpoint_value IS ?
+                      AND p.checkpoint_kind IS ?
+                    ORDER BY b.backtest_hash
+                    LIMIT 1
+                    """,
+                    params + [carrier[0], carrier[1], carrier[2]],
+                ).fetchone()
+                if row:
+                    return dict(row)
 
         row = db.execute(
             f"""
@@ -784,29 +805,16 @@ def populate_paired_metrics(
         rung=rung,
         carrier_pin_predicate=carrier_pin_predicate,
     )
-    _val_training_hash: str | None = None
-    try:
-        _case_db = get_case_study_dir(cs) / "run_log" / "registry.db"
-        with sqlite3.connect(str(_case_db)) as _con:
-            _row = _con.execute(
-                "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
-                (leader_phash,),
-            ).fetchone()
-            if _row:
-                _val_training_hash = _row[0]
-    except (sqlite3.Error, OSError) as exc:
-        print(
-            f"[warn] {cs}: failed to resolve val_training_hash from "
-            f"prediction_hash={leader_phash}: {type(exc).__name__}: {exc}"
-        )
-        _val_training_hash = None
+    # The carrier's training hash and checkpoint are both resolved inside
+    # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
+    # preference cannot be half-applied by a caller.
     ho_lineage = _holdout_lineage_for(
         cs,
         leader_label,
         strategy_spec=val_spec,
         label_restriction=label_restriction,
         rung=rung,
-        prefer_training_hash=_val_training_hash,
+        prefer_prediction_hash=leader_phash,
     )
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label

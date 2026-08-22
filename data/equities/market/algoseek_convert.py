@@ -474,17 +474,24 @@ def convert_nasdaq100(source: Path, out_root: Path, workers: int, force: bool) -
 
         t0 = time.time()
         frames = []
-        for day, reader in entries:
+        # One line per day. A month is ~21 days of ~504 symbol files each, and nothing is
+        # written until the whole month is concatenated, so without this the longest phase of
+        # the run produces no output and creates no directory - reported as the converter
+        # "not working" when it was working the whole time.
+        for n, (day, reader) in enumerate(entries, start=1):
             df = _parse_day(reader(), parse_nasdaq100_csv, workers)
             if df is not None:
                 frames.append(df)
+                _log(f"  {day} ({n}/{len(entries)}): {df.height:,} rows")
             else:
-                _log(f"  {day}: no rows")
+                _log(f"  {day} ({n}/{len(entries)}): no rows")
         if not frames:
             _log(f"{year}-{month}: nothing to write")
             continue
 
+        _log(f"{year}-{month}: concatenating and sorting {len(frames)} days")
         month_df = pl.concat(frames, how="vertical").sort("symbol", "timestamp")
+        del frames
         size_mb = _write(month_df, out_path)
         total_rows += month_df.height
         _log(
