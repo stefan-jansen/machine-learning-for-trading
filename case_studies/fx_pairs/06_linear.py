@@ -121,6 +121,21 @@ study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPAC
 declared_labels(study, "linear")
 
 # %% [markdown]
+# A run that narrows `LABELS` fits a different set of members than the canonical population
+# declares, and a population is immutable once written, so it must publish under its own name.
+# Asking for that here rather than at the run is the difference between a message naming the
+# parameter and a refusal from the registry several cells later.
+
+# %%
+declared = declared_labels(study, "linear")
+fitted_labels = tuple(LABELS) or declared
+if set(fitted_labels) != set(declared) and not POPULATION_NAME:
+    raise ValueError(
+        f"LABELS={list(fitted_labels)} is a subset of what the menus declare, so this run cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
 # Each name in the menu resolves to a preset file in the shared directory
 # `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
 # frame below is the menu for every label above, with each name resolved to the estimator class
@@ -146,7 +161,7 @@ declared_labels(study, "linear")
 configs = load_model_configs(
     study,
     "linear",
-    labels=LABELS or None,
+    labels=fitted_labels,
     config_names=CONFIG_NAMES or None,
 )
 configs
@@ -346,6 +361,31 @@ catalog.select(
 )
 
 # %% [markdown]
+# ### What each horizon reached
+#
+# One row per label, over the configurations that horizon actually charted. It is the frame the
+# horizon comparison below is read from, so the numbers quoted there are these and not a
+# different subset: `best_ic` is the best full-coverage result at that horizon, which is not the
+# same as the best result at that horizon when a partial-coverage configuration scores higher on
+# fewer dates.
+
+# %% tags=["results"]
+horizons = (
+    catalog.filter("full_coverage")
+    .group_by("label")
+    .agg(
+        charted=pl.len(),
+        scorable_dates=pl.col("ic_n_days").max(),
+        best_config=pl.col("config_name").sort_by("ic_mean", descending=True).first(),
+        best_ic=pl.col("ic_mean").max(),
+        worst_ic=pl.col("ic_mean").min(),
+        above_zero=(pl.col("ic_mean") > 0).sum(),
+    )
+    .sort("label")
+)
+horizons
+
+# %% [markdown]
 # ### How the penalty grid ranks
 #
 # One panel per label, so the same grid can be read at each horizon. Only the configurations
@@ -374,9 +414,15 @@ def compact(params: str) -> str:
 
 primary = primary_label(study)
 full = catalog.filter("full_coverage")
-panel_labels = [primary, *sorted(set(full.get_column("label")) - {primary})]
+charted = sorted(set(full.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels
+# by whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in charted] + [
+    label for label in charted if label != primary
+]
+order_label = panel_labels[0]
 config_order = (
-    full.filter(pl.col("label") == primary)
+    full.filter(pl.col("label") == order_label)
     .sort("ic_mean", descending=True)
     .get_column("config_name")
     .to_list()
@@ -416,7 +462,7 @@ fig_ic.update_xaxes(
     categoryorder="array",
     categoryarray=config_order,
     tickangle=-45,
-    title_text=f"Configuration (ordered by validation IC on {primary})",
+    title_text=f"Configuration (ordered by validation IC on {order_label})",
     row=len(panel_labels),
     col=1,
 )
@@ -431,7 +477,8 @@ show_plotly_with_alt(
     fig_ic,
     f"Three stacked bar charts of mean validation information coefficient across the linear "
     f"penalty grid, one panel per label and the configurations in the same order in each, that "
-    f"order being their ranking on {primary}. Each panel carries a dashed zero line. The highest "
+    f"order being their ranking on {order_label}. Each panel carries a dashed zero line. The "
+    f"highest "
     f"bar anywhere is {leader['config_name']} ({compact(leader['params'])}) on {leader['label']} "
     f"at IC {leader['ic_mean']:+.3f}, highlighted in amber.",
 )
@@ -441,27 +488,36 @@ show_plotly_with_alt(
 #
 # The panels are held in one order so the question can be asked, and this answers it with a
 # number rather than an impression: the rank correlation between two labels' orderings of the
-# same 28 configurations. One would mean the horizons agree on the whole grid, zero that the
-# ordering at one horizon says nothing about the other. Only configurations with full coverage
-# at both labels enter a pair, so the comparison is over the same members on both sides.
+# configurations they both charted. One would mean the horizons agree on the whole grid, zero
+# that the ordering at one horizon says nothing about the other.
+#
+# Each pair is built from its own two labels. One frame pivoted across all three and then
+# dropped would intersect every pair down to the configurations charted everywhere, so a pair
+# that shares its whole grid would still be reported on the smaller set, and `configurations`
+# would print the same number for all three pairs whatever their coverage was.
+
 
 # %% tags=["results"]
-wide = (
-    full.select("label", "config_name", "ic_mean")
-    .pivot(on="label", index="config_name", values="ic_mean")
-    .drop_nulls()
-)
+def rank_transfer(label_a: str, label_b: str) -> dict:
+    """Rank correlation between two labels' orderings, over what both of them charted."""
+    pair = (
+        full.filter(pl.col("label").is_in([label_a, label_b]))
+        .select("label", "config_name", "ic_mean")
+        .pivot(on="label", index="config_name", values="ic_mean")
+        .drop_nulls()
+    )
+    return {
+        "label_a": label_a,
+        "label_b": label_b,
+        "configurations": pair.height,
+        "rank_correlation": pair.select(
+            pl.corr(pl.col(label_a).rank(), pl.col(label_b).rank())
+        ).item(),
+    }
+
+
 transfer = pl.DataFrame(
-    [
-        {
-            "label_a": a,
-            "label_b": b,
-            "configurations": wide.height,
-            "rank_correlation": wide.select(pl.corr(pl.col(a).rank(), pl.col(b).rank())).item(),
-        }
-        for index, a in enumerate(panel_labels)
-        for b in panel_labels[index + 1 :]
-    ]
+    [rank_transfer(a, b) for index, a in enumerate(panel_labels) for b in panel_labels[index + 1 :]]
 )
 transfer
 
@@ -563,21 +619,26 @@ else:
 # stronger evidence for that mechanism than one label showing it, because the three do not share
 # a target: only the features and the folds are common to them.
 #
-# **The horizon changes the size of the result by more than the penalty does.** The best
-# configuration on the one-day label reaches an IC of about 0.006; on the five-day label about
-# 0.028, and on the 21-day label about 0.039 - six times the one-day figure, from the same
-# features and the same folds. The one-day horizon is the one the strategy chapters trade, so
-# the case study leads with its weakest label. That is worth knowing before reading any later
-# number, and it is a property of the horizon rather than of anything chosen here.
+# **The horizon changes the size of the result by more than the penalty does.** Read `best_ic`
+# down the horizons frame: the best full-coverage configuration at 21 days reaches several times
+# what the best one at one day reaches, from the same features, the same folds and the same
+# universe. The one-day horizon is the one the strategy chapters trade, so the case study leads
+# with its weakest label. That is worth knowing before reading any later number, and it is a
+# property of the horizon rather than of anything chosen here.
+#
+# The comparison is between full-coverage configurations on both sides. At five days the two
+# most aggressive L1 settings post a higher IC than any charted configuration does, on 1,543 of
+# the label's 2,059 dates rather than all of them, and taking that number as the horizon's
+# result would compare a selected subsample against two full ones.
 #
 # **The horizons agree on the direction and disagree on the detail.** The first panel descends
 # by construction, since it defines the order; the point is what the other two do under that
 # order, and they are jagged rather than flat or descending. The rank correlations put the
-# agreement between any two horizons well above zero and well below one, and the top three
-# configurations are a different three at each horizon: the configuration that leads the one-day
-# grid sits in the middle of both variant grids. What survives the change of horizon is the broad
-# direction - heavy penalties beat light ones everywhere - and what does not is the fine ordering.
-# Reading a specific configuration as "the best" therefore says which label it was best on.
+# agreement between any two horizons well above zero and well below one, and `best_config` in the
+# horizons frame names a different configuration at each horizon. What survives the change of
+# horizon is the broad direction - heavy penalties beat light ones everywhere - and what does not
+# is the fine ordering. Reading a specific configuration as "the best" therefore says which label
+# it was best on.
 #
 # **Small and positive is the honest description at the traded horizon.** Nothing in the one-day
 # grid reaches an information coefficient of the size a working equity cross-sectional signal
@@ -585,13 +646,14 @@ else:
 # A notebook that reported only the top row would be describing the least bad member of a narrow
 # set; the comparison that matters is against zero, and the margin above it is thin.
 #
-# **Coverage is uniform within each label but not identical across them.** The three horizons
-# offer 2,063, 2,059 and 2,043 scorable validation dates respectively, because a longer forward
-# window runs out earlier. Within the one-day and 21-day grids every configuration scored every
-# date available to it. Two five-day configurations did not: the most aggressive L1 settings zero
-# all but a couple of columns and predict a near-constant value on some dates, which has no rank
-# correlation with anything, so those dates drop out of the average. They are marked
-# `full_coverage` false and left out of the chart rather than compared on a smaller sample.
+# **Coverage is uniform within each label but not identical across them.** `scorable_dates` in
+# the horizons frame differs by label, because a longer forward window runs out earlier. Within
+# the one-day and 21-day grids every configuration scored every date available to it; `charted`
+# equals the menu size for those two and is smaller for five days. The configurations missing
+# there are the most aggressive L1 settings, which zero all but a couple of columns and predict a
+# near-constant value on some dates. A constant has no rank correlation with anything, so those
+# dates drop out of the average. They are marked `full_coverage` false and left out of the chart
+# rather than compared on a smaller sample.
 #
 # **A penalty cannot fix a dependent cross-section.** The `alpha` sweep addresses collinearity
 # among the columns of the design matrix. It does nothing about the fact that the rows being
