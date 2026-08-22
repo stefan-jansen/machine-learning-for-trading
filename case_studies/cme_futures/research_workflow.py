@@ -47,9 +47,14 @@ EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"
 # The result-protocol fields that differ between the two return horizons, and the axis the
 # final cross-horizon comparison therefore spans.
 HORIZON_DEPENDENT_PROTOCOL_FIELDS = ("cv", "feature_artifacts", "label_artifact")
+# Every name here has to be one a notebook actually registers: `official_prediction_catalog`
+# resolves each with `OfficialPopulation.one`, which raises on a name that does not exist, so a
+# name declared and never written stops `12_model_analysis` rather than being ignored. The first
+# two carry the case-study id, which is what the other eight case studies do; the remaining four
+# keep the abbreviation their producers still use, and move when 08, 09, 10a and 10b are next run.
 MODEL_POPULATION_NAMES = (
-    "cme-linear-validation-v1",
-    "cme-gbm-validation-v1",
+    "cme_futures-linear-validation-v1",
+    "cme_futures-gbm-validation-v1",
     "cme-tabular-dl-validation-v1",
     "cme-sequence-validation-v1",
     "cme-pca-validation-v1",

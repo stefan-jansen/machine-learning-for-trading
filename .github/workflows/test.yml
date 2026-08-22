@@ -24,6 +24,16 @@
 
 name: Tests
 
+# One run per ref, and a burst collapses to the newest tree. Merging eight pull requests in an
+# evening previously started eight full matrices on `main`, each testing a tree the next merge
+# superseded minutes later, and each mailing a failure notice. Cancelling the superseded ones
+# keeps the invariant the push trigger exists for - what is on `main` has been tested - while
+# testing the tip rather than every intermediate state. Pull-request runs collapse the same way
+# when a branch is pushed to repeatedly.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     branches: [main]

@@ -6,9 +6,11 @@ from .configs import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     planned_model_plan,
     primary_label,
     resolved_model_plan,
+    sweep_labels,
 )
 from .contracts import ExecutionTier, LifecycleState
 from .cv import CVSpec, EligibilityManifest, ResolvedCVSpec
@@ -76,8 +78,10 @@ __all__ = [
     "StateTransitionPolicy",
     "TrainingResult",
     "declared_labels",
+    "sweep_labels",
     "get_adapter",
     "load_model_configs",
+    "narrows_declared_catalog",
     "model_requests",
     "open_study",
     "register_adapter",
