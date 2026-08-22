@@ -345,15 +345,80 @@ def test_selected_features_artifact_stops_before_holdout() -> None:
     )
 
 
-def test_crypto_dml_seals_the_label_endpoint_and_hashes_current_inputs() -> None:
-    """The DML sample and cache identity must bind the corrected 8-hour lineage."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "11_causal_dml.py").read_text()
+def _declared_parameters(notebook: str) -> dict:
+    """Return the literal parameter assignments from a notebook's `parameters` cell.
 
-    assert 'ESTIMATOR_CONTRACT = "panel_time_v3"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert "holdout_cutoff - label_horizon" in source
-    assert "max() + LABEL_HORIZON >= HOLDOUT_CUTOFF" in source
+    Parsed rather than matched as text. These notebooks moved onto the shared research boundary,
+    where the device policy is one entry in an ``OVERRIDES`` mapping instead of a ``TRAIN_DEVICE``
+    module constant, and a substring assertion on the old spelling passes or fails on how the line
+    is written rather than on what it declares.
+    """
+    path = REPO_ROOT / "case_studies" / "crypto_perps_funding" / f"{notebook}.py"
+    declared: dict = {}
+    for node in ast.parse(path.read_text()).body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.targets[0], ast.Name):
+            continue
+        try:
+            declared[node.targets[0].id] = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+    return declared
+
+
+def _plans_through_shared_boundary(notebook: str) -> bool:
+    """True when the notebook builds its run through the shared boundary rather than by hand."""
+    path = REPO_ROOT / "case_studies" / "crypto_perps_funding" / f"{notebook}.py"
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and "research_workflow" in node.module:
+            if {"plan_model_catalog", "run_model_plan"} & {a.name for a in node.names}:
+                return True
+        # the causal notebook takes the other entry point on the same boundary
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "causal"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "study"
+        ):
+            return True
+    return False
+
+
+def _guards_executed_identity(notebook: str) -> bool:
+    """True when the notebook refuses a result whose spec differs from the one it resolved."""
+    path = REPO_ROOT / "case_studies" / "crypto_perps_funding" / f"{notebook}.py"
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Compare) or not isinstance(node.ops[0], ast.NotEq):
+            continue
+        rendered = ast.unparse(node)
+        if "spec" in rendered and rendered.count(".spec") == 2:
+            return True
+    return False
+
+
+def test_crypto_dml_plans_through_the_boundary_that_seals_the_holdout() -> None:
+    """The DML run must take its sample and its identity from the shared boundary.
+
+    It used to assert five identifiers in this notebook's source - `ESTIMATOR_CONTRACT`,
+    `modeling_input_fingerprint`, `INPUT_FINGERPRINT`, and two inline holdout comparisons. None of
+    them exists here any more: the notebook plans through `plan_model_catalog` / `run_model_plan`,
+    and the fold geometry and holdout seal those five lines hand-rolled are now the boundary's,
+    exercised by the fold tests above against the resolved splits rather than against the text.
+
+    What still has to be true of this notebook is that it does not do any of it itself.
+    """
+    assert _plans_through_shared_boundary("11_causal_dml")
+
+    declared = _declared_parameters("11_causal_dml")
+    assert declared["EXECUTION_TIER"] == "canonical"
+    assert declared["PREVIEW_REDUCTIONS"] == {}, (
+        "a committed notebook must declare no reductions; a preview supplies them"
+    )
+    assert _guards_executed_identity("11_causal_dml"), (
+        "the notebook must refuse a result whose spec differs from the one it resolved - the "
+        "identity binding the removed input-fingerprint assertions stood for"
+    )
 
 
 def test_crypto_folds_purge_the_24h_buffer_the_variant_label_configures() -> None:
@@ -404,43 +469,38 @@ def test_crypto_folds_purge_the_24h_buffer_the_variant_label_configures() -> Non
         )
 
 
-def test_crypto_tabm_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected TabM grid must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "08_tabular_dl.py").read_text()
+def test_crypto_tabm_requires_cuda_and_plans_through_the_boundary() -> None:
+    """The TABM grid must be GPU-only, and must say so where the runner reads it.
 
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
-
-
-def test_crypto_lstm_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected LSTM run must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "09_dl_lstm.py").read_text()
-
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert "extra_params=IDENTITY_PARAMS" in source
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
+    The device policy moved from a `TRAIN_DEVICE` module constant into the `OVERRIDES` mapping the
+    shared boundary resolves, so this reads the declaration rather than the spelling of the line.
+    """
+    declared = _declared_parameters("08_tabular_dl")
+    assert declared["OVERRIDES"]["device"] == "cuda"
+    assert declared["OVERRIDES"]["class_weight"] == "balanced"
+    assert _plans_through_shared_boundary("08_tabular_dl")
 
 
-def test_crypto_tcn_requires_cuda_and_hashes_current_inputs() -> None:
-    """The corrected TCN run must be GPU-only and content-addressed."""
-    source = (REPO_ROOT / "case_studies" / "crypto_perps_funding" / "10_dl_tcn.py").read_text()
+def test_crypto_lstm_requires_cuda_and_plans_through_the_boundary() -> None:
+    """The LSTM grid must be GPU-only, and must say so where the runner reads it.
 
-    assert 'TRAIN_DEVICE = "cuda"' in source
-    assert "modeling_input_fingerprint(" in source
-    assert '"device": TRAIN_DEVICE' in source
-    assert '"input_fingerprint": INPUT_FINGERPRINT' in source
-    assert source.count("extra_params=IDENTITY_PARAMS") == 2
-    assert "identity_params=IDENTITY_PARAMS" in source
-    assert "current CPU" not in source
+    The device policy moved from a `TRAIN_DEVICE` module constant into the `OVERRIDES` mapping the
+    shared boundary resolves, so this reads the declaration rather than the spelling of the line.
+    """
+    declared = _declared_parameters("09_dl_lstm")
+    assert declared["OVERRIDES"]["device"] == "cuda"
+    assert _plans_through_shared_boundary("09_dl_lstm")
+
+
+def test_crypto_tcn_requires_cuda_and_plans_through_the_boundary() -> None:
+    """The TCN grid must be GPU-only, and must say so where the runner reads it.
+
+    The device policy moved from a `TRAIN_DEVICE` module constant into the `OVERRIDES` mapping the
+    shared boundary resolves, so this reads the declaration rather than the spelling of the line.
+    """
+    declared = _declared_parameters("10_dl_tcn")
+    assert declared["OVERRIDES"]["device"] == "cuda"
+    assert _plans_through_shared_boundary("10_dl_tcn")
 
 
 @pytest.mark.parametrize(
