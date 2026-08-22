@@ -334,3 +334,31 @@ def test_catalog_reads_legacy_rows_without_claiming_current_contract(tmp_path: P
     assert row["prediction_hash"] == "legacy-prediction"
     assert row["identity_status"] == "legacy"
     assert row["complete"] is False
+
+
+def test_catalog_says_which_sibling_a_regression_auc_was_scored_against(tmp_path: Path) -> None:
+    """A regression row's AUC is scored against a declared direction label, not its own classes.
+
+    Without ``direction_label`` the column reads as the classification path's AUC on a row that
+    has no classes, and the two are not the same quantity.
+    """
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    scored = _publish(study.root, spec=_resolved_spec(alpha=1.0))
+    unscored = _publish(study.root, spec=_resolved_spec(alpha=2))
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        # The metric writer adds this column the first time a regression AUC is recorded, the
+        # same way it adds any other metric name it has not seen.
+        db.execute("ALTER TABLE prediction_metrics ADD COLUMN direction_label TEXT")
+        for prediction_hash, direction in ((scored, "fwd_dir_21d"), (unscored, None)):
+            db.execute(
+                "UPDATE prediction_metrics SET auc_mean_daily = 0.53, direction_label = ? "
+                "WHERE prediction_hash = ?",
+                (direction, prediction_hash),
+            )
+
+    rows = {row["prediction_hash"]: row for row in study.predictions.table().iter_rows(named=True)}
+    assert rows[scored]["direction_label"] == "fwd_dir_21d"
+    assert rows[unscored]["direction_label"] is None
+    assert study.predictions.table().schema["direction_label"] == pl.String
