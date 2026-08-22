@@ -273,7 +273,12 @@ modeling:
     libraries: [lightgbm]
     preset: default
     device: cpu
-    max_bin: 63
+    # LightGBM's own CPU default. 63 is the GPU default and was carried over with the
+    # device when these runs moved off the GPU, so every CPU fit was quantizing the design
+    # matrix into a quarter of the bins the library would have used. Coarser bins are
+    # faster and lose split points; the reader running this on a CPU gets what the
+    # documentation describes.
+    max_bin: 255
   latent_factors:
     persistent_entities: true
     macro_context:
