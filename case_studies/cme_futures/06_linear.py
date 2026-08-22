@@ -129,8 +129,8 @@ declared_labels(study, "linear")
 # Each name in the menu resolves to a preset file in the shared directory
 # `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
 # frame below is the menu for every label above, with each name resolved to the estimator class
-# it names and the arguments that class is constructed with. To change what runs, edit the menu or the
-# presets rather than this notebook.
+# it names and the arguments that class is constructed with. To change what runs, edit the menu
+# or the presets rather than this notebook.
 #
 # The grid covers the two shapes a penalty can take:
 #
