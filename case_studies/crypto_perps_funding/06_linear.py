@@ -608,7 +608,8 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Direction is a far easier thing to predict here than size, and the gap is not small.** Read
+# **For a penalized linear model, direction is a far easier target than size, and the gap is not
+# small.** Read
 # `best_ic` down the label frame. On `fwd_ret_8h` the best configuration reaches under a
 # thousandth and four of twenty-eight clear zero; on `fwd_dir_8h`, which is the sign of that same
 # return at that same horizon, the best reaches about 0.032 and every one of the twelve
@@ -633,6 +634,11 @@ show_plotly_with_alt(
 # fitted every label in one run. It does not say the direction models are worth trading: an IC of
 # 0.032 over fewer than 20 contracts and two folds is still small, and `13_backtest` is where it
 # has to survive costs and funding.
+#
+# Nor does it generalize past this family. [`07_gbm`](07_gbm.ipynb) fits the same four labels with
+# a tree ensemble and the gap closes: both formulations land in the same place. So what is
+# measured above is where a weighted sum of these columns can and cannot rank, rather than a fact
+# about which target is predictable at this horizon.
 #
 # **The L1 path reduces to one column, and the ranking stops moving exactly where it does.** Past
 # the middle of the `alpha_frac` grid the non-zero coefficient count reaches one, and from there
