@@ -441,7 +441,7 @@ trees_effect = (
 trees_effect
 
 # %% [markdown]
-# ### Whether the loss function is what separates them
+# ### Comparing every configuration at the same training length
 #
 # The curves are coloured by objective because that is the axis with a mechanism behind it. If
 # heavy tails are steering the squared-error fits, the three colours should separate, and they
@@ -520,7 +520,29 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# The colours in that chart are the claim, so here is the claim as numbers: at the final
+# ### Whether the horizon does here what it did to the linear grid
+#
+# The question this notebook took from `06_linear`, answered at the same training length for
+# every configuration. There the best full-coverage IC and the count above zero both rose with
+# the horizon; the frame below says whether a tree ensemble reproduces that.
+
+# %% tags=["results"]
+horizons = (
+    final.group_by("label")
+    .agg(
+        configurations=pl.len(),
+        best_ic=pl.col("ic_mean").max(),
+        worst_ic=pl.col("ic_mean").min(),
+        above_zero=(pl.col("ic_mean") > 0).sum(),
+    )
+    .sort("label")
+)
+horizons
+
+# %% [markdown]
+# ### Whether the loss function separates them
+#
+# The colours in the chart above are the claim, so here is the claim as numbers: at the final
 # iteration, each loss function's mean IC and how many of its configurations finished above zero,
 # per label. The ordering the heavy-tailed case studies show is Huber highest, absolute error
 # next, squared error lowest.
@@ -655,9 +677,24 @@ spread.group_by("label", maintain_order=True).head(5)
 # knowing what that baseline is for these paths, seven, eight and eight of fifteen is a
 # description and not evidence either way.
 #
-# What does carry the conclusion is the drift: two thirds of configurations end below where they
-# started at one day and at 21 days, and the median change is zero at five. There is nothing here
-# for a stopping rule to find.
+# What the drift does support is narrower, and it is not "there is nothing to stop for". Two
+# thirds of configurations end below where they started at one day and at 21 days, and the median
+# change is zero at five, so at two of the three horizons a rule that stopped at the first
+# checkpoint would have beaten training to the last. What that says is that 500 trees is not a
+# tuned quantity here: the grid fixes the training length so capacity and loss can be compared,
+# and the comparison is not helped by the extra trees. It does not say a stopping point is
+# undetectable, and choosing one on these curves would be choosing after seeing the validation
+# folds - which is exactly why the checkpoint travels into `13_backtest` as part of what gets
+# selected rather than being resolved here.
+#
+# **The horizon effect the linear grid showed does not reproduce cleanly here.** `06_linear` had
+# the best IC and the count above zero both rising across the three horizons. The `horizons` frame
+# at the final iteration says 21 days is well ahead of the other two on both measures, and that
+# one day and five days are level with each other - the best five-day configuration is slightly
+# below the best one-day one, and both put the same number above zero. So the pattern holds at the
+# long horizon and not in between. One case study with fifteen configurations per label is not
+# enough to say why; what it does say is that "longer horizons predict better" is not a rule to
+# carry into the next notebook unexamined.
 #
 # **Squared error is last at every horizon; which of the other two leads is not stable.** Read
 # `objective_summary`: by mean IC at the final iteration, `mse` is bottom of all three labels and
