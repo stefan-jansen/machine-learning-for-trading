@@ -79,12 +79,14 @@
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
     open_study,
+    primary_label,
     resolved_model_plan,
     run_model_population,
 )
@@ -261,39 +263,65 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per configuration and checkpoint. `ic_mean` is the **information coefficient**: on each
-# validation date, rank the stocks by the model's prediction, rank them by the return they went
-# on to earn, correlate the two rankings, and average that daily correlation over the validation
-# period.
+# One row per configuration, label and checkpoint. `ic_mean` is the **information coefficient**: on
+# each validation date, rank the stocks by the model's prediction, rank them by the return they
+# went on to earn, correlate the two rankings, and average that daily correlation over the
+# validation period.
 #
-# The table is sorted by IC, and the top of it is the trap this notebook exists to describe. The
-# leading row is the maximum of 150 numbers. Reading it as the result of one experiment would
-# attribute to the model whatever the stopping point contributed, and the section below measures
-# how large that contribution is before anything is concluded from the ranking.
+# The table is sorted by label and then by IC, and the top of each label's block is the trap this
+# notebook exists to describe. The leading row for a label is the maximum over that label's whole
+# grid at ten checkpoints each. Reading it as the result of one experiment would attribute to the
+# model whatever the stopping point contributed, and the section below measures how large that
+# contribution is before anything is concluded from the ranking.
+#
+# **Every count and every aggregate below is keyed on `(label, config_name)`, not on the
+# configuration name alone.** A name is unique within one label's menu and not across them:
+# `leaves_15_mae` is declared by all three regression labels here. Grouping on the name would
+# average a configuration's result across the labels it appears in, and concatenate their learning
+# curves into one line that runs from the last checkpoint of one label back to the first of the
+# next.
+#
+# Coverage is judged against each label's own maximum number of scorable validation dates. The
+# labels do not offer the same number to begin with - a ten-day forward window runs out earlier
+# than a five-day one - so a single global maximum would mark a whole label incomplete for a
+# reason that has nothing to do with any model.
 
 # %% tags=["results"]
 catalog = execution.catalog_rows.select(
     "config_name",
     "label",
+    "task",
     "complete",
     "checkpoint_value",
     "ic_mean",
     "ic_std",
     "ic_n_days",
+    "auc_mean_daily",
     "n_folds",
     "training_hash",
     "prediction_hash",
-).sort("ic_mean", descending=True)
+).sort(["label", "ic_mean"], descending=[False, True])
 
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("gbm execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
 
-print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
-print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each")
+primary = primary_label(study)
+present = sorted(set(catalog.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels by
+# whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in present] + [
+    label for label in present if label != primary
+]
+order_label = panel_labels[0]
+pairs = catalog.select("label", "config_name").unique().height
+print(f"{catalog.height} candidate models: {pairs} label-configuration pairs")
+print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
 catalog.select(
+    "label",
     "config_name",
     "checkpoint_value",
     "ic_mean",
@@ -303,11 +331,41 @@ catalog.select(
 ).head(15)
 
 # %% [markdown]
+# ### What the grid does on each label
+#
+# The frame below is the comparison this notebook can make only because every declared label was
+# fitted in one run. The features are the same, the folds are the same and the grid is the same;
+# what changes down the rows is what is being predicted.
+#
+# The two `fwd_dir_*` labels are the classification form of the same forward windows and carry
+# `auc_mean_daily` as well - the within-date reading of how well the predicted probability
+# separates the classes. It is null on the regression labels, which have no classes to separate.
+# `ic_mean` is defined for both, which is what puts every label on one axis.
+
+# %% tags=["results"]
+by_label = (
+    catalog.filter("full_coverage")
+    .group_by("label")
+    .agg(
+        task=pl.col("task").first(),
+        configurations=pl.col("config_name").n_unique(),
+        candidates=pl.len(),
+        scored_dates=pl.col("ic_n_days").max(),
+        best_ic=pl.col("ic_mean").max(),
+        worst_ic=pl.col("ic_mean").min(),
+        n_positive=(pl.col("ic_mean") > 0).sum(),
+        best_auc_daily=pl.col("auc_mean_daily").max(),
+    )
+    .sort("best_ic", descending=True)
+)
+by_label
+
+# %% [markdown]
 # ### What more trees do
 #
-# Each line traces one configuration's out-of-sample IC as trees are added to it. This is the
-# figure the checkpoint dimension exists to produce, and it separates two things a single
-# end-of-training number cannot.
+# Each line traces one configuration's out-of-sample IC as trees are added to it, in its own
+# label's panel. This is the figure the checkpoint dimension exists to produce, and it separates
+# two things a single end-of-training number cannot.
 #
 # A line that rises and then falls has an interior optimum: the model was still learning, then
 # began fitting the training window at the expense of the validation folds. A line that wanders
@@ -316,109 +374,193 @@ catalog.select(
 # respectable-looking maximum.
 
 # %%
-curves = catalog.filter("full_coverage").sort("config_name", "checkpoint_value")
-objectives = {"mse": COLORS["blue"], "mae": COLORS["amber"], "huber": COLORS["copper"]}
+curves = catalog.filter("full_coverage").sort("label", "config_name", "checkpoint_value")
+objectives = {
+    "mse": COLORS["blue"],
+    "mae": COLORS["amber"],
+    "huber": COLORS["copper"],
+    "binary": COLORS["slate"],
+}
 
 
 def objective_of(name: str) -> str:
-    """Read the loss function out of a declared configuration name."""
-    return next((key for key in objectives if name.endswith(key)), "mse")
+    """Read the loss function out of a declared configuration name.
+
+    Raising on an unrecognised name rather than defaulting is the point. The classification
+    labels declare `*_binary` configurations, and a default of `mse` drew them in the
+    squared-error colour under a legend that said the colour was the loss function.
+    """
+    match = next((key for key in objectives if name.endswith(key)), None)
+    if match is None:
+        raise ValueError(f"{name!r} does not end in a declared objective: {sorted(objectives)}")
+    return match
 
 
-fig_curves = go.Figure()
-for config_name in curves.get_column("config_name").unique(maintain_order=True):
-    series = curves.filter(pl.col("config_name") == config_name)
-    fig_curves.add_trace(
-        go.Scatter(
-            x=series.get_column("checkpoint_value").to_list(),
-            y=series.get_column("ic_mean").to_list(),
-            mode="lines",
-            name=config_name,
-            line=dict(color=objectives[objective_of(config_name)], width=1.5),
-            opacity=0.75,
-        )
-    )
-fig_curves.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
-fig_curves.update_layout(
-    title="Validation IC against boosting iteration, by loss function",
-    height=550,
-    width=1000,
-    margin=dict(t=70),
-    legend=dict(font=dict(size=9)),
+fig_curves = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.04,
+    subplot_titles=[
+        f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
+    ],
 )
-fig_curves.update_xaxes(title_text="Boosting iterations (trees kept)")
-fig_curves.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+drawn_objectives: set[str] = set()
+for row, label in enumerate(panel_labels, start=1):
+    panel = curves.filter(pl.col("label") == label)
+    for objective, color in objectives.items():
+        members = [
+            name
+            for name in panel.get_column("config_name").unique(maintain_order=True)
+            if objective_of(name) == objective
+        ]
+        for config_name in members:
+            series = panel.filter(pl.col("config_name") == config_name)
+            fig_curves.add_trace(
+                go.Scatter(
+                    x=series.get_column("checkpoint_value").to_list(),
+                    y=series.get_column("ic_mean").to_list(),
+                    mode="lines",
+                    name=objective,
+                    legendgroup=objective,
+                    # One legend entry per loss function, not per configuration: the colour is
+                    # the claim, and fifty-five named lines would bury it.
+                    showlegend=objective not in drawn_objectives,
+                    line=dict(color=color, width=1.5),
+                    opacity=0.75,
+                ),
+                row=row,
+                col=1,
+            )
+            drawn_objectives.add(objective)
+    fig_curves.add_hline(
+        y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+    fig_curves.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+fig_curves.update_xaxes(title_text="Boosting iterations (trees kept)", row=len(panel_labels), col=1)
+fig_curves.update_layout(
+    title="Validation IC against boosting iteration, by loss function and label",
+    height=260 * len(panel_labels),
+    width=1000,
+    margin=dict(t=90),
+    legend=dict(title_text="Loss function"),
+)
+# Which panels sit above zero is a fact about the frame, so the alt text reads it. Describing the
+# whole chart as sitting below zero was true of the one label this notebook used to fit.
+side_text = "; ".join(
+    f"{row['label']} has {row['n_positive']} of {row['candidates']} above zero"
+    for row in by_label.sort("label").iter_rows(named=True)
+)
 show_plotly_with_alt(
     fig_curves,
-    "Line chart of mean validation information coefficient against boosting iteration, one line "
-    "per configuration, coloured by loss function: blue for squared error, amber for absolute "
-    "error, copper for Huber. A dashed line marks zero. The lines sit in a narrow band just below "
-    "it, and the three colours are mixed through the band rather than separated into layers. They "
-    "wander up and down without rising to a common peak and falling away.",
+    "Line charts of mean validation information coefficient against boosting iteration, one line "
+    "per configuration, coloured by loss function: dark navy for squared error, gold for absolute "
+    "error, copper for Huber, slate for the binary objective the classification labels declare. "
+    "One panel per label, sharing the iteration axis, each with a dashed zero line. Counted from "
+    f"the frame: {side_text}. Within any one panel the lines wander up and down rather than "
+    "rising to a common peak and falling away.",
 )
 
 # %% [markdown]
 # ### Whether the loss function is what separates them
 #
 # The curves are coloured by objective because that is the axis with a mechanism behind it. If
-# heavy tails are steering the squared-error fits, the three colours should separate, and they
-# should separate more as trees are added, since each additional tree is fitted to the residuals
-# the previous ones left.
+# heavy tails are steering the squared-error fits, the three regression colours should separate,
+# and they should separate more as trees are added, since each additional tree is fitted to the
+# residuals the previous ones left.
 #
 # The chart below drops the checkpoint dimension by taking each configuration's final state, so
 # every configuration is compared at the same amount of training. That is the comparison that does
-# not require choosing anything after the fact.
+# not require choosing anything after the fact. The configurations are held in one order across
+# the panels - their ranking on the primary label - so a panel that does not descend is a label
+# that orders the grid differently.
 
 # %%
-final_iteration = int(catalog.get_column("checkpoint_value").max())
 final = (
-    catalog.filter(pl.col("checkpoint_value") == final_iteration)
+    catalog.filter(pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label"))
     .filter("full_coverage")
-    .with_columns(objective=pl.col("config_name").map_elements(objective_of, return_dtype=pl.Utf8))
+    .sort(["label", "ic_mean"], descending=[False, True])
+)
+final_iteration = int(final.get_column("checkpoint_value").max())
+config_order = (
+    final.filter(pl.col("label") == order_label)
     .sort("ic_mean", descending=True)
+    .get_column("config_name")
+    .to_list()
 )
 
-fig_obj = go.Figure(
-    go.Bar(
-        x=final.get_column("config_name").to_list(),
-        y=final.get_column("ic_mean").to_list(),
-        marker_color=[objectives[value] for value in final.get_column("objective")],
-        text=[f"{value:+.3f}" for value in final.get_column("ic_mean")],
-        textposition="outside",
-        cliponaxis=False,
+fig_obj = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    shared_yaxes=True,
+    vertical_spacing=0.04,
+    subplot_titles=[
+        f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
+    ],
+)
+for row, label in enumerate(panel_labels, start=1):
+    panel = final.filter(pl.col("label") == label)
+    # The classification labels declare their own configurations; they keep them and append them
+    # after the shared order rather than being dropped from the figure.
+    order = [name for name in config_order if name in set(panel.get_column("config_name"))]
+    order += [name for name in panel.get_column("config_name").to_list() if name not in order]
+    panel = panel.with_columns(
+        rank=pl.col("config_name").replace_strict(
+            {name: index for index, name in enumerate(order)}, return_dtype=pl.Int32
+        )
+    ).sort("rank")
+    fig_obj.add_trace(
+        go.Bar(
+            x=panel.get_column("config_name").to_list(),
+            y=panel.get_column("ic_mean").to_list(),
+            marker_color=[
+                objectives[objective_of(name)] for name in panel.get_column("config_name")
+            ],
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
     )
+    fig_obj.add_hline(
+        y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+    fig_obj.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+fig_obj.update_xaxes(
+    title_text=f"Configuration, ordered by rank on {order_label}",
+    tickangle=-45,
+    row=len(panel_labels),
+    col=1,
 )
-fig_obj.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig_obj.update_layout(
-    title="Validation IC at the final iteration, coloured by loss function",
-    height=500,
+    title="The label moves the grid further than the loss function does",
+    height=260 * len(panel_labels),
     width=1000,
-    showlegend=False,
-    margin=dict(t=70),
+    margin=dict(t=90),
 )
-fig_obj.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
-fig_obj.update_yaxes(title_text="Mean cross-sectional IC (validation)")
 show_plotly_with_alt(
     fig_obj,
-    "Bar chart of mean validation information coefficient for every full-coverage configuration "
-    "at its final boosting iteration, sorted descending and coloured by loss function, against a "
-    "dashed zero line. Almost every bar hangs just below the line and the bars are of similar "
-    "length. The three colours are interleaved across the ranking rather than grouped, so neither "
-    "the loss function nor the leaf count orders the configurations.",
+    "Bar charts of mean validation information coefficient at the final boosting iteration, one "
+    "panel per label sharing a vertical scale, bars coloured by loss function and held in the "
+    "primary label's ranking order in every panel. Within a panel the colours are interleaved "
+    "across the ranking rather than grouped, so the loss function does not order the grid; the "
+    "panels sit at visibly different heights, so the label does. Each panel carries a dashed zero "
+    "line.",
 )
 
 # %% [markdown]
 # ### How much the checkpoint moves a configuration
 #
-# One number per configuration: the range its IC covers across its own ten checkpoints. This is
-# the quantity that decides whether choosing a stopping point is a decision worth making carefully
-# or one being made by noise. A configuration whose IC varies more across its own training run
-# than the configurations vary among themselves is one where the checkpoint, not the model, is
-# doing the ranking.
+# One number per label and configuration: the range its IC covers across its own ten checkpoints.
+# This is the quantity that decides whether choosing a stopping point is a decision worth making
+# carefully or one being made by noise. A configuration whose IC varies more across its own
+# training run than the configurations vary among themselves is one where the checkpoint, not the
+# model, is doing the ranking. Both quantities are computed inside a label, because comparing a
+# within-run range against a spread taken across labels would compare two different things.
 
-# %%
+# %% tags=["results"]
 spread = (
-    curves.group_by("config_name")
+    curves.group_by("label", "config_name")
     .agg(
         ic_min=pl.col("ic_mean").min(),
         ic_max=pl.col("ic_mean").max(),
@@ -427,50 +569,60 @@ spread = (
     .with_columns(checkpoint_range=pl.col("ic_max") - pl.col("ic_min"))
     .sort("checkpoint_range", descending=True)
 )
-across_configs = float(final.get_column("ic_mean").max() - final.get_column("ic_mean").min())
-print(f"IC range across configurations at the final iteration: {across_configs:.4f}")
-print(
-    f"median IC range within one configuration: {spread.get_column('checkpoint_range').median():.4f}"
+checkpoint_vs_grid = (
+    spread.group_by("label")
+    .agg(median_checkpoint_range=pl.col("checkpoint_range").median())
+    .join(
+        final.group_by("label").agg(
+            across_configurations=pl.col("ic_mean").max() - pl.col("ic_mean").min()
+        ),
+        on="label",
+    )
+    .with_columns(
+        checkpoint_dominates=pl.col("median_checkpoint_range") > pl.col("across_configurations")
+    )
+    .sort("label")
 )
-spread
+print(f"compared at {final_iteration} boosting iterations")
+checkpoint_vs_grid
 
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Conditioning does not add anything here.** The whole reason to bring a tree ensemble to a
-# volatility surface is that reading one part of it conditional on another is how the surface is
-# actually used. Every configuration in this grid ends training at or below zero, in a band
-# narrower than a single percentage point of rank correlation, and the linear notebook's penalty
-# sweep reached the same place. Two model classes with different representational power arrive at
-# the same answer on the same rows, which points at the target rather than at either model.
+# **Read `checkpoint_dominates` before reading any ranking.** Where the median within-run IC range
+# exceeds the spread across the whole grid, the leading configuration for that label was chosen by
+# where its training run happened to be when it was measured, not by anything about the model. The
+# ranking is still a real ordering of registered candidates - `14_backtest` selects over all of
+# them - but it is not evidence that one configuration is better than another.
+#
+# **The label moves the results further than anything this grid varies.** Capacity from seven
+# leaves to sixty-three, three objectives, ten stopping points: all of it moves the metric less
+# than swapping what is being predicted. That is the finding the multi-label run makes available,
+# and it is the same shape the linear notebook found, which matters - two model families with very
+# different representational power agree about which target the features rank, and that points at
+# the target rather than at either model.
+#
+# **These features forecast dispersion rather than direction, and the label set tests it.** Implied
+# volatility says how wide the market expects the distribution to be, skew how asymmetric, the term
+# structure how that changes with horizon, the variance risk premium how much the market charges
+# for bearing it. None is a claim about the *mean*, which is what a forward return is. A
+# risk-adjusted return divides that mean by a measure of width, so a feature set that forecasts
+# width well should rank it better than the raw return. The `by_label` frame is where that
+# prediction meets the evidence.
 #
 # **The loss function does not separate the results, and that is worth stating.** In case studies
-# whose labels have heavy tails the three objectives order themselves consistently - Huber, then
-# absolute error, then squared error - because squared error spends the fit on extremes a rank
-# metric does not reward. Here the three medians land on top of one another. That is the control
-# working: this label is a five-day equity return, whose tails are mild next to a short straddle's
-# or a perpetual's, and where the tails are mild the choice of objective stops mattering. A reader
-# who took "always prefer Huber" from another notebook in this book should take this one as the
+# whose labels have heavy tails the three regression objectives order themselves consistently -
+# Huber, then absolute error, then squared error - because squared error spends the fit on extremes
+# a rank metric does not reward. Here the colours interleave. That is the control working: these
+# labels are equity returns over days, whose tails are mild next to a short straddle's or a
+# perpetual's, and where the tails are mild the choice of objective stops mattering. A reader who
+# took "always prefer Huber" from another notebook in this book should take this one as the
 # boundary of that rule.
-#
-# **Most configurations are still improving when training stops.** Nearly half reach their highest
-# IC at the last checkpoint rather than at an interior one. Read on its own that would suggest a
-# longer schedule; read against the level, it says the curves are drifting inside a band around
-# zero and the last checkpoint is where the drift happened to be. An interior optimum means
-# something when there is something to optimize.
-#
-# **The features being forecasts is what makes the null informative.** Elsewhere a weak result
-# invites the question of whether the features carry information. That question is already
-# answered here: implied volatility, skew and the variance risk premium are priced by people with
-# money at stake, and they demonstrably forecast something. What this notebook establishes is that
-# what they forecast is not the five-day cross-sectional ranking of the underlying stock's return.
-# The natural next question is what they do forecast, and the case study's other labels -
-# risk-adjusted return and direction - exist to ask it.
 #
 # **The sample is two folds, one of them 2020.** Every number above is an average over two
 # validation windows of a short dataset, one covering a year in which the option surface behaved
-# unlike any other in the sample. That is enough to say the effect is not large; it is not enough
-# to characterise it.
+# unlike any other in the sample. That is enough to say an effect is not large; it is not enough to
+# characterise one, and it applies to whichever label leads as much as to the ones that do not.
 #
 # **None of this selects anything.** IC measures whether predictions rank stocks correctly, not
 # whether a strategy trading them makes money after costs and turnover. Selection is on validation
@@ -478,12 +630,12 @@ spread
 # the checkpoint is part of what is selected.
 #
 # **Known limitations.** Two folds. The IC is an average of daily rank correlations with no
-# adjustment for the serial dependence overlapping five-day returns create, so it is a diagnostic
+# adjustment for the serial dependence overlapping multi-day returns create, so it is a diagnostic
 # rather than a test. The grid varies capacity and loss at a fixed learning rate. And every number
 # is measured on validation folds already read many times by the time a case study reaches this
 # notebook.
 #
 # **Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) fits a neural network to the same rows, and
 # [`11_latent_factors`](11_latent_factors.ipynb) asks whether the surface has structure that a
-# supervised model is the wrong instrument for. Given that two supervised families have now agreed,
-# the latent-factor route is the more interesting of the two.
+# supervised model is the wrong instrument for. Given that two supervised families have now agreed
+# about which label they can rank, the latent-factor route is the more interesting of the two.

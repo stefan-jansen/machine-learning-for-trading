@@ -78,12 +78,14 @@ import re
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
     open_study,
+    primary_label,
     resolved_model_plan,
     run_model_population,
 )
@@ -299,42 +301,67 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per configuration, read back from the registry. `ic_mean` is the **information
+# One row per configuration and label, read back from the registry. `ic_mean` is the **information
 # coefficient**: on each validation date, rank the stocks by the model's prediction, rank them by
 # the return they went on to earn, correlate the two rankings, and average that daily correlation
 # over the validation period. It measures whether the model ranks stocks correctly, on a scale
 # where zero is no relationship, positive means the ranking points the right way, and negative
 # means it points the wrong way.
 #
-# `ic_n_days` is how many validation dates produced a defined correlation. A model whose
-# coefficients collapse to one or two features predicts nearly the same value for every stock on
-# some dates; a constant has no rank correlation with anything, so those dates would contribute
-# nothing and that configuration's IC would be an average over a smaller sample than its
-# neighbours'. `full_coverage` marks the configurations measured on all of them.
+# The catalog is joined to the menu on **both** `label` and `config_name`. A configuration name is
+# unique within a label's menu and not across them: `ridge_a1.0` is declared by every regression
+# label here, so joining on the name alone would multiply each result row by the number of labels
+# that declare it and fill the table with copies carrying identical ICs.
+#
+# `ic_n_days` is how many validation dates produced a defined correlation, and coverage is judged
+# against **each label's own** maximum. The labels do not offer the same number of dates to begin
+# with - a ten-day forward window runs out earlier than a five-day one - so a single global
+# maximum would mark a whole label incomplete for a reason that has nothing to do with any model.
+# Within a label, the check is doing what it was built for: a model whose coefficients collapse to
+# one or two features predicts nearly the same value for every stock on some dates, a constant has
+# no rank correlation with anything, and its IC is then an average over a sample it selected
+# itself. `full_coverage` marks the configurations measured on all of their label's dates.
 
 # %% tags=["results"]
 catalog = (
     execution.catalog_rows.select(
         "config_name",
         "label",
+        "task",
         "complete",
         "ic_mean",
         "ic_std",
         "ic_n_days",
+        "auc_mean_daily",
         "n_folds",
         "training_hash",
         "prediction_hash",
     )
-    .sort("ic_mean", descending=True)
-    .join(configs.select("config_name", "model_class", "params"), on="config_name", how="left")
+    .sort(["label", "ic_mean"], descending=[False, True])
+    .join(
+        configs.select("label", "config_name", "model_class", "params"),
+        on=["label", "config_name"],
+        how="left",
+    )
 )
 
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("linear execution returned a partial prediction set")
 
-full_days = int(catalog.get_column("ic_n_days").max())
-catalog = catalog.with_columns(full_coverage=pl.col("ic_n_days") == full_days)
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+
+primary = primary_label(study)
+present = sorted(set(catalog.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels by
+# whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in present] + [
+    label for label in present if label != primary
+]
+print(f"{catalog.height} candidate models across {len(panel_labels)} labels")
 catalog.select(
+    "label",
     "config_name",
     "model_class",
     "params",
@@ -345,11 +372,48 @@ catalog.select(
 )
 
 # %% [markdown]
+# ### What the grid does on each label
+#
+# The frame below is the comparison this notebook exists to make, and it is only available because
+# every declared label was fitted in one run. The features are the same, the folds are the same,
+# and the estimators are the same; the only thing that changes down the rows is what is being
+# predicted.
+#
+# Read `n_positive` against `configurations`. A label where the whole grid sits on one side of zero
+# is saying something about the label; a label where the grid straddles zero is saying that the
+# spread across configurations is larger than anything the features contribute.
+#
+# The two `fwd_dir_*` labels are the classification form of the same forward window, and carry
+# `auc_mean_daily` as well: the within-date reading of how well the predicted probability
+# separates the classes. It is null on the regression labels, which have no classes to separate.
+
+# %% tags=["results"]
+by_label = (
+    catalog.filter("full_coverage")
+    .group_by("label")
+    .agg(
+        task=pl.col("task").first(),
+        configurations=pl.len(),
+        scored_dates=pl.col("ic_n_days").max(),
+        best_ic=pl.col("ic_mean").max(),
+        worst_ic=pl.col("ic_mean").min(),
+        n_positive=(pl.col("ic_mean") > 0).sum(),
+        best_auc_daily=pl.col("auc_mean_daily").max(),
+    )
+    .sort("best_ic", descending=True)
+)
+by_label
+
+# %% [markdown]
 # ### How the penalty grid ranks
 #
-# Only the configurations measured on all `full_days` validation dates are charted. The zero line
-# is the reference that matters: a bar below it is a model whose ranking pointed the wrong way out
-# of sample.
+# One panel per label, sharing a vertical scale so the labels are compared rather than each one
+# rescaled to fill its own panel. Only configurations measured on all of their label's dates are
+# charted. The zero line is the reference that matters: a bar below it is a model whose ranking
+# pointed the wrong way out of sample.
+#
+# The configurations are held in one order across the panels - their ranking on the primary label
+# - so a panel that does not descend is a label that orders the grid differently.
 
 
 # %%
@@ -359,38 +423,80 @@ def compact(params: str) -> str:
 
 
 full = catalog.filter("full_coverage")
-leader = full.row(0, named=True)
+config_order = (
+    full.filter(pl.col("label") == panel_labels[0])
+    .sort("ic_mean", descending=True)
+    .get_column("config_name")
+    .to_list()
+)
 
-fig_ic = go.Figure(
-    go.Bar(
-        x=full.get_column("config_name").to_list(),
-        y=full.get_column("ic_mean").to_list(),
-        marker_color=[
-            COLORS["amber"] if name == leader["config_name"] else COLORS["blue"]
-            for name in full.get_column("config_name")
-        ],
-        text=[f"{value:+.3f}" for value in full.get_column("ic_mean")],
-        textposition="outside",
-        cliponaxis=False,
+fig_ic = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    shared_yaxes=True,
+    vertical_spacing=0.04,
+    subplot_titles=[
+        f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
+    ],
+)
+for row, label in enumerate(panel_labels, start=1):
+    panel = full.filter(pl.col("label") == label)
+    # A label whose menu declares different configurations - the classification ones do - keeps
+    # its own members and appends them after the shared order rather than being dropped.
+    order = [name for name in config_order if name in set(panel.get_column("config_name"))]
+    order += [name for name in panel.get_column("config_name").to_list() if name not in order]
+    panel = panel.with_columns(
+        rank=pl.col("config_name").replace_strict(
+            {name: index for index, name in enumerate(order)}, return_dtype=pl.Int32
+        )
+    ).sort("rank")
+    best = panel.get_column("ic_mean").max()
+    fig_ic.add_trace(
+        go.Bar(
+            x=panel.get_column("config_name").to_list(),
+            y=panel.get_column("ic_mean").to_list(),
+            marker_color=[
+                COLORS["amber"] if value == best else COLORS["blue"]
+                for value in panel.get_column("ic_mean")
+            ],
+            showlegend=False,
+        ),
+        row=row,
+        col=1,
     )
+    fig_ic.add_hline(
+        y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+    fig_ic.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+fig_ic.update_xaxes(
+    title_text=f"Configuration, ordered by rank on {panel_labels[0]}",
+    tickangle=-45,
+    row=len(panel_labels),
+    col=1,
 )
-fig_ic.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig_ic.update_layout(
-    title="Validation IC across the full-coverage penalty grid",
-    height=500,
+    title="Which side of zero the grid sits on depends on the label, not the penalty",
+    height=260 * len(panel_labels),
     width=1100,
-    showlegend=False,
-    margin=dict(t=70),
+    margin=dict(t=90),
 )
-fig_ic.update_xaxes(title_text="Configuration (sorted by validation IC)", tickangle=-45)
-fig_ic.update_yaxes(title_text="Mean cross-sectional IC (validation)")
+# Which labels clear zero is a fact about the frame, so the alt text reads it rather than
+# asserting it. Describing every bar as negative was true of the one label this notebook used to
+# fit and is false of the set it fits now.
+side_text = "; ".join(
+    f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
+    for row in by_label.sort("label").iter_rows(named=True)
+)
 show_plotly_with_alt(
     fig_ic,
-    "Bar chart of mean validation information coefficient for every full-coverage linear "
-    f"configuration, sorted descending, against a dashed zero line. {leader['config_name']} "
-    f"({compact(leader['params'])}) is highlighted in amber at the top of the ranking at IC "
-    f"{leader['ic_mean']:+.3f}. Every bar falls below the zero line and the spread between the "
-    "top and the bottom of the grid is a few thousandths.",
+    "Bar charts of mean validation information coefficient for every full-coverage linear "
+    "configuration, one panel per declared label sharing a vertical scale, each panel's highest "
+    "bar in amber and the rest in dark navy, with a dashed zero line across each. The bars are "
+    "held in the primary label's ranking order in every panel, so a panel that does not descend "
+    f"is a label that orders the grid differently. Counted from the frame: {side_text}. The "
+    "spread within any one panel is a few thousandths, far smaller than the difference between "
+    "panels.",
 )
 
 # %% [markdown]
@@ -399,56 +505,63 @@ show_plotly_with_alt(
 # The bar chart mixes three estimators. Tracing IC across the Ridge penalty alone isolates the
 # effect of shrinkage, with the estimator, the features and the folds all held fixed and only
 # `alpha` moving. The alpha is read from each configuration's declared parameters rather than
-# parsed out of its name, so the curve plots what was fitted.
+# parsed out of its name, so the curve plots what was fitted. One line per label, because the
+# question is whether the penalty behaves the same way regardless of what is being predicted.
 
 # %%
 ridge = (
     catalog.filter(pl.col("model_class") == "Ridge")
-    .with_columns(
-        alpha=pl.col("params").str.extract(r"alpha=([0-9.eE+-]+)").cast(pl.Float64),
-    )
+    .with_columns(alpha=pl.col("params").str.extract(r"alpha=([0-9.eE+-]+)").cast(pl.Float64))
     .drop_nulls("alpha")
-    .sort("alpha")
+    .sort("label", "alpha")
 )
 if ridge.height:
-    log_alpha = np.log10(ridge.get_column("alpha").to_numpy())
-    ridge_ic = ridge.get_column("ic_mean").to_numpy()
-    peak = int(np.argmax(ridge_ic))
-
-    fig_alpha = go.Figure(
-        go.Scatter(
-            x=log_alpha,
-            y=ridge_ic,
-            mode="lines+markers",
-            line=dict(color=COLORS["blue"], width=2),
-            marker=dict(size=8, color=COLORS["blue"]),
+    line_colors = [COLORS["blue"], COLORS["copper"], COLORS["slate"], COLORS["amber"]]
+    fig_alpha = go.Figure()
+    for index, label in enumerate(panel_labels):
+        series = ridge.filter(pl.col("label") == label)
+        if not series.height:
+            continue
+        log_alpha = np.log10(series.get_column("alpha").to_numpy())
+        values = series.get_column("ic_mean").to_numpy()
+        peak = int(np.argmax(values))
+        color = line_colors[index % len(line_colors)]
+        fig_alpha.add_trace(
+            go.Scatter(
+                x=log_alpha,
+                y=values,
+                mode="lines+markers",
+                name=label,
+                line=dict(color=color, width=2),
+                marker=dict(size=7, color=color),
+            )
         )
-    )
-    fig_alpha.add_trace(
-        go.Scatter(
-            x=[log_alpha[peak]],
-            y=[ridge_ic[peak]],
-            mode="markers",
-            marker=dict(size=15, color=COLORS["amber"]),
-            showlegend=False,
+        fig_alpha.add_trace(
+            go.Scatter(
+                x=[log_alpha[peak]],
+                y=[values[peak]],
+                mode="markers",
+                marker=dict(size=13, color=COLORS["amber"], symbol="circle-open", line_width=3),
+                showlegend=False,
+            )
         )
-    )
     fig_alpha.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
     fig_alpha.update_layout(
         title="Ridge IC against penalty strength, over ten orders of magnitude",
-        height=500,
-        width=900,
-        showlegend=False,
+        height=520,
+        width=950,
         margin=dict(t=70),
+        legend=dict(title_text="Label"),
     )
     fig_alpha.update_xaxes(title_text="log₁₀(α)  (Ridge penalty strength)", zeroline=False)
     fig_alpha.update_yaxes(title_text="Mean cross-sectional IC (validation)")
     show_plotly_with_alt(
         fig_alpha,
-        "Line chart of mean validation information coefficient against the base-ten logarithm of the "
-        "Ridge penalty, against a dashed zero line. The curve is flat and below zero across most of "
-        f"the range, with its maximum at 1e{int(round(log_alpha[peak]))} marked in amber, and falls "
-        "further at the strongest penalties.",
+        "Line chart of mean validation information coefficient against the base-ten logarithm of "
+        "the Ridge penalty, one line per label over ten orders of magnitude, each line's highest "
+        "point ringed in amber, against a dashed zero line. The lines are separated from each "
+        "other by more than any of them moves across the penalty range, so the label a line "
+        "belongs to matters more than where on the line it sits.",
     )
 else:
     print(
@@ -460,48 +573,46 @@ else:
 # %% [markdown]
 # ## 5. What to notice
 #
-# **No configuration clears zero, and the whole grid fits inside a few thousandths.** That is the
-# result, and the top row of the table is not a finding - it is the least negative member of a set
-# that contains nothing. The comparison that matters is against zero, and nothing here reaches it.
-# A notebook that sorted the table and reported the first line would be describing an ordering
-# with no content.
+# **What is being predicted decides the result here, and the penalty does not.** The panels are
+# separated from each other by more than the grid moves inside any one of them: a sweep over ten
+# orders of magnitude of Ridge penalty moves the metric less than swapping the label does. When
+# that is the shape of the evidence, tuning the penalty is not the experiment worth running. The
+# top row of a grid sorted across labels reports which label was easiest, dressed as a model
+# comparison, so the table below is grouped by label and never sorted across them.
 #
-# **The penalty is not doing anything legible either.** Ridge is flat across most of the range and
-# falls at the strongest settings, and the L1 configurations sit in the same narrow band. When a
-# sweep over ten orders of magnitude moves the metric by less than the spread between neighbouring
-# configurations, the reading is that there is no signal for the penalty to trade off against
-# noise - not that some intermediate penalty is the right one.
-#
-# **These features are a forecast of dispersion, not of direction.** That is the explanation worth
-# taking away, and it is a property of what an option price is. Implied volatility says how wide
-# the market expects the distribution to be; skew says how asymmetric; the term structure says how
+# **These features are a forecast of dispersion, not of direction, and the labels test that
+# directly.** That is a property of what an option price is. Implied volatility says how wide the
+# market expects the distribution to be; skew says how asymmetric; the term structure says how
 # that changes with horizon; the variance risk premium says how much the market charges for
 # bearing it. None of them is a statement about the *mean* of the distribution, which is what a
-# forward return is. Asking a well-informed forecast of width to rank assets by their forward
-# return is asking it a question it was not making a claim about. `05_evaluation` screens these
-# features one at a time and says the same thing before any model is fitted.
+# forward return is. A risk-adjusted return divides that mean by a measure of width, so a feature
+# set that forecasts width well and direction badly should rank the risk-adjusted label better
+# than the raw one. Read the `by_label` frame with that expectation in hand: it is a prediction
+# the mechanism makes about which row leads, and it is the reason to fit more than one label
+# rather than a decoration on having done so. `05_evaluation` screens these features one at a time
+# and reaches the same place before any model is fitted.
 #
 # **Two folds, and one of them is 2020.** Half the validation evidence comes from a year in which
 # implied volatility across every name moved together and by more than in the rest of the sample
 # combined. A cross-sectional ranking asks which stock will out-return which, and that question
 # gets harder when one factor is moving everything. Nothing above separates a weak feature set
-# from an unrepresentative window, and with two folds nothing can.
+# from an unrepresentative window, and with two folds nothing can. This applies to every panel,
+# including whichever one leads.
 #
 # **What this does not rule out.** It says nothing about whether these features forecast the
 # *volatility* of these stocks, which is the quantity they are actually about and which the risk
 # chapters use them for. It says nothing about a strategy that trades the options rather than the
-# underlying, which is the question the `sp500_options` case study asks. And a linear model can only represent a weighted sum of these columns, so it cannot express
-# something like "skew matters when the term structure is inverted" unless someone builds that
-# column first.
+# underlying, which is the question the `sp500_options` case study asks. And a linear model can
+# only represent a weighted sum of these columns, so it cannot express something like "skew
+# matters when the term structure is inverted" unless someone builds that column first.
 #
 # **None of this selects anything.** IC measures whether predictions rank stocks correctly, not
 # whether a strategy trading them makes money after costs and turnover. Selection is on validation
 # backtest Sharpe over the population this notebook just published, and it happens in
-# [`14_backtest`](14_backtest.ipynb). What this notebook establishes is that the linear family
-# enters that comparison with nothing to defend.
+# [`14_backtest`](14_backtest.ipynb).
 #
 # **Known limitations.** The IC here is an average of daily rank correlations with no adjustment
-# for the serial dependence that overlapping five-day returns create, so it is a ranking
+# for the serial dependence that overlapping multi-day returns create, so it is a ranking
 # diagnostic rather than a test. The grid is a one-dimensional sweep of penalty strength at fixed
 # features and fixed folds. And every number here is measured on the validation folds, which have
 # been read many times over by the time a case study reaches this notebook.

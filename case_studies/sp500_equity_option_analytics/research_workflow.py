@@ -1,4 +1,14 @@
-"""Reader-facing model workflow for S&P 500 equity-option analytics."""
+"""Model workflow helpers for S&P 500 equity-option analytics.
+
+**No notebook in this case study imports this module.** The model notebooks call
+``case_studies.research`` directly and the latent-factor notebooks go through
+``case_studies.utils.latent_factors.case_study``; the only importer is
+``tests/test_sp500_equity_option_analytics_research.py``. It is kept because the shape it
+wraps - one place per case study where the label set, the menu and the population name are
+resolved together - is the shape ``cme_futures`` wires its notebooks through, and either
+this case study follows or the module goes. Until that is decided, nothing here describes
+itself as a path a notebook takes.
+"""
 
 from __future__ import annotations
 
@@ -60,13 +70,12 @@ def model_request_catalog(
     """Return every configured label and model requested by one notebook.
 
     The two selection arguments treat an empty collection differently, on purpose.
-    This case study's six model notebooks leave `LABELS = []` in the parameters cell
-    to mean every published label, and each converts it with `LABELS or None` before
-    calling - so `labels=None` is what actually arrives, and widening an empty list
-    here is for consistency with that convention rather than something a notebook
-    depends on. ``config_names`` is only ever a literal in notebook code, never a
-    reader parameter, so an empty list there cannot be that convention and is
-    refused instead of silently widened to the whole menu.
+    This case study's model notebooks leave `LABELS = []` in the parameters cell to mean
+    every published label and convert it with `LABELS or None` before calling
+    ``load_model_configs``, so widening an empty list here matches that convention.
+    ``config_names`` is a literal in notebook code rather than a reader parameter, so an
+    empty list there cannot be the same convention and is refused instead of silently
+    widened to the whole menu.
 
     The convention is this case study's, not the corpus's: `cme_futures` and
     `crypto_perps_funding` are the only siblings with this function and both declare

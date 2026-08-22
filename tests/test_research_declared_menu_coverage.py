@@ -11,6 +11,8 @@ every case study needs it and the failure it prevents is identical in each.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import polars as pl
 import pytest
 
@@ -38,6 +40,33 @@ def test_every_case_study_has_a_readable_menu():
         assert menu.height > 0, case_study
         assert set(menu.columns) == set(IDENTITY), case_study
         assert menu.height == menu.unique().height, f"{case_study} declares a duplicate member"
+
+
+def test_a_menu_that_declares_a_model_twice_is_refused(tmp_path, monkeypatch):
+    """The check above cannot fail on its own - the duplicate has to be caught where it is read."""
+    from case_studies.research import model_planning
+    from utils import artifact_specs, modeling
+
+    # `configured_model_menu` imports these inside the function body, so the double has to be
+    # installed on the module it imports from rather than on model_planning itself.
+    monkeypatch.setattr(
+        model_planning, "registered_adapters", lambda kind: [SimpleNamespace(name="linear")]
+    )
+    monkeypatch.setattr(
+        artifact_specs, "load_setup_config", lambda case_study: {"labels": {"primary": "fwd_ret"}}
+    )
+    monkeypatch.setattr(model_planning, "get_case_study_dir", lambda case_study: tmp_path)
+    menu_dir = tmp_path / "config" / "training"
+    menu_dir.mkdir(parents=True)
+    (menu_dir / "fwd_ret.yaml").write_text("linear:\n  - ols\n  - ols\n")
+    monkeypatch.setattr(
+        modeling,
+        "load_configs",
+        lambda case_study, label, family: [{"config_name": "ols"}, {"config_name": "ols"}],
+    )
+
+    with pytest.raises(ValueError, match="declare a model more than once"):
+        configured_model_menu("example")
 
 
 def test_causal_dml_is_excluded_by_the_adapter_rule_not_a_list():

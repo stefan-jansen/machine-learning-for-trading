@@ -109,8 +109,9 @@ def test_a_label_that_declares_no_such_family_blames_the_label_not_the_name():
 
     `pca` is declared on all three return labels, so blaming the configuration name
     here would send a reader hunting a typo that does not exist. The cause is that
-    `fwd_dir_5d` declares no latent factors at all. Reachable from `11a_pca.py` by
-    setting `PRIMARY_LABEL` to a direction label.
+    `fwd_dir_5d` declares no latent factors at all. No notebook reaches this module
+    today - `11a_pca.py` goes through `case_studies.utils.latent_factors.case_study` -
+    so what is pinned here is the message, against the day one does.
     """
     with pytest.raises(ValueError, match="no declared requests for 'latent_factors'"):
         model_request_catalog("latent_factors", labels=["fwd_dir_5d"], config_names=["pca"])
@@ -126,13 +127,12 @@ def test_an_undeclared_name_names_the_labels_it_was_checked_against():
 
 
 def test_a_label_that_declares_a_different_family_is_skipped_not_refused():
-    """The pass-through the five latent-factor notebooks depend on by default.
+    """A family the label does not declare is skipped, not refused.
 
     `published_labels()` includes `fwd_dir_5d`, which declares linear and gbm but no
-    latent factors, and `11a_pca.py` passes the full list unless a parameter narrows
-    it. So the mixed case - some labels declaring the family, some not - is the
-    default production path, and tightening the skip into a refusal would break all
-    five notebooks. Only the refusal side was pinned before this.
+    latent factors, so the mixed case - some labels declaring the family, some not - is
+    what any caller passing the full label set gets. Tightening the skip into a refusal
+    would make that call impossible. Only the refusal side was pinned before this.
     """
     catalog = model_request_catalog(
         "latent_factors", labels=[PRIMARY, "fwd_dir_5d"], config_names=["pca"]

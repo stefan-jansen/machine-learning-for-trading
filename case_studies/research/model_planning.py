@@ -291,7 +291,25 @@ def configured_model_menu(case_study: str, *, labels: Iterable[str] | None = Non
                 )
     if not rows:
         raise ValueError(f"{case_study}: no predictive model is declared for {list(selected)}")
-    return pl.DataFrame(rows).unique(maintain_order=True)
+    menu_frame = pl.DataFrame(rows)
+    # Deduplicating here would hide a menu that lists one configuration twice, and the caller
+    # cannot see it afterwards: the frame that reaches a test has already been collapsed, so an
+    # assertion about duplicates there can never fail. A repeated entry is a config defect - it
+    # says the same model twice and means the reader is told the grid is wider than it is - so it
+    # is refused where it is readable rather than smoothed over.
+    duplicates = (
+        menu_frame.group_by("family", "label", "config_name")
+        .len()
+        .filter(pl.col("len") > 1)
+        .sort("family", "label", "config_name")
+    )
+    if duplicates.height:
+        listed = ", ".join(
+            f"{row['family']}/{row['label']}/{row['config_name']} x{row['len']}"
+            for row in duplicates.iter_rows(named=True)
+        )
+        raise ValueError(f"{case_study}: training menus declare a model more than once: {listed}")
+    return menu_frame
 
 
 def require_declared_menu_coverage(
