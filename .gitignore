@@ -2,6 +2,9 @@
 
 # Environment and secrets
 .env
+.env.*
+# .env.example is tracked and documents the variables; keep it out of the sweep above.
+!.env.example
 .env.local
 .env.*.local
 
