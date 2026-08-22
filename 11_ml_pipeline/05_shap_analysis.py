@@ -258,7 +258,10 @@ if NEED_TRAINING:
         X_te_f = sc_f.transform(features_array[te_idx])
         m_f = Ridge(alpha=1.0, random_state=RANDOM_SEED)
         m_f.fit(X_tr_f, target_array[tr_idx])
-        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f))
+        # Same full background as the main explainer. On the default 100 rows the
+        # fold-8 point of this chart does not equal that feature's mean_abs_shap in
+        # the importance table, on the same split, model and scaling.
+        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f, max_samples=len(X_tr_f)))
         fold_importance[fold_i + 1] = np.mean(np.abs(exp_f(X_te_f).values), axis=0)
     print(f"Computed SHAP stability across {len(fold_importance)} folds.")
 
@@ -274,6 +277,11 @@ if NEED_TRAINING:
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
+            # Which background these attributions were computed against. A cache
+            # written before the full-background change carries values a hundredth
+            # away from the closed form, and neither staleness test below would see
+            # it: they compare fold count and row count only.
+            "background": "full",
             "fold_importance": fold_importance,
         },
         RESULTS_PATH,
@@ -321,9 +329,11 @@ if not NEED_TRAINING:
 # %% tags=[]
 _cache_fold_stale = fold_importance is not None and len(fold_importance) < len(cv_splits)
 _cache_data_stale = len(y_pred) != len(test_idx) or X_test.shape[0] != len(test_idx)
-if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
+_cache_background_stale = not NEED_TRAINING and _cached.get("background") != "full"
+if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale or _cache_background_stale):
     print(
-        "Cached SHAP artifacts are stale (fold count or data vintage changed); recomputing full artifacts."
+        "Cached SHAP artifacts are stale (fold count, data vintage or background "
+        "changed); recomputing full artifacts."
     )
     scaler = StandardScaler()
     X_train = scaler.fit_transform(features_array[train_idx])
@@ -351,7 +361,10 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
         X_te_f = sc_f.transform(features_array[te_idx])
         m_f = Ridge(alpha=1.0, random_state=RANDOM_SEED)
         m_f.fit(X_tr_f, target_array[tr_idx])
-        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f))
+        # Same full background as the main explainer. On the default 100 rows the
+        # fold-8 point of this chart does not equal that feature's mean_abs_shap in
+        # the importance table, on the same split, model and scaling.
+        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f, max_samples=len(X_tr_f)))
         fold_importance[fold_i + 1] = np.mean(np.abs(exp_f(X_te_f).values), axis=0)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -366,6 +379,11 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
+            # Which background these attributions were computed against. A cache
+            # written before the full-background change carries values a hundredth
+            # away from the closed form, and neither staleness test below would see
+            # it: they compare fold count and row count only.
+            "background": "full",
             "fold_importance": fold_importance,
         },
         RESULTS_PATH,
