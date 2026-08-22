@@ -115,6 +115,21 @@ study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPAC
 declared_labels(study, "gbm")
 
 # %% [markdown]
+# A run that narrows `LABELS` fits a different set of members than the canonical population
+# declares, and a population is immutable once written, so it must publish under its own name.
+# Asking for that here rather than at the run is the difference between a message naming the
+# parameter and a refusal from the registry several cells later.
+
+# %%
+declared = declared_labels(study, "gbm")
+fitted_labels = tuple(LABELS) or declared
+if set(fitted_labels) != set(declared) and not POPULATION_NAME:
+    raise ValueError(
+        f"LABELS={list(fitted_labels)} is a subset of what the menus declare, so this run cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
 # Each label's menu at `config/training/{label}.yaml` lists 15 named configurations under `gbm:`,
 # and each resolves to a preset in `case_studies/config/lgb/`. The grid is a product of two axes:
 #
@@ -134,7 +149,7 @@ declared_labels(study, "gbm")
 configs = load_model_configs(
     study,
     "gbm",
-    labels=LABELS or None,
+    labels=fitted_labels,
     config_names=CONFIG_NAMES or None,
 )
 configs
@@ -285,7 +300,13 @@ catalog = catalog.with_columns(
 )
 
 primary = primary_label(study)
-panel_labels = [primary, *sorted(set(catalog.get_column("label")) - {primary})]
+present = sorted(set(catalog.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels
+# by whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in present] + [
+    label for label in present if label != primary
+]
+order_label = panel_labels[0]
 print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
 catalog.select(
@@ -372,12 +393,50 @@ show_plotly_with_alt(
     "Three stacked line charts of mean validation information coefficient against boosting "
     "iteration, one panel per label, with one line per configuration coloured by loss function: "
     "blue for squared error, amber for absolute error, copper for Huber. Each panel carries a "
-    "dashed zero line. In every panel the lines start spread out at fifty trees and drift "
-    "downwards as trees are added, rather than rising to a common peak and falling away. In the "
-    "one-day panel the whole band sits below zero; in the two variant panels the copper Huber "
-    "lines stay highest and the blue squared-error lines lowest, so the colours separate there in "
-    "a way they do not at one day.",
+    "dashed zero line. The lines start spread out at fifty trees and cross each other repeatedly "
+    "rather than rising to a common peak and falling away. In the one-day and 21-day panels the "
+    "band drifts downwards as trees are added; in the five-day panel it stays where it started. "
+    "A few one-day curves are above the zero line at the earliest checkpoints and none is by the "
+    "last. In every panel the blue squared-error lines end lowest, though they are not lowest "
+    "throughout: one of them starts at the top of the 21-day panel.",
 )
+
+# %% [markdown]
+# Whether the lines trend, and which way, is not something to read off a page of overlapping
+# curves. The frame below measures it: for each configuration, its IC at the last checkpoint
+# minus its IC at the first, and whether its best checkpoint is an interior one rather than
+# either end. A family that is still learning would show positive changes and interior peaks; a
+# family that is overfitting would show negative changes; a family with nothing to learn would
+# show changes centred on zero with peaks scattered anywhere.
+
+# %% tags=["results"]
+drift = (
+    curves.group_by("label", "config_name")
+    .agg(
+        first_ic=pl.col("ic_mean").sort_by("checkpoint_value").first(),
+        last_ic=pl.col("ic_mean").sort_by("checkpoint_value").last(),
+        peak_checkpoint=pl.col("checkpoint_value").sort_by("ic_mean", descending=True).first(),
+        first_checkpoint=pl.col("checkpoint_value").min(),
+        last_checkpoint=pl.col("checkpoint_value").max(),
+    )
+    .with_columns(
+        change=pl.col("last_ic") - pl.col("first_ic"),
+        interior_peak=pl.col("peak_checkpoint").is_between(
+            pl.col("first_checkpoint"), pl.col("last_checkpoint"), closed="none"
+        ),
+    )
+)
+trees_effect = (
+    drift.group_by("label")
+    .agg(
+        configurations=pl.len(),
+        median_change=pl.col("change").median(),
+        ended_lower=(pl.col("change") < 0).sum(),
+        interior_peaks=pl.col("interior_peak").sum(),
+    )
+    .sort("label")
+)
+trees_effect
 
 # %% [markdown]
 # ### Whether the loss function is what separates them
@@ -400,7 +459,7 @@ final = (
 )
 final_iteration = int(final.get_column("checkpoint_value").max())
 config_order = (
-    final.filter(pl.col("label") == primary)
+    final.filter(pl.col("label") == order_label)
     .sort("ic_mean", descending=True)
     .get_column("config_name")
     .to_list()
@@ -434,7 +493,7 @@ fig_obj.update_xaxes(
     categoryorder="array",
     categoryarray=config_order,
     tickangle=-45,
-    title_text=f"Configuration (ordered by validation IC on {primary})",
+    title_text=f"Configuration (ordered by validation IC on {order_label})",
     row=len(panel_labels),
     col=1,
 )
@@ -450,11 +509,32 @@ show_plotly_with_alt(
     "Three stacked bar charts of mean validation information coefficient at the final boosting "
     "iteration, one panel per label, coloured by loss function: blue for squared error, amber for "
     "absolute error, copper for Huber. The configurations are in the same order in each panel, "
-    f"that order being their ranking on {primary}, and each panel carries a dashed zero line. In "
-    "the one-day panel every bar but one hangs below the line, with the blue squared-error bars "
-    "longest and grouped at the right of the order. The variant panels put a few copper Huber and "
-    "amber absolute-error bars above the line while the blue bars stay below it.",
+    f"that order being their ranking on {order_label}, and each panel carries a dashed zero "
+    "line. In the one-day panel two amber absolute-error bars clear the line and the other "
+    "thirteen hang below it, with the blue squared-error bars longest and grouped at the right of "
+    "the order. The 21-day panel puts five bars above the line, three copper Huber, one amber and "
+    "one blue. The five-day panel puts two amber bars barely above it and everything else below, "
+    "with one squared-error bar far longer than any other in the figure.",
 )
+
+# %% [markdown]
+# The colours in that chart are the claim, so here is the claim as numbers: at the final
+# iteration, each loss function's mean IC and how many of its configurations finished above zero,
+# per label. The ordering the heavy-tailed case studies show is Huber highest, absolute error
+# next, squared error lowest.
+
+# %% tags=["results"]
+objective_summary = (
+    final.group_by("label", "objective")
+    .agg(
+        configurations=pl.len(),
+        mean_ic=pl.col("ic_mean").mean(),
+        best_ic=pl.col("ic_mean").max(),
+        above_zero=(pl.col("ic_mean") > 0).sum(),
+    )
+    .sort(["label", "mean_ic"], descending=[False, True])
+)
+objective_summary
 
 # %% [markdown]
 # ### What the tails of each label look like
@@ -468,18 +548,28 @@ show_plotly_with_alt(
 # Excess kurtosis is the direct measurement of that, so it is worth taking before the explanation
 # is applied rather than after. Zero is the normal distribution; larger means more of the
 # variance sits in rare large moves.
+#
+# The label artifact on disk runs to the end of the data, holdout included. Measuring across all
+# of it would put a statistic computed partly on sealed outcomes into a validation-stage
+# notebook, so the rows are cut at `validation_end` - the same development boundary the fits
+# above were resolved against, taken from the plan rather than re-derived.
 
 # %% tags=["results"]
+development_end = plan.get_column("validation_end").max()
 tails = pl.DataFrame(
     [
         {
             "label": label,
-            "excess_kurtosis": pl.read_parquet(study.labels.get(label).path)
-            .get_column(label)
-            .drop_nulls()
-            .kurtosis(),
+            "development_end": development_end,
+            "rows": measured.height,
+            "excess_kurtosis": measured.get_column(label).kurtosis(),
         }
         for label in panel_labels
+        for measured in [
+            pl.read_parquet(study.labels.get(label).path)
+            .filter(pl.col("timestamp") <= development_end)
+            .drop_nulls(label)
+        ]
     ]
 )
 tails
@@ -496,7 +586,8 @@ tails
 # The frame below reduces that to one comparison per label: how far the fifteen configurations
 # spread at a fixed training length, against how far the median configuration travels across its
 # own checkpoints. A ratio near one means the two decisions are the same size, and choosing a
-# checkpoint is as consequential as choosing a model.
+# checkpoint is as consequential as choosing a model. The five widest-ranging configurations at
+# each label follow it.
 
 # %%
 spread = (
@@ -522,19 +613,18 @@ comparison = (
 comparison
 
 # %% tags=["results"]
-spread.head(15)
+spread.group_by("label", maintain_order=True).head(5)
 
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Gradient boosting does not clear zero at the traded horizon, and the linear family did.** The
-# penalty sweep in `06_linear` reached a thin positive margin on `fwd_ret_1d`; in this grid one
-# configuration out of fifteen ends training above zero on that label and the rest are below it.
-# This is the first thing to read carefully, because the ordering is the reverse of what "a more
-# expressive model class" suggests. Capacity is not free: a tree that can condition one feature on
-# another can also discover a condition that held in the training window and does not hold after
-# it, and a negative out-of-sample information coefficient is what a discovered-and-reversed
-# relationship looks like.
+# **Gradient boosting barely clears zero at the traded horizon, and the linear family did.** The
+# penalty sweep in `06_linear` put ten of twenty-eight one-day configurations above zero; here two
+# of fifteen end training above it, both by less than two thousandths. This is the first thing to
+# read carefully, because the ordering is the reverse of what "a more expressive model class"
+# suggests. Capacity is not free: a tree that can condition one feature on another can also
+# discover a condition that held in the training window and does not hold after it, and a negative
+# out-of-sample information coefficient is what a discovered-and-reversed relationship looks like.
 #
 # **The dependent cross-section is the reason to expect this.** The 20 pairs are quotes among eight
 # currencies, so much of what there is to find is a single fact - which currencies are strong -
@@ -544,40 +634,38 @@ spread.head(15)
 # and the cross-section being dependent are different problems, and neither model class addresses
 # the second.
 #
-# **More trees make it worse, at every horizon.** The curves do not rise to a peak and fall away,
-# which is the shape a model that is still learning would draw. They start spread out at fifty
-# trees and drift downwards. There is nothing here for a stopping rule to find, and reading the
-# maximum of one of these curves as "the right number of trees" would be reading the largest of
-# ten noisy numbers.
+# **More trees do not help, and at two of the three horizons they hurt.** The `trees_effect` frame
+# is the measurement: at one day and 21 days the median configuration ends below where it started
+# and two thirds of them end lower, while at five days the median configuration ends where it started, to
+# five decimal places. What no horizon shows is the shape of a model still learning - a rise to a peak and a fall
+# away. Roughly half the configurations peak at an interior checkpoint at every horizon, which is
+# what scattering ten noisy readings along an axis produces, not what an optimum produces. There
+# is nothing here for a stopping rule to find.
 #
-# **The loss function orders the results the way it does elsewhere, and the tails do not explain
-# where.** Huber sits closest to zero and squared error furthest below, which is the ordering the
-# heavy-tailed case studies show. Where it is visible is the surprise. The colours overlap on the
-# one-day label and separate on the five-day and 21-day ones - and the kurtosis frame above says
-# the one-day label is by far the heaviest-tailed of the three, with the 21-day label the closest
-# to normal. Aggregating a return over a longer window averages its extremes away, so the horizon
-# that shows the loss ordering most clearly is the horizon whose tails give a squared-error fit
-# the least trouble. The tail argument predicts the opposite of what the panels show.
+# **Squared error is last at every horizon; which of the other two leads is not stable.** Read
+# `objective_summary`: by mean IC at the final iteration, `mse` is bottom of all three labels and
+# only once finishes a configuration above zero. Huber leads at one day and 21 days, absolute
+# error at five. That much is the ordering the heavy-tailed case studies report, and it is the
+# part of the loss story this grid supports.
 #
-# What the panels are consistent with is simpler: an ordering can only be seen where something is
-# there to order. At one day every configuration is within a hundredth of zero and on the same
-# side of it, so no axis separates them, tails or otherwise. At the longer horizons some
-# configurations reach above zero and the ones that do are Huber and absolute error. Whether the
-# loss function is what put them there, or the horizon merely made a difference of any kind
-# visible, is not settled by this grid. It is stated as an open question rather than resolved,
-# because resolving it needs a comparison this notebook does not run - the same label at the same
-# horizon with its tails trimmed, which `06_linear` has no equivalent of either.
+# **The tails do not explain it, and this case study is where that shows.** The mechanism usually
+# offered is that a squared-error fit chases extreme observations, which a rank measure does not
+# reward, so the penalty should be heaviest on the heaviest-tailed label. The `tails` frame says
+# the one-day label has by far the heaviest tails of the three - aggregating a return over a longer
+# window averages its extremes away - yet the gap between the best and worst objective is widest at
+# five days and narrowest at 21. The ordering survives; its size does not track tail weight in the
+# direction the mechanism predicts. Fitting three horizons of one case study in one run is what
+# makes that checkable, because the features, the folds and the universe are held fixed and only
+# the label moves. Settling it needs a comparison this grid does not run - the same label with its
+# tails trimmed - so it is recorded as an open question rather than answered.
 #
-# Fitting the three horizons in one run is what makes the question askable at all: it is a
-# comparison inside one case study, on one feature set and one set of folds, rather than across
-# case studies that differ in more than their labels.
-#
-# **The checkpoint is a decision of the same order as the model.** The frame above puts the spread
-# across fifteen configurations at fixed training length against the median configuration's own
-# range across its ten checkpoints. The first is larger, by a factor between about one and three
-# depending on the label. That is not the comfortable answer. A ratio near one, which the 21-day
-# label is close to, means choosing where to stop matters nearly as much as choosing which model to
-# fit - and the stopping point is chosen after seeing the validation folds, while the model is not.
+# **The checkpoint is a decision of the same order as the model.** The comparison frame puts the
+# spread across fifteen configurations at fixed training length against the median configuration's
+# own range across its ten checkpoints. The first is larger, by a factor between about one and
+# three depending on the label. That is not the comfortable answer. A ratio near one, which the
+# 21-day label is close to, means choosing where to stop matters nearly as much as choosing which
+# model to fit - and the stopping point is chosen after seeing the validation folds, while the
+# model is not.
 #
 # **A near-zero negative is a weaker statement than a large negative.** In a case study where the
 # model reliably ranks the cross-section backwards, that is a relationship with the sign fitted the
@@ -598,8 +686,9 @@ spread.head(15)
 # the number of pairs. The five-day and 21-day labels add a second dependence the one-day label
 # does not have: consecutive decision dates share most of their forward window, so their daily
 # correlations are not independent draws. The grid varies capacity and loss at a fixed learning
-# rate. And every number is measured on validation folds already read many times by the time a case
-# study reaches this notebook.
+# rate, and five configurations per objective is a thin base for the objective comparison. And
+# every number is measured on validation folds already read many times by the time a case study
+# reaches this notebook.
 #
 # **Next**: [`08_tabular_dl`](08_tabular_dl.ipynb) asks the same question of a neural network built
 # for tabular data. Two model classes have now been fitted to this cross-section, and the useful
