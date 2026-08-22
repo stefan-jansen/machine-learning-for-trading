@@ -37,6 +37,7 @@
 import json
 
 import polars as pl
+import torch
 import yaml
 
 from case_studies.research import ExecutionTier, Study, plan_models
@@ -54,7 +55,7 @@ PREDICTION_SPLIT = "validation"
 N_EPOCHS = 0
 LOOKBACK = 0
 BATCH_SIZE = 0
-DEVICE = "cuda"
+DEVICE = ""
 SEED = 42
 
 # %% [markdown]
@@ -85,8 +86,15 @@ reductions = {
     **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
 }
 tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
+# An empty DEVICE resolves to what the machine has. The runners refuse "cuda" on a host without
+# it rather than falling back silently - which is the right contract for a run whose results get
+# registered - so a hardcoded "cuda" default made the notebook unrunnable for any reader without
+# an NVIDIA card, and unrunnable on a CPU CI runner. Resolving here keeps the refusal for anyone
+# who asks for "cuda" explicitly; the resolved value is printed with the rest of the numerics
+# below, so a run never leaves it implicit.
+device = DEVICE or ("cuda" if torch.cuda.is_available() else "cpu")
 overrides = {
-    "device": DEVICE,
+    "device": device,
     **({"n_epochs": N_EPOCHS} if N_EPOCHS else {}),
     **({"batch_size": BATCH_SIZE} if BATCH_SIZE else {}),
     **({"lookback": LOOKBACK} if LOOKBACK else {}),
