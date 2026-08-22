@@ -37,6 +37,21 @@ def _format_params(params: dict | None) -> str:
     return ", ".join(f"{key}={value}" for key, value in params.items())
 
 
+def primary_label(study: Study) -> str:
+    """The label the case study trades, as ``config/setup.yaml`` declares it.
+
+    Notebooks that fit every declared label need one of them to order a comparison by, and the
+    primary is the horizon the strategy chapters trade. Reading it here rather than re-parsing
+    ``setup.yaml`` in each notebook keeps the answer the same everywhere it is asked.
+    """
+    setup_path = get_case_study_dir(study.case_study) / "config" / "setup.yaml"
+    labels = (yaml.safe_load(setup_path.read_text()) or {}).get("labels") or {}
+    name = labels.get("primary")
+    if not name:
+        raise ValueError(f"{study.case_study} declares no labels.primary in {setup_path}")
+    return str(name)
+
+
 def declared_labels(study: Study, family: str) -> tuple[str, ...]:
     """Every label whose training menu declares ``family``, in menu-file order."""
     menu_dir = get_case_study_dir(study.case_study) / "config" / "training"
