@@ -90,12 +90,13 @@ from case_studies.research import (
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "fwd_ret_5d"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "sp500_equity_option_analytics-linear-validation-v1"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -112,11 +113,11 @@ study = open_study(
 # `fwd_dir_5d` and `fwd_dir_10d` are classification variants that ask for the direction rather
 # than the size.
 #
-# **This notebook fits one label per run.** `LABEL` above selects it, and every choice below
-# follows from that one setting, because each label has its own training menu at
-# `config/training/{label}.yaml`. The menu lists, family by family, the named configurations to
-# fit for that label. A label with no menu file has nothing declared and nothing to fit; these
-# are the ones that declare linear models.
+# **This notebook fits every declared label in one run.** Each label has its own training menu at
+# `config/training/{label}.yaml`, listing family by family the named configurations to fit for
+# that label. A label with no menu file has nothing declared and nothing to fit; the ones below
+# are those that declare linear models. `LABELS` narrows the run to a subset, which is a
+# diagnostic rather than the canonical population.
 
 # %%
 declared_labels(study, "linear")
@@ -124,7 +125,7 @@ declared_labels(study, "linear")
 # %% [markdown]
 # Each name in the menu resolves to a preset file in the shared directory
 # `case_studies/config/{model_type}/`, which holds that configuration's hyperparameters. The
-# frame below is the menu for `LABEL`, with each name resolved to the estimator class it names
+# frame below is the menu for every declared label, with each name resolved to the estimator class it names
 # and the arguments that class is constructed with. To change what runs, edit the menu or the
 # presets rather than this notebook.
 #
@@ -147,10 +148,26 @@ declared_labels(study, "linear")
 configs = load_model_configs(
     study,
     "linear",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name: on a fresh workspace it would otherwise register an
+# incomplete snapshot under the canonical one, and where the full population already exists the
+# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
+# either knob, and says so here rather than several cells later in a message about hashes.
+
+# %%
+if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
+        "the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -236,7 +253,10 @@ plan.select(
 # registered, and re-running fits only what is missing.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+population_name = POPULATION_NAME or "sp500_equity_option_analytics-linear-validation-v1"
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
@@ -432,9 +452,9 @@ if ridge.height:
     )
 else:
     print(
-        f"{LABEL} declares no Ridge configurations, so there is no penalty sweep to trace. "
-        f"Which estimators this section can show is decided by the menu at "
-        f"config/training/{LABEL}.yaml."
+        "No declared label carries a Ridge configuration, so there is no penalty sweep to "
+        "trace. Which estimators this section can show is decided by the per-label menus at "
+        "config/training/{label}.yaml."
     )
 
 # %% [markdown]

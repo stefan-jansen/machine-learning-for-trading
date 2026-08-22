@@ -91,12 +91,13 @@ from case_studies.research import (
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-LABEL = "fwd_ret_5d"
+LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
-POPULATION_NAME = "sp500_equity_option_analytics-gbm-validation-v1"
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
@@ -134,10 +135,26 @@ declared_labels(study, "gbm")
 configs = load_model_configs(
     study,
     "gbm",
-    labels=[LABEL],
+    labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
 configs
+
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
+# set of members than the canonical population does. A population is immutable once written, so
+# such a run must publish under its own name: on a fresh workspace it would otherwise register an
+# incomplete snapshot under the canonical one, and where the full population already exists the
+# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
+# either knob, and says so here rather than several cells later in a message about hashes.
+
+# %%
+if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
+        "the canonical population; pass POPULATION_NAME to give it its own"
+    )
+
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -207,7 +224,10 @@ plan.select(
 # complete, which is what makes the downstream comparison well defined.
 
 # %%
-execution, population = run_model_population(study, resolved, population_name=POPULATION_NAME)
+population_name = POPULATION_NAME or "sp500_equity_option_analytics-gbm-validation-v1"
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
