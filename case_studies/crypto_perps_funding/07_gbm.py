@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # Crypto perpetuals: 150 candidate models from two validation years
+# # Crypto perpetuals: 400 candidate models from two validation years
 #
 # [`06_linear`](06_linear.ipynb) worked through what a penalty does to a feature set that is one
 # economic quantity - the premium of the perpetual over spot - measured many ways. The L1 path
@@ -32,13 +32,19 @@
 # - **When to stop**, set by the number of trees. A boosted model has a meaningful state at every
 #   iteration, so this notebook scores each configuration at ten points along its own training run.
 #
-# **The arithmetic of that is the reason to read this notebook carefully.** Fifteen declared
-# configurations at ten checkpoints is 150 candidate models, and this case study has the shortest
-# usable history of the nine: `05_evaluation` set two walk-forward folds from the liquid funding
-# data that exists, so every one of those 150 numbers is measured on two validation years of a
-# market whose structure changed over them. The more candidates a search has, the better its best
-# member looks for reasons that have nothing to do with the data - and here the candidate count is
-# large while the evidence each candidate is judged on is small.
+# **The arithmetic of that is the reason to read this notebook carefully.** The four declared
+# labels bring fifteen configurations each for the two return horizons and five each for the two
+# direction cuts - forty in all, at ten checkpoints apiece, which is 400 candidate models. This
+# case study also has the shortest usable history of the nine: `05_evaluation` set two
+# walk-forward folds from the liquid funding data that exists, so every one of those 400 numbers
+# is measured on two validation years of a market whose structure changed over them. The more
+# candidates a search has, the better its best member looks for reasons that have nothing to do
+# with the data - and here the candidate count is large while the evidence each candidate is
+# judged on is small.
+#
+# The comparison is within a label. A candidate is a (label, configuration, checkpoint) triple,
+# and nothing below ranks a return model against a direction model as if they were competing for
+# the same slot; what the labels are compared on is how far each one's own grid gets.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -277,13 +283,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # cross-section moved together defines no AUC, while a rank correlation is still defined there.
 # It costs 540 of 2,189 timestamps here. `full_coverage` refers to `ic_n_days` only.
 #
-# The two together answer a question neither answers alone. This model is fitted to the size of
-# the next return; a model fitted to `fwd_dir_8h`, the direction cut from that same return at that
-# same horizon, is fitted only to its sign. `LABEL` is a parameter of this notebook, so the same
-# code run against that label produces the classifier and the registry holds both. Which
-# formulation suits the data is not settled by argument, because a squared-error fit spends its
-# capacity on the largest returns and crypto funding returns have a heavy tail. Carrying both
-# readings on every model lets the comparison be made directly.
+# The two together answer a question neither answers alone. Some of these models are fitted to the
+# size of the next return and some to its sign: `fwd_dir_8h` is the direction cut from the same
+# return at the same horizon as `fwd_ret_8h`, and `fwd_dir_8h_3c` cuts it into three. This run
+# fits all four, so both formulations sit in one catalog on identical folds and features. Which
+# one suits the data is not settled by argument - a squared-error fit spends its capacity on the
+# largest returns, and crypto funding returns have a heavy tail - and carrying both readings on
+# every model lets the comparison be made directly. `06_linear` made it and found the direction
+# cut far more rankable; the sections below make it again for this family.
 #
 # The table is sorted by label and then by IC, and the top of each label's block is the trap this
 # notebook exists to describe. The leading row for a label is the maximum of a configuration count
@@ -291,10 +298,12 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # whatever the stopping point contributed, and the section below measures how large that
 # contribution is before anything is concluded from the ranking.
 #
-# Coverage is judged against each label's own maximum number of scorable timestamps. The labels do
-# not offer the same number - a 24-hour label runs out of forward window earlier, and the
-# direction labels drop timestamps on which no contract changed sign - so one global maximum would
-# mark whole labels incomplete for reasons unrelated to any model.
+# Coverage is judged against each label's own maximum number of scorable timestamps, because the
+# labels do not offer the same number: the 24-hour label runs out of forward window earlier than
+# the eight-hour ones. One global maximum would mark that whole label incomplete for a reason
+# unrelated to any model. The direction labels are not affected - their IC is computed against the
+# continuous return, not the binary coding, so they carry the same `ic_n_days` as `fwd_ret_8h`.
+# What the constant-direction timestamps cost is AUC coverage, which the paragraph above covers.
 
 # %% tags=["results"]
 catalog = execution.catalog_rows.select(
@@ -327,7 +336,12 @@ panel_labels = [label for label in [primary] if label in present] + [
     label for label in present if label != primary
 ]
 order_label = panel_labels[0]
-print(f"{catalog.height} candidate models: {catalog.n_unique('config_name')} configurations")
+# Counting (label, config_name) pairs and not config_name alone: the fifteen regression names are
+# declared by both return labels, so counting names would print an arithmetic that does not hold.
+print(
+    f"{catalog.height} candidate models: "
+    f"{catalog.select('label', 'config_name').n_unique()} label-configuration pairs"
+)
 print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
 catalog.select(
     "label",
@@ -716,7 +730,7 @@ spread.group_by("label", maintain_order=True).head(5)
 # require choosing anything after the fact.
 #
 # **Two folds is the number to hold on to.** Every statement above rests on two validation years of
-# a market that changed structurally over them, and the search that produced it had 150 members.
+# a market that changed structurally over them, and the search that produced it had 400 members.
 # That combination - many candidates, little data - is the one where a best member looks convincing
 # for reasons unrelated to the data. Nothing here is a small effect measured precisely; it is a
 # moderate effect measured on a short sample, and the honest summary is the direction rather than

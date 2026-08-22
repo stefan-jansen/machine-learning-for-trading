@@ -581,18 +581,32 @@ l1.select(
 
 # %%
 path_colors = [COLORS["blue"], COLORS["copper"], COLORS["amber"], COLORS["recede"]]
-path_labels = [label for label in panel_labels if l1.filter(pl.col("label") == label).height]
+# One trace per (label, estimator). Lasso and ElasticNet each contribute a row at every
+# alpha_frac, so a single trace per label would double back at every x and merge two distinct
+# penalty paths into one zig-zag line.
+path_traces = [
+    (label, model_class)
+    for label in panel_labels
+    for model_class in ("Lasso", "ElasticNet")
+    if l1.filter((pl.col("label") == label) & (pl.col("model_class") == model_class)).height
+]
 fig_path = go.Figure()
-for index, label in enumerate(path_labels):
-    series = l1.filter(pl.col("label") == label)
+for index, (label, model_class) in enumerate(path_traces):
+    series = l1.filter((pl.col("label") == label) & (pl.col("model_class") == model_class)).sort(
+        "alpha_frac"
+    )
     fig_path.add_trace(
         go.Scatter(
             x=series.get_column("alpha_frac").to_list(),
             y=series.get_column("surviving_features").to_list(),
             mode="lines+markers",
-            name=label,
-            line=dict(color=path_colors[index % len(path_colors)], width=2),
-            marker=dict(size=8, color=path_colors[index % len(path_colors)]),
+            name=f"{label} · {model_class}",
+            line=dict(
+                color=path_colors[index // 2 % len(path_colors)],
+                width=2,
+                dash="solid" if model_class == "Lasso" else "dot",
+            ),
+            marker=dict(size=8, color=path_colors[index // 2 % len(path_colors)]),
         )
     )
 fig_path.update_layout(
@@ -600,16 +614,18 @@ fig_path.update_layout(
     height=520,
     width=900,
     margin=dict(t=70),
-    legend=dict(title_text="Label"),
+    legend=dict(title_text="Label and estimator"),
 )
 fig_path.update_xaxes(title_text="alpha_frac  (fraction of the fold's fully suppressing penalty)")
 fig_path.update_yaxes(title_text="Non-zero coefficients, averaged over folds")
 show_plotly_with_alt(
     fig_path,
     "Line chart of the average number of non-zero coefficients against alpha_frac, one line per "
-    "label. Every line falls steeply from the weakest penalty and flattens close to one across "
-    "the aggressive end of the grid, well before alpha_frac reaches the value that would zero "
-    "every coefficient.",
+    "label and estimator, solid for Lasso and dotted for ElasticNet. Every line falls steeply "
+    "from the weakest penalty. The eight-hour lines reach one coefficient at alpha_frac 0.7 and "
+    "stay there; the 24-hour lines flatten at about three and reach one and a half only at the "
+    "strongest penalty in the grid. None of them reaches the value that would zero every "
+    "coefficient.",
 )
 
 # %% [markdown]
@@ -647,17 +663,25 @@ show_plotly_with_alt(
 # measured above is where a weighted sum of these columns can and cannot rank, rather than a fact
 # about which target is predictable at this horizon.
 #
-# **The L1 path reduces to one column, and the ranking stops moving exactly where it does.** Past
-# the middle of the `alpha_frac` grid the non-zero coefficient count reaches one, and from there
-# the information coefficient is identical across configurations. That is the mechanical signature
-# of a path that has run out: once a single coefficient is left, more penalty scales it without
-# changing the order it induces, and a rank correlation only sees the order. The flat tail is not
-# several configurations agreeing, it is one model reported several times - and reading it as
-# agreement is the mistake the coefficient count is here to prevent.
+# **On `fwd_ret_8h` the L1 path reduces to one column, and the ranking stops moving exactly where
+# it does.** Past `alpha_frac` 0.7 the non-zero coefficient count for that label reaches one, and
+# from there the information coefficient is identical across configurations. That is the
+# mechanical signature of a path that has run out: once a single coefficient is left, more penalty
+# scales it without changing the order it induces, and a rank correlation only sees the order. The
+# flat tail is not several configurations agreeing, it is one model reported several times - and
+# reading it as agreement is the mistake the coefficient count is here to prevent.
 #
-# **The column it keeps is not a premium column.** With one coefficient left, what remains is a
-# volatility estimate rather than any of the many measurements of the premium. Read against the
-# framing at the top, that is the informative part. The premium block is wide but internally
+# The 24-hour label does not get that far. Its path flattens at about three coefficients and
+# reaches one and a half only at the strongest penalty the grid declares, so its aggressive end is
+# still comparing distinct models. The same grid of `alpha_frac` values therefore lands in
+# different places on two labels, because $\alpha_{\max}$ is computed from each fold's own data
+# and the two labels do not have the same one.
+#
+# **The column it keeps is not a premium column.** Read `dominant_feature` down the L1 frame: at
+# every penalty on both return labels the largest coefficient belongs to a volatility estimate
+# rather than to any of the many measurements of the premium, and on `fwd_ret_8h` it is the only
+# coefficient left at the aggressive end. Read against the framing at the top, that is the
+# informative part. The premium block is wide but internally
 # redundant, so no single member of it stands out as a column, and a penalty that has to choose
 # exactly one goes elsewhere. Ridge, which spreads weight across the block instead of choosing
 # within it, does not face that choice and does not show the same reduction.
