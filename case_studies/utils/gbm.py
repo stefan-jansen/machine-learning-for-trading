@@ -243,7 +243,10 @@ _SKIP_PARAMS: dict[str, set[str]] = {
 _BEST_GPU: dict[str, str | None] = {}
 
 DEFAULT_GBM_CPU_THREADS = 8
-GBM_DEFAULT_MAX_BIN = 63
+# What every case study's setup.yaml declares under modeling.gbm.max_bin. It is LightGBM's own
+# default; the 63 that preceded it was inherited from a device branch rather than declared, and
+# the populations fitted under it are superseded.
+GBM_DEFAULT_MAX_BIN = 255
 
 # Declared behaviour of this runner. Bump when a change here would change a fitted result: the
 # libraries it dispatches to, how a parameter is derived, the fitting procedure, the checkpoint
