@@ -853,6 +853,87 @@ def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[
     return kernel_name, root
 
 
+def research_preview_parameters(
+    py_path: Path,
+    parameters: dict | None,
+    output_dir: Path | None,
+) -> dict:
+    """Route migrated Study notebooks to the isolated reduced-run workspace."""
+    resolved = dict(parameters or {})
+    if output_dir is None:
+        return resolved
+    source = py_path.read_text(encoding="utf-8")
+    parameter_bounds = next(
+        (
+            (first_line, last_line)
+            for header, first_line, last_line in _percent_cell_bounds(source)
+            if PARAMETERS_CELL_MARKER in header
+        ),
+        None,
+    )
+    if parameter_bounds is None:
+        return resolved
+    first_line, last_line = parameter_bounds
+    tree = ast.parse(source, filename=str(py_path))
+    declared = {name for name, line in _top_level_bindings(tree) if first_line <= line <= last_line}
+    if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
+        resolved["EXECUTION_TIER"] = "preview"
+        resolved["WORKSPACE"] = str(output_dir.resolve())
+    if "PREVIEW_REDUCTIONS" in declared:
+        resolved = _collect_preview_reductions(resolved)
+    return resolved
+
+
+def _collect_preview_reductions(parameters: dict) -> dict:
+    """Fold the per-notebook reduction overrides into the single parameter that carries them.
+
+    A model notebook takes its reductions as one ``PREVIEW_REDUCTIONS`` mapping, because a
+    preview request has to declare every reduction it applies for the recorded identity to
+    describe what was actually fitted. ``overrides.yaml`` still states them one per line, the way
+    it does for every other notebook, so the translation happens here rather than in nine entries
+    that would then have to be kept agreeing with each other.
+    """
+    resolved = dict(parameters)
+    reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
+    max_folds = resolved.pop("MAX_FOLDS", None)
+    max_symbols = resolved.pop("MAX_SYMBOLS", None)
+    train_sample_frac = resolved.pop("TRAIN_SAMPLE_FRAC", None)
+    if max_folds is not None:
+        reductions.setdefault("folds", list(range(int(max_folds))))
+    if max_symbols is not None:
+        reductions.setdefault("max_symbols", int(max_symbols))
+    if train_sample_frac is not None:
+        reductions.setdefault("train_sample_frac", float(train_sample_frac))
+    # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
+    # request builder rejects it. Reducing the universe is the reduction that always applies.
+    if not reductions:
+        reductions["max_symbols"] = 5
+    resolved["PREVIEW_REDUCTIONS"] = reductions
+    return resolved
+
+
+def injected_parameters(
+    py_path: Path,
+    parameters: dict | None,
+    output_dir: Path | None,
+    *,
+    research_preview: bool,
+) -> dict | None:
+    """Return what Papermill should inject, given the tier this run declares.
+
+    ``PREVIEW_REDUCTIONS`` only means anything under the preview tier, and the request
+    builders reject it outright on a canonical one. An override file declares it once and
+    both paths read that file: ``tests/generate_intermediates.py`` passes the same entry
+    with ``research_preview=False``, so leaving it in fails at request construction
+    instead of reducing anything.
+    """
+    if research_preview:
+        return research_preview_parameters(py_path, parameters, output_dir)
+    if parameters and "PREVIEW_REDUCTIONS" in parameters:
+        return {k: v for k, v in parameters.items() if k != "PREVIEW_REDUCTIONS"}
+    return parameters
+
+
 def run_notebook(
     py_path: Path,
     parameters: dict | None = None,
@@ -864,6 +945,7 @@ def run_notebook(
     cwd: Path | None = None,
     kernel_python: str | None = None,
     kernel_launcher: Path | None = None,
+    research_preview: bool = False,
 ) -> dict:
     """Execute a notebook via Papermill with parameter injection.
 
@@ -884,6 +966,7 @@ def run_notebook(
         kernel_python: Interpreter to execute with, when the notebook needs an
             environment other than the one running pytest
         kernel_launcher: Optional launcher script for that interpreter
+        research_preview: Inject preview tier and workspace for migrated Study notebooks
 
     Returns:
         Dict with keys: status ("ok" or "error"), error (str if failed),
@@ -895,6 +978,9 @@ def run_notebook(
 
     start = time.time()
     nb_name = py_path.stem
+    parameters = injected_parameters(
+        py_path, parameters, output_dir, research_preview=research_preview
+    )
 
     def _log(msg: str) -> None:
         if log_path:

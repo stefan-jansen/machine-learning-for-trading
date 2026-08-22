@@ -61,7 +61,9 @@ mapping:
   class: systematic_straddle_sell
   position_state_space: short_straddle_hedged
   entry_logic: sell_atm_straddle_weekly
-  sizing: fixed_vega_notional
+  # Equal premium capital within each cohort, then 1/n_roll of portfolio capital
+  # per concurrent cohort. The specialized path does not target a fixed vega.
+  sizing: equal_premium_capital_with_fixed_cohort_fraction
 
 costs:
   class: dominant
@@ -354,8 +356,13 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
-    max_bin: 63
+    device: cpu
+    # LightGBM's own CPU default. 63 is the GPU default and was carried over with the
+    # device when these runs moved off the GPU, so every CPU fit was quantizing the design
+    # matrix into a quarter of the bins the library would have used. Coarser bins are
+    # faster and lose split points; the reader running this on a CPU gets what the
+    # documentation describes.
+    max_bin: 255
 
 causal:
   treatment: vrp_21d

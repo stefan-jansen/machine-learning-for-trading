@@ -11,6 +11,7 @@ from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.specs import (
     canonical_json,
+    canonical_value,
     compute_hash,
     project_training_identity,
     training_hash_from_spec,
@@ -33,6 +34,71 @@ class ResearchLock:
     state: str
     record: dict[str, Any]
 
+    def reopen(self) -> ResearchLock:
+        reopened = self.study.lifecycle.open(self.hash)
+        if reopened.record != self.record:
+            raise ValueError("research lock object differs from its immutable registry record")
+        return reopened
+
+
+def _canonical_fold_value(value: Any) -> str:
+    return json.dumps(canonical_value(value), sort_keys=True, separators=(",", ":"))
+
+
+def _fold_keyed_parameters(computation: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    found: list[tuple[str, dict[str, Any]]] = []
+    model = computation.get("model")
+    if isinstance(model, dict) and isinstance(model.get("effective_params_by_fold"), dict):
+        found.append(("model parameters", model["effective_params_by_fold"]))
+    task = computation.get("task")
+    if isinstance(task, dict):
+        imbalance = task.get("imbalance")
+        if isinstance(imbalance, dict) and isinstance(
+            imbalance.get("effective_class_weights_by_fold"), dict
+        ):
+            found.append(("class weights", imbalance["effective_class_weights_by_fold"]))
+    return found
+
+
+def _require_consistent_fold_parameters(
+    validation_computation: dict[str, Any],
+    holdout_computation: dict[str, Any],
+) -> None:
+    """Reject a holdout spec whose per-fold parameters contradict the selected training.
+
+    These dicts are keyed by fold id, so the holdout's single entry can never equal the
+    validation's several and the comparison below has to drop them. Dropping them outright
+    would let a holdout spec declare any parameters at all - a different alpha locks and
+    then finalizes as the selected candidate's holdout result.
+
+    Only the homogeneous case is decidable here. When every validation fold resolved to the
+    same values, nothing about that configuration is derived from a fold, so the holdout
+    fold must resolve to those values too. When the validation folds disagree, the values
+    demonstrably depend on the fold's training data and the holdout's legitimately differs;
+    which keys may move is family-specific and is checked by each adapter's
+    ``reconstruct_locked_request``.
+    """
+    validation = dict(_fold_keyed_parameters(validation_computation))
+    for name, holdout_by_fold in _fold_keyed_parameters(holdout_computation):
+        validation_by_fold = validation.get(name)
+        if not validation_by_fold or len(holdout_by_fold) != 1:
+            continue
+        # Not canonical_json: a fold entry is a dict of parameters for one family and a
+        # list of class weights for another, and canonical_json rejects anything but a
+        # dict. Both sides go through canonical_value so a legacy spec, which
+        # project_training_identity deep-copies rather than canonicalizing, does not
+        # compare unequal to its canonicalized counterpart over a tuple or a float.
+        distinct = {_canonical_fold_value(value): value for value in validation_by_fold.values()}
+        if len(distinct) != 1:
+            continue
+        actual = next(iter(holdout_by_fold.values()))
+        expected_key, expected = next(iter(distinct.items()))
+        if _canonical_fold_value(actual) != expected_key:
+            raise ValueError(
+                f"locked holdout {name} differ from the selected training, which resolved "
+                f"identically on every validation fold: {actual!r} != {expected!r}"
+            )
+
 
 def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[str, Any]) -> dict:
     projected_validation = project_training_identity(validation_spec)
@@ -45,8 +111,26 @@ def _locked_training_spec(validation_spec: dict[str, Any], holdout_spec: dict[st
     holdout_cv = holdout_computation.pop("cv", None)
     if holdout_cv is None or holdout_cv == validation_cv:
         raise ValueError("holdout retraining requires an explicit, distinct CV interval")
+    if "computation" in projected_holdout:
+        _require_consistent_fold_parameters(validation_computation, holdout_computation)
+        for computation in (validation_computation, holdout_computation):
+            computation.pop("expected_prediction_keys", None)
+            model = computation.get("model")
+            if isinstance(model, dict):
+                model.pop("effective_params_by_fold", None)
+            task = computation.get("task")
+            if isinstance(task, dict):
+                imbalance = task.get("imbalance")
+                if isinstance(imbalance, dict):
+                    imbalance.pop("effective_class_weights_by_fold", None)
+            macro = computation.get("macro_context")
+            if isinstance(macro, dict):
+                macro.pop("resolved_fold_digest", None)
     if projected_holdout != projected_validation:
-        raise ValueError("holdout retraining may differ from selected training only in CV interval")
+        raise ValueError(
+            "holdout retraining may differ from selected training only in CV interval "
+            "and its derived parameters or eligibility"
+        )
     return project_training_identity(holdout_spec)
 
 
@@ -59,7 +143,53 @@ def _locked_strategy_projection(spec: dict[str, Any]) -> dict[str, Any]:
     input_identity = projected.get("input_identity")
     if isinstance(input_identity, dict):
         input_identity.pop("prices", None)
+        input_identity.pop("funding_rates", None)
+    decision = projected.get("decision_artifact")
+    if isinstance(decision, dict):
+        decision.pop("hash", None)
+        decision.pop("artifact_digest", None)
+        source_identity = decision.get("source_identity")
+        if isinstance(source_identity, dict):
+            declared_inputs = source_identity.get("declared_inputs")
+            if isinstance(declared_inputs, dict):
+                declared_inputs.pop("prediction_hashes", None)
+                declared_inputs.pop("prices", None)
+            source_identity.pop("clean_replay_digest", None)
     return projected
+
+
+def _valid_holdout_decision(
+    study: Study,
+    locked_spec: dict[str, Any],
+    holdout_spec: dict[str, Any],
+    prediction_hash: str,
+) -> bool:
+    locked = locked_spec.get("decision_artifact")
+    holdout = holdout_spec.get("decision_artifact")
+    if locked is None:
+        return holdout is None
+    if not isinstance(holdout, dict) or not holdout.get("canonical"):
+        return False
+    from .decisions import DecisionArtifact
+
+    try:
+        artifact = DecisionArtifact.open(study, str(holdout["hash"]))
+        artifact.load()
+    except (KeyError, OSError, ValueError):
+        return False
+    valid = (
+        artifact.hash == holdout.get("hash")
+        and artifact.kind == holdout.get("kind")
+        and artifact.canonical
+        and artifact.spec["prediction_hashes"] == [prediction_hash]
+        and artifact.spec["artifact_digest"] == holdout.get("artifact_digest")
+        and artifact.spec["source_identity"] == holdout.get("source_identity")
+        and artifact.spec["state_transition_policy"] == holdout.get("state_transition_policy")
+    )
+    for name in ("decision_keys", "parameters"):
+        if name in holdout:
+            valid = valid and artifact.spec.get(name) == holdout[name]
+    return valid
 
 
 class Lifecycle:
@@ -129,7 +259,9 @@ class Lifecycle:
             "source_identity": training_record.get("git_commit"),
             "runtime_provenance": json.loads(training_record.get("runtime_json") or "{}"),
         }
-        lock_hash = compute_hash(canonical_json(lock_record))
+        serialized_lock = canonical_json(lock_record)
+        lock_record = json.loads(serialized_lock)
+        lock_hash = compute_hash(serialized_lock)
         db = _open_registry(self.study.root)
         try:
             existing_lock = db.execute(
@@ -145,7 +277,7 @@ class Lifecycle:
                 "VALUES (?,?,?,?)",
                 (
                     lock_hash,
-                    canonical_json(lock_record),
+                    serialized_lock,
                     LifecycleState.LOCKED.value,
                     _utc_now(),
                 ),
@@ -165,7 +297,33 @@ class Lifecycle:
             ).fetchone()
         if row is None:
             raise KeyError(f"Unknown research lock {lock_hash!r}")
-        return ResearchLock(self.study, lock_hash, row[1], json.loads(row[0]))
+        record = json.loads(row[0])
+        if compute_hash(canonical_json(record)) != lock_hash:
+            raise ValueError(f"research lock digest mismatch for {lock_hash!r}")
+        return ResearchLock(self.study, lock_hash, row[1], record)
+
+    def holdout_lineage(self, lock_hash: str) -> dict[str, str]:
+        lock = self.open(lock_hash)
+        if lock.state != LifecycleState.HOLDOUT_EVALUATED.value:
+            raise ValueError("holdout lineage is available only after evaluation")
+        with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
+            row = db.execute(
+                "SELECT holdout_training_hash, holdout_prediction_hash, "
+                "holdout_backtest_hash, fitted_state_digest "
+                "FROM holdout_evaluations WHERE lock_hash = ?",
+                (lock_hash,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("evaluated research lock has no finalized holdout lineage")
+        lineage = {
+            "lock_hash": lock_hash,
+            "holdout_training_hash": row[0],
+            "holdout_prediction_hash": row[1],
+            "holdout_backtest_hash": row[2],
+        }
+        if row[3]:
+            lineage["fitted_state_digest"] = row[3]
+        return lineage
 
     def _validated_holdout_lineage(
         self,
@@ -174,7 +332,7 @@ class Lifecycle:
         holdout_training_hash: str,
         holdout_prediction_hash: str,
         holdout_backtest_hash: str,
-    ) -> tuple[ResearchLock, TrainingResult, PredictionResult, BacktestResult, str]:
+    ) -> tuple[ResearchLock, TrainingResult, PredictionResult, BacktestResult]:
         lock = self.open(lock_hash)
         if lock.state != LifecycleState.LOCKED.value:
             raise ValueError("holdout evaluation requires a LOCKED research lock")
@@ -188,6 +346,7 @@ class Lifecycle:
             warmup_periods=strategy_warmup_periods(lock.record["strategy_spec"]),
         )
         canonical_price_digest = value_digest(canonical_holdout_prices)
+        backtest_spec = backtest.spec() if isinstance(backtest, BacktestResult) else {}
         valid = (
             isinstance(training, TrainingResult)
             and training.complete
@@ -205,8 +364,14 @@ class Lifecycle:
             and backtest.complete
             and backtest.execution_tier == "canonical"
             and backtest.registry_record()["prediction_hash"] == prediction.hash
-            and backtest.spec().get("input_identity", {}).get("prices") == canonical_price_digest
-            and _locked_strategy_projection(backtest.spec())
+            and backtest_spec.get("input_identity", {}).get("prices") == canonical_price_digest
+            and _valid_holdout_decision(
+                self.study,
+                lock.record["strategy_spec"],
+                backtest_spec,
+                prediction.hash,
+            )
+            and _locked_strategy_projection(backtest_spec)
             == _locked_strategy_projection(lock.record["strategy_spec"])
         )
         if not valid:
@@ -216,13 +381,7 @@ class Lifecycle:
         assert isinstance(training, TrainingResult)
         assert isinstance(prediction, PredictionResult)
         assert isinstance(backtest, BacktestResult)
-        lineage = {
-            "lock_hash": lock_hash,
-            "holdout_training_hash": training.hash,
-            "holdout_prediction_hash": prediction.hash,
-            "holdout_backtest_hash": backtest.hash,
-        }
-        return lock, training, prediction, backtest, compute_hash(canonical_json(lineage))
+        return lock, training, prediction, backtest
 
     def stage_holdout(
         self,
@@ -231,10 +390,11 @@ class Lifecycle:
         holdout_training_hash: str,
         holdout_prediction_hash: str,
         holdout_backtest_hash: str,
+        fitted_state_digest: str | None = None,
     ) -> ResearchLock:
         self.study.require_writable()
         self.study.activate()
-        lock, training, prediction, backtest, lineage_digest = self._validated_holdout_lineage(
+        lock, training, prediction, backtest = self._validated_holdout_lineage(
             lock_hash,
             holdout_training_hash=holdout_training_hash,
             holdout_prediction_hash=holdout_prediction_hash,
@@ -245,18 +405,37 @@ class Lifecycle:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
                 "SELECT holdout_training_hash, holdout_prediction_hash, "
-                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                "holdout_backtest_hash, fitted_state_digest, lineage_digest "
+                "FROM holdout_staging WHERE lock_hash = ?",
                 (lock_hash,),
             ).fetchone()
-            expected = (training.hash, prediction.hash, backtest.hash, lineage_digest)
+            if fitted_state_digest is not None and not fitted_state_digest:
+                raise ValueError("fitted-state digest cannot be empty")
+            lineage = {
+                "lock_hash": lock_hash,
+                "holdout_training_hash": training.hash,
+                "holdout_prediction_hash": prediction.hash,
+                "holdout_backtest_hash": backtest.hash,
+            }
+            if fitted_state_digest is not None:
+                lineage["fitted_state_digest"] = fitted_state_digest
+            lineage_digest = compute_hash(canonical_json(lineage))
+            expected = (
+                training.hash,
+                prediction.hash,
+                backtest.hash,
+                fitted_state_digest,
+                lineage_digest,
+            )
             if existing is not None and existing != expected:
                 raise ValueError("immutable staged holdout lineage conflict")
             if existing is None:
                 db.execute(
                     "INSERT INTO holdout_staging "
                     "(lock_hash, holdout_training_hash, holdout_prediction_hash, "
-                    "holdout_backtest_hash, lineage_digest, staged_at) VALUES (?,?,?,?,?,?)",
-                    (lock_hash, *expected[:3], lineage_digest, _utc_now()),
+                    "holdout_backtest_hash, fitted_state_digest, lineage_digest, staged_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (lock_hash, *expected, _utc_now()),
                 )
             db.commit()
         except Exception:
@@ -272,18 +451,28 @@ class Lifecycle:
         with closing(sqlite3.connect(self.study.root / "run_log" / "registry.db")) as db:
             staged = db.execute(
                 "SELECT holdout_training_hash, holdout_prediction_hash, "
-                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                "holdout_backtest_hash, fitted_state_digest, lineage_digest "
+                "FROM holdout_staging WHERE lock_hash = ?",
                 (lock_hash,),
             ).fetchone()
         if staged is None:
             raise ValueError("holdout artifacts must be staged before finalization")
-        _, training, prediction, backtest, lineage_digest = self._validated_holdout_lineage(
+        _, training, prediction, backtest = self._validated_holdout_lineage(
             lock_hash,
             holdout_training_hash=staged[0],
             holdout_prediction_hash=staged[1],
             holdout_backtest_hash=staged[2],
         )
-        if lineage_digest != staged[3]:
+        lineage = {
+            "lock_hash": lock_hash,
+            "holdout_training_hash": training.hash,
+            "holdout_prediction_hash": prediction.hash,
+            "holdout_backtest_hash": backtest.hash,
+        }
+        if staged[3] is not None:
+            lineage["fitted_state_digest"] = staged[3]
+        lineage_digest = compute_hash(canonical_json(lineage))
+        if lineage_digest != staged[4]:
             raise ValueError("staged holdout lineage digest does not validate")
 
         db = _open_registry(self.study.root)
@@ -291,7 +480,8 @@ class Lifecycle:
             db.execute("BEGIN IMMEDIATE")
             current_staged = db.execute(
                 "SELECT holdout_training_hash, holdout_prediction_hash, "
-                "holdout_backtest_hash, lineage_digest FROM holdout_staging WHERE lock_hash = ?",
+                "holdout_backtest_hash, fitted_state_digest, lineage_digest "
+                "FROM holdout_staging WHERE lock_hash = ?",
                 (lock_hash,),
             ).fetchone()
             if current_staged != staged:
@@ -304,12 +494,14 @@ class Lifecycle:
             db.execute(
                 "INSERT INTO holdout_evaluations "
                 "(lock_hash, holdout_training_hash, holdout_prediction_hash, "
-                "holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
+                "holdout_backtest_hash, fitted_state_digest, evaluated_at) "
+                "VALUES (?,?,?,?,?,?)",
                 (
                     lock_hash,
                     training.hash,
                     prediction.hash,
                     backtest.hash,
+                    staged[3],
                     _utc_now(),
                 ),
             )

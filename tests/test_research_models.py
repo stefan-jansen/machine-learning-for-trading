@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import weakref
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -868,24 +869,191 @@ def test_linear_runner_persists_complete_reusable_result(tmp_path, monkeypatch) 
     ]
 
 
+def test_thread_limit_does_not_leak_into_families_that_already_record_threads(
+    tmp_path, monkeypatch
+) -> None:
+    """gbm, tabular_dl and deep_learning must be byte-identical before and after this change.
+
+    They already record thread state - gbm carries num_threads in _GBM_REQUEST_FIELDS,
+    tabular_dl and deep_learning carry numerics blocks. Adding a second thread field to a
+    family that already has one moves its training identities and buys nothing. The pinning
+    helper is shared; the `numerics.thread_limit` field is applied to linear and causal only.
+    """
+    gbm_study = _gbm_study(tmp_path / "gbm", monkeypatch)
+    gbm_spec = (
+        gbm_study.model(
+            family="gbm",
+            label="fwd_ret_1d",
+            config_name="leaves_7_mse",
+            overrides={"device": "cpu", "max_bin": 63},
+        )
+        .resolve()
+        .spec
+    )
+    gbm_numerics = gbm_spec["computation"].get("numerics", {})
+    assert "thread_limit" not in gbm_numerics, (
+        "thread_limit leaked into gbm, which already records num_threads; "
+        "this moves every gbm training identity"
+    )
+
+    tabm_study, *_ = _tabm_study(tmp_path / "tabm", monkeypatch)
+    tabm_spec = (
+        tabm_study.model(family="tabular_dl", label="fwd_ret_1d", config_name="tabm_s")
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in tabm_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into tabular_dl, which already carries a numerics block"
+    )
+
+    # deep_learning builds its own numerics block at utils/deep_learning.py, so it is the third
+    # family this scope protects and equally likely to be caught by a future widening.
+    from tests.test_deep_learning_adapter import _resolve_nlinear_request
+
+    _, _, sequence_resolved = _resolve_nlinear_request(tmp_path / "sequence", monkeypatch)
+    sequence_spec = sequence_resolved.spec
+    assert "thread_limit" not in sequence_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into deep_learning, which already carries a numerics block"
+    )
+    assert sequence_spec["computation"]["numerics"]["num_threads"]
+
+    # latent_factors records num_threads too (utils/latent_factors/adapter.py), so it is the
+    # fourth family this scope protects and equally exposed to a future widening.
+    latent_study = _latent_study(tmp_path / "latent", monkeypatch)
+    latent_spec = (
+        latent_study.model(
+            family="latent_factors",
+            label="fwd_ret_1d",
+            config_name="pca",
+            overrides={"device": "cpu"},
+        )
+        .resolve()
+        .spec
+    )
+    assert "thread_limit" not in latent_spec["computation"].get("numerics", {}), (
+        "thread_limit leaked into latent_factors, which already records num_threads"
+    )
+
+
+def test_linear_pins_the_thread_pool_and_records_it_in_identity(tmp_path, monkeypatch) -> None:
+    """A linear fit is a deterministic function of the thread pool, not of the data alone.
+
+    Coordinate descent and the BLAS kernels reduce in thread order, so two runs can agree on
+    training_hash and prediction_hash and still differ in the coefficients. Measured on real
+    crypto data: lasso_f0.08 at identical training_hash produced prediction digests
+    37352b2ff14a4b6a uncapped (pools 16/24) against c81ca6b5302e1dc2 capped. Recording the
+    limit is what makes the identity cover the computation.
+    """
+    import threadpoolctl
+
+    study = _linear_study(tmp_path, monkeypatch)
+    request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
+    resolved = request.resolve()
+
+    numerics = resolved.spec["computation"]["numerics"]
+    assert numerics["thread_limit"] == linear.LINEAR_THREAD_LIMIT
+    assert numerics["deterministic_reduction"] is True
+
+    other = deepcopy(resolved.spec)
+    other["computation"]["numerics"]["thread_limit"] = linear.LINEAR_THREAD_LIMIT + 1
+    assert linear.training_hash_from_spec(other) != linear.training_hash_from_spec(resolved.spec)
+
+    # Observed from inside the limited block rather than by trusting the source: the runner
+    # calls _fold_predictions immediately after model.fit, within the same context manager.
+    observed: list[int] = []
+    original_predictions = linear._fold_predictions
+
+    def recording_predictions(model, fold, context):
+        observed.extend(
+            info["num_threads"]
+            for info in threadpoolctl.threadpool_info()
+            if info["user_api"] in {"openmp", "blas"}
+        )
+        return original_predictions(model, fold, context)
+
+    monkeypatch.setattr(linear, "_fold_predictions", recording_predictions)
+    request.run()
+
+    assert observed, "no thread pool was observed during the linear fit"
+    assert set(observed) == {linear.LINEAR_THREAD_LIMIT}, (
+        f"linear fitted with pools at {sorted(set(observed))}, not {linear.LINEAR_THREAD_LIMIT}"
+    )
+
+
+def _observe_fold_preparation(monkeypatch) -> list[int]:
+    """Record which folds are actually built, in the order they are built.
+
+    Preparation is shared across configurations and cached between runs, so the seam that says
+    how much work a run did is where a fold is constructed - not where one is asked for.
+    """
+    from case_studies.utils import folds as folds_module
+
+    folds_module.clear_memo()
+    built: list[int] = []
+    original = folds_module.standardized_fold
+
+    def observed(raw, *args, **kwargs):
+        built.append(int(raw.fold))
+        return original(raw, *args, **kwargs)
+
+    monkeypatch.setattr(folds_module, "standardized_fold", observed)
+    return built
+
+
+def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
+    """Record every fold built, paired with the sampling fraction it was built under.
+
+    Two configurations that subsample differently are not fitted on the same rows, so they need
+    separate fold sets; this is where that separation is visible.
+    """
+    from case_studies.utils import folds as folds_module
+
+    folds_module.clear_memo()
+    built: list[tuple[int, float]] = []
+    original = folds_module.prepare_raw_folds
+
+    def observed(mds, splits, *, train_sample_frac=1.0, **kwargs):
+        prepared = original(mds, splits, train_sample_frac=train_sample_frac, **kwargs)
+        built.extend((int(fold.fold), float(train_sample_frac)) for fold in prepared)
+        return prepared
+
+    monkeypatch.setattr(folds_module, "prepare_raw_folds", observed)
+    return built
+
+
+def test_a_fold_set_too_large_to_hold_is_released_as_it_is_consumed(tmp_path, monkeypatch) -> None:
+    """Holding every fold is worth 0.9 GB on etfs and 44 GB on nasdaq100_microstructure.
+
+    Above the budget nothing is retained, so a panel run costs one fold at a time rather than the
+    whole set - the bound the fold-major batch loop was written for.
+    """
+    from case_studies.utils import folds as folds_module
+
+    study = _linear_study(tmp_path, monkeypatch)
+    monkeypatch.setenv("ML4T_FOLD_MEMO_BUDGET_BYTES", "0")
+    folds_module.clear_memo()
+
+    study.model(family="linear", label="fwd_ret_1d", config_name="ridge").run()
+
+    assert not folds_module._STANDARDIZED_MEMO
+    assert not folds_module._RAW_MEMO
+
+
+def test_a_fold_set_within_budget_is_held_and_shared(tmp_path, monkeypatch) -> None:
+    from case_studies.utils import folds as folds_module
+
+    study = _linear_study(tmp_path, monkeypatch)
+    folds_module.clear_memo()
+
+    study.model(family="linear", label="fwd_ret_1d", config_name="ridge").run()
+
+    assert folds_module._STANDARDIZED_MEMO
+
+
 def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
     study = _linear_study(tmp_path / "batch", monkeypatch)
     individual_study = _linear_study(tmp_path / "individual", monkeypatch)
-    original_prepare = modeling.prepare_single_fold
-    prepared_folds: list[int] = []
-    released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
-
-    def observed_prepare(*args, **kwargs):
-        gc.collect()
-        if released_arrays:
-            assert released_arrays[-1]() is None
-        fold = original_prepare(*args, **kwargs)
-        assert fold is not None
-        prepared_folds.append(int(fold["fold"]))
-        released_arrays.append(weakref.ref(fold["X_train"]))
-        return fold
-
-    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    prepared_folds = _observe_fold_preparation(monkeypatch)
     requests = [
         study.model(
             family="linear",
@@ -898,7 +1066,6 @@ def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, m
 
     batch = run_models(study, requests=requests)
     batch_prepared_folds = list(prepared_folds)
-    monkeypatch.setattr(linear, "prepare_single_fold", original_prepare)
     individual = (
         individual_study.model(
             family="linear",
@@ -911,8 +1078,9 @@ def test_linear_batch_is_fold_major_and_matches_individual_execution(tmp_path, m
     )
     gc.collect()
 
+    # Each fold is built once for the whole batch. It used to be built once per configuration
+    # per pass, which is what made resolving 28 etfs configurations cost 313 seconds.
     assert batch_prepared_folds == [0, 1]
-    assert released_arrays[-1]() is None
     assert batch.runs[0].training.hash == individual.training.hash
     batch_predictions = batch.runs[0].predictions[0].load()
     individual_predictions = individual.predictions[0].load()
@@ -934,8 +1102,6 @@ def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
     tmp_path, monkeypatch
 ) -> None:
     study = _linear_study(tmp_path, monkeypatch)
-    original_prepare = modeling.prepare_single_fold
-    prepared_folds: list[int] = []
 
     def load_preset(config_name):
         if config_name == "lasso":
@@ -954,14 +1120,8 @@ def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
             "params": {"alpha": 1.0},
         }
 
-    def observed_prepare(*args, **kwargs):
-        fold = original_prepare(*args, **kwargs)
-        assert fold is not None
-        prepared_folds.append(int(fold["fold"]))
-        return fold
-
     monkeypatch.setattr(linear, "_load_preset", load_preset)
-    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    prepared_folds = _observe_fold_preparation(monkeypatch)
 
     batch = run_models(
         study,
@@ -975,13 +1135,73 @@ def test_linear_batch_resolves_fold_dependent_parameters_before_fitting(
         ],
     )
 
-    assert prepared_folds == [0, 1, 0, 1]
+    # Lasso's alpha is a fraction of each fold's own degeneracy threshold, so it cannot be known
+    # until that fold exists. Both folds are built once and both configurations read them.
+    assert prepared_folds == [0, 1]
     assert all(run.predictions[0].complete for run in batch.runs)
     lasso_params = batch.runs[1].training.spec()["computation"]["model"]["effective_params_by_fold"]
     assert set(lasso_params) == {"0", "1"}
     assert all(params["alpha"] > 0 for params in lasso_params.values())
     assert all("alpha_frac" not in params for params in lasso_params.values())
-    assert all(run.diagnostics["base_fold_preparations"] == 4 for run in batch.runs)
+    assert all(run.diagnostics["base_fold_preparations"] == 2 for run in batch.runs)
+
+
+def test_linear_model_plan_reuses_one_materialization_and_one_execution_fold_pass(
+    tmp_path, monkeypatch
+) -> None:
+    study = _linear_study(tmp_path, monkeypatch)
+    original_load = linear.load_modeling_dataset
+    loads = 0
+
+    def observed_load(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return original_load(*args, **kwargs)
+
+    def load_preset(config_name):
+        if config_name == "lasso":
+            return {
+                "config_name": config_name,
+                "family": "linear",
+                "library": "sklearn",
+                "model_class": "Lasso",
+                "params": {"alpha_frac": 0.5, "max_iter": 5000},
+            }
+        return {
+            "config_name": config_name,
+            "family": "linear",
+            "library": "sklearn",
+            "model_class": "Ridge",
+            "params": {"alpha": 1.0},
+        }
+
+    monkeypatch.setattr(linear, "load_modeling_dataset", observed_load)
+    monkeypatch.setattr(linear, "_load_preset", load_preset)
+    prepared_folds = _observe_fold_preparation(monkeypatch)
+    requests = [
+        study.model(family="linear", label="fwd_ret_1d", config_name=config_name)
+        for config_name in ("ridge", "lasso")
+    ]
+
+    plan = plan_models(study, requests=requests)
+    population = plan.create_population(
+        name="planned-linear-checkpoints",
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        population.require_complete()
+    execution = plan.run()
+
+    assert loads == 1
+    assert prepared_folds == [0, 1]
+    assert tuple(run.training.hash for run in execution.runs) == plan.expected_training_hashes
+    assert (
+        tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
+        == plan.expected_prediction_hashes
+    )
+    # Planning materialised both folds; execution built none, which is what "one
+    # materialization and one execution fold pass" now costs.
+    assert all(run.diagnostics["base_fold_preparations"] == 0 for run in execution.runs)
+    assert population.require_complete() == plan.expected_prediction_hashes
 
 
 def test_linear_model_plan_reuses_one_materialization_and_one_execution_fold_pass(
@@ -1053,9 +1273,7 @@ def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
 ) -> None:
     first = _linear_study(tmp_path / "first", monkeypatch)
     second = _linear_study(tmp_path / "second", monkeypatch)
-    original_prepare = modeling.prepare_single_fold
     original_load = linear.load_modeling_dataset
-    preparation: list[tuple[int, float]] = []
     load_count = 0
 
     def observed_load(*args, **kwargs):
@@ -1063,13 +1281,7 @@ def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
         load_count += 1
         return original_load(*args, **kwargs)
 
-    def observed_prepare(*args, **kwargs):
-        fold = original_prepare(*args, **kwargs)
-        assert fold is not None
-        preparation.append((int(fold["fold"]), float(kwargs["train_sample_frac"])))
-        return fold
-
-    monkeypatch.setattr(linear, "prepare_single_fold", observed_prepare, raising=False)
+    preparation = _observe_fold_sets(monkeypatch)
     monkeypatch.setattr(linear, "load_modeling_dataset", observed_load)
 
     def requests(study, order):
@@ -1096,6 +1308,12 @@ def test_linear_batch_separates_incompatible_sampling_and_is_order_invariant(
     forward_load_count = load_count
     preparation.clear()
     load_count = 0
+    # The second study has the same inputs, so it would otherwise be served the held fold sets -
+    # correct, but it would measure nothing about the order the second run prepares them in.
+    from case_studies.utils import folds as _folds_module
+
+    _folds_module.clear_memo()
+    linear.clear_input_memo()
     reverse = run_models(
         second,
         requests=requests(second, [(3.0, 0.5), (2.0, 0.75), (1.0, 0.75)]),
@@ -1174,8 +1392,8 @@ def test_linear_batch_failure_preserves_and_reuses_completed_candidate_folds(
     assert recovered_by_alpha[3.0].diagnostics["cache_hit"] is True
     assert recovered_by_alpha[2.0].diagnostics["reused_folds"] == [0]
     assert recovered_by_alpha[2.0].diagnostics["fitted_folds"] == [1]
-    assert recovered_by_alpha[2.0].diagnostics["base_fold_preparations"] == 1
-    assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {1}
+    # The interrupted run built these folds; recovery refits one of them without rebuilding it.
+    assert {run.diagnostics["base_fold_preparations"] for run in recovered.runs} == {0}
     assert study.predictions.table().filter(pl.col("complete")).height == 3
     assert population.require_complete() == plan.expected_prediction_hashes
 
@@ -1208,7 +1426,7 @@ def test_linear_batch_rejects_a_modified_fitted_preprocessor(tmp_path, monkeypat
 
     assert recovered.runs[0].diagnostics["reused_folds"] == [1]
     assert recovered.runs[0].diagnostics["fitted_folds"] == [0]
-    assert recovered.runs[0].diagnostics["base_fold_preparations"] == 1
+    assert recovered.runs[0].diagnostics["base_fold_preparations"] == 0
     assert recovered.runs[1].diagnostics["cache_hit"] is True
 
 
@@ -1290,23 +1508,81 @@ def test_linear_runner_replays_valid_models_after_registration_interrupt(
         "reused_folds": [0, 1],
         "fitted_folds": [],
     }
-    runtime = json.loads((model_dir.parent / "runtime.json").read_text())
-    assert runtime["elapsed_s"] > 0
+    elapsed, resources = _recorded_runtime(study, recovered.training.hash)
+    assert elapsed > 0
+    assert resources["process_peak_rss_bytes"] > 0
 
 
-def test_linear_runtime_update_is_atomic(tmp_path, monkeypatch) -> None:
-    runtime_path = tmp_path / "runtime.json"
-    runtime_path.write_text('{"status": "registered"}\n')
+def _recorded_runtime(study, training_hash: str) -> tuple[float, dict]:
+    """What the registry says a training run cost.
 
-    def interrupt_replace(*args, **kwargs):
-        raise RuntimeError("interrupted runtime update")
+    The measurement lives on the row rather than in the run's ``runtime.json``, which is compared
+    byte for byte when the same identity is registered again and so cannot carry one.
+    """
+    import sqlite3
 
-    monkeypatch.setattr(linear.os, "replace", interrupt_replace)
+    with sqlite3.connect(study.storage_root() / "run_log" / "registry.db") as db:
+        row = db.execute(
+            "SELECT elapsed_s, runtime_json FROM training_runs WHERE training_hash = ?",
+            (training_hash,),
+        ).fetchone()
+    assert row is not None, f"no training row for {training_hash}"
+    return row[0], (json.loads(row[1]) if row[1] else {}).get("resources", {})
+
+
+def test_linear_records_what_a_run_cost_against_its_registry_row(tmp_path, monkeypatch) -> None:
+    """A run that does not record its own cost cannot be used to schedule the next one.
+
+    Every row the current path produced carried a NULL ``elapsed_s`` while the value sat in the
+    run's ``runtime.json``, where no query looks.
+    """
+    study = _linear_study(tmp_path, monkeypatch)
+    run = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").run()
+
+    elapsed, resources = _recorded_runtime(study, run.training.hash)
+
+    assert elapsed > 0
+    assert resources["cpu_s"] > 0
+    assert resources["cores_used"] > 0
+    assert resources["process_peak_rss_bytes"] > 0
+
+
+def test_a_failed_runtime_update_leaves_the_row_as_it_was(tmp_path, monkeypatch) -> None:
+    """The measurement is written after the run, so a failure there must not lose the row."""
+    from case_studies.utils.registry import registration
+
+    study = _linear_study(tmp_path, monkeypatch)
+    run = study.model(family="linear", label="fwd_ret_1d", config_name="ridge").run()
+    before = _recorded_runtime(study, run.training.hash)
+
+    # The failure has to land after the UPDATE. Patching canonical_json, as this used to, raises
+    # while the argument tuple is still being built, so the row survived because nothing was ever
+    # written and the run this describes never happened. Failing the commit is the real case: the
+    # statement ran against the row, and its effect must not survive.
+    class FailsToCommit:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def commit(self):
+            raise RuntimeError("interrupted runtime update")
+
+    real_open = registration._open_registry
+    monkeypatch.setattr(
+        registration, "_open_registry", lambda case_dir: FailsToCommit(real_open(case_dir))
+    )
     with pytest.raises(RuntimeError, match="interrupted runtime update"):
-        linear._write_runtime_fields(runtime_path, elapsed_s=1.0)
+        registration.record_training_runtime(
+            study.case_study,
+            run.training.hash,
+            case_dir=study.storage_root(),
+            measured={"elapsed_s": 999.0},
+        )
 
-    assert json.loads(runtime_path.read_text()) == {"status": "registered"}
-    assert list(tmp_path.glob(".runtime.json.*.tmp")) == []
+    monkeypatch.setattr(registration, "_open_registry", real_open)
+    assert _recorded_runtime(study, run.training.hash) == before
 
 
 def test_linear_override_changes_training_identity(tmp_path, monkeypatch) -> None:
@@ -1506,22 +1782,29 @@ def test_gbm_runner_persists_every_declared_checkpoint(tmp_path, monkeypatch) ->
 
 
 def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monkeypatch) -> None:
+    # A fold set above the memo budget is not held, and that is the case this guards: on
+    # us_equities_panel one set is 90 GB, so the batch path must release each fold as it takes the
+    # next. Below the budget the set is deliberately held and shared, which no large panel reaches.
+    monkeypatch.setenv("ML4T_FOLD_MEMO_BUDGET_BYTES", "1")
+    from case_studies.utils import folds as fold_utils
+
+    fold_utils.clear_memo()
     study = _gbm_study(tmp_path / "batch", monkeypatch)
     individual_study = _gbm_study(tmp_path / "individual", monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     prepared: list[list[int]] = []
     released_arrays: list[weakref.ReferenceType[np.ndarray]] = []
 
-    def observed_prepare(dataset, splits, *args, **kwargs):
+    def observed_prepare(mds, splits, *args, **kwargs):
         gc.collect()
         if released_arrays:
             assert released_arrays[-1]() is None
         prepared.append([int(split["fold"]) for split in splits])
-        folds = original_prepare(dataset, splits, *args, **kwargs)
+        folds = original_prepare(mds, splits, *args, **kwargs)
         released_arrays.append(weakref.ref(folds[0]["X_train"]))
         return folds
 
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
     requests = [
         study.model(
             family="gbm",
@@ -1540,7 +1823,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
         population.require_complete()
     batch = plan.run()
     batch_preparations = list(prepared)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", original_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", original_prepare)
     individual = (
         individual_study.model(
             family="gbm",
@@ -1574,7 +1857,7 @@ def test_gbm_batch_is_fold_major_and_matches_individual_execution(tmp_path, monk
 
 def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatch) -> None:
     study = _gbm_study(tmp_path, monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     prepared: list[int] = []
     prepared_label_std: dict[str, float] = {}
 
@@ -1608,7 +1891,7 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
         return folds
 
     monkeypatch.setattr(modeling, "load_configs", configs)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
 
     batch = run_models(
         study,
@@ -1633,7 +1916,7 @@ def test_gbm_batch_resolves_fold_dependent_huber_parameters(tmp_path, monkeypatc
 def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypatch) -> None:
     first = _gbm_study(tmp_path / "first", monkeypatch)
     second = _gbm_study(tmp_path / "second", monkeypatch)
-    original_prepare = gbm_utils.prepare_gbm_folds
+    original_prepare = gbm_utils.prepare_gbm_folds_from_mds
     original_load = modeling.load_modeling_dataset
     preparation: list[tuple[int, float]] = []
     load_count = 0
@@ -1651,7 +1934,7 @@ def test_gbm_batch_separates_sampling_and_is_order_invariant(tmp_path, monkeypat
         return folds
 
     monkeypatch.setattr(modeling, "load_modeling_dataset", observed_load)
-    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds", observed_prepare)
+    monkeypatch.setattr(gbm_utils, "prepare_gbm_folds_from_mds", observed_prepare)
 
     def requests(study, order):
         return [
@@ -1798,6 +2081,8 @@ def test_gbm_batch_rejects_a_modified_booster(tmp_path, monkeypatch) -> None:
 
     assert recovered.runs[0].diagnostics["reused_folds"] == [1]
     assert recovered.runs[0].diagnostics["fitted_folds"] == [0]
+    # Gradient boosting still prepares its own folds; it moves onto the shared preparation
+    # before its rebuild starts, and this count drops to zero then.
     assert recovered.runs[0].diagnostics["base_fold_preparations"] == 1
     assert recovered.runs[1].diagnostics["cache_hit"] is True
 
@@ -2638,3 +2923,61 @@ def test_model_and_causal_adapters_have_one_extension_seam() -> None:
     assert get_adapter("causal", "fixture_causal").__name__ == "case_studies.utils.causal"
     assert "tabular_dl" in {binding.name for binding in registered_adapters("model")}
     assert "dml" in {binding.name for binding in registered_adapters("causal")}
+
+
+def test_published_logistic_presets_resolve_to_the_model_their_name_claims() -> None:
+    """A preset name must describe the model it produces, for every preset in the family.
+
+    `logistic_none` declared only max_iter and solver, so it inherited scikit-learn's defaults
+    of penalty="l2", C=1.0 and fitted coefficients identical to `logistic_l2_C1.0`. The
+    published menu advertised an unpenalized baseline that has never existed, and six training
+    menus across four case studies reference it.
+
+    Checking `logistic_none` alone would leave the rule unenforced everywhere else: the six
+    `logistic_l2_*` presets take their l2 from the same constructor default, and a collision
+    check catches a mistyped C only when it happens to collide with a sibling - `C: 5.0` on
+    `logistic_l2_C10.0` would pass. Deriving the expectation from the stem checks the claim
+    each name makes rather than only that the names differ.
+    """
+    import re
+    from pathlib import Path
+
+    from sklearn.linear_model import LogisticRegression
+
+    from utils.paths import REPO_ROOT
+
+    preset_dir = Path(REPO_ROOT) / "case_studies" / "config" / "logistic"
+    presets = {
+        path.stem: yaml.safe_load(path.read_text())["params"]
+        for path in sorted(preset_dir.glob("*.yaml"))
+    }
+    assert presets, "no published logistic presets found"
+
+    effective = {}
+    for name, params in presets.items():
+        resolved = LogisticRegression(**params).get_params()
+        effective[name] = (resolved["penalty"], resolved["C"], resolved["solver"])
+
+        stem = name.removeprefix("logistic_")
+        if stem == "none":
+            expected_penalty, expected_c = None, None
+        else:
+            match = re.fullmatch(r"(l1|l2)_C([0-9.]+)", stem)
+            assert match, f"unrecognised logistic preset name {name!r}"
+            expected_penalty, expected_c = match.group(1), float(match.group(2))
+
+        assert resolved["penalty"] == expected_penalty, (
+            f"{name} resolves to penalty={resolved['penalty']!r}, "
+            f"but its name claims {expected_penalty!r}"
+        )
+        if expected_c is not None:
+            assert resolved["C"] == expected_c, (
+                f"{name} resolves to C={resolved['C']}, but its name claims {expected_c}"
+            )
+
+    duplicates = {
+        signature: sorted(n for n, sig in effective.items() if sig == signature)
+        for signature in set(effective.values())
+        if sum(sig == signature for sig in effective.values()) > 1
+    }
+    assert not duplicates, f"published logistic presets resolve to one model: {duplicates}"

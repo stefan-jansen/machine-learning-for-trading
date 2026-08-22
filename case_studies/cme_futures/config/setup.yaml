@@ -334,13 +334,18 @@ modeling:
   gbm:
     libraries: [lightgbm]
     preset: default
-    device: gpu
-    max_bin: 63
+    device: cpu
+    # LightGBM's own CPU default. 63 is the GPU default and was carried over with the
+    # device when these runs moved off the GPU, so every CPU fit was quantizing the design
+    # matrix into a quarter of the bins the library would have used. Coarser bins are
+    # faster and lose split points; the reader running this on a CPU gets what the
+    # documentation describes.
+    max_bin: 255
   latent_factors:
     persistent_entities: true
     model_kwargs:
       sdf:
-        checkpoint_epochs: [256, 512, 768, 1024, 1280]
+        checkpoint_epochs: [256, 512, 768, 1024]  # conditional-relative; publishes global 256..1280
         beta_checkpoint_epochs: [256]
         beta_default_checkpoint: 256
 

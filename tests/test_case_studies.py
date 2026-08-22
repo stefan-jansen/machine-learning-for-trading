@@ -144,6 +144,7 @@ def test_case_study_pipeline(
         timeout=timeout,
         output_dir=seeded_output_dir,
         data_dir=populated_data_dir,
+        research_preview=True,
     )
 
     if result["status"] == "error":

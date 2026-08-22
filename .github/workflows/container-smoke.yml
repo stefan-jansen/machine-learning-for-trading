@@ -14,6 +14,11 @@
 
 name: Container Smoke
 
+# Collapse repeated pushes to one branch into a single run; see test.yml for the reasoning.
+concurrency:
+  group: smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   schedule:
     - cron: '0 6 * * 1'   # Monday 06:00 UTC

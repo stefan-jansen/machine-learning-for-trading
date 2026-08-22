@@ -25,7 +25,7 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +43,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
+from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
 
@@ -76,6 +77,9 @@ class TabMResearchContext:
     temporal_feature_names: tuple[str, ...]
     expected_keys: pl.DataFrame
     runtime_provenance: dict[str, Any]
+    prediction_split: str = "validation"
+    published_checkpoints: tuple[int, ...] | None = None
+    immutable_recovery: bool = False
 
 
 def _sha256(path: Path) -> str:
@@ -239,6 +243,7 @@ def _tabm_class_weights_by_fold(
 
 
 def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
+    entity_col = mds.entity_cols[0]
     frames = []
     for split in splits:
         date_dtype = mds.dataset.schema[mds.date_col]
@@ -251,7 +256,7 @@ def _tabm_expected_keys(mds, splits: list[dict[str, Any]]) -> pl.DataFrame:
         ).drop_nulls([mds.label_col, *([mds.eval_label_col] if mds.eval_label_col else [])])
         frames.append(
             frame.select(
-                pl.col(mds.entity_cols[0]).alias("symbol"),
+                pl.col(entity_col).alias("symbol"),
                 pl.col(mds.date_col).alias("timestamp"),
             ).with_columns(pl.lit(int(split["fold"]), dtype=pl.Int64).alias("fold"))
         )
@@ -279,8 +284,11 @@ def _resolve_model_request_from_materialized(
     unknown_reductions = set(reductions) - _TABM_PREVIEW_FIELDS
     if unknown_reductions:
         raise ValueError(f"unsupported TabM preview reductions: {sorted(unknown_reductions)}")
-    if mds.date_col != "timestamp" or mds.entity_cols[:1] != ["symbol"]:
-        raise ValueError("TabM runner requires canonical symbol and timestamp keys")
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("TabM runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+    if entity_col not in {"product", "symbol"}:
+        raise ValueError(f"TabM runner does not support entity key {entity_col!r}")
     splits, cv_record = _tabm_splits(mds, request)
     try:
         configured = configured_by_name[request["config_name"]]
@@ -379,7 +387,7 @@ def _resolve_model_request_from_materialized(
         label_col=mds.label_col,
         eval_label_col=mds.eval_label_col,
         date_col=mds.date_col,
-        entity_col=mds.entity_cols[0],
+        entity_col=entity_col,
         task_type=mds.task_type,
         class_values=tuple(mds.class_values),
         class_weights_by_fold=class_weights_by_fold,
@@ -434,6 +442,155 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def reconstruct_locked_request(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+):
+    """Reconstruct a TabM holdout fit without consulting a mutable preset."""
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+    from case_studies.research.models import (
+        ResolvedModelRequest,
+        locked_holdout_split,
+        validate_locked_expected_keys,
+    )
+    from case_studies.utils.registry import training_hash_from_spec
+    from utils.modeling import load_modeling_dataset
+
+    if checkpoint_kind != "epoch" or checkpoint_value is None:
+        raise ValueError("TabM holdout requires one locked epoch checkpoint")
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+    computation = spec["computation"]
+    if computation.get("sampling") != {"max_symbols": 0}:
+        raise ValueError("locked TabM holdout requires an unreduced canonical dataset")
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or mds.entity_cols[:1] not in (["symbol"], ["product"]):
+        raise ValueError("locked TabM runner requires canonical entity and timestamp keys")
+    expected_inputs = {
+        "label_artifact": {"digest": label_ref.digest, "name": label_ref.name},
+        "feature_artifacts": mds.input_lineage["artifacts"],
+        "feature_names": list(mds.feature_names),
+        "input_data_spec": mds.input_lineage,
+        "source_identity": _tabm_source_identity(),
+        "runtime_identity": _tabm_runtime_identity(),
+        "preprocessing": {
+            "imputer": {"class": "SimpleImputer", "strategy": "median"},
+            "scaler": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        },
+    }
+    for name, expected_value in expected_inputs.items():
+        if computation.get(name) != expected_value:
+            raise ValueError(f"locked TabM {name} does not match the available computation")
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    if mds.temporal_by_fold is not None and mds.temporal_keys and mds.temporal_feature_names:
+        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+    expected = _tabm_expected_keys(mds, [split])
+    validate_locked_expected_keys(spec, expected)
+
+    model = computation.get("model")
+    if (
+        not isinstance(model, dict)
+        or model.get("class") != "TabMModel"
+        or model.get("implementation") != "pytorch"
+        or not isinstance(model.get("params"), dict)
+    ):
+        raise ValueError("locked TabM model specification is unsupported")
+    params = dict(model["params"])
+    required_training = {
+        name: params.pop(name, None)
+        for name in (
+            "batch_size",
+            "checkpoint_interval",
+            "n_epochs",
+        )
+    }
+    if any(value is None for value in required_training.values()):
+        raise ValueError("locked TabM model omits exact training parameters")
+    config = _resolve_tabm_config(
+        {
+            "family": "tabular_dl",
+            "library": "tabm",
+            "config_name": str(
+                spec.get("config_name") or f"locked-{training_hash_from_spec(spec)}"
+            ),
+            "params": params,
+            **required_training,
+        },
+        {},
+    )
+    checkpoints = _tabm_checkpoint_epochs(config)
+    schedule = computation.get("checkpoint_schedule")
+    expected_schedule = [{"kind": "epoch", "value": value} for value in checkpoints]
+    if schedule != expected_schedule or checkpoint_value not in checkpoints:
+        raise ValueError("locked TabM checkpoint is absent from its exact schedule")
+    task = computation.get("task")
+    class_weight_method = "balanced"
+    if mds.task_type == "classification":
+        if not isinstance(task, dict) or not isinstance(task.get("imbalance"), dict):
+            raise ValueError("locked classification TabM task omits imbalance behavior")
+        class_weight_method = str(task["imbalance"].get("method"))
+    weights = _tabm_class_weights_by_fold(mds, [split], method=class_weight_method)
+    expected_task = {
+        "type": mds.task_type,
+        "class_values": list(mds.class_values),
+        "continuous_eval_label": label_ref.definition.continuous_eval_label,
+    }
+    if mds.task_type == "classification":
+        metrics = ["ic", "accuracy", "balanced_accuracy"]
+        if len(mds.class_values) == 2:
+            metrics[1:1] = ["auc_roc", "log_loss"]
+        expected_task.update(
+            {
+                "metrics": metrics,
+                "imbalance": {
+                    "method": class_weight_method,
+                    "effective_class_weights_by_fold": {
+                        str(fold): list(values) for fold, values in sorted(weights.items())
+                    },
+                },
+            }
+        )
+    if task != expected_task:
+        raise ValueError("locked TabM task behavior does not reproduce exactly")
+    numerics = computation.get("numerics")
+    if not isinstance(numerics, dict):
+        raise ValueError("locked TabM numerics are missing")
+    reproduced_numerics = tabm_runtime_spec(
+        str(numerics.get("device")),
+        seed=int(numerics.get("seed")),
+        num_threads=int(numerics.get("num_threads")),
+    )
+    if numerics != reproduced_numerics or int(spec["seed"]) != int(numerics["seed"]):
+        raise ValueError("locked TabM numerics cannot be reproduced")
+    context = TabMResearchContext(
+        dataset_pd=mds.dataset.to_pandas(),
+        splits=(split,),
+        config=config,
+        feature_names=tuple(mds.feature_names),
+        label_col=mds.label_col,
+        eval_label_col=mds.eval_label_col,
+        date_col=mds.date_col,
+        entity_col=mds.entity_cols[0],
+        task_type=mds.task_type,
+        class_values=tuple(mds.class_values),
+        class_weights_by_fold=weights,
+        temporal_by_fold=mds.temporal_by_fold,
+        temporal_keys=tuple(mds.temporal_keys),
+        temporal_feature_names=tuple(mds.temporal_feature_names),
+        expected_keys=expected,
+        runtime_provenance=_tabm_runtime_provenance(study),
+        prediction_split="holdout",
+        published_checkpoints=(int(checkpoint_value),),
+        immutable_recovery=True,
+    )
+    return ResolvedModelRequest(study, "tabular_dl", spec, context)
+
+
 def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResearchContext):
     from case_studies.research.models import ModelRun
     from case_studies.research.results import PredictionResult, Result, TrainingResult
@@ -442,7 +599,8 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
 
     training_hash = training_hash_from_spec(spec)
     computation = spec.get("computation", spec)
-    checkpoint_values = tuple(item["value"] for item in computation["checkpoint_schedule"])
+    checkpoint_values = tuple(int(item["value"]) for item in computation["checkpoint_schedule"])
+    published = context.published_checkpoints or checkpoint_values
     try:
         training = Result.open(
             study, training_hash, include_preview=spec["execution_tier"] == "preview"
@@ -453,13 +611,13 @@ def _cached_research_run(study: Study, spec: dict[str, Any], context: TabMResear
                 prediction_hash_from_parts(
                     training_hash,
                     checkpoint,
-                    "validation",
+                    context.prediction_split,
                     checkpoint_kind="epoch",
                     identity_version=spec["identity_version"],
                 ),
                 include_preview=spec["execution_tier"] == "preview",
             )
-            for checkpoint in checkpoint_values
+            for checkpoint in published
         )
     except KeyError:
         return None
@@ -515,24 +673,31 @@ def _publish_tabm_predictions(
     computation = spec.get("computation", spec)
     result_key = candidate_key or context.config["config_name"]
     prediction_results = []
-    for checkpoint in (item["value"] for item in computation["checkpoint_schedule"]):
+    published = context.published_checkpoints or tuple(
+        int(item["value"]) for item in computation["checkpoint_schedule"]
+    )
+    for checkpoint in published:
         predictions = (
             result["all_predictions"]
             .filter((pl.col("config") == result_key) & (pl.col("epoch") == checkpoint))
             .drop("config", "epoch")
             .rename({"fold_id": "fold", "y_true": "actual", "y_score": "prediction"})
-            .with_columns(
-                pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
-                pl.col(context.entity_col).cast(context.expected_keys.schema[context.entity_col]),
-                pl.col("fold").cast(context.expected_keys.schema["fold"]),
-            )
+        )
+        # The expected keys are the internal contract and always name the entity
+        # `symbol`; the runner emits the reader-facing key the case study uses.
+        if context.entity_col != "symbol":
+            predictions = predictions.rename({context.entity_col: "symbol"})
+        predictions = predictions.with_columns(
+            pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
+            pl.col("symbol").cast(context.expected_keys.schema["symbol"]),
+            pl.col("fold").cast(context.expected_keys.schema["fold"]),
         )
         prediction_results.append(
             study.results.publish_predictions(
                 training,
                 checkpoint_kind="epoch",
                 checkpoint_value=int(checkpoint),
-                split="validation",
+                split=context.prediction_split,
                 predictions=predictions,
                 expected_keys=context.expected_keys,
                 task_type=context.task_type,
@@ -679,22 +844,58 @@ class _TabMRecovery:
         if diagnostic.exists():
             os.replace(diagnostic, quarantine / diagnostic.name)
 
+    def _reject_or_quarantine(
+        self,
+        candidate_key: str,
+        fold_id: int,
+        reason: str,
+    ) -> None:
+        candidate = self.candidates[candidate_key]
+        if candidate.context.immutable_recovery:
+            raise ValueError(f"locked TabM fold {fold_id} {reason}")
+        self._quarantine(candidate_key, fold_id)
+
     def reuse(self, candidate_key: str, fold_id: int) -> tuple[pl.DataFrame, dict[str, Any]] | None:
         candidate = self.candidates[candidate_key]
         manifest, shard = self._paths(candidate_key, fold_id)
         diagnostic = self._diagnostic_path(candidate_key, fold_id)
-        if (
-            not candidate.ledger.reusable_fold(
-                training_hash=candidate.training.hash,
-                candidate_identity=candidate.training.hash,
-                fold_id=fold_id,
-                fitted_state=manifest,
-                prediction_shard=shard,
-                resolved_settings=self._settings(candidate_key, fold_id),
+        settings = self._settings(candidate_key, fold_id)
+        reusable = candidate.ledger.reusable_fold(
+            training_hash=candidate.training.hash,
+            candidate_identity=candidate.training.hash,
+            fold_id=fold_id,
+            fitted_state=manifest,
+            prediction_shard=shard,
+            resolved_settings=settings,
+        )
+        completed = candidate.ledger.fold_completion_exists(
+            training_hash=candidate.training.hash,
+            candidate_identity=candidate.training.hash,
+            fold_id=fold_id,
+        )
+        complete_population = all(
+            path.is_file()
+            for path in (
+                manifest,
+                shard,
+                diagnostic,
+                *self._checkpoint_files(candidate_key, fold_id),
             )
-            or not self._valid_manifest(candidate_key, fold_id, manifest)
-            or not diagnostic.is_file()
-        ):
+        )
+        valid_files = (
+            self._valid_manifest(candidate_key, fold_id, manifest) and diagnostic.is_file()
+        )
+        recover_uncommitted = not reusable and not completed and valid_files and shard.is_file()
+        if reusable and not valid_files:
+            self._reject_or_quarantine(
+                candidate_key,
+                fold_id,
+                "has fitted artifacts that disagree with its manifest",
+            )
+            return None
+        if not reusable and not recover_uncommitted:
+            if candidate.context.immutable_recovery and (completed or complete_population):
+                raise ValueError(f"locked TabM fold {fold_id} has conflicting persisted artifacts")
             self._quarantine(candidate_key, fold_id)
             return None
         frame = pl.read_parquet(shard)
@@ -712,24 +913,37 @@ class _TabMRecovery:
             "y_true",
         }
         if required - set(frame.columns):
-            self._quarantine(candidate_key, fold_id)
+            self._reject_or_quarantine(candidate_key, fold_id, "has an invalid prediction schema")
             return None
         if (
             set(frame["config"].unique().to_list()) != {candidate_key}
             or set(frame["fold_id"].unique().to_list()) != {fold_id}
             or {int(value) for value in frame["epoch"].unique().to_list()} != checkpoints
         ):
-            self._quarantine(candidate_key, fold_id)
+            self._reject_or_quarantine(
+                candidate_key,
+                fold_id,
+                "has conflicting prediction identities",
+            )
             return None
         keys = [candidate.context.date_col, candidate.context.entity_col, "fold_id", "epoch"]
         if frame.n_unique(keys) != frame.height:
-            self._quarantine(candidate_key, fold_id)
+            self._reject_or_quarantine(candidate_key, fold_id, "has duplicate prediction keys")
             return None
         try:
             training_record = json.loads(diagnostic.read_text())
         except (OSError, json.JSONDecodeError):
-            self._quarantine(candidate_key, fold_id)
+            self._reject_or_quarantine(candidate_key, fold_id, "has invalid diagnostics")
             return None
+        if recover_uncommitted:
+            candidate.ledger.complete_fold(
+                training_hash=candidate.training.hash,
+                candidate_identity=candidate.training.hash,
+                fold_id=fold_id,
+                fitted_state=manifest,
+                prediction_shard=shard,
+                resolved_settings=settings,
+            )
         candidate.reused_folds.append(fold_id)
         return frame, training_record
 
@@ -783,6 +997,161 @@ class _TabMRecovery:
 
 def run_resolved_request(study: Study, spec: dict[str, Any], context: TabMResearchContext):
     return _run_tabm_compatible_group(study, [(0, spec, context)])[0]
+
+
+def _reconstruct_locked_tabm_predictions(
+    model_root: Path,
+    training_hash: str,
+    context: TabMResearchContext,
+    checkpoint: int,
+    device: torch.device,
+) -> pl.DataFrame:
+    from case_studies.utils.deep_model_state import deep_checkpoint_path, restore_deep_model
+
+    frames = []
+    model_params = dict(context.config["params"])
+    output_dim = len(context.class_values) if context.task_type == "classification" else 1
+    expected_kwargs = {
+        "n_features": len(context.feature_names),
+        "output_dim": output_dim,
+        **model_params,
+    }
+
+    def factory(architecture: str, model_kwargs: Mapping[str, Any]) -> nn.Module:
+        if architecture != "tabm" or dict(model_kwargs) != expected_kwargs:
+            raise ValueError("locked TabM checkpoint architecture changed")
+        return TabMModel(**dict(model_kwargs))
+
+    for split in context.splits:
+        prepared = _prepare_tabm_fold(
+            context.dataset_pd,
+            split,
+            feature_names=list(context.feature_names),
+            label_col=context.label_col,
+            eval_label_col=context.eval_label_col,
+            date_col=context.date_col,
+            entity_col=context.entity_col,
+            temporal_by_fold=context.temporal_by_fold,
+            temporal_keys=list(context.temporal_keys),
+            temporal_feature_names=list(context.temporal_feature_names),
+        )
+        fold = int(split["fold"])
+        model, preprocessing, metadata = restore_deep_model(
+            deep_checkpoint_path(model_root, training_hash, fold, checkpoint),
+            factory,
+        )
+        expected_metadata = {
+            "config_name": training_hash,
+            "fold": fold,
+            "checkpoint_kind": "epoch",
+            "checkpoint_value": checkpoint,
+        }
+        if metadata != expected_metadata:
+            raise ValueError("locked TabM checkpoint metadata changed")
+        expected_preprocessing = prepared["preprocessing"]
+        stored_arrays = {
+            name: preprocessing.get(name)
+            for name in ("imputer_statistics", "scaler_mean", "scaler_scale")
+        }
+        arrays_match = True
+        for name, stored in stored_arrays.items():
+            if stored is None or not np.array_equal(stored, expected_preprocessing[name]):
+                arrays_match = False
+                break
+        if (
+            preprocessing.get("feature_names") != expected_preprocessing["feature_names"]
+            or not arrays_match
+        ):
+            raise ValueError("locked TabM preprocessing state changed")
+        raw_prediction = _predict_in_chunks(model.to(device), prepared["X_val"], device)
+        prediction = (
+            _classification_scores(raw_prediction, context.class_values)
+            if context.task_type == "classification"
+            else raw_prediction
+        )
+        columns: dict[str, Any] = {
+            context.date_col: prepared["val_dates"],
+            "symbol": prepared["val_entities"],
+            "fold": fold,
+            "actual": prepared["y_val"],
+            "prediction": prediction,
+        }
+        if context.eval_label_col:
+            columns["eval_actual"] = prepared["y_eval_val"]
+        frames.append(pl.DataFrame(columns))
+    return pl.concat(frames).with_columns(
+        pl.col(context.date_col).cast(context.expected_keys.schema[context.date_col]),
+        # expected_keys names the entity `symbol` whatever the reader key is, so the
+        # dtype has to be read from that column rather than from the reader name.
+        pl.col("symbol").cast(context.expected_keys.schema["symbol"]),
+        pl.col("fold").cast(context.expected_keys.schema["fold"]),
+    )
+
+
+def validate_locked_run(
+    study: Study,
+    spec: dict[str, Any],
+    context: TabMResearchContext,
+    run: ModelRun,
+) -> str:
+    """Validate the selected prediction and persisted TabM checkpoint population."""
+    from case_studies.utils.registry import training_hash_from_spec
+    from case_studies.utils.registry.specs import canonical_json
+
+    if run.training.hash != training_hash_from_spec(spec) or len(run.predictions) != 1:
+        raise ValueError("locked TabM run has the wrong training or prediction identity")
+    selected = context.published_checkpoints
+    prediction = run.predictions[0]
+    record = prediction.registry_record()
+    if (
+        selected is None
+        or len(selected) != 1
+        or (
+            record["split"],
+            record["checkpoint_kind"],
+            record["checkpoint_value"],
+        )
+        != (context.prediction_split, "epoch", selected[0])
+    ):
+        raise ValueError("locked TabM run published the wrong checkpoint")
+    # Both sides name the entity `symbol`: publishing renames it, and the reconstruction
+    # builds it that way, so they compare directly.
+    published = prediction.load().sort("symbol", context.date_col, "fold")
+    reopened = _cached_research_run(study, spec, context)
+    if reopened is None or reopened.predictions[0].hash != prediction.hash:
+        raise ValueError("locked TabM fitted state cannot be reused exactly")
+    model_root = run.training.root / "run_log" / "training" / run.training.hash / "models"
+    device = _configure_torch_runtime(spec["computation"]["numerics"])
+    reconstructed = _reconstruct_locked_tabm_predictions(
+        model_root,
+        run.training.hash,
+        context,
+        selected[0],
+        device,
+    )
+    reconstructed = reconstructed.sort("symbol", context.date_col, "fold")
+    key_columns = ["symbol", context.date_col, "fold"]
+    value_columns = ["prediction", "actual"]
+    if context.eval_label_col:
+        value_columns.append("eval_actual")
+    if not reconstructed.select(key_columns).equals(
+        published.select(key_columns)
+    ) or not np.allclose(
+        reconstructed.select(value_columns).to_numpy(),
+        published.select(value_columns).to_numpy(),
+        rtol=1e-7,
+        atol=1e-7,
+        equal_nan=False,
+    ):
+        raise ValueError("locked TabM fitted state does not reproduce published predictions")
+    files = {
+        str(path.relative_to(model_root)): _sha256(path)
+        for path in sorted(model_root.rglob("*"))
+        if path.is_file()
+    }
+    if not files:
+        raise ValueError("locked TabM run has no fitted state")
+    return hashlib.sha256(canonical_json(files).encode()).hexdigest()
 
 
 def _tabm_materialization_key(request: dict[str, Any]) -> tuple[str, str, int]:

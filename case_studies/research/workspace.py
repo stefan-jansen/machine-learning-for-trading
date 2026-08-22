@@ -17,7 +17,7 @@ from utils.paths import REPO_ROOT
 from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
-    from .catalog import PredictionCatalog
+    from .catalog import BacktestCatalog, PredictionCatalog
     from .causal import CausalRequest
     from .labels import LabelCatalog
     from .lifecycle import Lifecycle
@@ -164,8 +164,26 @@ class Study:
         manifest_path = target / ".study.json"
         if target.exists():
             if not manifest_path.is_file():
-                raise ValueError(f"Existing workspace has no .study.json manifest: {target}")
-            manifest = json.loads(manifest_path.read_text())
+                isolated_root = os.environ.get("ML4T_OUTPUT_DIR")
+                may_adopt = (
+                    isolated_root is not None
+                    and Path(isolated_root).expanduser().resolve() == output_root
+                    and not target.is_symlink()
+                    and (target / "config").is_dir()
+                )
+                if not may_adopt:
+                    raise ValueError(f"Existing workspace has no .study.json manifest: {target}")
+                manifest = {
+                    "schema_version": 1,
+                    "case_study": case_study,
+                    "baseline_source_commit": _source_commit(release_root),
+                    "baseline_manifest_sha256": _release_manifest_digest(release_case_dir),
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "adopted_output_root": True,
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            else:
+                manifest = json.loads(manifest_path.read_text())
             if manifest.get("schema_version") != 1 or manifest.get("case_study") != case_study:
                 raise ValueError(f"Invalid workspace manifest: {manifest_path}")
         else:
@@ -297,6 +315,12 @@ class Study:
         return PredictionCatalog(self)
 
     @property
+    def backtests(self) -> BacktestCatalog:
+        from .catalog import BacktestCatalog
+
+        return BacktestCatalog(self)
+
+    @property
     def release_case_root(self) -> Path:
         return self.release_root / "case_studies" / self.case_study
 
@@ -326,3 +350,56 @@ class Study:
         from .causal import CausalRequest
 
         return CausalRequest.from_request(self, request)
+
+
+def open_study(
+    case_study: str,
+    *,
+    execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
+    workspace: str | Path | None = None,
+    release_root: str | Path = REPO_ROOT,
+) -> Study:
+    """Open the study a notebook should execute against for its tier.
+
+    Canonical execution with no workspace regenerates the case study's own artifacts in place, and
+    is the production path. Canonical execution *with* a workspace is the same computation at full
+    scale writing to an isolated registry - a rehearsal that can be compared against the published
+    result without being able to damage it. Preview reads the same inputs, writes only to
+    ``workspace``, and must declare the reductions that make it cheap.
+    """
+    tier = ExecutionTier(execution_tier)
+    release_root = Path(release_root).expanduser().resolve()
+    if tier is ExecutionTier.CANONICAL:
+        if workspace is None:
+            return Study.regenerate(case_study, release_root=release_root)
+        return Study.open(case_study, workspace=workspace, release_root=release_root)
+
+    if workspace is None:
+        raise ValueError("preview execution requires an explicit workspace")
+    workspace = Path(workspace).expanduser().resolve()
+    case_dir = release_root / "case_studies" / case_study
+    generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
+    if not all(path.is_symlink() for path in generated):
+        return Study.open(case_study, workspace=workspace, release_root=release_root)
+
+    # A maintainer worktree links its generated directories to shared data, which
+    # `create_experiment` cannot copy. Read those inputs in place and redirect every write.
+    workspace.mkdir(parents=True, exist_ok=True)
+    shared_config = workspace / "config"
+    if not shared_config.exists():
+        shared_config.symlink_to(release_root / "case_studies" / "config", target_is_directory=True)
+    study = Study(
+        case_study=case_study,
+        root=case_dir,
+        release_root=release_root,
+        output_root=workspace,
+        read_only=False,
+        manifest={
+            "schema_version": 1,
+            "case_study": case_study,
+            "baseline_source_commit": _source_commit(release_root),
+            "preview_only": True,
+        },
+    )
+    study.activate(tier)
+    return study

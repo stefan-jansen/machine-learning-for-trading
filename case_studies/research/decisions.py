@@ -40,15 +40,23 @@ class StateTransitionPolicy:
             raise ValueError(f"state transitions must be one of {sorted(allowed)}")
 
 
+def _decision_entity_key(decisions: pl.DataFrame) -> str:
+    entity_keys = [column for column in ("symbol", "product") if column in decisions.columns]
+    if len(entity_keys) != 1:
+        raise ValueError("decision artifacts require exactly one entity key: symbol or product")
+    return entity_keys[0]
+
+
 def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
     value_column = {
         "target_weights": "weight",
         "target_positions": "position",
         "orders": "quantity",
+        "short_straddles": "weight",
     }.get(kind)
     if value_column is None:
         raise ValueError("unsupported decision artifact kind")
-    keys = ("symbol", "timestamp")
+    keys = (_decision_entity_key(decisions), "timestamp")
     required = {*keys, value_column}
     missing = required - set(decisions.columns)
     if missing:
@@ -66,6 +74,47 @@ def _validate_frame(kind: str, decisions: pl.DataFrame) -> tuple[str, ...]:
         raise ValueError("decision artifacts cannot contain both fold and fold_id")
     if fold_columns and decisions.get_column(fold_columns[0]).null_count():
         raise ValueError("decision artifact fold values cannot be null")
+    if kind == "short_straddles":
+        contract_columns = {
+            "strike",
+            "expiration",
+            "entry_date",
+            "entry_straddle_mid",
+            "entry_call_mid",
+            "entry_call_bid",
+            "entry_call_ask",
+            "entry_put_mid",
+            "entry_put_bid",
+            "entry_put_ask",
+        }
+        missing_contract = contract_columns - set(decisions.columns)
+        if missing_contract:
+            raise ValueError(
+                f"short-straddle decisions are missing columns: {sorted(missing_contract)}"
+            )
+        if decisions.select(*sorted(contract_columns)).null_count().sum_horizontal().item():
+            raise ValueError("short-straddle decisions cannot contain null contract fields")
+        invalid_dates = decisions.filter(
+            (pl.col("entry_date").cast(pl.Date) <= pl.col("timestamp").cast(pl.Date))
+            | (pl.col("expiration").cast(pl.Date) < pl.col("entry_date").cast(pl.Date))
+        )
+        if not invalid_dates.is_empty():
+            raise ValueError("short-straddle entry and expiration dates are invalid")
+        if decisions.filter(
+            (pl.col("strike") <= 0)
+            | (pl.col("entry_straddle_mid") <= 0)
+            | (pl.col("entry_call_mid") <= 0)
+            | (pl.col("entry_put_mid") <= 0)
+            | (pl.col("entry_call_bid") < 0)
+            | (pl.col("entry_put_bid") < 0)
+            | (pl.col("entry_call_ask") < pl.col("entry_call_bid"))
+            | (pl.col("entry_put_ask") < pl.col("entry_put_bid"))
+            | (pl.col("weight") <= 0)
+        ).height:
+            raise ValueError("short-straddle decisions contain invalid quotes, strike, or weight")
+        weight_sums = decisions.group_by("timestamp").agg(pl.col("weight").sum().alias("weight"))
+        if weight_sums.filter((pl.col("weight") - 1.0).abs() > 1e-10).height:
+            raise ValueError("short-straddle weights must sum to one per decision timestamp")
     return keys
 
 
