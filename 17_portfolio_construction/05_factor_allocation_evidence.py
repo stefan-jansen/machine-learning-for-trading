@@ -740,8 +740,9 @@ fig.update_layout(
         f"{DISCOVERY_T_THRESHOLD:.0f} disqualifies "
         f"{int(stats_df['significant_conventional'].sum() - stats_df['significant_harvey'].sum())}"
         " of these factors"
-        "<br><sup>Newey-West t-statistics on mean monthly returns; the dashed line is the "
-        "multiple-testing threshold, not the conventional one; histories differ by factor</sup>"
+        "<br><sup>Newey-West t-statistics on mean monthly returns; the dotted line is the "
+        "conventional threshold and the dashed line the multiple-testing one; the factors between "
+        "them are what raising the bar disqualifies; histories differ by factor</sup>"
     ),
     xaxis_title="Published factor portfolio",
     yaxis_title="Mean-return t-statistic (Newey-West)",

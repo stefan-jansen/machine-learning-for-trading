@@ -127,7 +127,7 @@ def test_the_return_series_covers_every_session(baseline):
     assert result.returns.notna().all()
 
 
-def test_the_helper_still_reproduces_the_numbers_notebook_01_published() -> None:
+def test_the_helper_still_reproduces_the_numbers_notebook_01_published(baseline) -> None:
     """Pin the helper to the figures `01_backtest_first_principles` actually shows.
 
     The test above re-derives the simulator from the helper's own `panel`,
@@ -142,11 +142,10 @@ def test_the_helper_still_reproduces_the_numbers_notebook_01_published() -> None
     to the inputs moves the helper away from the published account, this fails and
     the notebook's claim is caught rather than quietly becoming false.
     """
-    from _etf_baseline import DEFAULT_FEES, load_panel, metrics, momentum_weights, simulate
+    from _etf_baseline import DEFAULT_FEES, metrics, simulate
 
-    panel = load_panel()
-    result = simulate(panel, momentum_weights(panel), fees=DEFAULT_FEES)
-    m = metrics(result)
+    panel, weights = baseline
+    m = metrics(simulate(panel, weights, fees=DEFAULT_FEES))
 
     assert m["sharpe"] == pytest.approx(0.743, abs=5e-4)
     assert m["total_return"] == pytest.approx(1.9675, abs=5e-5)

@@ -29,8 +29,8 @@
 # minimum conditional drawdown all drop the expected-return vector entirely and optimize against
 # risk alone; equal weight optimizes against nothing.
 #
-# All five are fitted on a training window, frozen, and scored on a later one, alongside an
-# execution bridge that says what implementing one of them would have cost.
+# Every one of them is fitted on a training window, frozen, and scored on a later one, alongside
+# an execution bridge that says what implementing one of them would have cost.
 #
 # ## Learning objectives
 #

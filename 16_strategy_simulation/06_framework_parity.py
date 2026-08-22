@@ -533,15 +533,16 @@ fig.show()
 #
 # | | Array arithmetic | Sequential engine |
 # |---|---|---|
-# | How often it trades | On the dates the weight matrix changes: 77 in this sample, because the target moves only when the momentum selection or the risk-on flag does | Every session: `on_data` calls `rebalance_to_weights` on every bar, so the account is restored to its target daily. 3,258 fills |
+# | How often it trades | Only where the weight matrix changes: 78 dates, because the target moves when the momentum selection or the risk-on flag does | `on_data` calls `rebalance_to_weights` on all 3,522 sessions, so a rebalance is attempted daily whether the target moved or not |
 # | When a target is acted on | Immediately, as the weight in force over the next close-to-close return | An order placed on that bar, filled on the next one |
 # | What price it gets | The close, implicitly, because that is what the return is measured between | The next bar's open, moved against the order by the slippage rate |
 # | What the cost is charged on | The change in the target, whether or not a trade could have been made | The notional actually filled |
 # | What the account holds | A weight, which can be any real number | Whole shares, bought with the cash on hand |
 #
 # The first row is the largest and the least visible. The weight matrix built in section 3 moves on
-# 77 dates; the engine books 3,258 fills against it, forty times as many, and the counts printed
-# below the table are how you would find that out. The engine's daily restoration is not
+# 78 dates. The engine attempts a rebalance on all 3,522 sessions and 3,258 fills result - fewer
+# than one per session, because most attempts round to no share change, but still forty times the
+# number of dates on which anything about the target moved. The engine's daily restoration is not
 # correcting a signal - the target has not moved - it is correcting the drift that whole shares and
 # price movement introduce between rebalance dates, and it pays commission and slippage each time.
 #
@@ -553,11 +554,14 @@ fig.show()
 # These five act together here, and this notebook does not separate them.
 # `07_engine_divergence_anatomy` changes one at a time and measures each.
 
-# %% [markdown]
 # %%
-_weight_change_dates = int((weights.diff().abs().sum(axis=1) > 0).sum())
+# fillna(weights) so the opening allocation counts, matching how executed_turnover is
+# built at the top of section 5; weights.diff() alone leaves the first row NaN and drops it.
+_weight_change_dates = int((weights.diff().fillna(weights).abs().sum(axis=1) > 0).sum())
+print(f"Sessions in the panel:                  {len(close_prices):,}")
 print(f"Dates the weight matrix changes:        {_weight_change_dates:,}")
-print(f"Fills the sequential engine booked:     {len(results_ml4t['trades']):,}")
+print(f"Rebalances the engine attempted:        {len(close_prices):,}")
+print(f"Fills those attempts produced:          {len(results_ml4t['trades']):,}")
 print(f"Turnover charged on the array side:     {executed_turnover.sum():.1f}x portfolio value")
 
 # %% [markdown]
