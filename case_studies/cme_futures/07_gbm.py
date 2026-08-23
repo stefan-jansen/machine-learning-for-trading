@@ -644,6 +644,12 @@ objective_summary
 # of it would put a statistic computed partly on sealed outcomes into a validation-stage
 # notebook, so each label's rows are cut at its own `validation_end` - the same development
 # boundary its fits were resolved against, taken from the plan rather than re-derived.
+#
+# The artifact is asked for at the tier this notebook is running, rather than at the default.
+# `LabelCatalog.get` activates the tier it is given before resolving, and a preview activates a
+# workspace that carries `labels` as a link while its canonical root is empty - so a diagnostic
+# cell that takes the default reads a path only a canonical run has, and fails in preview after
+# the fits it is describing have already succeeded.
 
 # %% tags=["results"]
 # Each label has its own development boundary, because a longer forward window has to stop
@@ -661,7 +667,7 @@ tails = pl.DataFrame(
         }
         for label in panel_labels
         for measured in [
-            pl.read_parquet(study.labels.get(label).path)
+            pl.read_parquet(study.labels.get(label, execution_tier=EXECUTION_TIER).path)
             .filter(pl.col("timestamp") <= development_end[label])
             .drop_nulls(label)
         ]
