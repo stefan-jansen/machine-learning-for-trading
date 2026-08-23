@@ -38,11 +38,15 @@ import json
 
 import polars as pl
 import torch
-import yaml
 
-from case_studies.research import ExecutionTier, Study, plan_models
+from case_studies.research import (
+    ExecutionTier,
+    Study,
+    declared_labels,
+    plan_models,
+    sweep_labels,
+)
 from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -57,6 +61,7 @@ LOOKBACK = 0
 BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
+POPULATION_NAME = ""
 
 # %% [markdown]
 # ## Resolve one forecasting request
@@ -67,13 +72,31 @@ SEED = 42
 
 # %%
 set_global_seeds(SEED)
-case_dir = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+study = Study.regenerate(CASE_STUDY_ID)
+
+# Which labels this notebook fits is a question for the training menus, not for the sweep list:
+# `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
+# and a sweep label whose menu declares no `deep_learning:` section owes nothing here. The two
+# agree in this case study today, so restating the sweep list produced the right answer by
+# coincidence and would have kept producing it silently after a menu changed. The order stays
+# `setup.yaml`'s rather than `declared_labels`' menu-file order because the population is named
+# after its labels and hashed over its members as an ordered list, so re-ordering would give the
+# published population a new identity and demand a supersedes for a run that fits the same models.
+declared = declared_labels(study, "deep_learning")
 labels = (
     [PRIMARY_LABEL]
     if PRIMARY_LABEL
-    else [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+    else [label for label in sweep_labels(study) if label in set(declared)]
 )
+
+# A run that fits fewer labels than the menus declare is not the canonical population, and the
+# architecture is fixed below, so the label set is the only knob that narrows it. Such a run must
+# publish under its own name rather than register a partial snapshot under the canonical one.
+if set(labels) != set(declared) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run fits {len(labels)} of the {len(declared)} declared labels, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
+    )
 
 if PREDICTION_SPLIT != "validation":
     raise ValueError("model selection uses validation predictions; holdout runs start from a lock")
@@ -98,7 +121,6 @@ overrides = {
     **({"batch_size": BATCH_SIZE} if BATCH_SIZE else {}),
     **({"lookback": LOOKBACK} if LOOKBACK else {}),
 }
-study = Study.regenerate(CASE_STUDY_ID)
 ARCHITECTURE = "nlinear"
 menu = {
     label: [
@@ -183,7 +205,7 @@ checkpoint_schedule
 if len(plan.expected_prediction_hashes) != checkpoint_schedule.height * len(labels):
     raise RuntimeError("the plan does not cover every declared epoch checkpoint on every label")
 population = (
-    plan.create_population(name=f"{CASE_STUDY_ID}:{'+'.join(labels)}:nlinear")
+    plan.create_population(name=POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:nlinear")
     if tier is ExecutionTier.CANONICAL
     else None
 )
