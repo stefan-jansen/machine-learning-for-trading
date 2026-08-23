@@ -1484,32 +1484,39 @@ def build_all_synthesis(
         cost_bps = compute_cost_bps(setup)
         labels_cfg = setup.get("labels", {})
 
-        # Get date range from labels data if available
+        # Date range over the labels setup.yaml declares, unioned. Reading one file cannot
+        # answer this: labels of different horizons end on different dates, so any single one
+        # gives that label's range rather than the case study's. Taking whichever file a glob
+        # returned first also let a retired parquet nobody reads decide the answer, and made
+        # the result depend on filesystem ordering.
+        declared_labels = [labels_cfg.get("primary", "")] + list(labels_cfg.get("variants") or [])
         date_start, date_end = "", ""
         for labels_subdir in ["labels", "data/labels"]:
             labels_dir = case_dir / labels_subdir
-            if labels_dir.exists():
-                label_files = list(labels_dir.glob("*.parquet"))
-                if label_files:
-                    try:
-                        lf = pl.scan_parquet(label_files[0])
-                        cols = lf.collect_schema().names()
-                        ts_col = (
-                            "timestamp"
-                            if "timestamp" in cols
-                            else "date"
-                            if "date" in cols
-                            else None
-                        )
-                        if ts_col:
-                            ts_df = lf.select(ts_col).collect()
-                            if not ts_df.is_empty():
-                                date_start = str(ts_df[ts_col].min())[:10]
-                                date_end = str(ts_df[ts_col].max())[:10]
-                    except Exception:
-                        pass
-                if date_start:
-                    break
+            if not labels_dir.exists():
+                continue
+            for name in sorted({label for label in declared_labels if label}):
+                path = labels_dir / f"{name}.parquet"
+                if not path.exists():
+                    continue
+                try:
+                    lf = pl.scan_parquet(path)
+                    cols = lf.collect_schema().names()
+                    ts_col = (
+                        "timestamp" if "timestamp" in cols else "date" if "date" in cols else None
+                    )
+                    if ts_col is None:
+                        continue
+                    ts_df = lf.select(ts_col).collect()
+                    if ts_df.is_empty():
+                        continue
+                    first, last = str(ts_df[ts_col].min())[:10], str(ts_df[ts_col].max())[:10]
+                except Exception:
+                    continue
+                date_start = min(date_start, first) if date_start else first
+                date_end = max(date_end, last) if date_end else last
+            if date_start:
+                break
 
         meta = {
             "case_study_id": cs,
