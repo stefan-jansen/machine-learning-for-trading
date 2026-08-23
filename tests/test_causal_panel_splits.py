@@ -158,13 +158,16 @@ def test_panel_cross_fitting_residualizes_complete_dates() -> None:
 
 
 def test_panel_block_permutation_preserves_each_entity_history() -> None:
-    dates = np.array([1, 1, 2, 2, 3, 3, 4, 5])
-    units = np.array(["a", "b", "a", "b", "a", "b", "a", "a"])
-    treatment = np.array([11, 21, 12, 22, 13, 23, 14, 15])
+    """Treatment moves within an entity's own history and never across entities."""
+    dates = np.concatenate([np.arange(1, 13), np.arange(1, 13)])
+    units = np.array(["a"] * 12 + ["b"] * 12)
+    treatment = np.concatenate([np.arange(11, 23), np.arange(101, 113)])
+    order = np.argsort(dates, kind="stable")
+    dates, units, treatment = dates[order], units[order], treatment[order]
 
     permuted = block_permute(
         treatment,
-        block_size=2,
+        block_size=3,
         rng=np.random.default_rng(7),
         groups=dates,
         units=units,
@@ -173,6 +176,82 @@ def test_panel_block_permutation_preserves_each_entity_history() -> None:
     for unit in np.unique(units):
         assert sorted(permuted[units == unit]) == sorted(treatment[units == unit])
     assert not np.array_equal(permuted, treatment)
+
+
+def test_a_segment_too_short_for_two_blocks_is_left_intact() -> None:
+    """It is not shuffled: shuffling destroys the dependence the blocks preserve.
+
+    One entity in a panel can be shorter than two blocks while the others are not,
+    so this is per-segment behaviour rather than an error. `_assert_placebo_moved`
+    is what catches the case where it happens to every segment.
+    """
+    dates = np.concatenate([np.arange(1, 13), np.arange(1, 5)])
+    units = np.array(["long"] * 12 + ["short"] * 4)
+    treatment = np.concatenate([np.arange(11, 23), np.arange(101, 105)])
+    order = np.argsort(dates, kind="stable")
+    dates, units, treatment = dates[order], units[order], treatment[order]
+
+    permuted = block_permute(
+        treatment,
+        block_size=3,
+        rng=np.random.default_rng(7),
+        groups=dates,
+        units=units,
+    )
+
+    short = units == "short"
+    assert np.array_equal(permuted[short], treatment[short])
+    assert not np.array_equal(permuted[~short], treatment[~short])
+
+
+def test_a_weekend_is_not_a_gap_in_a_daily_series() -> None:
+    """The defect this pins: splitting at every diff != cadence cut a daily series
+    into five-row weeks, none of which could hold two blocks of a useful size."""
+    dates = pd.bdate_range("2024-01-01", periods=30).to_numpy()
+    treatment = np.arange(30, dtype=float)
+
+    permuted = block_permute(
+        treatment,
+        block_size=5,
+        rng=np.random.default_rng(3),
+        groups=dates,
+        expected_step="1D",
+    )
+
+    assert sorted(permuted) == sorted(treatment)
+    assert not np.array_equal(permuted, treatment)
+    # Whole weeks moved: four of every five steps stay contiguous.
+    assert np.sum(np.diff(permuted) == 1.0) >= 30 - 30 // 5 - 1
+
+
+def test_a_real_hole_in_the_series_is_still_a_gap() -> None:
+    """Six cadences apart is past the four-cadence tolerance, so the two runs of
+    observations are permuted independently and nothing crosses between them."""
+    dates = np.array(
+        [
+            "2024-01-01T00:00:00",
+            "2024-01-01T08:00:00",
+            "2024-01-01T16:00:00",
+            "2024-01-02T00:00:00",
+            "2024-01-04T00:00:00",
+            "2024-01-04T08:00:00",
+            "2024-01-04T16:00:00",
+            "2024-01-05T00:00:00",
+        ],
+        dtype="datetime64[s]",
+    )
+    treatment = np.arange(8)
+
+    permuted = block_permute(
+        treatment,
+        block_size=2,
+        rng=np.random.default_rng(7),
+        groups=dates,
+        expected_step="8h",
+    )
+
+    assert set(permuted[:4]) == set(treatment[:4])
+    assert set(permuted[4:]) == set(treatment[4:])
 
 
 def test_panel_block_permutation_requires_entity_column() -> None:
