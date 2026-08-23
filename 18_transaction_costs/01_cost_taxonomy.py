@@ -18,20 +18,28 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook builds a unit-aware transaction-cost taxonomy across six
-# liquid-market groups. It separates observed activity, sourced fee schedules,
-# and illustrative cost scenarios so that unlike quantities are not ranked as
-# if they were directly comparable.
+# A trading cost is charged in whatever unit the venue happens to use: cents per
+# share, dollars per contract, a spread quoted in the currency pair itself, or a
+# percentage of notional. This notebook reads the daily bars and the published fee
+# schedules for six markets, keeps each quantity in the unit it was measured in,
+# and converts only where the conversion has a defensible basis. It then asks how
+# much gross return a strategy has to earn before those costs are paid.
+#
+# A basis point (bp) is one hundredth of a percent, and it is the unit almost every
+# cost in this chapter is quoted in: 10 bps of a $1,000,000 order is $1,000.
 #
 # **Learning Objectives:**
-# - Preserve each market's native volume and fee units
-# - Compute daily dollar turnover only where a defensible conversion exists
-# - Compare commission, spread, and impact in explicit scenarios
-# - Validate the cost schemas in all nine case-study setup files
-# - Map breakeven alpha over transparent turnover and cost assumptions
+# - Read the daily volume of a market and say whether it can be turned into dollars
+#   traded per day, given what the price series in hand actually measures
+# - Read a published fee schedule and name the trade details you would still need
+#   before that fee becomes a number you can subtract from a return
+# - Work out which of commission, spread and price impact is the largest part of the
+#   cost of an order, and how that answer changes as the order gets bigger
+# - Compute the gross annual return a strategy needs just to pay for its trading,
+#   from how often it trades and what one round of trading costs
+# - Add the cost of borrowing stock to sell short to that same hurdle
 #
-# **Book Reference:** Chapter 18, Sections 18.1 (Why Costs Matter) and
-# 18.2 (Cost Components)
+# **Book Reference:** Chapter 18, Sections 18.1 and 18.2
 #
 # **Prerequisites:** Access to all six OHLCV datasets covered here and
 # case study `config/setup.yaml` files.
@@ -61,7 +69,7 @@ from data import (
     load_us_equities,
 )
 from utils.paths import REPO_ROOT, get_case_study_source_dir
-from utils.style import COLORS, add_message_title, ml4t_palette
+from utils.style import COLORS, add_message_title, ml4t_palette, show_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0  # 0 = all symbols
@@ -70,17 +78,23 @@ SOURCE_CHECK_DATE = "2026-07-21"
 # %% [markdown]
 # ## 1. Liquidity Has Units
 #
-# Average daily volume (ADV) can mean shares, contracts, base-asset units, or
-# quote updates. A dollar conversion is valid only when price and volume form a
-# traded notional. We therefore compare dollar turnover where that conversion
-# is defined and report ETF share activity and FX tick activity separately.
-# `MAX_SYMBOLS` selects an alphabetical prefix only to bound test runs; it is
-# not a liquidity screen.
+# Average daily volume (ADV) is the average number of units that change hands in a
+# day, and the unit differs by market: shares for a stock, contracts for a future,
+# base-asset quantity for a crypto perpetual, and - for the FX feed used here -
+# the number of price updates rather than any traded amount. Multiplying volume by
+# price gives dollars traded only when the two describe the same transaction. That
+# holds for the equity and crypto panels, holds for futures once the contract's
+# price multiplier is applied, and fails for the ETF and FX panels for reasons
+# given in each section below. Those two are therefore reported in their own units.
+#
+# `MAX_SYMBOLS` caps how many instruments are read from each panel, taking them in
+# alphabetical order so the selection never depends on the data. Leave it at 0 to
+# use every instrument; set it lower to shorten a run while working.
 
 
 # %%
 def limit_symbols(df: pl.DataFrame, symbol_col: str) -> pl.DataFrame:
-    """Apply a deterministic test-only symbol limit without ranking on future data."""
+    """Keep the alphabetically first MAX_SYMBOLS instruments, or all of them when it is 0."""
     if MAX_SYMBOLS <= 0:
         return df
     symbols = df.select(symbol_col).unique().sort(symbol_col).head(MAX_SYMBOLS)
@@ -291,9 +305,12 @@ add_message_title(
     source="ML4T datasets; each market retains its source coverage window",
 )
 fig.subplots_adjust(bottom=0.24)
-fig.show()
+show_with_alt(
+    fig,
+    "Violin plots of average daily dollar turnover per instrument, one violin per market, on a log scale. CME futures sit highest and US equities lowest, with each market spanning two to three orders of magnitude.",
+)
 
-# %%
+# %% tags=["results"]
 highest_turnover_market = adv_summary.row(0, named=True)
 display(
     Markdown(
@@ -316,10 +333,12 @@ display(
 # case-study assumptions.
 
 # %% [markdown]
-# ### Fee Evidence Row
+# ### One Row per Published Rate
 #
-# Each row carries its source and evidence status. A text rate is deliberate:
-# it prevents accidental arithmetic across incompatible charging units.
+# Each row records the venue, the instrument the rate applies to, the rate as the
+# venue publishes it, how firm that figure is, and where it came from. The rate is
+# stored as text so that a per-share fee and a per-contract fee cannot be added
+# together by accident.
 
 
 # %%
@@ -408,18 +427,30 @@ fee_schedule_df = pl.DataFrame(fee_rows).with_columns(
 fee_schedule_df
 
 # %% [markdown]
-# **Interpretation:** A notional order size alone cannot normalize this table.
-# Per-share scenarios also need the share price. Contract scenarios need a
-# premium or futures price and multiplier. FX needs the realized spread, while
-# crypto rates can vary by account tier. The next section therefore uses named,
-# transparent scenarios rather than presenting a venue ranking.
+# **Interpretation:** Knowing the dollar size of an order is not enough to put
+# these rates on one axis. A per-share fee needs the share price before it becomes
+# a fraction of notional. A per-contract fee needs the futures price or option
+# premium and the contract multiplier. The FX plan charges through the spread, so
+# it needs the spread that was actually quoted, and the crypto rate depends on the
+# account's fee tier. Each of those is a trade detail, and the next section supplies
+# them by writing out named scenarios.
 
 # %% [markdown]
-# ## 3. Cost Component Dominance
+# ## 3. Which Cost Component Is Largest
 #
-# The following parameters are illustrative, not calibrated estimates. Holding
-# them visible lets us ask a conditional question: under each scenario, which
-# component is largest at a given trade size?
+# The cost of an order splits into three parts. **Commission** is what the broker
+# and the venue charge. **Spread** is the gap between the highest price anyone is
+# currently bidding and the lowest anyone is offering, half of which an order that
+# executes immediately gives up. **Impact** is
+# the price move the order itself causes by consuming the resting liquidity, and
+# unlike the first two it grows with the size of the order.
+#
+# Each scenario below fixes five numbers per market: commission and half-spread in
+# basis points, the market's daily volatility `sigma`, its average daily dollar
+# turnover `adv_usd`, and `impact_eta`, the coefficient that scales the impact
+# model. They are round figures chosen to span the range these markets plausibly
+# occupy, not estimates fitted to the data loaded above, and the answer the section
+# gives holds only for the numbers written here.
 
 # %%
 cost_params = {
@@ -481,6 +512,19 @@ scenario_df
 
 # %% [markdown]
 # ### Component Calculator
+#
+# Commission and spread do not depend on order size in this model, so they enter at
+# their stated rate. Impact does. The square-root law, which Section 18.4 derives
+# and `03_market_impact_calibration` fits to data, says the price move an order
+# causes grows with the square root of the fraction of a day's volume it represents:
+#
+# $$\text{impact} = \eta \, \sigma \sqrt{\frac{Q}{\text{ADV}}}$$
+#
+# where $Q$ is the order's dollar size, ADV is average daily dollar turnover, and
+# $\sigma$ is daily volatility. Multiplying by 10,000 states the result in basis
+# points. The square root is what makes the answer to "which component is largest"
+# depend on order size: doubling the order less than doubles the impact, but a
+# hundredfold larger order still pays ten times the impact per dollar traded.
 
 
 # %%
@@ -524,9 +568,6 @@ for asset, params in cost_params.items():
                 "trade_size_usd": size,
                 "dominant": dominant,
                 "total_bps": total,
-                "commission_frac": costs["Commission"] / total if total > 0 else 0,
-                "spread_frac": costs["Spread"] / total if total > 0 else 0,
-                "impact_frac": costs["Impact"] / total if total > 0 else 0,
             }
         )
 
@@ -584,7 +625,10 @@ add_message_title(
     subtitle="Color shows the largest component or tie; labels show total one-way cost in bps",
     source="Illustrative parameters displayed above; square-root impact model",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A grid of markets by order size, each cell colored by which cost component is largest and labelled with the total one-way cost in basis points. Impact takes over only in the least liquid market at the largest sizes.",
+)
 
 # %% [markdown]
 # The impact crossover solves for the order size at which modeled impact equals
@@ -608,7 +652,7 @@ for asset, params in cost_params.items():
 crossover_df = pl.DataFrame(crossover_rows).sort("impact_crossover_usd")
 crossover_df
 
-# %%
+# %% tags=["results"]
 million_dominance = dominance.filter(pl.col("trade_size_usd") == 1_000_000).sort("asset_class")
 million_reading = ", ".join(
     f"{row['asset_class']}: {row['dominant'].lower()}"
@@ -625,9 +669,11 @@ display(
 # %% [markdown]
 # ## 4. Case Study Cost Assumptions
 #
-# The nine setup files express costs in several native schemas. Completeness is
-# mandatory, but comparability is not: an unsupported conversion must remain
-# unsupported rather than becoming a fallback number.
+# Every case study in this book records its cost assumption in its own
+# `config/setup.yaml`, and each one states it in the unit its market charges in.
+# The section below reads all nine and reports which of them already carry a cost
+# in basis points - the unit the rest of the book's backtests subtract - and which
+# carry something that needs a price, a multiplier or an observed spread first.
 
 # %%
 CASE_STUDIES = [
@@ -658,11 +704,11 @@ if len(setup_data) != len(CASE_STUDIES):
 print(f"Loaded cost configurations: {len(setup_data)}/{len(CASE_STUDIES)}")
 
 # %% [markdown]
-# ### Native Cost-Schema Classifier
+# ### Reading Each Configuration's Cost Unit
 #
-# The classifier records what each configuration can support directly. It does
-# not convert per-share, per-contract, tick, or premium costs to bps without the
-# missing trade details.
+# The function below inspects one `costs:` block and reports the unit it is stated
+# in, the basis-point value where the block already holds one, and the trade detail
+# that is still missing where it does not.
 
 
 # %%
@@ -710,9 +756,12 @@ cost_schema_df = pl.DataFrame([cost_schema_row(cs_id, setup_data[cs_id]) for cs_
 cost_schema_df
 
 # %% [markdown]
-# **Interpretation:** Only explicit bps fields support a direct bps scenario.
-# The remaining rows need instrument prices, multipliers, spreads, or realized
-# turnover. The schema differences are inputs to later cost models, not a ranking.
+# **Interpretation:** The `configured_bps` column is filled only where the
+# configuration already states a basis-point figure. Every other row names what is
+# missing, and the notebook that supplies it comes later in the chapter:
+# `02_spread_estimation` measures the spread the FX and equity rows need, and
+# `03_market_impact_calibration` fits the impact coefficient that turns an order
+# size into a cost.
 
 # %% [markdown]
 # ## 5. Breakeven Alpha Analysis
@@ -725,8 +774,9 @@ cost_schema_df
 # \text{annual traded-notional turnover}
 # \times \frac{\text{one-way cost in bps}}{10{,}000}$$
 #
-# The grid below is a sensitivity analysis. It does not estimate turnover from
-# rebalance labels and does not assign unsupported costs to case studies.
+# Both inputs are read off the grid below rather than measured from a strategy, so
+# the answer is a hurdle for a strategy with that turnover and that cost, not an
+# estimate for any particular one.
 
 # %%
 annual_turnover_grid = [1, 3, 6, 12, 24, 60]
@@ -779,9 +829,12 @@ add_message_title(
     subtitle="Breakeven gross alpha under explicit turnover and cost scenarios",
     source="Scenario grid computed from the breakeven formula above",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "A grid of annual turnover by one-way cost, each cell labelled with the gross annual return needed to break even. The requirement rises from a fraction of a percent to double digits across the grid.",
+)
 
-# %%
+# %% tags=["results"]
 example_turnover = 12
 example_cost_bps = 5
 example_breakeven = breakeven_df.filter(
@@ -792,17 +845,26 @@ display(
     Markdown(
         f"**Sensitivity reading:** Trading {example_turnover} times average capital per year at "
         f"{example_cost_bps} bps per dollar requires {example_breakeven:.2f}% annual gross alpha "
-        "just to cover transaction costs. A case-study claim needs measured turnover and a "
-        "compatible cost model before it can use this formula."
+        "just to cover transaction costs. For your own strategy, read the turnover off its "
+        "realized fills and the cost off a model calibrated to the market it trades."
     )
 )
 
 # %% [markdown]
 # ## 6. Borrow Costs for Long-Short Strategies
 #
-# A long-short portfolio adds stock-borrow cost on the short allocation. Borrow
-# rates vary by security and date, so the curves below are scenarios rather than
-# a claim about a current market-wide rate.
+# Selling a stock short means borrowing it first, and the lender charges a fee for
+# the loan for as long as the position is open. That fee is quoted as an annual rate
+# on the value borrowed, so it is a running cost rather than a per-trade one, and it
+# applies only to the short half of the book. Rates run from a few tens of basis
+# points a year on an easily borrowed large-cap to several percent on a stock that
+# is hard to locate, and they move with demand, so the curves below span a range
+# rather than estimating a single rate.
+#
+# Every curve holds the portfolio fixed and varies only the borrow rate. Gross alpha
+# on the horizontal axis is the return before any cost is subtracted; the vertical
+# axis is what is left after trading cost and borrow. The settings below say what each
+# of the fixed quantities decides.
 
 # %%
 borrow_rate_scenarios = [40, 100, 200, 500, 1000]
@@ -811,6 +873,13 @@ annual_traded_notional = 3.6
 one_way_trading_cost_bps = 20
 trading_cost_drag_bps = annual_traded_notional * one_way_trading_cost_bps
 gross_alphas = np.linspace(0, 700, 120)
+
+print(
+    f"Short side {short_allocation:.0%} of capital - borrow is charged on this half only\n"
+    f"Trades {annual_traded_notional}x capital per year at {one_way_trading_cost_bps} bps "
+    f"one way, so trading costs {trading_cost_drag_bps:.0f} bps per year\n"
+    f"Borrow rates spanned: {borrow_rate_scenarios} bps per year on the amount borrowed"
+)
 
 fig, ax = plt.subplots()
 for borrow_bps, color in zip(
@@ -828,16 +897,16 @@ ax.legend(loc="upper left")
 add_message_title(
     ax,
     "Borrow cost raises the gross-alpha hurdle for long-short portfolios",
-    subtitle=(
-        f"Scenarios use {short_allocation:.0%} short exposure, {annual_traded_notional:.1f}x annual "
-        f"traded notional, and {one_way_trading_cost_bps} bps trading cost"
-    ),
-    source="Illustrative borrow-rate scenarios; not a current securities-lending sample",
+    subtitle="Net of trading-cost drag and of borrow charged on the short half of the book",
+    source="Borrow-rate scenarios and portfolio assumptions stated above; not a market sample",
 )
 
-fig.show()
+show_with_alt(
+    fig,
+    "Five lines of net alpha against gross alpha, one per borrow rate. All are parallel and shifted down; higher borrow rates cross zero at higher gross alpha.",
+)
 
-# %%
+# %% tags=["results"]
 example_gross_alpha_bps = 200
 low_borrow_bps = borrow_rate_scenarios[0]
 high_borrow_bps = borrow_rate_scenarios[2]
@@ -849,35 +918,54 @@ display(
     Markdown(
         f"**Scenario reading:** At {example_gross_alpha_bps} bps gross alpha, the modeled net "
         f"alpha is {low_borrow_net:.0f} bps with a {low_borrow_bps} bps borrow rate and "
-        f"{high_borrow_net:.0f} bps with a {high_borrow_bps} bps rate. Both case studies with "
-        "long-short construction flag borrow cost, but a production estimate needs security-level "
-        "borrow observations."
+        f"{high_borrow_net:.0f} bps with a {high_borrow_bps} bps rate. Borrow is charged per "
+        "security and per day, so a portfolio-level rate like these is a placeholder until the "
+        "actual borrow quotes for the names being shorted are in hand."
     )
 )
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Units come first**: Share, contract, tick, spread, and notional fees
-#    require different trade details before they can be compared in bps.
+# 1. **Find out what a fee's denominator is before converting it.** A fee per share
+#    becomes a fraction of notional only once you supply the share price; a fee per
+#    contract needs the price and the contract multiplier. Write the trade detail
+#    down rather than assuming a typical one, because the assumed value is what the
+#    whole cost estimate then rests on.
 #
-# 2. **Liquidity conversions need a contract**: Equity share volume and crypto
-#    base volume support dollar-turnover estimates. Futures need multipliers.
-#    ETF volume paired with adjusted prices and FX tick volume must remain
-#    separate activity measures.
+# 2. **Multiply volume by price only when the two describe the same transaction.**
+#    Share volume times the traded close is dollars traded. Share volume times a
+#    split- and dividend-adjusted close is not, and a volume that counts price
+#    updates rather than trades has no dollar equivalent at all. Check what the
+#    price series in hand actually is before treating turnover as a number.
 #
-# 3. **Dominance is conditional**: Commission, spread, or impact can dominate
-#    depending on the stated volatility, liquidity, impact, and order-size inputs.
+# 3. **Ask which cost component dominates at the size you intend to trade, not in
+#    general.** Commission and spread are flat per dollar; impact grows with order
+#    size, so the answer flips somewhere. Solve for the order size at which impact
+#    overtakes the larger flat component and check which side of it you are on.
 #
-# 4. **Breakeven requires measured turnover**: A rebalance label cannot replace
-#    realized traded notional. Unsupported cost schemas must not receive a
-#    numeric fallback.
+# 4. **Turn a per-trade cost into an annual hurdle by multiplying it by turnover.**
+#    Trading capital over several times a year multiplies a cost that looked small
+#    per trade into a return the strategy has to earn before it earns anything.
 #
-# 5. **Borrow is a separate state variable**: Long-short research needs dated,
-#    security-level borrow inputs in addition to trading costs.
+# 5. **Charge borrow separately from trading cost.** It accrues with time held and
+#    only on the short side, so it does not scale with turnover and cannot be folded
+#    into a per-trade figure.
 #
-# **Next**: See `02_spread_estimation` for empirical spread estimates
-# and `03_market_impact_calibration` for impact model calibration.
+# ### Known limitations
 #
-# **Book**: Chapter 18.1-18.2 provides the theoretical framework for
-# cost decomposition.
+# - The six panels do not cover the same dates. The dollar-turnover comparison
+#   therefore mixes observation windows, and a market that looks more active may
+#   simply have been observed over a busier period.
+# - The fee table records rates as published on one date. Schedules change, and the
+#   tier a given account qualifies for changes what it is actually charged.
+# - The scenario parameters in Sections 3, 5 and 6 are round figures, not estimates
+#   fitted to these datasets. They fix the shape of the answer, not its magnitude.
+# - The impact model assumes an order is worked over roughly a day at a constant
+#   rate. An order executed faster pays more than the square-root law says, which is
+#   what `05_almgren_chriss_optimal_execution` makes explicit.
+#
+# **Next**: `02_spread_estimation` estimates the spread from daily bars, and
+# `03_market_impact_calibration` fits the impact coefficient used above.
+#
+# **Book**: Chapter 18, Sections 18.1 and 18.2.

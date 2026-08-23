@@ -14,50 +14,60 @@
 # ---
 
 # %% [markdown]
-# # Proper Sharpe Ratio Inference
+# # How much do you actually know from a Sharpe ratio?
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter 16: Strategy Simulation**
-# **Section Reference**: See Section 16.7 for strategy-level overfitting control
+# ## Purpose
+# A Sharpe ratio is an estimate computed from a sample, and like any estimate it has a distribution
+# around the quantity it is estimating. That distribution is much wider than most people expect: on
+# one year of daily data, the standard error of an annualized Sharpe is on the order of one, so a
+# strategy that reports a comfortably positive figure and a strategy with no edge at all produce
+# overlapping evidence.
 #
-# This notebook separates fixed-strategy Sharpe uncertainty from search adjustment.
-# It derives Probabilistic Sharpe Ratio (PSR), track-record requirements, and
-# autocorrelation-aware annualization before handing the multiple-testing problem
-# to Notebook 12.
+# This notebook builds the tools for saying how much a single strategy's Sharpe is worth: the
+# probability that its true value exceeds a benchmark, the amount of history that probability would
+# need to be convincing, and what changes when returns are skewed, fat-tailed or serially
+# dependent - all three of which real returns are.
 #
-# **Objectives**
+# It deliberately stops short of the harder problem. Everything here treats one strategy, chosen in
+# advance. A Sharpe that is the largest of many searched over needs a different correction, and
+# `12_dsr_validation` is where that happens.
 #
-# - Compute a fixed-strategy PSR with the correct one-sided tail probability
-# - Distinguish canonical MinTRL from a prospective 80%-power planning horizon
-# - Compare IID and Lo (2002) annualization on real SPY returns
-# - Show why selecting the best of many strategies requires DSR
+# ## Learning objectives
 #
-# **Prerequisites**: daily simple returns, annualized Sharpe ratios, and Section 16.7
+# - Put a confidence interval around a Sharpe ratio, and read it against the point estimate.
+# - Compute the probability that a strategy's true Sharpe exceeds a threshold, from the sample's
+#   own skewness and kurtosis rather than from a normal assumption.
+# - Work out how many observations a target Sharpe needs before it could be distinguished from
+#   zero, and use that number to decide whether an experiment is worth running.
+# - Annualize a Sharpe when returns are serially dependent, and judge how much to trust the
+#   correction on a sample of realistic length.
+# - Say why a large Sharpe picked from many candidates is not evidence, even when its
+#   single-strategy statistics look convincing.
 #
-# ## The Five Pitfalls of Naive Sharpe Analysis
+# ## Book reference
+# Chapter 16, Section 16.7 (strategy-level overfitting control).
 #
-# 1. **Independence/Normality assumptions** - Returns are autocorrelated and fat-tailed
-# 2. **No significance testing** - Treating point estimates as ground truth
-# 3. **Insufficient test power** - Not enough data to detect true effects
-# 4. **P-value misinterpretation** - Confusing P(data|H0) with P(H0|data)
-# 5. **Multiple testing** - Selection bias from testing many strategies
+# ## Prerequisites
 #
-# ## Key Tools
+# - Daily return series, annualized Sharpe ratios, and a working idea of a sampling distribution.
 #
-# | Method | Purpose | When to Use |
-# |--------|---------|-------------|
-# | **PSR** | Probabilistic Sharpe Ratio | Single strategy significance |
-# | **MinTRL** | Minimum Track Record Length | Confidence threshold |
-# | **Power planning** | Prospective sample requirement | Research design |
-# | **DSR** | Deflated Sharpe Ratio | Multiple strategy selection |
-# | **Lo annualization** | Serial-correlation-aware scaling | Dependent returns |
+# ## The vocabulary, defined once
+#
+# | | |
+# |---|---|
+# | **PSR**, probabilistic Sharpe ratio | The probability that a strategy's true Sharpe exceeds a stated benchmark, given the sample's length and shape |
+# | **MinTRL**, minimum track record length | The number of observations at which an observed Sharpe would clear a significance threshold |
+# | **Power planning** | The number of observations needed *before* collecting them, to have a stated chance of detecting a target Sharpe if it is real |
+# | **DSR**, deflated Sharpe ratio | The PSR corrected for having selected the largest of many candidates. `12_dsr_validation` |
+# | **Lo annualization** | Scaling a Sharpe from one frequency to another when returns are serially dependent, rather than by the square root of the frequency ratio |
 #
 # ## References
 #
 # - López de Prado et al. (2025). "How to Use the Sharpe Ratio". ADIA Lab.
-# - Bailey & López de Prado (2014). "The Deflated Sharpe Ratio"
-# - GitHub: https://github.com/zoonek/2025-sharpe-ratio
+# - Bailey & López de Prado (2014). "The Deflated Sharpe Ratio".
+# - Lo (2002). "The Statistics of Sharpe Ratios".
 
 # %% [markdown]
 # ## Setup
@@ -70,8 +80,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
-import seaborn as sns
-from IPython.display import Markdown, display
 from ml4t.diagnostic.evaluation.stats import (
     compute_min_trl,
 )
@@ -87,7 +95,34 @@ from utils.style import COLORS, add_message_title
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
 N_SIMULATIONS = 1000
+SAMPLE_START = "2020"
+SAMPLE_END = "2023"
+DEMO_TRUE_SR = 0.5
+DEMO_SAMPLE_DAYS = 252
+DEMO_ANNUAL_VOL = 0.15
+SEARCH_STRATEGIES = 30
+SEARCH_REAL = 5
+SEARCH_DAYS = 504
+SEARCH_TRUE_SR = 0.8
 SEED = 42
+
+# %% [markdown]
+# ### What each setting decides
+#
+# **Monte Carlo draws.** How many synthetic track records the sampling-distribution demonstration
+# generates. More draws sharpen the histogram and change nothing about the estimator.
+#
+# **Sample window.** The years of SPY history every real-data example uses. Short enough to be a
+# realistic evaluation window and, as the notebook shows, far too short for the statistics people
+# routinely compute on it.
+#
+# **Demonstration strategy.** A true annualized Sharpe, a sample length and an annual volatility.
+# Only the first two matter: the volatility cancels out of a Sharpe ratio and is there so the
+# simulated returns are on a recognizable scale.
+#
+# **Search experiment.** How many strategies are tested, how many of them are real, how long each
+# track record is, and what Sharpe the real ones have. These decide how badly a naive reading of
+# the selected strategy's statistics fails, which is the point of section 6.
 
 # %%
 set_global_seeds(SEED)
@@ -95,11 +130,13 @@ rng = np.random.default_rng(SEED)
 spy = load_etfs(symbols=["SPY"]).to_pandas()
 spy = spy.set_index("timestamp").sort_index()
 spy_returns = spy["close"].pct_change().dropna()
-print(f"SPY data: {spy_returns.index[0]} to {spy_returns.index[-1]}")
-print(f"Observations: {len(spy_returns)}")
+spy_sample = spy_returns.loc[SAMPLE_START:SAMPLE_END]
+print(f"SPY history loaded: {spy_returns.index[0]:%Y-%m-%d} to {spy_returns.index[-1]:%Y-%m-%d}")
+print(f"Sample used below:  {spy_sample.index[0]:%Y-%m-%d} to {spy_sample.index[-1]:%Y-%m-%d}")
+print(f"Observations in the sample: {len(spy_sample):,}")
 
 # %% [markdown]
-# ## 1. The Sharpe Ratio Sampling Distribution
+# ## 1. What a Sharpe ratio's sampling distribution looks like
 #
 # The Sharpe ratio is a **point estimate** with sampling uncertainty. For i.i.d.
 # normal returns at the native frequency:
@@ -157,7 +194,7 @@ def sharpe_ratio_variance(
 
 
 # %% [markdown]
-# ### Lo (2002) Autocorrelation-Corrected Annualization
+# ### Annualizing a Sharpe when returns are serially dependent
 #
 # Lo (2002, Eq. 17) shows that when returns are autocorrelated, the textbook
 # $\widehat{SR}(q) = \sqrt{q}\,\widehat{SR}(1)$ rule is wrong. With sample
@@ -166,7 +203,7 @@ def sharpe_ratio_variance(
 # $$\widehat{SR}(q) = \widehat{SR}(1)\cdot
 #     \frac{q}{\sqrt{q + 2\sum_{k=1}^{q-1}(q-k)\hat\rho_k}}.$$
 #
-# When all $\hat\rho_k = 0$ this collapses to $\sqrt{q}\,\widehat{SR}(1)$.
+# When all $\hat\rho_k = 0$ this reduces to $\sqrt{q}\,\widehat{SR}(1)$.
 # Positive autocorrelation inflates the denominator and pulls the annualized
 # Sharpe down; negative autocorrelation does the opposite. This is the
 # correct way to lift a daily Sharpe to an annual one when returns are not
@@ -229,7 +266,7 @@ def lo_2002_annualized_sharpe(
 
 
 # %% [markdown]
-# ### Standard Error Helper
+# ### From variance to standard error
 #
 # Convert the Sharpe-ratio variance estimate into a standard error.
 
@@ -242,82 +279,70 @@ def sharpe_ratio_se(
     return np.sqrt(sharpe_ratio_variance(sr, n, skewness, kurtosis, periods_per_year))
 
 
-# %%
-# Demonstrate sampling distribution
-true_sr = 0.5
-n_samples = 252
-
-# Simulate Sharpe ratio estimates
-simulated_srs = []
-for _ in range(N_SIMULATIONS):
-    # Generate returns with true annualized SR = 0.5 (assuming 15% annual vol)
-    daily_vol = 0.15 / np.sqrt(252)
-    daily_mean = true_sr * 0.15 / 252  # Annual mean = SR * annual_vol, then / 252
-    returns = rng.normal(daily_mean, daily_vol, n_samples)
-
-    # Compute observed SR
-    obs_sr = np.mean(returns) / np.std(returns, ddof=1) * np.sqrt(252)
-    simulated_srs.append(obs_sr)
-
-simulated_srs = np.array(simulated_srs)
-
-# Compare with theoretical distribution
-theoretical_se = sharpe_ratio_se(true_sr, n_samples)
-
-print("=== Sharpe Ratio Sampling Distribution ===")
-print(f"\nTrue SR: {true_sr}")
-print(f"Sample size: {n_samples}")
-print(f"\nSimulated mean: {np.mean(simulated_srs):.3f}")
-print(f"Simulated std: {np.std(simulated_srs, ddof=1):.3f}")
-print(f"Theoretical SE: {theoretical_se:.3f}")
-
+# %% [markdown]
+# The cheapest way to see how wide that distribution is: generate many track records from a
+# strategy whose true Sharpe is known, compute each one's Sharpe as a practitioner would, and look
+# at the spread. The theoretical standard error is drawn over the histogram, so the formula above
+# can be checked against the simulation rather than believed.
 
 # %%
-def _style_sampling_distribution(ax) -> None:
-    """Apply reference lines, labels, and the message title."""
-    ax.axvline(
-        true_sr,
-        color=COLORS["positive"],
-        linestyle="--",
-        lw=2,
-        label=f"True SR = {true_sr}",
-    )
-    ax.axvline(0, color=COLORS["neutral"], linestyle=":", alpha=0.6)
-    ax.set_xlabel("Sharpe Ratio")
-    ax.set_ylabel("Density")
-    add_message_title(
-        ax,
-        "One Trading Year Leaves Wide Sharpe Uncertainty",
-        subtitle=f"Monte Carlo sampling distribution, true annualized SR = {true_sr}, n = {n_samples}",
-    )
-    ax.set_title(
-        ax.get_title(loc="left"), loc="left", color=COLORS["blue"], fontweight="bold", pad=15
-    )
-    ax.legend()
-    sns.despine()
+daily_vol = DEMO_ANNUAL_VOL / np.sqrt(252)
+daily_mean = DEMO_TRUE_SR * DEMO_ANNUAL_VOL / 252
+simulated_srs = np.array(
+    [
+        np.mean(draw) / np.std(draw, ddof=1) * np.sqrt(252)
+        for draw in rng.normal(daily_mean, daily_vol, size=(N_SIMULATIONS, DEMO_SAMPLE_DAYS))
+    ]
+)
+theoretical_se = sharpe_ratio_se(DEMO_TRUE_SR, DEMO_SAMPLE_DAYS)
 
+print(f"True annualized Sharpe:  {DEMO_TRUE_SR}")
+print(f"Observations per draw:   {DEMO_SAMPLE_DAYS}")
+print(f"Mean of the estimates:   {np.mean(simulated_srs):.3f}")
+print(f"Spread of the estimates: {np.std(simulated_srs, ddof=1):.3f}")
+print(f"Standard error, formula: {theoretical_se:.3f}")
 
 # %%
-# Plot sampling distribution
 fig, ax = plt.subplots(figsize=(12, 5))
-
 ax.hist(
     simulated_srs,
     bins=50,
     density=True,
     alpha=0.55,
     color=COLORS["blue_light"],
-    label="Simulated",
+    label="Simulated estimates",
 )
-
-x = np.linspace(simulated_srs.min(), simulated_srs.max(), 300)
-theoretical_pdf = norm.pdf(x, loc=true_sr, scale=theoretical_se)
-ax.plot(x, theoretical_pdf, color=COLORS["amber"], lw=2, label="Theoretical N(SR, SE²)")
-_style_sampling_distribution(ax)
+grid = np.linspace(simulated_srs.min(), simulated_srs.max(), 300)
+ax.plot(
+    grid,
+    norm.pdf(grid, loc=DEMO_TRUE_SR, scale=theoretical_se),
+    color=COLORS["amber"],
+    lw=2,
+    label="Sampling distribution from the formula",
+)
+ax.axvline(DEMO_TRUE_SR, color=COLORS["positive"], linestyle="--", lw=2, label="True Sharpe ratio")
+ax.axvline(0, color=COLORS["neutral"], linestyle=":", alpha=0.6)
+ax.set_xlabel("Estimated annualized Sharpe ratio")
+ax.set_ylabel("Density")
+add_message_title(
+    ax,
+    "A year of data cannot tell a good strategy from no strategy",
+    subtitle=(
+        f"{N_SIMULATIONS:,} simulated track records of {DEMO_SAMPLE_DAYS} days, "
+        f"all from one strategy with a true annualized Sharpe of {DEMO_TRUE_SR}"
+    ),
+)
+ax.legend()
 plt.show()
 
 # %% [markdown]
-# ## 2. Probabilistic Sharpe Ratio (PSR)
+# The estimates are centred on the truth, which is the only reassuring thing about them. Their
+# spread is roughly one Sharpe unit, so a quarter of these draws came out negative, from a strategy
+# that genuinely makes money. A practitioner handed any single one of these track records and
+# asked "does this work" cannot answer from the Sharpe alone.
+
+# %% [markdown]
+# ## 2. The probability that the true Sharpe clears a benchmark
 #
 # PSR answers: **What is the probability that the true SR exceeds a benchmark?**
 #
@@ -372,13 +397,15 @@ print(f"P-value (one-sided): {psr_result['p_value']:.4f}")
 print(f"P-value (two-sided): {psr_result['p_value_two_sided']:.4f}")
 print(f"95% CI: [{psr_result['ci_95_lower']:.2f}, {psr_result['ci_95_upper']:.2f}]")
 
-# %%
-# Show how PSR varies with sample size
-sample_sizes = [63, 126, 252, 504, 756, 1008]  # 3m to 4y
-observed_sr = 0.8
-
 # %% [markdown]
-# **PSR sensitivity to sample size** (observed SR = 0.8):
+# The same observed Sharpe means different things at different sample lengths. Reading down the
+# `psr` column below shows how much of the confidence in a strategy comes from the length of its
+# record rather than from its performance, and the confidence interval is the same statement in
+# units a reader can act on.
+
+# %%
+sample_sizes = [63, 126, 252, 504, 756, 1008]
+observed_sr = 0.8
 
 # %%
 psr_rows = []
@@ -398,7 +425,7 @@ for n in sample_sizes:
 pl.DataFrame(psr_rows)
 
 # %% [markdown]
-# ## 3. Minimum Track Record Length (MinTRL)
+# ## 3. How much history a Sharpe needs before it means anything
 #
 # MinTRL answers: **How much data is needed to exceed a benchmark at a chosen confidence?**
 #
@@ -417,7 +444,7 @@ pl.DataFrame(psr_rows)
 # per-period Sharpe units give:
 #
 # $$T_\text{plan} \approx
-# \frac{(z_{1-\alpha}+z_{1-\beta})^2\left(1 + 0.5SR_p^2\right)}{SR_p^2}.$$
+# \frac{(z_{1-\alpha}+z_{1-\beta})^2\left(1 + \tfrac{1}{2}SR_p^2\right)}{SR_p^2}.$$
 
 
 # %%
@@ -481,7 +508,10 @@ def minimum_track_record_length(
 # %%
 # MinTRL for different Sharpe ratios
 # %% [markdown]
-# **Track-record requirements** (canonical MinTRL and 80%-power planning horizon):
+# Two numbers per target Sharpe. The first is the point at which an observed record of that
+# size would clear the significance threshold. The second is longer, because it also asks for a
+# stated chance of detecting the effect when it is real, and that is the one to use when deciding
+# whether an experiment is worth starting.
 
 # %%
 mintrl_rows = []
@@ -508,24 +538,16 @@ ax.axhline(252, color=COLORS["positive"], linestyle="--", label="1 year")
 ax.axhline(504, color=COLORS["amber"], linestyle="--", label="2 years")
 ax.axhline(756, color=COLORS["negative"], linestyle="--", label="3 years")
 
-ax.set_xlabel("Target Sharpe Ratio")
-ax.set_ylabel("Required Track Record (trading days, log scale)")
+ax.set_xlabel("Target annualized Sharpe ratio")
+ax.set_ylabel("Trading days required (log scale)")
 add_message_title(
     ax,
-    "Modest Target Sharpes Require Long Evidence Windows",
-    subtitle="Log scale; prospective horizon, one-sided α = 0.05, power = 0.80",
-)
-ax.set_title(
-    ax.get_title(loc="left"),
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="bold",
-    pad=15,
+    "Halving the target Sharpe roughly quadruples the history needed",
+    subtitle="Log scale; prospective horizon at one-sided alpha 0.05 and power 0.80",
 )
 ax.set_yscale("log")
 ax.legend()
 ax.grid(True, alpha=0.3)
-sns.despine()
 plt.show()
 
 sr_05 = minimum_track_record_length(0.5)
@@ -535,7 +557,7 @@ print(
 )
 
 # %% [markdown]
-# ## 4. Non-Normality and Autocorrelation Adjustments
+# ## 4. What changes when returns are neither normal nor independent
 #
 # Real returns have:
 # - **Negative skewness** (crash risk)
@@ -567,17 +589,16 @@ def compute_return_moments(returns: pd.Series) -> dict:
 
 # %%
 # Analyze real return moments
-spy_2020_2023 = spy_returns.loc["2020":"2023"]
-moments = compute_return_moments(spy_2020_2023)
+moments = compute_return_moments(spy_sample)
 
-print("=== SPY Return Moments (2020-2023) ===")
+print(f"SPY daily return moments, {SAMPLE_START} to {SAMPLE_END}")
 for key, value in moments.items():
     print(f"{key:20}: {value:.4f}")
 
 # %%
 # Compare PSR with and without non-normality adjustment
 observed_sr = moments["sharpe"]
-n = len(spy_2020_2023)
+n = len(spy_sample)
 
 # Normal assumption
 psr_normal = probabilistic_sharpe_ratio(observed_sr, 0, n, skewness=0, kurtosis=3)
@@ -621,7 +642,7 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ### Lo (2002) Annualization on Real SPY Returns
+# ### The correction on real SPY returns
 #
 # Apply `lo_2002_annualized_sharpe` to the SPY 2020-2023 series. The textbook
 # IID rule reports $\sqrt{252}\,\widehat{SR}(1)$; Lo's correction adds the
@@ -630,7 +651,7 @@ pl.DataFrame(
 # narrative warns about.
 
 # %%
-lo_result = lo_2002_annualized_sharpe(spy_2020_2023, periods_per_year=252)
+lo_result = lo_2002_annualized_sharpe(spy_sample, periods_per_year=252)
 pl.DataFrame(
     {
         "quantity": [
@@ -655,45 +676,84 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# **Reading the table.** The Lo annualization multiplier need not equal
-# $\sqrt{252}$. Positive weighted autocorrelation pulls the annualized Sharpe
-# down relative to the IID rule because variance accumulates faster; negative
-# weighted autocorrelation pushes it up. The sign and magnitude of the wedge
-# are computed from the truncated weighted sum shown above.
-
-# %% [markdown]
-# ### Five-year SR = 1.0 CI Example
+# The multiplier need not equal $\sqrt{252}$, and here it is not close. Positive weighted
+# autocorrelation pulls the annualized Sharpe down, because variance accumulates faster than
+# proportionally with horizon; negative autocorrelation, which is what this sample has, pushes it
+# up.
 #
-# A concrete reference point cited in §16.7: a strategy reports
-# $\widehat{SR}_\text{annual} = 1.0$ on 5 years of daily data. What is the
-# 95% confidence interval? We compute the SE under both the normal and
-# observed-moments assumptions, and report the resulting interval.
+# Before taking the corrected number, look at how it is built. Each $\hat\rho_k$ carries a
+# standard error of roughly $1/\sqrt{T}$, about three points on a thousand observations, and the
+# formula multiplies each one by a weight close to $q$ - here around 250. A sampling error of three
+# points in a single autocorrelation therefore moves the denominator by about fifteen, which is six
+# percent of $q$ before anything real has happened. The correction is right in principle and noisy
+# in practice at this lag structure.
+#
+# The cheapest way to see how noisy is to compute it on each year separately.
 
 # %%
-_sr_target = 1.0
-_n_5y = 252 * 5
-_psr_normal_5y = probabilistic_sharpe_ratio(_sr_target, 0, _n_5y, skewness=0.0, kurtosis=3.0)
-_psr_actual_5y = probabilistic_sharpe_ratio(
-    _sr_target, 0, _n_5y, skewness=moments["skewness"], kurtosis=moments["kurtosis"]
+lo_by_year = pl.DataFrame(
+    [
+        {
+            "year": year,
+            "days": int(len(spy_sample.loc[year])),
+            "sr_annual_iid": lo_2002_annualized_sharpe(spy_sample.loc[year])["sr_annual_iid"],
+            "sr_annual_lo": lo_2002_annualized_sharpe(spy_sample.loc[year])["sr_annual_lo"],
+            "multiplier_lo": lo_2002_annualized_sharpe(spy_sample.loc[year])[
+                "annualization_multiplier_lo"
+            ],
+            "rho_lag1": lo_2002_annualized_sharpe(spy_sample.loc[year])["rho_lag1"],
+        }
+        for year in [str(y) for y in range(int(SAMPLE_START), int(SAMPLE_END) + 1)]
+    ]
+)
+lo_by_year
+
+# %% [markdown]
+# Across four years of the same instrument the multiplier ranges over about five units, which is
+# comparable to the entire correction it delivers on the pooled sample. The lag-1 autocorrelation
+# behind it changes sign between years. That is what an estimator dominated by sampling error looks
+# like.
+#
+# It does not make the correction wrong, and ignoring serial dependence is not the safer choice -
+# the uncorrected rule is simply a different estimator, one that assumes the autocorrelations are
+# exactly zero. What it means is that the corrected Sharpe deserves the same treatment as the
+# uncorrected one: a point estimate with a wide interval around it, which is the subject of this
+# whole notebook.
+
+# %% [markdown]
+# ### What five years of a Sharpe of one is worth
+#
+# A concrete reference point, because "the interval is wide" is easier to dismiss than a number.
+# A strategy reports an annualized Sharpe of one on five years of daily data - a track record most
+# allocators would call substantial. The interval below is computed twice: once assuming returns
+# are normal, and once with the skewness and kurtosis measured on real SPY returns above.
+
+# %%
+five_year_days = 252 * 5
+five_year_normal = probabilistic_sharpe_ratio(1.0, 0, five_year_days, skewness=0.0, kurtosis=3.0)
+five_year_actual = probabilistic_sharpe_ratio(
+    1.0, 0, five_year_days, skewness=moments["skewness"], kurtosis=moments["kurtosis"]
 )
 pl.DataFrame(
     {
-        "assumption": ["IID normal", "Mertens skew/kurt (SPY moments)"],
-        "standard_error": [_psr_normal_5y["standard_error"], _psr_actual_5y["standard_error"]],
-        "ci_95_lower": [_psr_normal_5y["ci_95_lower"], _psr_actual_5y["ci_95_lower"]],
-        "ci_95_upper": [_psr_normal_5y["ci_95_upper"], _psr_actual_5y["ci_95_upper"]],
+        "assumption": ["Normal returns", "Measured skew and kurtosis"],
+        "standard_error": [five_year_normal["standard_error"], five_year_actual["standard_error"]],
+        "ci_95_lower": [five_year_normal["ci_95_lower"], five_year_actual["ci_95_lower"]],
+        "ci_95_upper": [five_year_normal["ci_95_upper"], five_year_actual["ci_95_upper"]],
         "ci_width": [
-            _psr_normal_5y["ci_95_upper"] - _psr_normal_5y["ci_95_lower"],
-            _psr_actual_5y["ci_95_upper"] - _psr_actual_5y["ci_95_lower"],
+            five_year_normal["ci_95_upper"] - five_year_normal["ci_95_lower"],
+            five_year_actual["ci_95_upper"] - five_year_actual["ci_95_lower"],
         ],
     }
 )
 
 # %% [markdown]
-# ## 5. IID Mertens PSR Inference Framework
+# ## 5. Putting it together for one strategy
 #
-# This framework reports an IID Mertens PSR verdict. The Lo-adjusted Sharpe is displayed as a
-# dependence-aware diagnostic, but it does not determine the significance status below.
+# The significance statement below rests on the Mertens correction for skewness and kurtosis, and
+# treats returns as serially independent. The Lo-adjusted Sharpe is reported alongside it as a
+# diagnostic and deliberately does not feed the significance calculation: as the previous section
+# showed, at this sample length the corrected annualization is too unstable to carry a threshold.
 
 
 # %%
@@ -772,7 +832,7 @@ def complete_sharpe_inference(
 
 # %%
 # Apply to SPY
-spy_inference = complete_sharpe_inference(spy_2020_2023, benchmark_sr=0)
+spy_inference = complete_sharpe_inference(spy_sample, benchmark_sr=0)
 
 print("=== Complete Sharpe Ratio Inference: SPY (2020-2023) ===")
 print("\n--- Basic Statistics ---")
@@ -796,46 +856,37 @@ print(f"Has sufficient data: {spy_inference['has_sufficient_data']}")
 print(f"\nIID Mertens PSR inference outcome: {spy_inference['iid_mertens_inference_status']}")
 
 # %% [markdown]
-# ## 6. Case Study: Simulated Strategy Selection
+# ## 6. What the same machinery does to a strategy that was searched for
 #
 # Demonstrate the full framework when selecting from multiple strategies.
 
 # %%
-# Simulate testing 30 strategy variants
-selection_rng = np.random.default_rng(123)
+selection_rng = np.random.default_rng(SEED)
+true_sr_values = selection_rng.permutation(
+    [SEARCH_TRUE_SR] * SEARCH_REAL + [0.0] * (SEARCH_STRATEGIES - SEARCH_REAL)
+).tolist()
 
-n_strategies = 30
-n_days = 504  # 2 years
-
-# Generate strategies: 5 have true SR = 0.8, rest have SR = 0
-true_sr_values = selection_rng.permutation([0.8] * 5 + [0.0] * (n_strategies - 5)).tolist()
-
-strategy_returns = {}
-for i, true_sr in enumerate(true_sr_values):
-    daily_vol = 0.15 / np.sqrt(252)
-    daily_mean = true_sr * 0.15 / 252  # Annual mean = SR * annual_vol, then / 252
-    returns = selection_rng.normal(daily_mean, daily_vol, n_days)
-    strategy_returns[f"Strategy_{i + 1}"] = pd.Series(returns)
-
-# Calculate observed Sharpe ratios
-observed_sharpes = {
-    name: (rets.mean() / rets.std(ddof=1) * np.sqrt(252), true_sr_values[i])
-    for i, (name, rets) in enumerate(strategy_returns.items())
+search_daily_vol = DEMO_ANNUAL_VOL / np.sqrt(252)
+strategy_returns = {
+    f"Strategy_{index + 1}": pd.Series(
+        selection_rng.normal(true_sr * DEMO_ANNUAL_VOL / 252, search_daily_vol, SEARCH_DAYS)
+    )
+    for index, true_sr in enumerate(true_sr_values)
 }
+observed_sharpes = {
+    name: (rets.mean() / rets.std(ddof=1) * np.sqrt(252), true_sr_values[index])
+    for index, (name, rets) in enumerate(strategy_returns.items())
+}
+sorted_strategies = sorted(observed_sharpes.items(), key=lambda item: -item[1][0])
 
-# Sort by observed SR
-sorted_strategies = sorted(observed_sharpes.items(), key=lambda x: -x[1][0])
+print(f"Strategies tested:        {SEARCH_STRATEGIES}")
+print(f"Of which genuinely work:  {SEARCH_REAL}, at a true annualized Sharpe of {SEARCH_TRUE_SR}")
+print(f"Track record length:      {SEARCH_DAYS} days each")
 
 # %% [markdown]
-# **Strategy-selection scenario.** The generated experiment contains:
-
-# %%
-display(
-    Markdown(
-        f"30 strategies tested: 5 true signals (SR = 0.8), 25 nulls "
-        f"(SR = 0), {n_days} days each. Top 10 by observed SR:"
-    )
-)
+# The ground truth is known here and hidden from the statistics, which is the only way to see what
+# a selection procedure does. Ranking by observed Sharpe and reading the top of the table is what a
+# research process does when it has no correction; the `true_sr` column is what it cannot see.
 
 # %%
 top10 = pl.DataFrame(
@@ -851,15 +902,50 @@ top10 = pl.DataFrame(
 )
 top10
 
+# %% [markdown]
+# Which of the two the top-ranked strategy turns out to be depends on the draw, so the
+# demonstration should not rest on it. The strategy to look at is the highest-ranked one whose true
+# Sharpe is zero: it exists in every draw, and it is the one a research process with no correction
+# would accept on exactly the same evidence as a real strategy.
+
 # %%
-# Apply complete per-strategy inference to the "best" strategy. PSR alone
-# does not know about the selection process; it asks "does this single
-# return series look like skill?" - and on a series cherry-picked as the
-# top of a 30-strategy search, it can answer "yes" even when the true SR is
-# zero. Notebook 12 (`12_dsr_validation`) shows the multiple-testing
-# correction; here we just show that PSR by itself is insufficient.
 best_name, (best_sr, best_true_sr) = sorted_strategies[0]
 best_returns = strategy_returns[best_name]
+
+best_null_name, (best_null_sr, _) = next(
+    (name, values) for name, values in sorted_strategies if values[1] == 0.0
+)
+best_null_returns = strategy_returns[best_null_name]
+best_null_rank = [name for name, _ in sorted_strategies].index(best_null_name) + 1
+
+print(f"Top-ranked strategy:            {best_name}, observed {best_sr:.3f}")
+print(f"Its true annualized Sharpe:     {best_true_sr}")
+print(f"Highest-ranked strategy with no edge: {best_null_name}, rank {best_null_rank}")
+print(f"Its observed annualized Sharpe: {best_null_sr:.3f}")
+print(
+    f"Real strategies inside the top {SEARCH_REAL}: "
+    f"{sum(1 for _, (_, true_sr) in sorted_strategies[:SEARCH_REAL] if true_sr > 0)}"
+)
+
+# %% [markdown]
+# Now run the full single-strategy machinery on that null. Whether it clears a significance
+# threshold on any particular draw is luck; what matters is what the numbers look like to a reader
+# who does not know the answer. A strategy with no edge whatsoever produces a respectable
+# annualized Sharpe and a high probability of being positive, and sits near the top of the ranking.
+# The statistics are not wrong - they are answering a question about one series, in ignorance of
+# the twenty-nine others that had to lose for this one to be looked at.
+#
+# Lengthen the records, or widen the search, and the same procedure starts clearing thresholds on
+# strategies that do nothing. `12_dsr_validation` supplies the correction.
+
+# %%
+null_inference = complete_sharpe_inference(best_null_returns, benchmark_sr=0, alpha=0.05)
+print(f"Strategy with no edge at all: {best_null_name}")
+print(f"  Observed annualized Sharpe: {null_inference['observed_sr_iid']:.3f}")
+print(f"  PSR, probability true Sharpe exceeds zero: {null_inference['psr']:.1%}")
+print(f"  One-sided p-value: {null_inference['psr_p_value']:.4f}")
+print(f"  95% interval: [{null_inference['ci_95'][0]:.3f}, {null_inference['ci_95'][1]:.3f}]")
+print(f"  Single-strategy conclusion: {null_inference['iid_mertens_inference_status']}")
 
 inference_result = complete_sharpe_inference(best_returns, benchmark_sr=0, alpha=0.05)
 
@@ -885,15 +971,15 @@ print(
 )
 
 # %% [markdown]
-# ## 7. Practical Workflow Summary
+# ## 7. When to do which of these
 #
-# ### Before Backtesting
+# ### Before running the backtest
 #
 # 1. **Define target SR**: What SR would make the strategy worthwhile?
 # 2. **Plan statistical power**: Do you have enough data for the target effect?
 # 3. **Plan for multiple testing**: How many variants will you test?
 #
-# ### After Backtesting
+# ### After running the backtest
 #
 # 1. **Calculate observed SR** with confidence intervals (PSR)
 # 2. **Adjust for non-normality** using actual skewness/kurtosis
@@ -968,17 +1054,20 @@ def sharpe_ratio_checklist(returns: pd.Series, target_sr: float, alpha: float = 
 
 # %%
 # Run checklist on SPY
-sharpe_ratio_checklist(spy_2020_2023, target_sr=0.5)
-
-# %%
-# Run checklist on simulated "best" strategy (note: PSR alone misses the
-# 30-strategy selection contest - Notebook 12 demonstrates the DSR correction
-# that would deflate this Sharpe).
-print("\n")
-sharpe_ratio_checklist(best_returns, target_sr=0.8)
+sharpe_ratio_checklist(spy_sample, target_sr=0.5)
 
 # %% [markdown]
-# **Prospective planning summary** (80% power, α=0.05):
+# The same checklist on the top-ranked simulated strategy. Every line of it is computed correctly
+# and the conclusion it supports is wrong, because none of the inputs record that this series was
+# picked out of a search.
+
+# %%
+sharpe_ratio_checklist(best_returns, target_sr=SEARCH_TRUE_SR)
+
+# %% [markdown]
+# The planning horizon across a range of target Sharpes, at the same significance level and
+# detection probability used throughout. Read it as a feasibility check before committing to an
+# experiment rather than as a judgement on data already collected.
 
 # %%
 mintrl_summary = pl.DataFrame(
@@ -995,7 +1084,8 @@ mintrl_summary = pl.DataFrame(
 mintrl_summary
 
 # %% [markdown]
-# **Sharpe-ratio 95% CI half-width** (SR=0.5) by sample size:
+# And the same statement in the units a reader argues about: half the width of the interval
+# around an observed Sharpe, as the record lengthens.
 
 # %%
 ci_width_rows = []
@@ -1005,7 +1095,7 @@ for n_ci in [126, 252, 504, 1260]:
 pl.DataFrame(ci_width_rows)
 
 # %% [markdown]
-# ## 8. Library API: From Theory to Practice
+# ## 8. The same calculations from the library
 #
 # The implementations above expose the mechanics of fixed-strategy PSR,
 # canonical MinTRL, prospective power planning, and Lo annualization. In
@@ -1014,7 +1104,7 @@ pl.DataFrame(ci_width_rows)
 
 # %%
 # --- PSR via library (single strategy, K=1) ---
-spy_result = lib_dsr(spy_2020_2023.values, frequency="daily")
+spy_result = lib_dsr(spy_sample.values, frequency="daily")
 
 print("=== Library PSR: SPY (2020-2023) ===")
 print(f"  Sharpe (annualized): {spy_result.sharpe_ratio_annualized:.3f}")
@@ -1069,20 +1159,41 @@ print("\nThe library handles frequency conversion, autocorrelation,")
 print("and higher moments automatically. See NB12/NB13 for DSR + RAS.")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **The Sharpe ratio is a noisy estimate** - always report confidence intervals
+# 1. **Report an interval, not a number.** The standard error of an annualized Sharpe on a year of
+#    daily data is around one. Any Sharpe quoted without a sample length is uninterpretable, and
+#    most Sharpes quoted with one turn out to be indistinguishable from zero.
+# 2. **Work out the required history before collecting it.** The planning calculation takes a
+#    target Sharpe and returns how long a record must be to have a decent chance of detecting it.
+#    Run it first: a target that needs a decade of data is not a research plan, it is a reason to
+#    look for a stronger effect.
+# 3. **Use the sample's own shape.** Skewness and kurtosis enter the Sharpe's variance directly.
+#    Assuming normality on a fat-tailed return series understates the uncertainty in the direction
+#    that flatters the strategy.
+# 4. **A correction can be right in principle and unusable in practice.** The autocorrelation-aware
+#    annualization is the correct estimator when returns are dependent, and on a sample of this
+#    length its multiplier moves more between years than the correction itself is worth. Check the
+#    stability of an adjustment before letting it change a decision.
+# 5. **Single-strategy statistics cannot see a search.** Every number in section 6's checklist is
+#    computed correctly on the selected strategy, and the conclusion is wrong, because none of the
+#    inputs record that the series was the largest of thirty. Report how many candidates were
+#    tried, or the statistics are not answerable.
 #
-# 2. **Plan power before starting** - ensure the design can detect the target SR
+# ### Known limitations
 #
-# 3. **Adjust for non-normality** - real returns are skewed and fat-tailed
+# - The variance formulas are asymptotic. At the shortest sample lengths shown here they are
+#   themselves approximations, and the intervals they produce are optimistic rather than
+#   conservative.
+# - The autocorrelation correction is truncated at a Newey-West lag cutoff, so it assumes every
+#   autocorrelation beyond that lag is exactly zero. That is an assumption, not a measurement.
+# - The search demonstration draws independent strategies. Real candidate sets are correlated,
+#   which makes the effective number of independent trials smaller than the count and is one of the
+#   things a deflated Sharpe has to estimate.
+# - Nothing here addresses whether the return series is stationary. A strategy whose edge decayed
+#   partway through the sample can produce a respectable Sharpe and a meaningless interval.
 #
-# 4. **Correct for multiple testing** - DSR deflates the "best" SR from many strategies
-#
-# 5. **A large selected Sharpe is not self-validating** - report the search breadth,
-#    sample length, and dependence assumptions that produced it
-#
-# ## Further Reading
+# ## Further reading
 #
 # - [López de Prado et al. (2025). "How to Use the Sharpe Ratio"](https://www.adialab.ae/research-series/how-to-use-the-sharpe-ratio)
 # - [GitHub: zoonek/2025-sharpe-ratio](https://github.com/zoonek/2025-sharpe-ratio)

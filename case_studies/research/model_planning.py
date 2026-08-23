@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+import yaml
 
 from case_studies.utils.registry.specs import (
     canonical_json,
     prediction_hash_from_parts,
     training_hash_from_spec,
 )
+from utils.paths import get_case_study_dir
 
-from .adapters import get_adapter
+from .adapters import get_adapter, registered_adapters
 from .contracts import ExecutionTier
 from .models import ModelRequest
 
@@ -233,3 +236,140 @@ def plan_models(
     if len(set(prediction_hashes)) != len(prediction_hashes):
         raise ValueError("model plan contains duplicate checkpoint identities")
     return ModelPlan(study, submitted, members, tiers.pop(), tuple(family_plans))
+
+
+def configured_model_menu(case_study: str, *, labels: Iterable[str] | None = None) -> pl.DataFrame:
+    """Return every predictive model a case study's published YAML menus declare.
+
+    One row per ``(family, label, config_name)``. A family counts as predictive
+    when a shared model adapter answers to its name, so a declared entry like
+    ``causal_dml`` is absent by that rule rather than by a hand-kept list that
+    goes stale as adapters are added.
+
+    A label whose menu omits the family is skipped, not refused: most case
+    studies declare linear and gbm on classification labels and the remaining
+    families only on the return labels.
+    """
+    from utils.artifact_specs import load_setup_config
+    from utils.modeling import load_configs
+
+    setup = load_setup_config(case_study)
+    declared = setup.get("labels") or {}
+    primary = declared.get("primary")
+    if not primary:
+        # load_setup_config returns {} for a path that does not resolve - an
+        # ML4T_OUTPUT_DIR redirect that was never seeded, most often - and
+        # str(None) would carry that on as the literal label "None", reporting an
+        # unreadable config as a case study that declares no models.
+        raise ValueError(f"{case_study}: setup.yaml declares no primary label, or was unreadable")
+    published = (str(primary), *(str(v) for v in declared.get("variants") or []))
+    selected = tuple(labels) if labels is not None else published
+    unknown = sorted(set(selected) - set(published))
+    if unknown:
+        raise ValueError(f"{case_study}: unknown labels {unknown}")
+
+    predictive = {binding.name for binding in registered_adapters("model")}
+    case_dir = get_case_study_dir(case_study)
+    rows = []
+    for label in selected:
+        menu_path = case_dir / "config" / "training" / f"{label}.yaml"
+        if not menu_path.is_file():
+            # A published label with no menu file is a broken config, not a label
+            # that declares nothing; only a family the menu omits is skipped.
+            raise ValueError(f"{case_study}: {label} is published but has no {menu_path.name}")
+        menu = yaml.safe_load(menu_path.read_text()) or {}
+        for family in menu:
+            if family not in predictive or not menu.get(family):
+                continue
+            for config in load_configs(case_study, label, family):
+                rows.append(
+                    {
+                        "family": family,
+                        "label": label,
+                        "config_name": str(config["config_name"]),
+                    }
+                )
+    if not rows:
+        raise ValueError(f"{case_study}: no predictive model is declared for {list(selected)}")
+    menu_frame = pl.DataFrame(rows)
+    # Deduplicating here would hide a menu that lists one configuration twice, and the caller
+    # cannot see it afterwards: the frame that reaches a test has already been collapsed, so an
+    # assertion about duplicates there can never fail. A repeated entry is a config defect - it
+    # says the same model twice and means the reader is told the grid is wider than it is - so it
+    # is refused where it is readable rather than smoothed over.
+    duplicates = (
+        menu_frame.group_by("family", "label", "config_name")
+        .len()
+        .filter(pl.col("len") > 1)
+        .sort("family", "label", "config_name")
+    )
+    if duplicates.height:
+        listed = ", ".join(
+            f"{row['family']}/{row['label']}/{row['config_name']} x{row['len']}"
+            for row in duplicates.iter_rows(named=True)
+        )
+        raise ValueError(f"{case_study}: training menus declare a model more than once: {listed}")
+    return menu_frame
+
+
+def require_declared_menu_coverage(
+    produced: pl.DataFrame,
+    *,
+    case_study: str,
+    unfitted: dict[tuple[str, str], str] | None = None,
+) -> pl.DataFrame:
+    """Fail unless a population covers every declared model on every label declaring it.
+
+    Comparing counts passes a population of the right height built on the wrong
+    labels, which is how a single-label plan of full menu length slips through, so
+    this compares ``(family, label, config_name)`` and names what is absent.
+
+    Each notebook's own completeness check is scoped to the configurations it
+    requests, so it cannot see a member that no notebook requests at all. This is
+    the check that can, and it belongs wherever the families reassemble - model
+    analysis - rather than in any one execution notebook.
+
+    ``unfitted`` maps a ``(family, config_name)`` the case study declares but no
+    notebook fits to the reason. It applies to every label declaring that model
+    rather than enumerating triples, and an entry matching nothing raises: a stale
+    exclusion outlives the gap it describes and hides the next one.
+
+    Returns the excluded rows with their reasons, so a notebook can display what it
+    is knowingly missing instead of the reader having to trust that it is nothing.
+    """
+    identity = ["family", "label", "config_name"]
+    missing_columns = set(identity) - set(produced.columns)
+    if missing_columns:
+        raise ValueError(f"produced population is missing {sorted(missing_columns)}")
+
+    entries = dict(unfitted or {})
+    declared = configured_model_menu(case_study)
+    keys = pl.DataFrame(
+        {
+            "family": [family for family, _ in entries],
+            "config_name": [config for _, config in entries],
+            "reason": list(entries.values()),
+        },
+        schema={"family": pl.String, "config_name": pl.String, "reason": pl.String},
+    )
+    excluded = declared.join(keys, on=["family", "config_name"], how="inner")
+    stale = sorted(set(entries) - set(excluded.select("family", "config_name").iter_rows()))
+    if stale:
+        raise ValueError(
+            f"{case_study}: declared-but-unfitted entries match no configured model: {stale}"
+        )
+
+    declared_rows = set(declared.select(identity).iter_rows())
+    excluded_rows = set(excluded.select(identity).iter_rows())
+    produced_rows = set(produced.select(identity).unique().iter_rows())
+    absent = sorted(declared_rows - produced_rows - excluded_rows)
+    if absent:
+        raise RuntimeError(
+            f"{case_study}: the population omits declared models that nothing excludes: {absent}"
+        )
+    undeclared = sorted(produced_rows - declared_rows)
+    if undeclared:
+        raise RuntimeError(
+            f"{case_study}: the population holds models no menu declares: {undeclared}"
+        )
+    return excluded.sort(identity)
