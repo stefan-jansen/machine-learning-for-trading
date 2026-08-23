@@ -220,10 +220,15 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Preparing a fold - slicing the window, cleaning the rows - depends on the data and not on the
+# model, so it does not differ between the configurations of one label. Whether it is therefore
+# done once depends on which path the run takes, and this notebook takes the resolved one: it
+# resolves every request before the call so it can show the plan above, and the runner then walks
+# the resolved requests one at a time, preparing that request's folds again. The path that walks
+# folds on the outside and configurations on the inside, holding one prepared fold set for the
+# whole grid, is the batch path in `case_studies/utils/gbm.py`, and it is reached by handing
+# `run_model_population` unresolved requests instead. It is the one to take on a panel large
+# enough for the repetition to cost something.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
