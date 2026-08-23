@@ -215,9 +215,14 @@ backtest:
     # Ch16 equal-weight baseline selection. Long-only top-k. Percentile
     # and quantile axes are commented out; uncomment to add them for any
     # label and the loader will synthesize the schemes automatically.
+    # k is a concentration choice and only means anything against the tradeable
+    # cross-section, which here is 99 names at the median decision date (p10 82).
+    # 5 / 10 / 20 is 5% / 10% / 20% of that: a genuinely concentrated low end and a
+    # diversified high end that still selects. The grid was [10, 20] and had no 5%
+    # end, which is where every comparable case study starts.
     top_k_grid:
-      fwd_ret_21d: [10, 20]
-      fwd_ret_5d:  [10, 20]
+      fwd_ret_21d: [5, 10, 20]
+      fwd_ret_5d:  [5, 10, 20]
     # percentile_grid:
     #   fwd_ret_21d: [80, 90, 95]
     # quantile_grid:
