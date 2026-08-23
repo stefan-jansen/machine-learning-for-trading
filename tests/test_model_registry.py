@@ -381,6 +381,26 @@ def _query_registry(db_path: Path, table: str, where: str = "") -> list[dict]:
         db.close()
 
 
+def _run_registry(output_root: Path, case_study: str) -> Path:
+    """Return the registry the notebook actually wrote, canonical or preview.
+
+    `run_notebook(..., research_preview=True)` injects EXECUTION_TIER=preview into every notebook
+    whose parameters cell declares it, and `Study.activate(PREVIEW)` repoints the output root to
+    `<root>/.preview`. So a migrated notebook writes to `<root>/.preview/<cs>/run_log/registry.db`
+    while an unmigrated one, which has no tier parameter and runs canonical, writes to
+    `<root>/<cs>/run_log/registry.db`.
+
+    Reading only the canonical path made every registry assertion below vacuous for migrated
+    notebooks: `_query_registry` returns `[]` for a file that does not exist, so "wrote to the
+    other registry" and "registered nothing" produced the same empty list. That is what made the
+    entry_point assertion look like a provenance problem when it was a path problem.
+    """
+    preview = output_root / ".preview" / case_study / "run_log" / "registry.db"
+    if preview.exists():
+        return preview
+    return output_root / case_study / "run_log" / "registry.db"
+
+
 def _registry_summary(db_path: Path) -> dict:
     """Return a summary of registry contents for reporting."""
     return {
@@ -442,8 +462,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     timeout = overrides.get("timeout", default_timeout)
 
     # --- Snapshot registry state before run ---
-    registry_db = isolated_model_output / case_study / "run_log" / "registry.db"
-    before = _registry_summary(registry_db)
+    before = _registry_summary(_run_registry(isolated_model_output, case_study))
 
     # --- Execute ---
     result = run_notebook(
@@ -460,6 +479,8 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     )
 
     # --- Registry assertions (for notebooks that register) ---
+    # Resolved again after the run: the preview root does not exist until the notebook creates it.
+    registry_db = _run_registry(isolated_model_output, case_study)
     after = _registry_summary(registry_db)
 
     # Check if this notebook is expected to register (match on suffix)
@@ -475,14 +496,45 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         # Some notebooks (e.g. 12_pca) re-register configs that were
         # already created by an earlier notebook (11_latent_factors),
         # resulting in upserts with 0 net new rows but updated entry_points.
-        expected_entry_point = _expected_entry_point(case_study, stage)
+        # Two fields, because the corpus is mid-migration and they answer the same question on
+        # different paths.
+        #
+        # An unmigrated notebook owns its runner and passes its own stem, which lands in
+        # `entry_point`. A migrated one goes through a shared family runner, so `entry_point`
+        # records the module - `case_studies.utils.linear`, `case_studies.utils.latent_factors` -
+        # which is true, is what a reader needs to find the code, and is legitimately shared by
+        # several notebooks. Asserting the stem against it worked only while every notebook had its
+        # own runner, and went silently red for every migrated notebook in every case study the
+        # moment that stopped being so. `notebook_path` is the field whose name already answers
+        # "which notebook", and the migrated path now fills it.
+        #
+        # Accepting either keeps the check meaningful on both paths during the migration rather
+        # than turning the unmigrated notebooks red to make the migrated ones green. Drop the
+        # `entry_point` half when the last notebook migrates.
+        #
+        # `json_extract` rather than a column: `notebook_path` is provenance, it lives in
+        # `runtime_json`, and `registry/specs.py:_V2_PROVENANCE_FIELDS` keeps it out of the
+        # training identity - so recording it moves no hash.
+        # A missing registry fails here rather than reading as an empty result set, which is the
+        # same rule as the assertion below: silence must not be indistinguishable from a pass.
+        assert registry_db.exists(), (
+            f"{case_study}::{stage} expects to register but wrote no registry under "
+            f"{isolated_model_output}"
+        )
+        expected_notebook = _expected_entry_point(case_study, stage)
         runs = _query_registry(
             registry_db,
             "training_runs",
-            f"entry_point = '{expected_entry_point}'",
+            f"json_extract(runtime_json, '$.notebook_path') = '{expected_notebook}' "
+            f"OR entry_point = '{expected_notebook}'",
         )
+        # Fails rather than skips when neither field names the notebook. An unset provenance field
+        # reading as "not checked" is how the entry_point half of this hid through an entire
+        # migration, and the point of the assertion is to catch a notebook whose registration
+        # silently stopped.
         assert runs, (
-            f"{case_study}::{stage} found no training run with entry_point='{expected_entry_point}'"
+            f"{case_study}::{stage} registered no training run naming itself: no row has "
+            f"runtime_provenance['notebook_path'] or entry_point equal to '{expected_notebook}'"
         )
 
         if new_training > 0:
@@ -533,8 +585,8 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
                 assert {1, 2}.issubset(checkpoints), checkpoints
         else:
             print(
-                f"\n  Registry OK: {len(runs)} training_runs with "
-                f"entry_point='{expected_entry_point}' (upserted, no net new rows)"
+                f"\n  Registry OK: {len(runs)} training_runs naming "
+                f"'{expected_notebook}' (upserted, no net new rows)"
             )
     else:
         # Non-registering notebook — just report what happened
