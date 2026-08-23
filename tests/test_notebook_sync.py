@@ -37,11 +37,11 @@ from notebook_provenance import (  # noqa: E402
     check_all,
     contradicts_injected_cell,
     destamped,
-    has_outputs,
     injected_parameters,
     is_cleared,
     production_parameters,
     stamp_notebook,
+    was_executed,
 )
 
 
@@ -641,21 +641,31 @@ def _stdout(text: str) -> dict:
     return {"output_type": "stream", "name": "stdout", "text": text}
 
 
-def test_a_notebook_with_outputs_has_outputs() -> None:
-    assert has_outputs(_notebook([_code("print(1)", [_stdout("1")])]))
+def test_a_notebook_with_outputs_was_executed() -> None:
+    assert was_executed(_notebook([_code("print(1)", [_stdout("1")])]))
 
 
-def test_a_notebook_whose_code_ran_nothing_has_no_outputs() -> None:
-    assert not has_outputs(_notebook([_code("print(1)")]))
+def test_a_notebook_whose_code_never_ran_was_not_executed() -> None:
+    assert not was_executed(_notebook([_code("print(1)")]))
+
+
+def test_a_silent_cell_with_an_execution_count_was_executed() -> None:
+    """A cell that only assigns or writes a file runs fine and displays nothing.
+
+    The kernel still stamps ``execution_count``, so the notebook is not hollow.
+    """
+    cell = _code("x = 1")
+    cell["execution_count"] = 3
+    assert was_executed(_notebook([cell]))
 
 
 def test_a_blank_code_cell_does_not_count_as_unexecuted_code() -> None:
     """jupytext leaves empty trailing cells; they must not make a live notebook hollow."""
-    assert has_outputs(_notebook([_code("print(1)", [_stdout("1")]), _code("   ")]))
+    assert was_executed(_notebook([_code("print(1)", [_stdout("1")]), _code("   ")]))
 
 
 def test_a_markdown_only_notebook_is_not_hollow() -> None:
-    assert has_outputs(_notebook([{"cell_type": "markdown", "source": "# hi", "metadata": {}}]))
+    assert was_executed(_notebook([{"cell_type": "markdown", "source": "# hi", "metadata": {}}]))
 
 
 def test_cleared_is_no_stamp_and_no_outputs(tmp_path) -> None:

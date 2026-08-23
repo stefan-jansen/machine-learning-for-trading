@@ -52,7 +52,9 @@ Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
 
 * ``source_py_blob`` must equal ``git hash-object`` of the current paired ``.py``
   (else the ``.py`` changed since the notebook was executed — STALE),
-* ``production`` must be True (else a TEST-mode run was committed), and
+* ``production`` must be True (else a TEST-mode run was committed),
+* some code cell must show it ran - an output or an execution count (else the stamp
+  is over a render nothing produced — HOLLOW), and
 * the stamp must not contradict a committed ``injected-parameters`` cell (else the
   notebook was re-executed with overrides after it was stamped).
 
@@ -69,8 +71,8 @@ linear:
    DE-STAMPED and keeping it read as STALE.
 
 The state the gate must still reject is the one that looks like (2) but claims (1):
-a stamp over an empty output set — a render rebuilt from the ``.py`` and re-stamped
-without a run behind it. That is HOLLOW and it fails.
+a stamp over a notebook showing no trace of execution — a render rebuilt from the
+``.py`` and re-stamped without a run behind it. That is HOLLOW and it fails.
 
 Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 ``--strict`` is passed. This is deliberate: adoption is gradual — stamp notebooks
@@ -671,23 +673,28 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
-def has_outputs(nb: dict) -> bool:
-    """True if any non-empty code cell in *nb* carries an output.
+def was_executed(nb: dict) -> bool:
+    """True if any non-empty code cell in *nb* shows evidence of having been run.
 
-    A notebook with code and no outputs anywhere has not been executed (or has been
-    deliberately cleared). The distinction matters twice below: a CLEARED notebook
-    claims nothing and may be committed, and a STAMPED one claims a production run
-    that left no outputs, which no real run does.
+    Evidence is an output OR a non-null ``execution_count``. Outputs alone are not
+    enough to ask about: a cell that only assigns, writes a file or logs somewhere
+    else runs successfully and displays nothing, and a notebook made entirely of
+    those would otherwise read as never executed. The counter is written by the
+    kernel on every execution and cleared only deliberately, so the two together
+    separate "ran and said little" from "did not run".
+
+    The distinction matters twice below: a CLEARED notebook shows no evidence and so
+    claims nothing, and a STAMPED one claims a production run that left no evidence
+    at all, which no real run does.
     """
     saw_code = False
     for cell in nb.get("cells", []):
         if cell.get("cell_type") != "code":
             continue
-        source = cell.get("source") or []
-        if not "".join(source).strip():
+        if not "".join(cell.get("source") or []).strip():
             continue
         saw_code = True
-        if cell.get("outputs"):
+        if cell.get("outputs") or cell.get("execution_count") is not None:
             return True
     return not saw_code
 
@@ -709,7 +716,7 @@ def is_cleared(nb_path: Path) -> bool:
         nb = json.loads(nb_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
-    return not nb.get("metadata", {}).get(STAMP_KEY) and not has_outputs(nb)
+    return not nb.get("metadata", {}).get(STAMP_KEY) and not was_executed(nb)
 
 
 def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
@@ -790,7 +797,7 @@ def check_all(
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-        if not has_outputs(nb):
+        if not was_executed(nb):
             hollow.append(rel)
     return stale, testmode, contradicted, unverified, alt_only, hollow
 
@@ -862,7 +869,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     )
     if hollow:
         print(
-            "HOLLOW (carries a provenance stamp over an empty output set — the stamp claims "
+            "HOLLOW (carries a provenance stamp over a notebook with no trace of a run — "
             "a run that left nothing behind; clear the notebook or re-execute it):"
         )
         for r in hollow:
