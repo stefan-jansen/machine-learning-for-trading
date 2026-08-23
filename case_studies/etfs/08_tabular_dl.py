@@ -145,7 +145,9 @@ configs = load_model_configs(
     labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
-configs
+# Every row of this family is the same network, so the estimator column the linear and boosted
+# menus vary is dropped here and the declared parameters carry the whole difference.
+configs.select("label", "config_name", "params")
 
 # %% [markdown]
 # `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
