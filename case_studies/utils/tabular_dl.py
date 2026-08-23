@@ -722,6 +722,39 @@ def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: s
     runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 
 
+def _record_tabm_training_runtime(
+    study: Study,
+    training,
+    *,
+    elapsed_s: float,
+    preparation_s: float | None = None,
+) -> None:
+    """Record what this TabM run cost, against its registry row.
+
+    ``_record_tabm_runtime`` above writes the same seconds into the run's ``runtime.json``, which
+    is the artifact compared byte for byte when the same identity is registered again. Nothing
+    queries that file. ``training_runs.elapsed_s`` is the column
+    ``reference/case-study-runtimes.md`` is built from, and it was NULL on every TabM row the
+    fleet had ever registered, so a run could be timed and still leave the next agent nothing to
+    cost the family from.
+
+    Only the fitting path calls this. A run served from the registry has no fit cost to record,
+    and writing one would overwrite the measurement its original fit left behind.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+    from case_studies.utils.runtime import resource_measurement
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(
+            elapsed_s=elapsed_s,
+            fold_preparation_s=preparation_s,
+        ),
+    )
+
+
 def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate_key: str) -> None:
     diagnostics_dir = train_dir / "diagnostics"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -1308,6 +1341,12 @@ def _run_tabm_compatible_group(study: Study, items):
                 candidate.attempt = None
                 continue
             _record_tabm_runtime(train_dir, result, candidate_key)
+            _record_tabm_training_runtime(
+                study,
+                training,
+                elapsed_s=float(fit_elapsed_by_candidate[candidate_key]),
+                preparation_s=preparation_elapsed_s,
+            )
             _persist_tabm_diagnostics(train_dir, result, candidate_key)
             predictions = _publish_tabm_predictions(
                 study,

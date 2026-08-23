@@ -1023,13 +1023,28 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: LatentFact
                 label=context.case.primary_label,
             )
         )
+    elapsed_s = time.perf_counter() - started
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
+        runtime["elapsed_s"] = elapsed_s
         temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
+    # The same seconds also go to the registry column. runtime.json is the artifact compared byte
+    # for byte when the same identity is registered again, and no query reads it;
+    # `training_runs.elapsed_s` is what `reference/case-study-runtimes.md` is built from. Only
+    # this fitting path records - `_cached_run` above returns without a fit cost, and
+    # writing one there would overwrite what the original fit measured.
+    from case_studies.utils.registry.registration import record_training_runtime
+    from case_studies.utils.runtime import resource_measurement
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(elapsed_s=elapsed_s),
+    )
     return ModelRun(training=training, predictions=tuple(prediction_results))
 
 

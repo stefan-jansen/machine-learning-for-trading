@@ -1160,6 +1160,24 @@ def run_resolved_request(
                 float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
             )
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
+    if result["grid_results"] and not reused_fitted_state:
+        # The seconds above land in runtime.json, which is the artifact compared byte for byte
+        # when the same identity is registered again and which no query reads.
+        # `training_runs.elapsed_s` is the column `reference/case-study-runtimes.md` is built
+        # from, and it was NULL on every sequence row the fleet had registered. Only the fitting
+        # path records: a run served from persisted state has no fit cost, and writing one would
+        # overwrite what its original fit measured.
+        from case_studies.utils.registry.registration import record_training_runtime
+        from case_studies.utils.runtime import resource_measurement
+
+        record_training_runtime(
+            study.case_study,
+            training.hash,
+            case_dir=training.root,
+            measured=resource_measurement(
+                elapsed_s=sum(float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]),
+            ),
+        )
     return ModelRun(training=training, predictions=prediction_results)
 
 
