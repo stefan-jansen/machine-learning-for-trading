@@ -101,7 +101,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "762b118009db"
+SUPERSEDES_POPULATION: str = "9f26b89f9310"
 
 # %%
 study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -253,9 +253,11 @@ plan.select(
 # prediction identities, so anything that moves a training identity - a changed estimator
 # parameter as much as a changed configuration menu - produces a different population under the
 # same name, and the registry refuses to write it without being told which snapshot it supersedes.
-# That lineage is the only record of which generation is which. Here it records the refit on
-# LightGBM's CPU `max_bin` default, which moved every prediction identity while leaving the
-# configuration menu alone.
+# That lineage is the only record of which generation is which. It has advanced twice: first for
+# the refit onto LightGBM's CPU `max_bin` default, and now for the refit onto the corrected ARIMA
+# feature, since `04` walking each product over its own history moved `model_based.parquet`'s
+# digest and with it every training identity fitted on it. The value here is the generation this
+# run replaces, not the first one.
 #
 # It defaults to the hash the published population actually superseded, not to empty. The hash is
 # part of what the snapshot is hashed over, so a run that left it empty would compute a different

@@ -94,6 +94,7 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
+SUPERSEDES_POPULATION: str = "8337482ecb59"
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
 
@@ -269,10 +270,27 @@ plan.select(
 # publish the first label and be refused for the second, which is what happened before this
 # notebook fitted them together. Everything that finished stays registered, and re-running fits
 # only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity produces a different
+# population under the same name, and the registry refuses to write it without being told which
+# snapshot it supersedes. Here it records the refit onto the corrected ARIMA feature: `04` now
+# walks each product over its own history instead of truncating all thirty to the shortest, which
+# moved `model_based.parquet`'s digest and therefore every training identity fitted on it.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record.
+#
+# It is canonical-only. A preview population is discarded with its workspace, so it has no lineage
+# to extend and `run_model_population` refuses one that carries a hash.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+supersedes = SUPERSEDES_POPULATION or None if EXECUTION_TIER == "canonical" else None
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=supersedes
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
