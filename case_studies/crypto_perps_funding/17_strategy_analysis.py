@@ -387,17 +387,31 @@ print(
 # that reported only the highest Sharpe would be reporting the largest of several hundred draws
 # as though it were one measurement.
 #
-# **A negative selected Sharpe is a result, not a failure of the pipeline.** If the highest
-# Sharpe in the pool is below zero, the deflated version is further below and the interval is not
-# the interesting part - what the case study has established is that this signal, on these
-# contracts, over these folds, does not support a profitable strategy once costs and funding are
-# charged. That is a finding about the market and the model, and it is the kind of finding a
-# selection procedure that could not return it would be worthless for.
+# **Every uncorrected statistic here says the selection is real, and the correction says it is
+# not.** The selected configuration posts a validation Sharpe of 1.59. Its bootstrap interval is
+# [0.30, 2.81] and excludes zero; its probabilistic Sharpe p-value is 0.0100; it needs 366 periods
+# to reach significance and it has 729. Read on their own, all four say the strategy works. The
+# deflated Sharpe is -0.15, and under either shrunk trial count it is still below zero. The
+# disagreement is not a contradiction: the interval and the p-value are computed for one series
+# and answer whether *this* return stream differs from zero, while the deflation asks whether the
+# best of 2,807 differs from what the best of 2,807 worthless strategies would have produced. The
+# largest of 2,807 draws lands near 1.6 whether or not any of them has an edge, so 1.59 is what
+# this search returns when nothing works.
+#
+# That is the whole reason the pool is frozen before it is read. A case study free to stop at the
+# interval would have reported a Sharpe of 1.59 significant at the 1% level, with each supporting
+# number correctly computed.
 #
 # **The interval and the correction answer different questions.** The bootstrap interval widens
 # with a shorter series; the deflation grows with more candidates. A long backtest of one strategy
 # has a tight interval and no deflation. A short backtest of five hundred has both problems, and
 # two validation folds of 8-hourly crypto data is closer to the second.
+#
+# The Rademacher-adjusted Sharpe of 1.11 stays positive where the deflated Sharpe does not, and
+# the two are not interchangeable. It penalizes the complexity of the strategy class by what the
+# same procedure achieves on permuted returns; the deflation penalizes the number of draws taken.
+# On a pool this size the count dominates, so where they disagree the deflation is the one being
+# asked the question this stage exists to ask.
 #
 # **Funding is a separate return stream, not a cost line.** It is reported beside commission and
 # slippage above because all three reduce or increase the same total, but it is the only one that

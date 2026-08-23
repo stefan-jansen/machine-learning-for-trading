@@ -899,8 +899,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
             print(f"  {r}")
     if alt_only:
         print(
-            "ALT-TEXT ONLY (the .py drifted from its stamp only in figure alt text the "
-            "outputs already carry, so re-executing could not change them — allowed):"
+            "OUTPUT-PRESERVING DRIFT (the .py moved only in prose, figure alt text the "
+            "outputs already carry, or inline Papermill metadata: nothing that executes "
+            "changed, so re-running could not produce different outputs - allowed):"
         )
         for r in alt_only:
             print(f"  {r}")
@@ -915,7 +916,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if not fail:
         print(
             f"notebook sync OK: {len(stale)} stale, {len(testmode)} test-mode, "
-            f"{len(contradicted)} contradicted, {len(alt_only)} alt-text-only, "
+            f"{len(contradicted)} contradicted, {len(alt_only)} output-preserving, "
             f"{len(unverified)} unverified (advisory)"
         )
     return 1 if fail else 0
