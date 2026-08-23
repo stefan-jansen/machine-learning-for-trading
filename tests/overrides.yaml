@@ -2082,9 +2082,18 @@ case_studies/us_firm_characteristics/08a_ipca:
     # `preset_patches.py` already rewrites the latent presets in the config directory
     # `conftest.py` copies, and a reduction named here would replace that patch rather than add
     # to it.
+    #
+    # `max_symbols` clears the declared factor count with room, and that is what it is for. Every
+    # latent preset declares `n_factors: 5`, so a fixture cross-section of 5 asks for as many
+    # components as there are assets on a date - which ipca reports as converged=False and pca
+    # does not report at all, because five components from five assets is rank-degenerate rather
+    # than unconverged. Raising the cross-section is the fix rather than reducing `n_factors`:
+    # `_MODEL_PREVIEW_FIELDS` accepts `n_factors` for ipca, cae and pca but not sae, so reducing
+    # it would give three notebooks of this cohort one reduction shape and the fourth another -
+    # and it would put the preview's hands on a production declaration.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
   timeout: 300
 # 08b is genuinely GPU: a Torch conditional autoencoder that trains, and its chapter
 # counterpart 14_latent_factors/06_conditional_autoencoder is already gpu: true.
@@ -2093,7 +2102,7 @@ case_studies/us_firm_characteristics/08b_conditional_autoencoder:
   parameters:
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
   timeout: 300
 case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
   gpu: true
@@ -2105,7 +2114,7 @@ case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
     # described. The three phase budgets are named here because nothing else reduces them.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
       n_epochs_cond: 2
       n_epochs_moment: 1
       n_epochs_unc: 2
@@ -2115,7 +2124,7 @@ case_studies/us_firm_characteristics/08d_supervised_autoencoder:
   parameters:
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
-      max_symbols: 5
+      max_symbols: 20
   timeout: 300
 case_studies/us_firm_characteristics/09_causal_dml:
   parameters:
