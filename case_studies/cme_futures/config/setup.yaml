@@ -147,8 +147,15 @@ backtest:
     # Moment-based allocators (IV/RP/HRP/MVO_LW) all use the CS-level
     # ``execution.allocator_lookback`` — no per-allocator vol_window /
     # lookback fields. No max-weight cap.
+    # No equal_weight entry. Equal weight IS the Chapter 16 baseline, and `stage` is not
+    # part of `backtest_hash`, so an equal-weight run at the allocation stage is a no-op
+    # reweight that hashes identically to its baseline parent - whichever writes first
+    # claims the row and the other is lost. Measured in this case study's own pre-rebuild
+    # store: 48 rows carrying `stage='signal'` with `allocation.method='equal_weight'`,
+    # and zero `allocation`/`equal_weight` rows, which downstream tooling then reported
+    # as both missing and unexpected trials. The baseline is already in the pool that the
+    # later stages select over.
     allocators:
-      - {name: equal_weight,    method: equal_weight}
       - {name: score_weighted,  method: score_weighted}
       - {name: inverse_vol,     method: inverse_vol}
       - {name: risk_parity,     method: risk_parity}

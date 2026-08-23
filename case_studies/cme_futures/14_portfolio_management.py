@@ -19,7 +19,11 @@
 # The signal stage ranks complete configurations by equal-weight validation backtest Sharpe. For
 # each label, this notebook retains the strongest checkpoint and signal concentration for each of
 # the configured number of distinct model configurations, then evaluates the declared alternative
-# allocators. Equal weight is excluded because it is already the signal baseline.
+# allocators. Equal weight is not among them: it is the baseline stage itself, and because
+# `stage` is not part of `backtest_hash`, running it again here produces a row hashing
+# identically to its baseline parent, so one of the two is silently lost. Measured in this
+# case study's own pre-rebuild store: 48 rows stamped `stage='signal'` while carrying
+# `allocation.method='equal_weight'`, and no allocation-stage equal-weight rows at all.
 #
 # All allocator lookbacks come from the case-study configuration. The official population is fixed
 # before execution; machine speed and caught failures cannot change which allocators run.
@@ -52,13 +56,15 @@ universe
 
 # %%
 shortlist_size = get_top_n_predictions("cme_futures", "allocation")
-allocators = [
-    allocation
-    for allocation in get_allocators("cme_futures")
-    if allocation.get("method") != "equal_weight"
-]
+allocators = get_allocators("cme_futures")
 if not allocators:
-    raise ValueError("the allocation population is empty after excluding equal weight")
+    raise ValueError("the configured allocator population is empty")
+if any(allocation.get("method") == "equal_weight" for allocation in allocators):
+    raise ValueError(
+        "equal_weight is the baseline stage, not an allocator: `stage` is not part of "
+        "`backtest_hash`, so an equal-weight reweight hashes identically to its baseline "
+        "parent and one of the two rows is lost. Remove it from the configured menu."
+    )
 
 request_rows = []
 for label in ALL_LABELS:
