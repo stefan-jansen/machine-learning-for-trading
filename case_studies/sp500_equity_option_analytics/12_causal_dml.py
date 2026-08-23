@@ -30,7 +30,7 @@
 # and positioning.
 #
 # **Learning Objectives**:
-# - Keep the sealed holdout outside an exploratory causal analysis
+# - Keep the holdout outside an exploratory causal analysis
 # - Cross-fit a panel by complete decision time with a time-based embargo
 # - Compare the adjusted estimate with naive OLS and a block-permutation null
 #
@@ -77,38 +77,44 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
-PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-RANDOM_SEED = 42
-CV_FOLDS = 5
-MAX_SAMPLES = 50000
-N_PLACEBO = 100
+# Each of these is zero or empty for "take the declared value". A run that passes one
+# overrides the declaration; a run that passes none reproduces the published analysis.
+LABEL = ""
+SEED = 0
+N_FOLDS = 0
+MAX_SAMPLES = 0
+N_PLACEBO = 0
+
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request. The values the analysis runs on are resolved below and
+# carry different names, so the two can be read side by side and neither can quietly overwrite
+# the other. Precedence is: an injected parameter wins, otherwise the case study's declaration.
+#
+# The declaration is read with `[...]` rather than `.get(key, literal)`. A literal default here
+# would substitute a number the case study never declared - silently, and only on the
+# configurations that happen to omit the key - so a missing key raises instead.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
+PRIMARY_LABEL = LABEL or setup["labels"]["primary"]
 
 causal_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "causal_dml")
 dml_cfg = causal_configs[0]
 
-for key, val in [
-    ("n_folds", CV_FOLDS),
-    ("n_placebo", N_PLACEBO),
-    ("max_samples", MAX_SAMPLES),
-    ("seed", RANDOM_SEED),
-]:
-    if dml_cfg.get(key, val) != val:
-        dml_cfg[key] = val
-
-CV_FOLDS = dml_cfg.get("n_folds", 5)
-N_PLACEBO = dml_cfg.get("n_placebo", 100)
-MAX_SAMPLES = dml_cfg.get("max_samples", 50000)
-RANDOM_SEED = dml_cfg.get("seed", 42)
+CV_FOLDS = N_FOLDS or int(dml_cfg["n_folds"])
+PLACEBO_REPS = N_PLACEBO or int(dml_cfg["n_placebo"])
+ROW_CAP = MAX_SAMPLES or int(dml_cfg["max_samples"])
+RANDOM_SEED = SEED or int(dml_cfg["seed"])
 
 print(f"DML config: {dml_cfg['config_name']}")
+print(
+    f"  folds {CV_FOLDS} | placebo reps {PLACEBO_REPS} | row cap {ROW_CAP:,} | seed {RANDOM_SEED}"
+)
 
 # %% [markdown]
 # The case-study configuration defines the treatment and confounders. Keeping
@@ -134,7 +140,7 @@ print(f"  Treatment: {TREATMENT_COL}")
 print(f"  Outcome: {PRIMARY_LABEL}")
 print(f"  Confounders: {CONFOUNDER_COLS}")
 print(f"  CV folds: {CV_FOLDS}")
-print(f"  Placebo reps: {N_PLACEBO}")
+print(f"  Placebo reps: {PLACEBO_REPS}")
 
 # %% [markdown]
 # ## 1. Load Artifacts
@@ -193,15 +199,28 @@ merged_clean = (
 
 # %% [markdown]
 # The forward-label buffer closes the development sample early enough that no
-# outcome interval crosses into the sealed holdout.
+# outcome interval crosses into the holdout.
+
+# %% [markdown]
+# Two quantities follow from the label buffer, and they answer different questions. The
+# **embargo** separates a fold's training window from its test window, so a label measured in
+# training cannot still be running when testing starts. The **permutation block size** is the
+# scale of the dependence the placebo has to preserve: shuffling in blocks shorter than the
+# label horizon pulls overlapping labels apart, and the placebo degrades towards an
+# independent draw - the permutation that is too easy to pass and therefore proves nothing.
+#
+# They are equal in this case study because the same buffer sets both. They are assigned
+# separately below so that stays a fact about this case study rather than an assumption
+# buried in a shared name.
 
 # %%
-EMBARGO_PERIODS = embargo_from_buffer(mds.label_buffer)
-BLOCK_SIZE = EMBARGO_PERIODS
+LABEL_HORIZON = embargo_from_buffer(mds.label_buffer)
+EMBARGO_PERIODS = LABEL_HORIZON
+BLOCK_SIZE = LABEL_HORIZON
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
 
-# Labels at or after this cutoff can overlap the sealed holdout return window.
+# Labels at or after this cutoff can overlap the holdout return window.
 merged_clean = merged_clean.loc[merged_clean[date_col] < DEVELOPMENT_CUTOFF].copy()
 
 sort_cols = [date_col, *entity_cols]
@@ -215,12 +234,12 @@ if entity_cols and merged_clean.duplicated([date_col, entity_cols[0]]).any():
 # construction cannot cut through a decision time.
 
 # %%
-if MAX_SAMPLES > 0 and len(merged_clean) > MAX_SAMPLES:
+if ROW_CAP > 0 and len(merged_clean) > ROW_CAP:
     date_counts = merged_clean.groupby(date_col, sort=True).size()
     reverse_cumulative = date_counts.iloc[::-1].cumsum()
-    selected_dates = reverse_cumulative[reverse_cumulative <= MAX_SAMPLES].index
+    selected_dates = reverse_cumulative[reverse_cumulative <= ROW_CAP].index
     if len(selected_dates) == 0:
-        raise ValueError(f"MAX_SAMPLES={MAX_SAMPLES:,} cannot fit one complete decision time")
+        raise ValueError(f"ROW_CAP={ROW_CAP:,} cannot fit one complete decision time")
     print(
         f"Taking {len(selected_dates):,} most recent complete decision times "
         f"({int(date_counts.loc[selected_dates].sum()):,} rows) from {len(merged_clean):,}"
@@ -234,13 +253,13 @@ assert merged_clean[date_col].max() < DEVELOPMENT_CUTOFF
 # %% [markdown]
 # > **Scope**: This is a development-period sensitivity analysis, not a holdout
 # > evaluation. The label buffer removes observations whose forward returns could
-# > overlap the sealed holdout. `MAX_SAMPLES` keeps complete cross-sections, so
+# > overlap the holdout. `ROW_CAP` keeps complete cross-sections, so
 # > neither folds nor embargoes cut through a decision time.
 
 # %%
 print(f"\nAnalysis data: {len(merged_clean):,} rows")
 print(f"Date range: {merged_clean[date_col].min()} to {merged_clean[date_col].max()}")
-print(f"Sealed holdout begins: {HOLDOUT_START.date()}")
+print(f"Holdout begins: {HOLDOUT_START.date()}")
 print(f"Development cutoff after label buffer: {DEVELOPMENT_CUTOFF.date()}")
 print(f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE}")
 if entity_cols:
@@ -262,7 +281,7 @@ results = run_dml_analysis(
     confounder_cols=CONFOUNDER_COLS,
     n_folds=CV_FOLDS,
     embargo=EMBARGO_PERIODS,
-    n_placebo=N_PLACEBO,
+    n_placebo=PLACEBO_REPS,
     block_size=BLOCK_SIZE,
     seed=RANDOM_SEED,
     horizon=EMBARGO_PERIODS,
@@ -310,8 +329,12 @@ bias_pct = results["confounding_bias_pct"]
 # p-value computed in run_dml_analysis (no duplication)
 p_value = results["p_value_hac"]
 
-ref = results.get("refutation", {})
-p_value_perm = ref.get("empirical_p", 1.0)
+ref = results.get("refutation") or {}
+if "empirical_p" not in ref:
+    # Defaulting to 1.0 here would report "cannot reject" for a refutation that never ran,
+    # which is the one reading a missing test must not produce.
+    raise RuntimeError("the DML run published no block-permutation refutation")
+p_value_perm = ref["empirical_p"]
 ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
 
 print("Statistical significance:")
@@ -438,22 +461,24 @@ register_causal_run(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The sealed holdout remains unused**: The analysis ends before the
+# 1. **The holdout is never read**: The analysis ends before the
 #    label-buffer cutoff, so exploratory causal diagnostics cannot influence or
 #    consume the final evaluation window.
 #
-# 2. **The adjusted association is not distinguishable from zero under panel
-#    uncertainty**: The DML estimate is -0.0228 units of five-day return per 1.0
-#    annualized IV-RV spread, with Driscoll-Kraay SE 0.0200 and p = 0.257.
+# 2. **Read the coefficient against its panel-aware standard error, not against zero**:
+#    the DML estimate is a five-day return per one annualized unit of IV-RV spread, and the
+#    Driscoll-Kraay standard error beside it is the one that allows for both serial and
+#    cross-sectional dependence. The summary cell above prints both, with the p-value.
 #
-# 3. **Observed confounders barely move the same-sample estimate**: Naive OLS is
-#    -0.022934 versus -0.022823 for DML, a -0.49% difference. Comparing both
-#    estimators on the same 38,422 out-of-fold rows removes the apparent large
-#    correction created by unequal samples.
+# 3. **Compare naive OLS and DML on the same rows**: `confounding_bias_pct` is the gap
+#    between them as a share of the adjusted estimate. Both are computed on the same
+#    out-of-fold sample, which is what stops an apparent large correction that is really
+#    two estimators reading different numbers of rows.
 #
-# 4. **The permutation result is supporting, not decisive**: The 100-placebo,
-#    5-fold block-null p-value is 0.01, indicating unusual time alignment under
-#    that diagnostic. It does not override the panel-aware coefficient uncertainty.
+# 4. **The permutation result is supporting, not decisive**: its p-value has a floor of
+#    one over the number of placebo draws plus one, so a run of this size cannot report
+#    zero however extreme the estimate is. It does not override the coefficient's own
+#    uncertainty, and a block permutation disturbs timing rather than confounding.
 #
 # 5. **Diagnostics do not establish identification**: Complete-date cross-fitting
 #    and both uncertainty checks strengthen the sensitivity analysis, but a

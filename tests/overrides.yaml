@@ -1799,10 +1799,12 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
+  # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
+  # value, so the parameter and the number the analysis runs on no longer share a name.
   parameters:
-    CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
+    N_FOLDS: 2
     N_PLACEBO: 5
   timeout: 120
 case_studies/sp500_equity_option_analytics/13_model_analysis:
