@@ -51,7 +51,7 @@
 # ## Setup
 
 # %%
-"""OLS and the Inferential Toolkit — classical inference diagnostics before the prediction pivot."""
+"""OLS and the Inferential Toolkit - classical inference diagnostics before the prediction pivot."""
 
 import warnings
 
@@ -64,11 +64,12 @@ from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_ser
 from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-from statsmodels.stats.stattools import durbin_watson, jarque_bera
+from statsmodels.stats.stattools import jarque_bera
 
 from utils.cv_splits import generate_cv_splits
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
+from utils.style import show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -158,9 +159,104 @@ print(f"Assets: {df[ASSET_COL].n_unique()}")
 print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
 # %% [markdown]
+# ### What is in the panel
+#
+# Two properties of this dataset decide how the diagnostics below have to be
+# computed, so we look at them before computing anything.
+#
+# The first is what the features are. They are not unrelated measurements:
+# they come in families that describe the same price history over different
+# windows - returns over several horizons, volatility over several windows,
+# moving-average ratios, oscillators. Members of a family move together, which
+# is what the collinearity diagnostic will find.
+#
+# The second is how much history each ETF has. The panel is unbalanced. An ETF
+# that listed in 2015 has no rows before it, and a row is dropped wherever a
+# feature could not be computed, so a symbol's rows can skip trading sessions
+# that other symbols have. Any statistic that reads "the previous observation"
+# off row order will silently cross those gaps.
+
+# %%
+FEATURE_FAMILY_PREFIXES = (
+    "ret_",
+    "vol_",
+    "sharpe_",
+    "sma_",
+    "ema_",
+    "rsi_",
+    "bb_",
+    "atr_",
+    "natr_",
+    "max_dd_",
+    "volume_",
+    "dollar_vol_",
+)
+
+
+def feature_family(name: str) -> str:
+    """Group a feature under the price-history family it is computed from."""
+    for prefix in FEATURE_FAMILY_PREFIXES:
+        if name.startswith(prefix):
+            return prefix.rstrip("_")
+    return "other"
+
+
+family_counts = (
+    pl.DataFrame({"feature": FEATURE_COLS})
+    .with_columns(family=pl.col("feature").map_elements(feature_family, return_dtype=pl.String))
+    .group_by("family")
+    .agg(pl.len().alias("n_features"), pl.col("feature").sort().str.join(", ").alias("members"))
+    .sort("n_features", descending=True)
+)
+family_counts
+
+# %% [markdown]
+# The history each symbol brings. One row per ETF, drawn only over the sessions
+# it actually appears on, so a break in a row is a stretch of sessions the panel
+# has for other symbols and not for this one.
+
+# %%
+sessions_per_symbol = (
+    df.group_by(ASSET_COL)
+    .agg(
+        pl.len().alias("sessions"),
+        pl.col("timestamp").min().alias("first"),
+        pl.col("timestamp").max().alias("last"),
+    )
+    .sort(["first", "sessions"])
+)
+
+fig, ax = plt.subplots(figsize=(9, 6))
+for row, symbol in enumerate(sessions_per_symbol[ASSET_COL].to_list()):
+    days = df.filter(pl.col(ASSET_COL) == symbol)["timestamp"].unique().sort().to_numpy()
+    breaks = np.flatnonzero(np.diff(days).astype("timedelta64[D]").astype(int) > 5)
+    for run in np.split(days, breaks + 1):
+        ax.hlines(row, run[0], run[-1], linewidth=1.2)
+ax.set_ylim(-1, sessions_per_symbol.height)
+ax.set_yticks([])
+ax.set_ylabel(f"{sessions_per_symbol.height} ETFs, ordered by first session")
+ax.set_xlabel("Session")
+ax.set_title("Symbols enter over time and some stop quoting for years")
+ax.grid(axis="x", alpha=0.3)
+plt.tight_layout()
+show_with_alt(
+    fig,
+    "One horizontal line per ETF over the sessions it appears on, ordered by first "
+    "session. Lines start at different dates and a few break in the middle.",
+)
+
+print(f"Sessions in the panel: {df['timestamp'].n_unique():,}")
+print(
+    "Sessions per symbol: "
+    f"shortest {sessions_per_symbol['sessions'].min():,}, "
+    f"median {int(sessions_per_symbol['sessions'].median()):,}, "
+    f"longest {sessions_per_symbol['sessions'].max():,}"
+)
+
+# %% [markdown]
 # ## Select a Single Training Fold
 #
-# Inference is an in-sample exercise — we fit one model on one training window
+# Inference is an in-sample exercise - we fit one model on one training window
 # and examine its properties. We use the first walk-forward fold and hold back
 # the validation set for a prediction comparison at the end.
 
@@ -191,7 +287,7 @@ if MAX_TRAIN_ROWS > 0 and len(y_train) > MAX_TRAIN_ROWS:
     unique_symbols = np.unique(symbols_arr)
     rows_per_symbol = max(1, len(y_train) // len(unique_symbols))
     n_keep = max(1, min(len(unique_symbols), MAX_TRAIN_ROWS // rows_per_symbol))
-    keep = np.random.default_rng(42).choice(unique_symbols, size=n_keep, replace=False)
+    keep = np.random.default_rng(SEED).choice(unique_symbols, size=n_keep, replace=False)
     idx = np.flatnonzero(np.isin(symbols_arr, keep))
     X_train_raw = X_train_raw[idx]
     y_train = y_train[idx]
@@ -227,7 +323,7 @@ print(ols_model.summary())
 # %% [markdown]
 # **Reading the summary**: The coefficients table shows many features with small
 # p-values in the `P>|t|` column, which might seem to indicate "significant" predictors.
-# But the overall $R^2$ is very low — typical for cross-sectional return prediction.
+# But the overall $R^2$ is very low - typical for cross-sectional return prediction.
 # A large sample (hundreds of thousands of observations) makes even tiny effects
 # "significant" in the statistical sense, while the economic magnitude may be
 # negligible. Note that even after removing the five exact linear combinations,
@@ -249,7 +345,7 @@ print(ols_model.summary())
 # into constant variance (Breusch-Pagan, below) and no correlation across
 # observations (residual autocorrelation, below); multicollinearity is read off
 # the design matrix via VIF. Linearity and exogeneity are assumptions about the
-# data-generating process that residuals cannot confirm — a misspecified model
+# data-generating process that residuals cannot confirm - a misspecified model
 # can produce well-behaved residuals.
 #
 # We also test normality, which is **not** a Gauss-Markov assumption. It is
@@ -271,7 +367,7 @@ print(f"F-statistic: {bp_fstat:.1f} (p = {bp_fpvalue:.2e})")
 
 if bp_pvalue < 0.05:
     print("\nResult: REJECT homoscedasticity.")
-    print("Consequence: OLS standard errors are biased — t-stats and p-values are unreliable.")
+    print("Consequence: OLS standard errors are biased - t-stats and p-values are unreliable.")
 else:
     print("\nResult: Cannot reject homoscedasticity at 5% level.")
 
@@ -285,32 +381,76 @@ else:
 # dependence and reports it under the name of serial correlation.
 #
 # To test serial correlation we regroup the residuals into one time-ordered
-# series per symbol and measure autocorrelation within each. Two lags are
-# informative here. Lag 1 asks whether yesterday's error predicts today's. Lag
-# 21 sits at the label horizon: `fwd_ret_21d` is a 21-day forward return, so
-# consecutive daily observations of one asset share 20 of 21 days of outcome
-# window. That overlap induces autocorrelation by construction out to lag 20 and
-# is the dominant source of the correlation we find.
+# series per symbol and measure autocorrelation within each. Three lags are
+# informative here. Lag 1 asks whether yesterday's error predicts today's. Lag 5
+# is one trading week. Lag 21 sits at the label horizon: `fwd_ret_21d` is a
+# 21-day forward return, so consecutive daily observations of one asset share 20
+# of 21 days of outcome window. That overlap induces autocorrelation by
+# construction out to lag 20 and is the dominant source of the correlation we
+# find. At lag 21 the outcome windows no longer overlap, so what is left is
+# whatever serial correlation the data has of its own.
+#
+# The lag has to be counted on the session grid the panel is dated on, not on
+# row position. As the unbalanced histories above showed, a symbol's rows skip
+# sessions wherever a feature could not be computed or the ETF was not trading,
+# and three symbols in this training window resume after a break of a year or
+# more. Pairing rows by position would file those gap-crossing pairs under "lag
+# 1". So each residual is placed at the number of the session it belongs to, and
+# a pair counts towards a lag only when its two sessions are exactly that far
+# apart. Durbin-Watson is computed the same way, over consecutive-session pairs
+# only.
 
 # %%
-resid_panel = train_meta.with_columns(residual=pl.Series(np.asarray(residuals))).sort(
-    [ASSET_COL, "timestamp"]
-)
+session_number = {
+    day: number for number, day in enumerate(df["timestamp"].unique().sort().to_list())
+}
+resid_panel = train_meta.with_columns(
+    residual=pl.Series(np.asarray(residuals)),
+    session=pl.col("timestamp").replace_strict(session_number, return_dtype=pl.Int32),
+).sort([ASSET_COL, "session"])
 
+
+# %%
 LAGS = (1, 5, 21)
+MIN_PAIRS = 60  # a correlation on fewer pairs than a quarter of sessions says little
+
+
+# %%
+def lagged_correlation(values: np.ndarray, sessions: np.ndarray, lag: int) -> float:
+    """Correlate residual pairs exactly `lag` sessions apart, ignoring gaps."""
+    on_grid = np.full(sessions[-1] - sessions[0] + 1, np.nan)
+    on_grid[sessions - sessions[0]] = values
+    earlier, later = on_grid[:-lag], on_grid[lag:]
+    both = np.isfinite(earlier) & np.isfinite(later)
+    if both.sum() < MIN_PAIRS:
+        return float("nan")
+    return float(np.corrcoef(earlier[both], later[both])[0, 1])
+
+
+def gap_aware_durbin_watson(values: np.ndarray, sessions: np.ndarray) -> float:
+    """Durbin-Watson counting only pairs on consecutive sessions."""
+    consecutive = np.diff(sessions) == 1
+    return float((np.diff(values)[consecutive] ** 2).sum() / (values**2).sum())
+
+
+# %%
 per_symbol = {lag: [] for lag in LAGS}
 dw_per_symbol = []
 for (_symbol,), group in resid_panel.group_by([ASSET_COL], maintain_order=True):
     r = group["residual"].to_numpy()
+    sessions = group["session"].to_numpy()
     if len(r) < max(LAGS) + 2:
         continue
-    dw_per_symbol.append(durbin_watson(r))
+    dw_per_symbol.append(gap_aware_durbin_watson(r, sessions))
     for lag in LAGS:
-        per_symbol[lag].append(np.corrcoef(r[:-lag], r[lag:])[0, 1])
+        correlation = lagged_correlation(r, sessions, lag)
+        if np.isfinite(correlation):
+            per_symbol[lag].append(correlation)
 
 autocorr_df = pl.DataFrame(
     {
         "lag": list(LAGS),
+        "symbols_measured": [len(per_symbol[lag]) for lag in LAGS],
         "median_autocorr": [float(np.median(per_symbol[lag])) for lag in LAGS],
         "share_positive": [float(np.mean(np.array(per_symbol[lag]) > 0)) for lag in LAGS],
     }
@@ -360,7 +500,7 @@ else:
 # %%
 X_vif = X_train_c
 if VIF_MAX_ROWS > 0 and len(X_vif) > VIF_MAX_ROWS:
-    idx = np.random.default_rng(43).choice(len(X_vif), size=VIF_MAX_ROWS, replace=False)
+    idx = np.random.default_rng(SEED).choice(len(X_vif), size=VIF_MAX_ROWS, replace=False)
     X_vif = X_vif.iloc[idx]
     print(f"VIF computed on {VIF_MAX_ROWS:,} sampled rows")
 
@@ -383,7 +523,7 @@ vif_df.head(15)
 # that flip sign across samples.
 
 # %% [markdown]
-# ## Section 3: When Standard Errors Fail — Robust Alternatives
+# ## Section 3: When Standard Errors Fail - Robust Alternatives
 #
 # Robust standard errors address exactly one failure: non-spherical errors. The
 # point estimates are unchanged and, if linearity and exogeneity hold, they stay
@@ -434,7 +574,7 @@ ols_hc3 = sm.OLS(y_train_s, X_train_c).fit(cov_type="HC3")
 date_groups = train_meta["timestamp"].to_physical().to_numpy()
 symbol_groups = train_meta[ASSET_COL].cast(pl.Categorical).to_physical().to_numpy()
 # Driscoll-Kraay sums within each date, so it needs consecutive period codes and
-# rows already ordered by date — which is how `df` was sorted on load.
+# rows already ordered by date - which is how `df` was sorted on load.
 time_codes = np.unique(date_groups, return_inverse=True)[1]
 
 ols_cluster_date = sm.OLS(y_train_s, X_train_c).fit(
@@ -478,27 +618,40 @@ se_comparison = pl.DataFrame(
 )
 
 # %% [markdown]
-# The features whose robust standard errors differ most from their OLS ones.
-# Reading left to right across the SE columns shows what each dependence the
-# estimator admits costs in precision.
+# Each estimator admits a different set of correlated pairs, and admitting a pair
+# costs precision: the standard error grows. The chart shows, for each estimator,
+# how much larger its standard error is than the OLS one, over all
+# features. A value of 1 means the estimator finds no dependence to correct for;
+# a value of 3 means OLS was overstating that coefficient's precision threefold.
 
 # %%
-cluster_ranked = (
-    se_comparison.sort("se_ratio_cluster", descending=True)
-    .head(10)
-    .select(
-        "feature",
-        "coef",
-        "se_ols",
-        "se_hc3",
-        "se_date",
-        "se_2way",
-        "se_cluster",
-        "se_ratio_cluster",
-        "t_cluster",
-    )
+SE_ESTIMATORS = {
+    "HC3": "se_hc3",
+    "Clustered by date": "se_date",
+    "Clustered by date + symbol": "se_2way",
+    "Driscoll-Kraay": "se_cluster",
+}
+
+ratios, labels = [], []
+for label, column in SE_ESTIMATORS.items():
+    ratio = (se_comparison[column] / se_comparison["se_ols"]).to_numpy()
+    ratio = ratio[np.isfinite(ratio)]
+    if ratio.size:
+        ratios.append(ratio)
+        labels.append(label)
+
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.boxplot(ratios, vert=False, tick_labels=labels, widths=0.6)
+ax.axvline(1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.8)
+ax.set_xlabel("Standard error relative to the OLS standard error")
+ax.set_title("Each dependence the estimator admits widens the standard errors")
+ax.grid(axis="x", alpha=0.3)
+plt.tight_layout()
+show_with_alt(
+    fig,
+    "Box plots of each estimator's standard error divided by the OLS standard error, "
+    "one box per estimator, against a dashed reference line at one.",
 )
-cluster_ranked
 
 # %%
 # Count how many features change significance at 5% level
@@ -554,7 +707,11 @@ ax.set_xlabel("Coefficient estimate (standardized feature, 21-day forward return
 ax.set_title("Most large coefficients cannot be signed once dependence is admitted")
 ax.grid(axis="x", alpha=0.3)
 plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "The largest coefficient estimates with Driscoll-Kraay confidence intervals, "
+    "sorted by value, against a dashed vertical line at zero.",
+)
 
 n_crosses_zero = int((np.abs(coef_values) <= CONF_Z * cluster_se).sum())
 print(
@@ -575,12 +732,12 @@ print(
 #   and autocorrelation by transforming the model
 # - **HAC (Newey-West)**: the standard correction for autocorrelation in a single
 #   time series, and the right tool once the panel is collapsed to one series per
-#   date — which is exactly what the IC calculation in the next section does
+#   date - which is exactly what the IC calculation in the next section does
 # - **Fama-MacBeth**: estimates the cross-section separately on each date and
 #   draws inference from the time series of those estimates, which sidesteps the
 #   within-date dependence rather than modelling it
 #
-# These are valuable tools for the data modeling culture — but they fix *inference*
+# These are valuable tools for the data modeling culture - but they fix *inference*
 # quality, not *prediction* quality. A coefficient with correct standard errors
 # still tells you about in-sample relationships, not out-of-sample forecasting power.
 
@@ -589,8 +746,8 @@ print(
 #
 # We now compute the one metric that matters for trading: the out-of-sample
 # Information Coefficient (IC). Because trading decisions rank assets at each
-# decision date, IC is computed cross-sectionally — Spearman rank correlation
-# between predicted and realized returns *within* each date — and then summarized
+# decision date, IC is computed cross-sectionally - Spearman rank correlation
+# between predicted and realized returns *within* each date - and then summarized
 # across the validation period via mean, IR ($\bar{IC} / \sigma_{IC}$), and a
 # t-statistic on the IC time series.
 #
@@ -601,6 +758,13 @@ print(
 # overstates significance by roughly the square root of the overlap. We report
 # the HAC-corrected statistic with the lag set to the label horizon, and the
 # naive one beside it to show the size of the error.
+#
+# Two dates are dropped before that average is taken. A date where every symbol
+# gets the same prediction has no ranking to correlate, so its Spearman
+# coefficient is undefined and comes back as NaN; a date with too few symbols
+# quoting comes back as null. Both have to go, and in polars they are separate
+# values: dropping nulls leaves a NaN in place, and one NaN makes the mean of
+# the whole series NaN.
 
 # %%
 X_val_c = sm.add_constant(X_val_df, has_constant="add")
@@ -618,9 +782,8 @@ ic_per_date = cross_sectional_ic_series(
     date_col="timestamp",
     entity_col=ASSET_COL,
 )
-# The HAC autocovariance is computed on the row order, so the series must be
-# sorted by date before it is passed on.
-ic_clean = ic_per_date.drop_nulls("ic").sort("timestamp")
+# Sorted by date because the HAC autocovariance is read off the row order.
+ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic").sort("timestamp")
 ic_mean = float(ic_clean["ic"].mean())
 ic_std = float(ic_clean["ic"].std())
 n_periods = ic_clean.height
@@ -649,7 +812,7 @@ print(f"Significant features:    {n_sig_cluster} (Driscoll-Kraay)")
 # %%
 MAX_PLOT_POINTS = 20000
 if len(y_val) > MAX_PLOT_POINTS:
-    idx = np.random.default_rng(44).choice(len(y_val), size=MAX_PLOT_POINTS, replace=False)
+    idx = np.random.default_rng(SEED).choice(len(y_val), size=MAX_PLOT_POINTS, replace=False)
     y_val_plot = y_val[idx]
     y_pred_plot = y_pred_val[idx]
 else:
@@ -677,7 +840,11 @@ axes[1].set_title("The largest predictions carry the largest negative residuals"
 axes[1].grid(alpha=0.3)
 
 plt.tight_layout()
-plt.show()
+show_with_alt(
+    fig,
+    "Two scatter plots over the validation set: realized against predicted return "
+    "with a 45-degree reference line, and residual against predicted return.",
+)
 
 # %% [markdown]
 # ### Why out-of-sample $R^2$ can go negative
@@ -699,7 +866,7 @@ plt.show()
 # by construction.
 #
 # **Out-of-sample**, both guarantees break. First, the coefficients were optimized
-# for the training set, not the validation set — they may amplify noise rather
+# for the training set, not the validation set - they may amplify noise rather
 # than capture signal, making $SS_{\text{res}} > SS_{\text{tot}}$ and driving
 # $R^2$ below zero. Second, the intercept was calibrated to the training-period
 # mean return. If the validation period has a different mean (as it usually does
@@ -707,21 +874,22 @@ plt.show()
 # the wrong level. This level error inflates $SS_{\text{res}}$ even if the model
 # ranks returns correctly.
 #
-# The out-of-sample $R^2$ printed above is negative: the model's magnitude
-# predictions are worse than the naive mean, driven by overfitting 52
-# coefficients and a stale intercept.
+# Both effects are visible in the out-of-sample $R^2$ printed above. Read it
+# against zero: below zero, the fitted coefficients and the training-period
+# intercept together predict worse than having used the validation period's own
+# mean return for every observation.
 #
 # The IC answers a different question, and the two can disagree. IC (Spearman
 # rank correlation) is invariant to level shifts and scaling, so a model whose
-# magnitudes are badly calibrated can still rank correctly — which is why it,
+# magnitudes are badly calibrated can still rank correctly - which is why it,
 # not $R^2$, is the standard metric for cross-sectional return prediction in
 # quantitative finance. Read the IC against its HAC p-value rather than its
 # sign: this is one validation fold of one case study, and the naive statistic
 # printed beside it overstates the evidence, because it counts overlapping
 # windows as independent observations.
 #
-# None of the diagnostic tests — Breusch-Pagan, residual autocorrelation,
-# Jarque-Bera, VIF — measure out-of-sample ranking accuracy. A coefficient can be
+# None of the diagnostic tests - Breusch-Pagan, residual autocorrelation,
+# Jarque-Bera, VIF - measure out-of-sample ranking accuracy. A coefficient can be
 # statistically significant yet contribute nothing to prediction (large sample,
 # tiny effect), and vice versa. The diagnostics tell us whether our *inference*
 # about parameter values is reliable; they say nothing about whether those
@@ -729,10 +897,10 @@ plt.show()
 #
 # This is the core insight of Section 11.1: the inferential toolkit and the
 # predictive toolkit answer different questions. For algorithmic trading, the
-# relevant question is "does this model rank future returns accurately?" — and
+# relevant question is "does this model rank future returns accurately?" - and
 # the relevant tool is out-of-sample evaluation, not hypothesis testing.
 #
-# Section 11.2 introduces regularization — the tool that directly targets
+# Section 11.2 introduces regularization - the tool that directly targets
 # prediction quality by trading bias for variance.
 
 # %% [markdown]
@@ -761,7 +929,7 @@ plt.show()
 # 4. **Robust standard errors repair one failure only.** They fix the variance
 #    estimate when errors are non-spherical. They cannot rescue a model whose
 #    exogeneity or functional form is wrong, where the point estimates
-#    themselves are not consistent — and they do not improve predictions.
+#    themselves are not consistent - and they do not improve predictions.
 #
 # 5. **For prediction, we need a different approach**: regularization +
 #    out-of-sample evaluation. The next notebook introduces Ridge, LASSO,

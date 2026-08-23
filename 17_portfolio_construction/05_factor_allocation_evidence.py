@@ -14,25 +14,40 @@
 # ---
 
 # %% [markdown]
-# # Factor Allocation Evidence: Diversification Across Return Sources
+# # Which return sources actually diversify each other
 #
 # **Docker image**: `ml4t`
 #
-# This notebook examines the empirical evidence for factor-based allocation using
-# nearly a century of data from AQR Capital Management and Kenneth French's Data Library.
-# The key question for portfolio construction: which factors diversify, which provide
-# crisis insurance, and what does this mean for allocation decisions?
+# ## Purpose
+# An allocator needs things to allocate between, and the useful question about a candidate is not
+# whether it earned a premium but whether it earns one when the others do not. This notebook works
+# through the published evidence on that, using close to a century of factor returns from AQR and
+# Kenneth French's data library.
 #
-# **Learning Objectives**:
-# - Assess factor premia using long pre-publication histories
-# - Analyze cross-asset evidence from 8 asset classes
-# - Quantify the value-momentum negative correlation for diversification
-# - Evaluate trend-following as portfolio insurance during crises
-# - Understand factor decay (the cautionary tale of the size premium)
+# Three things get separated that are easy to run together. Whether a factor's premium is real, on
+# a bar appropriate to a literature that has tested hundreds of candidates. Whether two factors
+# diversify each other, and whether there is a reason for it beyond the sample. And whether a
+# factor pays when a portfolio most needs it to, which is a question the available evidence can
+# describe and cannot test.
 #
-# **Book Reference**: Chapter 17, §17.4 (Baseline Allocators)
+# ## Learning objectives
 #
-# **Prerequisites**: None (uses AQR and Fama-French data, not case study data)
+# - Compute a serial-correlation-corrected t-statistic for a factor's mean return, and judge it
+#   against a threshold appropriate to the number of candidates the literature has tried.
+# - Measure the correlation between two factors across asset classes, and separate a correlation
+#   that has a structural explanation from one that does not.
+# - Read a crisis-window table without treating a set of windows chosen after the fact as a test
+#   of anything.
+# - Split a factor's history at its publication date and say precisely what a weaker second half
+#   does and does not establish.
+#
+# ## Book reference
+# Chapter 17, Section 17.4 (baseline allocators).
+#
+# ## Prerequisites
+#
+# - None. Everything here comes from AQR and Fama-French published series, not from the case
+#   studies.
 
 # %% [markdown]
 # ## Data Requirements
@@ -66,7 +81,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import polars as pl
 import structlog
-from IPython.display import Markdown, display
 from plotly.subplots import make_subplots
 from scipy import stats
 
@@ -85,17 +99,19 @@ AQRFactorProvider = provider_module.AQRFactorProvider
 FamaFrenchProvider = provider_module.FamaFrenchProvider
 
 
-def show_figure(figure: go.Figure) -> None:
-    """Render Plotly plus PNG while containing legacy Kaleido deprecations."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        figure.show()
-
+# %% [markdown]
+# ### What each setting decides
+#
+# There is no date range to choose: each factor's history is whatever its publisher has released,
+# and they differ, which is itself something the figures have to show rather than hide.
+#
+# What is a choice is the evidence bar. Two thresholds are bound below: the conventional one, which
+# assumes a single hypothesis was tested, and the higher one proposed for a literature that has
+# searched a large space of candidates. Which is appropriate is the subject of Part 2.
 
 # %% tags=["parameters"]
-# Production defaults - Papermill overrides for CI testing
-# This notebook uses AQR/Fama-French data (no case study data);
-# date range is governed by source-provider availability, no parameters needed.
+DISCOVERY_T_THRESHOLD = 3.0
+CONVENTIONAL_T_THRESHOLD = 2.0
 
 # %% [markdown]
 # ## Initialize Data Providers
@@ -116,14 +132,8 @@ except FileNotFoundError as err:
 # declared canonical inputs and are reconciled separately in the evidence bundle.
 ff = FamaFrenchProvider(cache_path=DATA_DIR / "factors" / "fama-french", use_cache=False)
 
-display(
-    Markdown(
-        f"The local AQR source exposes **{len(aqr.list_datasets())} datasets** across "
-        f"**{len(aqr.list_categories())} categories**. The French provider exposes "
-        f"**{len(ff.list_datasets())} datasets** across **{len(ff.list_categories())} "
-        "categories**."
-    )
-)
+print(f"AQR:    {len(aqr.list_datasets())} datasets in {len(aqr.list_categories())} categories")
+print(f"French: {len(ff.list_datasets())} datasets in {len(ff.list_categories())} categories")
 
 # %% [markdown]
 # These provider checks look mundane, but they matter because the notebook combines
@@ -150,13 +160,12 @@ mom = ff.fetch("mom")  # Momentum factor
 ff4 = ff3.join(mom, on="timestamp", how="inner")
 ff6 = ff5.join(mom, on="timestamp", how="inner")
 
-display(
-    Markdown(
-        f"French coverage spans **{len(ff3):,} FF3 months** "
-        f"({ff3['timestamp'].min():%Y-%m} to {ff3['timestamp'].max():%Y-%m}), "
-        f"**{len(ff5):,} FF5 months**, and **{len(mom):,} momentum months**."
-    )
+print(
+    f"Three-factor:  {len(ff3):,} months, "
+    f"{ff3['timestamp'].min():%Y-%m} to {ff3['timestamp'].max():%Y-%m}"
 )
+print(f"Five-factor:   {len(ff5):,} months")
+print(f"Momentum:      {len(mom):,} months")
 
 # %%
 # AQR factors (if available)
@@ -166,21 +175,25 @@ vme = aqr.fetch("vme_factors")
 tsmom = aqr.fetch("tsmom")
 century = aqr.fetch("century_premia")
 
-display(
-    Markdown(
-        f"AQR coverage includes **{len(qmj):,} QMJ months**, **{len(bab):,} BAB months**, "
-        f"**{len(vme):,} VME months**, **{len(tsmom):,} TSMOM months**, and "
-        f"**{len(century):,} Century months** through {century['timestamp'].max():%Y-%m}."
-    )
-)
+for label, frame in (
+    ("Quality minus junk", qmj),
+    ("Betting against beta", bab),
+    ("Value and momentum everywhere", vme),
+    ("Time-series momentum", tsmom),
+    ("Century of factor premia", century),
+):
+    print(f"{label:<32} {len(frame):>6,} months")
+print(f"Longest history runs through {century['timestamp'].max():%Y-%m}")
 
 # %% [markdown]
 # ## Return Units and Conventions
 #
-# The `ml4t.data.providers` library returns all factor data as **monthly decimals**:
-# - `0.01` = 1% monthly return
-# - `FamaFrenchProvider`: Divides raw French data (percent) by 100 on fetch
-# - `AQRFactorProvider`: Returns data as-is (already decimal in source files)
+# Every factor series here is a **monthly decimal return**: a hundredth means one percent for the
+# month. The providers reach that convention differently and it is worth knowing which is which,
+# because mixing the two silently rescales everything by a hundred.
+#
+# - `FamaFrenchProvider` divides the raw French data, which is published in percent, on fetch.
+# - `AQRFactorProvider` returns its files as they come, already in decimals.
 #
 # These are **current-vintage published research series**. Providers can revise,
 # backfill, or extend their histories. Observation timestamps identify return months,
@@ -206,11 +219,9 @@ for col in ["Mkt-RF", "HML", "SMB", "MOM"]:
             f"{col}: median |r| = {median_abs:.2f} suggests percent units (provider bug)"
         )
 
-display(
-    Markdown(
-        f"The combined French panel contains **{len(ff4_pd):,} monthly observations** from "
-        f"**{ff4_pd.index.min():%Y-%m} through {ff4_pd.index.max():%Y-%m}**."
-    )
+print(
+    f"Combined French panel: {len(ff4_pd):,} months, "
+    f"{ff4_pd.index.min():%Y-%m} to {ff4_pd.index.max():%Y-%m}"
 )
 
 # %% [markdown]
@@ -275,9 +286,13 @@ CRISES = {
 # before seeing any data). The evidence is strong because it's less susceptible to
 # post hoc window selection.
 
+# %% [markdown]
+# One colour assignment for the whole notebook, so a factor keeps its identity from figure to
+# figure. Where more than five factors appear at once, one is emphasised and the rest are neutral
+# rather than each getting its own hue: a reader cannot hold eight colours in mind, and a chart
+# that asks them to is a chart nobody reads.
+
 # %%
-# Consistent semantic emphasis across figures. Figures with more than five factors
-# use one focal color plus neutral context rather than a categorical rainbow.
 factor_colors = {
     "Mkt-RF": COLORS["blue"],
     "HML": COLORS["copper"],
@@ -355,7 +370,7 @@ fig.update_layout(
     height=500,
 )
 
-show_figure(fig)
+fig.show()
 
 # %% [markdown]
 # ### What the wealth paths establish
@@ -375,14 +390,16 @@ show_figure(fig)
 # > returns, not as a literal investable wealth trajectory.
 
 # %%
-display(
-    Markdown(
-        f"Over the shared French history, $1 grows to **${terminal_growth['Mkt-RF']:,.0f}** "
-        f"in the market factor and **${terminal_growth['MOM']:,.0f}** in momentum. "
-        "Those magnitudes exclude implementation frictions and do not establish that a reader "
-        "could have earned the same paths."
-    )
-)
+print("Growth of one dollar over the shared French history, gross of everything:")
+for name, value in sorted(terminal_growth.items(), key=lambda item: -item[1]):
+    print(f"  {name:<8} ${value:>12,.0f}")
+
+# %% [markdown]
+# Those magnitudes are what a long compounding window does to a modest monthly edge, and they are
+# also why long-horizon factor charts are misleading if read as achievable. Nothing has been
+# deducted: no financing on the short leg, no turnover, no capacity limit, no tax. The series is a
+# research construct measured on paper, and the gap between it and an investable version widens
+# with exactly the turnover that makes some of these factors work.
 
 # %% [markdown]
 # ## Century of Factor Premia: Pre-Publication Evidence
@@ -406,12 +423,9 @@ assert set(century_columns) <= set(century_pd.columns)
 century_factors = century_pd[century_columns].dropna()
 cum_century = (1 + century_factors).cumprod()
 
-display(
-    Markdown(
-        f"The aggregate Century panel contributes **{len(century_factors):,} common months** "
-        f"from **{century_factors.index.min():%Y-%m} through "
-        f"{century_factors.index.max():%Y-%m}**."
-    )
+print(
+    f"Century panel: {len(century_factors):,} common months, "
+    f"{century_factors.index.min():%Y-%m} to {century_factors.index.max():%Y-%m}"
 )
 
 # %% [markdown]
@@ -447,7 +461,7 @@ fig.update_layout(
     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
     height=500,
 )
-show_figure(fig)
+fig.show()
 
 # %% [markdown]
 # ---
@@ -477,27 +491,34 @@ show_figure(fig)
 #
 # # Part 2: Statistical Rigor: Do Factors Pass Significance Tests?
 #
-# Harvey, Liu & Zhu (2016) propose a stricter statistical bar for factor discovery:
-# given hundreds of factors tested in the literature, a **t-stat > 3.0** (not 2.0)
-# is needed to account for multiple testing.
+# The conventional significance threshold assumes one hypothesis was tested. Hundreds of factors
+# have been published, and the ones that reached publication are the ones that cleared a bar, so
+# the conventional threshold is the wrong one to judge them by.
+#
+# Harvey, Liu and Zhu (2016) propose raising it, on the reasoning that a literature searching a
+# large space needs a correspondingly higher bar for any single finding. Their conclusion is worth
+# quoting because it is not hedged:
 #
 # > "Most claimed research findings in financial economics are likely false."
-# > - Harvey, Liu & Zhu (2016)
 #
-# **Important caveats on the t > 3 threshold**:
+# Four things about the higher threshold used below, because it is easy to apply it to the wrong
+# quantity:
 #
-# 1. **It applies to mean return t-stats** (HAC-adjusted), not Sharpe ratio significance
-# 2. **It's a proposed bar for cross-sectional factor discovery**, not a universal law
-# 3. **The appropriate threshold depends on context**: pre-registered tests vs. data mining
-# 4. **We apply it here conservatively** to the Newey-West HAC t-stat of mean excess returns
+# 1. It applies to the t-statistic of the **mean return**, not to the significance of a Sharpe
+#    ratio, which is a different statistic with a different distribution.
+# 2. It is a proposal for cross-sectional factor discovery, not a general law of inference.
+# 3. What threshold is right depends on how many things were tried. A single pre-registered test
+#    does not need the same bar as a search over hundreds of candidates.
+# 4. The t-statistics here carry a Newey-West correction, because monthly factor returns are
+#    autocorrelated and an uncorrected standard error would be too small.
 
 
 # %% [markdown]
-# ### Mean Return t-statistic (Newey-West HAC)
+# ### The t-statistic the threshold applies to
 #
-# Harvey et al. (2016) propose t > 3.0 as a stricter bar for factor discovery.
-# This function computes the Newey-West HAC t-statistic for mean excess returns,
-# which is what the Harvey threshold applies to.
+# A Newey-West corrected t-statistic for the mean excess return. The correction matters: monthly
+# factor returns are serially dependent, and an uncorrected standard error understates the
+# uncertainty, which inflates every t-statistic in the same direction.
 
 
 # %%
@@ -672,7 +693,16 @@ if bab is not None:
 
 # %%
 stats_df = pd.DataFrame(factor_stats).T
-stats_df["significant_harvey"] = stats_df["t_stat"] > 3.0
+stats_df["significant_conventional"] = stats_df["t_stat"] > CONVENTIONAL_T_THRESHOLD
+stats_df["significant_harvey"] = stats_df["t_stat"] > DISCOVERY_T_THRESHOLD
+print(
+    f"Clear the conventional bar of {CONVENTIONAL_T_THRESHOLD}: "
+    f"{int(stats_df['significant_conventional'].sum())} of {len(stats_df)} factors"
+)
+print(
+    f"Clear the Harvey bar of {DISCOVERY_T_THRESHOLD}:       "
+    f"{int(stats_df['significant_harvey'].sum())} of {len(stats_df)} factors"
+)
 factor_order = ["Mkt-RF", "MOM", "HML", "RMW", "CMA", "QMJ", "BAB", "SMB"]
 factor_order = [f for f in factor_order if f in factor_stats]
 
@@ -688,7 +718,9 @@ fig.add_trace(
         x=[labels.get(factor, factor) for factor in factor_order],
         y=[factor_stats[factor]["t_stat"] for factor in factor_order],
         marker_color=[
-            COLORS["blue"] if factor_stats[factor]["t_stat"] > 3 else COLORS["neutral"]
+            COLORS["blue"]
+            if factor_stats[factor]["t_stat"] > DISCOVERY_T_THRESHOLD
+            else COLORS["neutral"]
             for factor in factor_order
         ],
         customdata=np.array([[factor_stats[factor]["sharpe"]] for factor in factor_order]),
@@ -696,14 +728,21 @@ fig.add_trace(
         "%{customdata[0]:.2f}<extra></extra>",
     )
 )
-fig.add_hline(y=3, line_dash="dash", line_color=COLORS["amber"], line_width=2)
+fig.add_hline(y=DISCOVERY_T_THRESHOLD, line_dash="dash", line_color=COLORS["amber"], line_width=2)
+fig.add_hline(
+    y=CONVENTIONAL_T_THRESHOLD, line_dash="dot", line_color=COLORS["neutral"], line_width=2
+)
 fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
 
 fig.update_layout(
     title=(
-        f"{int(stats_df['significant_harvey'].sum())} of {len(stats_df)} factors clear the "
-        "conservative t > 3 screen<br><sup>Newey-West HAC t-statistics for mean monthly "
-        "returns; sample histories differ by factor</sup>"
+        f"Raising the bar from {CONVENTIONAL_T_THRESHOLD:.0f} to "
+        f"{DISCOVERY_T_THRESHOLD:.0f} disqualifies "
+        f"{int(stats_df['significant_conventional'].sum() - stats_df['significant_harvey'].sum())}"
+        " of these factors"
+        "<br><sup>Newey-West t-statistics on mean monthly returns; the dotted line is the "
+        "conventional threshold and the dashed line the multiple-testing one; the factors between "
+        "them are what raising the bar disqualifies; histories differ by factor</sup>"
     ),
     xaxis_title="Published factor portfolio",
     yaxis_title="Mean-return t-statistic (Newey-West)",
@@ -711,7 +750,7 @@ fig.update_layout(
     height=450,
 )
 
-show_figure(fig)
+fig.show()
 
 # %% [markdown]
 # ### Test the SMB decay claim directly
@@ -749,18 +788,25 @@ fig.update_layout(
     yaxis_title="Annualized mean return (%)",
     height=420,
 )
-show_figure(fig)
+fig.show()
 
 # %%
-display(
-    Markdown(
-        f"SMB's annualized mean falls from **{smb_period_stats['Pre-1981']['ann_return']:.1%}** "
-        f"before 1981 (t = {smb_period_stats['Pre-1981']['t_stat']:.2f}) to "
-        f"**{smb_period_stats['1981-present']['ann_return']:.1%}** afterward "
-        f"(t = {smb_period_stats['1981-present']['t_stat']:.2f}). The split was chosen ex post, "
-        "so it documents decay rather than proving publication caused it."
+for period, period_stats in smb_period_stats.items():
+    print(
+        f"{period:<14} annualized mean {period_stats['ann_return']:>7.1%}   "
+        f"t-statistic {period_stats['t_stat']:>5.2f}"
     )
-)
+
+# %% [markdown]
+# The split date is the factor's publication year, chosen with the benefit of knowing what happened
+# after it. That makes the comparison a description of two halves and not a test: three
+# explanations fit it equally well. The premium may have been arbitraged away once it was known.
+# The market may have changed for unrelated reasons over four decades. Or the first half's estimate
+# may simply have been high, in which case the second half is the truth and the decay is an
+# artifact of where the line was drawn.
+#
+# Distinguishing them needs something this split does not have, which is a reason chosen in advance
+# to expect the break at that date and not another.
 
 # %% [markdown]
 # ---
@@ -776,12 +822,7 @@ display(
 
 # %%
 vme_pd = vme.to_pandas().set_index("timestamp")
-display(
-    Markdown(
-        f"The VME panel contains **{len(vme_pd):,} months** and "
-        f"**{len(vme_pd.columns)} published series**."
-    )
-)
+print(f"Value-and-momentum panel: {len(vme_pd):,} months, {len(vme_pd.columns)} series")
 
 # %% [markdown]
 # Map AQR VME column suffixes (`VALLS_VME_XX90`, `MOMLS_VME_XX90`) to
@@ -921,9 +962,8 @@ _ = fig.add_trace(
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], row=1, col=2)
 fig.update_layout(
     title=(
-        "Value and momentum diversify in every VME asset class"
-        f"<br><sup>Monthly published returns; median correlation {median_vme_corr:.2f}; "
-        f"range {min_vme_corr:.2f} to {max_vme_corr:.2f}</sup>"
+        "Value and momentum are negatively correlated in every asset class"
+        "<br><sup>Monthly published long-short returns, before any implementation cost</sup>"
     ),
     barmode="group",
     height=480,
@@ -934,17 +974,15 @@ fig.update_yaxes(title_text="Annualized Sharpe ratio", row=1, col=1)
 _ = fig.update_yaxes(title_text="Correlation", range=[-1, 1], row=1, col=2)
 
 # %%
-show_figure(fig)
+fig.show()
 
 # %%
-display(
-    Markdown(
-        f"Across the eight regional and cross-asset sleeves, value-momentum correlation ranges "
-        f"from **{min_vme_corr:.2f} to {max_vme_corr:.2f}**, with a median of "
-        f"**{median_vme_corr:.2f}**. The separate aggregate `EVERYWHERE` series has correlation "
-        f"**{vme_df.loc[vme_df['Asset Class'] == 'EVERYWHERE', 'Val-Mom Corr'].iloc[0]:.2f}**."
-    )
-)
+everywhere_corr = float(vme_df.loc[vme_df["Asset Class"] == "EVERYWHERE", "Val-Mom Corr"].iloc[0])
+print("Value-momentum correlation across the sleeves:")
+print(f"  lowest  {min_vme_corr:+.2f}")
+print(f"  median  {median_vme_corr:+.2f}")
+print(f"  highest {max_vme_corr:+.2f}")
+print(f"  pooled across everything: {everywhere_corr:+.2f}")
 
 # %% [markdown]
 # ### The Diversification Benefit
@@ -953,23 +991,28 @@ display(
 # every VME sleeve shown. This creates diversification potential, but the published
 # long-short returns do not include a reader's implementation costs or constraints.
 #
-# The negative correlation arises because:
-# - Value buys beaten-down assets (past losers that are now cheap)
-# - Momentum buys recent winners (past winners with positive trend)
+# The mechanism behind the negative correlation is that the two strategies buy, by construction,
+# nearly opposite things. Value buys what has fallen and is now cheap on a fundamental ratio;
+# momentum buys what has risen recently. An asset that has just dropped enters the value book and
+# leaves the momentum one on the same information, so when one side is being rewarded the other
+# tends not to be.
 #
-# These are opposite bets on mean reversion vs. trend continuation.
+# That is a structural argument rather than an empirical one, which is what makes it worth more
+# than the correlation estimate itself. A negative correlation measured on one sample can be
+# sampling noise; a negative correlation with a reason to be negative is likelier to persist.
 
 # %% [markdown]
 # ---
 #
 # # Part 4: Factor Correlations and Diversification
 
-# %%
-# Build combined factor dataset for correlation analysis
-# Use common period when all factors are available (1972+)
+# %% [markdown]
+# Correlations need every series present on the same months, so the panel below is restricted to
+# the window in which all of them have history. That is set by the shortest series, and it discards
+# decades of the longest ones - a real cost, and the alternative is a correlation matrix whose
+# entries are computed on different samples and therefore not comparable with one another.
 
-# Start with Fama-French 6 factors
-# Cast timestamp to microseconds for consistent join precision
+# %%
 combined_pl = ff6.select(["timestamp", "Mkt-RF", "SMB", "HML", "RMW", "CMA", "MOM"]).with_columns(
     pl.col("timestamp").cast(pl.Datetime("us"))
 )
@@ -990,12 +1033,9 @@ if bab is not None and "USA" in bab.columns:
 # Filter to common period (1972+) and drop nulls
 combined_pl = combined_pl.filter(pl.col("timestamp") >= pl.date(1972, 1, 1)).drop_nulls()
 
-display(
-    Markdown(
-        f"The common eight-factor panel contains **{len(combined_pl):,} months** from "
-        f"**{combined_pl['timestamp'].min():%Y-%m} through "
-        f"{combined_pl['timestamp'].max():%Y-%m}**."
-    )
+print(
+    f"Common eight-factor panel: {len(combined_pl):,} months, "
+    f"{combined_pl['timestamp'].min():%Y-%m} to {combined_pl['timestamp'].max():%Y-%m}"
 )
 
 # Convert to pandas only for correlation and visualization
@@ -1041,9 +1081,8 @@ fig = go.Figure(
 # %%
 _ = fig.update_layout(
     title=(
-        f"Value and momentum remain diversifying in the common factor panel"
-        f"<br><sup>Pairwise correlations on {len(combined_data):,} common monthly rows, "
-        f"{combined_data.index.min():%Y-%m} to {combined_data.index.max():%Y-%m}</sup>"
+        "The value-momentum relationship survives pooling every factor together"
+        "<br><sup>Pairwise correlations over the window in which all factors have history</sup>"
     ),
     height=560,
     margin=dict(l=135, r=90, b=120),
@@ -1051,7 +1090,7 @@ _ = fig.update_layout(
     yaxis_title="Factor",
 )
 
-show_figure(fig)
+fig.show()
 
 # %% [markdown]
 # ### Key Correlation Insights
@@ -1141,16 +1180,16 @@ fig = go.Figure(
 # %%
 fig.update_layout(
     title=(
-        f"TSMOM is positive in {tsmom_positive} of {tsmom_observed} observed crisis windows"
-        "<br><sup>Ex-post cumulative monthly returns; blanks predate a factor's history; "
-        "windows are descriptive, not prospective insurance tests</sup>"
+        "Trend following is the one factor that tends to pay in a crisis"
+        "<br><sup>Cumulative monthly returns over windows chosen after the fact; blanks predate "
+        "a factor's history</sup>"
     ),
     xaxis_title="Published factor portfolio",
     yaxis_title="Selected crisis window",
     height=520,
     margin=dict(l=105, r=75, b=100),
 )
-show_figure(fig)
+fig.show()
 
 # %% [markdown]
 # **Interpretation**: Crisis performance is where correlations and premia become
@@ -1268,7 +1307,7 @@ fig = go.Figure(
         marker=dict(
             size=12,
             color=[
-                COLORS["blue"] if value > 3 else COLORS["neutral"]
+                COLORS["blue"] if value > DISCOVERY_T_THRESHOLD else COLORS["neutral"]
                 for value in summary_df["t-statistic"]
             ],
         ),
@@ -1284,7 +1323,8 @@ fig = go.Figure(
 fig.update_layout(
     title=(
         "BAB and QMJ lead the historical factor risk-return trade-off"
-        "<br><sup>Published monthly factor returns; blue markers clear mean t > 3; "
+        "<br><sup>Published monthly factor returns; blue markers clear the discovery "
+        "threshold; "
         "sample histories differ</sup>"
     ),
     xaxis_title="Annualized volatility (%)",
@@ -1293,37 +1333,57 @@ fig.update_layout(
     margin=dict(l=75, r=75, b=80),
     showlegend=False,
 )
-show_figure(fig)
+fig.show()
 
 # %%
-display(
-    Markdown(
-        f"The cross-asset VME evidence supplies the clearest allocation result: median "
-        f"value-momentum correlation is **{median_vme_corr:.2f}** across eight sleeves. "
-        f"The inference screen is more selective: **{int(stats_df['significant_harvey'].sum())} "
-        f"of {len(stats_df)}** factor means exceed t = 3. TSMOM is positive in "
-        f"**{tsmom_positive} of {tsmom_observed}** observed crisis windows, while the explicit "
-        "SMB split documents weaker post-1981 performance without claiming publication caused it."
-    )
+print(f"Median value-momentum correlation across asset classes: {median_vme_corr:+.2f}")
+print(
+    f"Factor means clearing the discovery threshold: "
+    f"{int(stats_df['significant_harvey'].sum())} of {len(stats_df)}"
 )
+print(f"Crisis windows in which trend following was positive: {tsmom_positive} of {tsmom_observed}")
 
 # %% [markdown]
 # ---
 #
-# ## Key Takeaways
+# ## Key takeaways
 #
-# - **Diversification**: Value and momentum are negatively correlated in every
-#   regional and cross-asset VME sleeve shown, making the pair a stronger allocation
-#   building block than either factor alone.
-# - **Inference**: Historical Sharpe ratios and conservative mean-return t-statistics
-#   answer different questions. Long samples help, but they do not remove source
-#   revision, publication, financing, turnover, or capacity concerns.
-# - **Regime evidence**: TSMOM is the most frequent positive crisis companion in the
-#   selected post-1985 windows, not universal insurance. SMB weakens after 1981 in an
-#   ex-post split that documents decay without identifying its cause.
+# 1. **Two factors that are negatively correlated for a structural reason are worth more than two
+#    with high individual Sharpe ratios.** Value buys what has fallen and momentum buys what has
+#    risen, so the same piece of news moves an asset into one book and out of the other. That is a
+#    mechanism, not a correlation estimate, and it is the reason to expect the relationship to
+#    hold outside the sample it was measured on.
+# 2. **The bar for believing a published factor is higher than the bar for publishing one.**
+#    Hundreds of candidates have been tested and the surviving ones were selected for clearing a
+#    threshold, so judging them against the threshold they were selected on is circular. Of the
+#    eight measured here, seven clear the conventional bar of 2.0 and five clear Harvey's 3.0, so
+#    raising it disqualifies two - a smaller effect than the literature-wide claim, and expected,
+#    because these eight are the most-replicated factors in the field rather than a random draw
+#    from what has been published. The counts are printed above the chart.
+# 3. **A long history is not the same as strong evidence.** Every series here is current-vintage
+#    published research, revisable and backfillable by its provider, and none of it is net of
+#    financing, turnover or the capacity limits a real allocation would meet.
+# 4. **Crisis windows chosen after the fact cannot test insurance.** Trend following was positive
+#    in most of the windows shown, and the windows were picked because they were crises. That is
+#    worth knowing and it is not a prospective claim about the next one.
+# 5. **A factor weakening after publication is a decay to document, not a cause to assert.** The
+#    size premium is weaker after its publication date on this split. Whether publication caused
+#    it, whether the market changed, or whether the original estimate was lucky are three
+#    explanations this evidence does not separate.
 #
-# **Next**: `08_library_comparison` compares portfolio-construction implementations.
-# **Book**: Section 17.4 develops baseline allocators and factor diversification.
+# ### Known limitations
+#
+# - Every series is a published long-short research portfolio, gross of implementation. Financing,
+#   shorting costs, turnover and capacity all come out of these numbers before an allocator sees
+#   them, and none is measured here.
+# - Histories differ by factor, so a comparison across the whole set is either restricted to the
+#   shortest window or is comparing statistics computed on different samples. Both appear, and
+#   which one a figure uses is stated on it.
+# - The crisis windows and the pre- and post-publication split dates are chosen with knowledge of
+#   what happened. They describe; they do not test.
+#
+# **Next:** `08_library_comparison` compares implementations of the allocators these factors would
+# feed. Section 17.4 develops baseline allocators and factor diversification.
 #
 # ## References
 #

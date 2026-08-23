@@ -48,8 +48,9 @@ import plotly.graph_objects as go
 import polars as pl
 import yaml
 from IPython.display import Markdown, display
-from ml4t.diagnostic.metrics import compute_ic_uncertainty
+from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_series
 
+from case_studies.utils.notebook_contracts import defined_ic
 from utils.paths import REPO_ROOT, get_case_study_dir, get_case_study_source_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
@@ -285,17 +286,18 @@ def _align_common_panel(frames: list[pl.DataFrame]) -> list[pl.DataFrame]:
 # %%
 def _ic_summary(frame: pl.DataFrame) -> dict[str, float | int | str]:
     """Compute sorted decision-time rank IC with HAC uncertainty."""
-    daily = (
-        frame.with_columns(
-            pl.col("y_true").rank("average").over("timestamp").alias("actual_rank"),
-            pl.col("y_score").rank("average").over("timestamp").alias("score_rank"),
+    daily = defined_ic(
+        cross_sectional_ic_series(
+            frame,
+            frame,
+            pred_col="y_score",
+            ret_col="y_true",
+            date_col="timestamp",
+            entity_col="symbol",
+            method="spearman",
+            min_obs=5,
         )
-        .group_by("timestamp")
-        .agg(pl.corr("actual_rank", "score_rank").alias("ic"), pl.len().alias("n_symbols"))
-        .filter(pl.col("n_symbols") >= 5)
-        .drop_nulls("ic")
-        .sort("timestamp")
-    )
+    ).sort("timestamp")
     uncertainty = compute_ic_uncertainty(daily.select("ic"), horizon=1, n_boot=500)
     return {
         "family": frame["family"][0],
