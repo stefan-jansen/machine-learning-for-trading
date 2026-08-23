@@ -226,10 +226,19 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Each configuration prepares its own folds here, and that is a consequence of resolving the
+# requests above before running them. A resolved request goes straight to its own fit; only an
+# unresolved one reaches the family's batch runner, which walks folds on the outside and
+# configurations on the inside so that one prepared fold set serves every configuration.
+#
+# This notebook resolves first, and pays for it, because the plan table above is the point: a
+# resolved request knows its real feature count, eligible row count and fold boundaries, and can
+# show them before anything is fitted. Planning from unresolved requests computes the same
+# identities from placeholder folds, so the table would name configurations without being able to
+# say what each will actually read. On this panel the repeated preparation is affordable and the
+# visible plan is worth more. On a panel where it is not - `us_equities_panel` is the case the
+# runner was written for - pass the requests unresolved and let the batch runner hold one fold set
+# at a time.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
