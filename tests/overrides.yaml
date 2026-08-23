@@ -1811,44 +1811,64 @@ case_studies/sp500_options/06_linear:
 case_studies/sp500_options/07_gbm:
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
+  # DEVICE and POPULATION_NAME travel together. The device is inside the training
+  # identity, so a CPU run declares a different member set from the published CUDA one
+  # and the notebook makes it name its own population. The epoch budget comes from the
+  # patched fixture presets, not from a parameter. The reductions are written out rather
+  # than left as MAX_FOLDS / MAX_SYMBOLS: pm_helpers folds those two into
+  # PREVIEW_REDUCTIONS at run time, but test_every_declared_parameter_reaches_its_notebook
+  # reads the notebook's source and sees two names it never binds.
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500-options-tabular-dl-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_options/09_deep_learning:
   timeout: 60
 case_studies/sp500_options/09a_lstm:
+  # BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS are gone from the parameters
+  # cell; a preview declares its reductions in one mapping so the recorded identity says
+  # what was actually fitted. `09_deep_learning`, `09a_lstm` and `09b_patchtst` all default
+  # to the same canonical population name, so a preview has to name its own.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    POPULATION_NAME: sp500-options-sequence-preview-lstm
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 512
+  timeout: 300
 case_studies/sp500_options/09b_patchtst:
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 24
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    POPULATION_NAME: sp500-options-sequence-preview-patchtst
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 512
+  timeout: 300
 case_studies/sp500_options/10_causal_dml:
+  # The causal path requires EVERY declared reduction on a preview, not merely a non-empty
+  # mapping: omitting max_samples would silently resolve the full population, which is an
+  # uncapped run wearing the preview tier. `case_studies/utils/causal.py` names the four.
   parameters:
-    CV_FOLDS: 2
-    MAX_SAMPLES: 5000
-    MAX_SYMBOLS: 5
-    N_PLACEBO: 10
-  timeout: 120
+    PREVIEW_REDUCTIONS:
+      max_samples: 5000
+      max_symbols: 5
+      n_folds: 2
+      n_placebo: 10
+  timeout: 300
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
 case_studies/sp500_options/12_backtest:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
-  timeout: 120
+  # MAX_SYMBOLS and TOP_K are gone: the notebook takes its concentration grid from
+  # setup.yaml and its universe from the signal, and neither name is bound any more.
+  # A preview run needs WORKSPACE plus the exact PREVIEW_PREDICTION_HASHES of a preview
+  # model run, because a backtest population is defined by the prediction sets it names
+  # and never by registry presence. The fixture has no preview model run to name, so
+  # there is nothing for this notebook to resolve until one exists.
+  skip: true
+  skip_reason: "Needs the exact PREVIEW_PREDICTION_HASHES of a preview model run; the fixture has none to name."
 case_studies/sp500_options/13_portfolio_management:
   skip: true
   skip_reason: "Depends on 12_backtest signal-stage results — see that entry's skip_reason."
