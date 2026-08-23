@@ -112,6 +112,10 @@ n_assets = int(setup["universe"]["n_assets"])
 
 # %%
 top_n = get_top_n_predictions("crypto_perps_funding", "allocation")
+# `vertical_relaxed`, because `checkpoint_value` is Null-typed for a label whose survivors
+# are all final-checkpoint models and Int64 for one that advanced a boosted model on a
+# numbered checkpoint. Both are the same column meaning the same thing; a strict concat
+# refuses the pair, and it refuses it only when more than one label is in play.
 survivors = pl.concat(
     [
         resolve_best_predictions(
@@ -124,7 +128,8 @@ survivors = pl.concat(
             case_dir=study.root,
         )
         for label in labels
-    ]
+    ],
+    how="vertical_relaxed",
 )
 if survivors.is_empty():
     raise RuntimeError("no baseline survivors: run 13_backtest before this notebook")
