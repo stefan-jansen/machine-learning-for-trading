@@ -77,7 +77,6 @@ from sklearn.linear_model import LinearRegression, Ridge
 
 from case_studies.utils.causal import (
     block_permute,
-    empirical_permutation_p,
     manual_dml_timeseries,
 )
 from utils.modeling import load_modeling_dataset
@@ -442,21 +441,13 @@ if len(placebo_effects) > 10:
     placebo_mean = np.mean(placebo_effects)
     placebo_std = np.std(placebo_effects)
     z_score = (manual_ate - placebo_mean) / placebo_std if placebo_std > 0 else np.inf
-    # Not a false discovery rate, which is what this used to be called: it is the
-    # fraction of the permutation distribution at least as extreme as the observed
-    # effect, and it takes the plus-one correction because the observed statistic is
-    # itself one draw that distribution can produce. Without it, a run in which no
-    # placebo reaches the effect prints 0.0% - a claim no finite number of
-    # permutations can support. With n draws the smallest value is 1 / (n + 1).
-    permutation_p = empirical_permutation_p(np.asarray(placebo_effects), manual_ate)
+    fdr = np.mean(np.abs(placebo_effects) >= np.abs(manual_ate))
 
     print(f"   Placebo mean: {placebo_mean:.6f}")
     print(f"   Placebo std:  {placebo_std:.6f}")
     print(f"   Original effect: {manual_ate:.6f}")
     print(f"   Z-score vs placebo: {z_score:.2f}")
-    print(
-        f"   Permutation p-value: {permutation_p:.4f} (floor {1 / (len(placebo_effects) + 1):.4f})"
-    )
+    print(f"   False discovery rate: {fdr:.1%}")
 
     if abs(z_score) > 2:
         print("   PASS: Effect distinguishable from placebo (z > 2)")
@@ -465,7 +456,7 @@ if len(placebo_effects) > 10:
 else:
     print("   Insufficient successful permutations")
     z_score = None
-    permutation_p = None
+    fdr = None
 
 # %%
 # Test 3: Subset Stability
@@ -576,8 +567,8 @@ if dml_estimate is not None:
 
 if z_score is not None:
     results_summary["placebo_z_score"] = z_score
-if permutation_p is not None:
-    results_summary["permutation_p"] = permutation_p
+if fdr is not None:
+    results_summary["false_discovery_rate"] = fdr
 
 for key, value in results_summary.items():
     if isinstance(value, float):
@@ -626,8 +617,8 @@ if z_score is not None:
     print(
         f"Placebo Z-Score: {z_score:.2f} - {'distinguishable from noise' if abs(z_score) > 2 else 'not distinguishable from noise'}"
     )
-if permutation_p is not None:
-    print(f"Permutation p-value: {permutation_p:.4f}")
+if fdr is not None:
+    print(f"False Discovery Rate: {fdr:.1%}")
 
 # %% [markdown]
 # ## Key Takeaways

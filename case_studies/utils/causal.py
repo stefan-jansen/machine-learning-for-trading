@@ -273,7 +273,7 @@ def block_permute(
         # caller asked to keep; shuffling it would destroy exactly that, which is
         # what the old `rng.permutation(arr)` did to every weekend-bounded segment
         # of a daily series. A caller that permutes nothing at all is caught by
-        # `_assert_placebo_moved`, not here: inside a panel, one short unit staying
+        # `_assert_placebo_permutation_possible`, not here: inside a panel, one short unit staying
         # put while the others move is correct.
         return np.array(arr, copy=True)
 
@@ -534,23 +534,53 @@ def manual_dml_timeseries(
 REFUTATION_ALPHA = 0.05
 
 
-def _assert_placebo_moved(original: np.ndarray, permuted: np.ndarray, block_size: int) -> None:
-    """A placebo that equals the observed treatment measures nothing.
+def _placebo_is_unchanged(original: np.ndarray, permuted: np.ndarray) -> bool:
+    """Whether a placebo draw returned the observed treatment.
 
-    `block_permute` leaves a segment intact when it cannot hold two blocks of the
-    requested size, which is the right thing to do to one short unit in a panel. If
-    it happens to *every* segment - the block is larger than the longest
-    uninterrupted stretch of observations - then the "permuted" treatment is the
-    observed treatment, every placebo effect equals the observed effect, and the
-    refutation reports p = 1 while looking like it ran. Fail instead of publishing
-    that.
+    ``np.array_equal`` calls two arrays different wherever either holds a NaN, so a
+    frame the resolver's ``drop_nulls()`` never touched - which is every frame the
+    case-study notebooks pass to ``run_dml_analysis`` directly - would report every
+    identity draw as a real permutation. Compare the non-null positions and require
+    the null positions to agree.
     """
-    if np.array_equal(original, permuted):
+    original = np.asarray(original)
+    permuted = np.asarray(permuted)
+    if original.shape != permuted.shape:
+        return False
+    if not np.issubdtype(original.dtype, np.floating):
+        return bool(np.array_equal(original, permuted))
+    missing = np.isnan(original)
+    if not np.array_equal(missing, np.isnan(permuted)):
+        return False
+    return bool(np.array_equal(original[~missing], permuted[~missing]))
+
+
+def _assert_placebo_permutation_possible(
+    unchanged_draws: int, n_draws: int, block_size: int
+) -> None:
+    """A refutation whose every placebo equals the observed treatment measures nothing.
+
+    ``block_permute`` leaves a segment intact when it cannot hold two blocks of the
+    requested size, which is the right thing to do to one short unit in a panel. If it
+    happens to *every* segment - the block is larger than the longest uninterrupted
+    stretch of observations - then the "permuted" treatment is the observed treatment,
+    every placebo effect equals the observed effect, and the refutation reports p = 1
+    while looking like it ran. Fail instead of publishing that.
+
+    The test is over the whole set of draws, not each one. ``rng.permutation(n_blocks)``
+    can return the identity by chance - one time in two at two blocks, one in six at
+    three - so failing on a single unchanged draw aborts runs that are structurally
+    fine, with a message asserting something false about the data. Every draw coming
+    back unchanged is the structural condition; the chance of that happening to a
+    series that can be permuted falls off as the draws multiply.
+    """
+    if n_draws and unchanged_draws == n_draws:
         raise ValueError(
             f"block permutation with block_size={block_size} left the treatment "
-            "unchanged: no uninterrupted segment of the series holds two blocks of "
-            "that size. Either the block size exceeds the data's contiguous runs or "
-            "the gap tolerance is splitting the series too finely."
+            f"unchanged on all {n_draws} placebo draws: no uninterrupted segment of "
+            "the series holds two blocks of that size. Either the block size exceeds "
+            "the data's contiguous runs or the gap tolerance is splitting the series "
+            "too finely."
         )
 
 
@@ -753,6 +783,7 @@ def run_dml_analysis(
         # Block permutation refutation
         placebo_effects = []
         placebo_n_obs = []
+        unchanged_draws = 0
         for _ in range(n_placebo):
             T_perm = block_permute(
                 T,
@@ -762,7 +793,7 @@ def run_dml_analysis(
                 units=units,
                 expected_step=expected_step,
             )
-            _assert_placebo_moved(T, T_perm, block_size)
+            unchanged_draws += _placebo_is_unchanged(T, T_perm)
             perm_result = manual_dml_timeseries(
                 Y,
                 T_perm,
@@ -783,6 +814,8 @@ def run_dml_analysis(
                     )
                 placebo_effects.append(perm_result["theta"])
                 placebo_n_obs.append(int(perm_result["n_obs"]))
+
+        _assert_placebo_permutation_possible(unchanged_draws, n_placebo, block_size)
 
         refutation = {}
         if len(placebo_effects) >= 10:
