@@ -470,14 +470,36 @@ show_plotly_with_alt(
 # what the funnel prescribes: the question at the risk stage is whether an overlay helps the
 # highest-Sharpe configuration found so far, and equal weight is still eligible to be that
 # configuration. One set per label holds both stages.
+#
+# **A candidate set admits only results that traded every validation fold**, and that exclusion
+# is doing real work rather than tidying. Selection downstream is on validation Sharpe, and a
+# Sharpe earned over one fold is not a larger or smaller version of one earned over two - it is a
+# measurement of a different period. A strategy that sits out a fold the others traded is
+# therefore not a stronger candidate when that fold went badly; it is an incomparable one, and
+# admitting it lets the choice of configuration turn on which period each candidate happened to
+# be exposed to.
+#
+# For `conformal_weighted` this is structural rather than incidental: its intervals need an
+# earlier fold to calibrate on, so it can never trade the earliest one, and on a two-fold split
+# that is half the period. The results stay registered and visible in the grid above. What they
+# do not do is compete for a selection that would be reading exposure as skill.
 
 # %%
 for label in labels:
+    label_rows = keyed.filter(pl.col("label") == label)
+    # Every fold the label declares, in date order - not the most common value observed, which
+    # would define full exposure as whatever the majority of results happened to reach.
+    full = "+".join(str(fold) for fold in windows_by_label[label].get_column("fold").to_list())
+    admitted = label_rows.filter(pl.col("traded_folds") == full)
+    excluded = label_rows.height - admitted.height
     members = study.backtests.freeze(
-        results.filter(pl.col("label") == label),
+        results.filter(pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash"))),
         name=f"crypto-signal-allocation-{label}",
     )
-    print(f"{members.name}: {len(members.members)} members")
+    print(
+        f"{members.name}: {len(members.members)} members traded folds {full}; "
+        f"{excluded} excluded for trading fewer"
+    )
 
 # %% [markdown]
 # ## 6. What to notice
