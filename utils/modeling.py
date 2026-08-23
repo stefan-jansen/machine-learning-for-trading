@@ -2000,6 +2000,50 @@ def compute_classification_metrics(
     return metrics
 
 
+def cross_sectional_ic_mean(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    dates: np.ndarray,
+    entities: np.ndarray,
+    *,
+    min_obs: int = 10,
+) -> float:
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    The library computes the per-date series from two polars frames. Model
+    evaluation reaches it holding four aligned numpy arrays instead - what a
+    scikit-learn or Optuna objective has in hand inside a fold - so this adapts
+    the one to the other. It is the only thing this function does: the
+    correlation itself is `ml4t.diagnostic`'s.
+
+    A date carries no coefficient when fewer than `min_obs` entities are priced,
+    or when every prediction or every return ties. The library reports those as
+    null; the `is_finite` filter is belt-and-braces against an environment
+    resolving an ml4t-diagnostic older than the 0.1.2 floor, which returned NaN
+    and would poison the mean (#493).
+
+    Returns NaN when no date has a defined coefficient - a real answer to "what
+    was the average IC", unlike 0.0, which reads as "measured, and it was zero".
+    """
+    # Local import: `ml4t.diagnostic` brings scikit-learn's OpenMP runtime up
+    # transitively, and this module is imported by notebooks that must load a
+    # gradient-boosting library first. See .github/scripts/check_openmp_import_order.py.
+    from ml4t.diagnostic.metrics import cross_sectional_ic_series
+
+    ic_per_date = cross_sectional_ic_series(
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "prediction": y_pred}),
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "forward_return": y_true}),
+        pred_col="prediction",
+        ret_col="forward_return",
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+        min_obs=min_obs,
+    )
+    defined = ic_per_date.drop_nulls("ic").filter(pl.col("ic").is_finite())
+    return float(defined["ic"].mean()) if defined.height else float("nan")
+
+
 # Deprecated private aliases. Thirty notebook cells import these names with their leading
 # underscore, which is what made them look private in the first place; each is a
 # cross-module interface and is now public. The aliases keep those callers working until

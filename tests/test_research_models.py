@@ -1010,6 +1010,9 @@ def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
 
     folds_module.clear_memo()
     built: list[tuple[int, float]] = []
+    # `iter_raw_folds`, not `prepare_raw_folds`: preparation streams, and the list-collecting
+    # wrapper is what nothing on the execution path calls. Observing the wrapper recorded an
+    # empty list and asserted against it, which is a test that cannot fail.
     original = folds_module.iter_raw_folds
 
     # `iter_raw_folds`, not `prepare_raw_folds`: the batch paths stream folds so that only one is
