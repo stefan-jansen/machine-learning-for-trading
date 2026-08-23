@@ -2035,15 +2035,20 @@ case_studies/us_firm_characteristics/07_tabular_dl:
     # The harness supplies the tier: `research_preview_parameters` sees EXECUTION_TIER and
     # WORKSPACE in the parameters cell and injects preview plus the isolated output root, and
     # `_collect_preview_reductions` would otherwise substitute a bare `max_symbols: 5`. Naming
-    # the reduction here instead is what keeps the checkpoint surface in the CI path: two
-    # checkpoints at 25 and 50 exercise the per-epoch prediction sets that the whole notebook
-    # is about, where a five-symbol run at the declared 200 epochs would pay for eight of them
-    # and prove the same thing.
+    # the reduction keeps that choice here rather than in a default.
+    #
+    # It names no epoch budget, and that is deliberate. `preset_patches.py` already rewrites
+    # every tabm preset to `n_epochs: 2, checkpoint_interval: 1` in the config directory
+    # `conftest.py` copies, so the CI run publishes two checkpoints and the per-epoch
+    # prediction-set path this notebook exists to exercise is already covered. A reduction
+    # named here would not add to that patch, it would replace it: the preview branch of
+    # `_resolve_model_request_from_materialized` writes into the config after
+    # `_resolve_tabm_config` has loaded the patched preset. An earlier version of this entry
+    # asked for 50 epochs at an interval of 25, which buys the same two checkpoints for
+    # twenty-five times the training.
     PREVIEW_REDUCTIONS:
-      checkpoint_interval: 25
       folds: [0, 1]
       max_symbols: 5
-      n_epochs: 50
   timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
   gpu: true
