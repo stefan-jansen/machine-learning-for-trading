@@ -53,6 +53,9 @@
 # %%
 """Sweep the declared cost grid across the surviving crypto perpetuals configuration."""
 
+import sqlite3
+from contextlib import closing
+
 import plotly.graph_objects as go
 import polars as pl
 
@@ -201,6 +204,30 @@ for label in labels:
 # Read back from the registry. `cost_bps` is recovered from each registered specification rather
 # than carried over from the loop, so the table describes what was run and not what was intended.
 
+
+# %%
+def funding_metrics(study_root) -> pl.DataFrame:
+    """Settled funding per registered backtest.
+
+    The prediction and backtest catalogs project the metrics the pipeline shares across
+    case studies, and funding is not one of them - it exists only where the instrument
+    settles it. Reading it here keeps the column available without widening a shared
+    catalog for one case study's economics.
+    """
+    with closing(
+        sqlite3.connect(f"file:{study_root / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+    ) as db:
+        rows = db.execute(
+            "SELECT backtest_hash, funding_pnl, funding_events, funding_settlements "
+            "FROM backtest_metrics"
+        ).fetchall()
+    return pl.DataFrame(
+        rows,
+        schema=["backtest_hash", "funding_pnl", "funding_events", "funding_settlements"],
+        orient="row",
+    )
+
+
 # %%
 commission_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.commission.rate")
 slippage_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.slippage.rate")
@@ -214,14 +241,13 @@ curve = (
     .with_columns(
         ((commission_rate.cast(pl.Float64) + slippage_rate.cast(pl.Float64)) * 10_000)
         .round(6)
-        .alias("cost_bps"),
-        pl.col("metrics_json")
-        .str.json_path_match("$.funding_pnl")
-        .cast(pl.Float64)
-        .alias("funding_pnl"),
+        .alias("cost_bps")
     )
+    .join(funding_metrics(study.root), on="backtest_hash", how="left")
     .sort("label", "cost_bps")
 )
+if curve.filter(pl.col("funding_pnl").is_null()).height:
+    raise RuntimeError("a registered cost cell has no settled funding recorded")
 if curve.filter(~pl.col("complete")).height:
     raise RuntimeError("the cost sweep registered an incomplete result")
 expected = len(labels) * len(cost_grid)

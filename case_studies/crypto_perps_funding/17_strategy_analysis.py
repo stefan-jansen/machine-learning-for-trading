@@ -49,12 +49,16 @@
 # %%
 """Select and assess one crypto perpetuals configuration from the frozen validation pool."""
 
+import sqlite3
+from contextlib import closing
+
 import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
 from case_studies.research import CandidateSet, Result, open_study
 from case_studies.utils.uncertainty import (
+    compute_backtest_uncertainty,
     compute_cohort_metrics,
     load_daily_returns_with_timestamp,
     periods_per_year_from_setup,
@@ -135,8 +139,6 @@ keyed.filter(pl.col("backtest_hash") == selected.hash).select(
     "allocator",
     "overlay",
     "sharpe",
-    "sharpe_ci95_lo",
-    "sharpe_ci95_hi",
     "max_drawdown",
     "total_return",
     "num_trades",
@@ -162,10 +164,10 @@ keyed.group_by("stage").agg(
 #
 # Three separate questions, and they have different answers.
 #
-# **How precise is this one number?** The registry stores a ninety-five percent interval for
-# every backtest Sharpe, from a stationary block bootstrap on the daily return series with the
-# block length set from the label's rebalance step. That interval describes sampling variation
-# in one series and says nothing about the search.
+# **How precise is this one number?** A stationary block bootstrap on the selected result's
+# own daily return series gives a ninety-five percent interval, with the block length taken
+# from the label's rebalance step so that the resampling respects the holding period. That
+# interval describes sampling variation in one series and says nothing about the search.
 #
 # **How much of it is selection?** The selected Sharpe is the maximum over the whole pool, and the
 # maximum of many draws is above the truth even when every draw is worthless. The **deflated
@@ -183,6 +185,18 @@ keyed.group_by("stage").agg(
 # earlier stages admitted to their candidate sets on **folds traded** rather than on periods
 # observed - a result that sat out a fold would align perfectly here and be scored on a different
 # period, which is exactly the comparison the funnel is meant to prevent.
+
+# %%
+selected_returns = load_daily_returns_with_timestamp("crypto_perps_funding", selected.hash)
+if selected_returns is None:
+    raise RuntimeError("the selected result has no registered return series")
+selected_label = keyed.filter(pl.col("backtest_hash") == selected.hash).item(0, "label")
+interval = compute_backtest_uncertainty(
+    selected_returns,
+    periods_per_year=periods_per_year,
+    case_study="crypto_perps_funding",
+    label=selected_label,
+)
 
 # %%
 returns_by_hash = {}
@@ -209,11 +223,15 @@ pl.DataFrame(
     [
         {
             "metric": name,
-            "value": cohort.get(key),
+            "value": {**interval, **cohort}.get(key),
         }
         for name, key in [
             ("candidates (K)", "k_variants"),
             ("selected Sharpe", "leader_sharpe"),
+            ("Sharpe, 95% interval low", "sharpe_ci95_lo"),
+            ("Sharpe, 95% interval high", "sharpe_ci95_hi"),
+            ("probabilistic Sharpe p-value", "psr_pvalue"),
+            ("bootstrap block length", "bootstrap_block_length"),
             ("expected max Sharpe under the null", "expected_max_sharpe_raw"),
             ("deflated Sharpe, raw K", "dsr_raw"),
             ("deflated Sharpe, Marchenko-Pastur K", "dsr_mp"),
@@ -221,7 +239,7 @@ pl.DataFrame(
             ("Rademacher-adjusted Sharpe", "ras_leader"),
             ("periods needed for significance, effective-rank K", "min_trl_periods_er"),
         ]
-        if key in cohort
+        if key in {**interval, **cohort}
     ]
 )
 
@@ -274,20 +292,36 @@ show_plotly_with_alt(
 # payment between longs and shorts, settled every eight hours on whatever position is held. A
 # strategy whose return is mostly funding is a carry strategy whether or not it was built as one,
 # and it will behave completely differently when the funding rate changes sign.
+#
+# The shared backtest catalog projects the metrics every case study has in common, and funding
+# is not among them - it exists only where the instrument settles it. Reading it from the
+# registry keeps the column available without widening a shared catalog for one case study's
+# economics.
 
 # %% tags=["results"]
+with closing(
+    sqlite3.connect(f"file:{study.root / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+) as db:
+    funding_row = db.execute(
+        "SELECT funding_pnl, funding_events, funding_settlements FROM backtest_metrics "
+        "WHERE backtest_hash = ?",
+        (selected.hash,),
+    ).fetchone()
+if funding_row is None:
+    raise RuntimeError("the selected result has no registered metrics row")
 record = keyed.filter(pl.col("backtest_hash") == selected.hash)
-funding = record.select(
-    pl.col("metrics_json").str.json_path_match("$.funding_pnl").cast(pl.Float64).alias("funding"),
-    pl.col("metrics_json")
-    .str.json_path_match("$.funding_settlements")
-    .cast(pl.Float64)
-    .alias("settlements"),
-    pl.col("total_commission"),
-    pl.col("total_slippage"),
-    pl.col("total_return"),
+pl.DataFrame(
+    [
+        {
+            "funding_pnl": funding_row[0],
+            "funding_events": funding_row[1],
+            "funding_settlements": funding_row[2],
+            "total_commission": record.item(0, "total_commission"),
+            "total_slippage": record.item(0, "total_slippage"),
+            "total_return": record.item(0, "total_return"),
+        }
+    ]
 )
-funding
 
 # %% [markdown]
 # ## 5. The holdout is untouched
