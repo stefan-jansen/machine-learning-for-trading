@@ -2219,6 +2219,7 @@ def _apply_allocation(
             CALIBRATION_VERSION,
             DEFAULT_ALPHA,
             DEFAULT_MIN_CALIBRATION_N,
+            holdout_conformal_embargo_steps,
             load_conformal_widths,
         )
 
@@ -2245,12 +2246,39 @@ def _apply_allocation(
         # every case study whose predictions are tz-aware, e.g. crypto_perps_funding.
         if widths["timestamp"].dtype != ts_dtype:
             widths = widths.cast({"timestamp": ts_dtype})
+        # An unsupported SYMBOL raises inside compute_conformal_weights; an unsupported
+        # TIMESTAMP used to be dropped here in silence. That asymmetry is how
+        # crypto_perps_funding lost an entire validation fold without any guard firing:
+        # the backtest still booked a return for every period, because a period with no
+        # position books zero rather than nothing, so every count downstream agreed.
+        #
+        # Some drop is legitimate and unavoidable. Calibration needs residuals before it
+        # can produce a width, so the earliest decisions of a prediction set have none -
+        # at most `min_calibration_n` residuals plus the label-horizon embargo, and fewer
+        # in practice because the pooled fallback fills first. Anything beyond that
+        # warm-up is a hole, and a result with a hole covers part of the evaluation period
+        # and cannot be ranked against results that covered all of it.
         supported_timestamps = widths.select("timestamp").unique()
+        declared = rebal_preds.select("timestamp").unique().sort("timestamp")
         rebal_preds = rebal_preds.join(supported_timestamps, on="timestamp", how="inner")
         if rebal_preds.is_empty():
-            raise ValueError(
-                "conformal_weighted: no prediction timestamps have prior-only calibration"
+            raise ValueError("conformal_weighted: no prediction timestamp has a calibrated width")
+        kept = rebal_preds.select("timestamp").unique()
+        dropped = declared.join(kept, on="timestamp", how="anti").get_column("timestamp")
+        if dropped.len():
+            warmup_allowance = min_calibration_n + holdout_conformal_embargo_steps(
+                case_study, label
             )
+            earliest_kept = kept.get_column("timestamp").min()
+            if dropped.len() > warmup_allowance or dropped.max() > earliest_kept:
+                raise ValueError(
+                    f"conformal_weighted: {dropped.len()} of {declared.height} prediction "
+                    f"timestamps have no conformal width, which exceeds the warm-up of "
+                    f"{warmup_allowance} or falls outside it (first {dropped.min()}, last "
+                    f"{dropped.max()}). A backtest built on the remainder would cover part "
+                    "of the evaluation period and could not be compared with allocators "
+                    "that covered all of it."
+                )
         floor_q = float(alloc_spec.get("floor_quantile", 0.01))
         result = compute_conformal_weights(
             rebal_preds,

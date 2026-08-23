@@ -331,6 +331,13 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         db.close()
 
     def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
+        # walk_forward_v2 is the retired calibration contract, under which the earliest
+        # validation fold got no widths and the allocator silently sat it out. This branch
+        # only fires for rows still carrying that version. It is also not a sufficient
+        # remedy for what it was written against: ranking on common support intersects the
+        # timestamps two results share, and a flat day is a shared timestamp, so a result
+        # that held nothing through a fold aligns perfectly with one that traded it.
+        # Under walk_forward_v3 every fold is calibrated and the case does not arise.
         strategy = json.loads(row[8]).get("strategy", {})
         allocation = strategy.get("allocation") or {}
         return (
