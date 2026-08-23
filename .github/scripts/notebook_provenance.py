@@ -56,6 +56,22 @@ Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
 * the stamp must not contradict a committed ``injected-parameters`` cell (else the
   notebook was re-executed with overrides after it was stamped).
 
+Two states are legal at commit time, and the second is what keeps the workflow
+linear:
+
+1. **Stamped and in sync** — the notebook is its current ``.py``, executed in
+   production. The checks above apply.
+2. **Cleared** — no stamp and no outputs. It makes no claim about a run, so there
+   is nothing to be stale. ``clear`` puts a notebook in this state. Edit the
+   ``.py``, ``jupytext --sync``, ``clear``, commit; execute later and the stamp and
+   the checks come back. Without this the gate has no legal path for a correction
+   to an already-executed notebook, because clearing the stale stamp read as
+   DE-STAMPED and keeping it read as STALE.
+
+The state the gate must still reject is the one that looks like (2) but claims (1):
+a stamp over an empty output set — a render rebuilt from the ``.py`` and re-stamped
+without a run behind it. That is HOLLOW and it fails.
+
 Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 ``--strict`` is passed. This is deliberate: adoption is gradual — stamp notebooks
 as they are re-run through the canonical path, and the gate enforces only where
@@ -66,6 +82,7 @@ Usage::
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --parameters '{"MAX_SYMBOLS": 5}'
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production --notes "..."
+    uv run python .github/scripts/notebook_provenance.py clear <nb.ipynb>  # commit it unexecuted
     uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
     uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
 """
@@ -654,6 +671,47 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
+def has_outputs(nb: dict) -> bool:
+    """True if any non-empty code cell in *nb* carries an output.
+
+    A notebook with code and no outputs anywhere has not been executed (or has been
+    deliberately cleared). The distinction matters twice below: a CLEARED notebook
+    claims nothing and may be committed, and a STAMPED one claims a production run
+    that left no outputs, which no real run does.
+    """
+    saw_code = False
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        source = cell.get("source") or []
+        if not "".join(source).strip():
+            continue
+        saw_code = True
+        if cell.get("outputs"):
+            return True
+    return not saw_code
+
+
+def is_cleared(nb_path: Path) -> bool:
+    """True if *nb_path* carries neither a provenance stamp nor any output.
+
+    This is the state an edited-but-not-yet-executed notebook is committed in, and
+    it is the one state that makes the workflow linear: edit the ``.py``, sync,
+    clear the ``.ipynb``, commit. The notebook then asserts nothing about a run, so
+    there is nothing for the gate to catch it lying about. Execution restores the
+    outputs and the stamp, and the gate resumes checking them.
+
+    It is precisely distinguishable from the render the gate exists to reject. A
+    hollow render carries ``production: True`` over an empty output set - it claims
+    a run that did not happen. A cleared notebook carries no stamp at all.
+    """
+    try:
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return not nb.get("metadata", {}).get(STAMP_KEY) and not has_outputs(nb)
+
+
 def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
     """Notebooks stamped at *ref* and unstamped now.
 
@@ -676,16 +734,20 @@ def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]
         and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         .get("metadata", {})
         .get(STAMP_KEY)
+        # Dropping the stamp AND the outputs together is the documented way to
+        # commit an edited notebook before it is re-executed; only dropping the
+        # stamp while outputs stay is the regression this looks for.
+        and not is_cleared(REPO_ROOT / rel)
     )
 
 
 def check_all(
     strict: bool = False,
     only: set[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
+) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str]]:
+    """Return (stale, testmode, contradicted, unverified, alt_only, hollow) rows.
 
-    Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
+    ``stale``, ``testmode``, ``contradicted`` and ``hollow`` fail. ``alt_only`` is reported so that forgiving a drift is
     never silent: a notebook in that list has a ``.py`` that no longer matches its
     stamp, and the reason it is allowed is printed rather than assumed.
 
@@ -701,6 +763,7 @@ def check_all(
     contradicted: list[str] = []
     unverified: list[str] = []
     alt_only: list[str] = []
+    hollow: list[str] = []
     for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
@@ -727,7 +790,9 @@ def check_all(
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-    return stale, testmode, contradicted, unverified, alt_only
+        if not has_outputs(nb):
+            hollow.append(rel)
+    return stale, testmode, contradicted, unverified, alt_only, hollow
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
@@ -750,11 +815,58 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_clear(args: argparse.Namespace) -> int:
+    """Strip outputs, execution counts and the provenance stamp from a notebook.
+
+    The result is committable: it claims no run, so nothing about it can be stale.
+    Use it after editing a ``.py`` and before the notebook is re-executed, so the
+    correction lands on ``main`` in one commit instead of waiting on a run.
+    """
+    cleared = 0
+    for name in args.notebooks:
+        nb_path = Path(name).resolve()
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        nb.get("metadata", {}).pop(STAMP_KEY, None)
+        nb.get("metadata", {}).pop("papermill", None)
+        kept = []
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") == "code":
+                cell["outputs"] = []
+                cell["execution_count"] = None
+                cell.get("metadata", {}).pop("papermill", None)
+                cell.get("metadata", {}).pop("execution", None)
+                if "injected-parameters" in (cell.get("metadata", {}).get("tags") or []):
+                    continue
+            kept.append(cell)
+        nb["cells"] = kept
+        nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            shown = nb_path.relative_to(REPO_ROOT)
+        except ValueError:
+            shown = nb_path
+        print(f"cleared {shown}")
+        cleared += 1
+    if not cleared:
+        print("nothing to clear")
+    return 0
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     only = {str(Path(p)) for p in args.paths} or None
-    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict, only=only)
+    stale, testmode, contradicted, unverified, alt_only, hollow = check_all(
+        strict=args.strict, only=only
+    )
     lost = destamped(only=only)
-    fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
+    fail = bool(stale or testmode or contradicted or lost or hollow) or (
+        args.strict and bool(unverified)
+    )
+    if hollow:
+        print(
+            "HOLLOW (carries a provenance stamp over an empty output set — the stamp claims "
+            "a run that left nothing behind; clear the notebook or re-execute it):"
+        )
+        for r in hollow:
+            print(f"  {r}")
     if lost:
         print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
         for r in lost:
@@ -833,6 +945,13 @@ def main() -> int:
         "with none given, the whole tree is scanned",
     )
     cp.set_defaults(func=_cmd_check)
+
+    lp = sub.add_parser(
+        "clear",
+        help="strip outputs and the stamp so an edited notebook can be committed unexecuted",
+    )
+    lp.add_argument("notebooks", nargs="+")
+    lp.set_defaults(func=_cmd_clear)
 
     args = ap.parse_args()
     return args.func(args)
