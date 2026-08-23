@@ -84,7 +84,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme-tabular-dl-validation-v1",
+        population_name="cme_futures-tabular_dl-validation-v1",
         resolved_requests=resolved,
         supersedes=SUPERSEDES_POPULATION,
     )

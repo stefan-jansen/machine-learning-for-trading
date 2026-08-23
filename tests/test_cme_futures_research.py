@@ -776,7 +776,7 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
         pl.DataFrame(),
-        population_name="cme-pca-validation-v1",
+        population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
         supersedes="2d252634bffb",
     )
@@ -807,7 +807,7 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
         pl.DataFrame(),
-        population_name="cme-pca-validation-v1",
+        population_name="cme_futures-pca-validation-v1",
         resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
     )
 

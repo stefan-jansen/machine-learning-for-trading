@@ -82,7 +82,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme-pca-validation-v1",
+        population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
     )
 else:
