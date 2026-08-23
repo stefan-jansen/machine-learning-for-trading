@@ -221,14 +221,15 @@ plan.select(
 # registered prediction set with its own identity.
 #
 # Preparing a fold - slicing the window, cleaning the rows - depends on the data and not on the
-# model, so it does not differ between the configurations of one label. Whether it is therefore
-# done once depends on which path the run takes, and this notebook takes the resolved one: it
-# resolves every request before the call so it can show the plan above, and the runner then walks
-# the resolved requests one at a time, preparing that request's folds again. The path that walks
-# folds on the outside and configurations on the inside, holding one prepared fold set for the
-# whole grid, is the batch path in `case_studies/utils/gbm.py`, and it is reached by handing
-# `run_model_population` unresolved requests instead. It is the one to take on a panel large
-# enough for the repetition to cost something.
+# model, so it does not differ between the configurations of one label. When it happens is decided
+# by which path the run takes, and for gradient boosting **resolving is what prepares the folds**:
+# `resolve_model_request` calls `prepare_gbm_folds_from_mds` and hands the prepared set to the
+# fit, which only reads it. So the cell above, which resolves every request before the call so it
+# can show the plan, gives each configuration its own prepared fold set and holds all of them at
+# once. The path that prepares one fold set and walks the whole grid against it, holding one fold
+# at a time, is the batch path in `case_studies/utils/gbm.py`, reached by handing
+# `run_model_population` unresolved requests instead. Which to take is a question about the size of
+# the panel, and on this one the plan is worth more than the memory it costs.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -556,7 +557,7 @@ fig_obj.update_xaxes(
     col=1,
 )
 fig_obj.update_layout(
-    title="Which side of zero the grid sits on is set by the label, not by the loss function",
+    title="The label sets which side of zero the grid sits on, not the loss function",
     height=260 * len(panel_labels),
     width=1000,
     margin=dict(t=90),

@@ -75,12 +75,12 @@
 # per configuration, label and epoch checkpoint, in `run_log/registry.db` and under
 # `run_log/training/` and `run_log/predictions/`, grouped under a named population.
 # [`13_model_analysis`](13_model_analysis.ipynb) compares this family against the others, and
-# [`14_backtest`](14_backtest.ipynb) backtests the primary-label members of what this notebook
-# publishes - it reads one label, the one `config/setup.yaml` names primary - and selects on
-# validation backtest Sharpe. The other labels are fitted and registered here so the families can
-# be compared across targets, not because a backtest reads them. **Selection happens there, not
-# here.** The ranking below shows what capacity and training length do to a ranking measure; it
-# decides nothing.
+# [`14_backtest`](14_backtest.ipynb) sweeps and selects on validation backtest Sharpe over the
+# primary-label members of what this notebook publishes - its sweep reads the one label
+# `config/setup.yaml` names primary. Its read-only evaluation section then ranks the registry
+# across all five labels, so the members on the other two are read there rather than nowhere.
+# **Selection happens there, not here.** The ranking below shows what capacity and training length
+# do to a ranking measure; it decides nothing.
 
 # %%
 """Fit the declared option-analytics TabM population on the walk-forward folds."""
