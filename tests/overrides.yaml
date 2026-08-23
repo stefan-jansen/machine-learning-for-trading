@@ -1383,11 +1383,16 @@ case_studies/etfs/08_tabular_dl:
   # for a requested GPU, and the device is inside the training identity, so a CPU run
   # declares a different member set and the notebook makes it name its own population.
   # The epoch budget comes from the patched fixture presets, not from a parameter.
+  # The reductions are written out rather than left as MAX_FOLDS / MAX_SYMBOLS:
+  # pm_helpers folds those two into PREVIEW_REDUCTIONS at run time, but
+  # test_every_declared_parameter_reaches_its_notebook reads the notebook's source
+  # and sees two names it never binds.
   parameters:
     DEVICE: cpu
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
     POPULATION_NAME: etfs-tabular_dl-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/09_dl_lstm:
   parameters:
