@@ -5,11 +5,9 @@ place of a SHA-256 of fourteen files. The digest was unworkable twice over: a co
 ``panel.py`` invalidated every registered latent row, and it coupled the models to each other, so
 an SAE change refit IPCA. A declared version is only worth what checks it, which is this file.
 
-PCA, IPCA and CAE are pinned against a fitted result below. SAE and SDF are not: no SAE fit
-currently succeeds at all (`library_bridge.run_sae_fold_with_library` omits `batch_size`, so it
-trains on the whole panel in one batch and exhausts a 24 GB card), and an SDF fit is not cheap
-enough for a unit test at the time of writing. Their versions are declared and dispatched but
-their behaviour is unpinned, so a silent change to either would not fail here.
+PCA, IPCA, CAE and SAE are pinned against a fitted result below. SDF is not: a fit is not cheap
+enough for a unit test at the time of writing, so its version is declared and dispatched but its
+behaviour is unpinned, and a silent change to it would not fail here.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from case_studies.utils.latent_factors.cv import (
 )
 from case_studies.utils.latent_factors.ipca import IPCA_RUNNER_VERSION, run_ipca_fold
 from case_studies.utils.latent_factors.pca import PCA_RUNNER_VERSION, run_pca_fold
-from case_studies.utils.latent_factors.sae import SAE_RUNNER_VERSION
+from case_studies.utils.latent_factors.sae import SAE_RUNNER_VERSION, run_sae_fold
 from case_studies.utils.latent_factors.sdf import SDF_RUNNER_VERSION
 
 PINNED_VERSIONS = {
@@ -36,12 +34,14 @@ PINNED_VERSIONS = {
     "pca": 1,
     "ipca": 1,
     "cae": 1,
-    "sae": 1,
+    "sae": 2,
     "sdf": 1,
 }
 PINNED_PCA_PREDICTIONS = "4d62f4ceefc58141"
 PINNED_IPCA_PREDICTIONS = "0be530a116515880"
 PINNED_CAE_PREDICTIONS = "82a8721e8c074459"
+PINNED_SAE_PREDICTIONS = "01594687acc5416c"
+SAE_BATCH = 64
 
 N_DATES, N_ASSETS, N_CHARS, N_FACTORS = 24, 12, 4, 2
 
@@ -169,4 +169,55 @@ class TestTheDeclaredVersions:
         assert _digest(stacked) == PINNED_CAE_PREDICTIONS, (
             "the CAE runner now fits a different result; bump CAE_RUNNER_VERSION in "
             "case_studies/utils/latent_factors/cae.py and update this pin in the same commit"
+        )
+
+    def test_sae_reproduces_its_pinned_predictions(self, panel) -> None:
+        checkpoints, _ = run_sae_fold(
+            panel["chars_train"],
+            panel["returns_train"],
+            panel["chars_val"],
+            panel["returns_val"],
+            N_FACTORS,
+            n_epochs=2,
+            checkpoint_interval=1,
+            batch_size=SAE_BATCH,
+            device="cpu",
+            seed=42,
+        )
+
+        stacked = np.concatenate([np.asarray(checkpoints[e]) for e in sorted(checkpoints)])
+        assert _digest(stacked) == PINNED_SAE_PREDICTIONS, (
+            "the SAE runner now fits a different result; bump SAE_RUNNER_VERSION in "
+            "case_studies/utils/latent_factors/sae.py and update this pin in the same commit"
+        )
+
+    def test_the_sae_batch_size_reaches_the_library(self, panel) -> None:
+        """The defect behind `SAE_RUNNER_VERSION = 2`: `run_sae_fold_with_library` built its
+        `SAEConfig` without `batch_size`, so it took the library default of `None` and trained on
+        the whole panel in one batch - 21.72 GiB of allocations and an OOM on a 24 GB card at one
+        fold. A pin alone would not catch a re-omission, because this panel is smaller than the
+        default batch and would train identically either way. Two batch sizes that must disagree
+        is what actually holds the keyword in place."""
+
+        def fit(batch_size: int) -> np.ndarray:
+            checkpoints, _ = run_sae_fold(
+                panel["chars_train"],
+                panel["returns_train"],
+                panel["chars_val"],
+                panel["returns_val"],
+                N_FACTORS,
+                n_epochs=2,
+                checkpoint_interval=1,
+                batch_size=batch_size,
+                device="cpu",
+                seed=42,
+            )
+            return np.concatenate([np.asarray(checkpoints[e]) for e in sorted(checkpoints)])
+
+        minibatched = fit(SAE_BATCH)
+        full_panel = fit(10 * N_DATES * N_ASSETS)
+
+        assert not np.allclose(minibatched, full_panel), (
+            "minibatched and full-batch SAE fits agree, so `batch_size` is not reaching the "
+            "library and the OOM this guards against is back"
         )

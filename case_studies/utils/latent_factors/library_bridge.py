@@ -262,6 +262,7 @@ def run_sae_fold_with_library(
     noise_std: float = 0.035,
     alpha: float = 1.0,
     aux_weight: float = 1.0,
+    batch_size: int = 10_000,
     task_type: TaskType = "regression",
     seed: int = 42,
     device: str = "cpu",
@@ -288,6 +289,7 @@ def run_sae_fold_with_library(
             checkpoint_interval=checkpoint_interval,
             checkpoint_epochs=tuple(checkpoint_epochs or ()),
             lr=lr,
+            batch_size=batch_size,
             device=device,
             seed=seed,
         )
