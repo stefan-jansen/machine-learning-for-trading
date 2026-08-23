@@ -226,3 +226,61 @@ def test_fold_metric_backfill_is_restricted_to_requested_label(tmp_path, monkeyp
 
     assert count == 1
     assert seen == ["bt_full_a"]
+
+
+def _reference_artifacts(case_dir, source_root, prediction_hashes: list[str]) -> None:
+    """Record the rows a workspace copies and leave the parquets in the source root."""
+    for prediction_hash in prediction_hashes:
+        pred_dir = source_root / "run_log" / "predictions" / prediction_hash
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({"symbol": ["A"], "prediction": [0.1]}).write_parquet(
+            pred_dir / "predictions.parquet"
+        )
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "CREATE TABLE overlay_references ("
+            "result_hash TEXT, result_kind TEXT, source_root TEXT, created_at TEXT)"
+        )
+        db.executemany(
+            "INSERT INTO overlay_references VALUES (?, 'prediction', ?, '2026-08-23T00:00:00Z')",
+            [(value, str(source_root)) for value in prediction_hashes],
+        )
+
+
+def test_selection_reaches_a_prediction_the_run_log_only_references(tmp_path) -> None:
+    """A workspace run holds the rows and references the parquet; both must select."""
+    case_dir = tmp_path / "workspace"
+    _build_registry(case_dir)
+    _reference_artifacts(case_dir, tmp_path / "release", ["full_a", "full_b", "tabular"])
+
+    selected = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", stage="signal", top_n=10, case_dir=case_dir
+    )
+
+    assert sorted(selected["prediction_hash"].to_list()) == ["full_a", "full_b", "tabular"]
+
+
+def test_selection_survives_a_derived_artifact_landing_beside_a_referenced_prediction(
+    tmp_path,
+) -> None:
+    """The predictions directory existing is not evidence that any prediction is in it.
+
+    A workspace run writes derived per-prediction artifacts - conformal widths among them -
+    into a directory it creates beside a prediction it only references. Treating the
+    directory's existence as the test made this selection order-dependent: it returned every
+    candidate before any such artifact was written and none afterwards, from one registry.
+    """
+    case_dir = tmp_path / "workspace"
+    _build_registry(case_dir)
+    _reference_artifacts(case_dir, tmp_path / "release", ["full_a", "full_b", "tabular"])
+    derived = case_dir / "run_log" / "predictions" / "full_a"
+    derived.mkdir(parents=True)
+    pl.DataFrame({"alpha": [0.2], "width": [1.0]}).write_parquet(
+        derived / "conformal_widths.parquet"
+    )
+
+    selected = resolve_best_predictions(
+        "test", "fwd_ret_5d", split="validation", stage="signal", top_n=10, case_dir=case_dir
+    )
+
+    assert sorted(selected["prediction_hash"].to_list()) == ["full_a", "full_b", "tabular"]

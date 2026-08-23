@@ -55,16 +55,64 @@ def _table_exists(case_dir: Path, table: str) -> bool:
         db.close()
 
 
-def _existing_prediction_hashes(case_dir: Path) -> set[str] | None:
-    """Return prediction hashes that have physical parquet files, or None to skip filtering.
+def _overlaid_prediction_hashes(case_dir: Path) -> set[str]:
+    """Prediction hashes whose artifact this run log references rather than holds.
 
-    Returns None only when the predictions directory doesn't exist (no filtering).
-    Returns empty set when the directory exists but has no valid files (filters everything out).
+    A study opened against a private workspace copies a released prediction's registry rows
+    into its own run log and records where the parquet stayed, in `overlay_references`. The
+    parquet is not copied, so a reachability test that looks only at the local directory
+    reports the prediction missing and the selection funnel drops it.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    db_path = _registry_db_path(case_dir)
+    if not db_path.exists():
+        return set()
+    try:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='overlay_references'"
+            ).fetchone():
+                return set()
+            rows = db.execute(
+                "SELECT result_hash, source_root FROM overlay_references "
+                "WHERE result_kind = 'prediction'"
+            ).fetchall()
+    except sqlite3.DatabaseError:
+        return set()
+    return {
+        result_hash
+        for result_hash, source_root in rows
+        if (
+            Path(source_root) / "run_log" / "predictions" / result_hash / "predictions.parquet"
+        ).exists()
+    }
+
+
+def _existing_prediction_hashes(case_dir: Path) -> set[str] | None:
+    """Return prediction hashes whose parquet is reachable, or None to skip filtering.
+
+    Reachable means held locally or referenced through `overlay_references`. Returns None only
+    when the predictions directory doesn't exist and nothing is referenced (no filtering).
+
+    The two sources have to be read together rather than one as a fallback for the other,
+    because the local directory can exist while holding no predictions at all: a workspace run
+    writes derived per-prediction artifacts - conformal widths, for one - into a directory it
+    creates beside a prediction it only references. Testing the directory's existence alone
+    then makes this filter order-dependent, dropping every candidate on the second run of a
+    notebook that passed on the first.
     """
     pred_base = _run_log_dir(case_dir) / "predictions"
-    if not pred_base.exists():
+    local = (
+        {d.name for d in pred_base.iterdir() if (d / "predictions.parquet").exists()}
+        if pred_base.exists()
+        else set()
+    )
+    overlaid = _overlaid_prediction_hashes(case_dir)
+    if not pred_base.exists() and not overlaid:
         return None
-    return {d.name for d in pred_base.iterdir() if (d / "predictions.parquet").exists()}
+    return local | overlaid
 
 
 def _query_table(
