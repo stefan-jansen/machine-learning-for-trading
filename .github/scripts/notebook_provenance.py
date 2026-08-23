@@ -614,6 +614,17 @@ def stamp_notebook(
     conflict = contradicts_injected_cell(nb, parameters)
     if conflict:
         raise SystemExit(f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: {conflict}")
+    if not was_executed(nb):
+        # The gate catches this at commit time as HOLLOW; catching it here names the
+        # step that went wrong while the run is still on screen. The way it happens is
+        # a `jupytext --sync` that rebuilds the .ipynb from a newer .py after the run
+        # and before the stamp, which discards the outputs; nb-run.sh orders the sync
+        # after the stamp for exactly this reason.
+        raise SystemExit(
+            f"refusing to stamp {nb_path.relative_to(REPO_ROOT)}: no code cell carries an "
+            "output or an execution count, so nothing in it was executed. A stamp on this "
+            "would claim a run that left no trace. Execute it, or leave it cleared."
+        )
     stamp = {
         "source_py_blob": git_blob(py),
         "executed_at": datetime.now(UTC).isoformat(),
