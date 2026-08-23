@@ -1669,14 +1669,25 @@ case_studies/sp500_equity_option_analytics/08_tabular_dl:
   # declares a different member set and the notebook makes it name its own population.
   # BATCH_SIZE and N_EPOCHS named nothing after the migration; the epoch budget comes
   # from the patched fixture presets in tests/preset_patches.py, not from a parameter.
-  # MAX_FOLDS and MAX_SYMBOLS are gone for a subtler reason: pm_helpers folds them into
-  # PREVIEW_REDUCTIONS before injection, so the notebook never reads either name and
-  # test_every_declared_parameter_reaches_its_notebook rejects them. The reduction is
-  # applied anyway - research_preview_parameters forces the preview tier here and
-  # _collect_preview_reductions supplies max_symbols: 5 when nothing else is declared.
+  # MAX_FOLDS and MAX_SYMBOLS are gone for a subtler reason: the folding in
+  # _collect_preview_reductions happens on the papermill path, after
+  # test_every_declared_parameter_reaches_its_notebook has read this file, so the migrated
+  # notebook binds neither name and both are rejected. A reduction reaches it only under
+  # the name it declares. The tier comes from the harness: research_preview_parameters sees
+  # EXECUTION_TIER and WORKSPACE in the parameters cell and injects preview plus an isolated
+  # output root.
+  #
+  # The reduction is stated rather than left to the max_symbols: 5 the harness would
+  # substitute. It stops at the universe: tests/preset_patches.py already patches every tabm
+  # preset to n_epochs 2 at checkpoint_interval 1, so CI runs two epoch checkpoints and
+  # exercises the per-epoch prediction sets this notebook is about. Declaring n_epochs here
+  # would override that patch rather than add to it - 50 epochs at interval 25 is the same
+  # two checkpoints for twenty-five times the training.
   parameters:
     DEVICE: cpu
     POPULATION_NAME: sp500_equity_option_analytics-tabular_dl-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
   parameters:
