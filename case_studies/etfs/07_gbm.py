@@ -116,7 +116,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "6d9536da2ab6"
 
 # %%
 study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -242,8 +242,14 @@ plan.select(
 # same name, and the registry refuses to write it without being told which snapshot it
 # supersedes. That lineage is the only record of which generation is which.
 #
-# The default name is the contract with the notebooks downstream - `11_model_analysis` and
-# `12_backtest` resolve this population by name - rather than a label of convenience, which is
+# It defaults to the hash the published population actually superseded, not to empty. The hash
+# is part of what the snapshot is hashed over, so a run that left it empty would compute a
+# different population and be refused against the one on record. Carrying the value the
+# published run used is what lets this notebook re-run and resolve to the population it
+# published rather than to a new one.
+#
+# The default name is the contract with the notebooks downstream - `13_model_analysis` and
+# `14_backtest` resolve this population by name - rather than a label of convenience, which is
 # why a run that narrows the member set has to pass its own.
 
 # %%
@@ -726,16 +732,19 @@ spread
 # %% [markdown]
 # ## 5. What to notice
 #
-# **Every configuration ranks the cross-section the right way, and the loss function orders them.**
-# All fifteen are positive at the end of training. Sorted by IC, the four fixed-capacity Huber
-# configurations take the top four places, absolute error follows, and squared error occupies the
-# bottom - the weakest Huber setting still ranks above the strongest absolute-error one. That is
-# the order the label's tails predict. Squared error weights an observation by the square of its
-# error, so the largest 21-day moves dominate what each successive tree is fitted to, while the
-# information coefficient is a rank correlation that cares about order rather than magnitude:
-# effort spent getting the extremes right buys nothing on this metric. **An objective is a claim
-# about which errors matter, and it is worth choosing to match the metric the result will be
-# judged on.**
+# **Almost every configuration ranks the cross-section the right way, and the loss function
+# orders the families.** `above_zero` in the `horizons` frame is 14 of 15 on both labels, so one
+# configuration on each ends training pointing the wrong way, by a margin (`worst_ic`) small
+# enough to be indistinguishable from zero. Read `objective_summary` for the ordering: on both
+# labels Huber has the highest `mean_ic`, absolute error is next and squared error is last, and
+# squared error is also the only objective whose `above_zero` is not 5 of 5. The families order
+# on their averages but they overlap on individual configurations, so this is a statement about
+# objectives and not a ranking of the fifteen. That much is what the label's tails predict.
+# Squared error weights an observation by the square of its error, so the largest moves dominate
+# what each successive tree is fitted to, while the information coefficient is a rank correlation
+# that cares about order rather than magnitude: effort spent getting the extremes right buys
+# nothing on this metric. **An objective is a claim about which errors matter, and it is worth
+# choosing to match the metric the result will be judged on.**
 #
 # **The boosted population does not beat the linear one.** The strongest full-coverage
 # configuration here ranks below the strongest full-coverage configuration in
@@ -748,21 +757,27 @@ spread
 # interactions the trees can represent and a linear model cannot are real, but on this data they
 # do not pay for what greedy splitting gives up.
 #
-# **Every configuration is past its peak by the time it is reported.** All fifteen reach their
-# highest validation IC at the first or the second checkpoint and decline from there, without
-# exception. So the declared training length is longer than this data supports, and the
-# fixed-iteration comparison above is a comparison of fifteen models in their overfitted regime.
+# **Almost every configuration is past its peak by the time it is reported.** `ended_lower` in
+# the `trees_effect` frame is 14 of 15 on both labels, and `median_change` is negative on both,
+# so the typical configuration is worse at the declared training length than it was early on.
+# `interior_peaks` says the descent is not uniform: 3 configurations on fwd_ret_21d and 5 on
+# fwd_ret_5d reach their best IC somewhere in the middle of the run rather than at the first
+# checkpoint. So the declared training length is longer than this data supports, and the
+# fixed-iteration comparison above is a comparison of fifteen models mostly in their overfitted
+# regime.
 # That comparison is still the honest one, because each configuration is measured at the same
 # amount of training and nothing is chosen after the fact - but the ranking it produces is not the
 # ranking their best states would produce, and neither is a result until something selects on a
 # criterion that was fixed in advance.
 #
-# **The checkpoint is nearly as large a dial as the model.** Across the fifteen configurations at
-# fixed training length the IC spans a range; within a single configuration, across its own ten
-# checkpoints, the median range is about four fifths of that. A stopping point chosen after seeing
-# the curves would therefore be doing almost as much work as the choice of model, which is why
-# reporting the leading row of the results table would be reporting the maximum of 150 numbers as
-# though it were one.
+# **The checkpoint moves the IC nearly as far as the model does.** `checkpoint_vs_config`
+# compares the two: `across_configs` is the IC range over the fifteen configurations at the
+# declared training length, `median_within_config` is the median range a single configuration
+# covers over its own ten checkpoints. The second is about five eighths of the first on both
+# labels, which is why `checkpoint_dominates` is false and also why it is not reassuring. A
+# stopping point chosen after seeing the curves would be doing a comparable amount of work to the
+# choice of model, which is why reporting the leading row of the results table would be reporting
+# the maximum of 150 numbers as though it were one.
 #
 # **None of this selects anything.** IC measures whether predictions rank funds correctly, not
 # whether a strategy trading them makes money after costs and turnover. A monthly-horizon signal

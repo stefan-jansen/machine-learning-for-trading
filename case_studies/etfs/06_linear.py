@@ -90,7 +90,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "d808bf96955e"
 
 # %%
 study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -256,8 +256,14 @@ plan.select(
 # same name, and the registry refuses to write it without being told which snapshot it
 # supersedes. That lineage is the only record of which generation is which.
 #
-# The default name is the contract with the notebooks downstream - `11_model_analysis` and
-# `12_backtest` resolve this population by name - rather than a label of convenience, which is
+# It defaults to the hash the published population actually superseded, not to empty. The hash
+# is part of what the snapshot is hashed over, so a run that left it empty would compute a
+# different population and be refused against the one on record. Carrying the value the
+# published run used is what lets this notebook re-run and resolve to the population it
+# published rather than to a new one.
+#
+# The default name is the contract with the notebooks downstream - `13_model_analysis` and
+# `14_backtest` resolve this population by name - rather than a label of convenience, which is
 # why a run that narrows the member set has to pass its own.
 
 # %%
