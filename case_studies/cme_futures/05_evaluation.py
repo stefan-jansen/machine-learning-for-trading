@@ -328,9 +328,22 @@ display(
 # across folds and read once. The assertion is what makes the second half safe: if a
 # column that is supposed to carry no fitted parameter ever started to depend on the
 # fold, this cell would stop rather than quietly average two different quantities.
+#
+# **`hmm_` is the only prefix left here, and `arima_` was moved out deliberately.** The
+# hidden Markov model fits once per fold on that fold's training sessions and then holds
+# its parameters fixed, so its value for a date genuinely depends on which fold is
+# asking, and reading it outside that fold's validation window would read a parameter
+# fitted on later data. ARIMA is not that shape: it re-estimates as its walk proceeds, so
+# a forecast for a session is made by weights fitted only on earlier ones, and since
+# 2026-08-23 it is one walk per product over the whole history rather than one per fold.
+# Every value it emits is out of sample wherever it is read.
+#
+# So it belongs with the invariants, and putting it there is not a formality - it is what
+# subjects the replication to the assertion below. The five copies of a feature computed
+# once have to agree, and if they ever stop agreeing this cell is what says so.
 
 # %%
-FITTED_PREFIXES = ("arima_", "hmm_")
+FITTED_PREFIXES = ("hmm_",)
 # The artifact as written, one row per key and fold. The quality gate below reads this
 # rather than the resolved frame, because every fold's value is a value the training
 # notebooks can read, and the resolved frame has dropped most of them.
