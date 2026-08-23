@@ -419,6 +419,85 @@ print(f"  {len(financial_cols)} price-derived, {len(temporal_cols)} model-derive
 print(f"  a session counts once at least {MIN_CROSS_SECTION} products carry both columns")
 
 # %% [markdown]
+# ### What each fold's training window can actually supply
+#
+# A feature can be present in the declared set, present in every model's recorded
+# specification, and still be almost entirely absent from the rows a given fold trains on.
+# Anything with a long warm-up does this by construction: a rolling statistic over a year
+# needs a year before it produces anything, and a feature derived from a model fitted on
+# history cannot exist before that model has enough history to fit.
+#
+# Nothing downstream will complain. The imputer fills a missing value with the training
+# median, the scaler standardises that median to zero, and the fit proceeds with a column
+# that is present, inert, and indistinguishable in the registry from a column carrying real
+# variation. The only case that raises is a feature missing from *every* training row, which
+# is a narrow escape rather than a safety net: it fires at zero coverage and says nothing at
+# one per cent.
+#
+# So the rate is reported here, before any model is fitted, for both halves of the declared
+# set. The price-derived columns are read from the artifact as written; the model-derived
+# ones from `temporal_artifact`, which still carries every fold's value, rather than from
+# the out-of-sample frame assembled above - that one has already dropped each fitted column
+# outside its own validation window, which is exactly the training rows this question is
+# about.
+#
+# **This table does not repair anything, and it is not meant to.** Whether a fold should be
+# fitted at all when one of its declared features barely exists there is a question about
+# what this case study is teaching, and it is answered by a reader looking at the numbers,
+# not by a notebook quietly imputing its way past them.
+
+# %%
+train_windows = {
+    int(split["fold"]): (_as_date(split["train_start"]), _as_date(split["train_end"]))
+    for split in splits
+}
+
+
+def _coverage_rows(
+    frame: pl.DataFrame, columns: list[str], source: str, fold_id: int
+) -> list[dict]:
+    height = frame.height
+    return [
+        {
+            "fold": fold_id,
+            "source": source,
+            "feature": column,
+            "train_rows": height,
+            "non_null_pct": (frame.get_column(column).drop_nulls().len() / height * 100)
+            if height
+            else 0.0,
+        }
+        for column in columns
+    ]
+
+
+fold_coverage_rows: list[dict] = []
+for fold_id, (start, end) in sorted(train_windows.items()):
+    in_window = pl.col(DATE_COL).is_between(start, end)
+    fold_coverage_rows += _coverage_rows(
+        features.filter(in_window), financial_cols, "price-derived", fold_id
+    )
+    fold_coverage_rows += _coverage_rows(
+        temporal_artifact.filter(in_window & (pl.col("fold") == fold_id)),
+        temporal_feature_cols,
+        "model-derived",
+        fold_id,
+    )
+fold_coverage = pl.DataFrame(fold_coverage_rows)
+
+SPARSE_PCT = 5.0
+sparse = fold_coverage.filter(pl.col("non_null_pct") < SPARSE_PCT).sort("fold", "feature")
+print(f"{fold_coverage.height} (fold, feature) pairs across {len(train_windows)} folds")
+print(f"{sparse.height} are below {SPARSE_PCT:.0f}% non-null in their fold's training window")
+
+# %% tags=["results"]
+# Every feature whose fold sees almost none of it, and the per-fold rate for the columns
+# that vary most across folds. A feature absent here is imputed, not refused.
+fold_coverage.filter(
+    pl.col("feature").is_in(sparse.get_column("feature").unique().to_list())
+).pivot(on="fold", index=["source", "feature"], values="non_null_pct").sort("source", "feature")
+
+# %% [markdown]
 # ## 0. Data quality gate
 #
 # Before asking whether a feature predicts anything, check that the numbers are numbers:
