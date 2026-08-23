@@ -72,7 +72,7 @@ from pathlib import Path
 import polars as pl
 
 from case_studies.research import declared_labels, load_model_configs, open_study
-from utils.paths import get_case_study_dir
+from utils.paths import REPO_ROOT
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -109,7 +109,12 @@ menu
 # none of them can see a model that no notebook requests at all. That is what this cell is for.
 
 # %%
-CASE_DIR = get_case_study_dir("us_firm_characteristics")
+# The repository, not `get_case_study_dir`. That helper answers "where does this case study read
+# and write its data", which `ML4T_OUTPUT_DIR` redirects to an isolated root - correct for labels,
+# features and the run log, and wrong here: the notebooks are source, they live where the source
+# lives, and under a redirect the glob below found none of them and reported every declared member
+# as unclaimed.
+NOTEBOOK_DIR = REPO_ROOT / "case_studies" / "us_firm_characteristics"
 
 
 def claimed_model(path: Path) -> str:
@@ -128,7 +133,9 @@ def claimed_model(path: Path) -> str:
     raise ValueError(f"{path.name} binds no MODEL_NAME")
 
 
-notebooks = sorted(CASE_DIR.glob("08[a-z]_*.py"))
+notebooks = sorted(NOTEBOOK_DIR.glob("08[a-z]_*.py"))
+if not notebooks:
+    raise RuntimeError(f"no latent-factor execution notebooks under {NOTEBOOK_DIR}")
 claims = pl.DataFrame(
     {
         "notebook": [path.stem for path in notebooks],

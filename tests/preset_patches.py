@@ -38,7 +38,12 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
+    # No n_epochs or checkpoint_interval: IPCA is alternating least squares, not epoch
+    # training, and the adapter enforces that - `_resolve_model_configuration` raises
+    # "ipca checkpoint_interval must be 0" for anything else, which is what the shared
+    # presets declare. Patching an interval onto it made every migrated IPCA notebook fail
+    # in CI on a value production never uses.
+    "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
