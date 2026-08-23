@@ -229,15 +229,21 @@ execution, population = run_model_population(
     study, plan, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
 )
 
-fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
-reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
-print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the registry
-# already holds the matching rows, and the runner returns the stored result rather than fitting
-# again - so re-running this notebook unchanged costs the time it takes to read the data.
+# Re-running this notebook unchanged costs the time it takes to read the data. Every identity is
+# re-derived from the inputs, the registry already holds the matching rows, and the runner returns
+# the stored result rather than fitting again.
+#
+# **There are no fold counts above, and their absence is the honest reading rather than an
+# omission.** [`05_linear`](05_linear.ipynb), [`06_gbm`](06_gbm.ipynb) and
+# [`07_tabular_dl`](07_tabular_dl.ipynb) each print folds fitted against folds served from the
+# registry, because their runners record `fitted_folds` and `reused_folds` per run. The
+# latent-factor runner records neither - its result carries no diagnostics at all, so the only
+# per-run keys are the status and the training hash. Printing two zeros here would say every fold
+# came from cache, which is the opposite of what nothing-recorded means.
 #
 # ### Running configurations of your own
 #
