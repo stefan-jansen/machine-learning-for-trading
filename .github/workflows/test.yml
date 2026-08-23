@@ -571,6 +571,8 @@ jobs:
             tests/test_variant_fold_geometry.py \
             tests/test_artifact_sidecar_verification.py \
             tests/test_artifact_digest.py \
+            tests/test_sp500_equity_option_analytics_research.py \
+            tests/test_research_declared_menu_coverage.py \
             -v --tb=short
 
       # Reads only committed notebook JSON and its paired .py, so it belongs to
