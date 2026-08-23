@@ -509,17 +509,27 @@ side_text = "; ".join(
 # next run, so the two quantities are read and compared here.
 leader = by_label.sort("best_ic", descending=True).row(0, named=True)
 rest_best = by_label.filter(pl.col("label") != leader["label"]).get_column("best_ic").max()
-separation_text = (
-    f"the panels do not overlap: {leader['label']}'s weakest configuration scores "
-    f"{leader['worst_ic']:.4f}, above the {rest_best:.4f} that is the best any other label "
-    "reaches"
-    if leader["worst_ic"] > rest_best
-    else (
+if rest_best is None:
+    # A one-label `LABELS` run has no second panel, and `max()` over the empty selection is null
+    # rather than a number: comparing it raises, and formatting it would publish alt text about a
+    # comparison that was never made.
+    separation_text = (
+        f"there is one panel: this run fitted {leader['label']} alone, whose configurations "
+        f"span {leader['worst_ic']:.4f} to {leader['best_ic']:.4f}, so no comparison across "
+        "labels is drawn"
+    )
+elif leader["worst_ic"] > rest_best:
+    separation_text = (
+        f"the panels do not overlap: {leader['label']}'s weakest configuration scores "
+        f"{leader['worst_ic']:.4f}, above the {rest_best:.4f} that is the best any other label "
+        "reaches"
+    )
+else:
+    separation_text = (
         f"the panels overlap: {leader['label']} leads on its best configuration "
         f"({leader['best_ic']:.4f}) but its weakest ({leader['worst_ic']:.4f}) falls inside "
         f"the range other labels reach, whose best is {rest_best:.4f}"
     )
-)
 show_plotly_with_alt(
     fig_ic,
     "Bar charts of mean validation information coefficient for every full-coverage linear "
@@ -618,18 +628,27 @@ if ridge.height:
         )
         .filter(pl.col("n_labels") > 1)
     )
-    gap = float(shared_alpha.get_column("spread").min()) if shared_alpha.height else float("nan")
-    dominance = (
-        f"the closest two lines come at any shared penalty is {gap:.4f}, wider than the "
-        f"{sweep_span:.4f} the most penalty-sensitive line covers over the whole sweep, so the "
-        "label a line belongs to matters more than where on the line it sits"
-        if gap > sweep_span
-        else (
-            f"the most penalty-sensitive line covers {sweep_span:.4f} across the sweep while "
-            f"the closest two lines come within {gap:.4f} of each other, so the penalty moves "
-            "a line by as much as the label separates them"
+    if not shared_alpha.height:
+        # One Ridge label carries no gap between lines to measure. Computing one gave nan, which
+        # fell through to the else branch and published "the closest two lines come within nan of
+        # each other" over a chart showing one line.
+        dominance = (
+            f"the one line drawn covers {sweep_span:.4f} across the sweep; a second label "
+            "carrying Ridge at the same penalties is what this chart would compare it against"
         )
-    )
+    else:
+        gap = float(shared_alpha.get_column("spread").min())
+        dominance = (
+            f"the closest two lines come at any shared penalty is {gap:.4f}, wider than the "
+            f"{sweep_span:.4f} the most penalty-sensitive line covers over the whole sweep, so "
+            "the label a line belongs to matters more than where on the line it sits"
+            if gap > sweep_span
+            else (
+                f"the most penalty-sensitive line covers {sweep_span:.4f} across the sweep "
+                f"while the closest two lines come within {gap:.4f} of each other, so the "
+                "penalty moves a line by as much as the label separates them"
+            )
+        )
     show_plotly_with_alt(
         fig_alpha,
         "Line chart of mean validation information coefficient against the base-ten logarithm of "
