@@ -1379,12 +1379,16 @@ case_studies/etfs/06_linear:
 case_studies/etfs/07_gbm:
   timeout: 180
 case_studies/etfs/08_tabular_dl:
+  # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
+  # for a requested GPU, and the device is inside the training identity, so a CPU run
+  # declares a different member set and the notebook makes it name its own population.
+  # The epoch budget comes from the patched fixture presets, not from a parameter.
   parameters:
-    BATCH_SIZE: 32
+    DEVICE: cpu
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    POPULATION_NAME: etfs-tabular_dl-preview
+  timeout: 300
 case_studies/etfs/09_dl_lstm:
   parameters:
     BATCH_SIZE: 32
