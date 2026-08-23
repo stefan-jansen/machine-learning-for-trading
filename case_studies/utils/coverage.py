@@ -306,6 +306,39 @@ def declared_sessions(
     return sessions
 
 
+def _reject_label_mismatch(
+    frame: pl.DataFrame, *, case_study: str, label: str, split: str, source: str
+) -> None:
+    """Refuse to check a frame against a label it was not produced under.
+
+    The declared axis is sized by the label's own outcome horizon, so passing the
+    case study's primary label while handing in a variant's predictions produces a
+    small, plausible, entirely spurious gap. Measured in ``crypto_perps_funding``:
+    the 8-hour label declares 2,189 validation sessions and the 24-hour label 2,187,
+    because a decision at 2023-12-31 00:00 realizes inside the holdout under a
+    24-hour horizon and is purged. Checking a 24-hour artifact against the 8-hour
+    label therefore reports exactly two missing sessions and nothing is wrong.
+
+    The mismatch is only visible in one direction from the timestamps themselves - a
+    shorter declared horizon makes the observed frame a strict subset, which no
+    condition here can distinguish from a genuine gap. So it is caught from the
+    frame's own ``label`` column where one exists, and the check is silently skipped
+    where it does not rather than being asserted on absent evidence.
+    """
+    if "label" not in frame.columns:
+        return
+    present = frame.get_column("label").unique().drop_nulls().to_list()
+    if not present or present == [label]:
+        return
+    raise CoverageError(
+        f"{case_study}/{label}/{split} {source}: the frame carries label(s) "
+        f"{sorted(str(v) for v in present)}, not {label!r}. The declared session axis "
+        "is sized by the label's outcome horizon, so checking one label's predictions "
+        "against another's declaration reports a gap that is not there. Pass the label "
+        "the frame was produced under."
+    )
+
+
 def _coverage(
     frame: pl.DataFrame,
     *,
@@ -321,6 +354,8 @@ def _coverage(
             f"{case_study}/{label}/{split} {source}: frame is empty; a check that cannot "
             "run must not read as a pass"
         )
+
+    _reject_label_mismatch(frame, case_study=case_study, label=label, split=split, source=source)
 
     time_col = _time_column(frame.columns)
     windows = _declared_windows(case_study, label, split)
