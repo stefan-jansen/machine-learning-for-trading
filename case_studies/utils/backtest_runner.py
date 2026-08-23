@@ -1156,6 +1156,8 @@ def run_backtest(
             "slippage_bps": float(slippage_block["rate"]) * 10_000.0,
         }
 
+    _reject_inert_risk_spec(strategy.get("risk", {}))
+
     if rebal_spec["mode"] == "vectorized":
         if funding_rates is not None:
             raise ValueError("vectorized backtests cannot execute funding cashflows")
@@ -2332,6 +2334,39 @@ def _apply_allocation(
 # ---------------------------------------------------------------------------
 # Risk rules (Ch19) — engine-level integration
 # ---------------------------------------------------------------------------
+
+
+# Keys a risk block may carry that do not, on their own, ask the engine to do anything.
+# Everything else has to resolve to a rule, a limit or a state policy.
+_RISK_METADATA_KEYS = frozenset({"name", "type", "threshold", "bars", "breach_slippage"})
+_RISK_ACTIVE_KEYS = ("position_rules", "portfolio_limits", "state_transition_policy")
+
+
+def _reject_inert_risk_spec(risk_spec: dict) -> None:
+    """Refuse a risk block the engine would read as no overlay at all.
+
+    ``_build_position_rules`` and ``_build_risk_manager`` each read one key and return
+    ``None`` when it is absent, so a block that names a control without nesting it under
+    ``position_rules`` runs the unprotected strategy. It is not a quiet failure: the block
+    still reaches ``strategy.risk``, so the specification hashes differently and registers as
+    a distinct result carrying the control's name. Measured on crypto_perps_funding, fourteen
+    controls from a 3% stop to a 40-bar time exit registered fifty-six rows whose Sharpe,
+    drawdown and trade count were identical to the unprotected book in every digit.
+    """
+    if not risk_spec:
+        return
+    if any(risk_spec.get(key) for key in _RISK_ACTIVE_KEYS):
+        return
+    named = risk_spec.get("name") or risk_spec.get("type") or "<unnamed>"
+    stray = sorted(set(risk_spec) - _RISK_METADATA_KEYS)
+    raise ValueError(
+        f"risk control {named!r} asks for no overlay the engine can apply: none of "
+        f"{', '.join(_RISK_ACTIVE_KEYS)} is present"
+        + (f" (unrecognized keys: {', '.join(stray)})" if stray else "")
+        + ". A position-level control belongs under 'position_rules' as a list, e.g. "
+        "{'name': 'stop_loss_3pct', 'position_rules': [{'type': 'stop_loss', "
+        "'threshold': 0.03}]}."
+    )
 
 
 def _build_position_rules(risk_spec: dict):

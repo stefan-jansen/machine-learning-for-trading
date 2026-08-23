@@ -71,8 +71,13 @@ from utils.style import COLORS, show_plotly_with_alt
 LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-POPULATION_SUFFIX = "v1"
-SUPERSEDES: dict[str, str] = {}
+POPULATION_SUFFIX = "v2"
+SUPERSEDES: dict[str, str] = {
+    "fwd_ret_8h": "c16541d50dc3",
+    "fwd_ret_24h": "c2ba920126f4",
+    "fwd_dir_8h": "ae309637a66d",
+    "fwd_dir_8h_3c": "1c89e121f894",
+}
 
 # %%
 study = open_study(
@@ -179,6 +184,26 @@ pl.DataFrame(
 # specification and re-run once per control, with the `risk` field added and nothing else
 # changed. The prices carry the same warmup the allocator was given at the allocation stage, so a
 # moment-based allocator weights from the same history it did there.
+#
+# The control is nested under `position_rules`, which is the key the engine reads. A control
+# passed as the flat mapping `setup.yaml` declares would install no rule and run the unprotected
+# book, and it would do so without failing: the mapping still lands in `strategy.risk`, so the
+# specification hashes differently and registers as a distinct result under the control's name.
+
+
+# %%
+def as_risk_spec(control: dict) -> dict:
+    """The declared control in the shape the engine reads it."""
+    setting = (
+        {"bars": control["bars"]}
+        if control["type"] == "time_exit"
+        else {"threshold": control["threshold"]}
+    )
+    return {
+        "name": control["name"],
+        "position_rules": [{"type": control["type"], **setting}],
+    }
+
 
 # %%
 for label in labels:
@@ -200,7 +225,7 @@ for label in labels:
             predictions=predictions,
             signal=strategy["signal"],
             allocation=allocation,
-            risk=control,
+            risk=as_risk_spec(control),
             prices=prices,
             chapter="ch19",
             population_name=f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}",
@@ -259,11 +284,30 @@ results = study.backtests.table().filter(
     & pl.col("label").is_in(labels)
     & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
 )
+# A risk_overlay row whose specification carries no position rule was run without the control it
+# is registered under. The engine reads `strategy.risk.position_rules` and installs nothing when
+# it is absent, while the control's name still lands in `strategy.risk` and hashes the result as
+# distinct - so such a row reports the unprotected book under an overlay's name. The generation
+# this notebook replaces registered fifty-six of them.
+overlay_without_rule = results.filter(
+    (pl.col("stage") == "risk_overlay")
+    & pl.col("spec_json").str.json_path_match("$.strategy.risk.position_rules[0].type").is_null()
+)
+if overlay_without_rule.height:
+    print(
+        f"excluding {overlay_without_rule.height} risk_overlay rows that registered no position "
+        "rule: they measure the unprotected book"
+    )
+    results = results.filter(
+        ~pl.col("backtest_hash").is_in(overlay_without_rule.get_column("backtest_hash"))
+    )
 if results.filter(~pl.col("complete")).height:
     raise RuntimeError("the backtest catalog contains incomplete members")
 keyed = results.with_columns(
     pl.col("spec_json").str.json_path_match("$.strategy.risk.name").alias("control"),
-    pl.col("spec_json").str.json_path_match("$.strategy.risk.type").alias("control_type"),
+    pl.col("spec_json")
+    .str.json_path_match("$.strategy.risk.position_rules[0].type")
+    .alias("control_type"),
     pl.Series(
         "traded_folds",
         [
@@ -305,6 +349,23 @@ print(
     f"{comparable.height} of {overlay.height} overlay results traded the same folds as their "
     "baseline and are comparable to it"
 )
+if comparable.filter(pl.col("control_type").is_null()).height:
+    raise RuntimeError(
+        "an overlay result registered no control type: the rule never reached the engine"
+    )
+inert = comparable.filter(
+    (pl.col("sharpe_change") == 0.0)
+    & (pl.col("drawdown_change") == 0.0)
+    & (pl.col("extra_trades") == 0.0)
+)
+if inert.height == comparable.height:
+    raise RuntimeError(
+        "every control left the book identical in Sharpe, drawdown and trade count. The tightest "
+        "declared stop is 3% and the shortest time exit is 10 bars, against a baseline that draws "
+        "down tens of percent, so a control that binds on nothing is not a result about risk "
+        "management - it is a control the engine never installed."
+    )
+print(f"{inert.height} of {comparable.height} controls left the book untouched")
 comparable.select(
     "label",
     "control",
@@ -376,6 +437,12 @@ show_plotly_with_alt(
 # one that did. Here the rule catches a different failure than it did at the allocation stage - a
 # stop tight enough to close everything early sits out the rest of the span, and its Sharpe over
 # what it did trade would otherwise compete for the final selection.
+#
+# `SUPERSEDES` names the generation of each set this run replaces, which the freeze refuses to do
+# implicitly. `17_strategy_analysis` resolves these four sets by name, so two live generations of
+# one name would leave it unable to say which comparison a result came from. The hashes here are
+# the sets frozen by the run in which every control registered without its position rule; the
+# error raised on a changed set names the predecessor to pass.
 
 # %%
 for label in labels:

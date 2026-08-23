@@ -74,7 +74,7 @@ from utils.style import COLORS, show_plotly_with_alt
 LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-SUPERSEDES: str = ""
+SUPERSEDES: str = "1092e5153b02"
 
 # %%
 study = open_study(
