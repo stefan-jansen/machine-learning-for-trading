@@ -654,8 +654,11 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
-def destamped(ref: str | None = None) -> list[str]:
+def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
     """Notebooks stamped at *ref* and unstamped now.
+
+    ``only`` restricts the answer to those paths, so the pre-commit gate reports a
+    stamp this commit is dropping rather than one another commit dropped earlier.
 
     The gate says nothing about a notebook with no stamp, which is deliberate - the
     corpus is being stamped as notebooks are re-run, and failing the ones that have
@@ -668,7 +671,8 @@ def destamped(ref: str | None = None) -> list[str]:
     return sorted(
         rel
         for rel in stamped_at(ref or stamp_reference())
-        if (REPO_ROOT / rel).exists()
+        if (only is None or rel in only)
+        and (REPO_ROOT / rel).exists()
         and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         .get("metadata", {})
         .get(STAMP_KEY)
@@ -677,12 +681,20 @@ def destamped(ref: str | None = None) -> list[str]:
 
 def check_all(
     strict: bool = False,
+    only: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
 
     Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
     never silent: a notebook in that list has a ``.py`` that no longer matches its
     stamp, and the reason it is allowed is printed rather than assumed.
+
+    ``only`` restricts the scan to the notebooks whose ``.ipynb`` or paired ``.py``
+    is in that set of repo-relative paths. The pre-commit gate passes the staged
+    files, so a notebook someone else left dirty in the working tree no longer
+    blocks an unrelated commit; nothing unstaged can reach main, so the narrower
+    scan gives up no protection. CI calls it with no ``only`` and still scans the
+    whole tree.
     """
     stale: list[str] = []
     testmode: list[str] = []
@@ -694,6 +706,8 @@ def check_all(
         py = paired_py(nb_path)
         if py is None:
             continue  # un-paired notebooks have no .py to drift from
+        if only is not None and rel not in only and str(py.relative_to(REPO_ROOT)) not in only:
+            continue
         try:
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -737,8 +751,9 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict)
-    lost = destamped()
+    only = {str(Path(p)) for p in args.paths} or None
+    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict, only=only)
+    lost = destamped(only=only)
     fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
     if lost:
         print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
@@ -811,6 +826,12 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
+    cp.add_argument(
+        "paths",
+        nargs="*",
+        help="restrict the scan to these files (the pre-commit gate passes the staged ones); "
+        "with none given, the whole tree is scanned",
+    )
     cp.set_defaults(func=_cmd_check)
 
     args = ap.parse_args()
