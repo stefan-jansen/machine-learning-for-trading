@@ -47,11 +47,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
+from IPython.display import Markdown, display
 from matplotlib.patches import Patch
 
 warnings.filterwarnings("ignore")
 
 from utils.paths import get_chapter_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -77,237 +79,224 @@ DISPLAY_NAMES = {
 # %%
 variant_df = pl.read_parquet(OUTPUT_DIR / "variant_analysis.parquet")
 bt_df = pl.read_parquet(OUTPUT_DIR / "backtest_comparison.parquet")
+ic_df = pl.read_parquet(OUTPUT_DIR / "ic_comparison.parquet")
+holdout_df = pl.read_parquet(OUTPUT_DIR / "holdout_results.parquet")
+mq_df = pl.read_parquet(OUTPUT_DIR / "measurement_quality.parquet")
 synthesis = json.load((OUTPUT_DIR / "all_synthesis.json").open())
 
-sweep_path = OUTPUT_DIR / "signal_sweep.parquet"
-sweep_df = pl.read_parquet(sweep_path) if sweep_path.exists() else pl.DataFrame()
-
 print(f"Variants: {len(variant_df)} across {variant_df['case_study'].n_unique()} case studies")
-if len(sweep_df) > 0:
-    print(
-        f"Signal sweep: {len(sweep_df)} entries across {sweep_df['case_study'].n_unique()} case studies"
-    )
+print(f"Holdout configurations: {holdout_df.height}")
 
 # %% [markdown]
-# ## IC vs Sharpe: Validation and Holdout Overlay
+# ## IC vs Sharpe: What the Holdout Shows
 #
-# This is the key figure that differentiates NB03 from Ch16. Ch16 shows
-# validation-only IC-to-Sharpe with mechanical annotations (cadence, entry
-# rules, turnover). This notebook shows the **validation vs holdout overlay**:
-# does the translation pattern hold out-of-sample?
+# Ch16 shows the IC-to-Sharpe translation on validation data. What this notebook
+# adds is the holdout, and the comparison has to be made carefully.
+#
+# An earlier version of this figure put a validation IC and a holdout IC on the
+# same axis. They are not the same measurement. The validation number available
+# in the artifacts is the maximum IC over a whole hyperparameter sweep; the
+# holdout number is the IC of the one prediction that was selected. A
+# maximum over dozens of draws sits above the typical draw by construction, so
+# every arrow drawn between the two pointed left whether or not anything decayed.
+# The figure manufactured the decay it was meant to measure.
+#
+# Two panels instead, each comparing like with like. The left panel is the
+# IC-to-Sharpe translation measured entirely on the holdout, with the intervals
+# the registry stores for both quantities. The right panel is validation Sharpe
+# against holdout Sharpe for the same selected configuration, which is where a
+# decay claim can be made.
 
 # %%
-# Load holdout results for overlay
-holdout_parquet = OUTPUT_DIR / "holdout_results.parquet"
-holdout_map = {}
-if holdout_parquet.exists():
-    _ho_df = pl.read_parquet(holdout_parquet)
-    holdout_map = {row["cs_id"]: row for row in _ho_df.iter_rows(named=True)}
+selected = holdout_df.join(
+    mq_df.select("cs_id", "rank1_val_sharpe"), on="cs_id", how="left"
+).with_columns(label_name=pl.col("cs_id").replace_strict(DISPLAY_NAMES, default=pl.col("cs_id")))
 
 # %%
-# Build validation scatter from synthesis data (rank-1 configuration per CS)
-val_points = []
-ho_points = []
-for cs, data in synthesis.items():
-    models = data["pipeline_summary"]["models"]
-    backtest = data["pipeline_summary"].get("backtest", {})
-    costs = data["pipeline_summary"].get("costs", {})
-    best_ic = max((m.get("ic_mean") or 0) for m in models.values()) if models else 0
-    val_sharpe = costs.get("net_sharpe_at_actual")
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+colors = plt.cm.tab10(np.linspace(0, 1, max(selected.height, 1)))
 
-    if best_ic and val_sharpe is not None:
-        val_points.append(
-            {
-                "case_study": DISPLAY_NAMES.get(cs, cs),
-                "ic": best_ic,
-                "sharpe": val_sharpe,
-                "split": "Validation",
-            }
-        )
+ax = axes[0]
+for i, row in enumerate(selected.iter_rows(named=True)):
+    ax.errorbar(
+        row["holdout_ic"],
+        row["holdout_sharpe"],
+        xerr=[
+            [row["holdout_ic"] - row["holdout_ic_ci_lo"]],
+            [row["holdout_ic_ci_hi"] - row["holdout_ic"]],
+        ]
+        if row["holdout_ic_ci_lo"] is not None
+        else None,
+        yerr=[
+            [row["holdout_sharpe"] - row["holdout_sharpe_ci_lo"]],
+            [row["holdout_sharpe_ci_hi"] - row["holdout_sharpe"]],
+        ]
+        if row["holdout_sharpe_ci_lo"] is not None
+        else None,
+        fmt="D",
+        color=colors[i],
+        markersize=8,
+        markeredgecolor="black",
+        markeredgewidth=0.6,
+        elinewidth=1,
+        capsize=3,
+        alpha=0.9,
+        label=row["label_name"],
+    )
+ax.axhline(0, color="gray", linestyle="--", alpha=0.4)
+ax.axvline(0, color="gray", linestyle="--", alpha=0.4)
+ax.set_xlabel("Holdout IC (95% interval)")
+ax.set_ylabel("Holdout Sharpe (95% interval)")
+ax.set_title("Translation measured on the holdout")
+ax.legend(fontsize=7, loc="best")
 
-    # Holdout point
-    ho = holdout_map.get(cs, {})
-    ho_ic = ho.get("holdout_ic")
-    ho_sharpe = ho.get("holdout_sharpe")
-    if ho_ic is not None and ho_sharpe is not None:
-        ho_points.append(
-            {
-                "case_study": DISPLAY_NAMES.get(cs, cs),
-                "ic": ho_ic,
-                "sharpe": ho_sharpe,
-                "split": "Holdout",
-            }
-        )
+ax = axes[1]
+_paired = selected.filter(
+    pl.col("rank1_val_sharpe").is_not_null() & pl.col("holdout_sharpe").is_not_null()
+)
+for i, row in enumerate(_paired.iter_rows(named=True)):
+    ax.annotate(
+        "",
+        xy=(1, row["holdout_sharpe"]),
+        xytext=(0, row["rank1_val_sharpe"]),
+        arrowprops={"arrowstyle": "->", "color": colors[i], "lw": 1.6, "alpha": 0.85},
+    )
+    ax.text(
+        1.03,
+        row["holdout_sharpe"],
+        row["label_name"],
+        fontsize=8,
+        va="center",
+        color=colors[i],
+    )
+ax.axhline(0, color="gray", linestyle="--", alpha=0.4)
+ax.set_xlim(-0.15, 1.75)
+ax.set_xticks([0, 1])
+ax.set_xticklabels(["Validation", "Holdout"])
+ax.set_ylabel("Sharpe of the selected configuration")
+ax.set_title("The same configuration, before and after the holdout")
 
-scatter_data = pl.DataFrame(val_points + ho_points)
+fig.tight_layout()
+show_with_alt(
+    fig,
+    "Left: holdout IC against holdout Sharpe for each selected configuration, "
+    "with 95 percent intervals on both axes; the intervals are wide enough that "
+    "most points are not separated from zero. Right: arrows from each case "
+    "study's validation Sharpe to its holdout Sharpe for the same configuration.",
+)
 
-
-# %%
-def plot_ic_vs_sharpe():
-    """Plot IC vs Sharpe scatter with validation/holdout overlay."""
-    if scatter_data.height > 3:
-        fig, ax = plt.subplots(figsize=(10, 7))
-
-        scatter_pd = scatter_data.to_pandas()
-        case_studies = scatter_pd["case_study"].unique()
-        palette = plt.cm.tab10(np.linspace(0, 1, len(case_studies)))
-        cs_colors = dict(zip(case_studies, palette, strict=False))
-
-        # Validation points (filled circles)
-        val_data = scatter_pd[scatter_pd["split"] == "Validation"]
-        for cs in case_studies:
-            mask = val_data["case_study"] == cs
-            if mask.any():
-                ax.scatter(
-                    val_data.loc[mask, "ic"],
-                    val_data.loc[mask, "sharpe"],
-                    c=[cs_colors[cs]],
-                    label=f"{cs} (val)",
-                    s=80,
-                    alpha=0.8,
-                    marker="o",
-                    edgecolors="white",
-                    linewidth=0.5,
-                )
-
-        # Holdout points (diamond markers, same colors)
-        ho_data = scatter_pd[scatter_pd["split"] == "Holdout"]
-        for cs in case_studies:
-            mask = ho_data["case_study"] == cs
-            if mask.any():
-                ax.scatter(
-                    ho_data.loc[mask, "ic"],
-                    ho_data.loc[mask, "sharpe"],
-                    c=[cs_colors[cs]],
-                    label=f"{cs} (holdout)",
-                    s=100,
-                    alpha=0.9,
-                    marker="D",
-                    edgecolors="black",
-                    linewidth=0.8,
-                )
-
-        # Connect validation → holdout with arrows for each CS
-        for cs in case_studies:
-            v = val_data[val_data["case_study"] == cs]
-            h = ho_data[ho_data["case_study"] == cs]
-            if len(v) == 1 and len(h) == 1:
-                ax.annotate(
-                    "",
-                    xy=(h["ic"].iloc[0], h["sharpe"].iloc[0]),
-                    xytext=(v["ic"].iloc[0], v["sharpe"].iloc[0]),
-                    arrowprops=dict(arrowstyle="->", color=cs_colors[cs], alpha=0.4, lw=1),
-                )
-
-        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.3)
-        ax.axvline(x=0, color="gray", linestyle="--", alpha=0.3)
-        ax.set_xlabel("IC (Rank Correlation)")
-        ax.set_ylabel("Sharpe Ratio (Annualized)")
-        ax.set_title("IC → Sharpe Translation: Validation vs Holdout")
-        ax.legend(fontsize=7, loc="lower right", ncol=2)
-        fig.tight_layout()
-        fig.show()
-    else:
-        print("Insufficient data for IC-vs-Sharpe scatter")
-
-
-# %%
-plot_ic_vs_sharpe()
-# %% [markdown]
-# The arrows show how each case study moves from validation (circles) to
-# holdout (diamonds). Strategies where the arrow points down-left show
-# holdout degradation — both IC and Sharpe decline. Strategies where the
-# arrow stays flat or points right show robust translation. This is the
-# closure question Ch16 cannot answer with validation data alone.
+# %% tags=["results"]
+_up = _paired.filter(pl.col("holdout_sharpe") > pl.col("rank1_val_sharpe")).height
+_ic_pos = selected.filter(pl.col("holdout_ic_ci_lo") > 0).height
+_sh_pos = selected.filter(pl.col("holdout_sharpe_ci_lo") > 0).height
+display(
+    Markdown(
+        f"{selected.height} case studies reached the holdout. Of those, "
+        f"{_ic_pos} {'has' if _ic_pos == 1 else 'have'} a holdout IC whose 95 "
+        f"percent interval lies entirely above zero, and {_sh_pos} "
+        f"{'has' if _sh_pos == 1 else 'have'} a holdout Sharpe whose interval "
+        "does. "
+        f"Of the {_paired.height} with a validation Sharpe to compare against, "
+        f"{_up} came out higher on the holdout than on validation and "
+        f"{_paired.height - _up} came out lower.\n\n"
+        "Sharpe moving in both directions is what selection noise looks like. "
+        "The intervals are the reason to be careful here: a configuration can move a "
+        "long way between the two splits without that movement being "
+        "distinguishable from the width of either estimate."
+    )
+)
 
 # %% [markdown]
 # ## Where the IC-leading and Sharpe-leading families diverge
 #
-# Across the nine case studies, **the model family with the highest mean IC
-# is rarely the same family that produces the highest backtest Sharpe**.
-# This IC-Sharpe gap reflects how implementation details (entry scheme,
-# position sizing, rebalancing frequency) mediate the conversion from
-# prediction quality to portfolio performance.
+# The family with the highest mean IC need not be the family whose backtest
+# posts the highest Sharpe. IC scores the ordering of predictions; Sharpe scores
+# what a portfolio built from that ordering actually earned after the entry
+# scheme, the position sizing, the rebalancing cadence and the costs had their
+# say. The comparison below asks how often the two agree.
+#
+# It can only be asked where both exist. Four case studies have registered
+# predictions but no backtests, so they have an IC leader and no Sharpe leader.
+# They are shown, and excluded from the count, rather than being scored as
+# disagreements - an earlier version compared the IC leader against an empty
+# string and recorded four "No" rows on that basis.
 
 # %%
-# Build family-level comparison: IC leader vs Sharpe leader per case study
-leader_rows = []
-for cs, data in synthesis.items():
-    models = data["pipeline_summary"]["models"]
-    backtest = data["pipeline_summary"].get("backtest", {})
-
-    # IC leader: model family with highest mean IC
-    best_ic_family = None
-    best_ic_val = -1
-    for family, info in models.items():
-        ic = info.get("ic_mean") or 0
-        if ic > best_ic_val:
-            best_ic_val = ic
-            best_ic_family = family
-
-    # Sharpe leader: extract family from best_source (e.g., "tabular_dl/tabm_l")
-    best_source = backtest.get("best_source", "")
-    sharpe_leader = best_source.split("/")[0] if best_source else ""
-    val_sharpe = backtest.get("ml_sharpe", 0)
-
-    ho = holdout_map.get(cs, {})
-    ho_sharpe = ho.get("holdout_sharpe")
-
-    leader_rows.append(
+_ic_leaders = (
+    ic_df.filter(pl.col("ic_mean").is_not_null())
+    .sort("ic_mean", descending=True)
+    .group_by("case_study")
+    .first()
+    .select("case_study", ic_leader="family", ic_lead_value="ic_mean")
+)
+_sharpe_leaders = pl.DataFrame(
+    [
         {
-            "Case Study": DISPLAY_NAMES.get(cs, cs),
-            "IC Leader": best_ic_family or "—",
-            "IC": round(best_ic_val, 3) if best_ic_val > 0 else "—",
-            "Sharpe Leader": sharpe_leader or "—",
-            "Val Sharpe": round(val_sharpe, 3) if val_sharpe else "—",
-            "HO Sharpe": round(ho_sharpe, 3) if ho_sharpe is not None else "—",
-            "Same?": "Yes" if best_ic_family == sharpe_leader else "No",
+            "case_study": DISPLAY_NAMES.get(cs, cs),
+            "sharpe_leader": (
+                data["pipeline_summary"].get("backtest", {}).get("best_source", "") or ""
+            ).split("/")[0]
+            or None,
+            "val_sharpe": data["pipeline_summary"].get("backtest", {}).get("ml_sharpe"),
         }
+        for cs, data in synthesis.items()
+    ]
+)
+leader_df = (
+    _ic_leaders.join(_sharpe_leaders, on="case_study", how="full", coalesce=True)
+    .join(
+        holdout_df.select("case_study", "holdout_sharpe"),
+        on="case_study",
+        how="left",
     )
-
-if leader_rows:
-    leader_df = pl.DataFrame(leader_rows)
-    mismatches = sum(1 for r in leader_rows if r["Same?"] == "No")
-    print(
-        f"Family leaders diverge in {mismatches}/{len(leader_rows)} case studies "
-        f"(IC leader ≠ Sharpe leader)"
+    .with_columns(
+        agree=pl.when(pl.col("sharpe_leader").is_null())
+        .then(pl.lit("no backtest"))
+        .when(pl.col("ic_leader") == pl.col("sharpe_leader"))
+        .then(pl.lit("yes"))
+        .otherwise(pl.lit("no"))
     )
-else:
-    leader_df = pl.DataFrame()
-
-# %% [markdown]
-# ### Family leaders by IC vs by Sharpe
-
-# %%
+    .sort("ic_lead_value", descending=True, nulls_last=True)
+)
 leader_df
 
-# %% [markdown]
-# The table above shows a systematic pattern: in the majority of case
-# studies, the highest-IC family and the highest-Sharpe family are different.
-# This has three practical implications:
-#
-# 1. **Model selection by IC alone is insufficient** — Sharpe depends on
-#    how predictions interact with portfolio construction rules
-# 2. **The backtest stage is not just validation** — it surfaces
-#    implementation-stage interactions that IC alone does not capture
-# 3. **Label design matters as much as model choice** — case studies
-#    where the families diverge (e.g., US Firms: regression has the highest
-#    IC, classification has the highest Sharpe) show that the target
-#    definition is a first-order research decision
-#
-# The IC-Sharpe gap is a measurement the pipeline produces, not a defect.
-# The point of running the full pipeline (Ch11 → Ch20) is to surface these
-# implementation-stage interactions, since IC does not translate mechanically.
+# %% tags=["results"]
+_comparable = leader_df.filter(pl.col("agree") != "no backtest")
+_agreed = _comparable.filter(pl.col("agree") == "yes")
+display(
+    Markdown(
+        f"Of {leader_df.height} case studies, {_comparable.height} have both an "
+        f"IC leader and a Sharpe leader. They name the same family in "
+        f"{_agreed.height} of those"
+        + (f" ({', '.join(_agreed['case_study'].to_list())})" if _agreed.height else "")
+        + f" and different families in {_comparable.height - _agreed.height}. "
+        f"The remaining {leader_df.height - _comparable.height} have no "
+        "registered backtests and cannot answer the question either way."
+    )
+)
 
 # %% [markdown]
-# ## Cadence as the Hidden Moderator
+# With this many comparable case studies, the count settles nothing on its own.
+# What it does show is that agreement is not automatic: the ordering a model
+# produces and the return a portfolio built on that ordering earns are separated
+# by everything the implementation does in between. That is the reason the
+# pipeline runs the backtest stage at all rather than selecting on IC and
+# stopping, and it is why a model comparison reported only in IC leaves the
+# question of what to trade open.
+
+# %% [markdown]
+# ## Cadence
 #
-# Rebalancing cadence mediates the IC-to-Sharpe translation more than any
-# single model choice. A 15-minute strategy accumulates orders of magnitude
-# more turnover per day than a daily one, and a daily strategy churns many
-# times more than a monthly one. The same raw signal quality therefore
-# produces very different Sharpe ratios depending on how often positions
-# change, because frictions are amortized over longer holding periods.
+# Rebalancing cadence sets how much friction a signal has to overcome. A
+# 15-minute strategy turns its book over orders of magnitude more often than a
+# daily one, and a daily one many times more than a monthly one, so the same
+# per-period edge nets out very differently depending on how long a position is
+# held.
+#
+# That is the mechanism. Whether the numbers below demonstrate it is a separate
+# question, and they do not: each cadence in this panel is carried by a different
+# set of case studies, so a cadence difference and a case-study difference are
+# the same difference. The table is a description of what was run.
 
 # %%
 cadence_stats = (
@@ -329,25 +318,49 @@ cadence_stats = (
 # %%
 cadence_stats
 
-# %% [markdown]
-# Monthly rebalancing converts even modest IC into positive Sharpe because
-# turnover is amortized over longer horizons. Daily strategies produce
-# positive Sharpe when the signal is strong and negative Sharpe when it
-# is weak. Higher-frequency strategies typically produce positive Sharpe
-# only when label design (e.g., classification targets) reduces unnecessary
-# position changes. This mechanism is one reason why identical IC produces
-# very different signal Sharpe across the nine case studies.
+# %% tags=["results"]
+_backtested = variant_df.filter(pl.col("sharpe").is_not_null())
+_by_cad = (
+    _backtested.group_by("cadence")
+    .agg(n_cs=pl.col("case_study").n_unique(), cs=pl.col("case_study").unique())
+    .sort("n_cs", descending=True)
+)
+_no_bt = sorted(set(variant_df["cadence"].unique()) - set(_backtested["cadence"].unique()))
+display(
+    Markdown(
+        "Cadences with backtested variants: "
+        + "; ".join(
+            f"**{r['cadence']}** ({r['n_cs']} case "
+            f"{'study' if r['n_cs'] == 1 else 'studies'}: {', '.join(sorted(r['cs']))})"
+            for r in _by_cad.iter_rows(named=True)
+        )
+        + ". "
+        + (
+            f"No variant at {', '.join(_no_bt)} cadence has a registered "
+            "backtest, so the higher-frequency end of the comparison is absent "
+            "rather than weak. "
+            if _no_bt
+            else ""
+        )
+        + "Any cadence represented by a single case study cannot be separated "
+        "from that case study, and the median Sharpe attributed to it is that "
+        "case study's median."
+    )
+)
 
 # %% [markdown]
 # ## Signal Sharpe Distribution per Case Study
 #
-# The best Sharpe per case study hides the underlying distribution. In
-# most case studies, the majority of tested configurations produce
-# negative or near-zero Sharpe — the rank-1 configuration is an outlier
-# selected from a pool of losers. This is why Deflated Sharpe Ratio
-# correction matters:
-# the more configurations tested, the more likely the best result is a
-# statistical artifact rather than a genuine edge.
+# The highest Sharpe per case study says nothing about what the rest of the sweep
+# did. A configuration selected as the maximum of a large sample is drawn from
+# the upper tail of that sample, and how far into the tail it sits depends on how
+# many configurations were tried and how dispersed they were. The box plot below
+# shows the distribution each maximum was drawn from.
+#
+# This is the multiple-testing problem the Deflated Sharpe Ratio addresses by
+# discounting a maximum for the number of trials behind it. This notebook does
+# not compute a DSR; it shows the distribution that a DSR would be computed
+# against. Only case studies with registered backtests appear.
 
 # %%
 cadence_colors = {
@@ -389,8 +402,8 @@ for patch, color in zip(bp["boxes"], cs_colors_list, strict=False):
     patch.set_facecolor(color)
     patch.set_alpha(0.6)
 ax.axhline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.3)
-ax.set_ylabel("Signal-Stage Sharpe")
-ax.set_title("Distribution of Signal-Stage Backtests per Case Study")
+ax.set_ylabel("Signal-stage Sharpe")
+ax.set_title("Distribution of signal-stage backtests per case study")
 ax.tick_params(axis="x", rotation=30)
 
 cs_medians = np.array([np.median(s) for s in cs_sharpes]) if cs_sharpes else np.array([0.0])
@@ -423,33 +436,71 @@ handles = [
 if handles:
     ax.legend(handles=handles, loc="upper right", fontsize=8, title="Cadence")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Box plots of signal-stage Sharpe, one box per case study with a registered "
+    "backtest, ordered by best Sharpe and coloured by rebalancing cadence, with "
+    "a reference line at zero.",
+)
 
-# %% [markdown]
-# The within-case-study spread varies widely. The widest ranges appear where
-# configurations span strongly negative to positive Sharpe — US Equities (−1.9 to
-# 1.6), FX Pairs (−4.1 to −0.7), and Crypto (−2.8 to 0.4) — while case studies whose
-# variants are uniformly positive cluster more tightly: NASDAQ-100 runs 0.8 to 2.0,
-# and ETFs are tightest at 0.4 to 0.9. The dispersion within a single case study is
-# often as large as the differences between case studies, which is the practical
-# point: picking a single rank-1 configuration from dozens tested is a
-# multiple-testing problem that DSR is specifically designed to address.
+# %% tags=["results"]
+_spread = (
+    _backtested.group_by("case_study")
+    .agg(
+        n=pl.len(),
+        lo=pl.col("sharpe").min(),
+        med=pl.col("sharpe").median(),
+        hi=pl.col("sharpe").max(),
+    )
+    .with_columns(width=pl.col("hi") - pl.col("lo"), gap=pl.col("hi") - pl.col("med"))
+    .sort("width", descending=True)
+)
+_wide, _narrow = _spread.row(0, named=True), _spread.row(-1, named=True)
+_between = _spread["med"].max() - _spread["med"].min()
+_missing = sorted(set(variant_df["case_study"].unique()) - set(_spread["case_study"]))
+display(
+    Markdown(
+        f"{_spread.height} of {variant_df['case_study'].n_unique()} case studies "
+        "have backtested variants"
+        + (f"; {', '.join(_missing)} have none" if _missing else "")
+        + f". Widest spread: **{_wide['case_study']}**, {_wide['lo']:+.2f} to "
+        f"{_wide['hi']:+.2f} over {_wide['n']} configurations. Narrowest: "
+        f"**{_narrow['case_study']}**, {_narrow['lo']:+.2f} to "
+        f"{_narrow['hi']:+.2f} over {_narrow['n']}.\n\n"
+        f"The medians span {_between:.2f} Sharpe across case studies, while the "
+        f"widest single case study spans {_wide['width']:.2f} on its own. Choosing "
+        "a configuration inside one case study is a larger decision than choosing "
+        "between these case studies, and it is a decision made on validation data."
+    )
+)
 
 # %% [markdown]
 # ## Variant Analysis: Positive Sharpe Rate
 #
-# What fraction of model variants produce positive signal-stage Sharpe?
+# What fraction of backtested variants produce positive signal-stage Sharpe?
+#
+# The denominator is the number of variants that were actually backtested, not
+# the number registered. Dividing by every registered variant reported four case
+# studies at zero percent positive when none of their variants had been
+# backtested at all - a rate of zero and an absence of measurement rendered
+# identically, on the same bar chart, in the same colour.
 
 # %%
 variant_stats = (
-    variant_df.group_by("case_study")
+    variant_df.filter(pl.col("sharpe").is_not_null())
+    .group_by("case_study")
     .agg(
-        n_variants=pl.len(),
-        n_positive=pl.col("positive_sharpe").sum(),
-        pct_positive=(pl.col("positive_sharpe").sum() / pl.len() * 100).round(1),
+        n_backtested=pl.len(),
+        n_positive=(pl.col("sharpe") > 0).sum(),
+        pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100).round(1),
         best_sharpe=pl.col("sharpe").max(),
     )
-    .sort("pct_positive", descending=True)
+    .join(
+        variant_df.group_by("case_study").agg(n_registered=pl.len()),
+        on="case_study",
+        how="right",
+    )
+    .sort("pct_positive", descending=True, nulls_last=True)
 )
 
 # %% [markdown]
@@ -459,83 +510,70 @@ variant_stats = (
 variant_stats
 
 # %%
+_plotted = variant_stats.filter(pl.col("pct_positive").is_not_null()).sort(
+    "pct_positive", descending=True
+)
+_unmeasured = variant_stats.filter(pl.col("pct_positive").is_null())
+
 fig, ax = plt.subplots(figsize=(10, 5))
-
-cs_list = variant_stats["case_study"].to_list()
-pct_list = variant_stats["pct_positive"].to_list()
-n_list = variant_stats["n_variants"].to_list()
-
-bars = ax.barh(cs_list, pct_list)
-ax.set_xlabel("% Variants with Positive Signal-Stage Sharpe")
-ax.set_title("Model Selection: Share of Variants with Positive Sharpe")
+ax.barh(_plotted["case_study"].to_list(), _plotted["pct_positive"].to_list())
+ax.set_xlabel("% of backtested variants with positive signal-stage Sharpe")
+ax.set_title("Share of backtested variants with positive Sharpe")
 ax.set_xlim(0, 110)
-for i, (pct, n) in enumerate(zip(pct_list, n_list, strict=False)):
-    ax.text(pct + 1, i, f"{pct:.0f}% ({int(pct * n / 100)}/{n})", va="center", fontsize=9)
-
+ax.invert_yaxis()
+for i, row in enumerate(_plotted.iter_rows(named=True)):
+    ax.text(
+        row["pct_positive"] + 1,
+        i,
+        f"{row['pct_positive']:.0f}% ({row['n_positive']}/{row['n_backtested']})",
+        va="center",
+        fontsize=9,
+    )
+if _unmeasured.height:
+    ax.set_xlabel(
+        ax.get_xlabel()
+        + "\nnot shown, no backtested variants: "
+        + ", ".join(_unmeasured["case_study"].to_list())
+    )
 fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# ## Signal Threshold Sweep
-#
-# How does selectivity (top N% of assets) affect portfolio Sharpe?
-
-# %%
-if len(sweep_df) > 0:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    sweep_pd = sweep_df.to_pandas()
-    cs_list = sweep_pd["case_study"].unique()
-    colors = plt.cm.tab10(np.linspace(0, 1, len(cs_list)))
-
-    for i, cs in enumerate(cs_list):
-        mask = sweep_pd["case_study"] == cs
-        sub = sweep_pd[mask].sort_values("percentile")
-        axes[0].plot(
-            100 - sub["percentile"], sub["sharpe"], "o-", color=colors[i], label=cs, markersize=5
-        )
-        axes[1].plot(
-            100 - sub["percentile"],
-            sub["n_positions"],
-            "o-",
-            color=colors[i],
-            label=cs,
-            markersize=5,
-        )
-
-    axes[0].set_xlabel("Selectivity (top N%)")
-    axes[0].set_ylabel("Sharpe Ratio")
-    axes[0].set_title("Sharpe vs Selectivity")
-    axes[0].legend(fontsize=7, ncol=2)
-    axes[0].invert_xaxis()
-
-    axes[1].set_xlabel("Selectivity (top N%)")
-    axes[1].set_ylabel("Average Positions")
-    axes[1].set_title("Position Count vs Selectivity")
-    axes[1].invert_xaxis()
-
-    fig.tight_layout()
-    fig.show()
-else:
-    print("No signal sweep data available")
+show_with_alt(
+    fig,
+    "Horizontal bars giving, for each case study with backtested variants, the "
+    "percentage whose signal-stage Sharpe is positive, annotated with the count "
+    "over the number backtested. Case studies with no backtested variants are "
+    "named under the axis rather than drawn as zero.",
+)
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **IC does not linearly map to Sharpe.** The correlation is positive but
-#    noisy, mediated by costs, universe size, and holding period.
-# 2. **The highest-IC family is rarely the highest-Sharpe family.** In the
-#    majority of case studies the family with the highest mean IC is not
-#    the family with the highest backtest Sharpe; the implementation
-#    pipeline mediates between the two.
-# 3. **Label design is a first-order decision.** Case studies where the
-#    highest-IC family is not the highest-Sharpe family (ETFs, Crypto,
-#    NASDAQ-100, S&P 500 Eq+Opt, FX Pairs, CME Futures, S&P 500 Options —
-#    seven of nine) show that *what you predict* matters as much as
-#    *how you predict it*.
-# 4. **DSR significance is bimodal.** Some case studies pass all variants,
-#    others pass none, indicating DSR is more sensitive to the number of
-#    tested models than to gradual filtering.
+# - **IC does not map onto Sharpe by itself.** What sits between them is the
+#   implementation: the entry scheme, the sizing, the cadence, and the costs. A
+#   model comparison reported only in IC has not answered what to trade.
+# - **The IC leader and the Sharpe leader need not be the same family**, and in
+#   this registry they often are not. The computed count is above; it is small
+#   enough that it describes these case studies rather than establishing a rule.
+# - **The selected configuration's Sharpe is the maximum of a sample.** The box plots show the
+#   distributions those maxima were drawn from, and within one case study the
+#   spread is wider than the spread of medians across case studies. The Deflated
+#   Sharpe Ratio exists to discount a maximum for the number of trials behind it.
+# - **Absence of a measurement is not a measurement of zero.** Four case studies
+#   have registered predictions and no backtests. They are excluded from the
+#   rates and named, rather than plotted at zero percent alongside case studies
+#   that were measured and found wanting.
+#
+# ## Known Limitations
+#
+# - Five of nine case studies reach the holdout, so every count here is over a
+#   handful of cases and none of them supports a general claim.
+# - Cadence is confounded with case study: each cadence in this panel is carried
+#   by a different set of markets, so the two cannot be separated.
+# - Validation Sharpe is the selected configuration's own validation number, the
+#   one it was selected on. Comparing it to the holdout measures selection
+#   optimism together with whatever genuine decay occurred, and the two are not
+#   separated here.
+# - The holdout intervals come from the registry as stored; this notebook does
+#   not recompute them and inherits whatever bootstrap was used.
 #
 # **Next**: [`05_portfolio_allocation`](05_portfolio_allocation.ipynb)
 # compares allocator choices across the case studies;

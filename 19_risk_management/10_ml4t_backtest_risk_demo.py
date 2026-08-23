@@ -65,7 +65,7 @@ from ml4t.backtest.risk import (
 )
 
 from data import load_etfs
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 N_BARS = 252
@@ -78,7 +78,7 @@ N_BARS = 252
 # `PositionAction` (HOLD, EXIT_FULL, EXIT_PARTIAL, or ADJUST_STOP).
 
 # %% [markdown]
-# ### 1.1 Creating Position States
+# ### Creating Position States
 #
 # A compact state factory keeps the examples focused on rule behavior. Long and
 # short returns use the entry notional as the common denominator.
@@ -127,7 +127,7 @@ def create_position_state(
 
 
 # %% [markdown]
-# ### 1.2 Static Exit Rules
+# ### Static Exit Rules
 #
 # Static rules have fixed thresholds that don't change during the position lifetime.
 
@@ -137,7 +137,9 @@ take_profit = TakeProfit(pct=0.10)
 time_exit = TimeExit(max_bars=20)
 
 # %% [markdown]
-# **`StopLoss(pct=0.05)`** exits when the price reaches 5% below entry.
+# **`StopLoss`** exits once the loss from the entry price reaches the percentage it was
+# configured with. It measures against the entry, so the exit level never moves as the
+# position gains.
 
 # %%
 scenarios = [
@@ -156,7 +158,7 @@ for name, entry, current in scenarios:
         print(f"    Reason: {action.reason}")
 
 # %% [markdown]
-# **`TakeProfit(pct=0.10)`** exits when the price reaches the 10% target.
+# **`TakeProfit`** is the mirror image: it exits once the gain from entry reaches its target.
 
 # %%
 scenarios = [
@@ -183,12 +185,13 @@ for bars in [5, 15, 19, 20, 25]:
     print(f"  Bars held: {bars} -> {status}")
 
 # %% [markdown]
-# ### 1.3 Dynamic Exit Rules
+# ### Dynamic Exit Rules
 #
 # Dynamic rules have thresholds that adapt to position performance.
 
 # %% [markdown]
-# **`TrailingStop(pct=0.05)`** exits when price retraces 5% from the running high.
+# **`TrailingStop`** measures from the highest price reached since entry rather than from the
+# entry itself, so the exit level ratchets up with the position and never back down.
 # The rule uses the high-water mark through the prior completed bar, then updates
 # that state after the current bar is evaluated.
 
@@ -213,9 +216,10 @@ for state in states:
     hwm = max(hwm, state.current_price)
 
 # %% [markdown]
-# **`TighteningTrailingStop`** shrinks the trail width as the position becomes more
-# profitable. The configured schedule uses a 5% trail below 10% return, a 3%
-# trail from 10%, and a 2% trail from 20%.
+# **`TighteningTrailingStop`** narrows the trail as the position gains, on a schedule of
+# (return reached, trail width) pairs. The reasoning is that an unrealized gain is worth
+# protecting more tightly than an unproven one, at the cost of being stopped out of a
+# position that was going to keep running.
 
 # %%
 tightening = TighteningTrailingStop(
@@ -238,9 +242,10 @@ for peak_price in [108.0, 116.0, 128.0]:
     print(f"  Peak ${peak_price:.0f}, current ${current_price:.2f}: {status}")
 
 # %% [markdown]
-# **`ScaledExit`** takes partial exits at profit targets. Schedule: +5% -> exit 25%,
-# +10% -> exit 33% of remaining, +15% -> exit 50% of remaining. `ScaledExit`
-# is stateful, so this one instance follows one position and is reset afterward.
+# **`ScaledExit`** sells part of the position at each of a series of profit targets, taking a
+# stated fraction of what remains at each one. Unlike every other rule here it is stateful:
+# it remembers which targets have already fired, so one instance serves a single position and
+# must be reset before it is used for another.
 
 # %%
 scaled = ScaledExit(
@@ -273,8 +278,10 @@ scaled.reset()
 # - **AnyOf**: Any can trigger (OR logic, alias for RuleChain)
 
 # %% [markdown]
-# **`RuleChain`** returns the first non-`HOLD` action. Priority order:
-# `StopLoss(5%)` > `TakeProfit(10%)` > `TrailingStop(3%)` > `TimeExit(20)`.
+# **`RuleChain`** evaluates its rules in order and returns the first one that does not say
+# hold. Order is therefore policy: putting the stop first means a bar breaching both the stop
+# and the target is recorded as a stop, which is the conservative reading of a bar whose
+# internal sequence is unknown.
 
 # %%
 chain = RuleChain(
@@ -305,8 +312,9 @@ for name, entry, current, bars, hwm in test_cases:
         print(f"  {name}: HOLD")
 
 # %% [markdown]
-# **`AllOf`** implements AND logic: every constituent rule must trigger. This
-# example exits only after at least a 1% gain and a five-bar holding period.
+# **`AllOf`** requires every rule to trigger before it exits. The example below combines a
+# gain threshold with a minimum holding period, so neither a quick gain nor a long flat hold
+# exits on its own.
 
 # %%
 all_of = AllOf(
@@ -331,9 +339,9 @@ for name, ret, bars in test_cases:
     print(f"  {name} (ret={ret:.0%}, bars={bars}): {status}")
 
 # %% [markdown]
-# **`AnyOf`** implements OR logic; the first triggering rule wins. It is equivalent
-# to `RuleChain`: `StopLoss(5%)` OR `TakeProfit(10%)`
-# OR `TimeExit(20)`.
+# **`AnyOf`** exits when any rule triggers, which makes it equivalent to `RuleChain`. Worth
+# carrying over from `02_exit_strategies`: a rule that fires on almost every bar dominates
+# any combination it is placed in.
 
 # %%
 any_of = AnyOf(
@@ -401,7 +409,9 @@ def create_portfolio_state(
 
 
 # %% [markdown]
-# **`MaxDrawdownLimit`** warns from 15% drawdown and liquidates from 20%.
+# **`MaxDrawdownLimit`** carries two thresholds, a warning level and a liquidation level, so
+# the escalation from "look at this" to "close everything" is written into the rule rather
+# than decided under pressure.
 
 # %%
 dd_limit = MaxDrawdownLimit(max_drawdown=0.20, warn_threshold=0.15)
@@ -416,7 +426,9 @@ for dd_pct in [0.05, 0.10, 0.15, 0.18, 0.20, 0.25]:
         print(f"  Drawdown {dd_pct:.0%}: OK")
 
 # %% [markdown]
-# **`DailyLossLimit`** liquidates if today's loss exceeds 2% of current equity.
+# **`DailyLossLimit`** liquidates once the session's loss exceeds its threshold as a share of
+# current equity. Measuring against current rather than starting equity means the limit
+# tightens in absolute terms as the book shrinks.
 
 # %%
 daily_limit = DailyLossLimit(max_daily_loss_pct=0.02)
@@ -446,7 +458,9 @@ for n_pos in [5, 8, 10, 12]:
         print(f"  {n_pos} positions: OK")
 
 # %% [markdown]
-# **`GrossExposureLimit`** halts above 150% gross exposure.
+# **`GrossExposureLimit`** halts new trading above its threshold. Gross exposure adds the
+# absolute value of every position, so a long and a short of equal size count double rather
+# than netting to nothing - which is the point, since both can lose at once.
 
 # %%
 gross_limit = GrossExposureLimit(max_gross_exposure=1.5)
@@ -465,7 +479,9 @@ for leverage in [0.8, 1.0, 1.3, 1.5, 2.0]:
         print(f"  {leverage:.0%} gross: OK")
 
 # %% [markdown]
-# **`NetExposureLimit`** warns outside the -10% to +10% net-exposure band.
+# **`NetExposureLimit`** bounds the signed sum instead, which is directional market exposure.
+# A book can sit inside a tight net band while carrying large gross positions, so the two
+# limits constrain different things and a portfolio needs both.
 
 # %%
 net_limit = NetExposureLimit(max_net_exposure=0.10, min_net_exposure=-0.10)
@@ -518,22 +534,27 @@ portfolio_limits = [
 ]
 
 # %% [markdown]
-# **Position Rules (RuleChain, in priority order)**:
+# The two layers answer different questions and both are needed. The position rules decide what to
+# do about one trade going wrong, in priority order: a hard stop measured from entry, a trail that
+# tightens as the gain grows, a final target, and a holding-period cap so nothing is carried
+# indefinitely. The portfolio limits decide when to stop trading altogether regardless of which
+# individual position is responsible - a drawdown from the equity high, a single session's loss,
+# a count of open positions, and total gross exposure.
 #
-# 1. `StopLoss(3%)`: hard stop on entry-price drawdown
-# 2. `TighteningTrailingStop(5% -> 3% -> 2%)`: trail tightens with profit
-# 3. `TakeProfit(30%)`: final target
-# 4. `TimeExit(60 bars)`: maximum holding period
-#
-# **Portfolio Limits**:
-#
-# 1. `MaxDrawdownLimit(15%)`: liquidate at 15% drawdown, warn at 10%
-# 2. `DailyLossLimit(2%)`: liquidate above a 2% daily loss
-# 3. `MaxPositionsLimit(20)`: halt when the count reaches 20
-# 4. `GrossExposureLimit(100%)`: halt above 100% gross exposure
+# A position rule cannot see the portfolio and a portfolio limit cannot see which trade to close.
+# The configured values are in the cells above; the cell below prints them back so the
+# configuration a reader is looking at is the one being evaluated.
+
+# %%
+print("Position rules, in priority order:")
+for rule in position_rules.rules:
+    print(f"  {type(rule).__name__}")
+print("\nPortfolio limits:")
+for limit in portfolio_limits:
+    print(f"  {type(limit).__name__}")
 
 # %% [markdown]
-# ### 4.1 Evaluate Illustrative Position Paths
+# ### Evaluate Illustrative Position Paths
 
 # %%
 positions_sim = [
@@ -579,7 +600,7 @@ for pos in positions_sim:
         hwm = max(hwm, price)
 
 # %% [markdown]
-# ### 4.2 Portfolio Limit Check
+# ### Portfolio Limit Check
 
 # %%
 portfolio = create_portfolio_state(
@@ -616,7 +637,7 @@ for limit in portfolio_limits:
 # states rather than clipping or rewriting realized returns.
 
 # %% [markdown]
-# ### 5.1 Trigger Timing on a Real Price Path
+# ### Trigger Timing on a Real Price Path
 #
 # The position is entered after the first SPY close of 2020. Each subsequent bar
 # supplies its observed OHLC range. The trailing rule receives the high-water mark
@@ -731,10 +752,13 @@ fig.update_layout(
     height=430,
     legend_title_text="First action",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A price path with markers showing where each rule in the chain would have triggered, so the order in which they fire is visible against the same series.",
+)
 
 # %% [markdown]
-# ### 5.2 Rule Priority Across Position States
+# ### Rule Priority Across Position States
 #
 # A close-only grid isolates composition semantics. When the 20-bar time exit
 # overlaps a price rule, `RuleChain` returns the earlier rule in its declared order.
@@ -810,10 +834,13 @@ fig.update_layout(
     yaxis_title="Bars held",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A grid of position states by rule, coloured by the action each rule returns, showing which rule claims each region of the state space under the chain's priority order.",
+)
 
 # %% [markdown]
-# ### 5.3 Portfolio Escalation Surface
+# ### Portfolio Escalation Surface
 #
 # The portfolio map combines two independent checks without inventing realized
 # returns. Each cell constructs a `PortfolioState`, calls both limits, and reports
@@ -844,9 +871,9 @@ for row_idx, drawdown_pct in enumerate(drawdown_grid):
         )
 
 # %% [markdown]
-# The boundaries reflect the exact class contracts: drawdown warns from 15% and
-# liquidates from 20%, while daily loss liquidates only when it exceeds 2% of
-# current equity.
+# The boundaries in the surface are the class contracts, not approximations of them: each limit
+# warns at one configured level and liquidates at another, and the daily-loss limit escalates
+# straight to liquidation with no warning band at all.
 
 # %%
 portfolio_colors = [COLORS["silver_muted"], COLORS["amber"], COLORS["negative"]]
@@ -884,7 +911,10 @@ fig.update_layout(
     yaxis_title="Drawdown from high-water mark (%)",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A surface of portfolio state by limit outcome in three bands - no action, warn, and liquidate - with the warning band visible only for the limits that define one.",
+)
 
 # %% [markdown]
 # ## 6. Demonstrated API Coverage
@@ -931,28 +961,46 @@ library_coverage
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Position rules and portfolio limits act at different layers.**
-#    The six position rules (`StopLoss`, `TakeProfit`, `TimeExit`,
-#    `TrailingStop`, `TighteningTrailingStop`, `ScaledExit`) decide
-#    *individual* exits; the five portfolio limits
-#    (`MaxDrawdownLimit`, `DailyLossLimit`, `MaxPositionsLimit`,
-#    `GrossExposureLimit`, `NetExposureLimit`) decide *system-wide*
-#    halts. The two are not interchangeable.
-# 2. **Composition expresses ordering, conjunction, and disjunction.**
-#    `RuleChain` picks the first non-`HOLD` action;
-#    `AllOf` requires every rule to agree; `AnyOf` fires if any rule
-#    triggers. Priority is part of the policy and must be declared before
-#    evaluating outcomes.
-# 3. **Timing is part of every rule's definition.** Active stop orders may use
-#    current-bar OHLC, but the default trailing rule receives a water mark from
-#    completed prior bars. Entry-bar evaluation would violate that event order.
-# 4. **A limit class is an enforcement primitive, not complete governance.**
-#    Thresholds come from the risk mandate and still require escalation,
-#    approval, and reinstatement procedures. The diagnostic surfaces demonstrate
-#    mechanics and do not estimate performance benefits.
+# 1. **Exit rules and portfolio limits are different controls and neither substitutes for the
+#    other.** A position rule sees one trade and decides whether to close it. A portfolio limit
+#    sees the book and decides whether to keep trading at all. A book can be full of individually
+#    healthy positions and still be over its drawdown limit, and a single position can need closing
+#    while the book is fine.
+#
+# 2. **Order inside a rule chain is policy, not implementation.** The first rule that fires wins,
+#    so a chain that evaluates the target before the stop will record a bar that breached both as a
+#    profitable exit. Decide the order deliberately and state it, as `02_exit_strategies` had to
+#    for the same reason.
+#
+# 3. **Know which rules carry state.** Most of these evaluate a position afresh each bar. The
+#    scaled exit does not: it remembers which targets have already fired, so reusing one instance
+#    across positions silently skips targets for the second position onward.
+#
+# 4. **Check what each rule is allowed to see on the current bar.** A trailing stop that reads the
+#    current bar's own high to set the water mark it then tests against is using information the
+#    order did not have. The default here takes the water mark from completed bars.
+#
+# 5. **Distinguish gross from net exposure and limit both.** Gross sums absolute positions and net
+#    sums signed ones. A market-neutral book sits near zero net while carrying substantial gross,
+#    and only one of the two limits would catch it levering up.
+#
+# 6. **A limit class enforces a threshold; it does not decide one.** The value comes from a risk
+#    mandate, and the surrounding procedure - who is told, who may override, what has to be true to
+#    resume - is not in the library and is what makes a kill switch usable.
+#
+# ### Known limitations
+#
+# - Every example here is an evaluation of a constructed state, not a backtest. Nothing measures
+#   what applying these rules would have earned or cost, and the diagnostics show where rules fire
+#   rather than whether firing there was right.
+# - The position states are built by hand to sit either side of each threshold. That is the right
+#   way to demonstrate a contract and says nothing about how often real paths reach those states.
+# - No cost is charged on any exit. The rules differ mainly in how often they close positions,
+#   which is exactly what costs price.
+# - The portfolio limits are checked against a single snapshot of a book rather than a sequence, so
+#   nothing here exercises what happens after a limit breaches and trading halts.
 #
 # API reference: `ml4t.backtest.risk`.
 #
-# **Next**: [`11_systematic_risk_sweep`](11_systematic_risk_sweep.ipynb)
-# applies these position rules to 1D and 2D grids and shows how the
-# resulting surfaces interact with MAE/MFE-calibrated cuts.
+# **Next**: [`11_systematic_risk_sweep`](11_systematic_risk_sweep.ipynb) applies these position
+# rules across grids of thresholds and reads the resulting surfaces.
