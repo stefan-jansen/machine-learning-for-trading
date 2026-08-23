@@ -208,3 +208,115 @@ def test_the_seal_shortens_the_last_fold_when_the_horizon_is_intraday(case_dir, 
     sessions = declared_sessions("cs", LABEL, case_dir=case_dir)[0]
     assert sessions[-1] == dt.datetime(2020, 1, 17, 8), sessions
     assert dt.datetime(2020, 1, 17, 16) not in sessions
+
+
+# --- The three defects the first version shipped with, each measured on a real disagreement.
+#
+# All three passed the original suite because its fixture wrote naive timestamps and a
+# fold_id column on both sides, so the two artifacts agreed by construction. In this repo
+# they do not: crypto_perps_funding's label axis is Datetime('ms','UTC') while the
+# prediction diagnostics are naive, and the linear/GBM prediction folds carry `fold`
+# rather than `fold_id`. A fixture that agrees with itself measures nothing.
+
+
+@pytest.fixture
+def tz_case_dir(tmp_path: Path) -> Path:
+    """A tz-aware UTC label axis, as crypto_perps_funding actually writes it."""
+    labels = tmp_path / "labels"
+    labels.mkdir(parents=True)
+    pl.DataFrame(
+        [
+            {"timestamp": ts, "symbol": sym, LABEL: 0.01 * i}
+            for i, ts in enumerate(SESSIONS)
+            for sym in ("AAA", "BBB", "CCC")
+        ]
+    ).with_columns(
+        pl.col("timestamp").cast(pl.Datetime("ms")).dt.replace_time_zone("UTC")
+    ).write_parquet(labels / f"{LABEL}.parquet")
+    return tmp_path
+
+
+def test_a_tz_aware_label_axis_still_matches_a_naive_prediction_frame(tz_case_dir):
+    """The exact disagreement on disk: tz-aware labels, tz-naive predictions.
+
+    Compared as raw objects a tz-aware value never equals a naive one, so a complete
+    prediction set reported 100% of sessions missing - on the case study the module's
+    own docstring cites as its motivating failure.
+    """
+    report = check_prediction_coverage(
+        _frame(), "cs", LABEL, case_dir=tz_case_dir, raise_on_gap=False
+    )
+    assert report.complete, report.summary()
+    assert report.expected_sessions == len(SESSIONS)
+
+
+def test_a_tz_aware_frame_matches_a_naive_axis_too(case_dir):
+    """The reverse direction, which fails the same way."""
+    frame = _frame().with_columns(
+        pl.col("timestamp").cast(pl.Datetime("ms")).dt.replace_time_zone("UTC")
+    )
+    report = check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir, raise_on_gap=False)
+    assert report.complete, report.summary()
+
+
+def test_a_date_axis_matches_a_datetime_frame(tmp_path):
+    """A Date label column against a Datetime frame, the daily-equities shape."""
+    labels = tmp_path / "labels"
+    labels.mkdir(parents=True)
+    days = [dt.date(2020, 1, d) for d in (6, 7, 8, 9, 10, 13, 14, 15, 16, 17)]
+    pl.DataFrame([{"timestamp": d, "symbol": "AAA", LABEL: 0.01} for d in days]).write_parquet(
+        labels / f"{LABEL}.parquet"
+    )
+    frame = pl.DataFrame(
+        [
+            {
+                "timestamp": dt.datetime(d.year, d.month, d.day),
+                "symbol": "AAA",
+                "fold_id": 1 if d.day <= 10 else 0,
+                "prediction": 0.5,
+            }
+            for d in days
+        ]
+    )
+    report = check_prediction_coverage(frame, "cs", LABEL, case_dir=tmp_path, raise_on_gap=False)
+    assert report.complete, report.summary()
+
+
+def test_the_fold_checks_run_on_a_fold_schema_frame(case_dir):
+    """`fold`, not `fold_id`, is what the linear and GBM path writes.
+
+    A fold_id-only lookup skipped condition (1) in silence here, so a stale fold on the
+    artifacts the docstring sends callers to reported as a clean pass.
+    """
+    frame = _frame().rename({"fold_id": "fold"}).with_columns(pl.lit(7).alias("fold"))
+    with pytest.raises(CoverageError, match="undeclared_fold|stale fold"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+def test_a_frame_with_no_fold_column_raises_rather_than_passing(case_dir):
+    """The module's own header rule, applied to the module."""
+    frame = _frame().drop("fold_id")
+    with pytest.raises(CoverageError, match="no fold column"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+def test_fold_column_none_asks_for_session_coverage_only(case_dir):
+    """The explicit opt-out is a decision the caller states, not a silent skip."""
+    frame = _frame().drop("fold_id")
+    report = check_prediction_coverage(
+        frame, "cs", LABEL, case_dir=case_dir, fold_column=None, raise_on_gap=False
+    )
+    assert report.complete, report.summary()
+
+
+def test_sessions_outside_every_declared_window_are_a_gap(case_dir):
+    """`observed_sessions` used to count rows the declaration never asked for."""
+    extra = dt.datetime(2020, 2, 3, 16, 0)
+    frame = pl.concat(
+        [
+            _frame(),
+            pl.DataFrame([{"timestamp": extra, "symbol": "AAA", "fold_id": 0, "prediction": 0.5}]),
+        ]
+    )
+    with pytest.raises(CoverageError, match="belong to no declared|outside the declared"):
+        check_backtest_input_coverage(frame, "cs", LABEL, case_dir=case_dir)

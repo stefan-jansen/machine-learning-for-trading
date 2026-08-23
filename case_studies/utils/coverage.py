@@ -14,7 +14,7 @@ This module compares against the **declaration** instead: the fold boundaries in
 ``setup.yaml``, and the sessions that actually exist in the label artifact inside them.
 That is an absolute reference, so it fails when every peer is wrong together.
 
-Three conditions, all required, from ``reference/CASE_STUDY_PIPELINE.md`` section 3:
+Three conditions, all required:
 
 1. the folds present are the folds declared, and each one's timestamps lie inside its
    declared window;
@@ -109,6 +109,30 @@ def _as_date(value) -> date:
     return value if isinstance(value, date) else value.date()
 
 
+def _normalize_time(series: pl.Series) -> pl.Series:
+    """Put a time column into the one representation both sides are compared in.
+
+    The declaration and the frame genuinely disagree in this repo:
+    ``crypto_perps_funding/labels/fwd_ret_8h.parquet`` carries ``Datetime('ms', 'UTC')``
+    while the prediction diagnostics carry ``Datetime('ms', None)``, and
+    ``backtest_loaders.normalize_prediction_columns`` strips the zone and casts ``Date``
+    to ``Datetime`` before the backtest ever sees the frame. A tz-aware value never
+    equals a naive one, so comparing them as raw objects reports a correct prediction
+    set as 100% missing. This mirrors ``backtest_loaders.py`` rather than inventing a
+    second convention, so the gate agrees with what the pipeline itself does.
+    """
+    dtype = series.dtype
+    if dtype == pl.Date:
+        return series.cast(pl.Datetime("us"))
+    if dtype in (pl.String, pl.Utf8):
+        return series.str.to_datetime().cast(pl.Datetime("us"))
+    if isinstance(dtype, pl.Datetime):
+        if dtype.time_zone:
+            series = series.dt.replace_time_zone(None)
+        return series.cast(pl.Datetime("us"))
+    return series
+
+
 def _time_column(columns: list[str]) -> str:
     column = _first_present(columns, _TIME_ALIASES)
     if column is None:
@@ -117,6 +141,29 @@ def _time_column(columns: list[str]) -> str:
             "coverage cannot be evaluated"
         )
     return column
+
+
+_FOLD_ALIASES = ("fold_id", "fold")
+
+
+def _resolve_fold_column(columns: list[str], fold_column) -> str | None:
+    """Find the fold column under either name the pipeline uses.
+
+    The linear and GBM path writes ``fold`` (``prediction_folds/fold_*.parquet``,
+    ``deep_learning.py`` renames ``fold_id`` to ``fold`` on publish) and
+    ``backtest_loaders`` renames it back to ``fold_id`` only on the way into the
+    backtest. A ``fold_id``-only lookup therefore skipped condition (1) in silence on
+    half the artifacts, at the producer site the docstring sends callers to - which is
+    the "a check that cannot run must not read as a pass" failure this module exists to
+    prevent, in the module itself.
+    """
+    if fold_column is None:
+        return None
+    names = (fold_column,) if isinstance(fold_column, str) else tuple(fold_column)
+    for name in names:
+        if name in columns:
+            return name
+    return None
 
 
 def _label_artifact(case_study: str, label: str, case_dir: Path | None) -> Path:
@@ -179,7 +226,7 @@ def _session_axis(case_study: str, label: str, case_dir: Path | None) -> pl.Seri
             f"{path} carries no non-null {label!r}; the session axis is empty and "
             "coverage cannot be evaluated"
         )
-    return axis
+    return _normalize_time(axis)
 
 
 def _sealed(case_study: str, label: str, axis: pl.Series) -> pl.Series:
@@ -197,7 +244,11 @@ def _sealed(case_study: str, label: str, axis: pl.Series) -> pl.Series:
 
     from case_studies.utils.cv_window import _holdout_window, _load_setup_yaml
     from utils.artifact_specs import resolve_label_horizon, resolve_market_semantics
-    from utils.cv_splits import _purge_holdout_touching_validation
+    from utils.cv_splits import (
+        _map_calendar_id,
+        _normalize_label_buffer,
+        _purge_holdout_touching_validation,
+    )
 
     holdout = _holdout_window(case_study)
     if holdout is None:
@@ -206,14 +257,18 @@ def _sealed(case_study: str, label: str, axis: pl.Series) -> pl.Series:
     horizon = resolve_label_horizon(case_study, label, setup)
     if not horizon:
         return axis
-    calendar = resolve_market_semantics(case_study, setup).get("calendar")
+    # generate_cv_splits maps the calendar id and normalizes the buffer before calling
+    # the purge function; passing the raw values here would take a different branch of it
+    # for a 24/7 case study with an NdD-shaped horizon, and the expectation would then
+    # disagree with the folds it claims to agree with by construction.
+    calendar = _map_calendar_id(resolve_market_semantics(case_study, setup).get("calendar"))
 
     stamps = pd.DatetimeIndex(axis.to_list())
     kept = _purge_holdout_touching_validation(
         np.arange(len(stamps)),
         stamps,
         holdout_start=str(holdout[0]),
-        outcome_horizon=str(horizon),
+        outcome_horizon=_normalize_label_buffer(str(horizon)),
         calendar_id=calendar,
     )
     return axis.gather(kept.tolist())
@@ -259,7 +314,7 @@ def _coverage(
     split: str,
     source: str,
     case_dir: Path | None,
-    fold_column: str | None,
+    fold_column: tuple[str, ...] | str | None,
 ) -> CoverageReport:
     if frame.is_empty():
         raise CoverageError(
@@ -271,15 +326,24 @@ def _coverage(
     windows = _declared_windows(case_study, label, split)
     expected = declared_sessions(case_study, label, split=split, case_dir=case_dir)
 
-    observed = frame.select(pl.col(time_col)).unique().get_column(time_col)
+    observed = _normalize_time(frame.select(pl.col(time_col)).unique().get_column(time_col))
     observed_set = set(observed.to_list())
+
+    resolved_fold = _resolve_fold_column(frame.columns, fold_column)
+    if fold_column is not None and resolved_fold is None and split != "holdout":
+        raise CoverageError(
+            f"{case_study}/{label}/{split} {source}: no fold column among "
+            f"{_FOLD_ALIASES} in columns {sorted(frame.columns)}. The fold checks cannot "
+            "run, and a check that cannot run must not read as a pass; pass "
+            "fold_column=None to ask for session coverage only."
+        )
 
     gaps: list[CoverageGap] = []
 
     # (1) The folds present are the folds declared.
-    if fold_column and fold_column in frame.columns and split != "holdout":
+    if resolved_fold and split != "holdout":
         declared_ids = {fold for fold, _, _ in windows if fold is not None}
-        present_ids = set(frame.get_column(fold_column).unique().to_list())
+        present_ids = set(frame.get_column(resolved_fold).unique().to_list())
         for missing in sorted(declared_ids - present_ids):
             gaps.append(
                 CoverageGap(
@@ -301,7 +365,9 @@ def _coverage(
         bounds = {fold: (start, end) for fold, start, end in windows if fold is not None}
         for fold in sorted(declared_ids & present_ids):
             start, end = bounds[fold]
-            stamps = frame.filter(pl.col(fold_column) == fold).get_column(time_col).unique()
+            stamps = _normalize_time(
+                frame.filter(pl.col(resolved_fold) == fold).get_column(time_col).unique()
+            )
             if stamps.is_empty():
                 continue
             as_dates = stamps.dt.date() if stamps.dtype != pl.Date else stamps
@@ -351,6 +417,24 @@ def _coverage(
                     )
                 )
 
+    # (4) Nothing observed outside every declared window. Condition (1) covers this per
+    # fold, but only where a fold column exists and only for validation; without this a
+    # holdout frame carrying validation or post-holdout sessions reports complete, and
+    # observed_sessions counts rows the declaration never asked for, so the summary can
+    # read "N of N" while the frame carries extras.
+    declared_all = {session for sessions in expected.values() for session in sessions}
+    extras = sorted(observed_set - declared_all)
+    if extras:
+        gaps.append(
+            CoverageGap(
+                "out_of_window",
+                None,
+                f"{len(extras)} timestamps belong to no declared {split} window, "
+                f"first {extras[0]}, last {extras[-1]}",
+                len(extras),
+            )
+        )
+
     return CoverageReport(
         case_study=case_study,
         label=label,
@@ -380,7 +464,7 @@ def check_prediction_coverage(
     *,
     split: str = "validation",
     case_dir: Path | None = None,
-    fold_column: str | None = "fold_id",
+    fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
 ) -> CoverageReport:
     """Assert a prediction set covers the declared validation geometry.
@@ -410,7 +494,7 @@ def check_backtest_input_coverage(
     *,
     split: str = "validation",
     case_dir: Path | None = None,
-    fold_column: str | None = "fold_id",
+    fold_column: tuple[str, ...] | str | None = _FOLD_ALIASES,
     raise_on_gap: bool = True,
 ) -> CoverageReport:
     """Assert the frame a backtest is about to consume still covers the declaration.
