@@ -213,27 +213,38 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# There are two ways to submit these fits and this notebook takes the first of them. Resolving
+# every request before submitting is what let the plan table above show real feature counts, fold
+# geometry and eligible-row counts, and it costs one fold preparation per configuration: each
+# resolved request holds its own prepared folds and runs on its own. Submitting the requests
+# unresolved instead reaches a family batch runner that walks folds on the outside and
+# configurations on the inside, so one prepared fold set serves every configuration - at the cost
+# of a plan built from placeholder folds rather than the real ones. The choice is between seeing
+# what will be fitted and holding less at once; on a grid this size the first is affordable.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# The default name is the contract with `11_model_analysis` and `12_backtest`, which resolve this
+# population by name, rather than a label of convenience; a run that narrows the member set has to
+# pass its own.
+#
+# `SUPERSEDES_POPULATION` names the earlier snapshot this one replaces. A population is hashed
+# over its members *and* over what it supersedes, so the default carries the hash the published
+# snapshot actually superseded: leaving it empty would compute a different population and the
+# registry would refuse it against the one on record. It applies to a canonical run only. A
+# preview population lives and dies with its workspace, so it has no lineage to extend and the
+# runner refuses the argument rather than let a caller believe a snapshot was superseded when
+# nothing was written down.
 
 # %%
-# `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
-# the contract with them and not a label of convenience. A run that narrows the member set
-# has to pass its own.
-#
-# `SUPERSEDES_POPULATION` names the earlier snapshot this one replaces. A population is
-# hashed over its members *and* over what it supersedes, so the default carries the hash the
-# published snapshot actually superseded: leaving it empty would compute a different
-# population and the registry would refuse it against the one on record.
 population_name = POPULATION_NAME or "sp500-options-gbm-validation-v1"
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=(SUPERSEDES_POPULATION or None) if EXECUTION_TIER == "canonical" else None,
 )
 
 print(f"{len(execution.runs)} configurations fitted")
@@ -295,16 +306,21 @@ catalog = execution.catalog_rows.select(
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("gbm execution returned a partial prediction set")
 
-# Coverage is judged against each label's own maximum. The sweep declares one label today, so
-# this is the same number either way; it is written per label because adding a variant to
-# `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason
-# that has nothing to do with the models.
+# %% [markdown]
+# A configuration scores on every date its folds cover, and a configuration that covers fewer
+# dates than its neighbours is measured over a shorter window, so its IC is not comparable with
+# theirs. Coverage is judged against each label's own maximum rather than a global one: with one
+# label in the sweep the two are the same number, and adding a variant to `setup.yaml` is all it
+# would take for a global maximum to mark a whole grid incomplete for a reason that has nothing
+# to do with the models.
+#
+# The charts below are one panel, which is right only while the sweep is one label, so a second
+# label stops the notebook rather than pooling two horizons into one ranking.
+
+# %% tags=["results"]
 catalog = catalog.with_columns(
     full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
 )
-# The charts below are one panel, which is only right while the sweep is one label. A variant
-# added to `setup.yaml` has to be faceted the way `fx_pairs` and `cme_futures` facet theirs,
-# rather than silently pooled into one ranking.
 if catalog.get_column("label").n_unique() > 1:
     raise NotImplementedError(
         "this notebook charts one label; facet the figures before adding a sweep variant"
