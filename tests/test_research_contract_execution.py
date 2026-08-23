@@ -577,6 +577,20 @@ def test_preview_prediction_is_excluded_from_official_population(
     assert preview_selection.height == 1
     with pytest.raises(ValueError, match="preview.*candidate set"):
         study.predictions.freeze(preview_selection, name="preview-must-not-freeze")
+    # Two independent guards stand between a preview result and an official population, and
+    # only one of them can fire at a time. Fitting the preview above left the preview tier
+    # active, so the activation guard answers first and the member guard is never reached.
+    with pytest.raises(ValueError, match="preview run cannot create an official population"):
+        OfficialPopulation.create(
+            study,
+            name="preview-must-not-enter-official",
+            member_kind="prediction",
+            members=[preview.hash],
+        )
+    # Back on canonical the activation guard is silent, which is what makes the next call a
+    # test of the member guard this function is named for rather than a second reading of the
+    # first one.
+    study.activate()
     with pytest.raises(ValueError, match="preview.*cannot enter"):
         OfficialPopulation.create(
             study,

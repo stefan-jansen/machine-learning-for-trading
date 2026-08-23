@@ -301,3 +301,90 @@ def test_conformal_allocation_accepts_tz_aware_widths(monkeypatch: pytest.Monkey
 
     assert result.height == 4
     assert result["timestamp"].dtype == weights["timestamp"].dtype
+
+
+def _overlay_registry(workspace: Path, source_root: Path, prediction_hash: str) -> None:
+    """Record where a workspace's copied prediction row says its artifact stayed."""
+    import sqlite3
+
+    registry = workspace / "run_log" / "registry.db"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(registry) as db:
+        db.execute(
+            "CREATE TABLE overlay_references ("
+            "result_hash TEXT, result_kind TEXT, source_root TEXT, created_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO overlay_references VALUES (?,?,?,?)",
+            (prediction_hash, "prediction", str(source_root), "2026-08-23T00:00:00+00:00"),
+        )
+
+
+def _two_fold_rows() -> list[dict[str, object]]:
+    return (
+        [
+            {
+                "timestamp": datetime(2020, 1, 1),
+                "symbol": s,
+                "y_true": t,
+                "y_score": 0.0,
+                "fold_id": 1,
+            }
+            for s, t in (("A", 10.0), ("B", 1.0))
+        ]
+        + [
+            {
+                "timestamp": datetime(2020, 1, 2),
+                "symbol": s,
+                "y_true": t,
+                "y_score": 0.0,
+                "fold_id": 1,
+            }
+            for s, t in (("A", 10.0), ("B", 1.0))
+        ]
+        + [
+            {
+                "timestamp": datetime(2020, 2, 1),
+                "symbol": s,
+                "y_true": 100.0,
+                "y_score": 0.0,
+                "fold_id": 2,
+            }
+            for s in ("A", "B")
+        ]
+    )
+
+
+def test_widths_calibrate_from_a_prediction_the_workspace_only_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace run copies the registry rows and leaves the parquet where it was.
+
+    Resolving the artifact from the active case directory alone finds nothing, so the
+    conformal allocator used to fail on every prediction the caller did not fit themselves.
+    """
+    release = tmp_path / "release" / "demo"
+    _write_predictions(release, _two_fold_rows())
+    workspace = tmp_path / "workspace" / "demo"
+    _overlay_registry(workspace, release, "candidate")
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: workspace)
+
+    widths = conformal.compute_conformal_widths("demo", "candidate", min_calibration_n=2)
+
+    assert not widths.is_empty()
+    assert widths.filter(pl.col("fold_id") == 1).is_empty()
+    local = workspace / "run_log" / "predictions" / "candidate" / "conformal_widths.parquet"
+    released = release / "run_log" / "predictions" / "candidate" / "conformal_widths.parquet"
+    assert local.is_file(), "derived widths belong in the run log doing the deriving"
+    assert not released.exists(), "a workspace run must not write into the released run log"
+
+
+def test_a_missing_prediction_still_names_the_directory_it_was_expected_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace" / "demo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _: workspace)
+
+    with pytest.raises(FileNotFoundError, match=str(workspace)):
+        conformal.compute_conformal_widths("demo", "candidate", write=False)

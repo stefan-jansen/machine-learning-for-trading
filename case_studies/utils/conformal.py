@@ -191,6 +191,61 @@ def _predictions_dir(
     return resolved_case_dir / "run_log" / "predictions" / prediction_hash
 
 
+def _overlay_source_root(
+    case_study: str,
+    prediction_hash: str,
+    *,
+    case_dir: Path | None = None,
+) -> Path | None:
+    """Where a run log says one prediction's artifacts actually live, if not here."""
+    import sqlite3
+    from contextlib import closing
+
+    registry = (case_dir or get_case_study_dir(case_study)) / "run_log" / "registry.db"
+    if not registry.is_file():
+        return None
+    try:
+        with closing(sqlite3.connect(f"file:{registry}?mode=ro", uri=True)) as db:
+            row = db.execute(
+                "SELECT source_root FROM overlay_references "
+                "WHERE result_hash = ? AND result_kind = 'prediction'",
+                (prediction_hash,),
+            ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    return Path(row[0]) if row else None
+
+
+def _prediction_artifact(
+    case_study: str,
+    prediction_hash: str,
+    *,
+    case_dir: Path | None = None,
+) -> Path:
+    """Locate one prediction's parquet, following an overlay reference when it is not local.
+
+    A study opened against a private workspace copies a released prediction's registry rows
+    into its own run log and records where the artifact stayed, in `overlay_references`. The
+    parquet itself is not copied, so resolving it from the active case directory alone finds
+    nothing. Every other consumer reaches it through the result object, which knows its own
+    root; this module resolves by path and so has to follow the same reference. Without it
+    `conformal_weighted` fails on any prediction the caller did not fit themselves, which is
+    every prediction in the reader workflow the model notebooks document and every one in a
+    reduced-scale preview.
+
+    Falls back to the local path when nothing is recorded, so a genuinely missing artifact
+    still reports the directory the caller expected it in.
+    """
+    local = _predictions_dir(case_study, prediction_hash, case_dir=case_dir) / "predictions.parquet"
+    if local.exists():
+        return local
+    source_root = _overlay_source_root(case_study, prediction_hash, case_dir=case_dir)
+    if source_root is None:
+        return local
+    overlaid = source_root / "run_log" / "predictions" / prediction_hash / "predictions.parquet"
+    return overlaid if overlaid.exists() else local
+
+
 def _write_widths(
     path: Path,
     new_widths: pl.DataFrame,
@@ -280,7 +335,7 @@ def compute_conformal_widths(
         prior-fold (or fallback) filter.
     """
     pred_dir = _predictions_dir(case_study, prediction_hash, case_dir=case_dir)
-    pred_path = pred_dir / "predictions.parquet"
+    pred_path = _prediction_artifact(case_study, prediction_hash, case_dir=case_dir)
     if not pred_path.exists():
         raise FileNotFoundError(f"predictions.parquet not found: {pred_path}")
 
@@ -438,8 +493,7 @@ def compute_holdout_conformal_widths(
     ``[timestamp, symbol, fold_id, width, alpha, calibration_n]`` with
     ``fold_id = -1`` as a sentinel meaning "holdout, no fold partition".
     """
-    val_dir = _predictions_dir(case_study, val_prediction_hash)
-    val_path = val_dir / "predictions.parquet"
+    val_path = _prediction_artifact(case_study, val_prediction_hash)
     if not val_path.exists():
         raise FileNotFoundError(f"val predictions.parquet not found: {val_path}")
 
@@ -503,8 +557,7 @@ def compute_holdout_conformal_widths(
             f"validation residuals; need at least {min_calibration_n}"
         )
 
-    ho_dir = _predictions_dir(case_study, holdout_prediction_hash)
-    ho_path = ho_dir / "predictions.parquet"
+    ho_path = _prediction_artifact(case_study, holdout_prediction_hash)
     if not ho_path.exists():
         raise FileNotFoundError(f"holdout predictions.parquet not found: {ho_path}")
 
@@ -569,7 +622,9 @@ def compute_holdout_conformal_widths(
         )
 
     if write:
-        out = ho_dir / "conformal_widths.parquet"
+        # The widths are derived here, so they are written into the active run log rather than
+        # beside whichever prediction artifact was read.
+        out = _predictions_dir(case_study, holdout_prediction_hash) / "conformal_widths.parquet"
         _write_widths(out, widths, alpha, immutable=immutable)
 
     return widths
@@ -612,8 +667,7 @@ def load_conformal_widths(
 
 def coverage_summary(case_study: str, prediction_hash: str, *, alpha: float | None = None) -> dict:
     """Per-fold coverage and width-dispersion diagnostics (no side effects)."""
-    pred_dir = _predictions_dir(case_study, prediction_hash)
-    preds = pl.read_parquet(pred_dir / "predictions.parquet")
+    preds = pl.read_parquet(_prediction_artifact(case_study, prediction_hash))
     src_id_col = _detect_id_col(preds.columns)
     # Widths file always uses canonical "symbol" (see compute_conformal_widths).
     widths = load_conformal_widths(case_study, prediction_hash, alpha=alpha)
