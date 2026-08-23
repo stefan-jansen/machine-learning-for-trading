@@ -50,6 +50,7 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "config_name": pl.String,
     "label": pl.String,
     "task": pl.String,
+    "direction_label": pl.String,
     "split": pl.String,
     "checkpoint_kind": pl.String,
     "checkpoint_value": pl.Int64,
@@ -211,6 +212,11 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             _select("prediction_hash", metric_columns, "m"),
             _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
+            # Which sibling label an `auc_*` block was scored against. A classification row
+            # scores its own label and leaves this null; a regression row has no classes, so
+            # the AUC it carries is against a declared direction sibling and is meaningless
+            # without knowing which. A regression label with no sibling carries no AUC.
+            _select("direction_label", metric_columns, "m"),
             *[_select(metric, metric_columns, "m") for metric in _METRIC_COLUMNS],
         ]
         fold_metric_count = (
@@ -314,6 +320,7 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "config_name": record["t_config_name"],
             "label": record["t_label"],
             "task": task,
+            "direction_label": record["m_direction_label"],
             "split": record["p_split"],
             "checkpoint_kind": record["p_checkpoint_kind"],
             "checkpoint_value": record["p_checkpoint_value"],

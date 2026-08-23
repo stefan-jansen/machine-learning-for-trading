@@ -22,7 +22,7 @@
 #
 # This notebook performs the final out-of-sample test for each case study:
 #
-# 1. **Select** the best signal-stage model from the validation registry
+# 1. **Select** the signal-stage model with the highest validation Sharpe from the registry
 # 2. **Retrain** on all data before the holdout window
 # 3. **Predict** on the holdout period (never seen during model selection)
 # 4. **Backtest** the holdout predictions using the same strategy specification
@@ -40,7 +40,9 @@
 #
 # **Book Reference**: Chapter 20, Section 20.6 (Stability Across Time and Regimes)
 #
-# **Prerequisites**: All case studies must have completed Ch16–19 backtests.
+# **Prerequisites**: A case study appears in the table below only once its signal-stage backtests
+# are in the registry. One whose earlier stages have not been run reports the reason it could not
+# be evaluated rather than being omitted, so the table always accounts for all nine.
 
 # %%
 """Ch20 Holdout Predictions — out-of-sample validation for all 9 case studies."""
@@ -58,6 +60,9 @@ from holdout import generate_holdout, has_holdout_predictions, select_best_model
 CASE_STUDIES = []
 # Force regeneration of existing holdout predictions
 FORCE = False
+# A validation Sharpe smaller than this in absolute value makes the decay ratio meaningless,
+# because the denominator rather than the decay determines its size.
+MIN_VAL_SHARPE_FOR_DECAY = 0.05
 
 # %%
 ALL_CASE_STUDIES = [
@@ -89,12 +94,15 @@ cs_list = CASE_STUDIES if CASE_STUDIES else ALL_CASE_STUDIES
 # %% [markdown]
 # ## Best Model Selection
 #
-# For each case study, `BacktestExplorer.best()` ranks all signal-stage
-# backtests by Sharpe ratio. The top model is selected for holdout
-# retraining. Note that the best model may use a non-primary label —
-# for example, CME Futures' best model uses `fwd_ret_21d` rather than the
-# primary `fwd_ret_5d`. This is valid: multiple label horizons are part
-# of the experimental design.
+# For each case study, `BacktestExplorer.best()` ranks all signal-stage backtests by validation
+# Sharpe and the top-ranked one is retrained for the holdout. That ranking is the whole of the
+# selection, and it is what makes the holdout a genuine out-of-sample test: the choice was made
+# without reference to the holdout window.
+#
+# The top-ranked configuration may use a label other than the case study's primary one. That is
+# not a defect. Several label horizons are part of the experimental design, and the ranking is
+# free to prefer any of them - but it does mean a row of the table below can describe a different
+# forecasting problem from the row beneath it.
 
 # %%
 # Preview: which model will be selected for each case study
@@ -137,7 +145,7 @@ pl.DataFrame(selection_rows)
 # 3. Retrain the exact same model configuration (same hyperparameters,
 #    same checkpoint) on the larger training set
 # 4. Register predictions with `split="holdout"` in the registry
-# 5. Run a backtest using the same strategy specification as the best
+# 5. Run a backtest using the same strategy specification as the top-ranked
 #    validation backtest
 #
 # The holdout backtest uses `register=False` initially to avoid fold-metric
@@ -150,8 +158,12 @@ for cs_id in cs_list:
     print(f"\n{'=' * 60}")
     print(f"  {cs_id}")
     print(f"{'=' * 60}")
+    # Recorded before the call: with FORCE off, an existing holdout is loaded rather than
+    # regenerated, and the row then describes the model selected whenever it was first built.
+    was_cached = has_holdout_predictions(cs_id) and not FORCE
     try:
         result = generate_holdout(cs_id, force=FORCE, verbose=True)
+        result["from_cache"] = was_cached
         results.append(result)
     except Exception as e:
         print(f"  ERROR: {e}")
@@ -164,8 +176,8 @@ for cs_id in cs_list:
 #
 # - **Sharpe ratio degradation** is expected — validation benefits from
 #   selection across models, the holdout does not.
-# - A **moderate decline** (e.g., 1.0 → 0.5) suggests genuine signal
-#   with some overfitting to the validation window.
+# - A **decline of roughly half** suggests genuine signal with some overfitting to the
+#   validation window.
 # - A **sign flip** (positive → negative) suggests the signal was
 #   largely spurious or regime-dependent.
 # - **Constant predictions** (IC = NaN) mean the model zeroes out on
@@ -212,10 +224,12 @@ def build_holdout_summary(results):
             ho_sr = r["holdout_sharpe"]
             ho_ic = r["holdout_ic"]
 
-            # Holdout decay = arithmetic (HO − Val) / Val when Val is finite
-            # and non-zero. Left as NaN otherwise so downstream readers can
-            # distinguish "not yet measured" from "measured and X%".
-            if val_sr == val_sr and val_sr != 0 and ho_sr == ho_sr:
+            # Decay is (HO - Val) / Val, which is only meaningful when Val is far enough from
+            # zero to divide by. A validation Sharpe near zero sends the ratio to arbitrarily
+            # large values that say nothing about how much the signal decayed - the denominator
+            # is doing all the work. Below MIN_VAL_SHARPE_FOR_DECAY the ratio is left undefined
+            # and the reader is directed to the two Sharpes themselves.
+            if val_sr == val_sr and ho_sr == ho_sr and abs(val_sr) >= MIN_VAL_SHARPE_FOR_DECAY:
                 ho_decay = (ho_sr - val_sr) / val_sr
             else:
                 ho_decay = float("nan")
@@ -231,7 +245,7 @@ def build_holdout_summary(results):
                     "HO CAGR": round(r.get("holdout_cagr", float("nan")), 3),
                     "HO MaxDD": round(r.get("holdout_maxdd", float("nan")), 3),
                     "HO Decay": round(ho_decay, 3),
-                    "Status": "done",
+                    "Status": "from registry" if r.get("from_cache") else "generated",
                 }
             )
     return pl.DataFrame(summary_rows)
@@ -244,30 +258,44 @@ summary_df
 # %% [markdown]
 # ## Reading the table
 #
+# **Read the `Status` column first.** A row marked `from registry` was not produced by this run:
+# the holdout for that case study already existed, so it was loaded rather than regenerated. Its
+# `Family`, `Label` and `Val Sharpe` describe the model that holdout was built from, which is not
+# necessarily the model the selection table further up would choose today. Where the two tables
+# disagree, the registry has gained or lost validation backtests since the holdout was written,
+# and the holdout is the older statement.
+#
+# That is the intended behaviour and not a defect to route around: the holdout is used once, so a
+# holdout that already exists is not silently rebuilt against a newer ranking. Regenerating one is
+# a deliberate act, which is what the `FORCE` parameter is for.
+#
 # The table above reports, for each case study, the validation Sharpe of
-# the top signal-stage model selected by the in-sample registry, the
+# the model the holdout was built from, the
 # holdout Sharpe of that *same model configuration* retrained on all
 # pre-holdout data, the rank IC on holdout, and the arithmetic decay
 # `(HO − Val) / Val`.
 #
 # The chapter prose (§20.6, *Stability Across Time and Regimes*) uses
-# this output to discuss three *decay patterns* — prediction decay (IC
-# collapses), translation decay (IC survives but Sharpe halves or
-# reverses through portfolio construction, costs, or regime shifts),
-# and structural breaks. The notebook does not grade case studies; it
-# produces the numbers on which that discussion rests.
+# this output to discuss three *decay patterns*. In the first the prediction itself degrades and
+# the rank IC falls toward zero. In the second the IC holds while the Sharpe halves or changes
+# sign, because portfolio construction, costs or a regime shift stand between a correct ranking
+# and a return. In the third the relationship breaks structurally. This notebook does not grade
+# case studies; it produces the numbers that discussion rests on.
 #
 # Two design disciplines apply when reading the table:
+#
+# `HO Decay` is blank wherever the validation Sharpe is too close to zero to divide by. Read
+# `Val Sharpe` and `HO Sharpe` directly on those rows: a signal that scored near zero in
+# validation has no meaningful proportional decay, whatever it does out of sample.
 #
 # 1. **Measurement error**: holdout is a single out-of-sample window per
 #    case study. Cross-case-study Sharpe gaps within roughly one pooled
 #    standard error are not distinguishable (see `measurement_error.md`
 #    and the paired-fold t-test in `01_aggregate_synthesis`).
 # 2. **Single-metric Sharpe**: Sharpe-only ranking ignores CAGR,
-#    MaxDD, IC direction, capacity, and cost sensitivity. A signal that
-#    translates a small positive IC into a strong Sharpe through
-#    concentrated leverage is not the same story as a signal that
-#    survives broad diversification.
+#    MaxDD, IC direction, capacity, and cost sensitivity. A signal that turns a small positive IC
+#    into a high Sharpe through concentrated leverage is a different proposition from one that
+#    keeps its Sharpe under broad diversification, and Sharpe alone does not distinguish them.
 #
 # Readers should pair each row of this table with the corresponding
 # signal-stage diagnostics in `03_signal_quality` and the cost and risk
@@ -275,6 +303,20 @@ summary_df
 # any cross-case-study conclusion.
 
 # %% [markdown]
+# ### Known limitations
+#
+# - The holdout is one window per case study. Two case studies whose holdout Sharpes differ by less
+#   than the measurement error on either are not distinguishable, and this table does not compute
+#   that error - `01_aggregate_synthesis` does.
+# - Selection is by validation Sharpe alone. A configuration that ranked second on Sharpe and far
+#   better on drawdown or capacity is not the one retrained here.
+# - Case studies whose upstream stages are absent from the registry report an error and contribute
+#   no row of results. That is a statement about the registry on the day the notebook ran, not
+#   about the case study.
+# - Retraining on all pre-holdout data changes the training set the configuration was chosen on,
+#   so a hyperparameter that suited the shorter window may not suit the longer one. That is the
+#   intended procedure and it is a source of decay independent of overfitting.
+#
 # ## Key Takeaways
 #
 # 1. Out-of-sample holdout evaluation is the terminal step of the
@@ -285,9 +327,9 @@ summary_df
 # 3. Val-to-holdout decay is expected; the *magnitude* is informative,
 #    not a pass/fail gate. Large positive-to-negative swings usually
 #    signal regime sensitivity rather than outright overfitting.
-# 4. The table below is input to `01_aggregate_synthesis`, which joins
-#    these numbers with signal-stage measurement error and cost
-#    sensitivity to produce the Chapter 20 cross-case comparison.
+# 4. The holdout rows this notebook registers are what `01_aggregate_synthesis` reads back out of
+#    the registry, joins with signal-stage measurement error and cost sensitivity, and turns into
+#    the cross-case comparison. Nothing is passed between them as a file.
 #
 # **Next**: `01_aggregate_synthesis` builds cross-case comparison tables
 # and computes the paired-fold statistical tests that bound the

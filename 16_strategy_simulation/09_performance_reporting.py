@@ -14,25 +14,41 @@
 # ---
 
 # %% [markdown]
-# # Performance Reporting: The Core Metric Set
+# # Reporting a backtest so somebody else can audit it
 #
 # **Docker image**: `ml4t`
 #
-# This notebook turns a fully specified event-driven backtest into an auditable performance report.
-# It uses the RSI strategy and execution contract from `04_single_asset_ml4t_backtest`, then adds a
-# protocol-matched benchmark, exposure evidence, closed-trade diagnostics, and implementation-cost
-# accounting.
+# ## Purpose
+# A finished backtest is a pile of fills, positions and equity values. A report is the small set of
+# numbers somebody who did not run it can use to decide whether to believe it. This notebook builds
+# that report for one strategy - the RSI rule and execution contract from
+# `04_single_asset_ml4t_backtest`, unchanged - and shows what each part of it is for.
 #
-# **Learning objectives**:
+# Four kinds of evidence are kept apart on purpose, because they answer different questions and
+# mixing them is how a report flatters a strategy: the portfolio's own path, its relation to a
+# benchmark that faced the same conditions, how much of the time capital was actually at risk, and
+# what the round trips looked like once they closed.
 #
-# - Bridge keyed backtest returns to `PortfolioAnalysis` with crypto annualization
-# - Compare gross, net, and benchmark performance under matched execution assumptions
-# - Separate portfolio-level, closed-trade, exposure, and implementation-cost evidence
-# - Render the standard return, drawdown, rolling-risk, seasonality, and tail diagnostics
+# ## Learning objectives
 #
-# **Book reference**: Chapter 16, Section 16.5 (Performance Metrics and Reporting)
+# - Run the same strategy twice, once with costs and once without, and read the difference as the
+#   price of implementing it.
+# - Build a benchmark that trades the same instrument on the same dates through the same engine, so
+#   that the comparison isolates the trading rule.
+# - Report round-trip statistics from closed trades only, and say why the equity curve counts an
+#   open position at the end of the sample while the win rate must not.
+# - Account for commission and slippage exactly once, and prove it by reconciling trade P&L back to
+#   the change in account value.
+# - Compute the cost rate at which this backtest would have broken even, and say what that number
+#   does and does not cover.
 #
-# **Prerequisite**: `04_single_asset_ml4t_backtest`
+# ## Book reference
+# Chapter 16, Section 16.5 (performance metrics and reporting).
+#
+# ## Prerequisites
+#
+# - `04_single_asset_ml4t_backtest`, which specifies the strategy, the warmup and the fill
+#   convention this notebook reports on.
 
 # %% [markdown]
 # ## Setup
@@ -43,7 +59,7 @@
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import Markdown, display
+from IPython.display import display
 from ml4t.backtest import BacktestConfig, DataFeed, Engine, ExecutionMode, Strategy
 from ml4t.backtest.analytics import MAEMFEAnalyzer, TradeAnalyzer
 from ml4t.backtest.config import ExecutionPrice, ShareType
@@ -70,19 +86,40 @@ RSI_PERIOD = 14
 RSI_LOWER = 30
 RSI_UPPER = 70
 POSITION_SIZE = 0.95
+ROLLING_WINDOW_DAYS = 365
 N_BARS = 0  # 0 uses the full date range; a positive value keeps the latest bars
 
+# %% [markdown]
+# ### What each setting decides
+#
+# **RSI period.** How many days of gains and losses the indicator averages. It also fixes the
+# warmup: no signal exists until that many bars have passed, and nothing may trade before then.
+#
+# **Entry and exit levels.** The rule buys when the index falls below the lower level and sells
+# when it rises above the upper one. The gap between them is what keeps the strategy from flipping
+# on every small move.
+#
+# **Position size.** The share of equity a long position targets. It is deliberately under one:
+# fills happen at the next bar's open at a price nobody knows when the order is placed, and a
+# target of exactly one leaves nothing to absorb a gap up.
+#
+# **Commission and slippage.** Charged per fill. Commission is a fee on notional; slippage is the
+# price moving against the order between the decision and the fill. Both are set here and both are
+# switched off in the gross run, which is what makes the cost of implementation visible as a
+# difference rather than an assertion.
+#
+# **Bar limit.** Zero uses the whole date range. A positive value keeps only the most recent bars,
+# which is how a reduced-scale run is requested without changing any code.
+
 # %%
-display(
-    Markdown(
-        f"The experiment uses a **{RSI_PERIOD}-day simple rolling RSI**, enters below "
-        f"**{RSI_LOWER}**, exits above **{RSI_UPPER}**, and targets **{POSITION_SIZE:.0%}** "
-        f"exposure. Net fills pay **{FEES:.2%} commission** plus **{SLIPPAGE:.2%} slippage**."
-    )
-)
+print(f"Signal:   {RSI_PERIOD}-day RSI, buy below {RSI_LOWER}, sell above {RSI_UPPER}")
+print(f"Sizing:   target {POSITION_SIZE:.0%} of equity when long, fractional units")
+print(f"Costs:    {FEES:.2%} commission and {SLIPPAGE:.2%} slippage per fill, net run only")
+print(f"Capital:  {INITIAL_CASH:,} USDT")
+print(f"Sample:   {START_DATE} to {END_DATE}, UTC days")
 
 # %% [markdown]
-# ## 1. Reproduce the Signed Backtest Protocol
+# ## 1. Rebuild the exact backtest being reported
 #
 # The strategy is deliberately unchanged from `04_single_asset_ml4t_backtest`. Its RSI is a simple
 # rolling mean of gains and losses. The first valid value therefore appears only after the complete
@@ -147,23 +184,34 @@ class RSIMeanReversionStrategy(Strategy):
 
 
 # %% [markdown]
-# ### Protocol-matched benchmark
+# ### A benchmark that faced the same conditions
 #
-# Buy-and-hold uses the same sample, engine, 95% signal-time target, next-open execution,
-# fractional units, crypto calendar, and costs. It changes only the trading rule.
+# Buy-and-hold is the right benchmark for a long-only single-asset rule, and it is easy to give it
+# an advantage by accident. It runs here through the same engine, on the same bars, with the same
+# target exposure, the same next-open fills, the same fractional units, the same calendar and the
+# same costs.
+#
+# It also waits for the same warmup. The RSI strategy cannot place an order until the indicator has
+# a value, and a benchmark that buys on the first bar is holding the asset through a window the
+# strategy was not allowed to trade. Over this sample that window is a rising one, so the advantage
+# would be large and would look like the benchmark winning. Both therefore start when the signal
+# does, and the only thing that differs between them is the trading rule.
 
 
 # %%
 class BuyAndHoldStrategy(Strategy):
-    """Submit one target-weight entry and retain it through the sample."""
+    """Buy once on the first tradable bar and hold to the end of the sample."""
 
     def __init__(self, position_size: float = 0.95):
         self.position_size = position_size
         self.submitted = False
 
     def on_data(self, timestamp, data, context, broker):
-        """Submit the benchmark entry on the first available bar."""
+        """Enter on the first bar the strategy could also have traded."""
         asset = "BTCUSDT"
+        rsi = context.get("rsi")
+        if rsi is None or np.isnan(rsi):
+            return
         if not self.submitted and data.get(asset) is not None:
             broker.order_target_percent(asset, self.position_size)
             self.submitted = True
@@ -266,7 +314,7 @@ results_net = Engine(
     config=config_net,
 ).run()
 benchmark_results = Engine(
-    feed=DataFeed(prices_df=prices_df),
+    feed=DataFeed(prices_df=prices_df, context_df=context_df),
     strategy=BuyAndHoldStrategy(position_size=POSITION_SIZE),
     config=config_net,
 ).run()
@@ -304,11 +352,16 @@ run_summary = pl.DataFrame(
 display(run_summary)
 
 # %% [markdown]
-# ## 2. Join Daily Returns by Date
+# ## 2. Line the three return series up by date
 #
-# A tear sheet is only meaningful when strategy and benchmark observations refer to the same dates.
-# Each result first becomes a keyed daily frame. One-to-one joins then establish alignment before any
-# array crosses the `PortfolioAnalysis` API boundary. This avoids silently pairing unrelated rows.
+# Alpha, beta and the information ratio all take two arrays of returns and assume element $i$ of
+# one describes the same day as element $i$ of the other. Nothing in that interface checks it. If
+# one series is a day shorter, or starts a day earlier, every benchmark-relative number is computed
+# against a shifted series and nothing raises.
+#
+# So the three results become keyed daily frames first and are joined on their dates, one to one,
+# with the join declaring that it expects one row on each side. Only then does anything become an
+# array. The assertions after the join are the check that the alignment survived.
 
 
 # %%
@@ -370,7 +423,7 @@ print(
 # those two quantities separate avoids an off-by-one year estimate from dividing row count by 365.
 
 # %% [markdown]
-# ## 3. Return, Risk, and Benchmark Metrics
+# ## 3. What the portfolio earned, and how it compares
 
 # %%
 metrics_gross = analysis_gross.compute_summary_stats()
@@ -380,8 +433,12 @@ dd_result = analysis_net.compute_drawdown_analysis()
 dist = analysis_net.compute_returns_distribution()
 
 # %% [markdown]
-# The first table preserves exact reference values. The benchmark-relative columns come from the
-# date-aligned return vectors above and describe this sample, not a sealed holdout.
+# The first table is the portfolio's own path: what it earned, how much it moved, how far it fell.
+# The second is its relation to the benchmark, and every number in it comes from the date-aligned
+# return vectors above rather than from two separately computed summaries.
+#
+# Both describe the whole sample. Nothing was held out, so nothing here is an estimate of what the
+# rule would do next.
 
 # %%
 performance_table = pl.DataFrame(
@@ -445,17 +502,15 @@ benchmark_metrics = pl.DataFrame(
 display(benchmark_metrics)
 
 # %%
-rsi_total_return = metrics_net.total_return
-benchmark_total_return = metrics_benchmark.total_return
-return_leader = "Buy-and-hold" if benchmark_total_return > rsi_total_return else "The RSI strategy"
-display(
-    Markdown(
-        f"**{return_leader}** leads this protocol-matched in-sample comparison. The RSI strategy "
-        f"returns **{rsi_total_return:.2%}** net versus **{benchmark_total_return:.2%}** for "
-        f"buy-and-hold, with beta **{metrics_net.beta:.2f}** relative to the benchmark. Beta here "
-        "measures participation in BTC's daily return path; it is not proof of independent alpha."
-    )
-)
+print(f"RSI net total return:        {metrics_net.total_return:.2%}")
+print(f"Buy-and-hold total return:   {metrics_benchmark.total_return:.2%}")
+print(f"Beta of RSI net to benchmark: {metrics_net.beta:.2f}")
+
+# %% [markdown]
+# Beta below one is what a rule that is out of the market much of the time looks like: it cannot
+# participate in a move it is not positioned for. That is a statement about exposure, not about
+# skill. A strategy can lower its beta to any level by trading less, and the alpha figure in the
+# table above is the one that asks whether the time it *was* invested was chosen well.
 
 # %%
 fig = plot_cumulative_returns(
@@ -483,21 +538,27 @@ for trace in fig.data:
     )
 fig.update_layout(
     title=(
-        f"{return_leader} leads the matched BTC exposure comparison"
-        "<br><sup>Net cumulative return; 95% signal-time target, next-open fills, 2020-2023</sup>"
+        "An RSI rule and buy-and-hold over the same bars and the same costs"
+        f"<br><sup>Net cumulative return; both target {POSITION_SIZE:.0%} of equity and fill at "
+        "the next open</sup>"
     ),
-    yaxis_title="Cumulative Return (%)",
+    yaxis_title="Cumulative return (%)",
     height=500,
     margin={"r": 105},
 )
 fig.show()
 
 # %% [markdown]
-# ## 4. Exposure Evidence
+# ## 4. How much of the time capital was at risk
 #
-# Portfolio state records make exposure observable rather than assumed. Gross exposure is the
-# absolute position value; net exposure is signed. They coincide for this long-only strategy but
-# would diverge for a long-short portfolio. Both are scaled by contemporaneous equity.
+# A Sharpe ratio says nothing about how much of the sample the strategy was actually invested. Two
+# rules with the same Sharpe, one holding a position every day and one holding it a tenth of the
+# time, are completely different propositions: the second leaves capital idle that could have been
+# doing something else, and its return per unit of *deployed* capital is far higher.
+#
+# Gross exposure is the absolute value of the positions; net exposure is signed. They are identical
+# for a long-only rule, which is worth checking rather than assuming - the assertion below is what
+# turns "this strategy never shorts" from a claim into a fact about the run.
 
 # %%
 exposure_df = (
@@ -559,7 +620,7 @@ fig.update_layout(
         "<br><sup>Position value divided by contemporaneous equity; net backtest</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Portfolio Exposure (%)",
+    yaxis_title="Share of equity at risk (%)",
     yaxis_tickformat=".0%",
     height=420,
     hovermode="x unified",
@@ -567,10 +628,16 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## 5. Closed-Trade Diagnostics
+# ## 5. What the completed round trips looked like
 #
-# Portfolio equity includes an end-of-sample open position, but round-trip statistics must not.
-# Win rate, payoff, holding period, MFE, and MAE therefore use only trades with `status="closed"`.
+# A backtest that ends mid-position leaves one trade unresolved. The equity curve has to carry it,
+# because the money is genuinely at risk and marked at the last price. The win rate, the payoff
+# ratio and the average holding period must not, because none of those is defined until the trade
+# closes. Counting an open position that happens to be up, while a report that ended a week earlier
+# would have excluded it, is the easiest way to flatter a strategy without writing a false number.
+#
+# Every statistic below therefore comes from trades with `status="closed"`, and the assertion
+# checks that the count matches what the engine recorded rather than trusting the filter.
 
 # %%
 closed_trades = [trade for trade in results_net.trades if trade.status == "closed"]
@@ -649,10 +716,12 @@ exit_reasons = (
 display(exit_reasons)
 
 # %% [markdown]
-# ## 6. Reconcile Costs Once
+# ## 6. Charge every cost exactly once
 #
-# Fill prices already contain slippage. Adding recorded slippage to P&L computed from those prices
-# would count it twice. To recover reference-price P&L, remove entry and exit slippage from the
+# Slippage is already inside the fill price: the price the engine recorded is the one the order was
+# actually filled at, worse than the price it was aimed at by exactly the slippage. So computing
+# P&L from fill prices and then subtracting the recorded slippage charges it twice, which quietly
+# makes a strategy look worse than the engine actually made it. To recover reference-price P&L, remove entry and exit slippage from the
 # slipped prices, then subtract slippage dollars and commissions exactly once:
 #
 # $$
@@ -782,23 +851,38 @@ display(turnover_table)
 
 # %%
 if np.isfinite(breakeven_bps):
-    display(
-        Markdown(
-            f"The configured fills realize **{observed_cost_bps:.1f} bps** per one-way traded "
-            f"notional. The fixed-path break-even rate is **{breakeven_bps:.1f} bps**, "
-            f"leaving a descriptive margin of **{cost_margin_bps:.1f} bps** before market impact."
-        )
-    )
+    print(f"Cost actually paid, per one-way notional:  {observed_cost_bps:.1f} bps")
+    print(f"Cost at which this path breaks even:       {breakeven_bps:.1f} bps")
+    print(f"Margin:                                    {cost_margin_bps:.1f} bps")
 else:
-    display(
-        Markdown("Break-even cost is undefined because gross return or turnover is non-positive.")
-    )
+    print("Break-even cost is undefined: gross P&L or traded notional is not positive.")
 
 # %% [markdown]
-# ## 7. Visual Diagnostics
+# **On this run the margin does not exist.** Gross P&L is not positive, so there is no cost at
+# which the path breaks even: it did not make money at zero cost either, and the table prints both
+# figures as NaN. Nothing below is a reading of this run's numbers; it is what the margin means
+# where there is one, kept because the quantity is worth understanding before the next run produces
+# it.
 #
-# The remaining figures describe the net strategy's path. Titles state the measurement rather than
-# claiming persistence: the full sample is an in-sample teaching backtest with no sealed holdout.
+# Where gross P&L is positive, the margin answers "how much more expensive could execution have
+# been before this strategy stopped making money", and it is the number to compare against a
+# broker's actual schedule before trading anything.
+#
+# It holds the trade path fixed, which is the assumption that limits it even then. A strategy
+# paying more per trade would trade differently: some entries would no longer clear their own cost, positions would
+# be held longer, and the sequence of fills would diverge from this one. The margin is therefore an
+# upper bound on tolerance, not a forecast of behaviour at a higher cost. It also contains no market
+# impact - the slippage here is a fixed rate that does not grow with order size, which Chapter 18
+# replaces.
+
+# %% [markdown]
+# ## 7. Four views of the same return series
+#
+# Four views of the same net return series, each answering a question the summary table cannot.
+# How long the portfolio spent below its previous peak, not only how far it fell. Whether the
+# risk-adjusted return came from the whole sample or from one stretch of it. Which months carried
+# the result. And what the distribution of daily returns looks like for a rule that is flat most of
+# the time.
 
 # %%
 fig = plot_drawdown_underwater(analysis=analysis_net)
@@ -808,7 +892,7 @@ fig.data[0].opacity = 0.3
 fig.data[1].marker.color = COLORS["negative"]
 fig.update_layout(
     title=(
-        f"The deepest in-sample drawdown reaches {metrics_net.max_drawdown:.1%}"
+        "Time under water, not just the depth of the worst fall"
         "<br><sup>Net peak-to-trough return; zero is the high-water mark</sup>"
     ),
     xaxis_title="Date",
@@ -818,8 +902,7 @@ fig.update_layout(
 fig.show()
 
 # %%
-rolling_window = 365
-rolling = analysis_net.compute_rolling_metrics(windows=[rolling_window], metrics=["sharpe"])
+rolling = analysis_net.compute_rolling_metrics(windows=[ROLLING_WINDOW_DAYS], metrics=["sharpe"])
 fig = plot_rolling_sharpe(rolling_result=rolling)
 fig.data[0].line.color = COLORS["blue"]
 for shape in fig.layout.shapes:
@@ -829,10 +912,10 @@ for annotation in fig.layout.annotations:
 fig.update_layout(
     title=(
         "Risk-adjusted performance varies across the sample"
-        f"<br><sup>{rolling_window}-day rolling Sharpe; daily returns annualized with 365 periods</sup>"
+        f"<br><sup>{ROLLING_WINDOW_DAYS}-day rolling Sharpe, annualized on a 365-day year</sup>"
     ),
     xaxis_title="Date",
-    yaxis_title="Rolling Sharpe Ratio",
+    yaxis_title="Rolling Sharpe ratio",
     height=420,
 )
 fig.show()
@@ -875,8 +958,8 @@ fig.update_layout(
         "Daily returns combine many flat days with a heavy active tail"
         "<br><sup>Net calendar-day returns; vertical line marks the empirical 95% VaR</sup>"
     ),
-    xaxis_title="Daily Return (%)",
-    yaxis_title="Number of Days",
+    xaxis_title="Daily return (%)",
+    yaxis_title="Number of days",
     xaxis_tickformat=".1%",
     bargap=0.04,
     height=420,
@@ -884,7 +967,7 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# ## 8. Standard Report
+# ## 8. The report itself
 #
 # A compact report keeps portfolio path, benchmark relation, implementation, and trading behavior
 # distinct. Exact values are assembled from the freshly computed objects rather than copied into
@@ -911,18 +994,37 @@ report_df = pl.DataFrame({"metric": list(report), "value": list(report.values())
 display(report_df)
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Protocol is part of the result.** The RSI definition, warmup, fractional target sizing,
-#    crypto calendar, and next-open fills match `04_single_asset_ml4t_backtest` exactly.
-# 2. **Alignment precedes attribution.** Strategy, gross, and benchmark returns are joined one-to-one
-#    by date before benchmark-relative statistics cross an array-based API boundary.
-# 3. **Portfolio and trade evidence answer different questions.** Equity includes open exposure;
-#    win rate, payoff, and MFE/MAE use only completed round trips.
-# 4. **Costs need a single accounting identity.** Reference-price P&L subtracts commission and
-#    slippage once; break-even cost uses one-way fill notional and elapsed calendar time.
-# 5. **The report is descriptive.** Benchmark, exposure, drawdown, and tail evidence characterize
-#    this configured sample; they do not establish out-of-sample persistence or optimized exits.
+# 1. **A benchmark has to face the same constraints, including the ones that are easy to miss.**
+#    A strategy with a warmup cannot trade during it. A buy-and-hold benchmark that can is not
+#    measuring the trading rule, it is measuring the warmup, and on a trending sample that
+#    difference is larger than most of the effects a report is trying to show.
+# 2. **Join before you compare.** Benchmark-relative statistics take two arrays and assume they
+#    line up. Joining the two return series on their dates, one to one, and asserting the result
+#    before anything is passed as an array is what makes alpha and beta mean what their names say.
+# 3. **Equity and round trips answer different questions.** The equity curve has to carry an open
+#    position at the end of the sample, because the money is really at risk; the win rate must not,
+#    because the trade has not resolved. Drawing both from one pool is how an unresolved loss
+#    quietly leaves a report.
+# 4. **Charge each cost once and prove it.** Fill prices already contain slippage, so adding the
+#    recorded slippage to P&L computed from those prices counts it twice. The reconciliation here
+#    recovers reference-price P&L, subtracts commission and slippage once, and asserts the result
+#    equals the change in account value. That assertion is the check; the prose is not.
+# 5. **A break-even cost rate is more useful than a Sharpe ratio when deciding whether to trade.**
+#    It converts the whole backtest into one number a reader can hold against a real broker's fee
+#    schedule.
 #
-# **Next**: `10_regime_backtest_analysis` examines how reported performance varies across market
-# states. Section 16.5 discusses metric interpretation and practitioner thresholds.
+# ### Known limitations
+#
+# - One asset, one rule, one sample, no holdout. Every number describes the period it was computed
+#   on and none of them estimates what the rule does next.
+# - The entry and exit levels are conventional RSI defaults, not chosen on this data. That is what
+#   keeps the sample honest, and it also means nothing here says these are good levels.
+# - Slippage is a fixed rate per fill. It does not grow with order size and does not depend on how
+#   much volume the market had, so the cost figures understate what a large account would pay.
+# - The break-even margin holds the observed trade path fixed. A higher cost would change which
+#   trades happen, so the margin bounds tolerance rather than predicting behaviour.
+#
+# **Next:** `10_regime_backtest_analysis` splits this same report by market state and asks which
+# of its numbers hold in each. Section 16.5 covers metric interpretation and the thresholds practitioners use.

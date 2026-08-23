@@ -1010,14 +1010,20 @@ def _observe_fold_sets(monkeypatch) -> list[tuple[int, float]]:
 
     folds_module.clear_memo()
     built: list[tuple[int, float]] = []
-    original = folds_module.prepare_raw_folds
+    # `iter_raw_folds`, not `prepare_raw_folds`: preparation streams, and the list-collecting
+    # wrapper is what nothing on the execution path calls. Observing the wrapper recorded an
+    # empty list and asserted against it, which is a test that cannot fail.
+    original = folds_module.iter_raw_folds
 
+    # `iter_raw_folds`, not `prepare_raw_folds`: the batch paths stream folds so that only one is
+    # alive at a time, and `prepare_raw_folds` is now the list() wrapper no consumer calls.
+    # Observing the wrapper recorded nothing while the run underneath prepared every fold.
     def observed(mds, splits, *, train_sample_frac=1.0, **kwargs):
-        prepared = original(mds, splits, train_sample_frac=train_sample_frac, **kwargs)
-        built.extend((int(fold.fold), float(train_sample_frac)) for fold in prepared)
-        return prepared
+        for fold in original(mds, splits, train_sample_frac=train_sample_frac, **kwargs):
+            built.append((int(fold.fold), float(train_sample_frac)))
+            yield fold
 
-    monkeypatch.setattr(folds_module, "prepare_raw_folds", observed)
+    monkeypatch.setattr(folds_module, "iter_raw_folds", observed)
     return built
 
 
@@ -2917,3 +2923,15 @@ def test_published_logistic_presets_resolve_to_the_model_their_name_claims() -> 
         if sum(sig == signature for sig in effective.values()) > 1
     }
     assert not duplicates, f"published logistic presets resolve to one model: {duplicates}"
+
+
+def test_peak_rss_is_read_in_the_unit_the_platform_reports(monkeypatch) -> None:
+    """Linux reports ru_maxrss in kilobytes and macOS in bytes; the same reading is not both."""
+    from case_studies.utils import runtime
+
+    monkeypatch.setattr(runtime, "sys", type("_S", (), {"platform": "linux"}))
+    on_linux = runtime.peak_rss_bytes()
+    monkeypatch.setattr(runtime, "sys", type("_S", (), {"platform": "darwin"}))
+    on_macos = runtime.peak_rss_bytes()
+
+    assert on_linux == on_macos * 1024

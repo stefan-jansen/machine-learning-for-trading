@@ -317,7 +317,9 @@ class TrainingResult(Result):
         import joblib
 
         models = self.root / "run_log" / "training" / self.hash / "models"
-        paths = sorted(models.glob("fold_*.joblib"))
+        # Fold order, not filename order: a lexicographic sort puts fold_10 before fold_2, and
+        # `us_equities_panel` declares sixteen splits.
+        paths = sorted(models.glob("fold_*.joblib"), key=lambda path: int(path.stem.split("_")[1]))
         if not paths:
             raise FileNotFoundError(
                 f"training run {self.hash} stored no fitted state under {models}"

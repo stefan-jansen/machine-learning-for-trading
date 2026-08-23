@@ -18,22 +18,38 @@
 # **Docker image**: `ml4t`
 #
 # ## Purpose
-# Demonstrate VaR and CVaR computation methods - historical, parametric, Cornish-Fisher, and
-# Monte Carlo - on real ETF returns, then backtest them against realized losses, decompose
-# diversification benefit on a multi-asset portfolio, and contrast tail risk across volatility
-# regimes. These tail measures form the foundation for risk budgeting, exposure control, and
-# regulatory reporting.
+# **Value at Risk** answers one question: over the next day, how much could a position lose if the
+# day turns out badly but not catastrophically? Pick a confidence level - say the worst one day in
+# twenty - and VaR is the loss that is not exceeded on the other nineteen. It is a quantile of the
+# loss distribution and nothing more.
+#
+# That is also its weakness, and **conditional value at risk** is the answer to it. VaR says how far
+# down the threshold sits; it says nothing about what happens past it. CVaR, also called expected
+# shortfall, is the average loss *given* that the threshold was breached, so it reads the whole tail
+# rather than one point on it.
+#
+# This notebook computes both four different ways on nineteen years of real ETF returns, tests
+# whether the numbers hold up against what actually happened, and then asks two questions a
+# published VaR figure usually leaves unanswered: how much of it a diversified portfolio removes,
+# and how much worse it gets in the market states where it matters.
 #
 # ## Learning Objectives
 # After completing this notebook, you will be able to:
-# - Compute VaR and CVaR with historical, parametric, Cornish-Fisher, and Monte Carlo methods
-# - Backtest VaR estimates with the Kupiec proportion-of-failures test
-# - Quantify the diversification benefit on a multi-asset ETF portfolio
-# - Decompose tail risk into volatility regimes and contrast forecast losses
+# - Estimate a loss quantile four ways - from the observed returns, from a fitted normal, from a
+#   normal corrected for the shape of the observed distribution, and by simulation - and say what
+#   each one assumes
+# - Test whether a risk estimate was right, by counting how often losses exceeded it and asking
+#   whether that count is consistent with the confidence level it claimed
+# - Measure how much of a portfolio's tail risk diversification removes, and why the answer is an
+#   observation for VaR and a guarantee for CVaR
+# - Condition a risk estimate on the market state, using a label that was already known when the
+#   return it classifies arrived
+# - Score competing volatility forecasts with a loss function that penalizes under-prediction more
+#   than over-prediction, which is the asymmetry risk management actually faces
 #
 # ## Book reference
 # - Section 19.3 - Measuring the Tail: VaR and CVaR
-# - Section 19.4 - Drawdowns, Path Risk, and Time-to-Recovery (drawdown context)
+# - Section 19.4 - Drawdowns, Path Risk, and Time-to-Recovery
 #
 # ## Prerequisites
 # - Familiarity with daily return series and rolling volatility estimates
@@ -42,7 +58,6 @@
 # %%
 """Value at Risk and Conditional Value at Risk on real ETF returns."""
 
-import json
 import logging
 import warnings
 
@@ -59,7 +74,7 @@ from scipy import stats
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 warnings.filterwarnings("ignore")
 logging.disable(logging.INFO)
@@ -75,13 +90,40 @@ REGIME_WINDOW = 63
 REGIME_MIN_HISTORY = 252
 FORECAST_EVALUATION_START = "2020-01-02"
 N_MC_SIMULATIONS = 10_000
+CONFIDENCE_LEVELS = [0.90, 0.95, 0.99]
+BACKTEST_CONFIDENCE = 0.95
+ROLLING_VAR_WINDOW = 21
+EWMA_LAMBDA = 0.94
 
 # %%
 OUTPUT_DIR = get_output_dir(19, "var_cvar")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# %%
 set_global_seeds(SEED)
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `SYMBOL` carries the single-asset analysis and `PORTFOLIO_SYMBOLS` the diversification one. The
+#   five span US equities, US bonds, gold, developed international and emerging markets, so they
+#   are the kind of basket whose components do not all fall together.
+# - `START_DATE` and `END_DATE` bound the sample. It deliberately opens before 2008, because a
+#   tail-risk notebook whose sample contains no crisis measures the wrong thing.
+# - `ROLLING_WINDOW` is the trailing window each rolling VaR estimate is computed from, about a
+#   trading year. Shorter windows react to a change in volatility sooner and estimate the far tail
+#   from fewer observations: the deepest confidence level reported here rests on roughly the two or
+#   three worst days in the window.
+# - `REGIME_WINDOW` is the window the volatility state is read from, about a quarter, and
+#   `REGIME_MIN_HISTORY` is how much history must accumulate before the notebook is willing to
+#   split that volatility into terciles at all.
+# - `FORECAST_EVALUATION_START` is the date the volatility forecast comparison begins. The GARCH
+#   model is estimated strictly before it, so the comparison is out of sample for every method.
+# - `CONFIDENCE_LEVELS` are the coverage levels reported side by side, and `BACKTEST_CONFIDENCE`
+#   is the one carried into the backtest.
+# - `ROLLING_VAR_WINDOW` and `EWMA_LAMBDA` parameterize two of the three volatility forecasts. The
+#   lambda is the RiskMetrics convention: each day's variance keeps that share of yesterday's
+#   estimate and gives the rest to yesterday's squared return.
+# - `N_MC_SIMULATIONS` is how many paths the simulated VaR draws. It affects only the precision of
+#   that one estimate.
 
 # %% [markdown]
 # ## 1. Load ETF returns
@@ -211,7 +253,7 @@ def monte_carlo_var(
     confidence: float = 0.95,
     n_simulations: int = N_MC_SIMULATIONS,
     horizon: int = 1,
-    seed: int = 42,
+    seed: int = SEED,
 ) -> float:
     """Monte Carlo VaR by sampling from a fitted Student-t."""
     df, loc, scale = stats.t.fit(returns)
@@ -230,9 +272,8 @@ def monte_carlo_var(
 # the estimate needs a coverage backtest rather than automatic preference over simpler methods.
 
 # %%
-confidence_levels = [0.90, 0.95, 0.99]
 var_results = []
-for conf in confidence_levels:
+for conf in CONFIDENCE_LEVELS:
     var_results.append(
         {
             "confidence": conf,
@@ -246,7 +287,7 @@ var_df = pl.DataFrame(var_results)
 
 # %%
 fig = go.Figure()
-x = [f"{round(c * 100)}%" for c in confidence_levels]
+x = [f"{round(c * 100)}%" for c in CONFIDENCE_LEVELS]
 for method in ["historical", "parametric", "cornish_fisher", "monte_carlo"]:
     fig.add_trace(go.Bar(x=x, y=var_df[method], name=method.replace("_", " ").title()))
 fig.update_layout(
@@ -256,7 +297,10 @@ fig.update_layout(
     barmode="group",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of VaR by confidence level, four methods per level. All four agree closely at the shallowest level and fan apart at the deepest, where the assumption about tail shape starts to matter.",
+)
 
 # %% [markdown]
 # ## 3. Conditional Value at Risk (CVaR / Expected Shortfall)
@@ -318,7 +362,7 @@ def student_t_cvar(returns: np.ndarray, confidence: float = 0.95) -> float:
 
 # %%
 risk_measures = []
-for conf in confidence_levels:
+for conf in CONFIDENCE_LEVELS:
     risk_measures.append(
         {
             "confidence": conf,
@@ -353,16 +397,19 @@ for col in [1, 2]:
 fig.update_layout(
     title="CVaR reveals loss severity beyond the VaR threshold", barmode="group", height=400
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two grouped bar panels. The left compares VaR estimates across confidence levels, the right compares CVaR estimates. Every CVaR bar stands taller than its VaR counterpart, and the gap widens toward the deeper confidence levels.",
+)
 
 # %% [markdown]
-# CVaR systematically exceeds VaR at every confidence level, by a factor that grows in
-# the tail: the gap between Historical VaR(99%) and Historical CVaR(99%) is larger than
-# the corresponding gap at 90%. Student-t CVaR sits above the Gaussian estimate at deep
-# confidence, reflecting the heavier-tailed empirical distribution.
+# CVaR exceeds VaR at every confidence level, and the gap widens as the confidence level deepens.
+# That is the whole point of the measure: the further into the tail the threshold sits, the more
+# the losses beyond it differ from the threshold itself. The Student-t estimate sits above the
+# Gaussian one at the deepest level, which is what a heavier-tailed fit does.
 
 # %% [markdown]
-# ## 3.1 Cantelli Inequality: Distribution-Free Tail Bound
+# ## 4. A Bound That Assumes Nothing About the Distribution
 #
 # The Cantelli (one-sided Chebyshev) inequality provides a worst-case tail probability
 # requiring only finite mean and variance - no distributional assumptions:
@@ -379,7 +426,7 @@ cantelli_df = pl.DataFrame(
     {
         "k": k_values,
         "cantelli_bound": [1.0 / (1.0 + k**2) for k in k_values],
-        "gaussian_tail": [1.0 - stats.norm.cdf(k) for k in k_values],
+        "gaussian_tail": [stats.norm.sf(k) for k in k_values],
         "empirical_spy_tail": [np.mean(standardized_losses >= k) for k in k_values],
     }
 ).with_columns(pl.exclude("k").round(4))
@@ -398,9 +445,12 @@ fig.update_layout(
     yaxis_tickformat=".1%",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three curves of tail probability against standard deviations below the mean. The Cantelli bound sits far above both the Gaussian curve and the observed SPY frequencies at every point.",
+)
 
-# %%
+# %% tags=["results"]
 cantelli_k2 = cantelli_df.filter(pl.col("k") == 2.0).row(0, named=True)
 display(
     Markdown(
@@ -412,7 +462,7 @@ display(
 )
 
 # %% [markdown]
-# ## 4. Distribution Analysis with ml4t-diagnostic
+# ## 5. What Shape Is the Return Distribution
 #
 # `analyze_distribution` and `analyze_tails` from `ml4t.diagnostic` package together the
 # moments, normality tests, Hill estimator, and QQ-plot diagnostics. This puts the
@@ -444,7 +494,7 @@ distribution_summary = pl.DataFrame(
 distribution_summary
 
 # %% [markdown]
-# ## 5. VaR Backtesting
+# ## 6. Did the Estimates Hold Up
 #
 # A VaR estimate is only as good as its empirical exception rate. The Kupiec
 # proportion-of-failures test compares the realized exception rate to the configured
@@ -467,7 +517,7 @@ def kupiec_test(exceptions: np.ndarray, expected_rate: float) -> tuple[float, fl
         lr = -2 * n * np.log(p)
     else:
         lr = 2 * (x * np.log(x / (n * p)) + (n - x) * np.log((n - x) / (n * (1 - p))))
-    return lr, 1 - stats.chi2.cdf(lr, 1)
+    return lr, float(stats.chi2.sf(lr, 1))
 
 
 # %% [markdown]
@@ -519,7 +569,7 @@ def backtest_var(
 backtest_results = []
 for method in ["historical", "parametric", "cornish_fisher"]:
     backtest_results.append(
-        backtest_var(returns, window=ROLLING_WINDOW, confidence=0.95, method=method)
+        backtest_var(returns, window=ROLLING_WINDOW, confidence=BACKTEST_CONFIDENCE, method=method)
     )
 
 backtest_summary = pl.DataFrame(
@@ -546,7 +596,7 @@ backtest_summary
 # asks whether that distance is statistically distinguishable from correct unconditional
 # coverage. Failure to reject is evidence about coverage, not proof that a model is valid.
 
-# %%
+# %% tags=["results"]
 best_result = min(backtest_results, key=lambda r: abs(r["exception_ratio"] - 1))
 backtest_by_method = {result["method"]: result for result in backtest_results}
 historical_result = backtest_by_method["historical"]
@@ -597,15 +647,18 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=f"{best_result['method'].title()} VaR is closest to its exception budget",
+    title="Losses beyond the VaR line cluster rather than arriving evenly",
     xaxis_title="Date",
     yaxis_title="Return (%)",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A daily return series with a dashed VaR line beneath it and crosses marking the days the loss exceeded that line. The crosses are not spread evenly: they bunch tightly in 2008 and 2020 and are sparse for long stretches between.",
+)
 
 # %% [markdown]
-# ## 6. Rolling VaR and CVaR
+# ## 7. Rolling VaR and CVaR
 
 # %%
 rolling_var, rolling_cvar = [], []
@@ -683,10 +736,13 @@ fig.update_layout(
     ),
     height=600,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels over the full sample. The upper shows rolling VaR and CVaR moving together, spiking in 2008 and 2020. The lower shows their ratio, which stays above one throughout and moves independently of the level above it.",
+)
 
 # %% [markdown]
-# ## 6.1 Regime-Conditional VaR and CVaR
+# ## 8. Tail Risk Conditioned on the Volatility State
 #
 # Unconditional VaR averages over regimes and masks the tail amplification that occurs
 # during high-volatility periods. Each day uses prior-close 63-trading-day daily volatility
@@ -763,9 +819,12 @@ fig.update_layout(
     ),
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two bar panels, VaR on the left and CVaR on the right, each with one bar per volatility state. Both rise steeply from the low state to the high one.",
+)
 
-# %%
+# %% tags=["results"]
 low_vol_stats = regime_stats["Low Vol"]
 high_vol_stats = regime_stats["High Vol"]
 display(
@@ -779,7 +838,7 @@ display(
 )
 
 # %% [markdown]
-# ## 6.2 Drawdown depth and time-to-recovery
+# ## 9. How Deep the Losses Went, and How Long Recovery Took
 #
 # VaR and CVaR are point-loss measures; drawdowns capture *path* risk - how deep the
 # losses go and how long the recovery takes. For the same underlying return series,
@@ -861,24 +920,22 @@ fig.add_trace(
 _ = fig
 
 # %% [markdown]
-# The message title reports the observed depth and recovery, while the drawdown panel retains
-# the conventional zero-at-top orientation.
+# The lower panel plots drawdown as a negative percentage with zero at the top, which is the
+# convention: the line sits at zero whenever the series is at a new high and falls away from it
+# during a decline, so the depth of each trough is read directly off the axis.
 
 # %%
 fig.update_yaxes(title_text="Wealth ($1 → x)", row=1, col=1)
 fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
-recovery_days = recovery_idx - max_dd_idx if recovery_idx is not None else None
-recovery_message = (
-    f"and required {recovery_days:,} trading days to recover"
-    if recovery_days is not None
-    else "and remained unrecovered at the sample end"
-)
 fig.update_layout(
-    title=f"{SYMBOL} fell {abs(max_dd):.1%} from peak {recovery_message}",
+    title=f"{SYMBOL} took years to regain its pre-crisis peak",
     height=600,
     showlegend=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two stacked panels sharing a date axis: growth of one dollar with its running peak above, and drawdown below plotted as a negative percentage from a zero line at the top. The 2008 trough is by far the deepest and the recovery back to the previous peak takes years.",
+)
 
 # %% [markdown]
 # Maximum drawdown is the worst-case path loss in the sample; the trough-to-recovery
@@ -888,7 +945,7 @@ fig.show()
 # identical CVaR can produce very different drawdown experiences.
 
 # %% [markdown]
-# ## 7. Portfolio VaR - Diversification Benefit
+# ## 10. How Much Diversification Removes
 #
 # The gap between this portfolio's tail risk and the weighted stand-alone estimates measures
 # its empirical diversification benefit. Unlike CVaR, VaR is not generally subadditive, so a
@@ -968,9 +1025,12 @@ fig.update_layout(
     barmode="group",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars comparing the equal-weight portfolio's VaR and CVaR against the weighted sum of the same measures computed for each fund on its own. The portfolio bars are visibly shorter.",
+)
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"The equal-weight portfolio's VaR is {port_var_result['portfolio_var']:.2%}, "
@@ -982,10 +1042,13 @@ display(
 )
 
 # %% [markdown]
-# ### Diversification across point-in-time volatility states
+# ### Does the Benefit Hold When It Is Needed
 #
-# Applying the causal SPY state labels to the aligned ETF panel tests whether the observed
-# VaR benefit survives high-volatility days. The state is known before each portfolio return.
+# A diversification benefit measured over the whole sample is close to useless if it disappears in
+# the states where losses actually happen - correlations between asset classes are famously higher
+# in a crisis than in a calm market. Applying the same volatility labels to the aligned ETF panel
+# splits the benefit by state. Each label was known before the return it classifies, so a portfolio
+# could have been positioned on it.
 
 # %%
 regime_labels = pl.DataFrame({"timestamp": vol_dates, "regime": regimes})
@@ -1029,9 +1092,12 @@ fig.update_layout(
     barmode="group",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of the VaR and CVaR diversification benefit, one pair per volatility state, showing how much of the standalone tail risk the portfolio removes in each.",
+)
 
-# %%
+# %% tags=["results"]
 regime_portfolio_lookup = {row["regime"]: row for row in regime_portfolio_df.iter_rows(named=True)}
 low_regime_benefit = regime_portfolio_lookup["Low Vol"]["cvar_benefit_pct"]
 high_regime_benefit = regime_portfolio_lookup["High Vol"]["cvar_benefit_pct"]
@@ -1041,12 +1107,12 @@ display(
         f"The empirical CVaR benefit {benefit_direction} from {low_regime_benefit:.1f}% "
         f"in the low-volatility state to {high_regime_benefit:.1f}% in the "
         "high-volatility state. The result is sample-specific; the point-in-time labels "
-        "make the comparison usable as a diagnostic rather than a look-ahead mechanism."
+        "make the comparison one a risk control could have acted on at the time."
     )
 )
 
 # %% [markdown]
-# ## 8. Volatility Forecast Evaluation: QLIKE and MSE
+# ## 11. Scoring Volatility Forecasts
 #
 # Risk management depends on accurate volatility forecasts. Two complementary loss
 # functions evaluate forecast quality:
@@ -1094,8 +1160,11 @@ proxy_var = ret_series**2
 # Rolling and EWMA variance for day t use returns only through t-1. GARCH parameters are
 # estimated once on observations before the evaluation boundary; the fixed model then updates
 # conditional variance recursively as evaluation-period returns arrive.
-rolling_var_21 = ret_series.rolling(21).var().shift(1).dropna()
-ewma_var = ret_series.ewm(alpha=0.06).var().shift(1).dropna()
+rolling_var_21 = ret_series.rolling(ROLLING_VAR_WINDOW).var().shift(1).dropna()
+# RiskMetrics EWMA: sigma^2_t = lambda * sigma^2_{t-1} + (1 - lambda) * r^2_{t-1}, which is an
+# exponentially weighted mean of SQUARED RETURNS. pandas' .ewm().var() is a different estimator -
+# a debiased weighted variance about the weighted mean - so it is not what the lambda names.
+ewma_var = (ret_series**2).ewm(alpha=1 - EWMA_LAMBDA).mean().shift(1).dropna()
 garch_model = arch_model(ret_series * 100, vol="Garch", p=1, q=1, dist="normal")
 garch_fit = garch_model.fit(last_obs=FORECAST_EVALUATION_START, disp="off")
 garch_forecast = garch_fit.forecast(
@@ -1122,7 +1191,7 @@ forecast_eval_df = pl.DataFrame(
         }
         for name, fcast in [
             ("Rolling 21d", rolling_aligned),
-            ("EWMA λ=0.94", ewma_aligned),
+            (f"EWMA λ={EWMA_LAMBDA}", ewma_aligned),
             ("GARCH(1,1)", garch_aligned),
         ]
     ]
@@ -1162,9 +1231,12 @@ fig.update_layout(
     title="Out-of-sample loss functions compare volatility forecasts",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two panels of labelled points comparing three volatility forecasts, by QLIKE on the left and variance MSE on the right. The two loss functions do not order the three methods identically.",
+)
 
-# %%
+# %% tags=["results"]
 qlike_winner = forecast_eval_df.sort("qlike").row(0, named=True)
 mse_winner = forecast_eval_df.sort("mse_x_1e6").row(0, named=True)
 display(
@@ -1180,12 +1252,16 @@ display(
 )
 
 # %% [markdown]
-# ## 9. Save artefacts for downstream chapters
+# ## 12. Persist the Two Artifacts the Book's Figures Read
+#
+# Two figures in the printed chapter are generated from this notebook's output rather than from the
+# notebook's own charts, so those two tables are written to disk. Nothing else here is written:
+# an artifact no named consumer reads is one more thing that can go stale without anyone noticing.
 
 # %%
 var_comparison_df = pl.DataFrame(
     {
-        "confidence": [f"{round(c * 100)}%" for c in confidence_levels] * 4,
+        "confidence": [f"{round(c * 100)}%" for c in CONFIDENCE_LEVELS] * 4,
         "method": ["historical"] * 3
         + ["parametric"] * 3
         + ["cornish_fisher"] * 3
@@ -1196,111 +1272,76 @@ var_comparison_df = pl.DataFrame(
         + list(var_df["monte_carlo"]),
     }
 )
-var_cvar_df = risk_df
-backtest_df = pl.DataFrame(
-    {
-        "method": [r["method"] for r in backtest_results],
-        "n_exceptions": [r["n_exceptions"] for r in backtest_results],
-        "n_observations": [r["n_observations"] for r in backtest_results],
-        "exception_rate": [r["exception_rate"] for r in backtest_results],
-        "expected_rate": [r["expected_rate"] for r in backtest_results],
-        "exception_ratio": [r["exception_ratio"] for r in backtest_results],
-        "kupiec_pvalue": [r["kupiec_pvalue"] for r in backtest_results],
-    }
-)
-rolling_risk_df = pl.DataFrame(
-    {
-        "timestamp": pd.DatetimeIndex(rolling_dates).to_pydatetime().tolist(),
-        "var_95": rolling_var.tolist(),
-        "cvar_95": rolling_cvar.tolist(),
-        "cvar_var_ratio": (rolling_cvar / rolling_var).tolist(),
-    }
-)
-regime_pl = regime_df
-
-# %% [markdown]
-# The metadata captures the estimation boundaries and causal regime convention alongside the
-# reported values so downstream notebooks can audit how each result was produced.
-
-# %%
-best_bt = best_result
-methodology_metadata = {
-    "symbol": SYMBOL,
-    "portfolio_symbols": PORTFOLIO_SYMBOLS,
-    "start_date": str(returns_wide["timestamp"].min()),
-    "end_date": str(returns_wide["timestamp"].max()),
-    "n_days": int(N_DAYS),
-    "return_skewness": float(stats.skew(returns)),
-    "return_kurtosis": float(stats.kurtosis(returns)),
-    "is_non_normal": bool(abs(stats.skew(returns)) > 0.5 or stats.kurtosis(returns) > 1),
-    "avg_var_95": float(np.mean(rolling_var)),
-    "avg_cvar_95": float(np.mean(rolling_cvar)),
-    "cvar_var_ratio": float(np.mean(rolling_cvar) / np.mean(rolling_var)),
-    "diversification_benefit": float(port_var_result["var_benefit"]),
-    "cvar_diversification_benefit": float(port_var_result["cvar_benefit"]),
-    "best_backtest_method": best_bt["method"],
-    "kupiec_pvalue_best": float(best_bt["kupiec_pvalue"]),
-    "regime_low_vol_cvar_pct": float(regime_stats["Low Vol"]["cvar"]),
-    "regime_high_vol_cvar_pct": float(regime_stats["High Vol"]["cvar"]),
-    "regime_method": "prior-close rolling volatility with expanding point-in-time terciles",
-    "regime_window": REGIME_WINDOW,
-    "regime_min_history": REGIME_MIN_HISTORY,
-    "forecast_evaluation_start": str(common_idx.min().date()),
-    "forecast_evaluation_end": str(common_idx.max().date()),
-    "max_drawdown_pct": float(max_dd * 100),
-    "drawdown_duration_days": int(max_dd_idx - peak_idx),
-    "recovery_duration_days": (
-        int(recovery_idx - max_dd_idx) if recovery_idx is not None else None
-    ),
-}
-
-# %% [markdown]
-# The write step uses `get_output_dir`, which redirects every artifact to the isolated validation
-# directory when `ML4T_OUTPUT_DIR` is set.
-
-# %%
 var_comparison_df.write_parquet(OUTPUT_DIR / "var_method_comparison.parquet")
-var_cvar_df.write_parquet(OUTPUT_DIR / "var_cvar_comparison.parquet")
-backtest_df.write_parquet(OUTPUT_DIR / "var_backtest_results.parquet")
-rolling_risk_df.write_parquet(OUTPUT_DIR / "rolling_risk_metrics.parquet")
-regime_pl.write_parquet(OUTPUT_DIR / "regime_conditional_risk.parquet")
-regime_portfolio_df.write_parquet(OUTPUT_DIR / "regime_portfolio_diversification.parquet")
-forecast_eval_df.write_parquet(OUTPUT_DIR / "volatility_forecast_evaluation.parquet")
+regime_df.write_parquet(OUTPUT_DIR / "regime_conditional_risk.parquet")
+print(
+    f"var_method_comparison.parquet   {len(var_comparison_df)} rows -> book figure 19.2\n"
+    f"regime_conditional_risk.parquet {len(regime_df)} rows -> book figure 19.3"
+)
 
-with open(OUTPUT_DIR / "var_methodology_metadata.json", "w") as f:
-    json.dump(methodology_metadata, f, indent=2)
-
-print(f"[OK] VaR/CVaR artefacts saved to {OUTPUT_DIR}")
-print(f"  - var_method_comparison.parquet: {len(var_comparison_df)} rows")
-print(f"  - var_cvar_comparison.parquet:   {len(var_cvar_df)} rows")
-print(f"  - var_backtest_results.parquet:  {len(backtest_df)} methods")
-print(f"  - rolling_risk_metrics.parquet:  {len(rolling_risk_df)} days")
-print(f"  - regime_conditional_risk.parquet: {len(regime_pl)} regimes")
-print(f"  - regime_portfolio_diversification.parquet: {len(regime_portfolio_df)} regimes")
-print(f"  - volatility_forecast_evaluation.parquet: {len(forecast_eval_df)} methods")
-
-# %%
+# %% tags=["results"]
 high_low_cvar_ratio = high_vol_stats["cvar"] / low_vol_stats["cvar"]
 display(
     Markdown(
-        f"""## 10. Key Takeaways
-
-1. **Coverage must be backtested.** {best_result["method"].title()} VaR is closest to the
-   configured exception budget in this sample, with an exception ratio of
-   {best_result["exception_ratio"]:.2f} and Kupiec $p={best_result["kupiec_pvalue"]:.3f}$.
-2. **CVaR measures severity beyond VaR.** The equal-weight ETF basket shows an empirical
-   CVaR diversification benefit of {port_var_result["cvar_benefit"]:.1%}; CVaR is generally
-   subadditive, while VaR is not.
-3. **Tail-shape adjustments require diagnostics.** Student-t and Cornish-Fisher estimates
-   move away from Gaussian VaR at deep confidence, but the Cornish-Fisher polynomial becomes
-   unstable under large excess kurtosis.
-4. **Risk controls need causal states.** High-volatility CVaR is {high_low_cvar_ratio:.1f}x
-   the low-volatility estimate when each label uses information available before the return.
-5. **Forecast comparisons need an external window.** The volatility models are scored from
-   {common_idx.min().date()} onward after GARCH estimation ends.
-
-**Next**: [`06_stress_testing`](06_stress_testing.ipynb) challenges these tail-risk estimates
-with named historical crises and constructed shocks.
-"""
+        f"Across {N_DAYS:,} sessions, {best_result['method']} VaR came closest to its exception "
+        f"budget, with an exception ratio of {best_result['exception_ratio']:.2f} and Kupiec "
+        f"$p={best_result['kupiec_pvalue']:.3f}$. Rolling CVaR averaged "
+        f"{np.mean(rolling_cvar) / np.mean(rolling_var):.2f} times rolling VaR. Conditioning on "
+        f"the volatility state raised CVaR by a factor of {high_low_cvar_ratio:.1f} between the "
+        f"calmest and most stressed terciles. The equal-weight basket removed "
+        f"{port_var_result['cvar_benefit']:.1%} of the weighted stand-alone CVaR. "
+        f"{SYMBOL}'s worst drawdown was {max_dd:.1%}, taking "
+        f"{recovery_idx - max_dd_idx:,} trading days to recover."
     )
 )
+
+# %% [markdown]
+# ## Key Takeaways
+#
+# 1. **A risk number is a claim about frequency, so test it against how often it was wrong.** VaR
+#    at a stated confidence level predicts an exception rate. Count the exceptions, compare the
+#    count to what the level implies, and use a test that says whether the difference is more than
+#    sampling noise. An estimate that has never been backtested is an assertion.
+#
+# 2. **Report severity as well as frequency.** VaR locates a threshold and stops. CVaR averages
+#    what happens past it, and the two diverge more the deeper into the tail you go - which is
+#    exactly where a risk limit is supposed to bind.
+#
+# 3. **Correcting a normal distribution for skew and kurtosis is not free.** The Cornish-Fisher
+#    expansion is a truncated polynomial, and on returns with heavy tails it can move the quantile
+#    in ways that do not improve coverage. Its backtest here does no better than the plain normal.
+#
+# 4. **Estimate the market state from information that predates the return it labels.** The
+#    volatility used to classify each day ends at the previous close, and the thresholds splitting
+#    those volatilities expand through time rather than being fitted on the whole sample. A state
+#    label that peeks makes any conditional risk number unusable for the control it is meant to
+#    drive.
+#
+# 5. **Check that a diversification benefit is there when it is needed.** A benefit averaged over a
+#    long sample can be dominated by the calm periods that make up most of it. Splitting it by
+#    volatility state asks the question a portfolio actually faces.
+#
+# 6. **Choose the loss function that matches the asymmetry of the decision.** Squared error treats
+#    an over-forecast and an under-forecast of volatility as equally bad. For risk they are not:
+#    under-forecasting is what leaves a position too large going into a bad day, and QLIKE
+#    penalizes it more heavily. The two can rank the same three forecasts differently.
+#
+# ### Known limitations
+#
+# - Every estimate is unconditional on anything but the volatility state, and one-day-ahead. A
+#   ten-day regulatory horizon does not follow from scaling a one-day figure by the square root of
+#   ten unless returns are independent, which the exception clustering visible in Section 6 argues
+#   against.
+# - The Kupiec test checks only how many exceptions occurred, not when. A model that produces the
+#   right count but concentrates every exception in one month passes it and is badly wrong.
+# - Historical VaR cannot produce a loss larger than the worst one in its window, so it understates
+#   risk precisely when the recent past has been calm.
+# - The volatility proxy for the forecast comparison is the squared daily return, which is unbiased
+#   but extremely noisy. Small differences in either loss function are not decisive.
+# - The regime terciles are computed on this sample's own volatility distribution, so the states
+#   are relative to what this period contained rather than to any absolute level.
+# - The diversification results use five ETFs at equal weights over one sample. They describe this
+#   basket over this period.
+#
+# **Next**: [`06_stress_testing`](06_stress_testing.ipynb) asks what these estimates would have
+# said about crises they were not fitted on.

@@ -20,12 +20,14 @@
 #
 # The previous notebook traced the journey from signals to strategies. Here we
 # isolate the allocator layer: the same forecasts are routed through equal
-# weight, inverse-vol, MVO, risk parity, and score-weighted allocators in each
-# of the eight case studies that carry an allocation-stage spine (NASDAQ-100's
-# pinned carrier is a signal-stage slot strategy with no allocation-stage
-# sweep, so it drops out of this comparison). The resulting Sharpe spread
-# quantifies how much room the allocator has to add or subtract value once the
-# signal is fixed.
+# weight, inverse-vol, MVO, risk parity and score-weighted allocators, and the
+# resulting Sharpe spread says how much room the allocator has to add or subtract
+# value once the signal is fixed.
+#
+# A case study can only take part if it has a signal to hold fixed, meaning a
+# resolved spine prediction with allocation-stage backtests behind it. How many
+# do is a property of the current registry rather than a fixed number, so the
+# notebook reports it below instead of stating it here.
 #
 # **Learning Objectives**:
 # - Compare allocator performance across diverse asset classes and frequencies
@@ -54,6 +56,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
@@ -62,6 +65,7 @@ from case_studies.utils.analytics import (
     load_chapter_backtests,
 )
 from utils.paths import get_chapter_dir
+from utils.style import show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -86,6 +90,18 @@ def extract_top_k(spec_json: str) -> int:
 # constant. We load the `stage: "allocation"` runs and restrict to the spine
 # prediction_hash per case study so the comparison reads as
 # "best within the highest-validation-Sharpe signal carrier".
+#
+# A case study absent from the carrier file is an error: `01_aggregate_synthesis`
+# writes a row for every case study it iterates, so a missing key means the file
+# is stale. A case study present with a *null* spine is different: its registry
+# holds no backtests to resolve one from. It is named and excluded. The check
+# below used to test only that the key existed, so a null passed it and then
+# dropped out silently at the filter, the outcome the check exists to prevent.
+#
+# Universe size, used to size the bubbles much further down, comes from
+# `overview.parquet` rather than from a dict typed into this notebook. Every one
+# of that dict's nine entries had drifted from the shipped artifact - etfs 64
+# against 100, sp500_options 480 against 627, us_equities_panel 311 against 3199.
 
 # %%
 # Spine prediction hash per case study — read from the synthesis carrier
@@ -102,9 +118,6 @@ SPINE_BY_CS = dict(
     )
 )
 
-# Fail loudly if a requested case study has no spine in the carrier file —
-# otherwise SPINE_BY_CS.get() below silently returns None and the CS drops
-# out of the comparison without explanation.
 _missing_spine = [cs for cs in CS_LIST if cs not in SPINE_BY_CS]
 if _missing_spine:
     msg = (
@@ -112,6 +125,10 @@ if _missing_spine:
         f"{_missing_spine}. Re-run 01_aggregate_synthesis to refresh the carrier."
     )
     raise RuntimeError(msg)
+
+NO_SPINE = sorted(cs for cs in CS_LIST if SPINE_BY_CS.get(cs) is None)
+if NO_SPINE:
+    print(f"No resolved spine, excluded from the allocator comparison: {NO_SPINE}")
 
 # This section isolates the allocator layer: the signal is held fixed and only
 # the allocation method varies. Load the allocation stage ONLY — a trailing-stop
@@ -251,7 +268,11 @@ for bar, alloc in zip(bars, best_data["allocator"], strict=False):
         fontsize=8,
     )
 
-fig.show()
+show_with_alt(
+    fig,
+    "Bar chart of the highest Sharpe reached by any allocator in each case "
+    "study, ordered by that Sharpe, with a reference line at zero.",
+)
 
 # %% [markdown]
 # **Interpretation**: The bar chart makes the cross-dataset heterogeneity immediately visible.
@@ -284,9 +305,12 @@ improvement = (
         sharpe_diff=pl.col("best_sharpe") - pl.col("ew_sharpe"),
     )
     .with_columns(
+        # Null, not zero, where there is no equal-weight run to improve on. A
+        # zero reads as "the allocator changed nothing", which is a measurement;
+        # a missing baseline is the absence of one.
         pct_improvement=pl.when(pl.col("ew_sharpe").abs() > 0.001)
         .then((pl.col("sharpe_diff") / pl.col("ew_sharpe").abs()) * 100)
-        .otherwise(0.0),
+        .otherwise(None),
     )
     .sort("sharpe_diff", descending=True)
 )
@@ -295,10 +319,36 @@ improvement.select(
     "display_name", "ew_sharpe", "best_sharpe", "best_allocator", "sharpe_diff", "pct_improvement"
 )
 
-# %% [markdown]
-# **Interpretation**: This table shows that allocator choice usually changes the
-# result by less than the signal itself. The gains over equal weight are material
-# in a few datasets, but they are rarely universal.
+# %% tags=["results"]
+_with_ew = improvement.filter(pl.col("ew_sharpe").is_not_null())
+_without = improvement.filter(pl.col("ew_sharpe").is_null())
+display(
+    Markdown(
+        f"{_with_ew.height} of {improvement.height} case studies in this "
+        "comparison ran an equal-weight allocator on the spine prediction, so "
+        "only those can be measured against the baseline"
+        + (
+            f". The rest ({', '.join(_without['display_name'].to_list())}) have "
+            "a highest-Sharpe allocator but nothing to compare it with, and are "
+            "left blank rather than credited with a zero improvement"
+            if _without.height
+            else ""
+        )
+        + "."
+        + (
+            (
+                " In every one of them the highest-Sharpe allocator is equal "
+                "weight itself, so no alternative improved on the baseline."
+                if (_with_ew["sharpe_diff"].abs() < 1e-9).all()
+                else f" Where the comparison can be made, the change ranges from "
+                f"{_with_ew['sharpe_diff'].min():+.3f} to "
+                f"{_with_ew['sharpe_diff'].max():+.3f} Sharpe."
+            )
+            if _with_ew.height
+            else ""
+        )
+    )
+)
 
 # %% [markdown]
 # ## Allocator Performance Heatmap
@@ -347,7 +397,12 @@ ax.set_yticklabels(cs_names)
 ax.set_title("Allocator Sharpe Ratios Across Case Studies")
 fig.colorbar(im, ax=ax, label="Sharpe Ratio", shrink=0.8)
 fig.subplots_adjust(left=0.18, right=0.92, top=0.9, bottom=0.2)
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped bars comparing the Sharpe of each of the most common allocators "
+    "within each case study, so the height differences within a group show how "
+    "much the allocator choice moved the result.",
+)
 
 # %% [markdown]
 # **Interpretation**: The heatmap reveals that no single allocator dominates
@@ -449,7 +504,11 @@ for cs_id in comparison["case_study"].unique().sort().to_list():
             "n_allocators_tested": n_total,
             "n_beat_ew": n_better,
             "pct_beat_ew": round(100 * n_better / n_total, 0) if n_total > 0 else 0,
-            "breadth": "broad"
+            # "narrow" used to absorb the zero case, labelling "one or two
+            # allocators beat the baseline" and "none did" identically.
+            "breadth": "none"
+            if n_better == 0
+            else "broad"
             if n_better / max(n_total, 1) > 0.5
             else "moderate"
             if n_better / max(n_total, 1) > 0.25
@@ -477,16 +536,28 @@ if not breadth.is_empty():
         )
     )
 
-    n_broad = breadth.filter(pl.col("breadth") == "broad").height
-    n_narrow = breadth.filter(pl.col("breadth") == "narrow").height
-    print(f"\nBroad uplift: {n_broad}/{breadth.height}")
-    print(f"Narrow uplift: {n_narrow}/{breadth.height}")
+    for _label in ("broad", "moderate", "narrow", "none"):
+        _n = breadth.filter(pl.col("breadth") == _label).height
+        if _n:
+            print(f"\n{_label} uplift: {_n}/{breadth.height}")
+    _n_compared = comparison["case_study"].n_unique()
+    if breadth.height < _n_compared:
+        _dropped = sorted(set(comparison["case_study"].unique()) - set(breadth["case_study"]))
+        print(
+            f"\nExcluded for having no equal-weight run to compare against "
+            f"({len(_dropped)} of {_n_compared}): "
+            + ", ".join(SHORT_NAMES.get(c, c) for c in _dropped)
+        )
+else:
+    print("No case study has both an equal-weight run and an alternative to compare it with.")
 
 # %% [markdown]
 # **Interpretation**: "Broad" means most non-EW allocators improve over
-# equal weight — the uplift is insensitive to allocator choice. "Narrow"
-# means only one or two allocators exceed the baseline — the improvement
-# depends on picking the right method. This matters for Ch20: broad uplift
+# equal weight, so the uplift does not depend on which one was chosen. "Narrow"
+# means only one or two exceed the baseline, so the improvement is the choice.
+# "None" means no alternative beat equal weight at all, which is a different
+# result again and was previously reported as "narrow". This matters for Ch20:
+# broad uplift
 # is more trustworthy as a real improvement; narrow uplift could be
 # selection bias.
 
@@ -518,18 +589,13 @@ ch16_ew = (
     .select("case_study", ew_sharpe=pl.col("sharpe"))
 )
 
-UNIVERSE_SIZES = {
-    "etfs": 64,
-    "crypto_perps_funding": 19,
-    "nasdaq100_microstructure": 114,
-    "sp500_equity_option_analytics": 634,
-    "us_firm_characteristics": 2250,
-    "fx_pairs": 20,
-    "cme_futures": 30,
-    "sp500_options": 480,
-    "us_equities_panel": 311,
-}
+UNIVERSE_SIZES = dict(
+    pl.read_parquet(get_chapter_dir(20) / "output" / "overview.parquet")
+    .select("cs_id", "universe")
+    .iter_rows()
+)
 
+# %%
 # %%
 # Best allocator Sharpe per CS from Ch17
 best_alloc = (
@@ -630,51 +696,101 @@ if mvo_df.height >= 3:
         framealpha=0.9,
     )
 
-    fig.show()
+    show_with_alt(
+        fig,
+        "Scatter of allocation uplift against the equal-weight baseline Sharpe, "
+        "one bubble per case study sized by universe size and labelled by name, "
+        "with quadrant annotations naming the four possible regimes.",
+    )
 else:
     print("Insufficient data for MVO diagnostic scatter.")
 
 # %% [markdown]
-# **Finding**: The scatter reveals a clear pattern. Case studies with
-# **strong EW baselines** (positive Sharpe) see modest allocation uplift —
-# the signal dominates portfolio construction. Case studies with **weak
-# signals** (near-zero or negative EW Sharpe) show the largest swings from
-# allocation choice, but often in the wrong direction: optimization
-# amplifies noise when the underlying signal is unreliable.
-#
-# The bubble sizes show that **universe size** is a secondary factor.
-# Narrow universes (crypto, FX) leave little room for allocators to
-# differentiate. Broad universes (US Firms, S&P 500) create more scope
-# for optimization — but also more scope for overfitting to noise.
-#
-# **Practical takeaway**: If your EW baseline Sharpe is above ~0.5,
-# allocator choice is secondary. Below that, allocation can help
-# or hurt — but never rescues a failing signal.
+# %% tags=["results"]
+display(
+    Markdown(
+        f"The scatter carries {mvo_df.height} case studies: only those with both "
+        "a Ch16 equal-weight baseline and Ch17 allocation backtests on the spine "
+        "prediction qualify. Their baselines run from "
+        f"{mvo_df['ew_sharpe'].min():+.2f} to {mvo_df['ew_sharpe'].max():+.2f} "
+        f"Sharpe and their uplifts from {mvo_df['uplift'].min():+.2f} to "
+        f"{mvo_df['uplift'].max():+.2f}.\n\n"
+        "Every point sits in the same region of the plane, so the quadrant "
+        "labels describe where a case study could fall rather than where any of "
+        "these do. Nothing here separates a weak-signal regime from a "
+        "strong-signal one, because no weak-signal case study reached this "
+        "comparison. The chart is a template waiting for the registries still "
+        "being rebuilt."
+    )
+)
+
+# %% [markdown]
+# The mechanism the chart is meant to test is still worth stating, as a thing to
+# check rather than a thing shown: an allocator can only redistribute capital
+# across whatever the signal ranked, so when the ranking carries little
+# information the allocator is redistributing noise, and a method with more free
+# parameters has more ways to fit that noise. Whether that holds here needs
+# case studies on both sides of the line, which this registry does not have.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The highest-Sharpe allocator varies by case study.** No single
-#    allocator has the highest Sharpe across all eight case studies.
-# 2. **Equal weight is competitive across most case studies.** It is the
-#    highest-Sharpe allocator in two (US Firms and S&P 500 Eq+Opt) and
-#    sits within ~0.25 Sharpe of the top allocator in four others
-#    (CME Futures, US Equities, FX Pairs, S&P 500 Options). Across the eight
-#    case studies the best-allocator wins distribute as HRP (3: ETFs,
-#    S&P 500 Options, FX Pairs), equal_weight (2), risk_parity (1: Crypto),
-#    score_weighted (1: US Equities), and inverse_vol (1: CME Futures);
-#    MVO Ledoit-Wolf and conformal_weighted are top in none.
-# 3. **Allocation uplift is often narrow**: In most case studies, only a
-#    minority of allocators exceed equal weight — the improvement depends
-#    on choosing the right method, not on allocation being universally
-#    helpful.
-# 4. **Signal quality is the dominant driver**: Allocation does not turn a
-#    failing signal into a profitable strategy in any of the eight case studies.
-#    Its marginal value is strongly dataset-dependent and never substitutes
-#    for a strong forecasting signal.
-# 5. **When MVO helps**: Allocation optimization adds most value when the
-#    baseline signal is moderate (not too strong, not too weak) and the
-#    universe is broad enough to benefit from concentration choices.
+# The allocator that wins in each case study, and by how much over equal weight,
+# are properties of this registry. They are computed below. An earlier version of
+# this section typed them out, and named a leading allocator for six case studies
+# that have no allocation-stage backtests at all.
+
+# %% tags=["results"]
+_wins = best_sharpes.group_by("best_allocator").len().sort("len", descending=True)
+_spread_now = spread_df.sort("spread", descending=True)
+_wide, _tight = _spread_now.row(0, named=True), _spread_now.row(-1, named=True)
+display(
+    Markdown(
+        "**Which allocator posts the highest Sharpe**: "
+        + ", ".join(f"{r['best_allocator']} ({r['len']})" for r in _wins.iter_rows(named=True))
+        + f", across {best_sharpes.height} case studies. "
+        + (
+            "No allocator wins everywhere."
+            if _wins.height > 1
+            else "One allocator wins in all of them, which at this sample size is "
+            "not evidence that it generally does."
+        )
+        + f"\n\n**Allocator sensitivity** (highest minus lowest Sharpe within a "
+        f"case study) runs from {_tight['spread']:.3f} ({_tight['display_name']}, "
+        f"{_tight['n_allocators']} allocators) to {_wide['spread']:.3f} "
+        f"({_wide['display_name']}, {_wide['n_allocators']} allocators). Where the "
+        "spread is small, the choice of allocator is not what determines the "
+        "result; where it is large, it is a decision that has to be made on "
+        "validation data and carries the selection risk that implies."
+    )
+)
+
+# %% [markdown]
+# What holds independently of the registry:
+#
+# - **Allocation cannot manufacture a signal.** Every allocator reads the same
+#   ranking; if the ranking is uninformative, redistributing capital across it
+#   changes the variance of the result and not its expectation.
+# - **The spread between allocators is itself the useful number.** A case study
+#   where every allocator lands in the same place is one where this decision can
+#   be made on grounds other than backtested Sharpe - turnover, capacity,
+#   explicability. A case study with a wide spread is one where the decision was
+#   made by looking at validation results, and should be treated accordingly.
+# - **Equal weight is the baseline worth beating**, because it has no parameters
+#   to fit and therefore nothing to overfit. An allocator that does not clear it
+#   has bought estimation risk for nothing.
+#
+# ## Known Limitations
+#
+# - Only case studies with a resolved spine prediction take part, and the count
+#   is printed at the top of the notebook. The rest are mid-rebuild.
+# - Every Sharpe here is measured on validation folds. The allocator was chosen
+#   by looking at these numbers, so the spread between allocators overstates what
+#   the choice is worth out of sample by an amount this notebook does not
+#   estimate.
+# - Each allocator is represented by its own highest-Sharpe configuration across
+#   rebalance and top-k variants, so the comparison is between maxima and each is
+#   inflated by however many variants stood behind it.
 #
 # **Next**: [`06_cost_survival`](06_cost_survival.ipynb) translates the same
 # allocator choices into cost-adjusted performance.
