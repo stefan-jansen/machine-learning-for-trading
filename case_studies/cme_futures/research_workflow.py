@@ -40,7 +40,37 @@ from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
 
 CASE_STUDY = "cme_futures"
-ALL_LABELS = ("fwd_ret_5d", "fwd_ret_21d")
+
+
+def _declared_sweep_labels() -> tuple[str, ...]:
+    """The labels ``config/setup.yaml`` declares for the sweep, primary first.
+
+    Read from the declaration rather than restated beside it. A literal tuple here is a
+    second copy of what ``setup.yaml`` says, and nothing compares the two: adding a
+    variant to the sweep would leave every notebook fitting the old set and publishing a
+    population one label short, silently. That is the failure a ``PRIMARY_LABEL`` default
+    causes in other case studies, reached by a different route.
+
+    Anchored at ``REPO_ROOT`` rather than ``get_case_study_dir``, which honours
+    ``ML4T_OUTPUT_DIR``. The sweep declaration is committed source, not an output, so a
+    preview workspace or a test redirect must not be able to change which labels are
+    declared. The order is ``sweep_labels``' order - primary, then variants as written -
+    because a population hashes its members as an ordered list, and re-ordering would give
+    every published population a new identity.
+    """
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
+    )
+    labels = (setup or {}).get("labels") or {}
+    primary = labels.get("primary")
+    if not primary:
+        raise ValueError(f"{CASE_STUDY}: setup.yaml declares no labels.primary")
+    ordered = [str(primary)]
+    ordered += [str(name) for name in (labels.get("variants") or []) if str(name) != str(primary)]
+    return tuple(ordered)
+
+
+ALL_LABELS = _declared_sweep_labels()
 FRONT_CONTRACT_POSITION = 0
 ROLL_POLICY = "volume_rolled_multiplicative_back_adjustment"
 EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"

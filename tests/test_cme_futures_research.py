@@ -903,6 +903,57 @@ def test_product_decision_equivalence_holds_across_a_fold_boundary(tmp_path: Pat
     assert _returns(typed).equals(_returns(direct))
 
 
+def test_all_labels_is_read_from_the_sweep_declaration_and_not_restated() -> None:
+    """`ALL_LABELS` must be `setup.yaml`'s sweep, in its order, not a copy of it.
+
+    Every CME modelling and strategy notebook reaches its labels through this one
+    constant. While it was a literal tuple beside the declaration, nothing compared the
+    two: adding a variant to `labels.variants` would have left all twelve notebooks
+    fitting the old set and publishing populations one label short, with each notebook's
+    own completeness check passing because it is scoped to what that notebook requested.
+
+    The test reads the YAML itself rather than calling the same helper, so reverting the
+    constant to a literal fails here as soon as the declaration moves.
+    """
+    declared = (
+        yaml.safe_load(
+            (REPO_ROOT / "case_studies" / "cme_futures" / "config" / "setup.yaml").read_text()
+        )
+        or {}
+    ).get("labels") or {}
+    primary = str(declared["primary"])
+    variants = [str(name) for name in (declared.get("variants") or []) if str(name) != primary]
+    assert (primary, *variants) == research_workflow.ALL_LABELS
+
+
+def test_every_declared_label_has_a_training_menu_for_every_family_requested() -> None:
+    """A label in the sweep with no menu entry for a family fits nothing for that family.
+
+    `model_request_catalog` asks `load_configs` per label, so a family the menu omits on
+    one label yields a request catalog covering the other, and the population it publishes
+    is short by exactly the missing label. The two horizons declare identical family
+    menus today; this is what fails if one of them stops.
+    """
+    menus = {
+        label: yaml.safe_load(
+            (
+                REPO_ROOT / "case_studies" / "cme_futures" / "config" / "training" / f"{label}.yaml"
+            ).read_text()
+        )
+        or {}
+        for label in research_workflow.ALL_LABELS
+    }
+    families = {
+        label: {name for name, configs in menu.items() if configs} for label, menu in menus.items()
+    }
+    first, *rest = research_workflow.ALL_LABELS
+    for label in rest:
+        assert families[label] == families[first], (
+            f"{label} and {first} declare different families: "
+            f"{sorted(families[label] ^ families[first])}"
+        )
+
+
 def test_every_declared_model_population_is_published_by_a_notebook() -> None:
     """The contract must name only populations a notebook actually registers.
 
