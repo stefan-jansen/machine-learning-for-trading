@@ -116,7 +116,7 @@ def _tabm_runtime_identity() -> dict[str, str]:
     }
 
 
-def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
+def _tabm_runtime_provenance(study: Study, *, notebook: str | None = None) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -126,13 +126,22 @@ def _tabm_runtime_provenance(study: Study) -> dict[str, Any]:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    return {
+    record: dict[str, Any] = {
         "entry_point": "case_studies.utils.tabular_dl",
         "packages": _tabm_runtime_identity(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "source_commit": commit,
     }
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
+    return record
 
 
 def _normalize_splits(splits: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
@@ -429,7 +438,7 @@ def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
         label_ref,
         mds,
         configured_by_name,
-        _tabm_runtime_provenance(study),
+        _tabm_runtime_provenance(study, notebook=request.get("notebook")),
     )
 
 

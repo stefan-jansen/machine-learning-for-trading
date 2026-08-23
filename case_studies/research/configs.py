@@ -169,10 +169,16 @@ def model_requests(
     execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
     overrides: dict | None = None,
     preview_reductions: dict | None = None,
+    notebook: str | None = None,
 ) -> tuple[ModelRequest, ...]:
     """Build one unresolved request per catalog row.
 
     Only the identity columns reach the request; the display columns exist for the reader.
+
+    ``notebook`` is the stem of the notebook submitting these requests, recorded as
+    ``runtime_provenance["notebook_path"]`` so a registered row says which notebook produced it.
+    It is provenance rather than identity, so passing it moves no hash. Default ``None`` records
+    nothing: a wrong notebook name is worse than an absent one.
     """
     missing = set(REQUEST_COLUMNS) - set(catalog.columns)
     if missing:
@@ -184,6 +190,7 @@ def model_requests(
             execution_tier=tier,
             overrides=dict(overrides or {}),
             preview_reductions=dict(preview_reductions or {}),
+            notebook=notebook,
         )
         for row in catalog.select(*REQUEST_COLUMNS).iter_rows(named=True)
     )

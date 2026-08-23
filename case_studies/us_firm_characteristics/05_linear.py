@@ -219,6 +219,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="05_linear",
 )
 resolved = tuple(request.resolve() for request in requests)
 

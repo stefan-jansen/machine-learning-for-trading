@@ -232,6 +232,13 @@ class ModelRequest:
     cv: CVSpec | None
     execution_tier: ExecutionTier
     preview_reductions: dict[str, Any]
+    # The notebook that submitted this request, for `runtime_provenance["notebook_path"]`.
+    # Provenance only - `registry/specs.py:_V2_PROVENANCE_FIELDS` excludes it from the training
+    # identity, so two notebooks submitting the same computation still collide on one hash, which
+    # is what identity is for. It answers the separate question of which notebook produced a row,
+    # and `entry_point` cannot: that names the module, several notebooks share one, and naming the
+    # module is correct.
+    notebook: str | None = None
 
     @classmethod
     def from_request(cls, study: Study, request: dict[str, Any]) -> ModelRequest:
@@ -242,6 +249,7 @@ class ModelRequest:
             "overrides",
             "cv",
             "execution_tier",
+            "notebook",
             "preview_reductions",
         }
         unknown = set(request) - supported
@@ -272,6 +280,7 @@ class ModelRequest:
             cv=cv,
             execution_tier=tier,
             preview_reductions=reductions,
+            notebook=str(request["notebook"]) if request.get("notebook") else None,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -283,6 +292,7 @@ class ModelRequest:
             "cv": self.cv,
             "execution_tier": self.execution_tier.value,
             "preview_reductions": dict(self.preview_reductions),
+            "notebook": self.notebook,
         }
 
     def resolve(self) -> ResolvedModelRequest:

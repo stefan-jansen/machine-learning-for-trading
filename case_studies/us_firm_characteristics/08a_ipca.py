@@ -180,6 +180,7 @@ requests = model_requests(
     execution_tier=EXECUTION_TIER,
     overrides=overrides,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="08a_ipca",
 )
 plan = plan_models(study, requests=requests)
 

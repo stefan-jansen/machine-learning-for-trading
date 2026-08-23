@@ -161,6 +161,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="08b_conditional_autoencoder",
 )
 plan = plan_models(study, requests=requests)
 
