@@ -203,10 +203,12 @@ backtest:
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
-    # ETFs only: each advancing config contributes its best TWO checkpoints.
-    # latent_factors/sdf reaches its highest allocation-stage Sharpe on its
-    # second-best checkpoint; at 1 that prediction never enters the sweep.
-    checkpoints_per_config: 2
+    # Each advancing config contributes its single best (checkpoint, mapping) pair
+    # by baseline Sharpe, so ten distinct (family, config_name) fill the ten
+    # allocation slots and no model occupies two of them. Every checkpoint still
+    # competes: the baseline stage backtests all of them against every top_k_grid
+    # mapping, and this decides only what advances from there.
+    checkpoints_per_config: 1
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
     # All other alternative allocators take the cheap path.
