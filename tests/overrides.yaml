@@ -2051,8 +2051,9 @@ case_studies/us_firm_characteristics/07_tabular_dl:
       max_symbols: 5
   timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
-  gpu: true
-  timeout: 300
+  # No longer GPU: the index fits nothing. It reads the declared menu, reads each execution
+  # notebook's own MODEL_NAME, and checks that the two agree.
+  timeout: 120
 # 08a and 08b are the split successors of 08_latent_factors above, and the entry
 # never followed the split: neither had one, so both ran unreduced and unmarked and
 # died on the latent-factor CUDA guard. They need different treatment.
@@ -2070,27 +2071,52 @@ case_studies/us_firm_characteristics/08_latent_factors:
 # both ways - forced to CPU and on a 3090 it fails identically at cell 6 with "IPCA
 # fitting is forbidden during sign-off". So it skips for the same reason as 08c/08d.
 case_studies/us_firm_characteristics/08a_ipca:
-  skip: true
-  skip_reason: 'Cache-only publication replay: patches a fitting sentinel and asserts zero fit calls, so it requires the production registry IPCA predictions absent from the trimmed test-data. Not GPU-related - IPCA has no GPU implementation. Needs a full fixture rebuild.'
+  # No `gpu: true`: IPCA is alternating least squares and has no GPU implementation, which is why
+  # it is the one member declaring device cpu. The skip this entry carried described the old
+  # notebook, which patched a fitting sentinel over the model runner and asserted zero fit calls -
+  # a cache-only replay needing production registry rows the fixture does not have. The migrated
+  # notebook fits, so the reason is gone with the code that caused it.
+  parameters:
+    # The pre-migration knobs bind nothing after the migration; a reduction reaches a migrated
+    # notebook only under the name it declares. No epoch budget is named here because
+    # `preset_patches.py` already rewrites the latent presets in the config directory
+    # `conftest.py` copies, and a reduction named here would replace that patch rather than add
+    # to it.
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+  timeout: 300
 # 08b is genuinely GPU: a Torch conditional autoencoder that trains, and its chapter
 # counterpart 14_latent_factors/06_conditional_autoencoder is already gpu: true.
-# Verified passing on a 3090 with these parameters.
 case_studies/us_firm_characteristics/08b_conditional_autoencoder:
   gpu: true
   parameters:
-    FORCE_RETRAIN: true
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    MAX_VARIANT_LABELS: 0
-    N_EPOCHS: 2
-    N_FACTORS: 2
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/us_firm_characteristics/08c_stochastic_discount_factor:
-  skip: true
-  skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
+  gpu: true
+  parameters:
+    # SDF is the one latent member `preset_patches.py` does not reduce. Its patch sets `n_epochs`
+    # and `checkpoint_interval`, and SDF reads neither: `_expected_latent_checkpoints` builds its
+    # surface from `n_epochs_unc`, `n_epochs_cond` and `checkpoint_epochs`. So a CI run trained
+    # 256 unconditional plus 1024 conditional epochs, which is the timeout the removed skip
+    # described. The three phase budgets are named here because nothing else reduces them.
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      n_epochs_cond: 2
+      n_epochs_moment: 1
+      n_epochs_unc: 2
+  timeout: 300
 case_studies/us_firm_characteristics/08d_supervised_autoencoder:
-  skip: true
-  skip_reason: 'TEMPORARY: case-study end-to-end pipeline times out or fails with trimmed test-data; needs full fixture rebuild'
+  gpu: true
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+  timeout: 300
 case_studies/us_firm_characteristics/09_causal_dml:
   parameters:
     CV_FOLDS: 2

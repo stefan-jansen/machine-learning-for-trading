@@ -259,6 +259,16 @@ plan.select(
 # intermediate states worth scoring: there is one fit and therefore one checkpoint per
 # configuration, and no learning curve to plot.
 #
+# **This notebook resolves its requests before running them, and that decides how the fitting is
+# ordered.** There are two paths through `run_model_population`. Handing it unresolved requests,
+# or the plan built from them, reaches the family's batch runner, which walks folds on the outside
+# and configurations on the inside so one prepared fold is live at a time. Handing it resolved
+# requests - what the cell below passes - fits one configuration at a time, each preparing the
+# folds it needs. Resolving first is what let the plan above show `eligible_entities` and the real
+# fold boundaries, because those numbers exist only once the data has been read;
+# [`07_tabular_dl`](07_tabular_dl.ipynb) is the notebook where that trade goes the other way, and
+# it says so there.
+#
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # is going to produce. The list is computed from the resolved specifications before the first fit
 # and written down, and afterwards every member must exist and be complete. That is what makes

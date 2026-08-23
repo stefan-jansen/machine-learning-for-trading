@@ -227,10 +227,21 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set, which is what keeps a panel this size inside memory.
+# **This notebook resolves its requests before running them, and that decides how the fitting is
+# ordered.** There are two paths through `run_model_population` and they are not interchangeable.
+# Handing it unresolved requests, or the plan built from them, reaches the family's batch runner,
+# which walks folds on the outside and configurations on the inside so that one prepared fold is
+# live at a time. Handing it resolved requests - what the cell above produces, and what the plan
+# table two cells up is built from - fits one configuration at a time, each preparing the folds it
+# needs.
+#
+# The trade is visible in what you have already read. Resolving first is what let the plan show
+# `eligible_entities` and the real fold boundaries rather than the identities alone, because those
+# numbers exist only once the data has been read; the cost is that each configuration prepares its
+# own folds instead of sharing one prepared set. On this panel that is affordable and the plan is
+# worth seeing. On a panel where it is not, the notebook passes the plan and gives up the entity
+# count - [`07_tabular_dl`](07_tabular_dl.ipynb) is the case where that choice goes the other way,
+# and it says so there.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be

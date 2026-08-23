@@ -14,179 +14,191 @@
 # ---
 
 # %% [markdown]
-# # Latent Factor Model Suite for US Firm Characteristics
+# # Firm characteristics: what the latent-factor family is, and who publishes what
 #
-# This index reconciles the complete validation surfaces produced by the US Firm latent-model
-# notebooks. It does not fit a model or open the holdout.
+# The three notebooks before this one predicted the return from the characteristics directly. The
+# latent-factor family starts somewhere else: it supposes the cross-section is driven by a small
+# number of common factors, and treats a characteristic as evidence about **how exposed a firm is
+# to them** rather than about the return itself. What gets estimated is a map from characteristics
+# to exposures, shared by every firm and every month, so it is fitted on the whole panel instead of
+# one cross-section at a time.
+#
+# Four members of that family are declared here, and they are **two pairs rather than four points
+# on one axis**:
+#
+# | notebook | model | what it assumes |
+# |---|---|---|
+# | [`08a_ipca`](08a_ipca.ipynb) | instrumented PCA | exposures are a **linear** function of the characteristics |
+# | [`08b_conditional_autoencoder`](08b_conditional_autoencoder.ipynb) | conditional autoencoder | same structure, the map is a **network** |
+# | [`08c_stochastic_discount_factor`](08c_stochastic_discount_factor.ipynb) | stochastic discount factor | no two-stage split: prices the cross-section directly |
+# | [`08d_supervised_autoencoder`](08d_supervised_autoencoder.ipynb) | supervised autoencoder | no two-stage split: predicts the return directly, keeping only the bottleneck |
+#
+# The first pair differs in the shape of one function, which is what makes those two worth reading
+# against each other. The second pair breaks the two-stage shape from opposite ends - one because
+# it prices, one because it predicts - and `08d` is in particular the family's own control: it
+# keeps the low-dimensional bottleneck and drops the factor interpretation, so what it does not
+# achieve is what the structure is worth.
+#
+# **Ordinary PCA is not among them**, and its absence is declared rather than accidental. PCA finds
+# the directions of the return panel that explain the most variance, which involves the
+# characteristics nowhere, and it needs a firm to be the same firm across the whole sample. This
+# release publishes anonymous identifiers that persist only inside each tensor block, so that
+# second requirement cannot be met. `config/training/{label}.yaml` therefore declares no `pca`, and
+# IPCA is the linear characteristic-sorted baseline in its place.
 #
 # **Learning objectives**
 #
-# - Confirm that each eligible latent producer has one complete corrected identity.
-# - Compare each model at its global development checkpoint across all folds.
-# - Preserve every complete checkpoint as a downstream strategy candidate.
+# - Say what the family asserts that the direct predictors do not.
+# - Read a family whose members are split across notebooks as one declared population.
+# - Check that the notebooks that exist cover the menu that is declared.
 #
-# **Book reference:** Chapter 14, latent factor models and the objective comparison.
+# **Book reference**: Chapter 14, Sections 14.5 to 14.7 (advanced conditional-factor models, the
+# conditional autoencoder, and the stochastic discount factor and supervised autoencoder).
 #
-# **Prerequisites:** `08b_conditional_autoencoder`, `08c_stochastic_discount_factor`, and
-# `08d_supervised_autoencoder`. `08a_ipca` is an approved deferred publication exception because
-# the installed solver does not satisfy the corrected convergence contract.
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_evaluation`](04_evaluation.ipynb).
+#
+# **What it writes**: nothing. This notebook fits no model and opens no holdout. The four notebooks
+# it points at each publish their own population, and
+# [`10_model_analysis`](10_model_analysis.ipynb) is where they are compared against the other
+# families.
 
 # %%
-"""Latent factor notebook index for the US firm characteristics case study."""
+"""Index and coverage check for the US firm characteristics latent-factor family."""
 
-import warnings
+import ast
+from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
-from IPython.display import Markdown, display
 
-from case_studies.utils import registry
-from utils.style import COLORS, add_message_title
-
-warnings.filterwarnings("ignore")
+from case_studies.research import declared_labels, load_model_configs, open_study
+from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "us_firm_characteristics"
-LABEL = "fwd_ret_1m"
-EXPECTED_CHECKPOINTS = {"cae": 10, "sdf": 5, "sae": 10}
-
-# %% [markdown]
-# ## Load the corrected latent surface
-#
-# The live candidate contains only the three eligible corrected producers. IPCA is not represented
-# by a stale or unverified row. Each physical checkpoint combines the same epoch across every
-# validation fold.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %%
-training_runs = registry.load_training_runs(
-    CASE_STUDY_ID,
-    family="latent_factors",
-    label=LABEL,
+study = open_study(
+    "us_firm_characteristics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
 )
-prediction_sets = registry.load_prediction_sets(CASE_STUDY_ID, split="validation")
-prediction_metrics = registry.load_prediction_metrics(CASE_STUDY_ID)
-
-surface = (
-    training_runs.select("training_hash", "config_name", "entry_point")
-    .join(prediction_sets, on="training_hash", how="inner")
-    .join(prediction_metrics, on="prediction_hash", how="inner")
-    .sort("config_name", "checkpoint_value")
-)
-models = set(surface["config_name"].unique().to_list())
-if models != set(EXPECTED_CHECKPOINTS):
-    raise ValueError(f"Expected {set(EXPECTED_CHECKPOINTS)}, found {models}")
-
-print(f"Corrected latent identities: {training_runs.height}")
-print(f"Physical checkpoint surfaces: {surface.height}")
-print("IPCA status: deferred; no stale result admitted")
 
 # %% [markdown]
-# ## Verify completeness before comparison
+# ## 1. The declared menu
 #
-# A model enters the comparison only when every physical checkpoint covers all ten folds and all
-# 110 validation months. This excludes partial training and interrupted artifacts.
+# `config/training/{label}.yaml` lists the family's members for each label, and every declared
+# label declares the same four. That is the population the four execution notebooks are between
+# them responsible for.
 
 # %%
-completeness = (
-    surface.group_by("config_name")
-    .agg(
-        pl.col("training_hash").n_unique().alias("training_identities"),
-        pl.col("prediction_hash").n_unique().alias("checkpoints"),
-        pl.col("ic_n_days").min().alias("min_months"),
-        pl.col("ic_n_days").max().alias("max_months"),
-        pl.col("checkpoint_value").sort().alias("physical_checkpoints"),
+declared_labels(study, "latent_factors")
+
+# %%
+menu = load_model_configs(study, "latent_factors")
+menu
+
+# %% [markdown]
+# ## 2. Which notebook claims which member
+#
+# The menu says what must be produced; it does not say by whom. The family is split across four
+# notebooks, each publishing one model under its own population name, so the mapping between the
+# two lives in the notebooks and is read back here rather than restated.
+#
+# **A member the menu declares and no notebook claims publishes nothing, and nothing else would
+# catch it**: each execution notebook checks the labels it covers against its own declared rows, so
+# none of them can see a model that no notebook requests at all. That is what this cell is for.
+
+# %%
+CASE_DIR = get_case_study_dir("us_firm_characteristics")
+
+
+def claimed_model(path: Path) -> str:
+    """Return the model a latent-factor execution notebook publishes.
+
+    Read from the notebook's own `MODEL_NAME` binding rather than from a list kept here. A list
+    would be a second declaration of the same fact, and the failure it invites is the one this
+    cell exists to detect: it would keep agreeing with itself after a notebook changed.
+    """
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "MODEL_NAME" for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise ValueError(f"{path.name} binds no MODEL_NAME")
+
+
+notebooks = sorted(CASE_DIR.glob("08[a-z]_*.py"))
+claims = pl.DataFrame(
+    {
+        "notebook": [path.stem for path in notebooks],
+        "config_name": [claimed_model(path) for path in notebooks],
+    }
+).sort("config_name")
+claims
+
+# %%
+declared_models = set(menu.get_column("config_name"))
+claimed = claims.get_column("config_name").to_list()
+if len(claimed) != len(set(claimed)):
+    raise RuntimeError(f"two notebooks claim the same latent-factor model: {sorted(claimed)}")
+if set(claimed) != declared_models:
+    raise RuntimeError(
+        "the latent-factor notebooks do not cover the declared menu; "
+        f"unclaimed {sorted(declared_models - set(claimed))}, "
+        f"undeclared {sorted(set(claimed) - declared_models)}"
     )
-    .sort("config_name")
-)
-for row in completeness.iter_rows(named=True):
-    expected = EXPECTED_CHECKPOINTS[row["config_name"]]
-    if row["training_identities"] != 1 or row["checkpoints"] != expected:
-        raise ValueError(f"Incomplete {row['config_name']} surface: {row}")
-    if row["min_months"] != 110 or row["max_months"] != 110:
-        raise ValueError(f"Incomplete validation coverage: {row}")
-completeness
+print(f"{len(declared_models)} declared members, each claimed by exactly one notebook")
 
 # %% [markdown]
-# ## Direct supervision leads the latent objectives
+# ## 3. What each one costs to publish
 #
-# The comparison selects one global development checkpoint per model after combining every fold at
-# the same physical epoch. It does not create a fold-specific best-checkpoint composite. All 25
-# checkpoint surfaces remain eligible for the equal-weight baseline backtest.
-
-# %%
-best_by_model = (
-    surface.sort("ic_mean_daily", descending=True)
-    .group_by("config_name", maintain_order=True)
-    .first()
-    .sort("ic_mean_daily")
-    .select(
-        "config_name",
-        pl.col("checkpoint_value").alias("epoch"),
-        "prediction_hash",
-        "ic_mean_daily",
-        "ic_ci_lo",
-        "ic_ci_hi",
-        "ic_p_hac",
-        "ic_n_days",
-    )
-)
-best_by_model
-
-# %% [markdown]
-# HAC intervals distinguish a stable positive ranking signal from a nominal point estimate. The
-# chart compares model objectives without suppressing their other checkpoint candidates.
-
-# %%
-y = np.arange(best_by_model.height)
-means = best_by_model["ic_mean_daily"].to_numpy()
-lower = means - best_by_model["ic_ci_lo"].to_numpy()
-upper = best_by_model["ic_ci_hi"].to_numpy() - means
-
-fig, ax = plt.subplots(figsize=(9, 4.5))
-ax.errorbar(
-    means,
-    y,
-    xerr=[lower, upper],
-    fmt="o",
-    color=COLORS["blue"],
-    ecolor=COLORS["neutral"],
-    capsize=4,
-)
-ax.axvline(0, color=COLORS["neutral"], linewidth=1, linestyle="--")
-ax.set(
-    xlabel="Mean monthly rank IC with HAC 95% interval",
-    yticks=y,
-    yticklabels=[name.upper() for name in best_by_model["config_name"]],
-)
-add_message_title(
-    ax,
-    "Direct supervision leads the eligible latent objectives",
-    subtitle="Global development checkpoint per model; all physical checkpoints continue downstream",
-)
-fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# ## Takeaways
+# The number of prediction sets a member contributes is its labels times its checkpoints, and the
+# checkpoints come from how the estimator is trained rather than from a shared setting. IPCA runs
+# alternating least squares to convergence and has one state per fold; the two autoencoders train
+# for a declared epoch budget and save at a declared interval; the stochastic discount factor
+# trains in phases and saves at a declared list of cumulative epochs. Each notebook's plan shows
+# its own count before it fits anything.
 #
-# This index closes the latent producer boundary without changing the downstream selection funnel.
+# This is why the family cannot publish one population. A population is an immutable list of
+# prediction identities, and the four members are fitted by four notebooks at different times, so
+# one shared name would mean the first to run either blocks the others or publishes a snapshot
+# missing them.
 
 # %%
-leader = best_by_model.sort("ic_mean_daily", descending=True).row(0, named=True)
-display(
-    Markdown(
-        f"""
-- The corrected latent boundary contains **{training_runs.height}** eligible model identities and
-  **{surface.height}** complete physical checkpoint surfaces; IPCA remains explicitly deferred.
-- **{leader["config_name"].upper()} at epoch {int(leader["epoch"])}** leads development IC at
-  **{leader["ic_mean_daily"]:+.4f}**, with HAC 95% interval
-  **[{leader["ic_ci_lo"]:+.4f}, {leader["ic_ci_hi"]:+.4f}]** across
-  **{int(leader["ic_n_days"])}** months.
-- CAE, SDF, and SAE each contribute every complete checkpoint to `11_backtest`; this model-level
-  comparison does not prune the strategy research surface.
-- `09_causal_dml` adds a causal robustness diagnostic before `10_model_analysis` compares all model
-  families. The sealed holdout remains untouched until the final carrier is selected.
-"""
-    )
+labels = declared_labels(study, "latent_factors")
+pl.DataFrame(
+    {
+        "config_name": sorted(declared_models),
+        "labels": [len(labels)] * len(declared_models),
+        "population": [
+            f"us_firm_characteristics-{name}-validation-v1" for name in sorted(declared_models)
+        ],
+    }
 )
+
+# %% [markdown]
+# ## 4. What to notice
+#
+# **A family split across notebooks needs its coverage checked somewhere, and this is that place.**
+# Each execution notebook can tell that it fitted every label it declared; none of them can tell
+# that a fifth member exists in the menu with no notebook behind it. The check in section 2 reads
+# the claim out of each notebook's source rather than from a list maintained here, so adding a
+# member to the menu without adding a notebook fails, and so does adding a notebook that duplicates
+# another's model.
+#
+# **The four members are not a ladder.** They are two pairs, and the interesting comparisons are
+# within a pair - linear map against network map in the first, pricing against predicting in the
+# second - plus the cross-pair one between `08b` and `08d`, which share a network and a bottleneck
+# and differ only in whether the factor structure is imposed. A single ranking over all four would
+# hide every one of those.
+#
+# **Nothing here compares results, and that is deliberate.** Reading the four populations against
+# each other, and against the linear, boosted and tabular families, is
+# [`10_model_analysis`](10_model_analysis.ipynb)'s job, with the whole population in front of it
+# and the selection rule stated. A comparison made here would be made on a subset and would be made
+# before [`09_causal_dml`](09_causal_dml.ipynb) has run.
+
+# %% [markdown]
+# **Next**: [`08a_ipca`](08a_ipca.ipynb) publishes the linear member and is the one to read first,
+# because the three that follow are all described by what they change about it.

@@ -242,6 +242,19 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 # series per checkpoint covering the whole validation period, and each becomes its own registered
 # prediction set with its own identity. Nothing here chooses among them.
 #
+# **This notebook passes the plan rather than resolved requests, and that decides how the fitting
+# is ordered.** There are two paths through `run_model_population`. Passing the plan hands the
+# still-unresolved requests to the TabM batch runner, which groups the configurations reading the
+# same label and prepares that label's folds once for all of them. Passing resolved requests
+# instead fits one configuration at a time, each preparing its own folds - which is what
+# [`05_linear`](05_linear.ipynb) and [`06_gbm`](06_gbm.ipynb) do, and they say so there.
+#
+# The trade is what the plan table above could show. Resolving first would have added
+# `eligible_entities`, which needs the eligibility keys themselves; planning derives the same
+# identities from the specification and cannot. Nine configurations holding nine prepared copies
+# of a panel this size is the wrong side of that trade, and `eligible_rows` moves whenever the
+# universe does, so the check the column existed for is still made.
+#
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
