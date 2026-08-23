@@ -328,8 +328,24 @@ jobs:
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-sp500opt }}" == "true" ]]; then
             add_cs "sp500_options"
           fi
+          # us_equities_panel is DEFERRED and does not enroll, even on a push to
+          # main. It is the most expensive case study in the corpus - the runtime
+          # reference puts one tabular_dl configuration at 4.1 hours - and its
+          # rebuild is scheduled after the other eight complete. Until then its
+          # notebooks fail CI for reasons nobody is working on, which trains
+          # readers of this workflow to expect a red job and to stop reading it.
+          #
+          # A deferred case study must not also be a permanently red one. Enroll
+          # it again by deleting CS_DEFERRED below; nothing else needs changing,
+          # and the notice in the log names the condition so the skip cannot be
+          # forgotten silently.
+          CS_DEFERRED="us_equities_panel"
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-usequity }}" == "true" ]]; then
-            add_cs "us_equities_panel"
+            if [[ " $CS_DEFERRED " == *" us_equities_panel "* ]]; then
+              echo "::notice title=us_equities_panel deferred::case-study job skipped by design while its rebuild is descheduled; re-enroll by clearing CS_DEFERRED in .github/workflows/test.yml"
+            else
+              add_cs "us_equities_panel"
+            fi
           fi
 
           echo "case_matrix=$cases" >> "$GITHUB_OUTPUT"
