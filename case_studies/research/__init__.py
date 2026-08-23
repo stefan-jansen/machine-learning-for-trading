@@ -43,7 +43,13 @@ from .model_planning import (
 )
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation
-from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .results import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    BacktestResult,
+    PredictionResult,
+    Result,
+    TrainingResult,
+)
 from .strategy import Strategy
 from .workspace import Study, open_study
 
@@ -67,6 +73,7 @@ __all__ = [
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
+    "HORIZON_DEPENDENT_PROTOCOL_FIELDS",
     "HoldoutExecution",
     "PredictionResult",
     "PredictionCatalog",

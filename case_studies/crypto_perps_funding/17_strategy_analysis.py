@@ -56,7 +56,12 @@ import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import CandidateSet, Result, open_study
+from case_studies.research import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    CandidateSet,
+    Result,
+    open_study,
+)
 from case_studies.utils.uncertainty import (
     compute_backtest_uncertainty,
     compute_cohort_metrics,
@@ -87,10 +92,13 @@ periods_per_year = periods_per_year_from_setup("crypto_perps_funding")
 #
 # The four labels are not interchangeable inputs to one experiment. `fwd_ret_8h` and
 # `fwd_ret_24h` are continuous returns over different horizons; `fwd_dir_8h` and `fwd_dir_8h_3c`
-# are the 8-hour move coded into two and three classes. They carry different label artifacts and
-# a different purge interval, so a candidate set spanning them has to declare the return horizon
-# as the axis it spans - which is what `comparable_fields` does below. Everything else about the
-# protocol must still match, and the set refuses a member whose split or execution tier disagrees.
+# are the 8-hour move coded into two and three classes. Three things about the protocol move with
+# the horizon and nothing else does: the label artifact, the purge interval inside the
+# cross-validation split, and the feature artifacts, because the model-based features are fit per
+# label. A candidate set spanning the four has to declare those three as the axis it spans, which
+# is what `comparable_fields` does below, and `HORIZON_DEPENDENT_PROTOCOL_FIELDS` is the one
+# definition of that list rather than a copy of it. Everything else must still match: the set
+# refuses a member whose split or execution tier disagrees.
 
 # %%
 pool_members = []
@@ -101,7 +109,7 @@ pool = CandidateSet.create(
     study,
     "crypto-final-selection",
     pool_members,
-    comparison_contract={"comparable_fields": ["label_artifact", "cv"]},
+    comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
     supersedes=SUPERSEDES or None,
 )
 print(f"{len(pool.members)} candidates across {len(labels)} labels")
@@ -202,15 +210,41 @@ interval = compute_backtest_uncertainty(
 returns_by_hash = {}
 for member in pool.members:
     frame = load_daily_returns_with_timestamp("crypto_perps_funding", member)
-    if frame is not None:
-        returns_by_hash[member] = frame
+    if frame is None:
+        raise RuntimeError(f"pool member {member} has no registered return series")
+    returns_by_hash[member] = frame
 cohort = compute_cohort_metrics(returns_by_hash, periods_per_year=periods_per_year)
 if not cohort:
     raise RuntimeError("cohort alignment failed across the selection pool")
-if cohort["leader_hash"] != selected.hash:
+
+# %% [markdown]
+# The alignment intersects the pool on timestamp, and the intersection has to be the whole of
+# the shortest member's own series. If it is shorter than that, members disagree about *which*
+# dates they cover rather than about how many, and the corrections below would be computed on a
+# period none of them was measured over. The check is exact and carries no tolerance.
+#
+# When the intersection is clean, the ranking on it can still differ from the registered one by a
+# place, because each registered Sharpe was computed on that result's own series and these are
+# computed on the common one. That is a real difference and is reported rather than suppressed.
+
+# %%
+aligned_periods = int(cohort["n_periods"]) if "n_periods" in cohort else None
+shortest = min(frame.height for frame in returns_by_hash.values())
+longest = max(frame.height for frame in returns_by_hash.values())
+if aligned_periods is not None and aligned_periods < shortest:
     raise RuntimeError(
-        "the cohort leader on common support is not the candidate set's selection; "
-        "the pool is not aligned on a single period"
+        f"the pool intersects to {aligned_periods} periods but its shortest member has "
+        f"{shortest}, so members cover different dates rather than different amounts"
+    )
+print(
+    f"members span {shortest} to {longest} periods and intersect on "
+    f"{aligned_periods if aligned_periods is not None else shortest}"
+)
+if cohort["leader_hash"] != selected.hash:
+    print(
+        "on the common period the highest Sharpe is "
+        f"{cohort['leader_hash']}, not the registered selection {selected.hash}; "
+        "the difference is the period each was originally measured over"
     )
 
 # %% [markdown]

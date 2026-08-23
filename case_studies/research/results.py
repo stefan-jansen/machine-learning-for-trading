@@ -89,6 +89,19 @@ def _stored_source(
     return ("released", Path(row[0]).resolve()) if row is not None else (default, None)
 
 
+# The fields of :meth:`Result.protocol` that a return horizon is entitled to change. Its
+# complement - `split` and `execution_tier` - must match across any set of results being
+# compared, and a candidate set refuses a member that disagrees on either. This list is a
+# property of what `protocol` returns rather than of any one case study, so it lives beside
+# it; a case study comparing across horizons declares these as `comparable_fields` instead
+# of keeping its own copy.
+HORIZON_DEPENDENT_PROTOCOL_FIELDS: tuple[str, ...] = (
+    "cv",
+    "feature_artifacts",
+    "label_artifact",
+)
+
+
 @dataclass(frozen=True)
 class Result:
     study: Study
