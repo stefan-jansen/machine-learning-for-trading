@@ -83,6 +83,7 @@ from case_studies.utils.backtest_loaders import (
     get_rebalance_step,
     load_backtest_prices_for,
 )
+from case_studies.utils.coverage import check_prediction_coverage
 from case_studies.utils.sweep_config import get_entry_schemes_for
 from utils.artifact_specs import load_setup_config
 from utils.style import COLORS, show_plotly_with_alt
@@ -227,6 +228,43 @@ for label in labels:
         }
     )
 pl.DataFrame(intervals).sort("label")
+
+# %% [markdown]
+# ### Every decision the declaration asks for
+#
+# The interval check above reads the gaps between consecutive decisions and cannot see a decision
+# that is not there. A fold that ends early, or is missing outright, still has correct gaps
+# between the decisions it does contain, so the check passes on a prediction set covering half
+# the period it claims. Every other guard in the pipeline is relative in the same way -
+# completeness compares one configuration's key count against its peers', and a fault upstream of
+# the fit moves every peer together.
+#
+# `check_prediction_coverage` compares against the declaration instead: the fold boundaries in
+# `config/setup.yaml`, and the sessions the label artifact actually holds inside them. It asks
+# that the folds present are the folds declared, that every declared session carries a row, and
+# that the declared folds account for the whole window.
+
+# %% tags=["results"]
+coverage = [
+    check_prediction_coverage(
+        reference_predictions(label),
+        "crypto_perps_funding",
+        label,
+        case_dir=study.root,
+    )
+    for label in labels
+]
+pl.DataFrame(
+    [
+        {
+            "label": report.label,
+            "declared_folds": report.declared_folds,
+            "declared_sessions": report.expected_sessions,
+            "observed_sessions": report.observed_sessions,
+        }
+        for report in coverage
+    ]
+).sort("label")
 
 # %% [markdown]
 # ## 3. Which entry rules the universe can support
