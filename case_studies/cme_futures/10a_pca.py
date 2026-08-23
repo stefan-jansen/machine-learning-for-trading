@@ -45,6 +45,10 @@ from case_studies.cme_futures.research_workflow import (
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
+# The population hash this run replaces, read from the registry and set by a person. A
+# first population takes None; a re-run whose membership has changed is refused without
+# the hash it supersedes, and the refusal names the value required.
+SUPERSEDES_POPULATION: str | None = None
 
 # %% [markdown]
 # ## Declared requests
@@ -84,6 +88,7 @@ if EXECUTION_TIER == "canonical":
         requests,
         population_name="cme_futures-pca-validation-v1",
         resolved_requests=resolved,
+        supersedes=SUPERSEDES_POPULATION,
     )
 else:
     if WORKSPACE is None or not PREVIEW_REDUCTIONS:
