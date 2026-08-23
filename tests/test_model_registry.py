@@ -381,7 +381,7 @@ def _query_registry(db_path: Path, table: str, where: str = "") -> list[dict]:
         db.close()
 
 
-def _run_registry(output_root: Path, case_study: str) -> Path:
+def _run_registry(output_root: Path, case_study: str, notebook_path: Path) -> Path:
     """Return the registry the notebook actually wrote, canonical or preview.
 
     `run_notebook(..., research_preview=True)` injects EXECUTION_TIER=preview into every notebook
@@ -394,11 +394,32 @@ def _run_registry(output_root: Path, case_study: str) -> Path:
     notebooks: `_query_registry` returns `[]` for a file that does not exist, so "wrote to the
     other registry" and "registered nothing" produced the same empty list. That is what made the
     entry_point assertion look like a provenance problem when it was a path problem.
+
+    Which of the two applies is decided by the notebook, not by which file happens to exist. The
+    output root is session-scoped and shared across every notebook in `MODEL_TESTS`, so keying on
+    existence meant that once any migrated notebook in a case study created `.preview`, a later
+    unmigrated notebook in that same case study wrote canonical and was read from preview - a
+    registry it never touched, which reads as "registered nothing".
     """
-    preview = output_root / ".preview" / case_study / "run_log" / "registry.db"
-    if preview.exists():
-        return preview
+    if _declares_execution_tier(notebook_path):
+        return output_root / ".preview" / case_study / "run_log" / "registry.db"
     return output_root / case_study / "run_log" / "registry.db"
+
+
+def _declares_execution_tier(notebook_path: Path) -> bool:
+    """Whether this notebook has an EXECUTION_TIER parameter for `research_preview` to inject.
+
+    `run_notebook(..., research_preview=True)` is passed for every notebook, but it only reaches a
+    notebook whose parameters cell declares the name; an unmigrated notebook ignores it and runs
+    canonical. So the declaration is what decides the tier, and reading it is how this stays right
+    while the fleet is part-migrated.
+    """
+    source = notebook_path.read_text()
+    return any(
+        line.split("=")[0].strip() == "EXECUTION_TIER"
+        for line in source.splitlines()
+        if "=" in line
+    )
 
 
 def _registry_summary(db_path: Path) -> dict:
@@ -462,7 +483,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     timeout = overrides.get("timeout", default_timeout)
 
     # --- Snapshot registry state before run ---
-    before = _registry_summary(_run_registry(isolated_model_output, case_study))
+    before = _registry_summary(_run_registry(isolated_model_output, case_study, notebook_path))
 
     # --- Execute ---
     result = run_notebook(
@@ -479,8 +500,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     )
 
     # --- Registry assertions (for notebooks that register) ---
-    # Resolved again after the run: the preview root does not exist until the notebook creates it.
-    registry_db = _run_registry(isolated_model_output, case_study)
+    registry_db = _run_registry(isolated_model_output, case_study, notebook_path)
     after = _registry_summary(registry_db)
 
     # Check if this notebook is expected to register (match on suffix)
