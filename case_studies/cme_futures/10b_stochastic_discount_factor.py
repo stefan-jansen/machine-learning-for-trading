@@ -14,69 +14,101 @@
 # ---
 
 # %% [markdown]
-# # Stochastic Discount Factor for CME Futures
+# # CME Futures: Stochastic Discount-Factor Features
 #
-# The CME futures latent-factor lineup currently uses SDF as the nonlinear
-# counterpart to the PCA baseline, evaluated through the beta-network head.
+# The stochastic discount-factor model learns fold-scoped latent factors from the product panel and
+# maps them to each declared forward-return horizon. Training rows determine the representation;
+# validation rows are transformed without refitting. The fitted model, fold identity, prediction
+# shard, and eligible validation keys are persisted together.
+#
+# The notebook executes the declared SDF configurations and publishes their catalog rows. IC remains
+# diagnostic. The equal-weight validation backtest in `13_backtest` selects configurations.
+#
+# Prerequisites: `03_financial_features`, `04_model_based_features`, and `05_evaluation`.
 
 # %%
-"""CME futures SDF case-study run via the shared latent-factor library path."""
+"""Fit the declared CME futures stochastic discount-factor population."""
 
-import warnings
+import polars as pl
 
-from case_studies.utils.latent_factors.case_study import (
-    configured_models,
-    load_case_study_context,
-    run_case_study_model,
+from case_studies.cme_futures.research_workflow import (
+    ALL_LABELS,
+    model_request_catalog,
+    open_study,
+    product_universe_table,
+    resolve_model_requests,
+    resolved_model_plan,
+    run_official_model_catalog,
+    run_resolved_model_requests,
 )
-
-warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "cme_futures"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-N_FACTORS = 5
-N_EPOCHS = 50
-USE_CACHE = True
-FORCE_RETRAIN = False
-MAX_FOLDS = 0
-MAX_VARIANT_LABELS = -1
-USE_MACRO = True
-MODEL_NAME = "sdf"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_REDUCTIONS: dict = {}
+# The population hash this run replaces, read from the registry and set by a person. A
+# first population takes None; a re-run whose membership has changed is refused without
+# the hash it supersedes, and the refusal names the value required.
+SUPERSEDES_POPULATION: str | None = None
+
+# %% [markdown]
+# ## Declared requests
+#
+# Both return horizons use the named stochastic discount-factor configuration. The resolved plan
+# shows the eligible rows, folds, feature count, checkpoint schedule, and identity before fitting.
 
 # %%
-context = load_case_study_context(
-    CASE_STUDY_ID,
-    primary_label=PRIMARY_LABEL,
-    max_symbols=MAX_SYMBOLS,
-    max_folds=MAX_FOLDS,
-    max_variant_labels=MAX_VARIANT_LABELS,
-    use_macro=USE_MACRO,
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+requests = model_request_catalog(
+    "latent_factors",
+    labels=ALL_LABELS,
+    config_names=("sdf",),
 )
-available_models = configured_models(context)
-if MODEL_NAME not in available_models:
-    raise ValueError(f"{MODEL_NAME!r} is not configured for {CASE_STUDY_ID}")
-
-print(f"Case study: {CASE_STUDY_ID}")
-print(f"Model: {MODEL_NAME}")
-print(f"Primary label: {context.primary_label}")
-print(f"Dataset rows: {len(context.dataset):,}")
-print(f"Features: {len(context.feature_names)}")
-print(f"Splits: {len(context.splits)}")
-print(f"Macro panel: {'enabled' if context.macro_panel is not None else 'disabled'}")
-print(f"Model kwargs: {context.model_kwargs.get(MODEL_NAME, {})}")
+resolved = resolve_model_requests(
+    study,
+    requests,
+    execution_tier=EXECUTION_TIER,
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+universe = product_universe_table()
+universe
 
 # %%
-result = run_case_study_model(
-    context,
-    model_name=MODEL_NAME,
-    notebook="10b_stochastic_discount_factor",
-    n_factors=N_FACTORS,
-    n_epochs=N_EPOCHS,
-    use_cache=USE_CACHE,
-    force_retrain=FORCE_RETRAIN,
-)
+resolved_model_plan(resolved)
 
-print(result["model_results"])
-print(result["fold_metrics"][MODEL_NAME])
+# %% [markdown]
+# ## Execute and validate
+#
+# The shared latent-factor runner fits each representation inside its training fold, persists the
+# fitted state, and requires the complete validation key set before publication.
+
+# %%
+if EXECUTION_TIER == "canonical":
+    execution, population = run_official_model_catalog(
+        study,
+        requests,
+        population_name="cme_futures-sdf-validation-v1",
+        resolved_requests=resolved,
+        supersedes=SUPERSEDES_POPULATION,
+    )
+else:
+    if WORKSPACE is None or not PREVIEW_REDUCTIONS:
+        raise ValueError("preview execution requires WORKSPACE and PREVIEW_REDUCTIONS")
+    execution = run_resolved_model_requests(study, resolved)
+    population = None
+
+# %% tags=["results"]
+catalog = execution.catalog_rows.select(
+    "family",
+    "label",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "execution_tier",
+    "complete",
+    "training_hash",
+    "prediction_hash",
+).sort("label", "checkpoint_value")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("stochastic discount-factor execution returned a partial prediction")
+catalog
