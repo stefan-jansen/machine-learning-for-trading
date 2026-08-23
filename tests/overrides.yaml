@@ -2026,11 +2026,25 @@ case_studies/us_firm_characteristics/07_tabular_dl:
   # study pins no tabular_dl device.
   gpu: true
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 30
-    N_EPOCHS: 1
-  timeout: 180
+    # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration knobs and the
+    # migrated notebook binds none of them, so `unusable_parameters` flags all four - the
+    # folding in `_collect_preview_reductions` happens after that check reads this file, not
+    # before, so MAX_FOLDS and MAX_SYMBOLS are no more reachable here than the other two.
+    # A reduction reaches a migrated notebook only under the name it actually declares.
+    #
+    # The harness supplies the tier: `research_preview_parameters` sees EXECUTION_TIER and
+    # WORKSPACE in the parameters cell and injects preview plus the isolated output root, and
+    # `_collect_preview_reductions` would otherwise substitute a bare `max_symbols: 5`. Naming
+    # the reduction here instead is what keeps the checkpoint surface in the CI path: two
+    # checkpoints at 25 and 50 exercise the per-epoch prediction sets that the whole notebook
+    # is about, where a five-symbol run at the declared 200 epochs would pay for eight of them
+    # and prove the same thing.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 25
+      folds: [0, 1]
+      max_symbols: 5
+      n_epochs: 50
+  timeout: 300
 case_studies/us_firm_characteristics/08_latent_factors:
   gpu: true
   timeout: 300
