@@ -610,8 +610,24 @@ def publish_product_weights(
             "expiry_policy": EXPIRY_POLICY,
         },
         source_identity=source_identity,
+        # Positions carry across a fold boundary rather than being liquidated.
+        #
+        # The five expanding-window folds are adjacent in calendar time and nothing
+        # happens in the market on the four dates that separate them, so flattening
+        # there would be an artifact of the evaluation index rather than a property
+        # of the strategy. Liquidating also cannot be executed here in any case: the
+        # configured weekly_friday_close -> monday_open delay means the engine has no
+        # weight row to snap the reset onto, and research/strategy.py:128-149 refuses
+        # to snap it forward because that carries the old state across the boundary
+        # and then pays a round trip for no change in exposure.
+        #
+        # What this gives up: per-fold metrics are no longer computed from a flat
+        # start, so a fold inherits at most one week of exposure from the fold before
+        # it. Four boundaries against roughly 260 weekly decisions, so about 1.5% of
+        # them. Any notebook reporting per-fold results must say so rather than claim
+        # each fold begins flat.
         state_transition_policy=StateTransitionPolicy(
-            fold_boundary="liquidate",
+            fold_boundary="continue",
             temporal_gap="continue",
         ),
         canonical=canonical,
