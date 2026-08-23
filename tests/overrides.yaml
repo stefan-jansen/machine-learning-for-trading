@@ -1707,7 +1707,15 @@ case_studies/sp500_equity_option_analytics/10_dl_patchtst:
   timeout: 180
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   timeout: 600
-case_studies/sp500_equity_option_analytics/11a_pca: {}
+case_studies/sp500_equity_option_analytics/11a_pca:
+  # The harness forces EXECUTION_TIER=preview and WORKSPACE for any notebook declaring both, and
+  # _collect_preview_reductions would otherwise substitute a bare max_symbols: 5. Declared here so
+  # the preview identity says what it reduced. PCA needs no factor reduction: it decomposes the
+  # return panel, so the fixture's cross-section bounds nothing the way it does for IPCA below.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_equity_option_analytics/11b_ipca:
   # IPCA estimates a 45-characteristic Gamma from the cross-section. Production
   # has 634 symbols; the CI fixture has 23, giving 19-21 assets per date, so at
@@ -1742,9 +1750,19 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # reruns: 2 stays as a second line of defense, now that
   # pytest-rerunfailures is actually installed in the case-study CI job
   # (.github/workflows/test.yml) - it was a silent no-op before.
+  #
+  # After the migration none of those knobs is a papermill parameter any more. N_FACTORS was a
+  # positional argument of the retired run_case_study_model; it is now a declared preview
+  # reduction, which is where it belongs - it changes the preview identity rather than silently
+  # refitting a different model under the canonical name. MAX_VARIANT_LABELS is gone with the
+  # variant path: the notebook fits every declared label through one population, and the
+  # non-identified second variant the old comment describes is covered by the same n_factors
+  # reduction. The factor_ridge/gamma_ridge patch in tests/preset_patches.py is unchanged and
+  # still does the numerical work described above.
   parameters:
-    MAX_VARIANT_LABELS: 1
-    N_FACTORS: 2
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_factors: 2
   reruns: 2
   timeout: 600
 

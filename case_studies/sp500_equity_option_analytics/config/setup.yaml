@@ -319,6 +319,15 @@ modeling:
     max_bin: 255
   latent_factors:
     persistent_entities: true
+    # The device the family is fitted on. Declared rather than left out: it sits inside
+    # the hashed computation (case_studies/utils/latent_factors/adapter.py, computation
+    # .runtime and .numerical_runtime), and with no key here case_study.py falls back to
+    # preferred_latent_device(), which returns cuda or cpu depending on what the machine
+    # running it happens to have. That makes the training identity a property of the host.
+    # The three neural members are fitted here; 11a_pca and 11b_ipca override it to cpu,
+    # because run_pca_fold and run_ipca_fold are numpy and scipy and take no device at
+    # all, so recording cuda for them would describe a computation that did not happen.
+    device: cuda
     model_kwargs:
       ipca:
         max_iter: 10000
