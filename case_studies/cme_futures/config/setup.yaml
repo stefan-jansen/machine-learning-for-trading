@@ -343,6 +343,15 @@ modeling:
     max_bin: 255
   latent_factors:
     persistent_entities: true
+    # Declared, not inferred. Without this key case_study.py:93 falls back to
+    # preferred_latent_device(), which is `cuda` where torch sees a GPU and `cpu` where it
+    # does not. device enters computation.runtime and computation.numerical_runtime, both
+    # inside the hashed computation, so the same declared configuration resolves a different
+    # training identity on a GPU host than on a CPU one and each publishes under the same
+    # population name. 10b is neural and takes this; 10a overrides it to cpu, because
+    # PCAModel is numpy and scipy with no device argument and recording cuda there would
+    # describe a computation that did not happen.
+    device: cuda
     model_kwargs:
       sdf:
         checkpoint_epochs: [256, 512, 768, 1024]  # conditional-relative; publishes global 256..1280

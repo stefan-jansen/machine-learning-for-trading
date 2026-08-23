@@ -55,6 +55,14 @@ SUPERSEDES_POPULATION: str | None = None
 #
 # Both return horizons use the named PCA configuration. The resolved plan shows the eligible rows,
 # folds, feature count, checkpoint schedule, and identity before fitting begins.
+#
+# **PCA publishes on the CPU, and says so rather than inheriting it.** `setup.yaml` declares
+# `cuda` for the latent-factor family because the stochastic discount factor in
+# [`10b`](10b_stochastic_discount_factor.ipynb) is a neural model. This one is not: `PCAModel` is
+# numpy and scipy linear algebra and its `fit` takes no device argument, so a run recording `cuda`
+# would name hardware the computation never touched. The device is part of the hashed computation -
+# it enters both `runtime` and `numerical_runtime` - so this is an identity the notebook is
+# choosing, not a comment about it.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
@@ -67,6 +75,7 @@ resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
+    overrides={"device": "cpu"},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 universe = product_universe_table()

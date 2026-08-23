@@ -56,6 +56,18 @@ SUPERSEDES_POPULATION: str | None = None
 #
 # Both return horizons use the named stochastic discount-factor configuration. The resolved plan
 # shows the eligible rows, folds, feature count, checkpoint schedule, and identity before fitting.
+#
+# **This model publishes on `cuda`, declared in `setup.yaml` rather than detected.** The device
+# enters both `runtime` and `numerical_runtime` inside the hashed computation, so leaving it to
+# `preferred_latent_device()` would resolve one training identity on a GPU host and a different one
+# on a CPU host, both publishing under this population's name. `10a_pca` overrides the same
+# declaration to `cpu`, because PCA has no GPU implementation to record.
+#
+# **Nothing here fails on a fit that did not converge.** The shared runner enforces convergence for
+# IPCA only, and this case study does not declare IPCA; for the stochastic discount factor it
+# records the training history and the terminal Sharpe as fold extras and checks neither. That is a
+# gap in shared code rather than in this notebook, so what is claimed below is that every declared
+# checkpoint was produced and registered - not that the objective had settled when it was.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
