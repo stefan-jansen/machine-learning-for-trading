@@ -34,6 +34,7 @@ from case_studies.sp500_options._htm_backtest import (
     _select_cohorts,
     option_contract_source_identity,
     option_data_paths,
+    option_source_identity,
 )
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
@@ -316,6 +317,31 @@ def official_prediction_catalog(
     )
 
 
+def option_trade_calendar() -> pl.DataFrame:
+    """Return the decision, entry and expiration date of every candidate straddle.
+
+    One row per ``(decision date, symbol)`` in the option artifact the strategy chooses
+    from, before any ranking. The three dates are what a reader needs to check that the
+    interval traded is the interval the label measures: the decision uses information up
+    to its own session close, the position opens at the next session close, and it is held
+    until the contracts expire.
+    """
+    labels_dir, _raw_options_dir = option_data_paths()
+    calendar = pl.read_parquet(labels_dir / "contract_returns.parquet").select(
+        pl.col("feature_date").alias("decision_date"),
+        "symbol",
+        "entry_date",
+        "expiration",
+    )
+    if calendar.n_unique(["decision_date", "symbol"]) != calendar.height:
+        raise ValueError("option candidates are not unique by decision date and symbol")
+    if calendar.filter(pl.col("entry_date") <= pl.col("decision_date")).height:
+        raise ValueError("an option entry does not follow its own decision session")
+    if calendar.filter(pl.col("expiration") < pl.col("entry_date")).height:
+        raise ValueError("an option expires before it is entered")
+    return calendar.sort("decision_date", "symbol")
+
+
 def selected_prediction(study: Study, catalog_row: dict[str, Any]) -> PredictionResult:
     """Resolve one complete selected prediction row."""
     result = Result.open(
@@ -334,8 +360,23 @@ def resolve_short_straddle_decisions(
     prices: pl.DataFrame,
     signal: dict[str, Any],
     allocation: dict[str, Any] | None = None,
+    data_paths: tuple[Path, Path] | None = None,
+    option_contract_returns: dict[str, Any] | None = None,
+    option_sources: dict[str, Any] | None = None,
 ) -> pl.DataFrame:
-    """Resolve ranked predictions to exact option contracts and cohort weights."""
+    """Resolve ranked predictions to exact option contracts and cohort weights.
+
+    ``data_paths`` binds the resolved ``(labels_dir, raw_options_dir)`` explicitly so a clean
+    replay reproduces the parent's decisions from the parent's inputs rather than whatever the
+    child process would resolve on its own.
+
+    ``option_contract_returns`` and ``option_sources`` are the option-artifact identities recorded
+    in the decision artifact's ``declared_inputs``. ``research.holdout`` injects every declared
+    input back into this function when it replays a locked decision on the holdout prediction, so
+    they must be accepted here. They are checked rather than consumed: the option artifacts are
+    immutable, so a holdout replay that resolves a different digest than the lock recorded is
+    reading different data and must fail instead of silently producing a second population.
+    """
     if prediction.lineage()["training_spec"]["label"] != PRIMARY_LABEL:
         raise ValueError("short-straddle decisions require ret_to_expiry predictions")
     predictions = normalize_prediction_columns(prediction.load())
@@ -346,7 +387,19 @@ def resolve_short_straddle_decisions(
         signal,
         prediction_hash=prediction.hash,
     )
-    labels_dir, raw_options_dir = option_data_paths()
+    labels_dir, raw_options_dir = option_data_paths() if data_paths is None else data_paths
+    if (
+        option_contract_returns is not None
+        and option_contract_source_identity(labels_dir) != option_contract_returns
+    ):
+        raise ValueError(
+            "locked option contract-return identity does not match the resolved artifact"
+        )
+    if (
+        option_sources is not None
+        and option_source_identity(labels_dir, raw_options_dir) != option_sources
+    ):
+        raise ValueError("locked option source identity does not match the resolved artifacts")
     contract_returns = pl.read_parquet(labels_dir / "contract_returns.parquet")
     decisions = _select_cohorts(
         predictions,
@@ -354,6 +407,7 @@ def resolve_short_straddle_decisions(
         method=str(signal.get("method", "equal_weight_top_k")),
         top_k=int(signal.get("top_k", 20)),
         percentile=float(signal.get("percentile", 90.0)),
+        raw_options_dir=raw_options_dir,
     )
     if allocation:
         decisions = _apply_cohort_allocator(decisions, raw_options_dir, allocation)
@@ -418,7 +472,7 @@ def _publish_resolved_short_straddle_decisions(
 ) -> DecisionArtifact:
     if canonical and clean_replay_digest is None:
         raise ValueError("canonical option decisions require a clean-process replay digest")
-    labels_dir, _ = option_data_paths()
+    labels_dir, raw_options_dir = option_data_paths()
     contract_identity = option_contract_source_identity(labels_dir)
     source_identity: dict[str, Any] | None = None
     if canonical:
@@ -435,6 +489,7 @@ def _publish_resolved_short_straddle_decisions(
                 "prediction_hashes": [prediction.hash],
                 "prices": value_digest(prices),
                 "option_contract_returns": contract_identity,
+                "option_sources": option_source_identity(labels_dir, raw_options_dir),
                 "signal": signal,
                 "allocation": allocation,
             },
@@ -468,7 +523,9 @@ def _clean_replay_digests(
     tiers = {str(request["execution_tier"]) for request in requests}
     if len(tiers) != 1:
         raise ValueError("clean option decision replay cannot mix execution tiers")
+    labels_dir, raw_options_dir = option_data_paths()
     payload = {
+        "data_paths": {"labels": str(labels_dir), "raw_options": str(raw_options_dir)},
         "study": {
             "case_study": study.case_study,
             "root": str(study.root),
@@ -694,6 +751,10 @@ def _replay_from_stdin() -> None:
         manifest=descriptor["manifest"],
     )
     study.activate(payload["execution_tier"])
+    data_paths = (
+        Path(payload["data_paths"]["labels"]),
+        Path(payload["data_paths"]["raw_options"]),
+    )
     catalog = study.predictions.table(include_preview=True)
     price_cache: dict[tuple[str, int], pl.DataFrame] = {}
     replayed = []
@@ -717,6 +778,7 @@ def _replay_from_stdin() -> None:
             prices=price_cache[cache_key],
             signal=row["signal"],
             allocation=allocation,
+            data_paths=data_paths,
         )
         replayed.append(
             {"request_name": row["request_name"], "decision_digest": value_digest(decisions)}
