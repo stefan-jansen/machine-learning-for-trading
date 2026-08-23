@@ -59,7 +59,7 @@ from ml4t.diagnostic.integration.backtest_contract import TradeRecord
 
 from data import load_etfs, load_macro
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2006-01-01"
@@ -68,6 +68,10 @@ N_ESTIMATORS = 100
 TRAIN_FRACTION = 0.70
 WORST_N = 20
 MIN_EXPECTED_RETURN_BPS = 5
+STRESS_VIX_LEVEL = 25
+MOMENTUM_WINDOW = 20
+VOLATILITY_WINDOW = 20
+VOLUME_WINDOW = 60
 SEED = 42
 
 # %%
@@ -79,6 +83,25 @@ MIN_EXPECTED_RETURN = MIN_EXPECTED_RETURN_BPS / 10_000
 
 # %%
 set_global_seeds(SEED)
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `TRAIN_FRACTION` splits the sample chronologically. Everything before the boundary fits the
+#   model; everything after is the population the diagnosis runs on, and the model has never seen
+#   any of it.
+# - `MIN_EXPECTED_RETURN_BPS` is the forecast a prediction must clear before the notebook opens a
+#   position. Without it, every session with a forecast a hair above zero becomes a trade, and the
+#   worst-trade analysis fills with positions nobody would have taken. It stands in for the costs
+#   `18_transaction_costs` measures; those are not charged here.
+# - `WORST_N` is how many losing trades the SHAP analysis dissects. Small enough that each cluster
+#   can be read individually, large enough that clusters exist.
+# - `STRESS_VIX_LEVEL` is the volatility index level above which a session is labelled stressed,
+#   which is the `regime` feature. It is a round number, not a fitted boundary.
+# - `MOMENTUM_WINDOW`, `VOLATILITY_WINDOW` and `VOLUME_WINDOW` are the lookbacks the three
+#   price-derived features are computed over.
+# - `N_ESTIMATORS` bounds model capacity, and `GPU_MAX_BIN` sets the histogram resolution
+#   LightGBM's CUDA implementation uses.
 
 # %% [markdown]
 # ## 1. Build a Real Single-Asset Feature Panel
@@ -103,7 +126,7 @@ macro = macro.rename({column: column.lower() for column in macro.columns})
 macro = macro.select(
     "timestamp",
     yield_slope="t10y2y",
-    regime=(pl.col("vixcls") > 25).cast(pl.Int8),
+    regime=(pl.col("vixcls") > STRESS_VIX_LEVEL).cast(pl.Int8),
 )
 assert spy.n_unique(["symbol", "timestamp"]) == spy.height
 assert macro["timestamp"].n_unique() == macro.height
@@ -121,11 +144,11 @@ features_df = (
         exit_price=pl.col("close").shift(-1),
     )
     .with_columns(
-        momentum=(pl.col("close") / pl.col("close").shift(20) - 1),
-        volatility=pl.col("_ret").rolling_std(20),
+        momentum=(pl.col("close") / pl.col("close").shift(MOMENTUM_WINDOW) - 1),
+        volatility=pl.col("_ret").rolling_std(VOLATILITY_WINDOW),
         volume_zscore=(
-            (pl.col("volume") - pl.col("volume").rolling_mean(60))
-            / pl.col("volume").rolling_std(60)
+            (pl.col("volume") - pl.col("volume").rolling_mean(VOLUME_WINDOW))
+            / pl.col("volume").rolling_std(VOLUME_WINDOW)
         ),
         fwd_return=(pl.col("exit_price") / pl.col("close") - 1),
     )
@@ -143,7 +166,7 @@ features_df = (
     .sort("timestamp")
 )
 
-# %%
+# %% tags=["results"]
 np.testing.assert_allclose(
     features_df["fwd_return"],
     features_df["exit_price"] / features_df["entry_price"] - 1,
@@ -190,7 +213,7 @@ y_test = test_df["fwd_return"].to_numpy()
 # identical buffered trade selections and explanation identities across fresh
 # GPU processes in the same pinned image.
 
-# %%
+# %% tags=["results"]
 model = lgb.LGBMRegressor(
     n_estimators=N_ESTIMATORS,
     max_depth=3,
@@ -285,7 +308,7 @@ trade_records = [
     for trade in trade_dicts
 ]
 
-# %%
+# %% tags=["results"]
 trades_df = pl.DataFrame(trade_dicts)
 winning_trades = int((trades_df["pnl"] > 0).sum())
 losing_trades = int((trades_df["pnl"] < 0).sum())
@@ -294,7 +317,7 @@ display(
     Markdown(
         f"Forecasts above the fixed **{MIN_EXPECTED_RETURN_BPS} bp buffer** produce "
         f"**{trades_df.height:,} long trades**: "
-        f"**{winning_trades:,} winners**, **{losing_trades:,} losers**, and "
+        f"**{winning_trades:,} profitable**, **{losing_trades:,} at a loss**, and "
         f"**{flat_trades:,} flat**."
     )
 )
@@ -335,7 +358,7 @@ worst_summary
 # its trade's exact exit timestamp because `TradeRecord.timestamp` is the exit
 # field in the integration contract.
 
-# %%
+# %% tags=["results"]
 explainer = shap.TreeExplainer(model)
 shap_values = explainer.shap_values(X_test)
 expected_value = float(np.asarray(explainer.expected_value).reshape(-1)[0])
@@ -381,7 +404,7 @@ assert shap_analyzer.feature_names == FEATURE_COLS
 # align timestamps, extract SHAP vectors, cluster patterns, characterize, and
 # generate hypotheses.
 
-# %%
+# %% tags=["results"]
 result = shap_analyzer.explain_worst_trades(worst_trades)
 assert result.n_trades_analyzed == len(worst_trades)
 assert result.n_trades_explained == len(worst_trades)
@@ -508,10 +531,7 @@ fig = px.bar(
     barmode="group",
     color_discrete_map={"Predicted": COLORS["blue"], "Realized": COLORS["amber"]},
     category_orders={"trade_label": entry_order},
-    title=(
-        f"The worst miss on {worst_miss['entry_time']:%Y-%m-%d} forecast "
-        f"{worst_miss['predicted_pct']:+.1f}% before {worst_miss['actual_pct']:+.1f}% realized"
-    ),
+    title="Every worst trade was forecast to rise and every one fell",
     labels={
         "return_pct": "Next-session return (%)",
         "trade_label": "",
@@ -525,7 +545,10 @@ fig.update_layout(
     margin=dict(l=150, r=30, t=85, b=55),
     legend=dict(orientation="h", y=1.08),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Paired horizontal bars per worst trade, forecast against realized next-session return. Every forecast bar points positive and every realized bar points negative, by varying amounts.",
+)
 
 # %% [markdown]
 # ## 11. Inspect Attribution Variability
@@ -550,13 +573,16 @@ fig = px.box(
     y="feature",
     category_orders={"feature": feature_order},
     points="all",
-    title=f"{dominant_feature} has the largest mean |SHAP| across the worst trades",
+    title="Which feature drove each losing forecast, and how consistently",
     labels={"shap_bps": "SHAP contribution to predicted return (bps)", "feature": "Feature"},
 )
 fig.update_traces(marker_color=COLORS["blue"], line_color=COLORS["blue"], opacity=0.75)
 fig.add_vline(x=0, line_color=COLORS["neutral"], line_dash="dash")
 fig.update_layout(height=470, showlegend=False)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Box plots of SHAP contribution per feature across the worst trades, with individual points overlaid and a dashed line at zero. Several features straddle zero, so their contributions ran in both directions across the failures.",
+)
 
 # %% [markdown]
 # The forecast gaps confirm that these selected trades are genuine model
@@ -567,44 +593,70 @@ fig.show()
 # %% [markdown]
 # ## Key Takeaways
 
-# %%
+# %% tags=["results"]
 top_feature_counts = explanation_df.group_by("top_feature").len().sort("len", descending=True)
 top_feature_name = top_feature_counts["top_feature"][0]
 top_feature_trades = top_feature_counts["len"][0]
-cluster_takeaway = (
-    f"The default pipeline returns {len(result.error_patterns)} algorithmic hierarchical clusters. "
-    "Separation scores and corrected feature tests annotate them rather than gate reporting, and "
-    "the characterizer may fall back to top non-significant features. Their composition supports "
-    "model-review hypotheses, not causal claims."
-    if result.error_patterns
-    else "The pipeline returned no error pattern because clustering did not run or failed, not "
-    "because a statistical or separation threshold rejected every cluster."
-)
 display(
     Markdown(
-        f"""
-1. **Alignment is complete by construction.** Exact next-session timestamps connect all
-   {result.n_trades_explained} worst trades to their entry-decision feature vectors, with no
-   positional joins or calendar-day guesses.
-2. **A fixed {MIN_EXPECTED_RETURN_BPS} bp economic buffer leaves {trades_df.height:,}
-   model-directed longs and {losing_trades:,} losses.** It screens economically negligible forecasts;
-   the one-session purge keeps training labels outside the later diagnostic boundary.
-3. **{top_feature_name} is the largest absolute SHAP contributor for {top_feature_trades} of the
-   {len(result.explanations)} explained worst trades.** The box plots show signed dispersion, so
-   predictive attribution is not mistaken for a universal failure mechanism.
-4. **{cluster_takeaway}**
-5. **CUDA execution is best-effort reproducible, not bitwise deterministic.** Fixed seeds and pinned
-   inputs do not erase raw prediction drift. Fresh-process evidence therefore reports that drift and
-   requires identical buffered trade selections and explanation identities; this campaign does not
-   rerun a CPU configuration.
-"""
+        f"Of the {len(result.explanations)} worst trades explained, **{top_feature_name}** was the "
+        f"largest absolute contributor on **{top_feature_trades}**. The pipeline grouped them into "
+        f"**{len(result.error_patterns)} clusters**. The trades came from "
+        f"**{trades_df.height:,} model-directed longs**, of which "
+        f"**{losing_trades:,}** lost money."
     )
 )
 
 # %% [markdown]
+# 1. **Attach an explanation to the decision, not to the outcome's row.** A trade's SHAP vector has
+#    to be the one computed from the features the model actually saw when it opened the position.
+#    Joining on the exit date, or on row position across two frames that have dropped different
+#    rows, produces an explanation of a different decision and nothing complains.
+#
+# 2. **Screen out the trades nobody would have taken before asking which were worst.** Without a
+#    minimum expected return, every session whose forecast is a hair above zero becomes a trade,
+#    and the worst-trade analysis fills with positions that would never have been opened. The
+#    buffer here stands in for costs; charging the real ones from `18_transaction_costs` would
+#    screen more.
+#
+# 3. **Read the dispersion of an attribution, not just its average.** A feature can have the
+#    largest mean absolute SHAP across a set of failures while contributing in opposite directions
+#    within it. The average then names a feature that has no single failure mechanism behind it,
+#    which is why the signed distribution is plotted rather than a bar of means.
+#
+# 4. **SHAP attributes a prediction, not an outcome.** It decomposes what the model computed from
+#    the inputs it was given. It does not say the feature caused the loss, does not say the model
+#    was wrong to weight it, and cannot see a variable that was never a feature - which is the
+#    usual reason a set of trades failed together.
+#
+# 5. **Clusters of failures are hypotheses to check, not findings.** The pipeline will return
+#    clusters from any set of vectors. What makes one worth acting on is that it corresponds to
+#    something nameable - a regime, a data problem, a missing feature - and that check happens
+#    outside the clustering.
+#
+# 6. **A GPU fit is reproducible in its conclusions, not in its bits.** CUDA histogram reductions
+#    are not deterministic across processes, so fixed seeds do not pin the raw predictions. What
+#    can be required is that the same trades get selected and the same explanations attach, which
+#    is what the evidence bundle checks.
+#
+# ### Known limitations
+#
+# - One asset, one direction, one-session holds. Every trade is a long in SPY held overnight, so
+#   the failures cluster on what moves SPY overnight and not on anything a portfolio would face.
+# - The macro inputs come from a finalized snapshot rather than the vintages available at the time.
+#   The yield slope and the volatility index are both revised rarely, but the panel is not
+#   point-in-time and no macro conclusion should be drawn from it.
+# - No cost is charged. The expected-return buffer screens small forecasts but is not a cost model,
+#   and 746 overnight round trips would pay a great deal more than it.
+# - The worst trades are selected by realized loss, which is an outcome. A set of trades chosen
+#   that way contains the model's genuine failures and also its unlucky correct calls, and SHAP
+#   cannot separate the two.
+# - The regime feature is a threshold on the volatility index chosen as a round number. A different
+#   level would produce a different feature and, plausibly, different clusters.
+#
 # **Previous**: `04_factor_exposure` decomposes portfolio-level factor risk and return.
 #
-# **Next**: `06_stress_testing` extends single-trade diagnostics to portfolio-
-# level stress scenarios.
+# **Next**: `06_stress_testing` moves from diagnosing individual trades to asking what a portfolio
+# would have done in named crises.
 #
-# **Book reference**: §19.5 (Trade-Level SHAP as Diagnostic Tool).
+# **Book reference**: Chapter 19, Section 19.5.

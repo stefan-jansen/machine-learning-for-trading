@@ -70,8 +70,6 @@ DISPLAY_NAMES = {
     "us_equities_panel": "US Equities",
 }
 NASDAQ_ID = "nasdaq100_microstructure"
-NASDAQ_ACTIVE_HOLDOUT_HASH = "eb3da38446fe"
-NASDAQ_HOLDOUT_CI95 = (-2.07942782097352, 3.71411455717823)
 
 # %% [markdown]
 # ## 1. Load Pipeline Data
@@ -86,17 +84,17 @@ synthesis = json.load((OUTPUT_DIR / "all_synthesis.json").open())
 holdout_df = pl.read_parquet(OUTPUT_DIR / "holdout_results.parquet")
 holdout_map = {row["cs_id"]: row for row in holdout_df.iter_rows(named=True)}
 
-nasdaq_holdout = holdout_map.get(NASDAQ_ID)
-if (
-    nasdaq_holdout is None
-    or nasdaq_holdout.get("holdout_backtest_hash") != NASDAQ_ACTIVE_HOLDOUT_HASH
-):
-    raise RuntimeError(
-        "NASDAQ-100 v3.0 holdout row is absent or superseded; refusing historical fallback."
-    )
-
 print(f"Loaded synthesis for {len(synthesis)} case studies")
 print(f"Holdout results for {holdout_df.height} case studies")
+
+missing_holdout = sorted(set(synthesis) - set(holdout_map))
+if missing_holdout:
+    print(
+        "\nNo holdout row for: "
+        + ", ".join(DISPLAY_NAMES.get(cs, cs) for cs in missing_holdout)
+        + "\nEach is classified below as lacking holdout evidence rather than as having failed "
+        "a gate. The two are different conclusions and the table keeps them apart."
+    )
 
 # %% [markdown]
 # ## 2. Stage Attrition Funnel
@@ -338,12 +336,26 @@ def classify_exclusions():
                 {"cs": display, "detail": f"Max DD = {worst_dd:.0f}%"}
             )
 
-        if cs == NASDAQ_ID:
+        # A holdout interval that spans zero says the window cannot tell this strategy from one
+        # with no edge. That is a different finding from failing a gate, and it is read from the
+        # row rather than asserted, so it applies to whichever case studies it happens to be true
+        # of rather than to one named in advance.
+        if not ho:
+            exclusions["No holdout evidence"].append(
+                {"cs": display, "detail": "No holdout row in the registry"}
+            )
+        elif (
+            ho.get("holdout_sharpe_ci_lo") is not None
+            and ho.get("holdout_sharpe_ci_hi") is not None
+            and ho["holdout_sharpe_ci_lo"] < 0 < ho["holdout_sharpe_ci_hi"]
+        ):
             exclusions["Statistically unresolved"].append(
                 {
                     "cs": display,
                     "detail": (
-                        "Fixed-carrier holdout SR = +0.411, CI95 [-2.079, +3.714]; not deployable"
+                        f"Holdout Sharpe {ho['holdout_sharpe']:+.3f}, interval "
+                        f"[{ho['holdout_sharpe_ci_lo']:+.3f}, "
+                        f"{ho['holdout_sharpe_ci_hi']:+.3f}] spans zero"
                     ),
                 }
             )
@@ -608,17 +620,16 @@ if full_pass.height > 0 and gate_miss.height > 0:
 #
 # - **Daily frequency** case studies most often pass every gate — the
 #   cadence balances signal decay against cost pressure.
-# - **Higher-frequency** case studies split on outcome: Crypto (8h) clears
-#   the cost gate on its gross signal but has holdout Sharpe -0.13.
-#   NASDAQ-100's fixed ensemble carrier has corrected holdout Sharpe +0.411
-#   with CI95 [-2.079, +3.714]. It does not clear the evidence gate and remains
-#   marginal, statistically unresolved, and not deployable.
+# - **Higher-frequency** case studies split on outcome. One clears the cost gate on its gross
+#   signal and still turns in a negative holdout Sharpe. NASDAQ-100's holdout Sharpe is positive,
+#   and its confidence interval spans zero by a wide margin in both directions - the exclusion
+#   table above prints both. An interval that wide says the holdout window cannot distinguish this
+#   strategy from one with no edge, which is a different statement from having found it wanting.
 # - **Signal strength alone does not drive gate passage** — S&P 500 Options
 #   has positive IC and a positive holdout Sharpe under the bottom-quintile
-#   liquid-universe construction, but the HTM cost cascade pushes the best
-#   Sharpe to −0.28 even at the lowest 20% half-spread fraction, while CME
-#   futures passes downstream gates with a moderate IC because costs are
-#   low relative to the edge.
+#   liquid-universe construction, but the cost cascade turns its highest Sharpe negative even at
+#   the most generous half-spread assumption tested, while CME futures passes the downstream gates
+#   on a moderate IC because its costs are small relative to its edge.
 # - The top-ranked model family is a weaker predictor than frequency and
 #   cost structure. Deep-learning and GBM rank-1 configurations both appear
 #   in the full-pass group.

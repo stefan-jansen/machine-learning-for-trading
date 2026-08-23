@@ -13,11 +13,11 @@ who cannot allocate 80 GB is the reason both properties matter.
 from __future__ import annotations
 
 import gc
-import resource
 
 import polars as pl
 import pytest
 
+from case_studies.utils.runtime import peak_rss_bytes
 from utils.modeling import fold_temporal_frame, temporal_fold_index
 
 N_FOLDS = 8
@@ -131,19 +131,19 @@ class TestTheArtifactIsNotMaterialised:
     def test_selecting_a_fold_costs_a_fold_not_the_table(self, artifact_path):
         """The regression guard. Re-adding a ``.to_pandas()`` on the artifact fails here.
 
-        ``ru_maxrss`` is a high-water mark that never falls, so the baseline is taken before
+        ``peak_rss_bytes`` is a high-water mark that never falls, so the baseline is taken before
         anything in this test has read the artifact whole - reading it first would pay the peak
         up front and leave the assertion unable to fail. The budget is derived from one fold,
         not from the table, for the same reason.
         """
         gc.collect()
-        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        before = peak_rss_bytes()
 
         one_at_a_time = None
         for fold_id in range(N_FOLDS):
             one_at_a_time = fold_temporal_frame(pl.scan_parquet(artifact_path), fold_id)
         gc.collect()
-        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        after = peak_rss_bytes()
         assert one_at_a_time is not None
         growth = after - before
 

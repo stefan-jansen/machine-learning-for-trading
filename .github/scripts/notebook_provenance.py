@@ -52,9 +52,27 @@ Gate (``check``): for every tracked ``.ipynb`` that HAS a stamp,
 
 * ``source_py_blob`` must equal ``git hash-object`` of the current paired ``.py``
   (else the ``.py`` changed since the notebook was executed — STALE),
-* ``production`` must be True (else a TEST-mode run was committed), and
+* ``production`` must be True (else a TEST-mode run was committed),
+* some code cell must show it ran - an output or an execution count (else the stamp
+  is over a render nothing produced — HOLLOW), and
 * the stamp must not contradict a committed ``injected-parameters`` cell (else the
   notebook was re-executed with overrides after it was stamped).
+
+Two states are legal at commit time, and the second is what keeps the workflow
+linear:
+
+1. **Stamped and in sync** — the notebook is its current ``.py``, executed in
+   production. The checks above apply.
+2. **Cleared** — no stamp and no outputs. It makes no claim about a run, so there
+   is nothing to be stale. ``clear`` puts a notebook in this state. Edit the
+   ``.py``, ``jupytext --sync``, ``clear``, commit; execute later and the stamp and
+   the checks come back. Without this the gate has no legal path for a correction
+   to an already-executed notebook, because clearing the stale stamp read as
+   DE-STAMPED and keeping it read as STALE.
+
+The state the gate must still reject is the one that looks like (2) but claims (1):
+a stamp over a notebook showing no trace of execution — a render rebuilt from the
+``.py`` and re-stamped without a run behind it. That is HOLLOW and it fails.
 
 Notebooks WITHOUT a stamp are reported as "unverified" but do not fail unless
 ``--strict`` is passed. This is deliberate: adoption is gradual — stamp notebooks
@@ -66,6 +84,7 @@ Usage::
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --parameters '{"MAX_SYMBOLS": 5}'
     uv run python .github/scripts/notebook_provenance.py stamp <nb.ipynb> --executor ml4t-gpu --production --notes "..."
+    uv run python .github/scripts/notebook_provenance.py clear <nb.ipynb>  # commit it unexecuted
     uv run python .github/scripts/notebook_provenance.py check          # gate (stamped-only)
     uv run python .github/scripts/notebook_provenance.py check --strict  # also fail on unverified
 """
@@ -355,11 +374,20 @@ def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     return [(m, k, "".join(b)) for m, k, b in cells]
 
 
-def _blank_alts(code: str) -> tuple[str, list[str]] | None:
-    """(*code* with each alt literal replaced by a placeholder, the literals in source order).
+def _blank_alts(code: str) -> tuple[str, list[str | None]] | None:
+    """(*code* with each alt literal replaced by a placeholder, the alts in source order).
 
     None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
     byte offset, and replaces from the end so earlier spans keep their offsets.
+
+    An alt built with an f-string is reported as ``None`` rather than skipped. Its text
+    is not knowable from the source, so it cannot be compared against what the outputs
+    carry - but for the same reason it is not blanked either, so it stays in the AST dump
+    and any edit to it is caught as ordinary source drift. Dropping such a call from the
+    list instead would misalign every later position against the carried alts, and
+    omitting it entirely made the counts disagree and failed the whole notebook: eight
+    case studies write the leading configuration into their alt with an f-string, so the
+    carve-out never applied to the notebooks that read their figures off the frame.
     """
     try:
         tree = ast.parse(code)
@@ -370,29 +398,32 @@ def _blank_alts(code: str) -> tuple[str, list[str]] | None:
     for line in data.splitlines(keepends=True):
         line_start.append(line_start[-1] + len(line))
 
-    found: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str | None]] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and _alt_call_name(node.func) in ALT_FUNCS
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
         ):
             arg = node.args[1]
             if arg.end_lineno is None or arg.end_col_offset is None:
                 return None
+            literal = (
+                arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+            )
             found.append(
                 (
                     line_start[arg.lineno - 1] + arg.col_offset,
                     line_start[arg.end_lineno - 1] + arg.end_col_offset,
-                    arg.value,
+                    literal,
                 )
             )
     # ast.walk is breadth-first, not source order; the outputs it is compared against
     # are in source order.
-    found.sort()
-    for begin, finish, _ in reversed(found):
+    found.sort(key=lambda item: item[:2])
+    for begin, finish, literal in reversed(found):
+        if literal is None:
+            continue  # not blanked, so an edit to it stays visible in the AST dump
         data = data[:begin] + b'"<alt>"' + data[finish:]
     return data.decode("utf-8"), [alt for _, _, alt in found]
 
@@ -527,10 +558,18 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
             for out in cell.get("outputs", [])
             if "image/png" in out.get("data", {})
         ]
-        if len(blanked[1]) != len(carried) or any(
-            a != c for a, c in zip(blanked[1], carried, strict=True)
-        ):
+        if len(blanked[1]) != len(carried):
             return False
+        for a, c in zip(blanked[1], carried, strict=True):
+            if a is None:
+                # A computed alt. Its literal parts are in the AST dump the first half
+                # compared, so a change to them is already stale; what is left to require
+                # is that the output carries an alt at all, which is what catches an alt
+                # call added since the notebook was executed.
+                if not c:
+                    return False
+            elif a != c:
+                return False
     return True
 
 
@@ -634,8 +673,57 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
-def destamped(ref: str | None = None) -> list[str]:
+def was_executed(nb: dict) -> bool:
+    """True if any non-empty code cell in *nb* shows evidence of having been run.
+
+    Evidence is an output OR a non-null ``execution_count``. Outputs alone are not
+    enough to ask about: a cell that only assigns, writes a file or logs somewhere
+    else runs successfully and displays nothing, and a notebook made entirely of
+    those would otherwise read as never executed. The counter is written by the
+    kernel on every execution and cleared only deliberately, so the two together
+    separate "ran and said little" from "did not run".
+
+    The distinction matters twice below: a CLEARED notebook shows no evidence and so
+    claims nothing, and a STAMPED one claims a production run that left no evidence
+    at all, which no real run does.
+    """
+    saw_code = False
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        if not "".join(cell.get("source") or []).strip():
+            continue
+        saw_code = True
+        if cell.get("outputs") or cell.get("execution_count") is not None:
+            return True
+    return not saw_code
+
+
+def is_cleared(nb_path: Path) -> bool:
+    """True if *nb_path* carries neither a provenance stamp nor any output.
+
+    This is the state an edited-but-not-yet-executed notebook is committed in, and
+    it is the one state that makes the workflow linear: edit the ``.py``, sync,
+    clear the ``.ipynb``, commit. The notebook then asserts nothing about a run, so
+    there is nothing for the gate to catch it lying about. Execution restores the
+    outputs and the stamp, and the gate resumes checking them.
+
+    It is precisely distinguishable from the render the gate exists to reject. A
+    hollow render carries ``production: True`` over an empty output set - it claims
+    a run that did not happen. A cleared notebook carries no stamp at all.
+    """
+    try:
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return not nb.get("metadata", {}).get(STAMP_KEY) and not was_executed(nb)
+
+
+def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
     """Notebooks stamped at *ref* and unstamped now.
+
+    ``only`` restricts the answer to those paths, so the pre-commit gate reports a
+    stamp this commit is dropping rather than one another commit dropped earlier.
 
     The gate says nothing about a notebook with no stamp, which is deliberate - the
     corpus is being stamped as notebooks are re-run, and failing the ones that have
@@ -648,32 +736,48 @@ def destamped(ref: str | None = None) -> list[str]:
     return sorted(
         rel
         for rel in stamped_at(ref or stamp_reference())
-        if (REPO_ROOT / rel).exists()
+        if (only is None or rel in only)
+        and (REPO_ROOT / rel).exists()
         and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         .get("metadata", {})
         .get(STAMP_KEY)
+        # Dropping the stamp AND the outputs together is the documented way to
+        # commit an edited notebook before it is re-executed; only dropping the
+        # stamp while outputs stay is the regression this looks for.
+        and not is_cleared(REPO_ROOT / rel)
     )
 
 
 def check_all(
     strict: bool = False,
-) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
-    """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
+    only: set[str] | None = None,
+) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str]]:
+    """Return (stale, testmode, contradicted, unverified, alt_only, hollow) rows.
 
-    Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
+    ``stale``, ``testmode``, ``contradicted`` and ``hollow`` fail. ``alt_only`` is reported so that forgiving a drift is
     never silent: a notebook in that list has a ``.py`` that no longer matches its
     stamp, and the reason it is allowed is printed rather than assumed.
+
+    ``only`` restricts the scan to the notebooks whose ``.ipynb`` or paired ``.py``
+    is in that set of repo-relative paths. The pre-commit gate passes the staged
+    files, so a notebook someone else left dirty in the working tree no longer
+    blocks an unrelated commit; nothing unstaged can reach main, so the narrower
+    scan gives up no protection. CI calls it with no ``only`` and still scans the
+    whole tree.
     """
     stale: list[str] = []
     testmode: list[str] = []
     contradicted: list[str] = []
     unverified: list[str] = []
     alt_only: list[str] = []
+    hollow: list[str] = []
     for nb_path in iter_notebooks():
         rel = str(nb_path.relative_to(REPO_ROOT))
         py = paired_py(nb_path)
         if py is None:
             continue  # un-paired notebooks have no .py to drift from
+        if only is not None and rel not in only and str(py.relative_to(REPO_ROOT)) not in only:
+            continue
         try:
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -693,7 +797,9 @@ def check_all(
         conflict = contradicts_injected_cell(nb, stamp.get("parameters") or {})
         if conflict:
             contradicted.append(f"{rel} ({conflict})")
-    return stale, testmode, contradicted, unverified, alt_only
+        if not was_executed(nb):
+            hollow.append(rel)
+    return stale, testmode, contradicted, unverified, alt_only, hollow
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
@@ -716,10 +822,58 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_clear(args: argparse.Namespace) -> int:
+    """Strip outputs, execution counts and the provenance stamp from a notebook.
+
+    The result is committable: it claims no run, so nothing about it can be stale.
+    Use it after editing a ``.py`` and before the notebook is re-executed, so the
+    correction lands on ``main`` in one commit instead of waiting on a run.
+    """
+    cleared = 0
+    for name in args.notebooks:
+        nb_path = Path(name).resolve()
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        nb.get("metadata", {}).pop(STAMP_KEY, None)
+        nb.get("metadata", {}).pop("papermill", None)
+        kept = []
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") == "code":
+                cell["outputs"] = []
+                cell["execution_count"] = None
+                cell.get("metadata", {}).pop("papermill", None)
+                cell.get("metadata", {}).pop("execution", None)
+                if "injected-parameters" in (cell.get("metadata", {}).get("tags") or []):
+                    continue
+            kept.append(cell)
+        nb["cells"] = kept
+        nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            shown = nb_path.relative_to(REPO_ROOT)
+        except ValueError:
+            shown = nb_path
+        print(f"cleared {shown}")
+        cleared += 1
+    if not cleared:
+        print("nothing to clear")
+    return 0
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict)
-    lost = destamped()
-    fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
+    only = {str(Path(p)) for p in args.paths} or None
+    stale, testmode, contradicted, unverified, alt_only, hollow = check_all(
+        strict=args.strict, only=only
+    )
+    lost = destamped(only=only)
+    fail = bool(stale or testmode or contradicted or lost or hollow) or (
+        args.strict and bool(unverified)
+    )
+    if hollow:
+        print(
+            "HOLLOW (carries a provenance stamp over a notebook with no trace of a run — "
+            "a run that left nothing behind; clear the notebook or re-execute it):"
+        )
+        for r in hollow:
+            print(f"  {r}")
     if lost:
         print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
         for r in lost:
@@ -791,7 +945,20 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
+    cp.add_argument(
+        "paths",
+        nargs="*",
+        help="restrict the scan to these files (the pre-commit gate passes the staged ones); "
+        "with none given, the whole tree is scanned",
+    )
     cp.set_defaults(func=_cmd_check)
+
+    lp = sub.add_parser(
+        "clear",
+        help="strip outputs and the stamp so an edited notebook can be committed unexecuted",
+    )
+    lp.add_argument("notebooks", nargs="+")
+    lp.set_defaults(func=_cmd_clear)
 
     args = ap.parse_args()
     return args.func(args)

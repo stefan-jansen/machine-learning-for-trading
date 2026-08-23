@@ -14,24 +14,45 @@
 # ---
 
 # %% [markdown]
-# # Anatomy of Engine Divergence
+# # Anatomy of engine divergence
 #
 # **Docker image**: `ml4t`
 #
-# Backtesting frameworks make implicit execution decisions - fill ordering,
-# share rounding, cash management - that produce different P&L from identical
-# signals. This notebook makes those differences *visible* using ml4t-backtest's
-# configurable `BacktestConfig`, then compares against VectorBT.
+# ## Purpose
+# Two backtesting engines handed the same signals will not return the same track record, and the
+# reasons are rarely in the signal. They are decisions about execution - which side of a rebalance
+# is processed first, whether a position can be a fraction of a share, whether cash is reserved to
+# pay the commission - that most libraries make for you and few of them announce.
 #
-# **Learning Objectives**:
-# - Test when fill ordering (exit-first vs FIFO) changes P&L on identical signals
-# - Diagnose when integer sizing changes allocations or trade counts
-# - Quantify the impact of commission headroom on capital efficiency
-# - Diagnose which execution mechanics matter at a given portfolio scale
+# `BacktestConfig` exposes each of those as a named field, so this notebook can hold one strategy
+# fixed and change exactly one of them at a time. That turns "the two engines disagree" into a
+# measurement: this much came from share rounding, this much from the cash buffer, this much from
+# how the two interact, and this much is not explained by any of them.
 #
-# **Book Reference**: Chapter 16, Section 16.3 (Backtesting Engine Comparison)
+# One of the four is a null result, and it is worth as much as the other three: a setting the
+# configuration lets you change can still be unreachable, because something upstream of the broker
+# has already decided the thing it controls.
 #
-# **Prerequisites**: Complete [`06_linear`](../case_studies/etfs/06_linear.ipynb) (prediction artifacts).
+# ## Learning objectives
+#
+# - Build one controlled reference configuration in which every execution field is named, so that a
+#   later change to a library default cannot move the experiment without you noticing.
+# - Change one execution field at a time and measure what it is worth, in dollars of ending value
+#   and in the number of trades that actually filled.
+# - Check whether a setting reached the code path you think it reached, before crediting a result
+#   to it.
+# - Read a decomposition that does not add up: measure the effects together as well as separately,
+#   and treat the residual as a quantity rather than an error.
+#
+# ## Book reference
+# Chapter 16, Section 16.3 (backtesting engine comparison).
+#
+# ## Prerequisites
+#
+# - [`06_linear`](../case_studies/etfs/06_linear.ipynb), which produces the ETF prediction
+#   artifacts this notebook reads. Nothing here re-fits a model; the signals arrive precomputed and
+#   are held fixed throughout.
+# - `06_framework_parity`, which shows the same two-implementation gap without decomposing it.
 
 # %%
 """Anatomy of Engine Divergence - how execution mechanics change backtest results."""
@@ -69,12 +90,21 @@ LABEL = "fwd_ret_21d"
 INITIAL_CASH = 1_000_000
 
 # %% [markdown]
-# ## 1. Load Shared Data
+# ## 1. Load the shared signal
 #
-# We reuse validation predictions from the ETF linear model pipeline. Before
-# portfolio formation, we fix the tradable universe to assets with price
-# history at the first signal date. The rebuilt weights then feed every engine
-# configuration, isolating execution mechanics from signal-generation choices.
+# The predictions come from the ETF linear-model pipeline's validation window and are read, never
+# recomputed. Before any portfolio is formed, the tradable universe is fixed to the assets that
+# already had price history on the first signal date, so that no configuration below gains or loses
+# an asset partway through and no difference between runs can be traced to the universe.
+#
+# The settings this notebook binds:
+#
+# **Case study and label.** Which prediction artifact to read. The choice affects the level of
+# every number below and none of the comparisons, because every configuration reads the same one.
+#
+# **Starting capital.** The one setting that changes what the comparisons conclude. Whole-share
+# rounding is a fixed number of dollars per trade and a shrinking fraction of a growing account, so
+# the size of the account decides whether integer sizing is a rounding detail or a real constraint.
 
 # %%
 prices, signals, initial_weights, meta = load_case_study_data(CASE_STUDY, LABEL)
@@ -93,13 +123,19 @@ print(f"Cost: {meta['cost_bps']} bps ({cost_rate:.4f})")
 print(f"Period: {initial_weights.index[0].date()} to {initial_weights.index[-1].date()}")
 
 # %% [markdown]
-# ### Prepare Engine Infrastructure
+# ### Turn predictions into target weights
 #
-# `form_tie_aware_weights` makes the ranking policy explicit. An all-equal
-# prediction cross-section contains no ranking information, so every asset in
-# the fixed tradable universe receives equal weight. Otherwise, predictions
-# rank from high to low and `symbol` ascending is the stable secondary key,
-# including when a tie crosses the quintile cutoff.
+# Ranking a cross-section needs a rule for what to do when the ranking does not separate the
+# assets, and leaving that rule implicit is how two runs of the same code end up holding different
+# portfolios. Two cases have to be decided.
+#
+# A cross-section in which every prediction is identical carries no ranking at all. Sorting it
+# returns whatever order the rows happened to arrive in, so any top slice taken from it is an
+# artifact of the file. This notebook holds the whole tradable universe equally weighted on those
+# dates instead, and counts them, so the reader can see how much of the sample they are.
+#
+# A cross-section with a tie straddling the quintile cutoff has a genuine ranking and an ambiguous
+# boundary. Sorting by `symbol` ascending as the second key resolves it the same way every run.
 
 
 # %%
@@ -145,9 +181,12 @@ def form_tie_aware_weights(signals, tradable_assets, min_assets):
 
 
 # %% [markdown]
-# `build_tradable_weights` fixes the common price universe before applying that
-# policy. It then removes floating-point residue through a stable symbol anchor
-# so every executable baseline row is fully invested.
+# `build_tradable_weights` fixes that universe before the policy is applied, then removes the
+# floating-point residue left by dividing one by an asset count. The residue is a few parts in
+# 10^16 and would be irrelevant anywhere else, but a row that sums to slightly under one is a row
+# where the engine holds slightly less than the target, and comparing engines on differences of a
+# few basis points means that residue has to go. It is pushed onto one held asset, chosen by sorted
+# symbol so the choice is the same on every run.
 
 
 # %%
@@ -173,8 +212,11 @@ def build_tradable_weights(prices, signals, seed_weights, min_assets):
 
 
 # %% [markdown]
-# The fixed universe excludes XLC before selection. The audit below is
-# executable: every baseline row must sum to exactly 1.0.
+# The check below is executable rather than asserted in prose: every baseline row has to sum to
+# exactly one, and the run stops if any does not. Read the printed all-equal count as well - those
+# are dates on which the model separated nothing and the portfolio is the whole universe, so a
+# large share of them would mean the comparisons below are partly a comparison of equal-weight
+# rebalancing.
 
 # %%
 prices_f, weights_f, removed_assets, tie_policy = build_tradable_weights(
@@ -247,12 +289,16 @@ def metrics_row(r):
 
 
 # %% [markdown]
-# ## 2. Controlled Reference Configuration
+# ## 2. The controlled reference
 #
-# The reference uses next-bar open fills, fractional shares, exit-first ordering,
-# snapshot rebalancing, and percentage commission. Every field is explicit so a
-# future library-preset change cannot silently alter the experiment. Slippage is
-# disabled so each variant changes only its named execution mechanic.
+# Everything below is measured against one configuration, and every field of it is set explicitly
+# even where the value matches the library's own default. That is the point: a preset is a moving
+# target, and an experiment that inherits one silently changes when the library does.
+#
+# The reference fills at the next bar's open, allows fractional shares, processes exits before
+# entries, computes rebalance targets from a single pre-trade snapshot, and charges a percentage
+# commission. Slippage is switched off, so that the cost side of every comparison is the commission
+# alone and a variant cannot move for two reasons at once.
 
 
 # %%
@@ -274,6 +320,7 @@ def make_reference():
 
 baseline_config = make_reference()
 r_baseline = run_with_config(baseline_config)
+eq_base = r_baseline.equity_curve
 
 print("Controlled reference:")
 print(f"  Final Value:  ${r_baseline.final_value:,.0f}")
@@ -283,110 +330,21 @@ print(f"  Max Drawdown: {r_baseline.metrics.get('max_drawdown', 0):.2%}")
 print(f"  Trades:       {r_baseline.n_trades:,}")
 
 # %% [markdown]
-# ## 3. Fill Ordering: EXIT_FIRST vs FIFO
+# ## 3. Share type: fractional or whole shares
 #
-# When a rebalance requires both sells and buys, the engine must decide
-# which orders to process first:
+# A fractional-share account can sit exactly on its target weight, because any dollar amount
+# divides into a position. A whole-share account cannot, and what it is left with is not symmetric
+# noise. Two separate things happen.
 #
-# - **EXIT_FIRST**: Sells execute before buys, freeing cash for purchases.
-#   The buy-side has more capital available, potentially filling larger orders.
-# - **FIFO**: Orders execute in submission order. If early buys consume cash,
-#   later buys may be rejected for insufficient funds.
+# The first is rounding. Each order is rounded to a whole number of shares, so the position lands a
+# little above or below its target. The miss is at most one share: a fixed number of dollars, and
+# therefore a shrinking fraction of a growing account.
 #
-# Same signals, same shares, same timing - only the processing sequence differs.
-
-# %%
-fifo_config = make_reference()
-fifo_config.fill_ordering = FillOrdering.FIFO
-
-r_fifo = run_with_config(fifo_config)
-
-# Compare
-table = pl.DataFrame(
-    [
-        {"config": "EXIT_FIRST (baseline)", **metrics_row(r_baseline)},
-        {"config": "FIFO", **metrics_row(r_fifo)},
-    ]
-)
-table
-
-# %%
-eq_base = r_baseline.equity_curve
-eq_fifo = r_fifo.equity_curve
-common = eq_base.index.intersection(eq_fifo.index)
-
-diff_pct = (eq_base.loc[common] - eq_fifo.loc[common]) / eq_base.loc[common] * 100
-val_diff = r_baseline.final_value - r_fifo.final_value
-ordering_gap_bps = val_diff / r_baseline.final_value * 10_000
-
-# %% [markdown]
-# The upper panel compares portfolio value; the lower panel makes the small
-# pathwise gap visible around a zero reference.
-
-# %%
-fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], height_ratios=[2, 1], sharex=True)
-
-axes[0].plot(
-    eq_base.loc[common].index,
-    eq_base.loc[common].values,
-    color=COLORS["blue"],
-    label="EXIT_FIRST",
-)
-axes[0].plot(
-    eq_fifo.loc[common].index,
-    eq_fifo.loc[common].values,
-    color=COLORS["neutral"],
-    label="FIFO",
-    linestyle="--",
-)
-axes[0].set_ylabel("Portfolio value (USD)")
-axes[0].legend()
-axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-add_message_title(
-    axes[0], f"Fill ordering changes terminal value by {abs(ordering_gap_bps):.1f} bps"
-)
-axes[0].set_title(axes[0].get_title(loc="left"), loc="left", fontweight="bold")
-
-axes[1].fill_between(common, diff_pct.values, alpha=0.5, color=COLORS["blue"])
-zero_line(axes[1])
-axes[1].set_ylabel("Equity gap (%)")
-axes[1].set_xlabel("Date")
-
-fig.tight_layout()
-fig.show()
-
-print(f"\nFinal value difference: ${val_diff:,.0f} ({val_diff / r_baseline.final_value:.3%})")
-print(
-    f"Trade count: {r_baseline.n_trades:,} vs {r_fifo.n_trades:,} "
-    f"(delta: {r_baseline.n_trades - r_fifo.n_trades:,})"
-)
-
-# %% [markdown]
-# With fractional shares and snapshot target computation, the target-weight
-# executor submits reductions before increases. The broker's fill-order setting
-# acts only after that submission sequence, so the displayed gap may be zero
-# even though the configuration values differ.
-#
-# Fill ordering matters when **integer shares** constrain capital allocation:
-# an early buy may consume cash needed for a later buy, causing rejection.
-# EXIT_FIRST avoids this by freeing sell proceeds first. The combined-profile
-# comparison below changes integer sizing, ordering, and headroom together;
-# its interaction term should not be assigned to any one lever.
-
-# %% [markdown]
-# ## 4. Share Type: Fractional vs Integer
-#
-# Fractional shares allow exact target-weight allocation. Integer shares
-# introduce two effects:
-#
-# 1. **Rounding deviation**: Each trade is rounded to the nearest whole share,
-#    leaving a small positive or negative deviation from its target weight.
-# 2. **Skipped trades**: When the target delta rounds to zero shares,
-#    no order is submitted, so the portfolio drifts from its target.
-#
-# At \$1M, ranked dates hold the top quintile while all-equal dates hold the
-# full universe. Whole-share rounding is therefore small relative to each
-# allocation at this portfolio scale.
+# The second is disappearance, and it does not shrink. When the move a target implies is smaller
+# than half a share, the rounded order is zero shares and nothing is submitted. The position does
+# not edge towards its target; it stays where it is until the target moves far enough to be worth a
+# whole share. Watch the trade count as well as the value: the two effects show up in different
+# columns.
 
 # %%
 integer_config = make_reference()
@@ -396,8 +354,8 @@ r_integer = run_with_config(integer_config)
 
 table = pl.DataFrame(
     [
-        {"config": "Fractional (baseline)", **metrics_row(r_baseline)},
-        {"config": "Integer", **metrics_row(r_integer)},
+        {"config": "Fractional (reference)", **metrics_row(r_baseline)},
+        {"config": "Whole shares", **metrics_row(r_integer)},
     ]
 )
 table
@@ -411,8 +369,8 @@ val_diff_int = r_baseline.final_value - r_integer.final_value
 integer_gap_bps = val_diff_int / r_baseline.final_value * 10_000
 
 # %% [markdown]
-# Matching axes show whether integer quantization changes the equity path, while
-# the gap panel exposes differences hidden by the portfolio-value scale.
+# Both value paths go on one axis, and the panel beneath magnifies the gap between them, which is
+# far too small to see at the scale of the portfolio.
 
 # %%
 fig, axes = plt.subplots(2, 1, figsize=FIGSIZE["dual_v"], height_ratios=[2, 1], sharex=True)
@@ -426,7 +384,7 @@ axes[0].plot(
 axes[0].plot(
     eq_int.loc[common_int].index,
     eq_int.loc[common_int].values,
-    label="Integer",
+    label="Whole shares",
     color=COLORS["neutral"],
     linewidth=1,
     linestyle="--",
@@ -435,13 +393,14 @@ axes[0].set_ylabel("Portfolio value (USD)")
 axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
-    axes[0], f"Integer sizing changes terminal value by {abs(integer_gap_bps):.1f} bps"
+    axes[0],
+    "Whole-share rounding costs trades before it costs return",
+    subtitle="ETF linear-model signals, one configuration field changed from the reference",
 )
-axes[0].set_title(axes[0].get_title(loc="left"), loc="left", fontweight="bold")
 
 axes[1].fill_between(common_int, diff_int.values, alpha=0.5, color=COLORS["amber"])
 zero_line(axes[1])
-axes[1].set_ylabel("Equity gap (%)")
+axes[1].set_ylabel("Fractional minus whole (%)")
 axes[1].set_xlabel("Date")
 
 fig.tight_layout()
@@ -456,25 +415,85 @@ print(
 )
 
 # %% [markdown]
-# **Reading the table.** The integer-share row shows two effects relative to
-# the fractional baseline: a final-value gap (positive or negative depending
-# on the regime; see the printed numbers above) and a trade-count delta.
+# ## 4. Fill ordering, and a setting that never takes effect
 #
-# Integer sizing rounds each trade to the nearest share, so its deviation can
-# fall on either side of the exact target. A fractional delta below half a
-# share becomes no integer order, while a delta above that boundary becomes a
-# one-share order. Whether the gap is negligible or material depends on
-# portfolio size relative to share prices; the displayed table is the source
-# of truth for this run.
+# A rebalance that both sells and buys has to process one side first, and a long-only account with
+# no margin cares which. `FillOrdering.EXIT_FIRST` tells the broker to fill sells before buys, so
+# the proceeds are on hand to spend. `FillOrdering.FIFO` tells it to fill in submission order, so
+# an early buy can consume cash a later buy needed and the later one is rejected for want of funds.
+#
+# That is what the setting means. Whether it does anything is a different question, and it has to
+# be asked before any result is credited to it. Both share types are tested here, because the
+# obvious reason a fractional run would not care - it never runs out of cash - makes a prediction
+# about the whole-share run that can be checked.
+
+# %%
+fifo_config = make_reference()
+fifo_config.fill_ordering = FillOrdering.FIFO
+r_fifo = run_with_config(fifo_config)
+
+integer_fifo_config = make_reference()
+integer_fifo_config.share_type = ShareType.INTEGER
+integer_fifo_config.fill_ordering = FillOrdering.FIFO
+r_integer_fifo = run_with_config(integer_fifo_config)
+
+table = pl.DataFrame(
+    [
+        {"config": "Fractional, EXIT_FIRST (reference)", **metrics_row(r_baseline)},
+        {"config": "Fractional, FIFO", **metrics_row(r_fifo)},
+        {"config": "Whole shares, EXIT_FIRST", **metrics_row(r_integer)},
+        {"config": "Whole shares, FIFO", **metrics_row(r_integer_fifo)},
+    ]
+)
+table
+
+# %%
+val_diff = r_baseline.final_value - r_fifo.final_value
+integer_val_diff = r_integer.final_value - r_integer_fifo.final_value
+ordering_gap_bps = val_diff / r_baseline.final_value * 10_000
+integer_ordering_gap_bps = integer_val_diff / r_integer.final_value * 10_000
+
+print(f"Fractional:   EXIT_FIRST minus FIFO = ${val_diff:,.0f} ({ordering_gap_bps:.2f} bps)")
+print(
+    f"Whole shares: EXIT_FIRST minus FIFO = ${integer_val_diff:,.0f} "
+    f"({integer_ordering_gap_bps:.2f} bps)"
+)
+print(f"Trades, fractional:   {r_baseline.n_trades:,} vs {r_fifo.n_trades:,}")
+print(f"Trades, whole shares: {r_integer.n_trades:,} vs {r_integer_fifo.n_trades:,}")
 
 # %% [markdown]
-# ## 5. Commission Headroom
+# Both differences are zero, and the second one is what makes this worth a section rather than a
+# footnote. If the fractional run were unaffected because it never runs out of cash, the
+# whole-share run - which does have to fit its buys into a finite balance - would differ. It does
+# not.
 #
-# Some frameworks (notably Backtrader) reject orders when the portfolio
-# lacks sufficient cash to cover both the order and its commission.
-# The workaround: multiply every fully invested target row by 0.998, leaving
-# exactly 0.2% target-weight headroom. This prevents rejection but creates
-# systematic under-investment.
+# The reason sits upstream of the broker. `TargetWeightExecutor` sorts the rebalance itself before
+# submitting anything: it collects the assets whose exposure is being reduced, submits those, and
+# only then submits the increases. The comment in `ml4t/backtest/execution/rebalancer.py` calls it
+# building a deterministic execution order. By the time the broker's queue policy is consulted, the
+# orders have already arrived sells-first, so both settings describe the same sequence and produce
+# the same fills.
+#
+# `FillOrdering` is not dead code. It decides the sequence for a strategy that submits its own
+# orders in its own order, which is most strategies that are not driven by a target-weight
+# executor. It is unreachable through this one, and that is the transferable part: a configuration
+# field is a request, and whether the request reaches the code path you have in mind is a question
+# with an answer. Change the field, check that something moved, and only then attribute a result to
+# it. Section 7 shows what a decomposition does when one of its factors is inert.
+
+# %% [markdown]
+# ## 5. The cash a fully invested portfolio does not have
+#
+# A target row that sums to one asks the account to spend every dollar it holds. The commission is
+# then due on top, and there is nothing left to pay it with. Some engines - Backtrader among them -
+# reject the order rather than let the balance go negative, and a rejected order is worse than a
+# smaller one: the position simply does not move.
+#
+# The usual workaround scales every target row down by a small factor, so a sliver of cash is
+# always held back. It is a real fix and it has a real price, because the sliver is not invested.
+# The multiplier is applied to the whole row, so every held weight keeps its share of the portfolio
+# and only the total moves; the check that follows confirms the ratio is exact on every active
+# weight rather than asserting it in prose.
 
 # %%
 HEADROOM = 0.998
@@ -515,38 +534,42 @@ zero_line(ax)
 ax.set_ylabel("Equity-curve gap (bps)")
 ax.set_xlabel("Date")
 add_message_title(
-    ax, f"Commission headroom changes terminal value by {abs(headroom_gap_bps):.1f} bps"
+    ax,
+    "Holding back cash for fees costs more the longer it is held back",
+    subtitle="Reference equity minus headroom equity, in basis points of reference equity",
 )
-ax.set_title(ax.get_title(loc="left"), loc="left", fontweight="bold")
 fig.tight_layout()
 fig.show()
 
 print(f"\nFinal value difference: ${val_diff_hd:,.0f} ({val_diff_hd / r_baseline.final_value:.3%})")
 
 # %% [markdown]
-# **Reading the table.** The headroom buffer creates systematic
-# under-investment: the fully invested baseline sums to 1.0 on every date, and
-# the 0.998 multiplier leaves exactly 0.2% target-weight headroom at each
-# rebalance. That capital participates less in the subsequent return. The compounding
-# effect is path-dependent and *non-linear* in horizon;
-# print the final-value gap from the comparison above to see the realized
-# drag on this run. The headroom is necessary for frameworks like Backtrader
-# that reject orders when cash is insufficient to cover the trade plus
-# commission, but it has a measurable cost.
+# The drag is not the size of the buffer. A portfolio permanently short a fraction of its exposure
+# gives up that fraction of every subsequent return, and those givings-up compound, so the cost over
+# eight years is larger than the buffer and depends on what the market did in between. Reading the
+# gap as "the buffer costs the buffer" understates it.
+#
+# The buffer is also not optional for the engines that need it. What it is, is a cost that belongs
+# on the engine's side of a comparison rather than the strategy's.
 
 # %% [markdown]
-# ## 6. Combined Execution-Profile Comparison
+# ## 6. The same choices, bundled the way real engines bundle them
 #
-# Each backtesting framework embeds different combinations of these choices.
-# We compare the explicit controlled reference with the ml4t-backtest profiles
-# that emulate Backtrader and VectorBT, then run actual VectorBT on exactly the
-# same filtered prices and weights:
+# The sections above changed one field at a time, which is how you learn what a field does and not
+# how anyone actually runs a backtest. A library ships a bundle: Backtrader gives you whole shares,
+# submission-order fills and a cash constraint that forces a buffer; a vectorized library gives you
+# fractional positions and, unless told otherwise, fills at the same close it read.
 #
-# | Profile | Fill Timing | Shares | Fill Order | Headroom |
-# |--------|-------------|--------|------------|----------|
-# | Controlled reference | Next-bar open | Fractional | EXIT_FIRST | None |
-# | `backtrader` | Next-bar open | Integer | FIFO | 0.998 |
-# | `vectorbt` | Same-bar close | Fractional | EXIT_FIRST | None |
+# `BacktestConfig` has presets for both bundles, which means the same engine can be asked to
+# imitate either. The fourth row runs the real VectorBT on identical filtered prices and weights,
+# which is the check that the imitation is worth anything.
+#
+# | Profile | Fill timing | Shares | Fill order | Cash buffer |
+# |---|---|---|---|---|
+# | Controlled reference | Next bar's open | Fractional | Exits first | None |
+# | `backtrader` preset | Next bar's open | Whole | Submission order | Yes |
+# | `vectorbt` preset | Same bar's close | Fractional | Exits first | None |
+# | VectorBT itself | Same bar's close | Fractional | Its own | None |
 #
 # %%
 # Backtrader preset
@@ -582,38 +605,54 @@ styles = [
 
 # %%
 table = pl.DataFrame(
-    [{"config": label, **metrics_row(r)} for r, label in zip(all_results, all_labels, strict=False)]
+    [{"config": label, **metrics_row(r)} for r, label in zip(all_results, all_labels, strict=True)]
 )
 table
 
 # %%
 profile_values = [r.final_value for r in all_results]
 profile_spread_pct = (max(profile_values) - min(profile_values)) / max(profile_values) * 100
+print(f"Spread between the highest and lowest profile: {profile_spread_pct:.2f}% of final value")
+
 fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
-for r, label, style in zip(all_results, all_labels, styles, strict=False):
+for r, label, style in zip(all_results, all_labels, styles, strict=True):
     ax.plot(r.equity_curve.index, r.equity_curve.values, label=label, **style)
 
 ax.set_ylabel("Portfolio value (USD)")
 ax.set_xlabel("Date")
-add_message_title(ax, f"Execution profiles span {profile_spread_pct:.1f}% in terminal value")
-ax.set_title(ax.get_title(loc="left"), loc="left", fontweight="bold")
+add_message_title(
+    ax,
+    "One strategy, four execution profiles, four track records",
+    subtitle="Same signals and same commission rate throughout; only execution assumptions differ",
+)
 ax.legend()
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# The four equity curves use the same signals but deliberately different
-# execution profiles. The fresh table is the authority for the current library
-# version. This is a protocol-sensitivity comparison, not evidence that one
-# engine is more accurate: each profile answers a different execution question.
+# Two of these four fill at the same close the signal was read from, which is not a chronology any
+# account can trade: the closing price is not known until after the order would have had to exist.
+# Their curves are higher for that reason and are not comparable with the two that fill at the next
+# open. Read them as a measurement of what same-bar filling is worth, which is the number a reader
+# needs in order to reject a backtest that does it.
+#
+# The gap between the `vectorbt` preset and VectorBT itself is the honest residual of this exercise:
+# two engines configured to agree, still not agreeing, because a preset can only name the
+# assumptions somebody thought to expose.
 
 # %% [markdown]
-# ## 7. Divergence Decomposition
+# ## 7. A decomposition that does not add up
 #
-# How much does each execution decision contribute to the total divergence
-# between the controlled reference and Backtrader profile? We decompose the gap
-# by measuring each single-variable effect against the baseline.
+# The Backtrader profile differs from the reference in three named ways at once. Each of those was
+# measured on its own above, so the obvious move is to add the three and check the total against
+# the profile-versus-reference gap.
+#
+# It will not match, and the mismatch is the useful part. Two of the three change what the account
+# holds, which changes what the next rebalance has to trade, which changes what the third one does.
+# Effects that alter each other's inputs do not add. The residual is not an error term to apologise
+# for; it is the size of the interaction, and reporting it is what stops a reader from taking any
+# single bar as that lever's contribution to the bundle.
 
 # %%
 # Compute individual effects as percentage of baseline final value
@@ -622,7 +661,7 @@ effects = {
     "Fill ordering\n(EXIT_FIRST → FIFO)": (r_baseline.final_value - r_fifo.final_value)
     / baseline_val
     * 100,
-    "Share rounding\n(fractional → integer)": (r_baseline.final_value - r_integer.final_value)
+    "Share rounding\n(fractional → whole)": (r_baseline.final_value - r_integer.final_value)
     / baseline_val
     * 100,
     "Commission headroom\n(100% → 99.8%)": (r_baseline.final_value - r_headroom.final_value)
@@ -636,7 +675,6 @@ combined = (r_baseline.final_value - r_bt.final_value) / baseline_val * 100
 labels = list(effects.keys()) + ["Combined\n(reference to Backtrader)"]
 values = list(effects.values()) + [combined]
 colors = [COLORS["blue"]] * 3 + [COLORS["slate"]]
-dominant_effect = max(effects, key=lambda name: abs(effects[name])).split("\n", maxsplit=1)[0]
 
 # %% [markdown]
 # A horizontal bar chart separates the three one-factor effects from their
@@ -647,7 +685,7 @@ fig, ax = plt.subplots(figsize=FIGSIZE["single_tall"])
 bars = ax.barh(labels, values, color=colors, edgecolor=COLORS["silver_muted"], linewidth=0.5)
 
 # Value labels on bars
-for bar, val in zip(bars, values, strict=False):
+for bar, val in zip(bars, values, strict=True):
     x = bar.get_width()
     ax.text(
         x + 0.05 * max(abs(v) for v in values),
@@ -657,9 +695,12 @@ for bar, val in zip(bars, values, strict=False):
         fontweight="bold",
     )
 
-ax.set_xlabel("Impact on Final Value (%)")
-add_message_title(ax, f"{dominant_effect} is the largest one-factor effect")
-ax.set_title(ax.get_title(loc="left"), loc="left", fontweight="bold")
+ax.set_xlabel("Impact on final value (% of reference)")
+add_message_title(
+    ax,
+    "The one-factor effects do not add up to the combined effect",
+    subtitle="Each bar is the reference minus one variant, as a percentage of reference final value",
+)
 zero_line(ax, axis="x")
 fig.tight_layout()
 fig.show()
@@ -671,36 +712,44 @@ interaction = combined - sum_individual
 print(f"Individual effects sum: {sum_individual:+.2f}%")
 print(f"Combined effect:        {combined:+.2f}%")
 print(f"Interaction term:       {interaction:+.2f}%")
-print("\nThe interaction term shows these effects don't compose linearly.")
-print("Integer sizing and commission headroom alter subsequent positions and")
-print("cash balances together, so the combined effect differs from their sum.")
 
 # %% [markdown]
-# ## 8. Rebalance Mode: Snapshot vs Incremental vs Hybrid
-#
-# When rebalancing a portfolio of 20+ assets, the engine must decide: **does
-# each order see the updated portfolio value from prior fills, or do all
-# orders use a frozen pre-trade snapshot?**
-#
-# This is not an implementation detail. It reflects a real-world choice about
-# how brokers process multi-asset rebalances:
-#
-# | Mode | Target Value | Fills | Real-World Analog |
-# |------|-------------|-------|-------------------|
-# | **Snapshot** | Frozen (computed once) | Batched (all at once) | Backtrader, Zipline |
-# | **Incremental** | Recomputed after each fill | Sequential | Conservative broker |
-# | **Hybrid** | Frozen for targets | Sequential (cash checked live) | VectorBT |
-#
-# ml4t-backtest's `BacktestConfig.rebalance_mode` makes this choice explicit.
+# One of the three bars is exactly zero, and section 4 established why: the executor sorts the
+# rebalance before the broker's queue policy sees it, so changing that policy changes nothing. A
+# decomposition with an inert factor still adds up correctly - zero adds to anything - but it
+# invites a reader to conclude that fill ordering was tested and found small. It was not tested. It
+# was unreachable. The difference matters for anyone porting this strategy to an engine whose
+# executor does not sort, where the same field is live.
 
 # %% [markdown]
-# `run_rebalance_mode` runs the same baseline with a single rebalance-mode
-# variable swapped, holding share type, fill ordering, and execution mode fixed.
+# ## 8. Rebalance mode: what a multi-asset rebalance knows while it runs
+#
+# Rebalancing a hundred positions is not one decision, it is a hundred orders, and the engine has
+# to say what each one knows. Does order fifty size itself against the portfolio value as it stood
+# before any of this started, or against the value after the first forty-nine have filled and moved
+# the cash balance?
+#
+# The two answers correspond to real broker behaviour rather than to implementation taste, and a
+# third splits the difference:
+#
+# | Mode | Target value | Fills | Resembles |
+# |---|---|---|---|
+# | Snapshot | Computed once, before anything fills | All submitted, then processed | Backtrader, Zipline |
+# | Incremental | Recomputed after every fill | One at a time | A broker that re-checks the account each time |
+# | Hybrid | Computed once | One at a time, cash checked live | VectorBT |
+#
+# `BacktestConfig.rebalance_mode` names the choice instead of burying it.
+
+# %% [markdown]
+# The three runs below share a configuration that is deliberately not the reference: whole shares,
+# submission-order fills, same-bar close execution and the cash buffer. That combination is the one
+# in which rebalance mode has anything to bite on, because a fractional account with next-open
+# fills never runs low on cash mid-rebalance. Only the mode changes between the three.
 
 
 # %%
 def run_rebalance_mode(mode: RebalanceMode):
-    """Run one rebalance mode under an otherwise fixed close-fill profile."""
+    """Run one rebalance mode under a fixed whole-share, same-bar-close, buffered profile."""
     config = make_reference()
     config.share_type = ShareType.INTEGER
     config.fill_ordering = FillOrdering.FIFO
@@ -754,6 +803,7 @@ rebalance_values = [r_snapshot.final_value, r_incremental.final_value, r_hybrid.
 rebalance_spread_bps = (
     (max(rebalance_values) - min(rebalance_values)) / max(rebalance_values) * 10_000
 )
+print(f"Spread across the three rebalance modes: {rebalance_spread_bps:.1f} bps of final value")
 
 # %% [markdown]
 # The upper panel compares the three value paths. The lower panel magnifies the
@@ -781,9 +831,10 @@ axes[0].set_ylabel("Portfolio value (USD)")
 axes[0].legend()
 axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
 add_message_title(
-    axes[0], f"Rebalance modes span {rebalance_spread_bps:.1f} bps under the close-fill test"
+    axes[0],
+    "Rebalance mode moves the result far less than timing or sizing",
+    subtitle="Same-bar close fills throughout, which is not a tradable chronology",
 )
-axes[0].set_title(axes[0].get_title(loc="left"), loc="left", fontweight="bold")
 
 # Show incremental vs snapshot divergence
 diff_is = (eq_incr.loc[common_rb] - eq_snap.loc[common_rb]) / eq_snap.loc[common_rb] * 100
@@ -798,62 +849,58 @@ axes[1].legend(fontsize=9)
 fig.tight_layout()
 fig.show()
 
-# %%
-pl.DataFrame(
-    [
-        {"mode": name, "final_value": round(r.final_value), "trades": int(r.n_trades)}
-        for name, r in [
-            ("Snapshot", r_snapshot),
-            ("Incremental", r_incremental),
-            ("Hybrid", r_hybrid),
-        ]
-    ]
-)
 
 # %% [markdown]
-# **Reading the table.** This experiment deliberately applies weights computed
-# with day-$t$ closing information to the same close. That event ordering is not
-# tradable: the closing price is known only after the order would need to exist.
-# The resulting returns are therefore a diagnostic counterfactual, not strategy
-# performance. Holding that invalid chronology fixed still isolates the smaller
-# implementation differences among snapshot, hybrid, and incremental modes.
+# The three curves are close together and all three are wrong in the same way. The weights were
+# computed from day $t$'s close and filled at day $t$'s close, which no account can do: the price
+# is not known until after the order would have had to be placed. Nothing in this section is
+# strategy performance, and the highest of the three curves does not identify a better mode.
 #
-# **Takeaway**: Establish decision, order, and fill chronology before comparing
-# backtests. Same-close output cannot validate a close-derived strategy,
-# regardless of which rebalance mode produces the least-bad curve.
+# What holding an untradable chronology fixed does buy is a clean read on the modes themselves,
+# because whatever the same-bar fill is worth, it is worth the same to all three. The answer is
+# that this choice is worth far less than the ones in sections 3 and 5 - which is itself the
+# finding, and the reason to spend attention on fill timing and sizing first.
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Execution mechanics are design choices, not bugs.** Fill ordering, share
-#    rounding, cash management, and rebalance mode are deliberate engineering
-#    decisions that each framework makes differently.
+# 1. **Validity comes before size.** A signal read from the close cannot be filled at that close,
+#    and no rebalance mode, cost model or sizing rule repairs that. Settle the order of decision,
+#    submission and fill first; only then is it meaningful to ask what anything is worth.
+# 2. **Check that a setting is reachable before you credit it.** Fill ordering measured exactly zero
+#    here, in both share regimes, because the target-weight executor sorts the rebalance before the
+#    broker's queue policy is consulted. A field you can set is not necessarily a field that acts.
+#    Change it, confirm something moved, then attribute.
+# 3. **Whole-share rounding shows up in the trade count first.** An order that rounds to zero shares
+#    is never submitted, so the position stops tracking its target. That effect does not shrink with
+#    account size the way the rounding error does.
+# 4. **Cash held back to pay fees is exposure given up on every subsequent day.** The drag
+#    compounds and is larger than the buffer itself. Charge it against the engine that requires the
+#    buffer, not against the strategy.
+# 5. **One-factor effects do not add.** When two levers change what the account holds, each changes
+#    what the other has to trade. Measure the bundle as well as the parts, and report the residual
+#    as a quantity.
+# 6. **Set every execution field explicitly, including the ones that match the default.** A preset
+#    is a moving target. An experiment that inherits one silently changes when the library does, and
+#    nothing in the notebook records that it happened.
+# 7. **Publish the assumptions with the result.** Fill timing, share type, fill ordering, rebalance
+#    mode and cost model. A backtest without them is not reproducible by anyone, including its
+#    author six months later.
 #
-# 2. **ml4t-backtest makes these explicit** via `BacktestConfig`; readers
-#    choose their execution assumptions rather than inheriting hidden defaults.
+# ### Known limitations
 #
-# 3. **Fill timing determines validity before performance.** A signal computed
-#    from the close cannot trade at that same close. Treat such output as a
-#    diagnostic counterfactual, never as an investable backtest.
+# - The signals come from one case study's linear model over one validation window. The size of
+#   every effect here depends on that strategy's turnover, and a slower strategy would trade fewer
+#   times and pay less for all of it.
+# - Effects are measured one at a time against a single reference. That answers "what does this
+#   field do to this configuration", not "what is this field worth in general", and the interaction
+#   term in section 7 is how much the difference matters here.
+# - Slippage is switched off throughout, so nothing below measures how execution choices interact
+#   with a price that moves against the order. Chapter 18 puts a cost model behind the fill.
+# - Section 8 runs on an untradable chronology by design, and its numbers are not returns.
 #
-# 4. **Share rounding is scale-dependent.** At this portfolio size, the integer
-#    and fractional configurations track closely. Smaller portfolios and higher
-#    share prices magnify the target-weight deviation.
-#
-# 5. **Commission headroom compounds.** Cash reserved for fees reduces exposure
-#    at every rebalance; the table and gap chart quantify the realized effect.
-#
-# 6. **Submission order can neutralize fill order.** Inspect the orders an
-#    executor creates before attributing a result to the broker's queue policy.
-#
-# 7. **Always document your execution assumptions.** When publishing backtest
-#    results, specify: fill timing, share type, fill ordering, rebalance mode,
-#    and cost model. Without this, results are not reproducible.
-#
-# **Next**: the external-engine parity notebooks make the same execution knobs
-# concrete on the canonical benchmark:
-# [`15_lean_engine_parity`](15_lean_engine_parity.ipynb),
-# [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb),
-# and [`18_vectorbt_engine_parity`](18_vectorbt_engine_parity.ipynb).
-#
-# **Book**: Section 16.3 covers configurable parity and framework validation.
+# **Next:** the external-engine parity notebooks put the same fields against real engines on the
+# canonical benchmark: [`15_lean_engine_parity`](15_lean_engine_parity.ipynb),
+# [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb) and
+# [`18_vectorbt_engine_parity`](18_vectorbt_engine_parity.ipynb). Section 16.3 covers configurable
+# parity and framework validation.
