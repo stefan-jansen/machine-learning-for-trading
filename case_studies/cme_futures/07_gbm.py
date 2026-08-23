@@ -101,6 +101,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "762b118009db"
 
 # %%
 study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -238,10 +239,29 @@ plan.select(
 # that run declares. A population is immutable once written, so a notebook that fitted one label
 # per run under a single name would publish the first label and be refused for the second, which
 # is what happened before this notebook fitted them together.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it supersedes.
+# That lineage is the only record of which generation is which. Here it records the refit on
+# LightGBM's CPU `max_bin` default, which moved every prediction identity while leaving the
+# configuration menu alone.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record. Carrying the value the published run used
+# is what lets this notebook re-run and resolve to the population it published rather than to a
+# new one.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
