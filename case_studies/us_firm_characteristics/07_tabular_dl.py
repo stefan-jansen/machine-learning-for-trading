@@ -614,9 +614,10 @@ show_plotly_with_alt(
     "Grouped bar charts of mean validation information coefficient, one pair of bars per capacity "
     f"preset: dark navy for the first checkpoint at {first_epoch} epochs and neutral grey for the "
     f"last at {last_epoch}. One panel per label on one shared vertical scale, presets ordered "
-    "smallest to largest, each panel carrying a dashed zero line. Counted from the frame, the gap "
-    "between a preset's two bars against the spread across presets at the last checkpoint is "
-    f"{gap_text}.",
+    "smallest to largest, each panel carrying a dashed zero line. Counted from the frame, the "
+    "median across presets of the gap between a preset's two bars, set against the spread across "
+    f"presets at the last checkpoint, is {gap_text}. It is a median, so a single preset can run "
+    "against the label's direction.",
 )
 
 # %% [markdown]

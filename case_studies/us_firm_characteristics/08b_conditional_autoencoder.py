@@ -341,10 +341,14 @@ catalog.select(
 #
 # A line that rises and then flattens has learned what it is going to learn. A line still climbing
 # at the last checkpoint has not converged at the declared budget, so its final number is a lower
-# bound rather than a level. A line that peaks early and then falls is the third case: the network
-# is still improving its reconstruction of the training window while the ranking it produces out of
-# sample gets worse. All three are published, because which one a reader is looking at is a fact
-# about the data rather than something to resolve away before the backtest sees it.
+# bound rather than a level. A line that peaks early and then falls is the third case: added epochs
+# stop buying out-of-sample ranking and start costing it. All three are published, because which
+# one a reader is looking at is a fact about the data rather than something to resolve away before
+# the backtest sees it.
+#
+# What the chart cannot say is why. Only validation IC is computed here; the reconstruction loss on
+# the training window is not, so a falling line is evidence that more training stopped helping and
+# not evidence about what the network was doing to its inputs while that happened.
 
 # %%
 curves = catalog.filter("full_coverage").sort("label", "checkpoint_value")
@@ -368,7 +372,7 @@ fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_xaxes(title_text="Training epochs completed")
 fig.update_yaxes(title_text="Mean IC (validation)")
 fig.update_layout(
-    title="Where the ranking peaks is not where the reconstruction stops improving",
+    title="More training stops helping the out-of-sample ranking",
     height=460,
     width=900,
     margin=dict(t=90),

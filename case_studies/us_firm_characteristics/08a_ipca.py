@@ -311,6 +311,7 @@ catalog = execution.catalog_rows.select(
     "ic_mean",
     "ic_std",
     "ic_t",
+    "ic_t_hac",
     "ic_n_days",
     "auc_mean_daily",
     pl.col("direction_label").alias("auc_scored_against"),
@@ -341,6 +342,7 @@ catalog.select(
     "ic_mean",
     "ic_std",
     "ic_t",
+    "ic_t_hac",
     "ic_n_days",
     "auc_mean_daily",
     "auc_scored_against",
@@ -355,16 +357,20 @@ catalog.select(
 # fewer of them is not comparable with one measured on all of them - which is why it is shown
 # beside the mean rather than left implicit.
 #
-# `ic_t` is a Newey-West HAC statistic on the monthly IC series. It is a diagnostic and not a
-# selection rule: the monthly series is short, overlapping in the sense that the same firms recur,
-# and read many times over by the time a case study reaches this notebook.
+# Two t-statistics sit in the table and they answer different questions. `ic_t` is computed over
+# the fold-level mean ICs, one per fold, and `registry/metrics.py` calls it a diagnostic in terms.
+# `ic_t_hac` is the Newey-West statistic on the monthly IC series, and it is the inferential
+# reading - the one to quote, and the larger denominator of the two. Neither is a selection rule:
+# the monthly series is short, overlapping in the sense that the same firms recur, and read many
+# times over by the time a case study reaches this notebook.
 
 # %% tags=["results"]
 by_label = catalog.select(
     "label",
     "task",
     ic_mean=pl.col("ic_mean"),
-    ic_t=pl.col("ic_t"),
+    ic_t_fold=pl.col("ic_t"),
+    ic_t_hac=pl.col("ic_t_hac"),
     scored_months=pl.col("ic_n_days"),
     full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max(),
 ).sort("ic_mean", descending=True)
