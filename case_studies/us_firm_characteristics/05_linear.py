@@ -89,6 +89,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -169,14 +170,15 @@ configs
 # set of members than the canonical population does. A population is immutable once written, so
 # such a run must publish under its own name: on a fresh workspace it would otherwise register an
 # incomplete snapshot under the canonical one, and where the full population already exists the
-# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
-# either knob, and says so here rather than several cells later in a message about hashes.
+# registry refuses it. The comparison is over `(label, config_name)` pairs rather than row counts,
+# because a subset can match the canonical population on height while declaring different members,
+# and it says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run fits {configs.height} of the declared label-configuration pairs, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 
 
@@ -591,10 +593,8 @@ side_text = "; ".join(
     f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
     for row in by_label.sort("label").iter_rows(named=True)
 )
-# Whether the panels overlap is also a fact about the frame, and "the spread inside a panel is
-# small next to the distance between panels" is the kind of magnitude claim that goes stale on
-# the next run. Each label covers [worst_ic, best_ic]; this asks whether any two of those
-# intervals meet.
+# Whether the panels overlap is a fact about the frame too. Each label covers
+# [worst_ic, best_ic], and this asks whether any two of those intervals meet.
 ranges = by_label.sort("best_ic").select("label", "worst_ic", "best_ic").rows(named=True)
 touching = [
     (lower, upper)

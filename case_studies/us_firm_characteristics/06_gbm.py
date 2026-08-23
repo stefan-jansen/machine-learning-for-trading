@@ -89,12 +89,14 @@
 
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -153,14 +155,15 @@ configs
 # set of members than the canonical population does. A population is immutable once written, so
 # such a run must publish under its own name: on a fresh workspace it would otherwise register an
 # incomplete snapshot under the canonical one, and where the full population already exists the
-# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
-# either knob, and says so here rather than several cells later in a message about hashes.
+# registry refuses it. The comparison is over `(label, config_name)` pairs rather than row counts,
+# because a subset can match the canonical population on height while declaring different members,
+# and it says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run fits {configs.height} of the declared label-configuration pairs, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 
 
@@ -239,13 +242,15 @@ execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# Re-running this notebook unchanged costs the time it takes to read the data. Every identity is
-# re-derived from the inputs, the registry already holds the matching rows, and the runner returns
-# the stored result rather than fitting again.
+# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the registry
+# already holds the matching rows, and the runner returns the stored result rather than fitting
+# again - so re-running this notebook unchanged costs the time it takes to read the data.
 #
 # ### Running configurations of your own
 #
@@ -575,9 +580,20 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# The frame below is the claim the chart makes, computed rather than read off it: for each target,
-# the range each objective covers and whether the groups overlap. Complete separation is a
-# stronger statement than a difference in means, and it is the one the chart appears to show.
+# ### Which of the two axes moved the result
+#
+# The two frames below are the claims the charts make, computed rather than read off them, and
+# they sit together because they are read against each other.
+#
+# `by_objective` gives, for each target, the range each objective covers and whether the groups
+# overlap. Complete separation is a stronger statement than a difference in means, and it is the
+# one the chart appears to show.
+#
+# `checkpoint_vs_grid` puts the range a configuration's IC covers across its own ten checkpoints
+# against the spread across that target's whole grid at fixed training length. That is the
+# quantity that decides whether choosing a stopping point is a decision worth making carefully or
+# one being made by noise. Both are computed inside a target, because comparing a within-run range
+# against a spread taken across targets would compare two different things.
 
 # %% tags=["results"]
 by_objective = (
@@ -593,18 +609,6 @@ by_objective = (
     )
     .sort(["label", "ic_median"], descending=[False, True])
 )
-by_objective
-
-# %% [markdown]
-# ### How much the checkpoint moves a configuration
-#
-# One number per target and configuration: the range its IC covers across its own ten checkpoints,
-# against the spread across that target's whole grid at fixed training length. This is the
-# quantity that decides whether choosing a stopping point is a decision worth making carefully or
-# one being made by noise. Both are computed inside a target, because comparing a within-run range
-# against a spread taken across targets would compare two different things.
-
-# %% tags=["results"]
 spread = (
     curves.group_by("label", "config_name")
     .agg(
@@ -630,6 +634,7 @@ checkpoint_vs_grid = (
     .sort("label")
 )
 print(f"compared at {final_iteration} boosting iterations")
+display(by_objective)
 checkpoint_vs_grid
 
 # %% [markdown]
