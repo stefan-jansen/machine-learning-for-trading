@@ -40,11 +40,16 @@ decision:
 # show rather than a reason to exclude. If inverse-vol weighting does worse than
 # equal weight on a monthly cross-section, a reader with twelve months of history
 # has learned something; excluding it means the comparison never happens.
-# ``mvo_ledoit_wolf`` (allocation.py:362) does estimate a covariance, but through
-# Ledoit-Wolf shrinkage, which is the estimator built for n < p - so "cannot
-# support a covariance estimate" is at its weakest against the one allocator
-# named for solving that. It is held pending a decision on the menu rather than
-# excluded on this argument.
+# ``mvo_ledoit_wolf`` (allocation.py:362) does estimate a covariance, through
+# Ledoit-Wolf shrinkage - the estimator built for n < p, so the objection is at
+# its weakest against the one allocator named for solving that. It is held
+# pending a decision rather than excluded, and the decision is a window rather
+# than a yes or no. `sweep_config.get_allocators` injects the case-study lookback
+# as ``lookback`` for this method, which OVERRIDES `compute_mvo_weights`' own 126
+# default - so at this cadence it would estimate a 50x50 covariance from twelve
+# observations, and shrinkage does not rescue that. A per-entry override is the
+# supported route, including calendar strings resolved against periods_per_year,
+# so the question is MVO at which window.
 #
 # ``allocator_lookback`` below is therefore load-bearing again rather than a key
 # retained to satisfy a loader: sweep_config.get_allocators injects it as
