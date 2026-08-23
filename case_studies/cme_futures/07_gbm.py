@@ -262,14 +262,22 @@ plan.select(
 # population and be refused against the one on record. Carrying the value the published run used
 # is what lets this notebook re-run and resolve to the population it published rather than to a
 # new one.
+#
+# **It is canonical-only.** A preview population is discarded with its workspace, so it has no
+# lineage to extend and `run_model_population` refuses one that carries a hash. A default that is a
+# real hash rather than empty therefore has to be gated on the tier: passing it unconditionally
+# fails every preview of this notebook before it reaches a fit, which is how the reduced-scale
+# preview that gates the production run would go red for a reason that has nothing to do with the
+# model.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
+supersedes = SUPERSEDES_POPULATION or None if EXECUTION_TIER == "canonical" else None
 execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=supersedes,
 )
 
 print(f"{len(execution.runs)} configurations fitted")
