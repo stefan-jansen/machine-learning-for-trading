@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import polars as pl
 import pytest
@@ -569,4 +572,276 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     assert set(candidate_sets) == {"fwd_ret_21d"}
     assert set(candidate_sets["fwd_ret_21d"].members) == set(
         execution.catalog_rows.get_column("backtest_hash")
+    )
+
+
+def _labelled_prediction(study: Study, *, label: str, alpha: float):
+    """Publish one validation prediction whose training identity carries the given horizon."""
+    spec = _resolved_spec(alpha=alpha)
+    spec["label"] = label
+    computation = spec.get("computation", spec)
+    computation["label_artifact"] = f"{label}-artifact"
+    training = study.results.register_training(spec)
+    dates = pl.date_range(pl.date(2024, 1, 2), pl.date(2024, 1, 5), eager=True)
+    frame = pl.DataFrame(
+        {
+            "symbol": [product for timestamp in dates for product in ("ES", "NQ")],
+            "timestamp": [timestamp for timestamp in dates for _ in range(2)],
+            "fold": [0] * (2 * len(dates)),
+            "actual": [0.01, -0.01] * len(dates),
+            "prediction": [0.02 * alpha, -0.02 * alpha] * len(dates),
+        }
+    )
+    return study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+    )
+
+
+def _labelled_execution(study: Study, monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
+    """Run one canonical backtest per return horizon and return their hashes by label."""
+    prices = _product_prices()
+    path = FuturesPricePath(
+        prices=prices,
+        audit=pl.DataFrame(
+            {
+                "product": ["ES", "NQ"],
+                "position": [0, 0],
+                "timestamp": [prices.item(0, "timestamp"), prices.item(1, "timestamp")],
+                "cum_ratio": [1.0, 1.0],
+            }
+        ),
+        roll_transitions=pl.DataFrame(),
+        expiry_rules=_expiry_rules(["ES", "NQ"]),
+    )
+    monkeypatch.setattr(research_workflow, "load_futures_price_path", lambda *a, **k: path)
+    rows = []
+    for index, label in enumerate(research_workflow.ALL_LABELS):
+        prediction = _labelled_prediction(study, label=label, alpha=1.0 + index)
+        rows.append(
+            {
+                "request_name": f"{label}-equal-weight-k1",
+                "prediction_hash": prediction.hash,
+                "label": label,
+                "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+                "chapter": "ch16",
+            }
+        )
+    execution = run_official_backtest_requests(
+        study,
+        strategy_request_frame(rows),
+        population_name="test-cme-final",
+    )
+    catalog = execution.catalog_rows
+    return {
+        label: catalog.filter(pl.col("label") == label).get_column("backtest_hash").to_list()
+        for label in research_workflow.ALL_LABELS
+    }
+
+
+def test_final_selection_pool_spans_both_return_horizons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    study = _study(tmp_path)
+    by_label = _labelled_execution(study, monkeypatch)
+
+    def fake_pool(_study, *, label):
+        from case_studies.research import CandidateSet, Result
+
+        return CandidateSet.create(
+            _study,
+            f"test-final-validation-{label}",
+            [Result.open(_study, value) for value in by_label[label]],
+        )
+
+    monkeypatch.setattr(research_workflow, "final_validation_candidate_set", fake_pool)
+
+    selection = research_workflow.final_selection_candidate_set(study)
+
+    expected = {value for hashes in by_label.values() for value in hashes}
+    assert set(selection.members) == expected
+    assert len(selection.members) == len(expected) == 2
+    assert selection.comparison_contract["comparable_fields"] == sorted(
+        research_workflow.HORIZON_DEPENDENT_PROTOCOL_FIELDS
+    )
+
+    catalog = research_workflow.selection_catalog(study, selection)
+    assert catalog.height == 2
+    assert set(catalog.get_column("label")) == set(research_workflow.ALL_LABELS)
+    assert catalog.get_column("sharpe").to_list() == sorted(
+        catalog.get_column("sharpe").to_list(), reverse=True
+    )
+    assert selection.best_validation_sharpe().hash == catalog.item(0, "backtest_hash")
+
+
+def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from case_studies.research import CandidateSet
+
+    study = _study(tmp_path)
+    by_label = _labelled_execution(study, monkeypatch)
+    selection = SimpleNamespace(
+        members=(*(value for hashes in by_label.values() for value in hashes), "not-a-backtest")
+    )
+
+    with pytest.raises(ValueError, match="does not describe every candidate"):
+        research_workflow.selection_catalog(study, cast(CandidateSet, selection))
+
+
+def test_holdout_evidence_is_empty_until_the_lifecycle_is_locked(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+
+    assert research_workflow.holdout_evidence(study).is_empty()
+
+
+def test_holdout_evidence_reports_the_lock_and_its_single_evaluation(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    lock_record = {
+        "candidate_set_hash": "set-1",
+        "label": "fwd_ret_5d",
+        "checkpoint_kind": "epoch",
+        "checkpoint_value": 20,
+        "validation_backtest_hash": "bt-validation",
+    }
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) VALUES (?,?,?,?)",
+            ("lock-1", json.dumps(lock_record), "LOCKED", "2026-08-15T00:00:00Z"),
+        )
+
+    pending = research_workflow.holdout_evidence(study)
+    assert pending.height == 1
+    assert pending.item(0, "state") == "LOCKED"
+    assert pending.item(0, "label") == "fwd_ret_5d"
+    assert pending.item(0, "checkpoint_value") == 20
+    assert pending.item(0, "holdout_backtest_hash") is None
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO holdout_evaluations (lock_hash, holdout_training_hash, "
+            "holdout_prediction_hash, holdout_backtest_hash, evaluated_at) VALUES (?,?,?,?,?)",
+            ("lock-1", "tr-holdout", "pr-holdout", "bt-holdout", "2026-08-15T01:00:00Z"),
+        )
+        db.execute(
+            "UPDATE research_locks SET state = ? WHERE lock_hash = ?",
+            ("HOLDOUT_EVALUATED", "lock-1"),
+        )
+
+    evaluated = research_workflow.holdout_evidence(study)
+    assert evaluated.height == 1
+    assert evaluated.item(0, "state") == "HOLDOUT_EVALUATED"
+    assert evaluated.item(0, "holdout_backtest_hash") == "bt-holdout"
+    assert evaluated.item(0, "evaluated_at") == "2026-08-15T01:00:00Z"
+
+
+def test_official_model_catalog_forwards_the_population_it_supersedes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supersedes value must reach the snapshot, not stop at the boundary.
+
+    It is inside the hashed snapshot, so a run that drops it silently registers a
+    different population than the one the operator asked for - and the registry would
+    still look consistent afterwards.
+    """
+    seen: dict[str, object] = {}
+
+    def _create(study, *, name, member_kind, members, supersedes=None):  # noqa: ANN001
+        seen.update(name=name, member_kind=member_kind, supersedes=supersedes)
+        return SimpleNamespace(require_complete=lambda: None)
+
+    resolved = (
+        cast(
+            "object",
+            SimpleNamespace(spec={"execution_tier": "canonical"}),
+        ),
+    )
+    monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
+    monkeypatch.setattr(research_workflow, "expected_prediction_hashes", lambda _requests: ("h1",))
+    monkeypatch.setattr(
+        research_workflow,
+        "run_resolved_model_requests",
+        lambda _study, _resolved: SimpleNamespace(
+            runs=[SimpleNamespace(predictions=[SimpleNamespace(hash="h1")])]
+        ),
+    )
+
+    research_workflow.run_official_model_catalog(
+        cast("object", SimpleNamespace()),
+        pl.DataFrame(),
+        population_name="cme-pca-validation-v1",
+        resolved_requests=resolved,
+        supersedes="2d252634bffb",
+    )
+
+    assert seen["supersedes"] == "2d252634bffb"
+
+
+def test_official_model_catalog_defaults_to_superseding_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first population must pass None: population.py rejects a supersedes it cannot match."""
+    seen: dict[str, object] = {}
+
+    def _create(study, *, name, member_kind, members, supersedes=None):  # noqa: ANN001
+        seen["supersedes"] = supersedes
+        return SimpleNamespace(require_complete=lambda: None)
+
+    monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
+    monkeypatch.setattr(research_workflow, "expected_prediction_hashes", lambda _requests: ("h1",))
+    monkeypatch.setattr(
+        research_workflow,
+        "run_resolved_model_requests",
+        lambda _study, _resolved: SimpleNamespace(
+            runs=[SimpleNamespace(predictions=[SimpleNamespace(hash="h1")])]
+        ),
+    )
+
+    research_workflow.run_official_model_catalog(
+        cast("object", SimpleNamespace()),
+        pl.DataFrame(),
+        population_name="cme-pca-validation-v1",
+        resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
+    )
+
+    assert seen["supersedes"] is None
+
+
+def test_every_declared_model_population_is_published_by_a_notebook() -> None:
+    """The contract must name only populations a notebook actually registers.
+
+    `12_model_analysis` and `13_backtest` resolve every entry of
+    `MODEL_POPULATION_NAMES` with `OfficialPopulation.one`, which raises on a name that
+    does not exist. A name declared here and written nowhere therefore stops those two
+    notebooks on a clean registry, and nothing catches it until they run - which is how
+    the linear and GBM entries drifted from their producers three times over.
+
+    Reading the literals is the point: the name is the whole contract between the
+    producer and the consumer, and it is the literal that has drifted every time.
+    """
+    notebooks = sorted(
+        (Path(__file__).parent.parent / "case_studies" / "cme_futures").glob("[0-9]*.py")
+    )
+    assert notebooks, "no CME notebooks found"
+    published = {
+        name
+        for notebook in notebooks
+        for name in re.findall(
+            # `population_name="..."` in a call, and `population_name = POPULATION_NAME or "..."`
+            # at module level, which is how 06 and 07 leave the name overridable.
+            r'population_name\s*=\s*(?:POPULATION_NAME\s+or\s+)?"([^"]+)"',
+            notebook.read_text(),
+        )
+    }
+    declared = set(research_workflow.MODEL_POPULATION_NAMES)
+    assert not declared - published, (
+        f"MODEL_POPULATION_NAMES declares populations no notebook publishes: "
+        f"{sorted(declared - published)}"
     )

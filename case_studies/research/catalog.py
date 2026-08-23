@@ -20,11 +20,24 @@ _METRIC_COLUMNS = (
     "ic_mean",
     "ic_std",
     "ic_t",
+    # Validation dates that produced a defined cross-sectional IC. A configuration whose
+    # predictions collapse to near-constant on some folds yields no IC on those dates, so its
+    # ic_mean is measured over fewer of them and is not comparable to a full-coverage one.
+    # Ranking without this column reports the partial-coverage artifact as the leader.
+    "ic_n_days",
     "n_folds",
     "pct_positive",
     "accuracy",
     "balanced_accuracy",
+    # `auc_roc` pools every (entity, date) row in a fold into one ROC, so it pays a model for
+    # the base rate moving through the year as well as for ranking within a date.
+    # `auc_mean_daily` is the cross-sectional reading, computed within each date and averaged,
+    # which is the same shape as `ic_mean` and the one to compare against it. Both are carried:
+    # they agree where the cross-section is balanced and diverge where it is not.
     "auc_roc",
+    "auc_mean_daily",
+    "auc_n_days",
+    "auc_t_hac",
     "auc_pr",
     "log_loss",
     "brier_score",
@@ -37,6 +50,7 @@ RESERVED_COLUMNS: dict[str, Any] = {
     "config_name": pl.String,
     "label": pl.String,
     "task": pl.String,
+    "direction_label": pl.String,
     "split": pl.String,
     "checkpoint_kind": pl.String,
     "checkpoint_value": pl.Int64,
@@ -198,6 +212,11 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             _select("prediction_hash", metric_columns, "m"),
             _select("computed_at", metric_columns, "m"),
             _select("task_type", metric_columns, "m"),
+            # Which sibling label an `auc_*` block was scored against. A classification row
+            # scores its own label and leaves this null; a regression row has no classes, so
+            # the AUC it carries is against a declared direction sibling and is meaningless
+            # without knowing which. A regression label with no sibling carries no AUC.
+            _select("direction_label", metric_columns, "m"),
             *[_select(metric, metric_columns, "m") for metric in _METRIC_COLUMNS],
         ]
         fold_metric_count = (
@@ -301,6 +320,7 @@ def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
             "config_name": record["t_config_name"],
             "label": record["t_label"],
             "task": task,
+            "direction_label": record["m_direction_label"],
             "split": record["p_split"],
             "checkpoint_kind": record["p_checkpoint_kind"],
             "checkpoint_value": record["p_checkpoint_value"],

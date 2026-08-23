@@ -58,8 +58,15 @@ from case_studies.research.models import ModelRun
 from case_studies.research.recovery import ExecutionAttempt, ExecutionLedger
 from case_studies.research.results import PredictionResult, Result, TrainingResult
 from case_studies.utils.artifact_digest import value_digest
+from case_studies.utils.derived_params import quantize_derived
+from case_studies.utils.folds import (
+    FOLD_PREPARATION_VERSION,
+    prepare_gbm_folds_from_mds,
+    training_labels_for_split,
+)
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.registry.specs import canonical_json
+from case_studies.utils.runtime import cpu_seconds, resource_measurement
 from utils.modeling import RANDOM_SEED, seed_everything
 
 if TYPE_CHECKING:
@@ -121,6 +128,7 @@ class _GBMBatchCandidate:
     fitted_folds: list[int] = field(default_factory=list)
     fit_elapsed_s: float = 0.0
     started_at_s: float = 0.0
+    started_cpu_s: float = 0.0
     result: ModelRun | None = None
     error: Exception | None = None
 
@@ -235,7 +243,21 @@ _SKIP_PARAMS: dict[str, set[str]] = {
 _BEST_GPU: dict[str, str | None] = {}
 
 DEFAULT_GBM_CPU_THREADS = 8
-GBM_DEFAULT_MAX_BIN = 63
+# What every case study's setup.yaml declares under modeling.gbm.max_bin. It is LightGBM's own
+# default; the 63 that preceded it was inherited from a device branch rather than declared, and
+# the populations fitted under it are superseded.
+GBM_DEFAULT_MAX_BIN = 255
+
+# Declared behaviour of this runner. Bump when a change here would change a fitted result: the
+# libraries it dispatches to, how a parameter is derived, the fitting procedure, the checkpoint
+# schedule, or what is predicted. Do not bump for logging, comments, refactoring or anything a run
+# merely records.
+GBM_RUNNER_VERSION = 1
+
+# What a fold is cast to before it reaches the booster. No imputation and no scaling: a tree splits
+# on the ordering of a feature and routes a missing value down its own branch, so both would only
+# fabricate observations. Bump when that casting changes.
+GBM_PREPROCESSING_ID = "lightgbm-native-float32/v1"
 
 
 def _best_gpu_device(library: str) -> str | None:
@@ -1436,12 +1458,25 @@ def _gbm_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _gbm_source_identity() -> dict[str, str]:
-    from utils import modeling
+def _gbm_source_identity() -> dict[str, int | str]:
+    """The behaviour of this runner, declared rather than fingerprinted.
 
-    assert modeling.__file__ is not None
-    paths = (Path(__file__), Path(modeling.__file__))
-    return {path.name: _gbm_sha256(path) for path in paths}
+    This used to be the SHA-256 of ``gbm.py`` and ``utils/modeling.py``. ``gbm.py`` is nearly three
+    thousand lines, so every edit to any part of it - a comment, a log line, a fix to a function no
+    boosted tree ever calls - invalidated every GBM result ever registered. That is unworkable
+    against the rule that a fix which does not change a result must not force a refit.
+
+    What replaces it is a declaration. ``GBM_RUNNER_VERSION`` is bumped when a change to this module
+    would change a fitted result, ``FOLD_PREPARATION_VERSION`` covers the shared fold preparation
+    the same way, and ``GBM_PREPROCESSING_ID`` names the cast applied to a fold.
+    ``tests/test_gbm_identity.py`` pins the predictions these versions claim to describe and fails
+    when they move without a bump, so the declaration is checked rather than trusted.
+    """
+    return {
+        "gbm_runner": GBM_RUNNER_VERSION,
+        "fold_preparation": FOLD_PREPARATION_VERSION,
+        "preprocessing": GBM_PREPROCESSING_ID,
+    }
 
 
 def _gbm_runtime_identity() -> dict[str, str]:
@@ -1548,8 +1583,14 @@ def _validate_lightgbm_params(params: dict[str, Any]) -> None:
 
 
 def _scaled_huber_alpha(scale: float, labels: np.ndarray) -> float:
-    """Resolve LightGBM's residual-unit Huber delta from one training fold."""
-    return max(scale * float(np.nanstd(labels)), float(np.finfo(np.float32).eps))
+    """Resolve LightGBM's residual-unit Huber delta from one training fold.
+
+    Quantized for the reason in :mod:`case_studies.utils.derived_params`: the delta is computed
+    from the training labels, so its last digits carry the reduction order rather than
+    information, and an unrounded value gives one declared configuration two training identities.
+    """
+    delta = max(scale * float(np.nanstd(labels)), float(np.finfo(np.float32).eps))
+    return quantize_derived(delta)
 
 
 def _gbm_effective_params_by_fold(
@@ -1830,7 +1871,7 @@ def _gbm_compatibility_key(study: Study, request: dict[str, Any]) -> str:
             "device": device,
             "max_bin": max_bin,
             "num_threads": num_threads,
-            "preprocessing": "lightgbm-native-float32/v1",
+            "preprocessing": GBM_PREPROCESSING_ID,
         }
     )
 
@@ -1838,21 +1879,8 @@ def _gbm_compatibility_key(study: Study, request: dict[str, Any]) -> str:
 def resolve_model_request(study: Study, request: dict[str, Any]):
     base = _load_gbm_batch_base(study, request)
     mds = base["mds"]
-    folds = prepare_gbm_folds(
-        base["dataset_pd"],
-        base["splits"],
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        mds.entity_cols[0],
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=base["train_sample_frac"],
-        eval_label_col=mds.eval_label_col,
-        seed=RANDOM_SEED,
+    folds = prepare_gbm_folds_from_mds(
+        mds, base["splits"], train_sample_frac=base["train_sample_frac"]
     )
     if len(folds) != len(base["splits"]) or any(
         not fold["n_train"] or not fold["n_val"] for fold in folds
@@ -2207,19 +2235,16 @@ def _write_learning_curves(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _gbm_sampled_training_labels(base: dict[str, Any], split: dict[str, Any]) -> np.ndarray:
-    mds = base["mds"]
-    dataset = base["dataset_pd"]
-    dates = dataset[mds.date_col]
-    mask = (dates >= split["train_start"]) & (dates <= split["train_end"])
-    labels = dataset.loc[mask, mds.label_col].values.astype(np.float32)
-    labels = labels[~np.isnan(labels)]
-    train_sample_frac = base["train_sample_frac"]
-    if 0.0 < train_sample_frac < 1.0 and len(labels) > 0:
-        n_keep = max(1, int(len(labels) * train_sample_frac))
-        rng = np.random.default_rng(RANDOM_SEED + int(split["fold"]))
-        keep_idx = rng.choice(len(labels), size=n_keep, replace=False)
-        keep_idx.sort()
-        labels = labels[keep_idx]
+    """The training labels Huber's threshold is derived from, as the fold will actually see them.
+
+    This used to re-select the rows itself, in pandas, casting to float32. It agreed with fold
+    preparation until preparation stopped casting labels, and then the planner and the resolver
+    derived two different thresholds for one declared configuration and gave it two identities.
+    Both now come from the one selection, so they cannot drift apart again.
+    """
+    labels = training_labels_for_split(
+        base["mds"], split, train_sample_frac=base["train_sample_frac"], seed=RANDOM_SEED
+    )
     if not len(labels):
         raise ValueError(f"GBM request has no training labels for fold {split['fold']}")
     return labels
@@ -2261,25 +2286,13 @@ def _gbm_effective_params_for_splits(
 
 
 def _prepare_gbm_batch_fold(base: dict[str, Any], split: dict[str, Any]) -> dict[str, Any]:
-    mds = base["mds"]
-    folds = prepare_gbm_folds(
-        base["dataset_pd"],
-        [split],
-        mds.feature_names,
-        mds.label_col,
-        mds.date_col,
-        mds.entity_cols[0],
-        task_type=mds.task_type,
-        class_values=mds.class_values,
-        temporal_by_fold=mds.temporal_by_fold,
-        temporal_keys=mds.temporal_keys,
-        temporal_feature_names=mds.temporal_feature_names,
-        train_sample_frac=base["train_sample_frac"],
-        eval_label_col=mds.eval_label_col,
-        seed=RANDOM_SEED,
+    folds = prepare_gbm_folds_from_mds(
+        base["mds"], [split], train_sample_frac=base["train_sample_frac"]
     )
-    if len(folds) != 1 or not folds[0]["n_train"] or not folds[0]["n_val"]:
+    if len(folds) != 1 or int(folds[0]["fold"]) != int(split["fold"]):
         raise ValueError(f"GBM request could not prepare fold {split['fold']}")
+    if not folds[0]["n_train"] or not folds[0]["n_val"]:
+        raise ValueError(f"GBM request prepared fold {split['fold']} empty")
     return folds[0]
 
 
@@ -2471,6 +2484,7 @@ def _resolve_gbm_batch_candidate(
         candidate.result = cached
         return
     candidate.started_at_s = time.perf_counter()
+    candidate.started_cpu_s = cpu_seconds()
     candidate.training = study.results.register_training(
         spec,
         execution_tier=spec["execution_tier"],
@@ -2535,6 +2549,31 @@ def _run_gbm_batch_fold(candidate: _GBMBatchCandidate, fold: dict[str, Any]) -> 
     (candidate.reused_folds if reused else candidate.fitted_folds).append(fold_id)
 
 
+def _record_gbm_runtime(
+    study: Study,
+    training: TrainingResult,
+    *,
+    elapsed_s: float,
+    cpu_s: float | None = None,
+    fit_s: float | None = None,
+) -> None:
+    """Record what this training run cost, against its registry row.
+
+    Wall time on its own cannot tell a run that saturated the machine from one that spent the
+    time waiting, so CPU seconds and the ratio between them go with it, and peak resident memory
+    decides whether two notebooks can share the machine. Every GBM row had these NULL, which is
+    what made the boosting families unschedulable from recorded cost.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(elapsed_s=elapsed_s, cpu_s=cpu_s, fit_s=fit_s),
+    )
+
+
 def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> None:
     if candidate.result is not None or candidate.error is not None:
         return
@@ -2587,9 +2626,14 @@ def _finish_gbm_batch_candidate(study: Study, candidate: _GBMBatchCandidate) -> 
         candidate.attempt.finish("completed", diagnostics)
         candidate.attempt = None
         runtime_path = curves_path.with_name("runtime.json")
-        _write_gbm_runtime_fields(
-            runtime_path,
-            elapsed_s=time.perf_counter() - candidate.started_at_s,
+        elapsed_s = time.perf_counter() - candidate.started_at_s
+        _write_gbm_runtime_fields(runtime_path, elapsed_s=elapsed_s)
+        _record_gbm_runtime(
+            study,
+            candidate.training,
+            elapsed_s=elapsed_s,
+            cpu_s=cpu_seconds() - candidate.started_cpu_s,
+            fit_s=candidate.fit_elapsed_s,
         )
         candidate.result = ModelRun(
             candidate.training,
@@ -2841,6 +2885,7 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     if cached is not None:
         return cached
     started = time.perf_counter()
+    started_cpu = cpu_seconds()
     computation = spec["computation"]
     training = study.results.register_training(
         spec,
@@ -2905,13 +2950,18 @@ def run_resolved_request(study: Study, spec: dict[str, Any], context: GBMContext
     curves_path = train_dir / "learning_curves.parquet"
     if not curves_path.exists() and result["learning_curves"]:
         _write_learning_curves(curves_path, result["learning_curves"])
+    elapsed_s = time.perf_counter() - started
     runtime_path = train_dir / "runtime.json"
     if runtime_path.exists():
         runtime = json.loads(runtime_path.read_text())
-        runtime["elapsed_s"] = time.perf_counter() - started
+        runtime["elapsed_s"] = elapsed_s
         temporary = runtime_path.with_name(f".{runtime_path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, runtime_path)
+    # The artifact above is not queryable, and the schedule reads the column. Both are written:
+    # a resolved request runs through here rather than through the batch path, so recording it
+    # only there left every row this path produced with a NULL elapsed_s.
+    _record_gbm_runtime(study, training, elapsed_s=elapsed_s, cpu_s=cpu_seconds() - started_cpu)
     return ModelRun(training=training, predictions=tuple(prediction_results))
 
 

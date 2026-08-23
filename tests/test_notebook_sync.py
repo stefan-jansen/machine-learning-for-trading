@@ -494,3 +494,112 @@ def test_a_stamped_blob_this_repo_does_not_have_is_stale(tmp_path, monkeypatch) 
     py = tmp_path / "nb.py"
     py.write_text("fig = build()\n", encoding="utf-8")
     assert not notebook_provenance.alt_text_only_drift("0" * 40, py, _notebook([]))
+
+
+def test_prose_edit_beside_a_computed_alt_is_not_stale(tmp_path, monkeypatch) -> None:
+    """Eight case studies write the leading configuration into their alt with an f-string.
+
+    That alt is not knowable from the source, so it cannot be compared against what the
+    output carries. Requiring the comparison anyway made the counts disagree and failed
+    the notebook, so the carve-out never applied to the notebooks that read their figures
+    off the frame - the ones it was written for.
+    """
+    old = (
+        "# %% [markdown]\n# the grid spans 0.032 to 0.0008\n\n"
+        "# %%\nfig = build()\n"
+        'show_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n'
+    )
+    new = (
+        "# %% [markdown]\n# read best_ic against worst_ic in the frame\n\n"
+        "# %%\nfig = build()\n"
+        'show_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n'
+    )
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader} at {value:+.3f}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {"image/png": {"alt": "the leader is ridge at +0.032"}},
+            }
+        ],
+    }
+    assert _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_editing_the_literal_part_of_a_computed_alt_is_stale(tmp_path, monkeypatch) -> None:
+    """A computed alt is not blanked, so its literal parts stay in the compared AST dump."""
+    old = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the leader is {leader}")\n'
+    new = '# %%\nfig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n'
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"the winner is {leader}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {"image/png": {"alt": "the winner is ridge"}},
+            }
+        ],
+    }
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_a_computed_alt_the_output_does_not_carry_is_stale(tmp_path, monkeypatch) -> None:
+    """An alt added since execution: the image is there and no alt metadata is."""
+    old = '# %% [markdown]\n# one\n\n# %%\nfig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n'
+    new = '# %% [markdown]\n# two\n\n# %%\nfig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n'
+    cell = {
+        "cell_type": "code",
+        "metadata": {},
+        "source": 'fig = build()\nshow_plotly_with_alt(fig, f"{leader}")\n',
+        "outputs": [
+            {
+                "output_type": "display_data",
+                "data": {"image/png": "iVBORw0KGgo="},
+                "metadata": {},
+            }
+        ],
+    }
+    assert not _drift(tmp_path, monkeypatch, old, new, _notebook([cell]))
+
+
+def test_every_row_the_scan_returns_is_one_of_the_files_it_was_given() -> None:
+    """The gate must answer for the files it is given, not for the working tree.
+
+    `check_all` scanning everything is what let one session's dirty notebook block
+    every unrelated commit in a shared worktree. This is the contract that fixes it,
+    and it holds whatever state the tree is in: no category may name a notebook
+    outside `only`. Nothing unstaged can reach main, so the narrower scan gives up
+    no protection.
+    """
+    everything = check_all()
+    all_rows = sorted({r for category in everything for r in category})
+    assert all_rows, "no notebook in this tree for the scan to report on"
+
+    chosen = {all_rows[0]}
+    for category in check_all(only=chosen):
+        assert set(category) <= chosen
+
+    excluded = set(all_rows[1:])
+    if excluded:
+        for category in check_all(only=excluded):
+            assert all_rows[0] not in category
+
+
+def test_the_paired_py_selects_its_notebook() -> None:
+    """pre-commit stages the `.py`, so naming it has to reach the `.ipynb` beside it."""
+    everything = check_all()
+    all_rows = sorted({r for category in everything for r in category})
+    assert all_rows, "no notebook in this tree for the scan to report on"
+    nb = all_rows[0]
+    by_py = check_all(only={nb.removesuffix(".ipynb") + ".py"})
+    assert sorted({r for category in by_py for r in category}) == [nb]
+
+
+def test_an_empty_restriction_still_scans_everything() -> None:
+    """`only=None` is the whole tree, which is what CI calls and must not change."""
+    assert check_all(only=None) == check_all()

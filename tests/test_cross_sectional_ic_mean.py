@@ -1,88 +1,117 @@
-"""Tests for `utils.modeling.cross_sectional_ic_mean`.
+"""Behavior of the shared cross-sectional IC adapter in utils.modeling.
 
-The one definition of the numpy-array adapter that chapters 11, 12 and 13 use to
-score a fold. It replaced 17 copy-pasted definitions, 13 of which took the mean
-over a series that could still hold NaN (#493).
+The defect these pin (#493): a date whose predictions all tie has an undefined
+Spearman coefficient. ml4t-diagnostic 0.1.1 reports it as NaN and 0.1.2 as null,
+and in polars `drop_nulls` removes only the second. One survivor turns the mean
+of the entire series into NaN, so a notebook reports `nan` for its headline
+metric, or selects an arbitrary model, with no error anywhere.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pytest
 
 from utils.modeling import cross_sectional_ic_mean
 
+N_ENTITIES = 12
 
-def _panel(n_dates: int = 4, n_entities: int = 12, tied_date: int | None = None):
-    """Aligned (y_true, y_pred, dates, entities) arrays, optionally with a tied date."""
-    rng = np.random.default_rng(0)
-    y_true, y_pred, dates, entities = [], [], [], []
-    for d in range(n_dates):
-        truth = rng.normal(size=n_entities)
-        pred = (
-            np.full(n_entities, 0.5)
-            if d == tied_date
-            else 0.7 * truth + 0.3 * rng.normal(size=n_entities)
-        )
-        y_true.extend(truth)
-        y_pred.extend(pred)
-        dates.extend([f"2024-01-{d + 1:02d}"] * n_entities)
-        entities.extend(f"S{e:02d}" for e in range(n_entities))
-    return (
-        np.asarray(y_true),
-        np.asarray(y_pred),
-        np.asarray(dates),
-        np.asarray(entities),
+
+def _date_block(day: str, predictions: np.ndarray, returns: np.ndarray):
+    entities = np.array([f"S{i}" for i in range(len(predictions))])
+    dates = np.array([day] * len(predictions))
+    return dates, entities, predictions, returns
+
+
+def _concat(*blocks):
+    return tuple(np.concatenate(parts) for parts in zip(*blocks, strict=True))
+
+
+def _ranked_block(day: str, *, tied: bool):
+    ordered = np.arange(N_ENTITIES, dtype=float)
+    predictions = np.full(N_ENTITIES, 0.5) if tied else ordered / 10.0
+    returns = (ordered % 5) / 100.0
+    return _date_block(day, predictions, returns)
+
+
+def test_the_tied_date_really_is_undefined() -> None:
+    """The case the next test relies on: the library cannot score a tied date.
+
+    Without this, a library version that started scoring tied dates would make
+    the poisoning test pass for the wrong reason and stop measuring anything.
+    """
+    import polars as pl
+    from ml4t.diagnostic.metrics import cross_sectional_ic_series
+
+    dates, entities, predictions, returns = _ranked_block("2020-01-02", tied=True)
+    ic = cross_sectional_ic_series(
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "prediction": predictions}),
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "forward_return": returns}),
+        pred_col="prediction",
+        ret_col="forward_return",
+        date_col="timestamp",
+        entity_col="symbol",
+        min_obs=10,
+    )
+    undefined = ic["ic"].null_count() + int(ic["ic"].is_nan().fill_null(False).sum())
+    assert undefined == ic.height
+
+
+def test_a_tied_date_does_not_poison_the_mean() -> None:
+    """One undefined date must be dropped, not propagated into the average."""
+    defined_only = _ranked_block("2020-01-01", tied=False)
+    with_a_tied_date = _concat(defined_only, _ranked_block("2020-01-02", tied=True))
+
+    dates, entities, predictions, returns = defined_only
+    one_date = cross_sectional_ic_mean(returns, predictions, dates, entities)
+
+    dates, entities, predictions, returns = with_a_tied_date
+    two_dates = cross_sectional_ic_mean(returns, predictions, dates, entities)
+
+    assert math.isfinite(two_dates)
+    assert two_dates == pytest.approx(one_date)
+
+
+def test_every_date_undefined_returns_nan_not_zero() -> None:
+    """A model that predicts one constant has no IC, and NaN is what says so."""
+    dates, entities, predictions, returns = _concat(
+        _ranked_block("2020-01-01", tied=True),
+        _ranked_block("2020-01-02", tied=True),
     )
 
-
-def test_positive_ic_when_predictions_track_returns() -> None:
-    ic = cross_sectional_ic_mean(*_panel())
-    assert np.isfinite(ic)
-    assert ic > 0.5
-
-
-def test_a_tied_date_is_excluded_not_propagated() -> None:
-    """The #493 regression: one undefined date must not make the mean NaN."""
-    with_tie = cross_sectional_ic_mean(*_panel(tied_date=1))
-    assert np.isfinite(with_tie), "a tied date poisoned the mean"
-
-    # And it is excluded rather than counted as zero: dropping the tied date from
-    # the input entirely must give the same answer.
-    y_true, y_pred, dates, entities = _panel(tied_date=1)
-    keep = dates != "2024-01-02"
-    assert with_tie == pytest.approx(
-        cross_sectional_ic_mean(y_true[keep], y_pred[keep], dates[keep], entities[keep])
-    )
-
-
-def test_all_dates_tied_returns_nan_not_zero() -> None:
-    """No date has a coefficient, so there is no average to report."""
-    y_true, y_pred, dates, entities = _panel()
-    ic = cross_sectional_ic_mean(y_true, np.full_like(y_pred, 0.5), dates, entities)
-    assert np.isnan(ic)
+    assert math.isnan(cross_sectional_ic_mean(returns, predictions, dates, entities))
 
 
 def test_min_obs_excludes_a_thin_cross_section() -> None:
-    """12_gradient_boosting/06_optuna_multi_asset lowers the floor to 3."""
-    y_true, y_pred, dates, entities = _panel(n_entities=4)
+    """Below min_obs a date is not scored, so a thin panel scores no dates."""
+    thin = 4
+    ordered = np.arange(thin, dtype=float)
+    dates, entities, predictions, returns = _date_block(
+        "2020-01-01", ordered / 10.0, (ordered % 3) / 100.0
+    )
 
-    assert np.isnan(cross_sectional_ic_mean(y_true, y_pred, dates, entities))
-    assert np.isfinite(cross_sectional_ic_mean(y_true, y_pred, dates, entities, min_obs=3))
+    assert math.isnan(cross_sectional_ic_mean(returns, predictions, dates, entities, min_obs=10))
+    assert math.isfinite(
+        cross_sectional_ic_mean(returns, predictions, dates, entities, min_obs=thin)
+    )
 
 
 def test_a_nan_from_a_pre_0_1_2_library_is_still_filtered(monkeypatch) -> None:
-    """Belt-and-braces: 0.1.1 returned NaN for an undefined date, and `drop_nulls`
-    does not remove NaN. Simulate that library so the guard is actually exercised
-    rather than shadowed by the 0.1.2 floor pinned in pyproject.toml."""
+    """0.1.1 reported an undefined date as NaN, and `drop_nulls` does not remove NaN.
+
+    pyproject pins the 0.1.2 floor, which reports null instead, so without
+    simulating the older library the NaN half of the guard is never exercised.
+    """
     import polars as pl
     from ml4t.diagnostic import metrics as diagnostic_metrics
 
     def old_library_series(*_args, **_kwargs):
         return pl.DataFrame(
             {
-                "timestamp": ["2024-01-01", "2024-01-02", "2024-01-03"],
-                "n_obs": [12, 12, 12],
+                "timestamp": ["2020-01-01", "2020-01-02", "2020-01-03"],
+                "n_obs": [N_ENTITIES] * 3,
                 "ic": [0.2, float("nan"), -0.4],
             }
         )
@@ -90,6 +119,7 @@ def test_a_nan_from_a_pre_0_1_2_library_is_still_filtered(monkeypatch) -> None:
     monkeypatch.setattr(diagnostic_metrics, "cross_sectional_ic_series", old_library_series)
 
     # Precondition: the naive reading of that frame really is NaN.
-    assert np.isnan(old_library_series().drop_nulls("ic")["ic"].mean())
+    assert math.isnan(old_library_series().drop_nulls("ic")["ic"].mean())
 
-    assert cross_sectional_ic_mean(*_panel()) == pytest.approx(-0.1)
+    dates, entities, predictions, returns = _ranked_block("2020-01-01", tied=False)
+    assert cross_sectional_ic_mean(returns, predictions, dates, entities) == pytest.approx(-0.1)

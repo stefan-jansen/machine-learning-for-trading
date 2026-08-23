@@ -65,7 +65,6 @@ def corwin_schultz_spread(
         gamma = gamma.rolling_mean(window)
 
     # α coefficient
-    k = 2 * np.sqrt(2) - 3  # 3 - 2√2 ≈ 0.1716, but k = 2√2 - 3 ≈ -0.1716
     denom = 3 - 2 * np.sqrt(2)  # ≈ 0.1716
 
     alpha = (((2 * beta).sqrt() - beta.sqrt()) / denom) - (gamma / denom).sqrt()

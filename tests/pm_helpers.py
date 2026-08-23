@@ -879,7 +879,59 @@ def research_preview_parameters(
     if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
         resolved["EXECUTION_TIER"] = "preview"
         resolved["WORKSPACE"] = str(output_dir.resolve())
+    if "PREVIEW_REDUCTIONS" in declared:
+        resolved = _collect_preview_reductions(resolved)
     return resolved
+
+
+def _collect_preview_reductions(parameters: dict) -> dict:
+    """Fold the per-notebook reduction overrides into the single parameter that carries them.
+
+    A model notebook takes its reductions as one ``PREVIEW_REDUCTIONS`` mapping, because a
+    preview request has to declare every reduction it applies for the recorded identity to
+    describe what was actually fitted. ``overrides.yaml`` still states them one per line, the way
+    it does for every other notebook, so the translation happens here rather than in nine entries
+    that would then have to be kept agreeing with each other.
+    """
+    resolved = dict(parameters)
+    reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
+    max_folds = resolved.pop("MAX_FOLDS", None)
+    max_symbols = resolved.pop("MAX_SYMBOLS", None)
+    train_sample_frac = resolved.pop("TRAIN_SAMPLE_FRAC", None)
+    if max_folds is not None:
+        reductions.setdefault("folds", list(range(int(max_folds))))
+    if max_symbols is not None:
+        reductions.setdefault("max_symbols", int(max_symbols))
+    if train_sample_frac is not None:
+        reductions.setdefault("train_sample_frac", float(train_sample_frac))
+    # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
+    # request builder rejects it. Reducing the universe is the reduction that always applies.
+    if not reductions:
+        reductions["max_symbols"] = 5
+    resolved["PREVIEW_REDUCTIONS"] = reductions
+    return resolved
+
+
+def injected_parameters(
+    py_path: Path,
+    parameters: dict | None,
+    output_dir: Path | None,
+    *,
+    research_preview: bool,
+) -> dict | None:
+    """Return what Papermill should inject, given the tier this run declares.
+
+    ``PREVIEW_REDUCTIONS`` only means anything under the preview tier, and the request
+    builders reject it outright on a canonical one. An override file declares it once and
+    both paths read that file: ``tests/generate_intermediates.py`` passes the same entry
+    with ``research_preview=False``, so leaving it in fails at request construction
+    instead of reducing anything.
+    """
+    if research_preview:
+        return research_preview_parameters(py_path, parameters, output_dir)
+    if parameters and "PREVIEW_REDUCTIONS" in parameters:
+        return {k: v for k, v in parameters.items() if k != "PREVIEW_REDUCTIONS"}
+    return parameters
 
 
 def run_notebook(
@@ -926,8 +978,9 @@ def run_notebook(
 
     start = time.time()
     nb_name = py_path.stem
-    if research_preview:
-        parameters = research_preview_parameters(py_path, parameters, output_dir)
+    parameters = injected_parameters(
+        py_path, parameters, output_dir, research_preview=research_preview
+    )
 
     def _log(msg: str) -> None:
         if log_path:

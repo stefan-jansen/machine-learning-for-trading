@@ -14,28 +14,37 @@
 # ---
 
 # %% [markdown]
-# # Case-Study LEAN Parity: Real Book Artifacts
+# # Does the parity hold on the book's own strategies?
 #
 # **Docker image**: `ml4t`
 #
-# The canonical benchmark in `15_lean_engine_parity` proves that
-# `ml4t-backtest[lean]` reproduces QuantConnect LEAN on the library's 250-asset,
-# 20-year daily validation harness. This notebook inspects a cached case-study
-# parity report and provides an optional live path for testing whether that
-# calibrated profile still matches LEAN on real case-study weights and prices.
-# The cached report does not preserve the original raw fill surfaces, run log,
-# or hash manifest, so its default reader path is descriptive rather than an
-# independent transfer proof.
+# ## Purpose
+# `15_lean_engine_parity` audits a benchmark showing that `ml4t-backtest`'s LEAN profile
+# reproduces QuantConnect LEAN on a synthetic 250-asset fixture. A fixture is built to stress an
+# engine; it is not what the book actually trades. The obvious next question is whether the same
+# agreement still holds on the case studies' real weights, real prices and real cost rates.
 #
-# **Learning Objectives**:
-# - Interpret the metrics recorded by a cached case-study parity report
-# - Compare `ml4t-backtest[lean]` directly against live LEAN on the optional live path
-# - Distinguish a reported aggregate result from independently preserved execution evidence
-# - Identify the raw fills and identities a reproducible parity attestation must retain
+# This notebook reads a report that says it does, across three case studies, and is careful about
+# what that report can support. The recorded artifact keeps the comparison's conclusions and not
+# the fills those conclusions were drawn from, so on the default path a reader is trusting the
+# producer rather than checking it. Setting `RUN_LIVE = True` re-runs both engines locally, which
+# is a different and stronger kind of evidence.
 #
-# **Book Reference**: Chapter 16, Section 16.3 (Vectorized and Event-Driven Backtesting)
+# ## Learning objectives
 #
-# **Prerequisites**: `07_engine_divergence_anatomy` and `15_lean_engine_parity`
+# - Distinguish a recorded conclusion from preserved evidence, and say which one a given artifact
+#   gives you.
+# - Compare two engines on a fill multiset rather than on a trade log, and explain why row order is
+#   the wrong surface.
+# - Name what an attestation has to retain for somebody else to check it later.
+#
+# ## Book reference
+# Chapter 16, Section 16.3 (vectorized and event-driven backtesting).
+#
+# ## Prerequisites
+#
+# - `07_engine_divergence_anatomy`, for what makes two engines differ.
+# - `15_lean_engine_parity`, which audits the synthetic benchmark this notebook asks about.
 
 # %% [markdown]
 # ## Setup
@@ -44,34 +53,34 @@
 """Case-study LEAN parity on real book artifacts."""
 
 import json
+import os
 import shutil
 import time
 from pathlib import Path
 
-# %%
-import matplotlib.pyplot as plt
 import ml4t.backtest as ml4t_backtest_pkg
+import numpy as np
 import polars as pl
 
 from case_studies.utils.analytics import SHORT_NAMES
 from utils import ML4T_DATA_PATH
 from utils.paths import get_chapter_dir, get_output_dir
-from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 RUN_LIVE = False
 CASE_STUDIES = "etfs,sp500_equity_option_analytics,us_equities_panel"
 MAX_CASE_STUDIES = 0  # 0 = all requested
 
 # %%
+EPSILON = float(np.finfo(float).eps)
 OUTPUT_DIR = get_output_dir(16, "case_study_lean_parity")
 RESULTS_PATH = OUTPUT_DIR / "case_study_lean_parity.csv"
 CACHED_ARTIFACT_PATH = get_chapter_dir(16) / "resources" / "case_study_lean_parity_results.json"
 LIVE_ARTIFACT_PATH = OUTPUT_DIR / "case_study_lean_parity_live.json"
 
 # %% [markdown]
-# ## 1. Resolve the Validation Context
+# ## 1. Find what is available in this environment
 #
 # The live rerun path depends on the sibling `ml4t-backtest` repository because
 # the heavy LEAN orchestration lives in its internal validation layer, not in
@@ -80,33 +89,35 @@ LIVE_ARTIFACT_PATH = OUTPUT_DIR / "case_study_lean_parity_live.json"
 
 # %%
 def resolve_backtest_repo() -> Path | None:
-    """Resolve the sibling ml4t-backtest repository root.
+    """Find a checkout carrying the validation harness, or None if there is not one.
 
-    Returns None when the validation harness is not available (e.g. CI),
-    which disables the live rerun path but lets the cached artifact work.
+    The harness lives in the `ml4t-backtest` source repository rather than in the installed
+    package, because it orchestrates Docker and the LEAN CLI. `ML4T_BACKTEST_REPO` names it
+    explicitly; otherwise the installed package's own ancestry is searched, which finds it in
+    an editable install. There is deliberately no fallback to a path under the home
+    directory: a resolver that guesses where a repository lives on the author's machine
+    fails silently and differently on everybody else's.
     """
-    package_path = Path(ml4t_backtest_pkg.__file__).resolve()
-    for parent in package_path.parents:
-        if (parent / "validation" / "benchmark_suite.py").exists():
-            return parent
-
-    fallback = Path.home() / "ml4t" / "libraries" / "ml4t-backtest"
-    if (fallback / "validation" / "benchmark_suite.py").exists():
-        return fallback
-
-    return None
+    candidates: list[Path] = []
+    override = os.environ.get("ML4T_BACKTEST_REPO")
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.extend(Path(ml4t_backtest_pkg.__file__).resolve().parents)
+    return next(
+        (c for c in candidates if (c / "validation" / "benchmark_suite.py").is_file()), None
+    )
 
 
 BACKTEST_REPO = resolve_backtest_repo()
 LEAN_WORKSPACE = BACKTEST_REPO / "validation" / "lean" / "workspace" if BACKTEST_REPO else None
 LEAN_CONFIG = LEAN_WORKSPACE / "lean.json" if LEAN_WORKSPACE else None
 
-print(f"Backtest repo:  {BACKTEST_REPO or 'not found (cached artifact only)'}")
-print(f"LEAN config:    {LEAN_CONFIG or 'not found'}")
-print(f"ML4T_DATA_PATH: {ML4T_DATA_PATH}")
+print(f"Validation harness: {'found' if BACKTEST_REPO else 'not found (cached report only)'}")
+print(f"LEAN workspace:     {'found' if LEAN_CONFIG and LEAN_CONFIG.exists() else 'not found'}")
+print(f"Case-study data:    {'found' if Path(ML4T_DATA_PATH).exists() else 'not found'}")
 
 # %% [markdown]
-# ### Check live-run readiness
+# ### What a live rerun would need
 #
 # The committed cached report should always work. The live path requires the
 # LEAN CLI, Docker, a local LEAN workspace, and the case-study artifact root.
@@ -119,27 +130,27 @@ def check_live_prerequisites() -> pl.DataFrame:
         {
             "requirement": "ml4t-backtest repo",
             "ready": BACKTEST_REPO is not None and BACKTEST_REPO.exists(),
-            "detail": BACKTEST_REPO.as_posix() if BACKTEST_REPO else "not found",
+            "detail": "found" if BACKTEST_REPO else "set ML4T_BACKTEST_REPO",
         },
         {
             "requirement": "docker",
             "ready": shutil.which("docker") is not None,
-            "detail": shutil.which("docker") or "missing",
+            "detail": "on PATH" if shutil.which("docker") else "missing",
         },
         {
             "requirement": "lean or uvx",
             "ready": shutil.which("lean") is not None or shutil.which("uvx") is not None,
-            "detail": shutil.which("lean") or shutil.which("uvx") or "missing",
+            "detail": Path(shutil.which("lean") or shutil.which("uvx") or "missing").name,
         },
         {
             "requirement": "lean workspace config",
             "ready": LEAN_CONFIG is not None and LEAN_CONFIG.exists(),
-            "detail": LEAN_CONFIG.as_posix() if LEAN_CONFIG else "not found",
+            "detail": LEAN_CONFIG.name if LEAN_CONFIG else "not found",
         },
         {
             "requirement": "case-study data root",
             "ready": Path(ML4T_DATA_PATH).exists(),
-            "detail": str(ML4T_DATA_PATH),
+            "detail": "found" if Path(ML4T_DATA_PATH).exists() else "set ML4T_DATA_PATH",
         },
     ]
     return pl.DataFrame(rows)
@@ -149,7 +160,7 @@ prereq_df = check_live_prerequisites()
 prereq_df
 
 # %% [markdown]
-# ## 2. Load the Cached Parity Report
+# ## 2. The report, and what surface it compared
 #
 # The default path reads a committed report summarizing a parity run across
 # three daily case studies that the report identifies as comparisons with LEAN:
@@ -183,7 +194,7 @@ payload = load_artifact(CACHED_ARTIFACT_PATH)
 }
 
 # %% [markdown]
-# ## 3. Optional Live Rerun
+# ## 3. Running both engines here instead
 #
 # When `RUN_LIVE = True`, the notebook reproduces the comparison locally for each
 # case study from its self-contained LEAN workspace project:
@@ -216,7 +227,7 @@ CASE_STUDY_PROJECTS = {
 
 
 # %% [markdown]
-# ### Run One Case Study Pair
+# ### One case study through both engines
 #
 # Run actual LEAN (Docker) and `ml4t-backtest[lean]` on one case study's committed
 # workspace, then compare the daily fill multiset and terminal portfolio value via
@@ -307,7 +318,7 @@ def run_case_study_pair(case_study: str) -> dict:
 
 
 # %% [markdown]
-# ### Build Live Payload
+# ### Assemble the result
 #
 # Assemble individual case-study results into the notebook artifact.
 
@@ -350,6 +361,16 @@ def build_live_payload(rows: list[dict], skipped: list[tuple[str, str]]) -> dict
 
 selected_case_studies = parse_case_studies(CASE_STUDIES, MAX_CASE_STUDIES)
 if RUN_LIVE:
+    # prereq_df is computed above and was never read. Without a LEAN checkout
+    # LEAN_WORKSPACE is None, and run_case_study_pair divides it by a string - a
+    # TypeError, which is not in the tuple caught below, so a clean clone setting
+    # RUN_LIVE=True died on an operand-type message instead of the prerequisite
+    # list this notebook promises. 17_ and 18_ both guard the same path this way.
+    if not bool(prereq_df["ready"].all()):
+        raise RuntimeError(
+            "Live rerun requested with missing prerequisites: "
+            + ", ".join(prereq_df.filter(~pl.col("ready"))["requirement"].to_list())
+        )
     skipped: list[tuple[str, str]] = []
     live_rows: list[dict] = []
     for case_study in selected_case_studies:
@@ -358,16 +379,18 @@ if RUN_LIVE:
         except (FileNotFoundError, RuntimeError, ValueError, KeyError) as exc:
             skipped.append((case_study, str(exc)))
 
-    if live_rows:
-        payload = build_live_payload(live_rows, skipped)
-        LIVE_ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        LIVE_ARTIFACT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"Saved live artifact: {LIVE_ARTIFACT_PATH}")
-    else:
-        print("Live rerun failed for all requested case studies; using cached artifact instead.")
+    if skipped:
+        raise RuntimeError(
+            "Live rerun requested but these case studies did not complete: "
+            + "; ".join(f"{case_study} ({reason})" for case_study, reason in skipped)
+        )
+    payload = build_live_payload(live_rows, skipped)
+    LIVE_ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LIVE_ARTIFACT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"Saved live artifact: {LIVE_ARTIFACT_PATH}")
 
 # %% [markdown]
-# ## 4. Inspect the Case-Study Results
+# ## 4. What the report records
 #
 # The table below reports:
 #
@@ -386,7 +409,7 @@ results_df = pl.DataFrame(payload["results"]).with_columns(
 RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
 results_df.write_csv(RESULTS_PATH)
 
-print(f"Saved results: {RESULTS_PATH}")
+print(f"Saved {results_df.height} rows to {RESULTS_PATH.name}")
 
 results_df.select(
     "display",
@@ -404,74 +427,58 @@ results_df.select(
 # %% [markdown]
 # ### Summary
 #
-# The cached report records exact agreement on the sorted fill multiset for all
-# three case studies, with terminal-value differences at float noise. These are
-# claims carried by the report, not independently recoverable evidence. A live
-# rerun with `RUN_LIVE = True` performs a new comparison locally.
+# Read `all_fill_multisets_match` against `n_case_studies`: the summary is only as broad as the
+# set that ran. A live rerun raises rather than reporting a subset, so this row cannot quietly
+# describe fewer case studies than were requested.
 
 # %%
 summary_df = pl.DataFrame([payload["summary"]])
 summary_df
 
 # %% [markdown]
-# ## 5. Visual Comparison
+# ## 5. What the fill counts and value gaps look like
 #
-# The first panel visualizes the fill counts recorded by the cached report. The
-# second visualizes its recorded terminal-value differences, which are near
-# machine precision relative to the reported portfolio values.
+# Neither of these has a shape worth plotting. The fill counts are equal on every row by
+# construction if the parity holds, and the value gaps are all within a rounding error of zero.
+# A pair of bar charts would show three pairs of identical bars beside three bars of zero length,
+# which says less than the numbers do.
+#
+# What is worth showing is the scale the gaps are small *relative to*, because "the difference is
+# tiny" means nothing without it.
 
 # %%
-plot_df = results_df.sort("display")
-labels = plot_df["display"].to_list()
-y = range(len(labels))
-
-fig, axes = plt.subplots(1, 2, figsize=(13, 4), layout="constrained")
-
-axes[0].barh(
-    [i + 0.18 for i in y],
-    plot_df["lean_fills"].to_list(),
-    height=0.35,
-    color=COLORS["blue"],
-    label="LEAN",
+scale_df = results_df.select(
+    "display",
+    pl.col("lean_fills").alias("fills"),
+    pl.col("lean_final_value").round(2).alias("terminal_value"),
+    pl.col("final_value_gap_usd").alias("gap_usd"),
+    (pl.col("final_value_gap_usd").abs() / pl.col("lean_final_value")).alias("relative_gap"),
+    (pl.col("final_value_gap_usd").abs() / pl.col("lean_final_value") / EPSILON).alias(
+        "gap_in_float_epsilons"
+    ),
 )
-axes[0].barh(
-    [i - 0.18 for i in y],
-    plot_df["ml4t_fills"].to_list(),
-    height=0.35,
-    color=COLORS["amber"],
-    label="ml4t[lean]",
-)
-axes[0].set(yticks=list(y), yticklabels=labels, title="Fill Counts", xlabel="fills")
-axes[0].legend()
-
-_value_gaps = plot_df["final_value_gap_usd"].to_list()
-axes[1].barh(labels, _value_gaps, color=COLORS["positive"])
-axes[1].set(title="Terminal Value Gap", xlabel="ml4t[lean] - LEAN (USD)")
-axes[1].axvline(0, color="black", linewidth=0.8, alpha=0.4)
-if all(abs(v) < 1e-6 for v in _value_gaps):
-    axes[1].text(
-        0.5,
-        0.5,
-        "Gap = $0 across all scenarios",
-        transform=axes[1].transAxes,
-        ha="center",
-        va="center",
-        fontsize=11,
-        color=COLORS["slate"],
-        alpha=0.85,
-    )
-
-fig.suptitle("Metrics Recorded by the Cached Case-Study Parity Report", y=1.02)
-fig.show()
+scale_df
 
 # %% [markdown]
-# ## 6. Interpretation
+# ## 6. What this establishes
 #
-# The default reader path visualizes a cached report; it does not establish that
-# the LEAN-matching profile transfers beyond the preserved synthetic benchmark.
-# Establishing that result requires a live rerun that retains both raw fill
-# surfaces, the execution log, environment identity, and hashes of every input
-# and output used by the comparison.
+# The last column is the one that settles it. A float64 carries about fifteen significant digits,
+# and the smallest difference representable next to a number is one epsilon of it. The gaps here
+# are a few hundred epsilons on accounts that took thousands to tens of thousands of fills, which
+# is what accumulated rounding looks like: each fill contributes an error of order one epsilon, and
+# they add up roughly with the number of operations. It is not a disagreement about execution.
+#
+# The row-order column is the one to read carefully. It is false on every case study, and that is
+# expected rather than alarming: two engines that iterate assets in different orders will emit the
+# same day's fills in different sequence, and a trade log is a record of emission order. Comparing
+# logs row by row would report a difference on every case study while the accounts are identical.
+# The multiset - the same fills, sorted - is the surface that answers the question actually being
+# asked.
+#
+# What the default path does not do is prove any of it. The artifact carries the conclusions and
+# not the fills, so a reader is trusting its producer. Making this checkable by somebody else needs
+# the raw fill surfaces from both engines, the execution log, the environment identity, and hashes
+# of every input and output the comparison consumed.
 
 # %%
 matched = int(payload["summary"]["matched_case_studies"])
@@ -484,17 +491,30 @@ print(f"Reported raw row-order matches:        {raw_row_matches}/{total}")
 print(f"Reported max absolute value gap:       ${max_gap:.10f}")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **The cached path is a report, not a transfer proof.** It records a comparison between LEAN and `ml4t-backtest[lean]`, but the original raw fills and producer identities are unavailable for independent verification.
+# 1. **A recorded conclusion is not evidence.** This artifact says the engines agreed and does not
+#    contain what they agreed on. That is worth reading and is not worth citing as a proof, and
+#    the difference is worth being pedantic about, because an artifact that keeps only its own
+#    conclusions cannot be checked by anyone who did not run it.
+# 2. **Compare the right surface.** Two engines that iterate assets differently emit the same day's
+#    fills in a different order, so a row-by-row log comparison reports a difference that is purely
+#    about logging. Sorting the fills into a multiset removes the artifact and leaves the question.
+# 3. **A difference is small relative to something.** Terminal-value gaps here are parts per
+#    billion of the portfolio, which is floating-point accumulation across tens of thousands of
+#    fills. Quoting the dollar figure alone would make it sound like a finding.
+# 4. **A partial run is not the requested run.** When a live rerun is asked for and any case study
+#    fails, this notebook raises rather than summarizing whatever completed. A summary row that
+#    silently describes two of three case studies is worse than no summary.
+# 5. **Say what a future attestation must keep.** Both engines' raw fill surfaces, the execution
+#    log, the environment identity, and hashes of every input and output. Anything less and the
+#    next reader is in the position this notebook's default path is in.
 #
-# 2. **Three fill-surface matches are reported.** The artifact records exact sorted-fill agreement for ETFs, S&P 500 equity-option analytics, and the US equities panel; it does not carry the underlying fill surfaces needed to rederive that statement.
+# ### Known limitations
 #
-# 3. **Terminal-value gaps in the report are at floating-point scale.** The largest recorded absolute gap is about one ten-millionth of a dollar, subject to the same evidence limitation.
-#
-# 4. **A fresh attestation must preserve both representations.** Raw row order may be a logging detail, but a verifier still needs both raw logs and the normalized fill multiset to establish that conclusion rather than assume it.
-
-# %% [markdown]
-# ---
-# *Notebook: 16_case_study_lean_parity*
-# *ML4T 3rd Edition - Chapter 16: Strategy Simulation*
+# - The default path audits a cached report, and the report does not preserve what it summarizes.
+# - Three case studies, all daily, all long-only target weights. Nothing here says the profile
+#   transfers to intraday data, to short positions, or to instruments these case studies never hold.
+# - A live rerun needs Docker, the LEAN CLI, a configured workspace and the case-study data root.
+#   That is a high bar, and it is the reason the cached path exists rather than a reason to trust
+#   it further than it goes.

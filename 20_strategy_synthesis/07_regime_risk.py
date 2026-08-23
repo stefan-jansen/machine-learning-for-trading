@@ -26,9 +26,9 @@
 # drawdown rather than buy one with the other.
 #
 # **Learning Objectives**:
-# - Compare baseline vs risk-managed Sharpe ratios across the seven case studies
-#   that carry Ch19 overlay backtests (US Firms and S&P 500 Options have no
-#   overlay sweep, so they drop out of this cross-cut)
+# - Compare baseline against risk-managed Sharpe for the case studies that carry
+#   Ch19 overlay backtests, however many that currently is - the count is printed
+#   when the overlays load
 # - Identify which rule categories help vs hurt by case study
 # - Understand why tight stops destroy value in most cross-asset strategies
 #
@@ -47,6 +47,7 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 from matplotlib.patches import Patch as QPatch
 
 from case_studies.utils.analytics import (
@@ -54,6 +55,7 @@ from case_studies.utils.analytics import (
     SHORT_NAMES,
     load_chapter_backtests,
 )
+from utils.style import show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -108,6 +110,12 @@ def extract_risk_name(spec_json: str) -> str:
 
 # %% [markdown]
 # ## Load Risk Overlay Results from Registry
+#
+# Each case study is reduced to its single highest-Sharpe overlay row, selected by
+# row rather than by name. Overlay names such as `trailing_3pct` cover many risk
+# parameterizations within one case study, so a name selects several rows, and
+# anything downstream that treats one row as one case study then plots several
+# points under one label.
 #
 # Ch19 backtests apply different risk overlays to the same base strategy,
 # each tagged with `chapter: "ch19"`. The `risk.name` field identifies the
@@ -183,13 +191,8 @@ overlay_df = risk_df.join(baseline_sharpe, on="case_study", how="left").with_col
     sharpe_delta=pl.col("sharpe") - pl.col("baseline_sharpe"),
 )
 
-best_per_cs_flag = (
-    overlay_df.sort("sharpe", descending=True)
-    .unique(subset=["case_study"], keep="first")
-    .select("case_study", best_overlay=pl.col("overlay"))
-)
-overlay_df = overlay_df.join(best_per_cs_flag, on="case_study", how="left").with_columns(
-    is_best=(pl.col("overlay") == pl.col("best_overlay")),
+overlay_df = overlay_df.with_columns(
+    is_best=(pl.col("sharpe").rank("ordinal", descending=True).over("case_study") == 1),
 )
 
 n_cs = overlay_df["case_study"].n_unique()
@@ -204,9 +207,11 @@ overlay_df.group_by("case_study").agg(
 # %% [markdown]
 # ## Baseline vs Best-Managed Comparison
 #
-# For each case study we compare the baseline (unmanaged) strategy with
-# the best risk overlay. A positive Sharpe delta means the overlay adds
-# value at this configuration.
+# For each case study we compare the baseline unmanaged strategy with its
+# highest-Sharpe overlay configuration. A positive Sharpe delta means that
+# configuration beat the baseline, which is a weaker statement than the overlay
+# category being worth applying: it is the maximum over every configuration swept
+# for that case study, and the next section reports what the typical one did.
 
 # %%
 best_per_cs = (
@@ -262,19 +267,31 @@ axes[1].set_title("Risk Overlay Impact")
 axes[1].axvline(0, color="gray", linewidth=0.5, linestyle="--")
 axes[1].invert_yaxis()
 
-fig.show()
+show_with_alt(
+    fig,
+    "Left: paired horizontal bars per case study giving baseline Sharpe and the "
+    "Sharpe of its highest-Sharpe overlay configuration. Right: the difference "
+    "between them, coloured green where positive and red where negative.",
+)
 
 # %% [markdown]
-# **Finding**: Per case study, the *best* overlay improves Sharpe in some
-# studies and worsens it in others — the effect is strongly case-study- and
-# overlay-dependent. Population-wide across the three overlay categories present
-# in the registry (time exits, stop losses, trailing stops), the mean Sharpe
-# delta is positive for time exits (+0.50) and stop losses (+0.35) but negative
-# for trailing stops (-0.33). All three carry a negative *median* delta and lift
-# Sharpe in fewer than 30% of configurations — the positive means are driven by
-# a few extreme baseline changes rather than broad-based improvement.
-# NASDAQ-100 is excluded because its timing-corrected broad risk grid is
-# deferred to v3.1.
+# %% tags=["results"]
+_helped = best_per_cs.filter(pl.col("sharpe_delta") > 0)
+display(
+    Markdown(
+        f"For {_helped.height} of {best_per_cs.height} case studies the "
+        "highest-Sharpe overlay configuration beats the baseline"
+        + (f" ({', '.join(_helped['display_name'].to_list())})" if _helped.height else "")
+        + ". Deltas run from "
+        f"{best_per_cs['sharpe_delta'].min():+.3f} to "
+        f"{best_per_cs['sharpe_delta'].max():+.3f}.\n\n"
+        "Taking a maximum over a sweep and asking whether it beats the baseline "
+        "is close to asking whether the sweep was large enough. The population "
+        "statistics in the next section are the ones that say whether applying "
+        "an overlay is a good idea, because they include the configurations that "
+        "would have been chosen by someone without the benefit of this table."
+    )
+)
 
 # %% [markdown]
 # ## Rule Category Effectiveness
@@ -290,7 +307,9 @@ category_stats = (
         n_case_studies=pl.col("case_study").n_unique(),
         mean_sharpe_delta=pl.col("sharpe_delta").mean(),
         median_sharpe_delta=pl.col("sharpe_delta").median(),
-        pct_positive=((pl.col("sharpe_delta") > 0).sum() / pl.len()),
+        # A share under a name saying percent: the table printed 0.068 where
+        # the chart beside it printed "7% positive".
+        pct_positive=(100 * (pl.col("sharpe_delta") > 0).sum() / pl.len()),
     )
     .sort("mean_sharpe_delta", descending=True)
 )
@@ -332,7 +351,7 @@ for i, (bar, pct) in enumerate(zip(bars, pct_pos, strict=False)):
     ax.text(
         width + 0.02 if width >= 0 else width - 0.02,
         i,
-        f"{pct:.0%} positive",
+        f"{pct:.0f}% positive",
         va="center",
         ha="left" if width >= 0 else "right",
         fontsize=9,
@@ -340,14 +359,21 @@ for i, (bar, pct) in enumerate(zip(bars, pct_pos, strict=False)):
 
 ax.invert_yaxis()
 ax.margins(y=0.08)
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of the mean Sharpe change against baseline for each overlay "
+    "category, annotated with the share of configurations in that category that "
+    "improved on the baseline.",
+)
 
 # %% [markdown]
 # ## Rule Category × Case Study Heatmap
 #
-# For each combination of rule category and case study, show the best
-# Sharpe delta achieved. This reveals which rule types are universally
-# helpful vs case-study-specific.
+# For each combination of rule category and case study, the largest Sharpe change
+# any configuration in that cell achieved. A cell is a maximum over however many
+# configurations that combination swept, so cells backed by more configurations
+# are higher for that reason alone and the heatmap is not a like-for-like
+# comparison across cells.
 
 # %%
 heatmap_data = (
@@ -388,7 +414,11 @@ for i in range(len(hm_matrix.index)):
 fig.colorbar(im, ax=ax, label="Best Sharpe Delta", shrink=0.8)
 ax.set_title("Best Risk Overlay Effect by Rule Category × Case Study")
 fig.subplots_adjust(left=0.12, right=0.92, top=0.9, bottom=0.18)
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap of the best Sharpe change achieved by each overlay category within "
+    "each case study, with blank cells where that category was not swept.",
+)
 
 # %% [markdown]
 # ## Drawdown Protection
@@ -447,7 +477,12 @@ if not dd_plot.is_empty():
         label = f"Sharpe {sd:+.2f}"
         ax.text(dd + 0.5, i, label, va="center", fontsize=8)
 
-    fig.show()
+    show_with_alt(
+        fig,
+        "Horizontal bars of the percentage reduction in maximum drawdown achieved "
+        "by the best overlay in each case study, annotated with the Sharpe change "
+        "that came with it.",
+    )
 else:
     print("No drawdown improvement data available")
 
@@ -468,7 +503,7 @@ for cs_id in overlay_df["case_study"].unique().sort().to_list():
     if best_overlay_name.is_empty():
         continue
 
-    display = cs_overlay["display_name"].first()
+    display_name = cs_overlay["display_name"].first()
     baseline_sr = cs_overlay["baseline_sharpe"].first()
     best_sr = cs_overlay.filter(pl.col("is_best")).select("sharpe").head(1).item()
     best_dd = cs_overlay.filter(pl.col("is_best")).select("max_drawdown").head(1).item()
@@ -485,7 +520,7 @@ for cs_id in overlay_df["case_study"].unique().sort().to_list():
     regime_rows.append(
         {
             "case_study": cs_id,
-            "display_name": display,
+            "display_name": display_name,
             "baseline_sharpe": float(baseline_sr) if baseline_sr is not None else 0,
             "managed_sharpe": float(best_sr) if best_sr is not None else 0,
             "sharpe_delta": float(sharpe_delta),
@@ -564,56 +599,95 @@ if regime_df.height >= 3:
     ax.set_title("(b) Do Overlays Help More in High-Risk Strategies?")
 
     fig.suptitle("Cross-Dataset Overlay Effectiveness", fontsize=11, y=1.02)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Panel a: each case study placed by Sharpe change against drawdown "
+        "reduction, with quadrants labelled for the four combinations. Panel b: "
+        "Sharpe change against the depth of the baseline drawdown.",
+    )
 else:
     print("Insufficient data for regime-conditional analysis.")
 
 # %% [markdown]
-# **Finding**: The quadrant analysis (panel a) reveals three distinct
-# overlay outcomes:
+# %% [markdown]
+# Panel (a) places each case study by what its best overlay did to Sharpe and to
+# maximum drawdown. Four outcomes are possible and the quadrants name all four,
+# whether or not this registry has a case study in each: both improve, drawdown
+# falls at the cost of Sharpe, Sharpe rises at the cost of drawdown, or both
+# worsen. The second is the ordinary insurance trade, paid for in return.
 #
-# - **Sharpe up, drawdown down** (green, upper-right): Overlays that
-#   improve both Sharpe and drawdown.
-# - **DD reduced at SR cost** (orange, upper-left): Overlays that reduce
-#   drawdown but sacrifice returns — the classic insurance trade-off.
-# - **Both metrics worsen** (red, lower-left): Overlays that reduce
-#   Sharpe and increase drawdown — tight rules truncating positive-return
-#   trades and adding turnover-driven friction.
-#
-# Panel (b) tests whether overlays help more when the baseline strategy
-# has larger drawdowns. Strategies with deep baseline drawdowns benefit
-# most from overlays; strategies with already-moderate drawdowns see
-# diminishing or negative returns from additional constraints.
+# Panel (b) asks whether an overlay helps more when the baseline drawdown is
+# deeper. That is the plausible mechanism - a rule that cuts losing positions has
+# more to cut - but with this many case studies the panel shows the coordinates
+# and settles nothing.
 
 # %% [markdown]
 # ## Key Takeaways
+
+# %% tags=["results"]
+_cat = category_stats.sort("median_sharpe_delta", descending=True)
+_neg_med = _cat.filter(pl.col("median_sharpe_delta") < 0)
+_top_rate = _cat.sort("pct_positive", descending=True).row(0, named=True)
+_best = best_per_cs.sort("sharpe_delta", descending=True).row(0, named=True)
+_dd_change = (
+    100 * (_best["managed_max_dd"] - _best["baseline_max_dd"]) / abs(_best["baseline_max_dd"])
+)
+display(
+    Markdown(
+        f"**Across {int(_cat['n_configs'].sum())} overlay configurations in "
+        f"{_cat.height} categories**, the median Sharpe change is negative in "
+        f"{_neg_med.height} of them"
+        + (f" ({', '.join(_neg_med['category'].to_list())})" if _neg_med.height else "")
+        + ". The typical overlay costs Sharpe: it truncates trades that would "
+        "have recovered and adds turnover.\n\n"
+        f"**Highest positive rate**: {_top_rate['category']}, improving on "
+        f"baseline in {_top_rate['pct_positive']:.1f} percent of its "
+        f"{_top_rate['n_configs']} configurations. The categories run from "
+        f"{_cat['pct_positive'].min():.1f} to {_cat['pct_positive'].max():.1f} "
+        "percent, so on none of them is improvement the common case.\n\n"
+        f"**Largest single improvement**: {_best['display_name']} with "
+        f"{_best['overlay']}, Sharpe {_best['baseline_sharpe']:.2f} to "
+        f"{_best['managed_sharpe']:.2f} ({_best['sharpe_delta']:+.2f}), maximum "
+        f"drawdown {_best['baseline_max_dd']:.1%} to "
+        f"{_best['managed_max_dd']:.1%}, a {abs(_dd_change):.0f} percent "
+        "reduction. That is one configuration selected as the best of a sweep on "
+        "validation data, which is where a claim like it belongs on the evidence "
+        "and not in a deployment decision."
+    )
+)
+
+# %% [markdown]
+# What holds regardless of which case studies are loaded:
 #
-# 1. **Position-level overlays cut the *median* Sharpe in every category,
-#    but the mean splits**. Across 314 trailing-stop configs the mean Sharpe
-#    delta is −0.33 (median −0.55); 104 fixed stop-loss configs average +0.35
-#    (median −0.32); 78 time-exit configs average +0.50 (median −0.37). Every
-#    category's median is negative — the typical overlay truncates
-#    positive-return trades and adds turnover-driven friction — while the
-#    positive means for stops and time exits come entirely from a few
-#    deep-drawdown rescues.
-# 2. **Stop losses carry the highest positive-rate** of the three categories
-#    (28.8% of configs improve on baseline, vs 24.5% for trailing stops and
-#    20.5% for time exits). The minority of configurations that help are
-#    concentrated in case studies with deep baseline drawdowns, which
-#    indicates regime-dependent rather than universal benefit.
-# 3. **One unambiguous win-win exists in the panel**: on S&P 500 Eq+Opt
-#    the 3% trailing stop lifts Sharpe from 1.39 to 2.39 (+1.00) while
-#    compressing maximum drawdown from −36.5% to −7.1% — an 81% drawdown
-#    reduction. No other case study shows a comparable joint improvement.
-# 4. **Overlay effectiveness scales with baseline drawdown depth**. The
-#    largest positive Sharpe deltas come from the case studies with the
-#    deepest baseline drawdowns; strategies whose baselines already operate
-#    at moderate drawdown levels show overlay deltas indistinguishable
-#    from noise.
-# 5. **Default is no overlay** for the majority of case-study × allocator
-#    combinations in this panel. Overlays earn their friction cost only
-#    when the baseline strategy carries meaningful tail risk; the surviving
-#    win-win cell is the exception, not the rule.
+# - **An overlay is not free.** It cuts the left tail and the right tail
+#   together, and it trades more. A category whose median configuration loses
+#   Sharpe is the normal finding, not a broken sweep.
+# - **The highest-Sharpe configuration of a sweep is not the expected outcome of applying
+#   the rule.** Both are reported above, and it is the population statistic that
+#   should inform whether to use an overlay, because that is the distribution a
+#   future choice is drawn from.
+# - **Drawdown reduction and Sharpe are separate outcomes.** An overlay that cuts
+#   drawdown while costing Sharpe is buying insurance, and whether that is worth
+#   it depends on what the drawdown would have cost, which is a question about
+#   the mandate rather than about the backtest.
+# - **The default is no overlay.** The evidence needed to depart from it is a
+#   configuration that improves both metrics and continues to do so out of
+#   sample, and nothing here has been tested out of sample.
+#
+# ## Known Limitations
+#
+# - Only case studies with Ch19 overlay backtests appear; NASDAQ-100 is excluded
+#   pending a corrected risk grid and the rest have no overlay sweep. The loaded
+#   count is printed above.
+# - Every Sharpe here is a validation-fold number, and the overlay was chosen by
+#   looking at it. The improvement of a best-of-sweep configuration is inflated by
+#   the size of the sweep, and no deflation is applied.
+# - The baseline is the allocation-stage strategy, with a signal-stage fallback
+#   where no allocation baseline exists. A delta measured against a fallback
+#   baseline is not comparable with one measured against an allocation baseline.
+# - Maximum drawdown is a single realized path statistic with no interval. Two
+#   configurations differing by a few percentage points of drawdown are not
+#   distinguishable on this evidence.
 #
 # **Next**: [`08_recommendations`](08_recommendations.ipynb) for per-case-study
 # recommendations and a practitioner decision matrix.

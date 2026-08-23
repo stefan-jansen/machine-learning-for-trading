@@ -176,3 +176,102 @@ def test_planned_tabm_runner_attempts_later_group_after_failure(monkeypatch) -> 
         tabular_dl.run_model_plan(cast(Study, SimpleNamespace()), payload)
 
     assert calls == ["first", "second"]
+
+
+def _planned_spec(config_name: str) -> dict:
+    """A spec with the blocks `planned_model_plan` reads, shaped like a registered one."""
+    return ResolvedSpec.create(
+        family="planned_family",
+        label="target",
+        seed=7,
+        computation={
+            "checkpoint_schedule": [{"kind": "epoch", "value": 5}],
+            "cv": {
+                "folds": [
+                    {"fold": 0, "val_start": "2021-01-04", "val_end": "2021-12-31"},
+                    {"fold": 1, "val_start": "2022-01-03", "val_end": "2022-12-30"},
+                ]
+            },
+            "expected_prediction_keys": {"digest": "abc", "n_folds": 2, "n_rows": 4096},
+            "feature_artifacts": {"features": "digest"},
+            "feature_names": ["a", "b", "c"],
+            "label_artifact": {"name": "target", "digest": "label-digest"},
+            "model": {"class": "FixtureModel", "params": {"variant": config_name}},
+            "task": {"type": "regression"},
+        },
+        provenance={"device": "cpu"},
+        config_name=config_name,
+        execution_tier="canonical",
+    ).as_dict()
+
+
+def _plan_of(study, config_names, monkeypatch):
+    def batch_planner(_study, request_dicts):
+        specs = tuple(_planned_spec(request["config_name"]) for request in request_dicts)
+        return specs, request_dicts
+
+    monkeypatch.setattr(
+        "case_studies.research.model_planning.get_adapter",
+        lambda kind, family: SimpleNamespace(plan_model_requests=batch_planner),
+    )
+    return plan_models(study, requests=[_request(study, name) for name in config_names])
+
+
+def test_planned_model_plan_reads_the_table_out_of_the_plan(monkeypatch) -> None:
+    """The notebook's table without resolving, which is what a large panel cannot afford."""
+    from case_studies.research.configs import planned_model_plan
+
+    study = cast(Study, SimpleNamespace())
+    frame = planned_model_plan(_plan_of(study, ["first", "second"], monkeypatch))
+
+    assert frame.height == 2
+    assert frame.get_column("config_name").to_list() == ["first", "second"]
+    assert frame.get_column("eligible_rows").to_list() == [4096, 4096]
+    assert frame.get_column("folds").to_list() == [2, 2]
+    assert frame.get_column("feature_count").to_list() == [3, 3]
+    assert frame.get_column("validation_start").to_list() == ["2021-01-04", "2021-01-04"]
+    assert frame.get_column("validation_end").to_list() == ["2022-12-30", "2022-12-30"]
+    assert frame.get_column("checkpoints").to_list() == [1, 1]
+    assert frame.get_column("training_hash").n_unique() == 2
+    # An entity count would need the eligibility keys, which is the memory this path avoids.
+    assert "eligible_entities" not in frame.columns
+
+
+def test_run_official_models_given_a_plan_does_not_plan_a_second_time(monkeypatch) -> None:
+    """A notebook shows its plan and then runs it. Planning a large panel twice is not free."""
+    from case_studies.research import execution
+
+    study = cast(Study, SimpleNamespace())
+    plan = _plan_of(study, ["first", "second"], monkeypatch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("run_official_models planned again instead of using the plan given")
+
+    monkeypatch.setattr(execution, "plan_models", refuse)
+    monkeypatch.setattr(
+        execution.ModelPlan,
+        "create_population",
+        lambda self, *, name, supersedes=None: SimpleNamespace(name=name, supersedes=supersedes),
+    )
+    forwarded = {}
+
+    def capture(_study, requests, **kwargs):
+        forwarded["requests"] = tuple(requests)
+        forwarded["expected"] = kwargs["expected"]
+        return "execution", kwargs["population"]
+
+    monkeypatch.setattr(execution, "run_official_model_subset", capture)
+
+    _, population = execution.run_official_models(
+        study, plan, population_name="p", supersedes="0ff1ce"
+    )
+
+    assert population.name == "p"
+    # The plan path has to carry the lineage too. A refit under a corrected parameter is a changed
+    # population under an existing name, and the registry refuses that write without it.
+    assert population.supersedes == "0ff1ce"
+    assert forwarded["expected"] == plan.expected_prediction_hashes
+    # Unresolved, so run_models takes the fold-major batch path instead of holding one prepared
+    # fold set per configuration - the failure the planning path exists to prevent.
+    assert forwarded["requests"] == plan.requests
+    assert all(isinstance(request, ModelRequest) for request in forwarded["requests"])
