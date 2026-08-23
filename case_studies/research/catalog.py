@@ -703,6 +703,7 @@ class PredictionCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative prediction members selected with Polars."""
         from .comparison import CandidateSet
@@ -717,6 +718,7 @@ class PredictionCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )
 
 
@@ -779,6 +781,7 @@ class BacktestCatalog:
         *,
         name: str,
         comparison_contract: dict[str, Any] | None = None,
+        supersedes: str | None = None,
     ) -> CandidateSet:
         """Freeze exact authoritative backtest members selected with Polars."""
         from .comparison import CandidateSet
@@ -793,4 +796,5 @@ class BacktestCatalog:
             name,
             members,
             comparison_contract=comparison_contract,
+            supersedes=supersedes,
         )

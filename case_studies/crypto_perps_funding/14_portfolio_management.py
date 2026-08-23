@@ -80,6 +80,7 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
+SUPERSEDES: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -483,6 +484,14 @@ show_plotly_with_alt(
 # earlier fold to calibrate on, so it can never trade the earliest one, and on a two-fold split
 # that is half the period. The results stay registered and visible in the grid above. What they
 # do not do is compete for a selection that would be reading exposure as skill.
+#
+# A set is identified by its members, so a re-run that admits the same results returns the set
+# that already exists. A re-run that admits different ones - because something upstream was
+# corrected, or because the admission rule changed - is a second generation, and it has to name
+# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_costs`,
+# `16_risk_management` and `17_strategy_analysis` all resolve this set by name, so two live
+# generations of one name would leave them unable to say which comparison a result came from.
+# The error raised on a changed set names the predecessor hash to pass.
 
 # %%
 for label in labels:
@@ -495,6 +504,7 @@ for label in labels:
     members = study.backtests.freeze(
         results.filter(pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash"))),
         name=f"crypto-signal-allocation-{label}",
+        supersedes=SUPERSEDES.get(label),
     )
     print(
         f"{members.name}: {len(members.members)} members traded folds {full}; "

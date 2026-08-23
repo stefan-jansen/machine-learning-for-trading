@@ -230,7 +230,8 @@ CREATE TABLE IF NOT EXISTS candidate_sets (
     member_kind              TEXT NOT NULL,
     comparison_contract_json TEXT NOT NULL,
     created_at               TEXT NOT NULL,
-    git_commit               TEXT
+    git_commit               TEXT,
+    supersedes_hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_set_members (
@@ -649,6 +650,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     for table in ("holdout_staging", "holdout_evaluations"):
         if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
             db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
+
+    # A candidate set is derived from the registry, so re-running the stage that froze it
+    # produces a second set under the same name whenever the membership moves. Recording
+    # which one each replaces is what lets a reader resolve the name to the generation in
+    # force instead of getting "resolved to 2 identities".
+    if "candidate_sets" in tables and not _table_has_column(
+        db, "candidate_sets", "supersedes_hash"
+    ):
+        db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:
