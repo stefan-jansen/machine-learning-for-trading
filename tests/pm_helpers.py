@@ -879,6 +879,16 @@ def research_preview_parameters(
     if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
         resolved["EXECUTION_TIER"] = "preview"
         resolved["WORKSPACE"] = str(output_dir.resolve())
+        if "SUPERSEDES_POPULATION" in declared:
+            # A preview population is discarded with its workspace, so it extends no lineage
+            # and `run_model_population` refuses a non-None `supersedes` outright. The
+            # notebook's default is the hash its canonical population actually superseded -
+            # which is what lets a reader re-run the canonical population and resolve to the
+            # one on record - so the value has to be cleared here rather than removed there.
+            # Forced for the same reason the tier and the workspace are: the preview routing
+            # is this function's job, and nine notebooks each deciding it is nine chances to
+            # decide it differently.
+            resolved["SUPERSEDES_POPULATION"] = ""
     if "PREVIEW_REDUCTIONS" in declared:
         resolved = _collect_preview_reductions(resolved)
     return resolved

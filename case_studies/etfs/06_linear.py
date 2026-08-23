@@ -262,6 +262,11 @@ plan.select(
 # published run used is what lets this notebook re-run and resolve to the population it
 # published rather than to a new one.
 #
+# A reduced-scale run passes it empty. A population produced under a reduction is thrown
+# away with the workspace it was written to, so it has no lineage to extend, and the call
+# refuses a supersede rather than accept one it will not record. Pass
+# `SUPERSEDES_POPULATION=` alongside the reductions.
+#
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
 # `14_backtest` resolve this population by name - rather than a label of convenience, which is
 # why a run that narrows the member set has to pass its own.

@@ -34,12 +34,15 @@
 #
 # **TabM is an ensemble, and the ensemble is the point.** Averaging several independently
 # initialized networks is a standard way to make a neural fit on a small table less erratic, and
-# the cost is that you train several networks. TabM trains what is nearly one: the members share
-# every weight matrix, and each member owns a small number of per-member scaling vectors that
-# multiply the shared weights element-wise. A member is therefore a rescaled view of one shared
-# network rather than a separate network, so *k* members cost close to one network's parameters and
-# one network's training time, and the predictions are averaged over members. The grid here varies
-# two dials together: the width of the shared network and the number of members.
+# the cost is that you train several networks. TabM trains most of one. A two-layer network - the
+# backbone - is shared by every member. Each member then owns two small things of its own: a
+# vector carrying one number per hidden unit, which multiplies the backbone's output element by
+# element, and its own final linear layer turning that scaled output into a prediction. The
+# members' predictions are averaged. So what differs between members is one vector and one output
+# layer each, set against a backbone whose two layers are as wide as the hidden size - which is
+# why adding members grows the model far more slowly than training that many separate networks
+# would. The grid here varies two dials together: the width of the shared backbone and the number
+# of members.
 #
 # **A neural fit has a meaningful state at every epoch**, in the way a boosted model has one at
 # every iteration and a linear fit does not. An **epoch** is one pass over the training rows. The
@@ -50,7 +53,7 @@
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
 # - Describe what a weight-sharing ensemble holds in common between its members and what it keeps
-#   separate, and say why that makes an ensemble of *k* members cost about as much as one network.
+#   separate, and say why that makes *k* members cost far less than *k* networks.
 # - Read the epoch schedule out of a declared configuration and say how many scoreable models the
 #   run will publish for it.
 # - Read a curve of out-of-sample ranking accuracy against training epoch, and tell apart a model
@@ -247,8 +250,12 @@ plan.select(
 # Step 4 is what makes one training run produce eight results. The fold predictions are
 # concatenated into one series per checkpoint covering the whole validation period, and each
 # becomes its own registered prediction set with its own identity. Preparing a fold - slicing the
-# window, imputing, standardizing - depends on the data and not on the network, so it happens once
-# per fold and is shared by the three configurations trained on it.
+# window, imputing, standardizing - depends on the data and not on the network, so it is work
+# several configurations could share. They share it when the requests are handed to the runner
+# unresolved, because that path walks folds on the outside and configurations on the inside.
+# Resolved first, as they are here so that the plan above can be shown against the real data,
+# each configuration prepares its own folds. That costs seconds on a cross-section this size and
+# buys a plan that can be read before anything is fitted.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it is
 # going to produce. The list is computed from the resolved specifications before the first fit and
@@ -265,6 +272,8 @@ plan.select(
 # registry refuses to write it without being told which snapshot it supersedes. That lineage is the
 # only record of which generation is which, and the hash is part of what a snapshot is hashed over,
 # so a later run that changed something must carry the value it replaced rather than an empty one.
+# A reduced-scale run passes it empty whatever the default is: a population produced under a
+# reduction is thrown away with the workspace it was written to, so it has no lineage to extend.
 #
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
 # `14_backtest` resolve this population by name - rather than a label of convenience, which is why
@@ -646,11 +655,12 @@ spread
 # the comparison to make on your own data before spending a sweep on the largest configuration.
 #
 # **The ensemble is what makes this cheap enough to sweep.** Averaging *k* independently trained
-# networks costs *k* training runs. Sharing every weight matrix and giving each member only its own
-# scaling vectors costs one, and the parameter count barely moves with `n_members`. That is a
-# design choice worth recognising in other architectures: where an ensemble helps because it
-# averages away initialization noise rather than because its members are genuinely different
-# models, most of the benefit is still there once the bulk of the parameters are shared.
+# networks costs *k* training runs. Sharing the backbone and giving each member only its own
+# scaling vector and output layer costs close to one, and the parameter count grows with
+# `n_members` far more slowly than a separate network per member would. That is a design choice
+# worth recognising in other architectures: where an ensemble helps because it averages away
+# initialization noise rather than because its members are genuinely different models, most of the
+# benefit is still there once the bulk of the parameters are shared.
 #
 # **None of this selects anything.** IC measures whether predictions order the cross-section
 # correctly, not whether a strategy trading them makes money after costs and turnover. Those are

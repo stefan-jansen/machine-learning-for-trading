@@ -227,10 +227,15 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Slicing the window and cleaning its rows depends on the data and not on the model, so it is
+# work several configurations could share. Whether they do depends on how the requests reach the
+# runner. Handed over unresolved, they go to a batch path that walks folds on the outside and
+# configurations on the inside, so one prepared fold serves every configuration and only one is
+# held at a time. Resolved first - as they are here, so that the plan above can be shown against
+# the real data - each configuration prepares its own. On a cross-section of this size that costs
+# seconds and buys a plan that can be read before anything is fitted. On a panel large enough
+# that one prepared fold set does not comfortably fit in memory the trade runs the other way,
+# which is why the call also accepts requests that have not been resolved.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -247,6 +252,11 @@ plan.select(
 # different population and be refused against the one on record. Carrying the value the
 # published run used is what lets this notebook re-run and resolve to the population it
 # published rather than to a new one.
+#
+# A reduced-scale run passes it empty. A population produced under a reduction is thrown
+# away with the workspace it was written to, so it has no lineage to extend, and the call
+# refuses a supersede rather than accept one it will not record. Pass
+# `SUPERSEDES_POPULATION=` alongside the reductions.
 #
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
 # `14_backtest` resolve this population by name - rather than a label of convenience, which is
