@@ -171,9 +171,12 @@ survivors.select("label", "family", "config_name", "checkpoint_value", "sharpe")
 #   there because a nineteen-by-nineteen covariance estimated from a few hundred observations
 #   contains enough noise that optimizing against it directly concentrates the book on whichever
 #   pair happens to look least correlated in the sample.
-# - **`conformal_weighted`** reads how wrong the model has been. For each contract it builds an
-#   interval around the prediction, wide where the model's past errors on that contract were
-#   large, and gives less capital to the wider intervals.
+# - **`conformal_weighted`** reads how wrong the model has been. For each contract it takes a
+#   quantile of the model's own past absolute errors on that contract and gives less capital
+#   where that quantile is larger. It is inverse-uncertainty sizing with a conformal quantile
+#   standing in for a volatility estimate, and nothing here consumes it as an interval: the
+#   weights are `1/width` normalized within each side at each timestamp, so any factor common
+#   to every contract cancels and only the spread across contracts reaches the portfolio.
 #
 # The four that read return history share one window, so that a difference between them is the
 # method rather than the amount of history each was given.
@@ -203,22 +206,28 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ### An allocator that calibrates cannot trade its calibration window
+# ### What an allocator that calibrates costs, and what it does not
 #
-# `conformal_weighted` builds its intervals from the model's residuals on **earlier validation
-# folds only**, which is what keeps them out of sample. The earliest fold has no earlier fold, so
-# no contract has a width there, and the strategy holds nothing at all until the fold after it
-# begins. Every other allocator trades from the first decision.
+# `conformal_weighted` needs residuals before it can size anything, and a residual is only usable
+# once the return it measures has been realized. So its width at a decision comes from every
+# error the model has already made on that contract up to the label horizon before that decision
+# - earlier folds and the current fold's own elapsed history alike. That costs a **warm-up**: the
+# first few decisions of the validation span have no width and the allocator holds nothing
+# through them. On this case study's 8-hourly grid the warm-up is three decisions.
 #
-# That is not a detail about one allocator. It means two results can cover the same dates and
-# still not be comparable, because one of them was in cash for part of the span. A strategy that
-# sits out a losing period and trades only the rest is being measured on a different sample from
-# one that traded both, and differencing the two attributes the sample to the sizing.
+# It used to cost a great deal more. Calibrating on whole earlier folds only meant the earliest
+# fold had no earlier fold, so the allocator sat out the entire first year - and that is worth
+# keeping in view even though it is fixed, because of how the resulting number looked. **A period
+# a strategy sits out still counts as a period it observed.** A day holding nothing books a
+# return of exactly zero, so a book flat for a year reports the same period count as one that
+# traded every day of it, and every summary built on that count agreed the two were comparable.
+# The strategy that sat out 2022 posted the highest Sharpe in the stage by not trading a losing
+# year.
 #
-# **The period count does not detect this.** A day on which a strategy holds nothing still
-# contributes a return observation, of zero, so a book that is flat for a year reports the same
-# number of periods as one that traded every day of it. Section 4 measures which folds each
-# result actually traded and pairs only within a matching set.
+# Section 4 therefore measures which folds each result actually **traded**, from its registered
+# return series, and pairs only within a matching set. That test is not about one allocator: any
+# result that covered part of the span for any reason is measured on a different sample from one
+# that covered all of it, and differencing the two attributes the sample to the sizing.
 #
 # ## 3. Running the grid
 #
@@ -535,11 +544,13 @@ for label in labels:
 # `mvo_ledoit_wolf` and the clustering in `hrp` exist at all - both are ways of asking the same
 # data for fewer numbers.
 #
-# **An unpaired row is reported, not quietly dropped.** The conformal results are real results
-# and they are registered like the others; what they are not is comparable to a baseline that was
-# holding positions while they were still calibrating. Excluding them from the paired frame while
-# leaving them in the grid table is the distinction, and the frame printed beside the count names
-# which allocator it covers and which folds those rows actually traded.
+# **An unpaired row is reported, not quietly dropped.** A result that traded fewer folds than its
+# baseline is a real result and is registered like the others; what it is not is comparable to a
+# baseline that was holding positions while it was flat. Excluding such a row from the paired
+# frame while leaving it in the grid table is the distinction, and the frame printed beside the
+# count names which allocator it covers and which folds those rows actually traded. With every
+# allocator now calibrated on every fold, that frame is expected to be empty - which is what a
+# working guard looks like, not a reason to remove it.
 #
 # **The count of observations is not the count of exposure.** A flat day still registers a return
 # of zero, so period counts, and any check built on them, agree exactly between a result that
