@@ -14,199 +14,180 @@
 # ---
 
 # %% [markdown]
-# # S&P 500 Options: Risk Management
+# # S&P 500 Options: The Risk-Overlay Boundary
 #
-# **Chapter 19 - Risk Management**
+# In the other case studies this stage adds a risk overlay: a rule sitting on top of the
+# allocator's weights that caps a position, scales the book down after a drawdown, or targets a
+# volatility. The overlay is expressed as a target-weight transformation, which works because in
+# those case studies a position is a quantity of one instrument and its risk moves with that
+# quantity.
 #
-# The S&P 500 options setup intentionally configures no generic risk-overlay
-# sweep. Its overlapping hold-to-expiry cohorts, daily delta hedges, premium
-# costs, and cash settlement are part of the strategy engine itself. Generic
-# stop-loss and portfolio-halt grids would change the declared instrument and
-# can create zero-variance artifacts, so Chapter 19 treats them as governance
-# controls rather than validation hyperparameters.
+# A short straddle does not have that shape. Its exposure is two option legs whose sensitivity
+# changes as the underlying moves and as expiration approaches, plus a hedge position in the
+# underlying that is rebalanced daily against exactly that drift. Scaling a target weight would
+# leave the leg pairing, the settlement and the hedge accounting untouched, so the resulting
+# position would be a different instrument from the one whose risk was being managed. The controls
+# that do govern this strategy - the delta-hedge threshold, the settlement convention, the entry
+# cost model, how many weekly cohorts run at once - are part of the strategy specification itself
+# and were set in `12_backtest` and `14_costs`.
 #
-# This notebook verifies that boundary against the completed allocation surface.
-# It writes no registry rows when both configured risk-control lists are empty,
-# then confirms that no risk-overlay result is available for selection. The
-# strategy remains governed by the fixed carrier and the HTM cost cascade.
+# So this case study declares no risk-overlay variants, and this notebook is where that is
+# checked rather than assumed. It resolves the candidate set that came out of
+# `13_portfolio_management`, shows that the configured risk request set is empty, demonstrates that
+# a risk request would be refused if one were configured, and confirms it wrote nothing.
 #
-# **Book Reference:** Chapter 19, Sections 19.3–19.6
+# **Learning objectives**
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# - Recognise when a generic portfolio control cannot be applied to an instrument, and say what
+#   about the instrument makes it inapplicable.
+# - Read a stage that deliberately produces no results, and check that claim against the registry
+#   rather than against the notebook's own narration.
+#
+# **Book reference**: Chapter 19
+#
+# **Prerequisites**: the finalized candidate set published by `13_portfolio_management`.
 
 # %%
-"""S&P 500 Options: Risk: Engine-Level Risk Rules."""
-
-import json
-import warnings
+"""Validate the empty S&P 500 options risk-overlay request boundary."""
 
 import polars as pl
 
-warnings.filterwarnings("ignore")
-
-from case_studies.sp500_options.backtest_contract import (
-    assert_accepted_deep_baselines,
-    assert_complete_allocation_surface,
-    assert_complete_baseline_surface,
+from case_studies.research import CandidateSet
+from case_studies.sp500_options.research_workflow import (
+    open_study,
+    run_official_backtest_requests,
+    strategy_request_frame,
 )
-from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import strategy_view
-from case_studies.utils.registry import resolve_best_backtest_runs, resolve_best_predictions
 from case_studies.utils.sweep_config import (
-    get_allocators,
-    get_checkpoints_per_config,
     get_portfolio_risk_controls,
     get_position_risk_controls,
-    get_top_k_values_for,
-    get_top_n_predictions,
 )
-from utils.paths import get_case_study_dir
+
+CASE_STUDY = "sp500_options"
+STRATEGY_CANDIDATES = "sp500-options-strategy-candidates-v1"
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "sp500_options"
-LABEL = ""
-MAX_SYMBOLS = 0
-MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
-TOP_N_COMBOS = None
-
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-assert_accepted_deep_baselines(CASE_DIR / "run_log" / "registry.db")
-assert_complete_baseline_surface(CASE_DIR / "run_log" / "registry.db")
-bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
-if not LABEL:
-    LABEL = bt_config.primary_label
-
-from case_studies.utils.backtest_loaders import VECTORIZED_CASE_STUDIES
-
-IS_VECTORIZED = CASE_STUDY_ID in VECTORIZED_CASE_STUDIES
-MODE_LABEL = "vectorized" if IS_VECTORIZED else "engine"
-print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}, mode: {MODE_LABEL}")
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
+# ## The candidate set that passes through
 #
-# The highest-ranked allocation result is loaded only to verify upstream
-# completion and lineage. It is not promoted through a risk sweep because no
-# risk variants are configured for this case study.
+# Every member is required to be a complete backtest before the set is allowed to move on, so a
+# partial result cannot reach selection by being carried through a stage that does nothing.
 
 # %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
-)
+if EXECUTION_TIER != "canonical":
+    raise ValueError("risk-boundary validation requires the canonical candidate set")
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+candidates = CandidateSet.one(study, name=STRATEGY_CANDIDATES)
+if candidates.member_kind != "backtest":
+    raise TypeError("the finalized strategy candidate set must contain backtests")
+backtests_before = study.backtests.table()
+members = backtests_before.filter(pl.col("backtest_hash").is_in(candidates.members))
+if members.height != len(candidates.members) or members.filter(~pl.col("complete")).height:
+    raise RuntimeError("the finalized strategy candidate set is incomplete")
 
-if top_combos.is_empty():
-    msg = "No allocation-stage results found. Run the portfolio management notebook first."
-    raise RuntimeError(msg)
-
-for row in top_combos.iter_rows(named=True):
-    spec = json.loads(row["spec_json"])
-    alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-    print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
-
-# %%
-prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
-_allocation_predictions = resolve_best_predictions(
-    CASE_STUDY_ID,
-    LABEL,
-    split="validation",
-    stage="signal",
-    top_n=get_top_n_predictions(CASE_STUDY_ID, "allocation"),
-    checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY_ID),
-    universe_filter="liquid",
-)
-_allocation_methods = {
-    allocation["method"]
-    for allocation in get_allocators(CASE_STUDY_ID)
-    if allocation["method"] != "equal_weight"
-}
-assert_complete_allocation_surface(
-    CASE_DIR / "run_log" / "registry.db",
-    prediction_hashes=set(_allocation_predictions["prediction_hash"].to_list()),
-    top_ks=tuple(get_top_k_values_for(CASE_STUDY_ID, LABEL, prices["symbol"].n_unique())),
-    allocators=_allocation_methods,
+# %% tags=["results"]
+pl.DataFrame(
+    {
+        "candidate_set": [candidates.name],
+        "candidate_set_hash": [candidates.hash],
+        "member_count": [len(candidates.members)],
+        "stages": [", ".join(sorted(members.get_column("stage").unique().to_list()))],
+    }
 )
 
 # %% [markdown]
-# ### Configured Risk Boundary
+# ## The configured risk requests
 #
-# Empty position and portfolio grids are the expected production contract. A
-# future non-empty grid requires an explicit methodology decision because it
-# changes the HTM strategy rather than merely reporting its risk.
+# Position-scope controls act on one holding, portfolio-scope controls act on the book. Both lists
+# come from `config/setup.yaml`, and both are empty for this case study. Reading them rather than
+# writing the emptiness into the notebook is what makes this a check: adding a control to the
+# configuration makes the cell below raise instead of quietly running an overlay the option path
+# cannot represent.
 
 # %%
-position_controls = get_position_risk_controls(CASE_STUDY_ID)
-portfolio_controls = get_portfolio_risk_controls(CASE_STUDY_ID)
-if MAX_RISK_VARIANTS > 0:
-    position_controls = position_controls[:MAX_RISK_VARIANTS]
-    portfolio_controls = portfolio_controls[:MAX_RISK_VARIANTS]
-    print(f"Risk variants limited to {MAX_RISK_VARIANTS} each")
-
-if position_controls or portfolio_controls:
-    raise RuntimeError(
-        "S&P 500 Options declares no generic risk-overlay sweep; "
-        "review methodology before adding risk variants"
-    )
-print("No generic risk variants configured - registry remains read-only in this notebook.")
+risk_rows = [
+    {"scope": "position", **request} for request in get_position_risk_controls(CASE_STUDY)
+] + [{"scope": "portfolio", **request} for request in get_portfolio_risk_controls(CASE_STUDY)]
+risk_requests = (
+    pl.DataFrame(risk_rows)
+    if risk_rows
+    else pl.DataFrame(schema={"scope": pl.String, "name": pl.String, "method": pl.String})
+)
+if not risk_requests.is_empty():
+    raise RuntimeError("risk variants require an implemented typed options path before execution")
+risk_requests
 
 # %% [markdown]
-# ## 2. Risk Overlay Sweep
+# ## What happens to a risk request that is submitted anyway
 #
-# With both grids empty, there are no eligible inputs and therefore no backtest
-# or registry write. The assertion keeps that behavior visible and fail-closed.
+# The refusal lives in the execution path, not in this notebook, so it holds for a reader who
+# writes their own request as well. The cell below builds one against the highest-Sharpe candidate
+# and confirms it is rejected before anything is fitted or written.
 
 # %%
-n_done = 0
-assert not position_controls and not portfolio_controls
-print("Risk sweep complete: 0 backtests; registry remains read-only.")
-
-# %% [markdown]
-# ## 3. Risk Impact Analysis
-#
-# This section is **read-only** and confirms the expected absence of risk-overlay
-# rows. The allocation and premium-denominated HTM cost results remain the final
-# validation surface. No hypothetical overlay statistic is interpreted.
-
-# %%
-from case_studies.utils.backtest_explorer import BacktestExplorer
-
-explorer = BacktestExplorer(CASE_STUDY_ID)
-
-# %%
-risk_df = explorer.risk_impact()
-
-if not risk_df.is_empty():
-    # Best by risk type
-    for risk_type in risk_df["risk_type"].unique().sort().to_list():
-        subset = risk_df.filter(pl.col("risk_type") == risk_type).sort("sharpe", descending=True)
-        best = subset.head(1)
-        print(f"  Best {risk_type}: {best['risk_name'][0]} → Sharpe={best['sharpe'][0]:.3f}")
-
-    print(f"\nAll risk overlays ({len(risk_df)}):")
-    print(
-        risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta")
-        .sort("sharpe", descending=True)
-        .head(15)
-    )
+probe_member = members.sort("sharpe", "backtest_hash", descending=[True, False]).row(0, named=True)
+probe = strategy_request_frame(
+    [
+        {
+            "request_name": "risk-overlay-probe",
+            "prediction_hash": probe_member["prediction_hash"],
+            "label": probe_member["label"],
+            "signal": {"method": "equal_weight_top_k", "top_k": 5, "universe_filter": "liquid"},
+            "allocation": None,
+            "risk": {"name": "position_cap", "method": "max_weight", "max_weight": 0.1},
+            "costs": None,
+            "chapter": "ch19",
+        }
+    ]
+)
+try:
+    run_official_backtest_requests(study, probe, population_name=None)
+except ValueError as refusal:
+    print(f"risk request refused: {refusal}")
 else:
-    print("No risk overlay data in registry")
+    raise RuntimeError("the option execution path accepted a risk overlay it cannot represent")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Nothing was written
 #
-# 1. No generic position or portfolio risk variants are configured, so this
-#    notebook makes zero registry writes by design.
-# 2. The HTM engine already models the strategy's economic controls: overlapping
-#    cohort sizing, daily delta hedging, entry costs, and cash settlement.
-# 3. Stop-losses and portfolio halts belong to the governance layer for this
-#    case study. Sweeping them as validation hyperparameters would change the
-#    declared strategy and expand the selection surface.
-# 4. The downstream analysis therefore preserves the validation-only carrier
-#    and reports the absence of a risk-overlay stage explicitly.
+# The registry is read back and compared against the snapshot taken before the probe. This is the
+# claim the stage makes, so it is checked against the store rather than against a counter this
+# notebook keeps.
+
+# %% tags=["results"]
+backtests_after = study.backtests.table()
+if backtests_after.height != backtests_before.height:
+    raise RuntimeError("the empty risk boundary wrote a backtest result")
+if set(backtests_after.get_column("backtest_hash")) != set(
+    backtests_before.get_column("backtest_hash")
+):
+    raise RuntimeError("the empty risk boundary changed the published backtest set")
+pl.DataFrame(
+    {
+        "check": ["configured risk requests", "backtests before", "backtests after"],
+        "value": [
+            str(risk_requests.height),
+            str(backtests_before.height),
+            str(backtests_after.height),
+        ],
+    }
+)
+
+# %% [markdown]
+# ## Key takeaways
 #
-# **Next:** Ch20 synthesis aggregates the cross-stage rank-1 from this
-# case study into the cross-case-study comparison; the contribution is
-# the worked example of switching to a premium-denominated cost
-# framework as the cost mitigation itself.
+# - A portfolio control is defined against a representation of a position. When the instrument's
+#   risk lives in a leg structure and a rebalancing hedge rather than in a quantity, a
+#   target-weight overlay changes the position without changing its risk.
+# - A stage that produces nothing still has to prove it, and the proof is the store's contents
+#   before and after, not a statement in the notebook.
+# - Refusing an unsupported request in the shared execution path, rather than in the notebook, is
+#   what makes the boundary hold for a reader's own requests too.
+#
+# **Known limitations**: this says nothing about whether risk controls on a short-volatility book
+# are a good idea, only that the generic target-weight form cannot express them here. Implementing
+# them would mean an option-aware overlay acting on cohort membership, contract selection or the
+# hedge rule, and that is a change to the strategy specification rather than a stage on top of it.
