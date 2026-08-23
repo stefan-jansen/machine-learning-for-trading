@@ -1766,15 +1766,36 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   reruns: 2
   timeout: 600
 
+case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
+  # Five symbols, and nothing else. n_epochs is deliberately absent: preset_patches.py already
+  # patches cae to n_epochs 2 / checkpoint_interval 1, and declaring n_epochs here would override
+  # that patch rather than reinforce it - the notebook would train the full schedule for the same
+  # two checkpoints.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
+
 case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
-  # The SDF training cell exceeded the 300s default in CI while the whole
-  # notebook runs in 98s locally on the same image, so the cap is what fails,
-  # not the notebook. Sized for the slower runner with headroom.
+  # SDF is the one latent model preset_patches.py cannot reduce: its entry patches `n_epochs`,
+  # which this model does not read - the budgets are n_epochs_unc, n_epochs_moment and
+  # n_epochs_cond, so an unreduced CI run trains 256 + 64 + 1024 epochs. They are reduced here
+  # instead, which the adapter supports directly and which also rebuilds `checkpoint_epochs`
+  # against the smaller budget (case_studies/utils/latent_factors/adapter.py:248-260).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_epochs_unc: 2
+      n_epochs_moment: 2
+      n_epochs_cond: 4
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
-  # 95s locally, ~190s on the CI runner - passing, but close enough to the 300s
-  # default that the next slow runner turns it red. Same headroom as 11d.
+  # Five symbols. As with 11c, n_epochs stays out: preset_patches.py patches sae to 2 epochs and
+  # declaring it here would replace that patch with the full schedule.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
