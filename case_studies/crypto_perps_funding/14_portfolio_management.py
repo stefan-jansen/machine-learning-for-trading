@@ -62,7 +62,7 @@ import plotly.graph_objects as go
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
-from case_studies.research import CandidateSet, open_study, run_backtests
+from case_studies.research import Result, open_study, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.registry.queries import resolve_best_predictions
@@ -202,13 +202,22 @@ pl.DataFrame(
 )
 
 # %% [markdown]
-# ### Conformal sizing does not trade the whole validation period
+# ### An allocator that calibrates cannot trade its calibration window
 #
-# Its intervals are calibrated on the model's residuals from **earlier validation folds only**,
-# which is what keeps them out of sample. The first fold has no earlier fold, so no contract has
-# a width there and those decision times are not traded at all. Every other allocator trades
-# them. That makes the conformal column an unpaired comparison, and the `periods` column in the
-# results below is what shows it rather than a warning that has to be remembered.
+# `conformal_weighted` builds its intervals from the model's residuals on **earlier validation
+# folds only**, which is what keeps them out of sample. The earliest fold has no earlier fold, so
+# no contract has a width there, and the strategy holds nothing at all until the fold after it
+# begins. Every other allocator trades from the first decision.
+#
+# That is not a detail about one allocator. It means two results can cover the same dates and
+# still not be comparable, because one of them was in cash for part of the span. A strategy that
+# sits out a losing period and trades only the rest is being measured on a different sample from
+# one that traded both, and differencing the two attributes the sample to the sizing.
+#
+# **The period count does not detect this.** A day on which a strategy holds nothing still
+# contributes a return observation, of zero, so a book that is flat for a year reports the same
+# number of periods as one that traded every day of it. Section 4 measures which folds each
+# result actually traded and pairs only within a matching set.
 #
 # ## 3. Running the grid
 #
@@ -264,9 +273,10 @@ for label in labels:
 # %% [markdown]
 # ## 4. What came out
 #
-# Read back from the registry, one row per allocator and entry rule. `periods` is the count of
-# return observations each result was measured over, and it is in the table because the conformal
-# rows are measured over fewer of them than the rest.
+# Read back from the registry, one row per allocator. `traded_folds` lists the validation folds
+# each result actually held a position in, derived below from the registered return series rather
+# than assumed from the allocator's name. A fold's number identifies it and does not order it -
+# the walk-forward split numbers folds as it builds them - so the list is written oldest first.
 
 # %%
 results = study.backtests.table().filter(
@@ -288,6 +298,66 @@ keyed = results.with_columns(
     pl.col("allocation_method").fill_null("equal_weight").alias("allocator"),
 )
 
+# %% [markdown]
+# Each decision carries its fold in the prediction set, and the dates a result held a
+# position on are in the return series it registered - a day the strategy was flat contributes a
+# return of exactly zero. Intersecting the two says which folds each result traded, which is the
+# property that has to match before two results can be differenced. The windows are put in date
+# order here because the fold numbers are not in date order.
+
+
+# %%
+def fold_windows(label: str) -> pl.DataFrame:
+    """First and last decision date of each validation fold, for one label.
+
+    Every configuration for a label predicts the same keys, which 13_backtest established, so
+    one prediction set carries the fold calendar for all of them.
+    """
+    reference = catalog.filter(pl.col("label") == label).sort("prediction_hash")
+    return (
+        Result.open(study, reference.item(0, "prediction_hash"))
+        .load()
+        .group_by("fold")
+        .agg(
+            fold_start=pl.col("timestamp").min().dt.date(),
+            fold_end=pl.col("timestamp").max().dt.date(),
+        )
+        .sort("fold_start")
+    )
+
+
+# %%
+def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
+    """Which validation folds one registered result actually held a position in."""
+    returns = pl.read_parquet(
+        study.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+    )
+    column = next(name for name in returns.columns if name != "timestamp")
+    active = returns.filter(pl.col(column) != 0).select(pl.col("timestamp").dt.date().alias("day"))
+    if active.is_empty():
+        return ()
+    return tuple(
+        int(row["fold"])
+        for row in windows.iter_rows(named=True)
+        if active.filter(pl.col("day").is_between(row["fold_start"], row["fold_end"])).height
+    )
+
+
+# %%
+windows_by_label = {label: fold_windows(label) for label in labels}
+keyed = keyed.with_columns(
+    pl.Series(
+        "traded_folds",
+        [
+            "+".join(
+                str(fold)
+                for fold in traded_folds(row["backtest_hash"], windows_by_label[row["label"]])
+            )
+            for row in keyed.iter_rows(named=True)
+        ],
+    )
+)
+
 # %% tags=["results"]
 allocation_grid = (
     keyed.filter(pl.col("stage") == "allocation")
@@ -297,7 +367,7 @@ allocation_grid = (
         labels=pl.col("label").n_unique(),
         median_sharpe=pl.col("sharpe").median(),
         above_zero=(pl.col("sharpe") > 0).sum(),
-        median_periods=pl.col("n_periods").median(),
+        traded_folds=pl.col("traded_folds").unique().sort().str.join(", "),
         median_turnover=pl.col("avg_turnover").median(),
     )
     .sort("allocator")
@@ -313,22 +383,32 @@ allocation_grid
 # allocation result with the baseline built on the **same prediction set and the same entry
 # rule**, so the only field that differs is the allocator, and reports the difference.
 #
-# The conformal rows are excluded from the paired frame for the reason above - their return
-# series covers fewer dates than the baseline they would be differenced against, so the
-# subtraction would mix a sizing effect with a shorter sample.
+# A pair is admitted only when both legs traded the same folds. That is what excludes the
+# conformal rows, and it would exclude anything else that sat out part of the span for any other
+# reason - the test is what the result did, not which allocator produced it.
 
 # %% tags=["results"]
 baseline = keyed.filter(pl.col("stage") == "signal").select(
-    "prediction_hash", "entry_rule", pl.col("sharpe").alias("baseline_sharpe"), "n_periods"
+    "prediction_hash",
+    "entry_rule",
+    pl.col("sharpe").alias("baseline_sharpe"),
+    pl.col("traded_folds").alias("baseline_traded_folds"),
 )
+allocation = keyed.filter(pl.col("stage") == "allocation")
 paired = (
-    keyed.filter(pl.col("stage") == "allocation")
-    .join(baseline, on=["prediction_hash", "entry_rule"], how="inner", suffix="_baseline")
-    .filter(pl.col("n_periods") == pl.col("n_periods_baseline"))
+    allocation.join(baseline, on=["prediction_hash", "entry_rule"], how="inner")
+    .filter(pl.col("traded_folds") == pl.col("baseline_traded_folds"))
     .with_columns((pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_change"))
 )
-unpaired = keyed.filter(pl.col("stage") == "allocation").height - paired.height
-print(f"{paired.height} paired comparisons; {unpaired} allocation results left unpaired")
+unpaired = (
+    allocation.join(baseline, on=["prediction_hash", "entry_rule"], how="inner")
+    .filter(pl.col("traded_folds") != pl.col("baseline_traded_folds"))
+    .group_by("allocator")
+    .agg(left_unpaired=pl.len(), traded_folds=pl.col("traded_folds").unique().sort().str.join(", "))
+    .sort("allocator")
+)
+print(f"{paired.height} paired comparisons")
+print(unpaired)
 
 paired.group_by("allocator").agg(
     pairs=pl.len(),
@@ -424,9 +504,15 @@ for label in labels:
 # data for fewer numbers.
 #
 # **An unpaired row is reported, not quietly dropped.** The conformal results are real results
-# and they are registered like the others; what they are not is comparable to a baseline measured
-# over a longer period. Excluding them from the paired frame while leaving them in the grid table
-# is the distinction, and the count printed above says how many rows it covers.
+# and they are registered like the others; what they are not is comparable to a baseline that was
+# holding positions while they were still calibrating. Excluding them from the paired frame while
+# leaving them in the grid table is the distinction, and the frame printed beside the count names
+# which allocator it covers and which folds those rows actually traded.
+#
+# **The count of observations is not the count of exposure.** A flat day still registers a return
+# of zero, so period counts, and any check built on them, agree exactly between a result that
+# traded a fold and one that sat it out. This is the kind of difference that a comparison hides
+# rather than reports, and finding it needs the return series rather than the summary row.
 #
 # **Known limitations.** The rolling window is one length for every moment-based allocator, so
 # nothing here says whether a different amount of history would suit one of them better - that
