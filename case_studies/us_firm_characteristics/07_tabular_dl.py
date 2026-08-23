@@ -266,15 +266,24 @@ execution, population = run_model_population(
     study, plan, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
 )
 
-fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
-reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
-print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+# The two branches of the runner report different keys, so read what both provide. A
+# configuration served whole from the registry carries `reused: True` and no fold counts - it
+# prepared no folds, so it has none to count - while one that fitted carries `fitted_folds` and
+# `reused_folds` per fold. Asking only for the fold counts raises `KeyError` on the second run
+# of a notebook whose first run registered everything, which is exactly the run that is supposed
+# to be cheap.
+reused_configs = sum(1 for item in execution.diagnostics if item.get("reused"))
+fitted = sum(len(item.get("fitted_folds") or ()) for item in execution.diagnostics)
+reused_folds = sum(len(item.get("reused_folds") or ()) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {reused_configs} served from the registry")
+print(f"folds fitted: {fitted}, folds reused: {reused_folds}")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the registry
-# already holds the matching rows, and the runner returns the stored result rather than fitting
-# again - so re-running this notebook unchanged costs the time it takes to read the data.
+# On a second run every configuration is served from the registry. Each identity is re-derived
+# from the inputs, the registry already holds the matching rows, and the runner returns the
+# stored result rather than fitting again - so re-running this notebook unchanged costs the time
+# it takes to read the data rather than the time it took to fit.
 #
 # ### Running configurations of your own
 #
@@ -471,7 +480,7 @@ for row, label in enumerate(panel_labels, start=1):
         fig_curves.update_yaxes(matches="y", row=row, col=1)
 fig_curves.update_xaxes(title_text="Training epochs completed", row=len(panel_labels), col=1)
 fig_curves.update_layout(
-    title="Where each capacity setting peaks is a property of the target",
+    title="Every capacity setting peaks at its earliest checkpoint",
     height=280 * len(panel_labels),
     width=1000,
     margin=dict(t=90),
@@ -578,21 +587,36 @@ fig_capacity.update_xaxes(
     title_text="Capacity preset, smallest first", row=len(panel_labels), col=1
 )
 fig_capacity.update_layout(
-    title="Training length moves the grid further than hidden width does",
+    title="Which axis moves the result depends on the target",
     height=280 * len(panel_labels),
     width=1000,
     margin=dict(t=90),
     barmode="group",
     legend=dict(title_text="Checkpoint"),
 )
+# Whether the gap within a pair beats the gap across presets is what the chart is for, and it
+# differs by label, so the alt reads it rather than asserting one answer for all three.
+within = (
+    edges.with_columns(pair_gap=(pl.col("first_ic") - pl.col("last_ic")).abs())
+    .group_by("label")
+    .agg(
+        median_pair_gap=pl.col("pair_gap").median(),
+        across_presets=pl.col("last_ic").max() - pl.col("last_ic").min(),
+    )
+    .sort("label")
+)
+gap_text = "; ".join(
+    f"{row['label']}: {'wider' if row['median_pair_gap'] > row['across_presets'] else 'narrower'}"
+    for row in within.iter_rows(named=True)
+)
 show_plotly_with_alt(
     fig_capacity,
     "Grouped bar charts of mean validation information coefficient, one pair of bars per capacity "
     f"preset: dark navy for the first checkpoint at {first_epoch} epochs and neutral grey for the "
     f"last at {last_epoch}. One panel per label on one shared vertical scale, presets ordered "
-    "smallest to largest, each panel carrying a dashed zero line. Within a panel the three navy "
-    "bars are of similar height and the three grey bars are of similar height, while the vertical "
-    "distance between the navy and grey bar of a pair is the larger difference.",
+    "smallest to largest, each panel carrying a dashed zero line. Counted from the frame, the gap "
+    "between a preset's two bars against the spread across presets at the last checkpoint is "
+    f"{gap_text}.",
 )
 
 # %% [markdown]
