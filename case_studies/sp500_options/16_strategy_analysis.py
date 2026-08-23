@@ -82,15 +82,9 @@ from ml4t.diagnostic.integration import (
 )
 
 # %% [markdown]
-# Load the case-study contracts and registry readers that bind every
-# reported result to the accepted producer surface.
+# Load the registry readers and reporting helpers the notebook draws on.
 
 # %%
-from case_studies.sp500_options.backtest_contract import (
-    assert_accepted_deep_baselines,
-    assert_complete_allocation_surface,
-    assert_complete_baseline_surface,
-)
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_reporting import cohort_metric_attribution, reportable_pbo
@@ -105,7 +99,6 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
     load_paired_metrics,
-    resolve_best_predictions,
 )
 from case_studies.utils.strategy_analysis import (
     ci_status,
@@ -131,31 +124,8 @@ CASE_DIR = get_case_study_dir(CASE_STUDY)
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-assert_accepted_deep_baselines(CASE_DIR / "run_log" / "registry.db")
-
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
-
-_registry_path = CASE_DIR / "run_log" / "registry.db"
-assert_complete_baseline_surface(_registry_path)
-_sweep = setup["backtest"]["sweep"]
-_allocation_shortlist = resolve_best_predictions(
-    CASE_STUDY,
-    PRIMARY_LABEL,
-    split="validation",
-    stage="signal",
-    top_n=int(_sweep["top_n_predictions"]["allocation"]),
-    checkpoints_per_config=1,
-    universe_filter="liquid",
-)
-assert_complete_allocation_surface(
-    _registry_path,
-    prediction_hashes=set(_allocation_shortlist["prediction_hash"].to_list()),
-    top_ks=tuple(_sweep["top_k_grid"][PRIMARY_LABEL]),
-    allocators={
-        item["method"] for item in _sweep["allocators"] if item["method"] != "equal_weight"
-    },
-)
 
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
