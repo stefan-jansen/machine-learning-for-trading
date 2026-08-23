@@ -4,7 +4,7 @@ import json
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -812,6 +812,95 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
     )
 
     assert seen["supersedes"] is None
+
+
+def _multifold_frames(n_days: int = 60) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Two folds over one product pair, so a fold BOUNDARY exists.
+
+    The single-fold fixture cannot exercise the state-transition policy at all:
+    `fold_boundary="liquidate"` only emits a transition where one fold ends and the
+    next begins, so with `fold_id` constant the policy is a no-op and the typed and
+    direct paths are the same computation. A real run has five folds.
+    """
+    dates = pl.date_range(
+        pl.date(2024, 1, 2), pl.date(2024, 1, 2) + timedelta(days=n_days - 1), eager=True
+    )
+    products = ("ES", "NQ")
+    rows = [(d, p, i) for i, d in enumerate(dates) for p in products]
+    base = {"ES": 4_800.0, "NQ": 16_800.0}
+    prices = pl.DataFrame(
+        {
+            "product": [p for _, p, _ in rows],
+            "timestamp": [d for d, _, _ in rows],
+            "open": [base[p] + i * 10 for _, p, i in rows],
+            "high": [base[p] + i * 10 + 20 for _, p, i in rows],
+            "low": [base[p] + i * 10 - 20 for _, p, i in rows],
+            "close": [base[p] + i * 10 + 10 for _, p, i in rows],
+            "volume": [1_000] * len(rows),
+        }
+    ).with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
+    half = len(dates) // 2
+    predictions = pl.DataFrame(
+        {
+            "symbol": [p for _, p, _ in rows],
+            "timestamp": [d for d, _, _ in rows],
+            "fold_id": [0 if i < half else 1 for _, _, i in rows],
+            "y_true": [0.01 if p == "ES" else -0.01 for _, p, _ in rows],
+            "y_score": [0.02 if p == "ES" else -0.02 for _, p, _ in rows],
+        }
+    )
+    return predictions, prices
+
+
+def test_product_decision_equivalence_holds_across_a_fold_boundary(tmp_path: Path) -> None:
+    """The typed path must equal the direct path when a fold boundary is crossed.
+
+    Reproduces a real-data failure the single-fold equivalence test cannot reach:
+    against the produced canonical predictions the typed path raises
+
+        ValueError: state-transition sequencing requires same-bar engine execution
+
+    because publish_product_weights declares fold_boundary="liquidate" while
+    cme_futures executes weekly_friday_close -> monday_open. A liquidation at the
+    boundary cannot be honoured under a delayed fill, and the engine refuses rather
+    than leaving the position live across a boundary the spec says was flat.
+    """
+    study = _study(tmp_path)
+    frame, prices = _multifold_frames()
+    training = study.results.register_training(_training_spec(label="fwd_ret_5d"))
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    assert frame.get_column("fold_id").n_unique() > 1, "fixture must cross a fold boundary"
+
+    signal = {"method": "equal_weight_top_k", "top_k": 1}
+    allocation = {"method": "inverse_vol", "vol_window": 2}
+    decision = publish_product_weights(
+        prediction, prices=prices, signal=signal, allocation=allocation
+    )
+    # The 7d cadence thins the weight grid, so a short fixture can drop the boundary
+    # entirely: at 8 days the weights carry fold 1 only and the policy is a no-op again.
+    assert decision.load().get_column("fold").n_unique() > 1, (
+        "the WEIGHTS must cross the boundary, not merely the predictions"
+    )
+    resolved_signal = decision.spec["parameters"]["signal"]
+    resolved_allocation = decision.spec["parameters"]["allocation"]
+
+    direct = study.strategy(
+        prediction=prediction, signal=resolved_signal, allocation=resolved_allocation
+    ).run(prices=prices)
+    typed = study.strategy(
+        prediction=prediction,
+        signal=resolved_signal,
+        allocation=resolved_allocation,
+        decision=decision,
+    ).run(prices=prices)
+    assert _returns(typed).equals(_returns(direct))
 
 
 def test_every_declared_model_population_is_published_by_a_notebook() -> None:
