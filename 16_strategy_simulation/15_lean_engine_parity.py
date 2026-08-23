@@ -14,23 +14,42 @@
 # ---
 
 # %% [markdown]
-# # External Engine Parity: ml4t-backtest vs LEAN
+# # Auditing somebody else's claim that two engines agree
 #
 # **Docker image**: `ml4t`
 #
-# This notebook audits a recorded external-engine benchmark and shows how to
-# interpret its bounded parity checks without turning them into a strategy-performance claim.
+# ## Purpose
+# "Our engine matches LEAN" is the kind of statement that gets made in a README and believed. This
+# notebook takes one such claim - a recorded benchmark of `ml4t-backtest` against QuantConnect's
+# LEAN over 250 US equities and 20 years of daily bars - and treats it as evidence to be checked
+# rather than a result to be quoted.
 #
-# **Learning Objectives**:
-# - Validate the identity and schema of a committed LEAN benchmark artifact
-# - Distinguish decoded fills from closed round-trip trades
-# - Recompute aggregate fill and terminal-value parity from engine-level rows
-# - Identify what an endpoint comparison can and cannot establish
+# The work is mostly validation, and that is the point. Before any number in the artifact means
+# anything, the file has to be the one it says it is, contain both engines exactly once, carry
+# plausible values in every field, and agree with what those fields imply when recomputed. Only
+# then is it worth asking whether the two engines match, and only on the two surfaces the benchmark
+# actually compared.
 #
-# **Book Reference**: Chapter 16, Section 16.3 (Vectorized and Event-Driven Backtesting)
+# ## Learning objectives
 #
-# **Prerequisites**: `06_framework_parity` and `07_engine_divergence_anatomy`; a live replay also
-# requires the public `ml4t-backtest` validation harness, LEAN CLI, Docker, and the daily equity data.
+# - Check a result artifact against its own declared contract before reading a number out of it,
+#   and fail closed on any disagreement rather than degrading to a partial answer.
+# - Recompute an artifact's stored comparison from its raw rows, so a corrupted or hand-edited
+#   summary cannot pass.
+# - Say precisely which surfaces a parity claim covers, and which properties two engines could
+#   still differ on while passing it.
+# - Distinguish a fill from a round-trip trade, and know which one a given engine reports.
+#
+# ## Book reference
+# Chapter 16, Section 16.3 (vectorized and event-driven backtesting).
+#
+# ## Prerequisites
+#
+# - `06_framework_parity` and `07_engine_divergence_anatomy`, which establish what makes two
+#   engines differ in the first place.
+# - Reproducing the benchmark rather than auditing it additionally needs the public
+#   `ml4t-backtest` validation harness, the LEAN CLI, Docker, and the daily equity panel. The
+#   audit runs without any of them.
 
 # %% [markdown]
 # ## Setup
@@ -47,13 +66,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import ml4t.backtest as ml4t_backtest_pkg
 import polars as pl
-from IPython.display import Markdown, display
 
 from utils.paths import get_chapter_dir, get_output_dir
-from utils.style import COLORS
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -69,20 +85,19 @@ LIVE_ARTIFACT_PATH = OUTPUT_DIR / "lean_parity_results_live.json"
 EXPECTED_FRAMEWORK_IDS = ("ml4t-lean", "lean")
 
 # %% [markdown]
-# ## 1. Scope and Source of Truth
+# ## 1. What is being audited, and what it is not
 #
-# The default path reads a versioned result snapshot produced by the public
-# `ml4t-backtest` validation harness. Code-repository commit `a53fb3ea` replaced an earlier
-# placeholder fixture with the recorded real-data run. Public harness commit `9ef065f0` carries the
-# correction that counts decoded LEAN fills, matching the comparison surface used by the ml4t
-# adapter.
+# The default path reads a committed snapshot of a run produced by the public `ml4t-backtest`
+# validation harness. This notebook does not run LEAN. It reads the recorded result, checks it, and
+# recomputes the comparison from the engine rows.
 #
-# This notebook independently validates the snapshot and recomputes its aggregate differences. It
-# does not recreate LEAN by default. Setting `RUN_LIVE = True` requests a fresh harness run and
-# fails if any prerequisite is absent; it never silently falls back to the snapshot.
+# Reading a recorded result is weaker evidence than reproducing it, and the notebook is explicit
+# about which it is doing. Setting `RUN_LIVE = True` asks for a fresh run of both engines and
+# raises if any prerequisite is missing. It never falls back to the snapshot on failure, because a
+# silent fallback would let a reader believe they had reproduced something they had not.
 
 # %% [markdown]
-# ### Resolve the validation harness
+# ### Find the harness, if it is here
 #
 # The optional `ML4T_BACKTEST_REPO` override takes precedence. Otherwise, the resolver checks the
 # installed package ancestry without embedding a machine-specific path.
@@ -116,7 +131,7 @@ print(f"Backtest repo:   {'available' if BACKTEST_REPO else 'not found (snapshot
 print(f"Benchmark suite: {BENCHMARK_SUITE.name if BENCHMARK_SUITE else 'not found'}")
 
 # %% [markdown]
-# ## 2. Live-Replay Prerequisites
+# ## 2. What a live replay would need
 #
 # The data resolver honors the notebook parameter first and then the canonical `ML4T_DATA_PATH`.
 # No home-directory fallback is used.
@@ -181,7 +196,7 @@ prereq_df = check_live_prerequisites(BACKTEST_REPO, REAL_DATA_FILE)
 prereq_df
 
 # %% [markdown]
-# ## 3. Validate the Recorded Artifact
+# ## 3. Check the artifact against its own contract
 #
 # The loader records the exact resource hash so a reader can distinguish this snapshot from a later
 # revision before interpreting any metric.
@@ -293,7 +308,7 @@ metrics = validate_parity_payload(payload, SCENARIO_ID)
 print(f"Validated snapshot SHA-256: {artifact_sha256}")
 
 # %% [markdown]
-# ## 4. Optional Fail-Closed Live Replay
+# ## 4. Reproducing it, if everything is present
 #
 # Each framework is run with refreshed preprocessing. The report must contain exactly one successful
 # row for the requested framework and scenario.
@@ -410,12 +425,17 @@ else:
 metrics = validate_parity_payload(payload, SCENARIO_ID)
 
 # %% [markdown]
-# ## 5. Aggregate Parity Results
+# ## 5. What the two engines agreed on
 #
-# The benchmark uses adjusted daily equity bars and seeded IID ranking scores to create a controlled
-# top/bottom target-share surface. Full-window universe selection and bidirectional filling make it
-# an engine fixture, not a point-in-time investment backtest. It has no model selection, holdout,
-# label, purge, or embargo, and it supports no claim about strategy efficacy.
+# Read the strategy behind the benchmark before the result. It ranks assets on seeded random scores
+# and takes a share of the top and bottom of that ranking, over a universe chosen from the whole
+# window and filled in both directions. That is a fixture designed to exercise an execution engine
+# hard: it generates a large number of fills across many symbols and both sides. It is not an
+# investment strategy, it has no holdout, no labels and no point-in-time universe, and nothing in
+# it says anything about whether such a rule makes money.
+#
+# What it does establish is that when both engines are handed the same instructions, they fill the
+# same number of times and finish within a stated tolerance of each other.
 
 # %%
 comparison_df = pl.DataFrame(payload["results"]).rename({"num_trades": "decoded_fills"})
@@ -425,106 +445,73 @@ parity_pass = (
     metrics["fill_gap_abs"] == 0 and metrics["final_value_gap_bps_abs"] <= PARITY_TOLERANCE_BPS
 )
 
-display(
-    Markdown(
-        f"The validated **{payload['scenario_label']}** snapshot contains "
-        f"**{ml4t_row['decoded_fills']:,}** decoded fills for ml4t-backtest and "
-        f"**{lean_row['decoded_fills']:,}** for LEAN. The terminal values differ by "
-        f"**${metrics['final_value_gap_abs']:,.2f}** "
-        f"(**{metrics['final_value_gap_bps_abs']:.4f} bps**), so the declared aggregate parity "
-        f"check **{'passes' if parity_pass else 'fails'}** at "
-        f"**{PARITY_TOLERANCE_BPS:.2f} bps**."
-    )
+print(f"Scenario:            {payload['scenario_label']}")
+print(f"Bars fed to each:    {ml4t_row['data_points']:,}")
+print(f"Decoded fills, ml4t: {ml4t_row['decoded_fills']:,}")
+print(f"Decoded fills, LEAN: {lean_row['decoded_fills']:,}")
+print(f"Difference:          {metrics['fill_gap']:,}")
+print(
+    f"Terminal value gap:  ${metrics['final_value_gap_abs']:,.2f}"
+    f" ({metrics['final_value_gap_bps_abs']:.4f} bps of the LEAN value)"
 )
+print(f"Tolerance:           {PARITY_TOLERANCE_BPS:.2f} bps")
+print(f"Parity check:        {'passes' if parity_pass else 'FAILS'}")
 
 # %% [markdown]
-# ## 6. Visualize the Bounded Claim
+# ## 6. The comparison, as a table
 #
-# The first panel compares decoded-fill totals from a zero baseline. The second compares the
-# absolute terminal-value gap with the declared tolerance. Recorded runtime is excluded because it
-# is hardware-specific and volatile.
+# There is nothing here with a shape to plot. Two engines, two scalars each, and the interesting
+# property is whether two numbers are equal - which a table states and a bar chart obscures behind
+# two bars of visually identical height. Runtime is reported and deliberately not compared: it
+# describes the machine the benchmark ran on rather than either engine.
 
 # %%
-labels = [ml4t_row["label"], lean_row["label"]]
-fill_counts = [ml4t_row["decoded_fills"], lean_row["decoded_fills"]]
-colors = [COLORS["blue"], COLORS["amber"]]
-
-fig, axes = plt.subplots(1, 2, figsize=(12, 4), layout="constrained")
-axes[0].bar(labels, fill_counts, color=colors)
-axes[0].set_ylabel("Decoded fills (count)")
-axes[0].set_ylim(bottom=0)
-axes[0].tick_params(axis="x", rotation=12)
-axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda value, _: f"{value:,.0f}"))
-for index, count in enumerate(fill_counts):
-    axes[0].text(index, count, f"{count:,}", ha="center", va="bottom")
-axes[0].set_title(
-    "Decoded-fill totals match", loc="left", color=COLORS["blue"], fontweight="bold", pad=8
+comparison_df.select(
+    "label",
+    pl.col("decoded_fills").alias("fills"),
+    pl.col("final_value").round(2).alias("terminal_value"),
+    pl.col("runtime_sec").round(1).alias("runtime_seconds"),
+    "data_points",
 )
-
-axes[1].bar(["Terminal value"], [metrics["final_value_gap_bps_abs"]], color=COLORS["blue"])
-axes[1].axhline(PARITY_TOLERANCE_BPS, color=COLORS["amber"], linestyle="--", label="Tolerance")
-axes[1].set_ylabel("Absolute difference (bps)")
-axes[1].set_ylim(0, PARITY_TOLERANCE_BPS * 1.25)
-axes[1].legend(frameon=False)
-axes[1].text(
-    0,
-    metrics["final_value_gap_bps_abs"],
-    f"{metrics['final_value_gap_bps_abs']:.4f}",
-    ha="center",
-    va="bottom",
-)
-axes[1].set_title(
-    "Terminal-value gap stays below tolerance",
-    loc="left",
-    color=COLORS["blue"],
-    fontweight="bold",
-    pad=8,
-)
-
-fig.show()
 
 # %% [markdown]
-# Equal aggregate fill totals do not prove identical timestamps, symbols, quantities, or prices.
-# Likewise, a terminal-value check can miss offsetting path differences. Event-level chronology and
-# broader scenario coverage require separate harness diagnostics; this notebook makes neither claim.
+# Equal fill counts do not prove identical fills. Two engines can reach the same total on different
+# timestamps, different symbols, different quantities and different prices, and a terminal value
+# can match while the paths that produced it diverged and reconverged. What this artifact supports
+# is exactly two statements: the engines filled the same number of times, and they finished within
+# the stated tolerance of each other. Anything stronger needs order-level reconciliation, which is
+# a different diagnostic than this one.
 
 # %% [markdown]
-# ## 7. Key Takeaways and Limitations
+# ## Key takeaways
 #
-# The synthesis below is generated from the validated rows so its reported values remain aligned
-# with either the recorded snapshot or a requested live replay.
-
-# %%
-display(
-    Markdown(
-        "\n".join(
-            [
-                f"1. **Aggregate fill parity {'holds' if metrics['fill_gap_abs'] == 0 else 'does not hold'}.** "
-                f"The absolute decoded-fill gap is **{metrics['fill_gap_abs']:,}**.",
-                f"2. **Terminal-value parity {'passes' if parity_pass else 'fails'}.** The absolute gap is "
-                f"**{metrics['final_value_gap_bps_abs']:.4f} bps** against the declared "
-                f"**{PARITY_TOLERANCE_BPS:.2f} bps** tolerance.",
-                f"3. **Recorded speed is contextual.** This snapshot reports an approximate "
-                f"**{metrics['runtime_speedup']:.1f}x** ratio, which is specific to its hardware, "
-                "software, cache state, and run date.",
-                "4. **The scope is deliberately narrow.** Seeded IID scores, full-window universe "
-                "selection, and bidirectional filling make this an execution fixture, not a "
-                "point-in-time strategy evaluation.",
-                "5. **Endpoint agreement is not chronology identity.** Order-level reconciliation "
-                "is required before claiming that every fill event matches.",
-            ]
-        )
-    )
-)
-
-# %% [markdown]
-# This bounded parity audit supports Chapter 16 Section 16.3 by showing how an external-engine claim
-# must be tied to explicit comparison surfaces and tolerances.
+# 1. **Validate the artifact before reading a number out of it.** The checks in section 3 are the
+#    substance of this notebook: the file names the scenario it claims, carries each engine exactly
+#    once with the label that matches its identity, holds finite positive values in every numeric
+#    field, and its stored comparison reproduces from its own rows. A summary that disagrees with
+#    the data it summarizes is the failure mode worth catching, and only a recomputation catches it.
+# 2. **Fail closed, never fall back.** A live replay that cannot find its prerequisites raises. The
+#    alternative - quietly reporting the committed snapshot - would let a reader believe they had
+#    reproduced a result they had not, which is worse than no result.
+# 3. **A parity claim is only as broad as the surfaces it compared.** Two engines agreeing on a
+#    fill count and a terminal value have agreed on two numbers. They may still differ on when each
+#    fill happened, at what price, in what quantity, and on which symbol.
+# 4. **Know which object each engine counts.** One engine's "trades" are round trips and another's
+#    are fills, and comparing the two produces a difference that is entirely an artifact of
+#    vocabulary. This benchmark compares fills on both sides.
+# 5. **Do not compare runtimes across machines.** The recorded ratio describes one machine, one
+#    software stack, one cache state and one day. It is reported here and deliberately excluded
+#    from the parity decision.
 #
-# **Next**: [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb)
-# applies the same discipline to two additional event-driven engines.
-
-# %% [markdown]
-# ---
-# *Notebook: 15_lean_engine_parity*
-# *ML4T 3rd Edition - Chapter 16: Strategy Simulation*
+# ### Known limitations
+#
+# - The default path audits a recorded result rather than reproducing it. That is weaker evidence
+#   and the notebook says which it is doing rather than blurring the two.
+# - The benchmark strategy is a fixture built to stress an execution engine, not an investment
+#   rule: seeded random scores, a universe chosen from the whole window, and fills in both
+#   directions. Nothing here bears on whether such a strategy would earn anything.
+# - One scenario at one scale. Engines that agree on 250 assets over 20 daily years may diverge on
+#   intraday data, on corporate actions, or on an instrument type this fixture never trades.
+#
+# **Next:** [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb)
+# applies the same discipline to two more event-driven engines.

@@ -26,11 +26,11 @@
 #
 # We demonstrate four layers of interpretation:
 #
-# 1. **Global feature importance** — which features matter most across all predictions.
-# 2. **Individual forecast explanation** — how features combine for a single prediction.
-# 3. **Decision-relevant analysis** — SHAP profiles for *right* vs *wrong*
+# 1. **Global feature importance** - which features matter most across all predictions.
+# 2. **Individual forecast explanation** - how features combine for a single prediction.
+# 3. **Decision-relevant analysis** - SHAP profiles for *right* vs *wrong*
 #    high-magnitude predictions.
-# 4. **Stability** — cross-fold importance trajectories + within-fold bootstrap
+# 4. **Stability** - cross-fold importance trajectories + within-fold bootstrap
 #    confidence bands on the top features' mean $|\phi_j|$.
 #
 # **Learning objectives**
@@ -40,7 +40,7 @@
 # - Compare feature drivers for correct vs incorrect high-conviction predictions
 # - Build a SHAP stability chart and bootstrap confidence bands within a fold
 #
-# **Book reference**: Section 11.4 — Inside the Black Box: Model
+# **Book reference**: Section 11.4 - Inside the Black Box: Model
 # Interpretability with SHAP.
 #
 # **Prerequisites**
@@ -56,7 +56,7 @@
 # ## Setup
 
 # %% tags=[]
-"""SHAP Interpretability for Linear Models — decompose Ridge predictions into per-feature attributions."""
+"""SHAP Interpretability for Linear Models - decompose Ridge predictions into per-feature attributions."""
 
 import warnings
 
@@ -65,14 +65,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import shap
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
+from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.cv_splits import generate_cv_splits
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -85,14 +85,17 @@ ARTIFACT_TAG = ""
 
 # %% tags=[]
 RANDOM_SEED = SEED
+LABEL_HORIZON_SESSIONS = (
+    21  # the forward window in the label, and the overlap the t-stat must absorb
+)
 set_global_seeds(SEED)
 
 # %% [markdown] tags=[]
 # ## Load Features and Labels
 #
 # We use the same ETF features (Ch8) and 21-day forward returns (Ch7) as
-# `02_regularization_paths`. The features matrix has 57 columns spanning
-# momentum, volatility, volume, and cross-asset families.
+# `02_regularization_paths`, spanning momentum, volatility, volume and
+# cross-asset families.
 
 # %% tags=[]
 CASE_DIR = get_case_study_dir("etfs")
@@ -186,9 +189,14 @@ print(f"  Test:  {last_split['val_start']} to {last_split['val_end']} ({len(test
 # %% [markdown] tags=[]
 # ## Train Ridge Model and Compute SHAP Values
 #
-# We fit Ridge regression ($\alpha = 1.0$, a moderate default after standardization)
-# on the training fold and compute SHAP values on the test set.
-# `shap.LinearExplainer` gives **exact** SHAP values for linear models — no
+# We fit Ridge on the training fold and compute SHAP values on the test set. The
+# penalty is deliberately light, set in the cell below: the point here is the
+# attribution machinery, and a lightly penalized model spreads weight across
+# more features, which makes the decomposition easier to read. It is not the
+# penalty `02_regularization_paths` found best for prediction on this panel, and
+# the attributions below describe the model that was fitted rather than the one
+# that would be traded.
+# `shap.LinearExplainer` gives **exact** SHAP values for linear models - no
 # approximation, no sampling.
 #
 # **SHAP API pattern** (v0.50+): Create a masker to describe the background
@@ -223,8 +231,12 @@ if NEED_TRAINING:
 
 # %% tags=[]
 if NEED_TRAINING:
-    # Independent masker assumes feature independence → SHAP = coef * (x - mean)
-    masker = shap.maskers.Independent(X_train)
+    # Independent masker assumes feature independence → SHAP = coef * (x - mean).
+    # max_samples defaults to 100, which would make that mean a 100-row subsample and
+    # leave the closed-form check below disagreeing in the second decimal. The whole
+    # point of the section is that linear SHAP is exact given the true background
+    # expectation, so the background is the full training set.
+    masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
     explainer = shap.LinearExplainer(model, masker)
     explanation = explainer(X_test)
     shap_values = explanation.values
@@ -246,7 +258,10 @@ if NEED_TRAINING:
         X_te_f = sc_f.transform(features_array[te_idx])
         m_f = Ridge(alpha=1.0, random_state=RANDOM_SEED)
         m_f.fit(X_tr_f, target_array[tr_idx])
-        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f))
+        # Same full background as the main explainer. On the default 100 rows the
+        # fold-8 point of this chart does not equal that feature's mean_abs_shap in
+        # the importance table, on the same split, model and scaling.
+        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f, max_samples=len(X_tr_f)))
         fold_importance[fold_i + 1] = np.mean(np.abs(exp_f(X_te_f).values), axis=0)
     print(f"Computed SHAP stability across {len(fold_importance)} folds.")
 
@@ -262,6 +277,11 @@ if NEED_TRAINING:
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
+            # Which background these attributions were computed against. A cache
+            # written before the full-background change carries values a hundredth
+            # away from the closed form, and neither staleness test below would see
+            # it: they compare fold count and row count only.
+            "background": "full",
             "fold_importance": fold_importance,
         },
         RESULTS_PATH,
@@ -287,9 +307,11 @@ if not NEED_TRAINING:
     shap_values = _cached["shap_values"]
     expected_value = _cached["expected_value"]
     fold_importance = _cached.get("fold_importance")
+    # Read before the dict goes: the staleness cell below cannot reach _cached.
+    _cached_background = _cached.get("background")
     del _cached
 
-    # Reconstruct Explanation — joblib caches arrays, not SHAP objects
+    # Reconstruct Explanation - joblib caches arrays, not SHAP objects
     explanation = shap.Explanation(
         values=shap_values,
         base_values=np.full(len(shap_values), expected_value),
@@ -301,7 +323,7 @@ if not NEED_TRAINING:
 # ### Recompute Stale Artifacts
 #
 # The cache is stale if it was produced with fewer folds (e.g. a TEST run)
-# or against a different data vintage — when the feature/label tables are
+# or against a different data vintage - when the feature/label tables are
 # regenerated the test fold's row count changes, so a cached `y_pred` no
 # longer aligns with the current `test_idx`. Either condition triggers a
 # refit on the full split set and a recompute of per-fold SHAP importance.
@@ -309,9 +331,11 @@ if not NEED_TRAINING:
 # %% tags=[]
 _cache_fold_stale = fold_importance is not None and len(fold_importance) < len(cv_splits)
 _cache_data_stale = len(y_pred) != len(test_idx) or X_test.shape[0] != len(test_idx)
-if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
+_cache_background_stale = not NEED_TRAINING and _cached_background != "full"
+if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale or _cache_background_stale):
     print(
-        "Cached SHAP artifacts are stale (fold count or data vintage changed); recomputing full artifacts."
+        "Cached SHAP artifacts are stale (fold count, data vintage or background "
+        "changed); recomputing full artifacts."
     )
     scaler = StandardScaler()
     X_train = scaler.fit_transform(features_array[train_idx])
@@ -323,7 +347,10 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
 
-    masker = shap.maskers.Independent(X_train)
+    # Same background as the NEED_TRAINING block above: the library default of 100
+    # rows would put this branch's attributions a hundredth away from the closed form
+    # the verify cell checks, and this branch also writes shap_arrays.npz.
+    masker = shap.maskers.Independent(X_train, max_samples=len(X_train))
     explainer = shap.LinearExplainer(model, masker)
     explanation = explainer(X_test)
     shap_values = explanation.values
@@ -336,7 +363,10 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
         X_te_f = sc_f.transform(features_array[te_idx])
         m_f = Ridge(alpha=1.0, random_state=RANDOM_SEED)
         m_f.fit(X_tr_f, target_array[tr_idx])
-        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f))
+        # Same full background as the main explainer. On the default 100 rows the
+        # fold-8 point of this chart does not equal that feature's mean_abs_shap in
+        # the importance table, on the same split, model and scaling.
+        exp_f = shap.LinearExplainer(m_f, shap.maskers.Independent(X_tr_f, max_samples=len(X_tr_f)))
         fold_importance[fold_i + 1] = np.mean(np.abs(exp_f(X_te_f).values), axis=0)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -351,6 +381,11 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
             "y_pred": y_pred,
             "shap_values": shap_values,
             "expected_value": expected_value,
+            # Which background these attributions were computed against. A cache
+            # written before the full-background change carries values a hundredth
+            # away from the closed form, and neither staleness test below would see
+            # it: they compare fold count and row count only.
+            "background": "full",
             "fold_importance": fold_importance,
         },
         RESULTS_PATH,
@@ -360,11 +395,12 @@ if not NEED_TRAINING and (_cache_fold_stale or _cache_data_stale):
 # %% [markdown] tags=[]
 # ### Persist SHAP Arrays for Downstream Figures
 #
-# Writes the raw arrays needed to reproduce the SHAP figures
-# (`shap_values`, `X_test`, `y_pred`, `y_test`, `expected_value`,
-# `feature_names`, and the per-fold importance matrix) to
-# `output/05_shap_analysis/shap_arrays.npz`. Downstream consumers can
-# load these with `np.load` without depending on the SHAP toolchain.
+# Writes the arrays behind the figures above to
+# `output/05_shap_analysis/shap_arrays.npz`: the SHAP values, the test matrix,
+# predictions and outcomes, the base value, the feature names and the per-fold
+# importance matrix. The book's Figure 11.3 is generated from this file, which
+# is why it is written in a plain `.npz` a reader can open with `np.load`
+# without installing the SHAP toolchain.
 
 # %% tags=[]
 SHAP_ARRAYS_PATH = get_output_dir(11, "05_shap_analysis") / "shap_arrays.npz"
@@ -401,30 +437,33 @@ ic_per_date = cross_sectional_ic_series(
     date_col="timestamp",
     entity_col="symbol",
 )
-ic_clean = ic_per_date.drop_nulls("ic")
+ic_clean = ic_per_date.drop_nans("ic").drop_nulls("ic").sort("timestamp")
 ic = float(ic_clean["ic"].mean())
-ic_std = float(ic_clean["ic"].std())
 n_periods = ic_clean.height
-ic_t = ic / (ic_std / np.sqrt(n_periods)) if ic_std > 0 else float("nan")
+ic_stats = compute_ic_hac_stats(ic_clean, ic_col="ic", label_horizon=LABEL_HORIZON_SESSIONS)
 
 print(f"Test set: {len(y_test):,} samples ({n_periods} dates)")
 print(f"IC (cross-sectional Spearman, mean across dates): {ic:.4f}")
-print(f"IC t-stat: {ic_t:.2f}")
+print(f"IC t-stat, HAC:   {ic_stats['t_stat']:.2f}  (p = {ic_stats['p_value']:.3f})")
+print(f"IC t-stat, naive: {ic_stats['naive_t_stat']:.2f}  (treats dates as independent)")
 print(f"SHAP values shape: {shap_values.shape}")
 
 # %% [markdown] tags=[]
 # ## Verify: SHAP Matches Coefficient Attribution
 #
-# For a linear model, each SHAP value should closely match the coefficient
-# times the feature's deviation from its background mean:
+# For a linear model, each SHAP value is exactly the coefficient times the
+# feature's deviation from its background mean:
 #
 # $$\phi_j^{(i)} = \beta_j \cdot \bigl(x_j^{(i)} - \bar{x}_j\bigr)$$
 #
-# This makes linear SHAP transparent — every attribution can be checked
-# by hand. The SHAP library's internal handling of background distributions
-# may introduce tiny numerical differences, but the correspondence is
-# near-perfect. Ch12 contrasts this with tree-based models where SHAP
-# requires algorithmic computation.
+# This makes linear SHAP transparent - every attribution can be checked by hand,
+# and the cell below finds the two agree to float precision. The identity holds
+# because the background here is the whole training set, so $\bar{x}_j$ in the
+# formula is the mean the library integrates over. A subsampled background is
+# what would put a gap between them: `shap.maskers.Independent` defaults to a
+# hundred rows, and at that setting these two disagree in the second decimal.
+# Ch12 contrasts this with tree-based models where SHAP requires algorithmic
+# computation.
 
 # %% tags=[]
 coef_attribution = model.coef_ * (X_test - X_train.mean(axis=0))
@@ -452,13 +491,17 @@ explanation.feature_names = FEATURE_COLS
 
 # %% tags=[]
 shap.plots.beeswarm(explanation, max_display=20, show=False)
-plt.title("Global Feature Importance (SHAP)")
-plt.show()
+plt.title("A handful of features carry most of the attribution")
+show_with_alt(
+    plt.gcf(),
+    "SHAP beeswarm: one row per feature ordered by mean absolute attribution, one "
+    "dot per prediction, positioned by its SHAP value and coloured by feature value.",
+)
 
 # %% [markdown] tags=[]
 # ### Mean |SHAP| by Feature
 #
-# The bar chart provides a simpler summary — mean absolute SHAP value per
+# The bar chart provides a simpler summary - mean absolute SHAP value per
 # feature, equivalent to the average *magnitude* of each feature's contribution
 # to predictions.
 
@@ -504,7 +547,7 @@ sign_check = pl.DataFrame(
 sign_check
 
 # %% [markdown] tags=[]
-# Sign violations are not necessarily wrong — Ridge splits credit across
+# Sign violations are not necessarily wrong - Ridge splits credit across
 # correlated features, so a feature may flip sign if a correlated partner
 # absorbs its effect. But persistent violations across folds warrant investigation.
 
@@ -513,12 +556,14 @@ sign_check
 #
 # For a linear model, the SHAP dependence plot is linear by construction
 # ($\phi_j = \beta_j \cdot (x_j - \bar{x}_j)$). We show it here to establish
-# the pattern — Ch12 extends this to tree models where dependence reveals
+# the pattern - Ch12 extends this to tree models where dependence reveals
 # threshold effects and non-linear interactions.
+#
+# The feature plotted is the highest-importance one that actually varies on this
+# test fold. A feature that is near-constant over the window has near-constant
+# attribution too, and its dependence plot reduces to a single point.
 
 # %% tags=[]
-# Skip degenerate features (near-constant on the test fold), which can collapse
-# dependence plots into a single point.
 dep_feature = None
 for feat in importance["feature"].to_list():
     idx = FEATURE_COLS.index(feat)
@@ -533,15 +578,18 @@ top_idx_dep = FEATURE_COLS.index(dep_feature)
 color_feature = importance["feature"][1] if len(importance) > 1 else dep_feature
 color_idx = FEATURE_COLS.index(color_feature)
 
-plt.figure(figsize=(8, 5))
 shap.plots.scatter(
     explanation[:, top_idx_dep],
     color=explanation[:, color_idx],
     show=False,
 )
 ax = plt.gca()
-ax.set_title(f"SHAP Dependence: {dep_feature} (color: {color_feature})")
-plt.show()
+ax.set_title("For a linear model the dependence plot is a straight line")
+show_with_alt(
+    plt.gcf(),
+    "Scatter of one feature's SHAP value against its own value, coloured by a "
+    "second feature, forming a straight line.",
+)
 
 # %% [markdown] tags=[]
 # ## Individual Forecast Explanation
@@ -573,8 +621,12 @@ print(f"  Date: {dates_np[test_idx[example_right]]}  Asset: {assets_np[test_idx[
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[example_right], max_display=12, show=False)
-plt.title("Correct High-Conviction Prediction")
-plt.show()
+plt.title("A confident call the model got right, feature by feature")
+show_with_alt(
+    plt.gcf(),
+    "Waterfall of one prediction: bars for each feature's contribution, running "
+    "from the base value to the predicted return.",
+)
 
 # %% tags=[]
 print("--- Incorrect high-conviction prediction ---")
@@ -583,13 +635,17 @@ print(f"  Date: {dates_np[test_idx[example_wrong]]}  Asset: {assets_np[test_idx[
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[example_wrong], max_display=12, show=False)
-plt.title("Incorrect High-Conviction Prediction")
-plt.show()
+plt.title("A confident call the model got wrong, decomposed the same way")
+show_with_alt(
+    plt.gcf(),
+    "Waterfall of one prediction: bars for each feature's contribution, running "
+    "from the base value to the predicted return.",
+)
 
 # %% [markdown] tags=[]
 # The waterfall plots show the same model making confident calls for different
 # reasons. Comparing the feature attributions gives a first hint at what
-# distinguishes correct from incorrect predictions — the systematic analysis
+# distinguishes correct from incorrect predictions - the systematic analysis
 # below makes this rigorous.
 
 # %% [markdown] tags=[]
@@ -597,14 +653,15 @@ plt.show()
 #
 # Not all predictions are equally important. In a portfolio context, predicted
 # return magnitude maps directly to position size ($w_i \propto \hat{y}_i$), so
-# predictions with large $|\hat{y}|$ are **decision-relevant** — they drive the
+# predictions with large $|\hat{y}|$ are **decision-relevant** - they drive the
 # biggest bets and have the greatest impact on PnL.
 #
-# We isolate the top 20% of predictions by $|\hat{y}|$ and split them into:
+# We isolate the highest-conviction predictions, the top band by $|\hat{y}|$ set
+# in the cell below, and split them into:
 #
-# - **Right**: $\text{sign}(\hat{y}) = \text{sign}(y)$ — the model was
+# - **Right**: $\text{sign}(\hat{y}) = \text{sign}(y)$ - the model was
 #   confidently correct
-# - **Wrong**: $\text{sign}(\hat{y}) \neq \text{sign}(y)$ — the model was
+# - **Wrong**: $\text{sign}(\hat{y}) \neq \text{sign}(y)$ - the model was
 #   confidently incorrect
 #
 # Comparing their SHAP profiles reveals which features *systematically* mislead
@@ -634,14 +691,12 @@ print(f"  Right: {np.mean(y_test[right_mask]):+.4f}")
 print(f"  Wrong: {np.mean(y_test[wrong_mask]):+.4f}")
 
 # %% [markdown] tags=[]
-# **Frame the result honestly**: at the 80th-percentile conviction band the
-# model is wrong $58\%$ of the time — its biggest bets are systematically
-# *worse* than a coin flip. The right-vs-wrong SHAP comparison below diagnoses
-# *why*; it is not a sign that the model has skill at high conviction. The
-# Ridge model on this fold has IC $\approx 0.018$ ($t \approx 1.17$), which
-# is barely above zero and consistent with the high-conviction breakdown.
-# Treat the analysis as a model-improvement diagnostic, not a validation of
-# the current model.
+# Read the right/wrong split before reading anything below it. If the model is
+# wrong on more than half of its largest bets, the SHAP comparison that follows
+# is a diagnosis of what misleads it, not evidence that it has skill where it is
+# most confident. Attribution explains what a model did; it says nothing about
+# whether the model was right, and a confident wrong prediction has just as
+# clean a decomposition as a confident correct one.
 
 # %% [markdown] tags=[]
 # ### SHAP Profiles: Right vs Wrong
@@ -673,9 +728,9 @@ print(
 comparison.head(15)
 
 # %% [markdown] tags=[]
-# Features with wrong/right ratios well above 1.0 are the model's weak points
-# at high conviction — it relied on them heavily when making its biggest
-# mistakes. If volume or cross-asset features dominate the top of this list,
+# A ratio above one means the feature contributed more to the mistakes than to
+# the successes: the model leaned on it hardest when it was wrong. If volume or
+# cross-asset features dominate the top of this list,
 # they may be unreliable as standalone predictors and could benefit from
 # interaction terms or non-linear modeling in Ch12.
 
@@ -703,14 +758,18 @@ ax.barh(x - width / 2, wrong_vals, width, label="Wrong (incorrect)", alpha=0.8)
 ax.set_yticks(x)
 ax.set_yticklabels(top_features, fontsize=9)
 ax.set_xlabel("Mean |SHAP value|")
-ax.set_title("Feature Importance: Right vs Wrong High-Magnitude Predictions")
+ax.set_title("Some features drive the mistakes more than the successes")
 ax.legend(loc="lower right")
 ax.invert_yaxis()
-plt.show()
+show_with_alt(
+    fig,
+    "Paired horizontal bars of mean absolute SHAP per feature, one bar for the "
+    "correct high-conviction predictions and one for the incorrect ones.",
+)
 
 # %% [markdown] tags=[]
 # **Interpretation**: Features where the "wrong" bar substantially exceeds the "right"
-# bar are the model's weak points at high conviction — it relied on them heavily when
+# bar are the model's weak points at high conviction - it relied on them heavily when
 # making its biggest mistakes. These features are candidates for re-engineering
 # (e.g., adding interaction terms) or non-linear modeling in Ch12.
 
@@ -747,7 +806,7 @@ signed_comparison.tail(10)
 
 # %% [markdown] tags=[]
 # **Interpretation**: Large positive direction differences mean the feature pushed wrong
-# predictions upward more than right ones — a systematic directional bias at the moments
+# predictions upward more than right ones - a systematic directional bias at the moments
 # that matter most. Features with large negative differences show the opposite pattern.
 # Both directions suggest the feature's signal is unreliable under high conviction.
 
@@ -755,8 +814,9 @@ signed_comparison.tail(10)
 # ### Concentration Risk
 #
 # When a single feature dominates the total SHAP attribution, the prediction
-# hinges on one input — a fragile basis for trading. We flag predictions where
-# any feature accounts for more than 60% of the total |SHAP|.
+# hinges on one input, which is a fragile basis for a trade. The cell below flags
+# any prediction where one feature accounts for more than the concentration
+# threshold it sets.
 
 # %% tags=[]
 total_abs = np.abs(shap_values).sum(axis=1)
@@ -771,12 +831,15 @@ print(f"Mean max-feature fraction: {max_frac.mean():.1%}")
 print(f"95th percentile: {np.percentile(max_frac, 95):.1%}")
 
 # %% [markdown] tags=[]
-# On this fold the 60% concentration threshold flags zero predictions —
-# the typical max-feature share is $\approx 20\%$ and the 95th percentile sits
-# at $\approx 33\%$. The model is not relying on a single feature to make
-# any given call; attribution is spread across the feature set. A higher
-# threshold (or a different aggregation, such as the share of the top-three
-# features) would be needed to surface concentration risk on this dataset.
+# Compare the flagged count with the mean and 95th-percentile shares printed
+# above. A threshold that flags nothing is telling you the threshold is wrong
+# for this model, not that the risk is absent: on this panel this fitted Ridge
+# puts a mean of 19% and a 95th percentile of 31% on its largest single feature,
+# so a cut at 60% could not fire. That is what these coefficients on this data
+# do, not something the penalty guarantees - a single large coefficient can
+# still dominate a row's attribution. Where the counts come back
+# empty, either raise the aggregation to the top three features or compare the
+# distribution against another model rather than against a fixed cut.
 # In a fold dominated by a regime change, the same diagnostic can flip and
 # flag many predictions; checking it per fold is part of the standing
 # pipeline rather than a one-time exercise.
@@ -805,8 +868,11 @@ print(f"  Asset: {assets_np[test_idx[median_right]]}")
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[median_right], max_display=12, show=False)
-plt.title("Median Right: High-Magnitude Correct Prediction")
-plt.show()
+plt.title("The typical correct high-conviction call")
+show_with_alt(
+    plt.gcf(),
+    "Waterfall of the median correct high-magnitude prediction, one bar per feature.",
+)
 
 # %% tags=[]
 print("--- Median high-magnitude WRONG prediction ---")
@@ -815,15 +881,18 @@ print(f"  Asset: {assets_np[test_idx[median_wrong]]}")
 
 fig, ax = plt.subplots(figsize=(8, 6))
 shap.plots.waterfall(explanation[median_wrong], max_display=12, show=False)
-plt.title("Median Wrong: High-Magnitude Incorrect Prediction")
-plt.show()
+plt.title("The typical incorrect high-conviction call")
+show_with_alt(
+    plt.gcf(),
+    "Waterfall of the median incorrect high-magnitude prediction, one bar per feature.",
+)
 
 # %% [markdown] tags=[]
 # ## SHAP Stability Across Folds
 #
 # A model that learns different feature rankings in each fold is less trustworthy
 # than one with stable importance. We train Ridge on all 8 walk-forward folds
-# and track mean |SHAP| for the top features — a key validation diagnostic.
+# and track mean |SHAP| for the top features - a key validation diagnostic.
 
 # %% tags=[]
 if fold_importance is not None:
@@ -855,10 +924,14 @@ if fold_importance is not None:
 
     ax.set_xlabel("Fold")
     ax.set_ylabel("Mean |SHAP value| on test fold")
-    ax.set_title("SHAP Feature Importance Stability Across Folds")
+    ax.set_title("Feature importance is not the same in every period")
     ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
-    plt.show()
+    show_with_alt(
+        fig,
+        "One line per leading feature, tracking its mean absolute SHAP value across "
+        "the walk-forward folds.",
+    )
 else:
     print("Fold importance not available (run with RETRAIN=True)")
 
@@ -870,8 +943,8 @@ else:
 # > **Library note**: In production, `ml4t.diagnostic.evaluation.compute_shap_importance()`
 # > automates fold-level SHAP aggregation.
 #
-# > **Extension**: Regime-conditional SHAP analysis — partitioning test data by
-# > volatility tercile and computing SHAP summaries within each partition — is
+# > **Extension**: Regime-conditional SHAP analysis - partitioning test data by
+# > volatility tercile and computing SHAP summaries within each partition - is
 # > demonstrated in the cross-dataset evaluation notebooks where regime labels
 # > from Ch7 are available. This adds the fourth layer of economic narrative
 # > building described in the chapter text.
@@ -893,10 +966,19 @@ top_boot = importance["feature"].head(TOP_K_BOOT).to_list()
 top_boot_idx = [FEATURE_COLS.index(f) for f in top_boot]
 n_test = shap_values.shape[0]
 
+# Resample DATES, not rows. Roughly a hundred ETFs quote on each date and adjacent
+# dates share overlapping 21-session feature windows, so drawing rows independently
+# treats one date's cross-section as a hundred independent observations and returns
+# an interval several times too narrow.
+boot_sessions = np.unique(dates_test)
+session_rows = [np.flatnonzero(dates_test == d) for d in boot_sessions]
+n_sessions = len(boot_sessions)
+
 rng = np.random.default_rng(RANDOM_SEED)
 boot_means = np.empty((N_BOOT, TOP_K_BOOT), dtype=float)
 for b in range(N_BOOT):
-    sample = rng.integers(0, n_test, n_test)
+    drawn = rng.integers(0, n_sessions, n_sessions)
+    sample = np.concatenate([session_rows[i] for i in drawn])
     boot_means[b] = np.mean(np.abs(shap_values[sample][:, top_boot_idx]), axis=0)
 
 boot_lo = np.percentile(boot_means, 2.5, axis=0)
@@ -933,52 +1015,76 @@ ax.set_yticks(ypos)
 ax.set_yticklabels(top_boot)
 ax.invert_yaxis()
 ax.set_xlabel("Mean |SHAP value| (with 95% bootstrap CI)")
-ax.set_title("Within-Fold Bootstrap Confidence Bands on Top-10 Features")
-plt.show()
+ax.set_title("Resampling one fold moves the importance ranking")
+show_with_alt(
+    fig,
+    "Mean absolute SHAP per leading feature with a 95 percent bootstrap interval "
+    "drawn as a horizontal error bar.",
+)
+
+# %% tags=[]
+lead_col = 0
+diff_draws = boot_means[:, lead_col][:, None] - boot_means[:, 1:]
+diff_lo = np.percentile(diff_draws, 2.5, axis=0)
+diff_hi = np.percentile(diff_draws, 97.5, axis=0)
+
+ranking = pl.DataFrame(
+    {
+        "against": top_boot[1:],
+        "mean_gap": point_estimate[lead_col] - point_estimate[1:],
+        "gap_p2.5": diff_lo,
+        "gap_p97.5": diff_hi,
+        "outranks": diff_lo > 0,
+    }
+)
+print(
+    f"{top_boot[lead_col]} outranks {int(ranking['outranks'].sum())} of "
+    f"{ranking.height} other leading features on this fold, at 95%."
+)
+ranking
 
 # %% [markdown] tags=[]
-# **Interpretation**: a top feature whose 95% bootstrap interval excludes the
-# point estimate of a lower-ranked feature is genuinely *more important on this
-# fold* — finite-sample noise alone cannot explain the gap. Features whose
-# intervals overlap with several neighbours have brittle rankings; they may
-# trade rank order across bootstrap replicates and should not be treated as
-# uniquely "the most important" feature. This is the within-fold complement
-# to the across-fold stability chart above.
+# **Interpretation**: each interval says how much that feature's own mean
+# $|\phi_j|$ moves when the sessions are redrawn. It does not say whether one
+# feature outranks another. Reading one feature's interval against a second
+# feature's point estimate compares two different quantities, and the two move
+# together across replicates - a session that lifts one lifts the other - so the
+# comparison ignores exactly the correlation that decides the question.
+#
+# The cell below asks it directly, by bootstrapping the *difference* between the
+# leading feature's mean $|\phi_j|$ and each other feature's, on the same redrawn
+# sessions. A ranking is claimed only where that difference interval excludes
+# zero. This is the within-fold complement to the across-fold stability chart
+# above.
 
 # %% [markdown] tags=[]
 # ## Key Takeaways
 #
 # 1. **Linear SHAP is exact.** For Ridge regression, SHAP values equal
-#    $\beta_j \cdot (x_j - \bar{x}_j)$ — no approximation, fully verifiable.
-#    This makes linear models the ideal starting point for interpretability;
-#    the closed-form match (correlation $\approx 0.99$, max difference
-#    $< 10^{-2}$) is a sanity check for the whole SHAP toolchain.
+#    $\beta_j \cdot (x_j - \bar{x}_j)$, with no approximation and no sampling.
+#    That makes a linear model the right place to learn the machinery, and the
+#    closed-form comparison above is the check to run whenever the toolchain,
+#    the masker or the library version changes.
 #
-# 2. **Volatility horizons dominate global importance.** $vol_{126d}$
-#    (positive coefficient) and $vol_{63d}$ (negative coefficient) lead
-#    mean $|\phi_j|$, with $sharpe_{63d}$, $vol\_ratio_{medium}$, and
-#    $yield\_curve\_slope$ rounding out the top five. Three of six prior-belief
-#    momentum features (`ret_63d`, `ret_126d`, `obv_zscore_63d`) flip sign
-#    versus expectation; the standalone factor signals are not strong on this
-#    panel.
+# 2. **Read global importance as magnitude, not as evidence.** Mean $|\phi_j|$
+#    says how much a feature moved predictions, not whether moving them helped.
+#    A feature can lead the ranking while contributing nothing out of sample,
+#    which is why the sign check and the right-versus-wrong split follow it.
 #
-# 3. **High-conviction predictions are wrong more often than right** ($58\%$
-#    wrong vs $42\%$ right at the top-20% conviction band). The right-vs-wrong
-#    SHAP comparison is therefore a model-improvement diagnostic, not a
-#    validation of the current model. Features with high *wrong / right*
-#    SHAP ratios — most notably `hurst_100`, `yield_curve_zscore`, and
-#    `chop_14` on this fold — are the first candidates for re-engineering or
-#    interaction terms.
+# 3. **Compare attribution between the calls the model got right and the ones
+#    it got wrong.** Attribution alone cannot distinguish them: a confident
+#    wrong prediction decomposes exactly as cleanly as a confident correct one.
+#    Splitting the high-conviction band by outcome and ranking features by the
+#    wrong-to-right ratio is what turns a description into a diagnosis.
 #
-# 4. **Concentration and stability checks belong in the standing pipeline,
-#    not as one-off diagnostics.** The 60% concentration threshold flags zero
-#    predictions on this fold (median max-feature share $\approx 20\%$); the
-#    cross-fold importance trajectory plus within-fold bootstrap CIs together
-#    distinguish "feature is important everywhere" from "feature looks
-#    important on this fold only."
+# 4. **Distinguish the two kinds of instability, and check both per fold.**
+#    Importance that moves across folds is a regime story; importance that is
+#    uncertain within a fold is a sample-size story. The cross-fold trajectory
+#    answers the first and the within-fold bootstrap interval answers the
+#    second, and a feature can look solid on one while failing the other.
 #
 # **Next**: `06_conformal_prediction` quantifies *how uncertain* each
-# prediction is — the natural complement to "what drives this prediction."
+# prediction is - the natural complement to "what drives this prediction."
 # *Chapter 12* extends SHAP to gradient boosting via `TreeExplainer`, where
 # attributions capture non-linear interactions invisible to coefficient
 # tables.

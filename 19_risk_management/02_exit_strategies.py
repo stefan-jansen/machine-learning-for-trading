@@ -73,28 +73,43 @@ from sklearn.preprocessing import StandardScaler
 from data import load_etfs
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %%
 warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
-# Production defaults; Papermill injects overrides for CI
 SEED = 42
 LABEL_HORIZON = 5
+SYMBOL = "SPY"
+START_DATE = "2018-01-01"
+END_DATE = "2024-01-01"
+N_TRADES = 100
+ADVERSE_MOVE_THRESHOLD = -0.02
+TEST_FRACTION = 0.30
 
-# %%
-np.random.seed(SEED)
+# %% [markdown]
+# What each setting decides:
+#
+# - `SYMBOL`, `START_DATE` and `END_DATE` fix the price series every exit rule is simulated on.
+#   The window spans the 2020 drawdown, which is where stop rules earn or lose their keep.
+# - `LABEL_HORIZON` is how many sessions ahead the ML section looks when deciding whether a bar
+#   preceded an adverse move. It also sets the purge: that many rows are dropped before the test
+#   boundary, because each training label reads that far forward and would otherwise overlap the
+#   first test features.
+# - `ADVERSE_MOVE_THRESHOLD` is the move over that horizon that counts as adverse and defines the
+#   classifier's positive class. A less extreme threshold gives a more balanced problem and a
+#   signal worth less.
+# - `TEST_FRACTION` is the share of the sample held back for the chronological test.
+# - `N_TRADES` is how many entry dates are drawn. It sets the precision of every mean return
+#   reported: the standard errors in the tables shrink with its square root, and at this count
+#   they are large relative to the differences between policies.
+# - `SEED` fixes the entry dates and the model fit, so re-running reproduces the same trades.
 
 # %% [markdown]
 # ## 1. Data Preparation
 
 # %%
-# Load sample data from canonical ETF source
-SYMBOL = "SPY"
-START_DATE = "2018-01-01"
-END_DATE = "2024-01-01"
-
 print(f"Loading {SYMBOL} data from canonical source...")
 etf_data = load_etfs()
 
@@ -114,8 +129,19 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # %%
 set_global_seeds(SEED)
 
+# %% [markdown]
+# ### Price and Volatility Features
+#
+# The exit rules need three things from the price series: a measure of how far the price typically
+# travels in a day, for scaling stops to volatility; trend context, for the ML features; and the
+# raw returns everything else is built from.
+#
+# **Average true range** is the volatility measure the stop rules use. Rather than the plain
+# high-minus-low range, it takes the largest of three distances - today's range, and each of
+# today's extremes measured from yesterday's close - so that a gap between sessions counts as
+# movement rather than being missed entirely.
+
 # %%
-# Add the base price and volatility features used by the exit rules.
 df = df.with_columns(
     [
         (pl.col("close").pct_change()).alias("returns"),
@@ -130,16 +156,21 @@ df = df.with_columns(
         pl.col("close").pct_change().rolling_std(20).alias("volatility_20"),
         pl.col("close").rolling_mean(20).alias("sma_20"),
         pl.col("close").rolling_mean(50).alias("sma_50"),
-        pl.col("close").pct_change().alias("change"),
     ]
 )
 
+# %% [markdown]
+# ### Relative Strength Index
+#
+# The last feature is the relative strength index, which compares the average size of recent up
+# moves with the average size of recent down moves and maps the ratio onto a nought-to-hundred
+# scale. It enters the ML section as a measure of how one-sided recent trading has been.
+
 # %%
-# Complete the RSI-style smoothing used in the ML exit model.
 df = df.with_columns(
     [
-        pl.when(pl.col("change") > 0).then(pl.col("change")).otherwise(0).alias("gain"),
-        pl.when(pl.col("change") < 0).then(-pl.col("change")).otherwise(0).alias("loss"),
+        pl.when(pl.col("returns") > 0).then(pl.col("returns")).otherwise(0).alias("gain"),
+        pl.when(pl.col("returns") < 0).then(-pl.col("returns")).otherwise(0).alias("loss"),
     ]
 )
 
@@ -219,6 +250,29 @@ def long_barrier_fill(
 
 
 # %% [markdown]
+# ### Reading a Set of Trade Outcomes
+#
+# Every comparison below is a mean over a finite number of trades, and trade returns are dispersed
+# enough that two policies can differ by a large-looking amount purely by chance. The helper
+# reports the standard error of each mean alongside it - the sample standard deviation divided by
+# the square root of the trade count - so a difference between two rows can be read against the
+# precision of the rows themselves. A gap smaller than a couple of standard errors is not a result.
+
+
+# %%
+def summarize_trades(results: list[dict]) -> dict:
+    """Mean trade return with its standard error, the win rate, and the trade count."""
+    returns = np.array([r["return"] for r in results], dtype=float)
+    n = len(returns)
+    return {
+        "n_trades": n,
+        "mean_return_pct": returns.mean() * 100,
+        "stderr_pct": returns.std(ddof=1) / np.sqrt(n) * 100 if n > 1 else float("nan"),
+        "win_rate_pct": float((returns > 0).mean() * 100),
+    }
+
+
+# %% [markdown]
 # ## 2. Fixed Take Profit / Stop Loss
 #
 # The simplest exit strategy: exit when price hits a fixed percentage target or stop.
@@ -277,23 +331,26 @@ def simulate_fixed_exits(
     return results
 
 
-# %%
-# Generate random entry signals (for demonstration)
-# In practice, these would come from your alpha signal
-n_trades = 100
-entry_indices = np.sort(np.random.choice(range(50, len(df) - 50), size=n_trades, replace=False))
+# %% [markdown]
+# ### Entry Dates Chosen at Random, on Purpose
+#
+# The entries below are drawn uniformly from the sample rather than produced by a signal. That is
+# the control this comparison needs: an exit rule's job is to manage a position after it exists,
+# and entries carrying an edge would let a rule look good by accident of when it happened to close.
+# Random entries have no edge in either direction, so any difference between rules is the rules.
+#
+# What random entries cannot do is make the comparison precise. Each rule is measured over the same
+# finite set of trades, and the tables report the standard error of every mean for that reason.
 
-# Simulate with different stop loss levels
+# %%
+entry_indices = np.sort(np.random.choice(range(50, len(df) - 50), size=N_TRADES, replace=False))
+
 prices = df["close"].to_numpy()
 opens = df["open"].to_numpy()
 highs = df["high"].to_numpy()
 lows = df["low"].to_numpy()
-# Timestamp per bar (df coordinate). The ML section keys exit probabilities
-# by timestamp because df_ml drops additional warm-up / forward-target rows
-# and therefore does NOT share df's integer index.
-# Normalize to a single unit so timestamp keys hash-match across the
-# polars-native and pandas-converted datetime64 arrays (different units
-# are ==-equal but not hash-equal).
+# Cast to a single resolution: two datetime64 values of different units compare equal but hash
+# differently, and these timestamps are used as dictionary keys in the ML section.
 bar_timestamps = df["timestamp"].to_numpy().astype("datetime64[ns]")
 
 configs = [
@@ -308,19 +365,20 @@ for config in configs:
     results_by_config[f"SL={config.stop_loss_pct:.0%}"] = results
 
 # %% [markdown]
-# The summary separates stop-outs, targets, and timeouts so the cost of tightening
-# the downside barrier is visible rather than inferred from mean return alone.
+# The summary separates stop-outs, targets and timeouts, because that is where the effect of
+# tightening the stop is actually legible. The exit-type counts are close to deterministic given
+# the price path: a tighter stop is touched more often, and that shows up as a large, reliable
+# shift between the three columns. The mean return is not legible in the same way, which is why
+# its standard error sits next to it.
 
 # %%
 fixed_summary_rows = []
 for name, results in results_by_config.items():
-    returns = [r["return"] for r in results]
     exit_types = [r["exit_type"] for r in results]
     fixed_summary_rows.append(
         {
             "config": name,
-            "mean_return_pct": np.mean(returns) * 100,
-            "win_rate_pct": sum(1 for r in returns if r > 0) / len(returns) * 100,
+            **summarize_trades(results),
             "take_profits": exit_types.count("take_profit"),
             "stop_losses": exit_types.count("stop_loss"),
             "timeouts": exit_types.count("timeout"),
@@ -395,7 +453,10 @@ fig.update_layout(
     height=400,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three histograms of trade returns, one per stop-loss width, on shared axes. The tightest stop produces a tall spike of small losses at its stop level; wider stops spread that mass into a broader distribution with a longer left tail.",
+)
 
 # %% [markdown]
 # ## 3. Trailing Stop Loss
@@ -501,24 +562,14 @@ fixed_results = simulate_fixed_exits(
 
 # %%
 trailing_rows = []
-for name, results in trailing_results.items():
-    returns = [r["return"] for r in results]
+for name, results in list(trailing_results.items()) + [("Fixed SL/TP (baseline)", fixed_results)]:
     trailing_rows.append(
         {
             "config": name,
-            "mean_return_pct": np.mean(returns) * 100,
-            "win_rate_pct": sum(1 for r in returns if r > 0) / len(returns) * 100,
+            **summarize_trades(results),
             "avg_hold_days": float(np.mean([r["holding_days"] for r in results])),
         }
     )
-trailing_rows.append(
-    {
-        "config": "Fixed SL/TP (baseline)",
-        "mean_return_pct": np.mean([r["return"] for r in fixed_results]) * 100,
-        "win_rate_pct": sum(1 for r in fixed_results if r["return"] > 0) / len(fixed_results) * 100,
-        "avg_hold_days": float(np.mean([r["holding_days"] for r in fixed_results])),
-    }
-)
 trailing_summary_df = pl.DataFrame(trailing_rows).with_columns(pl.exclude("config").round(2))
 trailing_summary_df
 
@@ -611,13 +662,11 @@ for config in atr_configs:
 # %%
 atr_rows = []
 for name, results in atr_results.items():
-    returns = [r["return"] for r in results]
     stop_distances = [r["stop_distance_pct"] * 100 for r in results]
     atr_rows.append(
         {
             "config": name,
-            "mean_return_pct": np.mean(returns) * 100,
-            "win_rate_pct": sum(1 for r in returns if r > 0) / len(returns) * 100,
+            **summarize_trades(results),
             "avg_stop_distance_pct": float(np.mean(stop_distances)),
             "stop_distance_std_pct": float(np.std(stop_distances)),
         }
@@ -639,25 +688,31 @@ fig.update_layout(
     yaxis_title="Stop Distance (%)",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Trade return against average holding period for each trailing distance, with the fixed-stop baseline alongside. Tighter trails cut holding periods sharply.",
+)
 
 # %% [markdown]
 # ## 5. ML-Based Exit Signals
 #
-# Train a classifier to predict adverse price moves and use predictions for exits.
+# The rules so far react to price: the stop fires once the loss has happened. A model can in
+# principle fire earlier, by recognizing conditions that have preceded adverse moves before. That
+# is the claim to test here.
 #
-# **Approach**:
-# - Target: Will price drop >2% in next 5 days?
-# - Features: Technical indicators, recent returns, volatility
-# - Model: Gradient Boosting
-# - Exit: Use today's close-based probability at the next session's open
+# The classifier is asked one question per bar: did the close fall by more than
+# `ADVERSE_MOVE_THRESHOLD` over the next `LABEL_HORIZON` sessions? Its inputs are the technical
+# features built above. Its output is a probability, and the exit rule is a threshold on it.
+#
+# Three things about the setup matter more than the model choice, and each is handled explicitly
+# below: the split is chronological, the training rows that overlap the test window are purged, and
+# every probability is delayed to the session on which it could first be traded.
 
 # %%
-# Prepare ML features and target
 df_ml = df.with_columns(
     [
         # Target: price drops >2% in next 5 days
-        (pl.col("close").shift(-LABEL_HORIZON) / pl.col("close") - 1 < -0.02)
+        (pl.col("close").shift(-LABEL_HORIZON) / pl.col("close") - 1 < ADVERSE_MOVE_THRESHOLD)
         .cast(pl.Int32)
         .alias("target"),
         # Features
@@ -673,9 +728,13 @@ df_ml = df.with_columns(
     ]
 ).drop_nulls()
 
+# %% [markdown]
+# The nine features are returns over four horizons, realized volatility, the relative strength
+# index, the distance from two moving averages, and volume relative to its own recent average.
+# `08_ml_exit_signals` builds the two-model entry-and-exit architecture; the model here predicts
+# only the exit side.
+
 # %%
-# This notebook deliberately uses a self-contained exit model. The companion
-# 08_ml_exit_signals notebook covers a two-model entry/exit architecture.
 FEATURES = [
     "ret_1d",
     "ret_5d",
@@ -691,12 +750,18 @@ FEATURES = [
 print(f"ML dataset: {len(df_ml):,} samples")
 print(f"Target rate: {df_ml['target'].mean() * 100:.1f}% (adverse moves)")
 
+# %% [markdown]
+# ### Split Chronologically, and Purge the Overlap
+#
+# The split is by date, never at random, because a model that has seen tomorrow cannot be evaluated
+# on it. That alone is not enough: the label on the last training bar is read from closes several
+# sessions ahead, which fall inside the test period. Those training rows would carry information
+# from the test window. Dropping `LABEL_HORIZON` rows before the boundary - purging them - is what
+# makes every training outcome strictly earlier than the first test feature.
+
 # %%
-# Train/test split. Five rows are purged before the test boundary because each
-# training label reads five closes forward. This keeps every training outcome
-# strictly before the first test feature row.
 df_pd = df_ml.to_pandas()
-test_start = int(len(df_pd) * 0.7)
+test_start = int(len(df_pd) * (1 - TEST_FRACTION))
 train_end = test_start - LABEL_HORIZON
 
 X_train = df_pd[FEATURES].iloc[:train_end]
@@ -708,7 +773,6 @@ test_timestamps = df_pd["timestamp"].iloc[test_start:].to_numpy().astype("dateti
 print(f"Train: {len(X_train):,} samples, Purged: {LABEL_HORIZON}, Test: {len(X_test):,} samples")
 
 # %%
-# Train model
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
@@ -793,7 +857,10 @@ fig.update_layout(
     yaxis_title="Feature",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Stop distance over time for each ATR multiple, widening in volatile periods and narrowing in calm ones, against the flat line of a fixed percentage stop.",
+)
 
 
 # %% [markdown]
@@ -857,9 +924,16 @@ def simulate_ml_exits(
     return results
 
 
+# %% [markdown]
+# ### Delay Each Signal to the Session It Could First Be Traded On
+#
+# A probability computed from today's close cannot be acted on until tomorrow's open, so every
+# probability is shifted forward one session before any simulation reads it. The mapping is keyed
+# by timestamp rather than by row number, because `df_ml` dropped warm-up and forward-label rows
+# and no longer shares an index with `df`; a positional mapping would silently attribute each
+# signal to the wrong date.
+
 # %%
-# Map each test close's probability to the next session, when it can first be
-# executed. The timestamp lookup avoids assuming df and df_ml share row indices.
 bar_index_by_timestamp = {timestamp: i for i, timestamp in enumerate(bar_timestamps)}
 proba_by_ts = {}
 for signal_timestamp, probability in zip(test_timestamps, y_pred_proba, strict=True):
@@ -899,14 +973,11 @@ if baseline_results:
 # %%
 ml_rows = []
 for name, results in ml_results.items():
-    returns = [r["return"] for r in results]
     exit_types = [r["exit_type"] for r in results]
     ml_rows.append(
         {
             "config": name,
-            "n_trades": len(results),
-            "mean_return_pct": np.mean(returns) * 100,
-            "win_rate_pct": sum(1 for r in returns if r > 0) / len(returns) * 100,
+            **summarize_trades(results),
             "ml_exits": exit_types.count("ml_signal"),
             "timeouts": exit_types.count("timeout"),
         }
@@ -914,7 +985,7 @@ for name, results in ml_results.items():
 ml_summary_df = pl.DataFrame(ml_rows).with_columns(pl.exclude("config").round(2))
 ml_summary_df
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"The chronological test AUC is {test_auc:.3f}. Lower thresholds fire on more bars, "
@@ -1096,12 +1167,13 @@ for name, results in hybrid_results.items():
     returns = [r["return"] for r in results]
     exit_types = [r["exit_type"] for r in results]
 
+    stats_row = summarize_trades(results)
     comparison_data.append(
         {
             "Strategy": name,
-            "Mean Return": f"{np.mean(returns) * 100:+.2f}%",
+            "Mean Return": f"{stats_row['mean_return_pct']:+.2f}% ± {stats_row['stderr_pct']:.2f}",
             "Trade Return / SD": f"{np.mean(returns) / np.std(returns):.2f}",
-            "Win Rate": f"{sum(1 for r in returns if r > 0) / len(returns) * 100:.1f}%",
+            "Win Rate": f"{stats_row['win_rate_pct']:.1f}%",
             "Stop Losses": exit_types.count("stop_loss"),
             "Trailing Stops": exit_types.count("trailing_stop"),
             "Take Profits": exit_types.count("take_profit"),
@@ -1113,7 +1185,6 @@ comparison_df = pl.DataFrame(comparison_data)
 comparison_df
 
 # %%
-# Exit type breakdown as comparable shares across strategies.
 exit_type_colors = {
     "stop_loss": COLORS["negative"],
     "trailing_stop": COLORS["amber"],
@@ -1152,7 +1223,10 @@ fig.update_layout(
     barmode="stack",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Horizontal bars of mean decrease in impurity per feature with error bars across five chronological folds. The bars are of similar length and the error bars are wide relative to the differences between them.",
+)
 
 # %% [markdown]
 # ## 7. ml4t-backtest Risk Rules
@@ -1335,9 +1409,13 @@ def should_exit(result) -> bool:
 # therefore trigger an exit in a calm regime but remain inside the risk budget in
 # a volatile regime.
 
+# %% [markdown]
+# The rule is built in current-ATR mode so that each scenario below is evaluated against the ATR it
+# displays. A live position would instead hold one rule instance that remembers the ATR at entry,
+# which keeps the stop distance fixed for the life of the trade rather than letting it breathe with
+# the market.
+
 # %%
-# Use current-ATR mode so each independent scenario evaluates its displayed ATR.
-# Production code can instead keep entry ATR in one rule instance per position.
 stop_2x = risk.VolatilityStop(multiplier=2.0, atr_key="atr", use_entry_atr=False)
 
 scenarios = [
@@ -1495,9 +1573,9 @@ print(f"\nCalibrated rules: SL={abs(stop_val):.2%}, TP={target_val:.2%}, max 30 
 # class MyStrategy(Strategy):
 #     def __init__(self):
 #         self.exit_rules = RuleChain([
-#             StopLoss(pct=0.02),
-#             TakeProfit(pct=0.05),
-#             TimeExit(max_bars=20),
+#             StopLoss(pct=STOP_LOSS_PCT),
+#             TakeProfit(pct=TAKE_PROFIT_PCT),
+#             TimeExit(max_bars=MAX_HOLDING_BARS),
 #         ])
 #
 #     def on_data(self, timestamp, data, context, broker):
@@ -1550,7 +1628,7 @@ print(f"\nCalibrated rules: SL={abs(stop_val):.2%}, TP={target_val:.2%}, max 30 
 # - Consistent behavior across strategies
 
 # %% [markdown]
-# ## 7.1 Signal Quality with BarrierAnalysis
+# ## 8. Signal Quality with BarrierAnalysis
 #
 # The ml4t-diagnostic library provides `BarrierAnalysis` to evaluate signal quality
 # using triple barrier outcomes (TP hit, SL hit, timeout) instead of simple returns.
@@ -1686,7 +1764,10 @@ fig.update_layout(
     height=400,
     legend=dict(orientation="h", yanchor="bottom", y=1.02),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Stacked bars of exit-type composition for each policy. Adding the trailing overlay converts most stop-loss and take-profit exits into trailing-stop exits; adding the ML overlay converts timeouts into signal exits.",
+)
 
 # %% [markdown]
 # **Interpreting BarrierAnalysis Results**:
@@ -1700,29 +1781,57 @@ fig.show()
 #
 
 # %% [markdown]
-# ## 8. Key Takeaways
+# ## 9. Key Takeaways
 #
-# | Strategy | Strength | Weakness |
-# |----------|----------|----------|
-# | **Fixed SL/TP** | Simple, predictable | Ignores volatility |
-# | **Trailing Stop** | Locks in profits | May exit too early in trends |
-# | **ATR-Based** | Adapts to volatility | Requires calibration |
-# | **ML-Based** | Can flag regime changes | Requires purged temporal validation |
-# | **Hybrid** | Combines signals | Inherits the most aggressive rule |
+# 1. **Separate the part of an exit rule's behaviour that is reliable from the part that is a
+#    sample.** How often each rule fires, and which barrier it fires on, is close to deterministic
+#    given the price path and shows a clear, repeatable pattern as the stop width changes. The mean
+#    return each rule produced is a mean over a finite number of trades, and its standard error
+#    here is comparable to the differences between the rules. Read the exit-type composition as
+#    evidence and the return column as an estimate.
 #
-# 1. **Tighter stops reduce per-trade loss but increase whipsaws;** wider
-#    stops admit noise but cap fewer losers. Match the stop to the trading
-#    timeframe and the asset's volatility rather than a generic preference.
-# 2. **ATR-based stops adapt to volatility without re-tuning** a fixed
-#    percentage; this is the cheapest robustness upgrade over fixed stops.
-# 3. **ML exits require a stricter timing contract than fixed rules.** The
-#    five-day forward label requires a five-row purge at the train/test
-#    boundary. Each close-based probability is keyed by timestamp and delayed
-#    to the next session's open; a positional or same-close mapping would
-#    silently evaluate exits on the wrong date. Treat the model as an overlay
-#    on explicit stops unless its chronological test results justify more.
+# 2. **Test exit rules on entries that carry no edge.** An exit rule's job starts once a position
+#    exists. Feeding it entries from a signal lets the signal's timing flatter or damn the rule for
+#    reasons that have nothing to do with the rule.
 #
-# **Next**: [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb)
-# connects these exit policies to position sizing and excursion-based
-# calibration; `BarrierAnalysis` validates that a signal predicts barrier
-# outcomes, not just returns.
+# 3. **Scale the stop to what the instrument actually does.** A fixed percentage stop is a
+#    different rule in a calm month than in a violent one, because the same distance is a different
+#    number of daily ranges. An ATR-scaled stop holds the distance constant in units of the
+#    instrument's own movement, which is what makes it portable across assets and periods without
+#    re-tuning.
+#
+# 4. **Decide the same-bar ordering convention explicitly, and state it.** A daily bar that touches
+#    both the stop and the target does not say which came first. Assuming the target settles first
+#    manufactures winning trades. Every simulation here assumes the stop settles first, which is
+#    conservative and is why the results are believable in the direction they are believable.
+#
+# 5. **A model-driven exit needs a stricter timing contract than a rule-driven one.** The forward
+#    label forces a purge at the split boundary; the probability has to be delayed to the session it
+#    could first be traded on; and the mapping from signal to bar has to survive the two frames
+#    having different row indices. Any one of those done positionally rather than by timestamp
+#    evaluates exits on the wrong date and does so silently.
+#
+# 6. **Combining rules inherits the tightest one.** A hybrid policy exits the first time any of its
+#    components says to, so adding an overlay can only shorten trades. That shows up in the exit
+#    composition immediately and in the return only through noise.
+#
+# ### Known limitations
+#
+# - One symbol, one six-year window, one set of randomly drawn entries. Every mean return here is
+#   an estimate with a standard error printed beside it, and none of the differences between
+#   policies is large relative to those errors. The exit-type composition is what this sample
+#   supports; the ranking by return is not.
+# - The fixed, trailing and ATR sections run on all the drawn entries; the ML and hybrid sections
+#   run only on the ones falling in the chronological test period. Their tables are therefore not
+#   comparable across sections, only within one.
+# - Fills assume a resting order executes at the barrier price, or at the open after a gap. There
+#   is no slippage, no partial fill, and no spread, all of which `18_transaction_costs` shows are
+#   material for a rule that trades this often.
+# - The classifier reaches an out-of-sample AUC only slightly above chance, so the ML exit sections
+#   demonstrate the timing contract rather than a signal worth trading.
+# - Volatility stops use current ATR rather than ATR at entry, so a scenario's stop distance moves
+#   with the market during the trade.
+#
+# **Next**: [`03_position_sizing_mae_mfe`](03_position_sizing_mae_mfe.ipynb) calibrates the stop
+# distance from how far trades actually travel against you before they recover, rather than from a
+# grid of round numbers.

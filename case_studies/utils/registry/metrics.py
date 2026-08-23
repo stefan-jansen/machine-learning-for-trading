@@ -67,6 +67,7 @@ def compute_prediction_fold_metrics(
         cross_sectional_ic_series,
     )
 
+    from case_studies.utils.notebook_contracts import defined_ic
     from utils.modeling import compute_classification_metrics
 
     if not isinstance(predictions, pl.DataFrame):
@@ -223,9 +224,10 @@ def compute_prediction_fold_metrics(
         method="spearman",
         min_obs=5,
     )
-    if isinstance(daily_ic, pl.DataFrame) and daily_ic.drop_nulls("ic").height >= 3:
+    defined_daily_ic = defined_ic(daily_ic) if isinstance(daily_ic, pl.DataFrame) else None
+    if defined_daily_ic is not None and defined_daily_ic.height >= 3:
         ic_unc = compute_ic_uncertainty(
-            daily_ic.drop_nulls("ic").select("ic"),
+            defined_daily_ic.select("ic"),
             horizon=int(max(1, horizon)),
             n_boot=1000,
         )

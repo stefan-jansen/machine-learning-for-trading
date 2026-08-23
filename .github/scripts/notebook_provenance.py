@@ -355,11 +355,20 @@ def _percent_cells(src: str) -> list[tuple[str, str, str]]:
     return [(m, k, "".join(b)) for m, k, b in cells]
 
 
-def _blank_alts(code: str) -> tuple[str, list[str]] | None:
-    """(*code* with each alt literal replaced by a placeholder, the literals in source order).
+def _blank_alts(code: str) -> tuple[str, list[str | None]] | None:
+    """(*code* with each alt literal replaced by a placeholder, the alts in source order).
 
     None if *code* does not parse. Works in bytes because ``col_offset`` is a UTF-8
     byte offset, and replaces from the end so earlier spans keep their offsets.
+
+    An alt built with an f-string is reported as ``None`` rather than skipped. Its text
+    is not knowable from the source, so it cannot be compared against what the outputs
+    carry - but for the same reason it is not blanked either, so it stays in the AST dump
+    and any edit to it is caught as ordinary source drift. Dropping such a call from the
+    list instead would misalign every later position against the carried alts, and
+    omitting it entirely made the counts disagree and failed the whole notebook: eight
+    case studies write the leading configuration into their alt with an f-string, so the
+    carve-out never applied to the notebooks that read their figures off the frame.
     """
     try:
         tree = ast.parse(code)
@@ -370,29 +379,32 @@ def _blank_alts(code: str) -> tuple[str, list[str]] | None:
     for line in data.splitlines(keepends=True):
         line_start.append(line_start[-1] + len(line))
 
-    found: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str | None]] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and _alt_call_name(node.func) in ALT_FUNCS
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and isinstance(node.args[1].value, str)
         ):
             arg = node.args[1]
             if arg.end_lineno is None or arg.end_col_offset is None:
                 return None
+            literal = (
+                arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+            )
             found.append(
                 (
                     line_start[arg.lineno - 1] + arg.col_offset,
                     line_start[arg.end_lineno - 1] + arg.end_col_offset,
-                    arg.value,
+                    literal,
                 )
             )
     # ast.walk is breadth-first, not source order; the outputs it is compared against
     # are in source order.
-    found.sort()
-    for begin, finish, _ in reversed(found):
+    found.sort(key=lambda item: item[:2])
+    for begin, finish, literal in reversed(found):
+        if literal is None:
+            continue  # not blanked, so an edit to it stays visible in the AST dump
         data = data[:begin] + b'"<alt>"' + data[finish:]
     return data.decode("utf-8"), [alt for _, _, alt in found]
 
@@ -527,10 +539,18 @@ def alt_text_only_drift(stamped_blob: str, py: Path, nb: dict) -> bool:
             for out in cell.get("outputs", [])
             if "image/png" in out.get("data", {})
         ]
-        if len(blanked[1]) != len(carried) or any(
-            a != c for a, c in zip(blanked[1], carried, strict=True)
-        ):
+        if len(blanked[1]) != len(carried):
             return False
+        for a, c in zip(blanked[1], carried, strict=True):
+            if a is None:
+                # A computed alt. Its literal parts are in the AST dump the first half
+                # compared, so a change to them is already stale; what is left to require
+                # is that the output carries an alt at all, which is what catches an alt
+                # call added since the notebook was executed.
+                if not c:
+                    return False
+            elif a != c:
+                return False
     return True
 
 
@@ -634,8 +654,11 @@ def stamp_reference(base_branch: str = "main") -> str:
     return "HEAD"
 
 
-def destamped(ref: str | None = None) -> list[str]:
+def destamped(ref: str | None = None, only: set[str] | None = None) -> list[str]:
     """Notebooks stamped at *ref* and unstamped now.
+
+    ``only`` restricts the answer to those paths, so the pre-commit gate reports a
+    stamp this commit is dropping rather than one another commit dropped earlier.
 
     The gate says nothing about a notebook with no stamp, which is deliberate - the
     corpus is being stamped as notebooks are re-run, and failing the ones that have
@@ -648,7 +671,8 @@ def destamped(ref: str | None = None) -> list[str]:
     return sorted(
         rel
         for rel in stamped_at(ref or stamp_reference())
-        if (REPO_ROOT / rel).exists()
+        if (only is None or rel in only)
+        and (REPO_ROOT / rel).exists()
         and not json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         .get("metadata", {})
         .get(STAMP_KEY)
@@ -657,12 +681,20 @@ def destamped(ref: str | None = None) -> list[str]:
 
 def check_all(
     strict: bool = False,
+    only: set[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     """Return (stale, testmode, contradicted, unverified, alt_only) repo-relative rows.
 
     Only the first four fail. ``alt_only`` is reported so that forgiving a drift is
     never silent: a notebook in that list has a ``.py`` that no longer matches its
     stamp, and the reason it is allowed is printed rather than assumed.
+
+    ``only`` restricts the scan to the notebooks whose ``.ipynb`` or paired ``.py``
+    is in that set of repo-relative paths. The pre-commit gate passes the staged
+    files, so a notebook someone else left dirty in the working tree no longer
+    blocks an unrelated commit; nothing unstaged can reach main, so the narrower
+    scan gives up no protection. CI calls it with no ``only`` and still scans the
+    whole tree.
     """
     stale: list[str] = []
     testmode: list[str] = []
@@ -674,6 +706,8 @@ def check_all(
         py = paired_py(nb_path)
         if py is None:
             continue  # un-paired notebooks have no .py to drift from
+        if only is not None and rel not in only and str(py.relative_to(REPO_ROOT)) not in only:
+            continue
         try:
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -717,8 +751,9 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
-    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict)
-    lost = destamped()
+    only = {str(Path(p)) for p in args.paths} or None
+    stale, testmode, contradicted, unverified, alt_only = check_all(strict=args.strict, only=only)
+    lost = destamped(only=only)
     fail = bool(stale or testmode or contradicted or lost) or (args.strict and bool(unverified))
     if lost:
         print("DE-STAMPED (carried a provenance stamp where this branch forked, and does not now):")
@@ -791,6 +826,12 @@ def main() -> int:
 
     cp = sub.add_parser("check", help="gate: fail on stale or test-mode stamped notebooks")
     cp.add_argument("--strict", action="store_true", help="also fail on unstamped notebooks")
+    cp.add_argument(
+        "paths",
+        nargs="*",
+        help="restrict the scan to these files (the pre-commit gate passes the staged ones); "
+        "with none given, the whole tree is scanned",
+    )
     cp.set_defaults(func=_cmd_check)
 
     args = ap.parse_args()

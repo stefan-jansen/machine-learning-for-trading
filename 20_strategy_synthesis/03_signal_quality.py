@@ -24,8 +24,8 @@
 # the chosen signal is trustworthy enough to trade on.
 #
 # **Scope rule**: Ch11-15 insight notebooks teach what each model family
-# reveals. This notebook asks: does the best signal per case study
-# survive scrutiny?
+# reveals. This notebook asks whether the signal each case study selected holds
+# up when its validation and holdout evidence are put side by side.
 #
 # **Learning Objectives**:
 # - Assess which case studies have trustworthy signal evidence
@@ -46,10 +46,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
+from IPython.display import Markdown, display
 
 warnings.filterwarnings("ignore")
 
 from utils.paths import get_chapter_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -95,6 +97,13 @@ print(
 # ## IC Landscape Heatmap
 #
 # Which model families produce the strongest signals for which asset classes?
+#
+# Each cell is the mean information coefficient over every prediction that family
+# registered for that case study, on the case study's primary label and excluding
+# the holdout split. It is an average over a whole hyperparameter sweep, so it
+# measures how the family does typically, not how well its best configuration can
+# do. The maximum over the same sweep is the `ic_best` column, used further down;
+# the two answer different questions and can rank the families differently.
 
 # %%
 # Build IC matrix: case study × model family
@@ -126,7 +135,11 @@ for cs in case_order:
 matrix_arr = np.array(matrix_data)
 
 fig, ax = plt.subplots(figsize=(10, 7))
-im = ax.imshow(matrix_arr, cmap="RdYlGn", aspect="auto")
+# RdYlGn is diverging, so zero has to be the midpoint. Left to autoscale, a
+# range that happens to sit above zero paints a weak positive IC red and a
+# range below it paints a negative IC green.
+ic_extent = float(np.nanmax(np.abs(matrix_arr))) if np.isfinite(matrix_arr).any() else 1.0
+im = ax.imshow(matrix_arr, cmap="RdYlGn", aspect="auto", vmin=-ic_extent, vmax=ic_extent)
 
 ax.set_xticks(range(len(family_labels)))
 ax.set_xticklabels(family_labels, rotation=45, ha="right")
@@ -138,13 +151,19 @@ for i in range(len(case_order)):
     for j in range(len(family_order)):
         val = matrix_arr[i, j]
         if not np.isnan(val):
-            color = "white" if abs(val) > 0.15 else "black"
+            color = "white" if abs(val) > 0.75 * ic_extent else "black"
             ax.text(j, i, f"{val:.3f}", ha="center", va="center", fontsize=9, color=color)
 
-plt.colorbar(im, ax=ax, label="Mean IC", shrink=0.8)
-ax.set_title("Predictive Signal Quality (IC) by Case Study and Model Family")
+plt.colorbar(im, ax=ax, label="Mean IC across the family's predictions", shrink=0.8)
+ax.set_title("Mean IC by case study and model family")
 fig.subplots_adjust(left=0.2, right=0.92, top=0.9, bottom=0.18)
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap of mean information coefficient with case studies as rows and model "
+    "families as columns, each cell annotated with its value and coloured on a "
+    "red-to-green scale centred on zero. Blank cells are families that case "
+    "study did not run.",
+)
 
 # %% [markdown]
 # ## Signal Sharpe Heatmap
@@ -197,19 +216,70 @@ for i in range(len(sharpe_rows)):
             color = "white" if abs(val) > 1.2 else "black"
             ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=9, color=color)
 
-plt.colorbar(im, ax=ax, label="Median Signal Sharpe", shrink=0.8)
-ax.set_title("Signal-Stage Sharpe by Case Study and Model Family")
+plt.colorbar(im, ax=ax, label="Median signal-stage Sharpe", shrink=0.8)
+ax.set_title("Median signal-stage Sharpe by case study and model family")
 fig.subplots_adjust(left=0.2, right=0.92, top=0.9, bottom=0.18)
-fig.show()
+show_with_alt(
+    fig,
+    "Heatmap of the median signal-stage Sharpe with case studies as rows and "
+    "model families as columns, annotated per cell and coloured red to green on "
+    "a scale from -2 to +2 centred on zero.",
+)
 
 # %% [markdown]
-# Reading the IC and Sharpe heatmaps together separates ranking quality
-# (signal Sharpe) from average prediction quality (IC). GBM typically shows
-# the widest within-family Sharpe spread: its highest-Sharpe configuration
-# may be 2+ Sharpe points above its median. Latent factors and deep learning
-# can have the highest signal Sharpe on ETFs and the S&P 500 studies in
-# cases where a different family has the highest average IC — top-k ranking
-# accuracy and average IC are not the same measurement.
+# Reading the two heatmaps together separates ranking quality, which is what the
+# Sharpe of a long-short book made from the predictions measures, from average
+# prediction quality, which is what IC measures. A family can be accurate on
+# average and still rank the extremes badly, or the reverse.
+#
+# The dispersion within a family matters as much as its centre. A family whose
+# best configuration sits far above its own median is one where the choice of
+# configuration is doing much of the work, and that choice was made on
+# validation data.
+
+# %% tags=["results"]
+_sp = (
+    variant_df.filter(pl.col("sharpe").is_not_null())
+    .group_by("family")
+    .agg(
+        median_sharpe=pl.col("sharpe").median(),
+        max_sharpe=pl.col("sharpe").max(),
+        n=pl.len(),
+    )
+    .with_columns(spread=pl.col("max_sharpe") - pl.col("median_sharpe"))
+    .sort("spread", descending=True)
+)
+_w = _sp.row(0, named=True)
+_agree = (
+    ic_df.filter(pl.col("ic_mean").is_not_null())
+    .sort("ic_mean", descending=True)
+    .group_by("case_study")
+    .first()
+    .join(
+        variant_df.filter(pl.col("sharpe").is_not_null())
+        .group_by("case_study", "family")
+        .agg(median_sharpe=pl.col("sharpe").median())
+        .sort("median_sharpe", descending=True)
+        .group_by("case_study")
+        .first()
+        .select("case_study", sharpe_leader="family"),
+        on="case_study",
+        how="inner",
+    )
+)
+_same = _agree.filter(pl.col("family") == pl.col("sharpe_leader")).height
+display(
+    Markdown(
+        f"Widest within-family spread: **{FAMILY_NAMES.get(_w['family'], _w['family'])}**, "
+        f"whose best of {_w['n']} configurations reaches Sharpe "
+        f"{_w['max_sharpe']:.2f} against a median of {_w['median_sharpe']:.2f}, "
+        f"a gap of {_w['spread']:.2f}. Across the {_agree.height} case studies "
+        "where both measurements exist, the family with the highest mean IC is "
+        f"also the family with the highest median signal Sharpe in {_same} of "
+        "them. The two rankings are related but not the same measurement, which "
+        "is the disconnect Section 20.3 takes up."
+    )
+)
 
 # %% [markdown]
 # ## Model Family Comparison
@@ -268,31 +338,50 @@ axes[1].set_xlim(0, 100)
 for i, v in enumerate(pos_counts["pct_positive"].to_list()):
     axes[1].text(v + 1, i, f"{v:.0f}%", va="center")
 
-fig.show()
+fig.tight_layout()
+show_with_alt(
+    fig,
+    "Left: box plots of mean IC per model family across case studies, with a "
+    "reference line at zero. Right: horizontal bars giving, for each family, the "
+    "percentage of the case studies it ran on where its mean IC was positive.",
+)
 
 # %% [markdown]
 # ## IC by Asset Class Characteristics
 #
 # Does universe size, frequency, or cost regime predict IC?
 
-# %%
-meta_rows = []
-for cs, data in synthesis.items():
-    meta = data["meta"]
-    models = data["pipeline_summary"]["models"]
-    best_ic = max((m.get("ic_mean", 0) or 0) for m in models.values()) if models else 0.0
-    meta_rows.append(
-        {
-            "case_study": DISPLAY_NAMES.get(cs, cs),
-            "universe_size": meta["universe_size"],
-            "frequency": meta["frequency"],
-            "cost_bps": meta["cost_bps"],
-            "best_ic": best_ic,
-            "n_families": len(data["pipeline_summary"]["models"]),
-        }
-    )
+# %% [markdown]
+# `best_ic` below comes from `ic_comparison.parquet` rather than from the models
+# block of `all_synthesis.json`. That block stores the per-family maximum under a
+# key named `ic_mean` (agent-workspace #863), so reading it here would put a
+# maximum under the same axis label as the mean plotted in the heatmap above. The
+# parquet keeps the two apart: `ic_mean` is the family average, `ic_best` the
+# family maximum.
 
-meta_df = pl.DataFrame(meta_rows)
+# %%
+_best_ic = (
+    ic_df.filter(pl.col("ic_best").is_not_null())
+    .group_by("case_study")
+    .agg(best_ic=pl.col("ic_best").max())
+)
+meta_df = (
+    pl.DataFrame(
+        [
+            {
+                "case_study": DISPLAY_NAMES.get(cs, cs),
+                "universe_size": data["meta"]["universe_size"],
+                "frequency": data["meta"]["frequency"],
+                "cost_bps": data["meta"]["cost_bps"],
+                "n_families": len(data["pipeline_summary"]["models"]),
+            }
+            for cs, data in synthesis.items()
+        ]
+    )
+    # An inner join drops any case study with no registered IC rather than
+    # plotting it at a fabricated zero.
+    .join(_best_ic, on="case_study", how="inner")
+)
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -323,25 +412,73 @@ axes[1].set_xlabel("Transaction Cost (bps per leg)")
 axes[1].set_ylabel("Best IC")
 axes[1].set_title("Signal Quality vs Transaction Costs")
 
-fig.show()
+fig.tight_layout()
+show_with_alt(
+    fig,
+    "Two scatter panels, each point a case study labelled by name: best IC "
+    "against universe size on a log axis, and best IC against the assumed "
+    "per-leg transaction cost in basis points.",
+)
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **IC spans roughly two orders of magnitude** across asset classes — from
-#    near-zero (NASDAQ-100, FX Pairs, crypto) to ~0.04–0.05 (ETFs and US Firms),
-#    plausibly because momentum and cross-sectional signals on those datasets
-#    are more persistent
-# 2. **Tree-based and factor models carry the strongest signal** — GBM posts the
-#    highest mean IC overall (0.014, positive on eight of nine case studies),
-#    while deep-learning and latent-factor families lead the remaining datasets;
-#    linear models are competitive only on ETFs and US Equities and trail badly
-#    on CME Futures (lowest, negative mean IC)
-# 3. **No single model family has the highest IC in every case study** — GBM
-#    leads on US Firms, US Equities, and the options datasets; deep-learning
-#    leads on ETFs, crypto, and FX Pairs; latent factors lead on CME Futures;
-#    the highest-IC family is dataset-specific
-# 4. **Universe size is not predictive** of IC — what matters is feature quality and
-#    the predictability horizon
+# Which family leads where is a property of this registry, not a standing fact
+# about the families, so it is computed below rather than written down. The two
+# statements that do survive re-running are structural: no family leads
+# everywhere, and universe size does not order the case studies by IC.
+
+# %% tags=["results"]
+_leaders = (
+    ic_df.filter(pl.col("ic_mean").is_not_null())
+    .sort("ic_mean", descending=True)
+    .group_by("case_study")
+    .first()
+    .select("case_study", "family", "ic_mean")
+    .sort("ic_mean", descending=True)
+)
+_lead_counts = _leaders.group_by("family").len().sort("len", descending=True).rows(named=True)
+_fam = family_stats.row(0, named=True)
+_hi, _lo = _leaders.row(0, named=True), _leaders.row(-1, named=True)
+display(
+    Markdown(
+        f"**Highest mean IC per case study** ranges from {_lo['ic_mean']:.4f} "
+        f"({_lo['case_study']}, {FAMILY_NAMES.get(_lo['family'], _lo['family'])}) "
+        f"to {_hi['ic_mean']:.4f} ({_hi['case_study']}, "
+        f"{FAMILY_NAMES.get(_hi['family'], _hi['family'])}).\n\n"
+        "**Which family leads, and how often**: "
+        + ", ".join(
+            f"{FAMILY_NAMES.get(r['family'], r['family'])} {r['len']}" for r in _lead_counts
+        )
+        + f" of {_leaders.height}. No family leads everywhere.\n\n"
+        f"**Best family average**: {FAMILY_NAMES.get(_fam['family'], _fam['family'])}, "
+        f"mean IC {_fam['mean_ic']:.4f} over the {_fam['n_studies']} case studies "
+        f"it ran on, positive on {_fam['n_positive']} of them."
+    )
+)
+
+# %% [markdown]
+# The IC-against-universe-size panel shows no ordering: the largest universe is
+# not the highest-IC case study and the smallest is not the lowest. Nine points
+# could not establish such a relationship even if one existed, so the panel is
+# there to show that the obvious confound is not driving the spread, not to rule
+# it out. What differs between these case studies is the label horizon, the
+# feature menu, and how much of the predictable variation the frictions of that
+# market consume - which is where §04 goes next.
 #
-# **Next**: [`04_signal_to_strategy`](04_signal_to_strategy.ipynb) explores the gap between IC and Sharpe.
+# ## Known Limitations
+#
+# - Every IC here is measured on validation folds. It is an in-sample-to-the-
+#   selection-process number: configurations were chosen by looking at it. The
+#   holdout comparison in §01 is where that selection is priced.
+# - The per-family mean averages over however many configurations that family
+#   happened to sweep, and the counts differ by an order of magnitude between
+#   families and case studies. A family that swept 28 configurations and one that
+#   swept 150 do not have comparably precise averages, and no interval is
+#   attached to either.
+# - Families are absent from a case study when it did not run them. A blank cell
+#   means not attempted, never attempted and failed, and the two are not
+#   distinguished in the heatmaps.
+#
+# **Next**: [`04_signal_to_strategy`](04_signal_to_strategy.ipynb) explores the
+# gap between IC and Sharpe.

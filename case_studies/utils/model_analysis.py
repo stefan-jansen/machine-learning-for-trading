@@ -44,7 +44,7 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 
 from utils.paths import get_case_study_dir
 
-from .notebook_contracts import degenerate_prediction_sql
+from .notebook_contracts import defined_ic, degenerate_prediction_sql
 
 # ---------------------------------------------------------------------------
 # Fast metrics from registry (no raw prediction loading needed)
@@ -563,9 +563,10 @@ def model_summary_table(
             min_obs=5,
         )
         unc: dict[str, float] = {}
-        if isinstance(daily_ic, pl.DataFrame) and daily_ic.drop_nulls("ic").height >= 3:
+        defined = defined_ic(daily_ic) if isinstance(daily_ic, pl.DataFrame) else None
+        if defined is not None and defined.height >= 3:
             u = compute_ic_uncertainty(
-                daily_ic.drop_nulls("ic").select("ic"),
+                defined.select("ic"),
                 horizon=int(max(1, horizon)),
                 n_boot=n_boot,
             )
@@ -1207,7 +1208,11 @@ def load_daily_metrics_series(
     case_dir = get_case_study_dir(case_study_id)
     path = case_dir / "run_log" / "predictions" / prediction_hash / "daily_metrics.parquet"
     if path.exists():
-        return pl.read_parquet(path)
+        # Files written before ml4t-diagnostic 0.1.2 store an undefined date as
+        # NaN, not null; normalise here so every consumer sees one convention.
+        return pl.read_parquet(path).with_columns(
+            pl.when(pl.col("ic").is_finite()).then(pl.col("ic")).otherwise(None).alias("ic")
+        )
 
     predictions = load_predictions(
         case_study_id,

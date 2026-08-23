@@ -690,10 +690,11 @@ spread.group_by("label", maintain_order=True).head(5)
 # ## 5. What to notice
 #
 # **The size-against-direction gap the linear notebook found is a property of that family, not of
-# these labels.** `06_linear` reached 0.0008 on `fwd_ret_8h` and 0.032 on its direction cut, and
-# concluded that the sign was the far more rankable target. Read the `horizons` frame here: the
-# return labels reach 0.025 and 0.038 and the direction labels 0.026, with every configuration of
-# every label above zero. The two formulations end up in the same place once the model can
+# these labels.** `06_linear` reached an order of magnitude more on the direction cut of
+# `fwd_ret_8h` than on the return itself, and concluded that the sign was the far more rankable
+# target. Read `best_ic` down the `horizons` frame here: the return labels and the direction
+# labels land in the same range, with every configuration of every label above zero. The two
+# formulations end up in the same place once the model can
 # condition one feature on another. What the linear grid measured was its own inability to rank
 # magnitudes on this feature set, not a fact about what is predictable at this horizon. That
 # correction is available only because both notebooks now fit all four labels; with one label per
@@ -724,9 +725,9 @@ spread.group_by("label", maintain_order=True).head(5)
 # **The checkpoint still moves the answer, by between a third and two thirds of what the model
 # choice does.** The comparison frame puts the spread across configurations at fixed training
 # length against the median configuration's own range across its ten checkpoints, and the ratio
-# runs from about 1.3 to about 2.8 depending on the label. So the stopping point is a smaller dial
-# than the model - but not a negligible one, and the leading row of the table is still the maximum
-# of a configuration count times ten. The fixed-iteration chart is the comparison that does not
+# is a small single-digit multiple at every label. So the stopping point is a smaller dial than
+# the model - but not a negligible one, and the leading row of the table is still the maximum of
+# a configuration count times ten. The fixed-iteration chart is the comparison that does not
 # require choosing anything after the fact.
 #
 # **Two folds is the number to hold on to.** Every statement above rests on two validation years of
