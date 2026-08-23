@@ -84,6 +84,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -98,7 +99,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "06e9ea03f2f2"
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -150,10 +151,11 @@ configs
 # either knob, and says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        "complete declared catalog, so it cannot publish the canonical population; pass "
+        "POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -222,6 +224,18 @@ plan.select(
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it supersedes.
+# That lineage is the only record of which generation is which.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record. Carrying the value the published run used
+# is what lets this notebook re-run and resolve to the population it published rather than to a
+# new one.
 #
 # **One population covers every label**, because one run fits every label. A population is
 # immutable once written, so a notebook fitting one label per run under a single name publishes
