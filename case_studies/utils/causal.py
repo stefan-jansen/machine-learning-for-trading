@@ -510,6 +510,34 @@ def manual_dml_timeseries(
 REFUTATION_ALPHA = 0.05
 
 
+def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float) -> float:
+    """Two-sided Monte Carlo p-value for the block-permutation refutation.
+
+    The observed statistic is itself one draw the permutation distribution can
+    produce, so both the count and the denominator take the plus-one correction
+    (Davison and Hinkley 1997; Phipson and Smyth 2010). Without it, a run in
+    which no placebo reaches the observed effect reports ``p = 0.000`` - a claim
+    no finite number of permutations can support. With ``n`` placebo draws the
+    smallest p-value the test can report is ``1 / (n + 1)``.
+
+    Parameters
+    ----------
+    placebo_effects : np.ndarray
+        Treatment effects from the successful placebo permutations.
+    observed_effect : float
+        The treatment effect estimated on the unpermuted data.
+
+    Returns
+    -------
+    float
+        The fraction of the permutation distribution at least as extreme as the
+        observed effect in absolute value, in ``(0, 1]``.
+    """
+    placebo = np.asarray(placebo_effects, dtype=float)
+    at_least_as_extreme = int(np.sum(np.abs(placebo) >= abs(observed_effect)))
+    return (1.0 + at_least_as_extreme) / (1.0 + placebo.size)
+
+
 def classify_refutation(empirical_p: float) -> str:
     """Binary pass/fail of the block-permutation refutation test at 5 %.
 
@@ -717,7 +745,7 @@ def run_dml_analysis(
             p_mean = np.mean(placebo_arr)
             p_std = np.std(placebo_arr)
             z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
-            emp_p = float(np.mean(np.abs(placebo_arr) >= np.abs(dml_effect)))
+            emp_p = empirical_permutation_p(placebo_arr, dml_effect)
             ref_class = classify_refutation(emp_p)
             refutation = {
                 "z_score": z,
@@ -994,7 +1022,7 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         "refutation": {
             "method": "within_symbol_contiguous_block_permutation",
             "n_placebo": n_placebo,
-            "block_size": embargo,
+            "block_size": horizon_steps,
             "seed": seed,
             "temporal_gap_policy": "reset",
             "observation_cadence": str(cadence),
@@ -1031,7 +1059,15 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         n_folds=n_folds,
         embargo=embargo,
         n_placebo=n_placebo,
-        block_size=embargo,
+        # The block permutation exists to preserve the serial dependence the
+        # overlapping labels create, so the block spans the label horizon - the
+        # same scale the HAC bandwidth rule above uses (L >= h - 1). The embargo
+        # separates folds and says nothing about that dependence; taking the
+        # block size from it made block_size = 1 wherever embargo_periods = 1,
+        # which is an iid shuffle and the refutation test the permutation is
+        # meant to be hard to pass. Non-overlapping labels give horizon_steps = 1
+        # and an iid shuffle, which is correct for them.
+        block_size=horizon_steps,
         seed=seed,
         horizon=horizon_steps,
         expected_step=cadence,
