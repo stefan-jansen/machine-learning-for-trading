@@ -98,6 +98,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -229,7 +230,9 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "fx_pairs-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")

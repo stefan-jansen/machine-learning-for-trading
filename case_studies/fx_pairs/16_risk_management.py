@@ -14,455 +14,327 @@
 # ---
 
 # %% [markdown]
-# # FX Pairs: Position-Level Risk Controls
+# # Position Risk Controls - FX Pairs
 #
-# **Chapter 19 - Risk Management**
+# This notebook selects one validation strategy per label from the equal-weight and allocation
+# populations, then changes only its predeclared position-risk rule. Cost-sensitivity results are
+# excluded from selection, so an optimistic cost assumption cannot advance a strategy.
 #
-# A 20-day time exit improves the selected allocation's point estimates, but not the strength of
-# the evidence. Validation Sharpe rises from 0.037 to 0.048 and maximum drawdown falls from 29.7%
-# to 16.7%; the overlay's 95% Sharpe interval still spans zero. Tighter stops generally add trades
-# and reduce Sharpe, which matters because FX15 places the point-estimate breakeven at only 7.91 bps
-# per traded leg.
+# **Learning objectives**
 #
-# 1. **Reproduction contract** - analyze the frozen registry without writing by default
-# 2. **Risk sweep** - optionally apply the declared position controls to the selected lineage
-# 3. **Risk evidence** - compare Sharpe uncertainty, drawdown, and trade count with no overlay
+# - Select one parent strategy from an immutable validation cohort.
+# - Compare declared position controls while preserving upstream identity.
+# - Freeze the complete risk population before final strategy selection.
 #
-# **Book Reference:** Chapter 19, Sections 19.3-19.6
+# **Book reference**: Chapter 19
 #
-# **Prerequisites:** Completed Ch17 allocation results in `registry.db`.
+# **Prerequisite**: `15_costs`.
 
 # %%
-"""Ch19 position-level risk controls for the FX pairs case study."""
+"""Run the declared FX position-risk controls for each label."""
 
-import json
-import sqlite3
-import time
-from datetime import UTC, datetime
+from copy import deepcopy
+from typing import Any
 
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
+import yaml
 
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    load_backtest_prices_for,
-    warmup_periods_for,
-)
-from case_studies.utils.backtest_presets import (
-    clone_backtest_spec,
-    ensure_backtest_spec,
-    serializable_backtest_spec,
-    strategy_view,
-)
-from case_studies.utils.backtest_runner import (
-    normalize_prediction_columns,
-    precompute_weights,
-    run_backtest,
-)
-from case_studies.utils.registry import (
-    backtest_hash_from_parts,
-    load_existing_backtest_hashes,
-    read_predictions,
-    resolve_best_backtest_runs,
+from case_studies.research import (
+    BacktestResult,
+    CandidateSet,
+    OfficialPopulation,
+    PredictionResult,
+    Result,
+    open_study,
+    plan_backtests,
+    run_backtests,
 )
 from case_studies.utils.sweep_config import (
+    get_allocators,
     get_portfolio_risk_controls,
     get_position_risk_controls,
-    get_top_n_predictions,
+    get_top_k_values_for,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
-LABEL = "fwd_ret_21d"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+LABEL = ""
 SPLIT = "validation"
-MAX_SYMBOLS = 0
+TOP_K = 0
+TOP_N_PREDICTIONS = None
 MAX_RISK_VARIANTS = 0
-TOP_N_COMBOS = None
-RUN_SWEEP = False
+SEED = 42
+RUN_SWEEP = True
 FORCE_REBACKTEST = False
 
 # %% [markdown]
-# ## 1. The default path is read-only
+# ## Select the parent strategy
 #
-# Risk controls sit on the same 21-day Ridge/HRP top-5 allocation evaluated in FX14 and FX15.
-# Validation ends before the sealed 2024 holdout, and the configured 7 bps per-leg friction remains
-# active in every stored overlay.
+# Production uses the same signal-plus-allocation candidate cohort as the cost notebook. Preview
+# mode resolves one deterministic allocation result from the reduced prediction catalog.
 
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-REGISTRY_PATH = CASE_DIR / "run_log" / "registry.db"
-bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+# %% tags=["results"]
+set_global_seeds(SEED)
+universe_symbols = yaml.safe_load(
+    (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
+)["universe"]["symbols"]
+n_assets = len(universe_symbols)
+if SPLIT != "validation":
+    raise ValueError("risk comparison uses validation backtests")
+if FORCE_REBACKTEST:
+    raise ValueError("identical complete backtests are reused by identity")
+if not RUN_SWEEP:
+    raise ValueError("set RUN_SWEEP=True to execute the visible risk request")
 
-print(f"""=== Protocol Term Sheet ===
-  Case study:    {CASE_STUDY_ID}
-  Label:         {LABEL}
-  Split:         {SPLIT}
-  Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
-  Execution:     {bt_config.execution_delay}
-  Cost:          {bt_config.commission_bps + bt_config.slippage_bps:.1f} bps per leg
-  Registry mode: {"write enabled" if RUN_SWEEP else "read only"}
-""")
-
-# %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    stage="allocation",
-    top_n=TOP_N_COMBOS,
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+include_preview = bool(TOP_K or TOP_N_PREDICTIONS or MAX_RISK_VARIANTS)
+catalog = study.predictions.table(include_preview=include_preview).filter(
+    (pl.col("identity_status") == "current")
+    & (pl.col("split") == SPLIT)
+    & pl.col("complete")
+    & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
-if top_combos.is_empty():
-    raise RuntimeError("No validation allocation result found for the 21-day label")
-
-for row in top_combos.iter_rows(named=True):
-    allocation = strategy_view(json.loads(row["spec_json"]))["allocation"]
-    print(
-        f"Selected allocation: {allocation['method']} top-{allocation['top_k']} "
-        f"Sharpe={row['sharpe']:.3f} hash={row['backtest_hash']}"
+if LABEL:
+    catalog = catalog.filter(pl.col("label") == LABEL)
+if TOP_N_PREDICTIONS is not None:
+    catalog = catalog.sort("label", "family", "config_name", "checkpoint_value").head(
+        TOP_N_PREDICTIONS
     )
+if catalog.is_empty():
+    raise RuntimeError("risk comparison resolved no complete prediction rows")
 
-# %%
-prices = load_backtest_prices_for(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-    max_symbols=MAX_SYMBOLS,
+
+def _open_backtests(population: OfficialPopulation) -> list[BacktestResult]:
+    population.require_complete()
+    opened = [Result.open(study, value) for value in population.members]
+    if any(not isinstance(result, BacktestResult) for result in opened):
+        raise TypeError(f"population {population.name!r} contains a non-backtest result")
+    return [result for result in opened if isinstance(result, BacktestResult)]
+
+
+def _label(result: BacktestResult) -> str:
+    return str(result.lineage()["training_spec"]["label"])
+
+
+def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
+    row = rows.sort("family", "config_name", "checkpoint_value").row(0, named=True)
+    prediction = Result.open(study, row["prediction_hash"], include_preview=True)
+    if not isinstance(prediction, PredictionResult):
+        raise TypeError("preview catalog identity is not a prediction")
+    label = str(row["label"])
+    top_k = TOP_K or get_top_k_values_for(CASE_STUDY_ID, label, n_assets)[0]
+    strategy = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": top_k},
+        allocation=get_allocators(CASE_STUDY_ID)[0],
+        chapter="17",
+    )
+    result = Result.open(study, strategy.identity(), include_preview=True)
+    if not isinstance(result, BacktestResult) or not result.complete:
+        raise RuntimeError("the deterministic preview allocation result is not complete")
+    return result
+
+
+selected_by_label: dict[str, BacktestResult] = {}
+candidate_sets: dict[str, CandidateSet] = {}
+if include_preview:
+    for label in sorted(catalog.get_column("label").unique()):
+        selected_by_label[label] = _preview_leader(catalog.filter(pl.col("label") == label))
+else:
+    baselines = _open_backtests(
+        OfficialPopulation.one(study, name=f"{CASE_STUDY_ID}:equal-weight-baselines")
+    )
+    allocations = _open_backtests(
+        OfficialPopulation.one(study, name=f"{CASE_STUDY_ID}:allocation-backtests")
+    )
+    for label in sorted(catalog.get_column("label").unique()):
+        members = [result for result in [*baselines, *allocations] if _label(result) == label]
+        candidates = CandidateSet.create(
+            study,
+            name=f"{CASE_STUDY_ID}:{label}:pre-risk-strategies",
+            members=members,
+        )
+        candidate_sets[label] = candidates
+        leader = candidates.best_validation_sharpe()
+        if not isinstance(leader, BacktestResult):
+            raise TypeError("strategy selection did not return a backtest")
+        selected_by_label[label] = leader
+
+pl.DataFrame(
+    [
+        {
+            "label": label,
+            "backtest_hash": result.hash,
+            "prediction_hash": result.registry_record()["prediction_hash"],
+            "stage": result.registry_record()["stage"],
+        }
+        for label, result in selected_by_label.items()
+    ]
 )
-validation_end = prices["timestamp"].max()
-if isinstance(validation_end, datetime):
-    validation_end = validation_end.date()
-holdout_start = datetime.fromisoformat(bt_config.holdout_start).date()
-assert validation_end < holdout_start
-print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} pairs")
-print(f"Validation ends {validation_end}; sealed holdout starts {holdout_start}")
 
 # %% [markdown]
-# ## 2. The optional sweep changes only the position rule
+# ## Plan and freeze exact risk siblings
 #
-# The eligible grid contains only thresholds declared before evaluation. Predictions, top-5
-# selection, HRP weights, execution timing, and costs remain fixed. Thresholds calibrated on the
-# same validation window are ineligible because that would fit and evaluate a risk rule on the same
-# observations. Portfolio-level circuit breakers are deliberately absent because they are
-# governance controls rather than comparable position rules.
+# Every position rule is declared in `config/setup.yaml`. Portfolio-level controls are absent for
+# this case study. The identity audit removes only the risk block and chapter label; the prediction,
+# signal, allocation, configured costs, and execution contract must remain unchanged. Production
+# freezes every expected risk identity before the first backtest is written.
 
-# %%
+# %% tags=["results"]
 position_controls = get_position_risk_controls(CASE_STUDY_ID)
-portfolio_controls = get_portfolio_risk_controls(CASE_STUDY_ID)
-assert not portfolio_controls
-
-if MAX_RISK_VARIANTS > 0:
+if get_portfolio_risk_controls(CASE_STUDY_ID):
+    raise RuntimeError("FX declares position controls only")
+if MAX_RISK_VARIANTS:
     position_controls = position_controls[:MAX_RISK_VARIANTS]
-print(f"Position controls: {len(position_controls)}; portfolio controls: 0")
+if not position_controls:
+    raise RuntimeError("the position-risk grid is empty")
 
 
-# %%
-def _risk_payload(control: dict) -> dict:
+def _risk_payload(control: dict[str, Any]) -> dict[str, Any]:
     if control["type"] == "time_exit":
-        rule = {"type": control["type"], "bars": control["bars"]}
+        rule = {"type": control["type"], "bars": int(control["bars"])}
     else:
-        rule = {"type": control["type"], "threshold": control["threshold"]}
+        rule = {"type": control["type"], "threshold": float(control["threshold"])}
     return {"name": control["name"], "position_rules": [rule]}
 
 
-def _build_sweep_jobs() -> list[dict]:
-    jobs = []
-    for combo in top_combos.iter_rows(named=True):
-        prediction_hash = combo["prediction_hash"]
-        base_spec = ensure_backtest_spec(
-            CASE_STUDY_ID,
-            bt_config,
-            json.loads(combo["spec_json"]),
-            prices=prices,
-            prediction_hash=prediction_hash,
-            initial_cash=bt_config.initial_cash,
+def _catalog_row(result: BacktestResult) -> pl.DataFrame:
+    prediction_hash = result.registry_record()["prediction_hash"]
+    row = catalog.filter(pl.col("prediction_hash") == prediction_hash)
+    if row.height != 1:
+        raise RuntimeError(f"prediction {prediction_hash} resolved to {row.height} catalog rows")
+    return row
+
+
+def _strategy_arguments(result: BacktestResult) -> dict[str, Any]:
+    strategy = result.spec()["strategy"]
+    return {
+        "signal": deepcopy(strategy["signal"]),
+        "allocation": deepcopy(strategy.get("allocation")),
+        "execution_mode": strategy.get("rebalance", {}).get("mode"),
+    }
+
+
+def _non_risk_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    projected.pop("chapter", None)
+    projected.pop("_runtime_backtest_config", None)
+    projected.get("strategy", {}).pop("risk", None)
+    metadata = projected.get("backtest_config", {}).get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("chapter", None)
+    return projected
+
+
+risk_jobs = []
+for label, selected in selected_by_label.items():
+    arguments = _strategy_arguments(selected)
+    for control in position_controls:
+        risk = _risk_payload(control)
+        plan = plan_backtests(
+            study,
+            predictions=_catalog_row(selected),
+            signal=arguments["signal"],
+            allocation=arguments["allocation"],
+            risk=risk,
+            chapter="19",
+            execution_mode=arguments["execution_mode"],
         )
-        for control in position_controls:
-            spec = clone_backtest_spec(base_spec)
-            spec["chapter"] = "ch19"
-            spec["strategy"]["risk"] = _risk_payload(control)
-            jobs.append(
-                {
-                    "prediction_hash": prediction_hash,
-                    "risk_name": control["name"],
-                    "spec": spec,
-                    "hash": backtest_hash_from_parts(
-                        prediction_hash, serializable_backtest_spec(spec)
-                    ),
-                }
-            )
-    return jobs
+        if len(plan.members) != 1:
+            raise RuntimeError("a risk plan must contain exactly one backtest")
+        risk_jobs.append(
+            {
+                "label": label,
+                "selected": selected,
+                "arguments": arguments,
+                "risk": risk,
+                "risk_name": control["name"],
+                "backtest_hash": plan.expected_hashes[0],
+            }
+        )
 
+planned_hashes = [job["backtest_hash"] for job in risk_jobs]
+if len(planned_hashes) != len(set(planned_hashes)):
+    raise RuntimeError("two planned risk requests collapse to the same identity")
 
-sweep_jobs = _build_sweep_jobs()
-print(f"Risk grid: {len(sweep_jobs)} backtests")
-
-# %%
-existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="risk_overlay")
-expected_hashes = {job["hash"] for job in sweep_jobs}
-portable_overlap = expected_hashes & existing_hashes
-print(f"Stored risk-overlay hashes: {len(existing_hashes)}")
-print(f"Current-grid portable-hash overlap: {len(portable_overlap)}/{len(expected_hashes)}")
-
-if RUN_SWEEP and existing_hashes and not portable_overlap:
-    raise RuntimeError(
-        "RUN_SWEEP refused: this registry uses legacy hashes. Migrate it or use a fresh registry."
+risk_population = None
+if not include_preview:
+    risk_population = OfficialPopulation.create(
+        study,
+        name=f"{CASE_STUDY_ID}:risk-overlay-backtests",
+        member_kind="backtest",
+        members=planned_hashes,
     )
-if not RUN_SWEEP:
-    print("Reproduce-only mode: no backtests or registry rows will be written.")
-
-# %%
-sweep_results = []
-if RUN_SWEEP:
-    pending = [job for job in sweep_jobs if FORCE_REBACKTEST or job["hash"] not in existing_hashes]
-    prediction_hash = top_combos["prediction_hash"][0]
-    predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, prediction_hash))
-    base_spec = json.loads(top_combos["spec_json"][0])
-    weights = precompute_weights(
-        predictions,
-        base_spec,
-        prices,
-        label=LABEL,
-        case_study=CASE_STUDY_ID,
-        prediction_hash=prediction_hash,
-    )
-    started = time.time()
-    completed = failed = 0
-    for job in pending:
-        try:
-            result = run_backtest(
-                CASE_STUDY_ID,
-                prediction_hash,
-                job["spec"],
-                prices=prices,
-                predictions=predictions,
-                label=LABEL,
-                register=True,
-                initial_cash=bt_config.initial_cash,
-                calendar=bt_config.calendar,
-                precomputed_weights=weights,
-            )
-            sweep_results.append(result)
-            completed += 1
-        except Exception as exc:
-            failed += 1
-            stamp = datetime.now(UTC).isoformat(timespec="seconds")
-            print(f"[{stamp}] FAILED {job['hash']}: {type(exc).__name__}: {exc}")
-        processed = completed + failed
-        if processed % 5 == 0 or processed == len(pending):
-            stamp = datetime.now(UTC).isoformat(timespec="seconds")
-            print(f"[{stamp}] completed={completed} failed={failed} total={len(pending)}")
-    print(f"Sweep elapsed: {time.time() - started:.1f}s")
-    if failed:
-        raise RuntimeError(f"Risk sweep finished with {failed} failed backtests")
+    print(f"Frozen expected risk population: {risk_population.hash}")
 
 # %% [markdown]
-# ## 3. A 20-day exit improves point estimates, not confidence
-#
-# The immutable query below is pinned to the selected prediction. It cannot pool the one-day TCN or
-# five-day Ridge overlay panels into the 21-day result. The allocation row is the exact no-overlay
-# sibling, so point changes in Sharpe, drawdown, and trade count preserve the carrier and execution
-# protocol.
+# ## Execute the frozen risk grid
 
-# %%
-RISK_SQL = """
-SELECT br.backtest_hash, br.spec_json,
-       tr.family, tr.config_name, tr.label,
-       bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi,
-       bm.max_drawdown, bm.max_dd_ci95_lo, bm.max_dd_ci95_hi,
-       bm.total_return, bm.num_trades, bm.avg_turnover
-FROM backtest_runs br
-JOIN backtest_metrics bm USING (backtest_hash)
-JOIN prediction_sets ps USING (prediction_hash)
-JOIN training_runs tr USING (training_hash)
-WHERE br.stage = 'risk_overlay'
-  AND ps.split = 'validation'
-  AND br.prediction_hash = ?
-ORDER BY bm.sharpe DESC
-"""
-
-BASELINE_SQL = """
-SELECT br.backtest_hash, bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi,
-       bm.max_drawdown, bm.max_dd_ci95_lo, bm.max_dd_ci95_hi,
-       bm.total_return, bm.num_trades, bm.avg_turnover
-FROM backtest_runs br
-JOIN backtest_metrics bm USING (backtest_hash)
-WHERE br.backtest_hash = ?
-"""
-
-
-# %%
-def _read_registry(query: str, parameters: tuple = ()) -> pl.DataFrame:
-    connection = sqlite3.connect(f"file:{REGISTRY_PATH}?mode=ro&immutable=1", uri=True)
-    try:
-        return pl.read_database(query, connection, execute_options={"parameters": parameters})
-    finally:
-        connection.close()
-
-
-leader_prediction_hash = top_combos["prediction_hash"][0]
-risk_rows = _read_registry(RISK_SQL, (leader_prediction_hash,))
-baseline = _read_registry(BASELINE_SQL, (top_combos["backtest_hash"][0],))
-if risk_rows.is_empty() or baseline.height != 1:
-    raise RuntimeError("Stored 21-day risk overlay or its allocation baseline is missing")
-
-risk_names = []
-risk_types = []
-risk_payloads = []
-for spec_json in risk_rows["spec_json"]:
-    risk = strategy_view(json.loads(spec_json))["risk"]
-    risk_names.append(risk["name"])
-    risk_types.append(risk["position_rules"][0]["type"])
-    risk_payloads.append(json.dumps(risk, sort_keys=True, separators=(",", ":")))
-risk_rows = risk_rows.with_columns(
-    pl.Series("risk_name", risk_names),
-    pl.Series("risk_type", risk_types),
-    pl.Series("risk_payload", risk_payloads),
-).drop("spec_json")
-
-stored_names = set(risk_rows["risk_name"])
-stored_payloads = set(risk_rows["risk_payload"])
-declared_by_payload = {
-    json.dumps(
-        strategy_view(job["spec"])["risk"],
-        sort_keys=True,
-        separators=(",", ":"),
-    ): job["risk_name"]
-    for job in sweep_jobs
-}
-declared_payloads = set(declared_by_payload)
-assert risk_rows.height == len(stored_names) == 20
-eligible_payloads = stored_payloads & declared_payloads
-missing_declared = declared_payloads - stored_payloads
-historical_calibrated_names = set(
-    risk_rows.filter(~pl.col("risk_payload").is_in(sorted(declared_payloads)))["risk_name"]
-)
-print(
-    f"Frozen controls: {len(stored_names)} = {len(eligible_payloads)} declared + "
-    f"{len(historical_calibrated_names)} historical calibrated"
-)
-if missing_declared:
-    missing_names = sorted(declared_by_payload[payload] for payload in missing_declared)
-    print(f"Declared controls absent from the frozen registry: {missing_names}")
-print("Historical calibrated controls are audit-only and cannot win selection.")
-print(
-    risk_rows.select(
-        "risk_name",
-        "risk_type",
-        "sharpe",
-        "sharpe_ci95_lo",
-        "sharpe_ci95_hi",
-        "max_drawdown",
-        "num_trades",
+# %% tags=["results"]
+risk_results: list[BacktestResult] = []
+risk_rows = []
+for job in risk_jobs:
+    selected = job["selected"]
+    arguments = job["arguments"]
+    execution = run_backtests(
+        study,
+        predictions=_catalog_row(selected),
+        signal=arguments["signal"],
+        allocation=arguments["allocation"],
+        risk=job["risk"],
+        chapter="19",
+        execution_mode=arguments["execution_mode"],
     )
-)
-
-# %%
-base = baseline.row(0, named=True)
-eligible_rows = risk_rows.filter(pl.col("risk_payload").is_in(sorted(declared_payloads)))
-if eligible_rows.is_empty():
-    raise RuntimeError("No frozen risk overlay matches a fully declared control payload")
-leader = eligible_rows.row(0, named=True)
-sharpe_delta = leader["sharpe"] - base["sharpe"]
-drawdown_delta = leader["max_drawdown"] - base["max_drawdown"]
-trade_delta = leader["num_trades"] - base["num_trades"]
-
-print(f"Best overlay: {leader['risk_name']} ({leader['backtest_hash']})")
-print(f"Sharpe: {base['sharpe']:.6f} -> {leader['sharpe']:.6f} (point delta {sharpe_delta:+.6f})")
-print(
-    f"Maximum drawdown: {base['max_drawdown']:.2%} -> {leader['max_drawdown']:.2%} "
-    f"(point delta {drawdown_delta:+.2%})"
-)
-print(f"Trades: {base['num_trades']:.0f} -> {leader['num_trades']:.0f} ({trade_delta:+.0f})")
-print("No exact baseline-versus-overlay paired metric is stored; point deltas are descriptive.")
-
-# %%
-plot_rows = risk_rows.sort("sharpe")
-y = np.arange(plot_rows.height)
-points = plot_rows["sharpe"].to_numpy()
-lower = plot_rows["sharpe_ci95_lo"].to_numpy()
-upper = plot_rows["sharpe_ci95_hi"].to_numpy()
-colors = [
-    COLORS["amber"]
-    if payload == leader["risk_payload"]
-    else COLORS["blue"]
-    if payload in declared_payloads
-    else COLORS["neutral"]
-    for payload in plot_rows["risk_payload"]
-]
-markers = [
-    "D" if payload == leader["risk_payload"] else "o" if payload in declared_payloads else "x"
-    for payload in plot_rows["risk_payload"]
-]
-alphas = [1.0 if payload in declared_payloads else 0.65 for payload in plot_rows["risk_payload"]]
-
-fig, ax = plt.subplots(figsize=(10, 8))
-for idx, (point, lo, hi, color, marker, alpha) in enumerate(
-    zip(points, lower, upper, colors, markers, alphas, strict=True)
-):
-    ax.errorbar(
-        point,
-        idx,
-        xerr=[[point - lo], [hi - point]],
-        fmt=marker,
-        color=color,
-        ecolor=color,
-        elinewidth=1.4,
-        capsize=3,
-        alpha=alpha,
+    if len(execution.results) != 1:
+        raise RuntimeError("a risk request must produce exactly one backtest")
+    result = execution.results[0]
+    if result.hash != job["backtest_hash"]:
+        raise RuntimeError("a completed risk identity differs from the frozen plan")
+    if _non_risk_projection(result.spec()) != _non_risk_projection(selected.spec()):
+        raise RuntimeError("a risk sibling changed a non-risk strategy field")
+    if result.registry_record()["stage"] != "risk_overlay" or not result.complete:
+        raise RuntimeError("a risk result is incomplete or misclassified")
+    risk_results.append(result)
+    risk_rows.append(
+        {
+            "label": job["label"],
+            "risk_name": job["risk_name"],
+            "backtest_hash": result.hash,
+            "prediction_hash": result.registry_record()["prediction_hash"],
+        }
     )
-ax.axvline(0, color=COLORS["neutral"], linewidth=1, linestyle="--", label="Zero")
-ax.axvline(
-    base["sharpe"],
-    color=COLORS["amber"],
-    linewidth=1.5,
-    linestyle=":",
-    label="No overlay",
-)
-ax.scatter([], [], marker="D", color=COLORS["amber"], label="Selected declared control")
-ax.scatter([], [], marker="o", color=COLORS["blue"], label="Other declared controls")
-ax.scatter(
-    [],
-    [],
-    marker="x",
-    color=COLORS["neutral"],
-    alpha=0.65,
-    label="Historical calibrated, audit only",
-)
-ax.set_yticks(y)
-ax.set_yticklabels([name.replace("pct", "%").replace("_", " ") for name in plot_rows["risk_name"]])
-ax.set_xlabel("Validation Sharpe ratio with 95% interval")
-ax.set_title("A 20-day exit raises the point estimate, not the evidence")
-ax.grid(axis="x", alpha=0.22)
-ax.legend(
-    frameon=False,
-    ncol=3,
-    loc="upper center",
-    bbox_to_anchor=(0.5, -0.11),
-)
-fig.show()
+
+pl.DataFrame(risk_rows).sort("label", "risk_name")
+
+# %% [markdown]
+# ## Validate the frozen risk population
+
+# %% tags=["results"]
+if not include_preview:
+    if risk_population is None:
+        raise RuntimeError("the canonical risk population was not frozen before execution")
+    risk_population.require_complete()
+    print(f"Official risk population: {risk_population.hash}")
+
+    holdout_candidates = CandidateSet.create(
+        study,
+        name=f"{CASE_STUDY_ID}:holdout-candidates",
+        members=[*baselines, *allocations, *risk_results],
+        comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
+    )
+    selected = holdout_candidates.best_validation_sharpe()
+    print(f"Frozen holdout candidate set: {holdout_candidates.hash}")
+    print(f"Validation-selected backtest: {selected.hash}")
+else:
+    print("Preview risk results remain outside official populations and candidate sets.")
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **The 20-day exit is the least-weak overlay.** It raises point Sharpe from `0.037126` to
-#    `0.047624`, but its interval `[-0.560212, 0.725714]` crosses zero.
-# 2. **Drawdown improves at the point estimate.** Maximum drawdown moves from `-29.65%` without an
-#    overlay to `-16.73%` with the 20-day exit. The stored drawdown intervals overlap, so this is not
-#    evidence of a reliably smaller drawdown.
-# 3. **The exit changes the trading path.** Registered trades rise from 501 to 637. With the cost
-#    point estimate crossing zero near 7.91 bps per leg, added execution remains a material concern.
-# 4. **Tight trailing stops are destructive.** The 1% trailing stop falls to Sharpe `-0.835379`, and
-#    its 95% interval excludes zero on the negative side.
-# 5. **Same-window calibration is ineligible.** Six historical thresholds were calibrated on the
-#    evaluation window and remain visible only for audit. The leader is the predeclared 20-day exit,
-#    so excluding those rows from selection does not change the result.
-#
-# **Next:** The strategy-analysis notebook assembles the frozen stage, cohort, benchmark, and
-# holdout evidence into the final FX case-study assessment.
+# - Risk variants descend from the same signal-plus-allocation selection cohort as cost variants.
+# - Each comparison changes one declared position-risk rule.
+# - The final candidate set contains signal, allocation, and risk results across every label.
