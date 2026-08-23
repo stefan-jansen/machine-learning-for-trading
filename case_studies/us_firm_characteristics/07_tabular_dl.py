@@ -36,10 +36,11 @@
 #
 # **What TabM is.** A conventional deep ensemble trains several independent networks and averages
 # them, which costs several networks. TabM keeps one shared backbone and gives each ensemble
-# member its own rank-1 scaling of the shared weights, so the members are trained together in one
-# forward pass and diverge only through those adapters. Averaging them cancels the part of each
-# member's error that the adapters made independent. `n_members` is how many adapters there are,
-# and it is the axis that separates the three presets alongside hidden width.
+# member a small adapter of its own - one learned scaling vector per layer, so a member costs a
+# row of parameters rather than a matrix. The members train together in one forward pass and
+# diverge only through those vectors, and averaging them cancels the part of each member's error
+# that its own scaling made independent. `n_members` is how many adapters there are, and it is
+# the axis that separates the three presets alongside hidden width.
 #
 # **Learning objectives**
 #
@@ -233,8 +234,8 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 # 2. fits a median imputer and a standardizer on those rows and applies them to the fold's
 #    validation rows - a network needs a complete, comparably scaled design matrix, unlike the
 #    trees in [`06_gbm`](06_gbm.ipynb) which route a missing value down their own branch,
-# 3. trains the shared backbone and its rank-1 adapters for the declared number of epochs, saving
-#    the fitted state at each checkpoint on the way,
+# 3. trains the shared backbone and every member's adapter for the declared number of epochs,
+#    saving the fitted state at each checkpoint on the way,
 # 4. predicts the fold's validation rows from each saved state.
 #
 # Step 4 is what makes one fit produce many results. Fold predictions are concatenated into one
@@ -251,13 +252,15 @@ execution, population = run_model_population(
     study, plan, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# Re-running this notebook unchanged costs the time it takes to read the data. Every identity is
-# re-derived from the inputs, the registry already holds the matching rows, and the runner returns
-# the stored result rather than fitting again.
+# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the registry
+# already holds the matching rows, and the runner returns the stored result rather than fitting
+# again - so re-running this notebook unchanged costs the time it takes to read the data.
 #
 # ### Running configurations of your own
 #
