@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 from sklearn.dummy import DummyRegressor
 
+from case_studies.utils import causal
 from case_studies.utils.causal import (
+    _placebo_is_unchanged,
     _resolve_panel_columns,
     _walk_forward_indices,
     block_permute,
@@ -158,13 +160,16 @@ def test_panel_cross_fitting_residualizes_complete_dates() -> None:
 
 
 def test_panel_block_permutation_preserves_each_entity_history() -> None:
-    dates = np.array([1, 1, 2, 2, 3, 3, 4, 5])
-    units = np.array(["a", "b", "a", "b", "a", "b", "a", "a"])
-    treatment = np.array([11, 21, 12, 22, 13, 23, 14, 15])
+    """Treatment moves within an entity's own history and never across entities."""
+    dates = np.concatenate([np.arange(1, 13), np.arange(1, 13)])
+    units = np.array(["a"] * 12 + ["b"] * 12)
+    treatment = np.concatenate([np.arange(11, 23), np.arange(101, 113)])
+    order = np.argsort(dates, kind="stable")
+    dates, units, treatment = dates[order], units[order], treatment[order]
 
     permuted = block_permute(
         treatment,
-        block_size=2,
+        block_size=3,
         rng=np.random.default_rng(7),
         groups=dates,
         units=units,
@@ -173,6 +178,82 @@ def test_panel_block_permutation_preserves_each_entity_history() -> None:
     for unit in np.unique(units):
         assert sorted(permuted[units == unit]) == sorted(treatment[units == unit])
     assert not np.array_equal(permuted, treatment)
+
+
+def test_a_segment_too_short_for_two_blocks_is_left_intact() -> None:
+    """It is not shuffled: shuffling destroys the dependence the blocks preserve.
+
+    One entity in a panel can be shorter than two blocks while the others are not,
+    so this is per-segment behaviour rather than an error. The case where it happens
+    to every segment is caught by `_assert_placebo_permutation_possible`.
+    """
+    dates = np.concatenate([np.arange(1, 13), np.arange(1, 5)])
+    units = np.array(["long"] * 12 + ["short"] * 4)
+    treatment = np.concatenate([np.arange(11, 23), np.arange(101, 105)])
+    order = np.argsort(dates, kind="stable")
+    dates, units, treatment = dates[order], units[order], treatment[order]
+
+    permuted = block_permute(
+        treatment,
+        block_size=3,
+        rng=np.random.default_rng(7),
+        groups=dates,
+        units=units,
+    )
+
+    short = units == "short"
+    assert np.array_equal(permuted[short], treatment[short])
+    assert not np.array_equal(permuted[~short], treatment[~short])
+
+
+def test_a_weekend_is_not_a_gap_in_a_daily_series() -> None:
+    """The defect this pins: splitting at every diff != cadence cut a daily series
+    into five-row weeks, none of which could hold two blocks of a useful size."""
+    dates = pd.bdate_range("2024-01-01", periods=30).to_numpy()
+    treatment = np.arange(30, dtype=float)
+
+    permuted = block_permute(
+        treatment,
+        block_size=5,
+        rng=np.random.default_rng(3),
+        groups=dates,
+        expected_step="1D",
+    )
+
+    assert sorted(permuted) == sorted(treatment)
+    assert not np.array_equal(permuted, treatment)
+    # Whole weeks moved: four of every five steps stay contiguous.
+    assert np.sum(np.diff(permuted) == 1.0) >= 30 - 30 // 5 - 1
+
+
+def test_a_real_hole_in_the_series_is_still_a_gap() -> None:
+    """Six cadences apart is past the four-cadence tolerance, so the two runs of
+    observations are permuted independently and nothing crosses between them."""
+    dates = np.array(
+        [
+            "2024-01-01T00:00:00",
+            "2024-01-01T08:00:00",
+            "2024-01-01T16:00:00",
+            "2024-01-02T00:00:00",
+            "2024-01-04T00:00:00",
+            "2024-01-04T08:00:00",
+            "2024-01-04T16:00:00",
+            "2024-01-05T00:00:00",
+        ],
+        dtype="datetime64[s]",
+    )
+    treatment = np.arange(8)
+
+    permuted = block_permute(
+        treatment,
+        block_size=2,
+        rng=np.random.default_rng(7),
+        groups=dates,
+        expected_step="8h",
+    )
+
+    assert set(permuted[:4]) == set(treatment[:4])
+    assert set(permuted[4:]) == set(treatment[4:])
 
 
 def test_panel_block_permutation_requires_entity_column() -> None:
@@ -233,3 +314,126 @@ def test_dml_comparisons_use_the_observed_second_stage_sample_and_folds() -> Non
     assert result["naive_n_obs"] == residuals["n_obs"]
     assert result["refutation"]["n_folds"] == 2
     assert set(result["refutation"]["placebo_n_obs"]) == {residuals["n_obs"]}
+
+
+def _two_entity_panel(n_dates: int, seed: int = 19) -> pd.DataFrame:
+    """A small balanced daily panel that DML can residualize."""
+    rng = np.random.default_rng(seed)
+    dates = np.repeat(pd.date_range("2020-01-01", periods=n_dates, freq="B"), 2)
+    confounder = rng.normal(size=len(dates))
+    treatment = 0.4 * confounder + rng.normal(size=len(dates))
+    return pd.DataFrame(
+        {
+            "timestamp": dates,
+            "symbol": np.tile(["A", "B"], n_dates),
+            "treatment": treatment,
+            "outcome": 0.3 * treatment + 0.2 * confounder + rng.normal(size=len(dates)),
+            "confounder": confounder,
+        }
+    )
+
+
+def test_a_block_longer_than_every_contiguous_run_fails_the_refutation() -> None:
+    """The guard the short-segment path depends on: if no segment can hold two
+    blocks, every placebo IS the observed treatment and p = 1 is an artefact."""
+    frame = _two_entity_panel(n_dates=100)
+
+    try:
+        run_dml_analysis(
+            frame,
+            treatment_col="treatment",
+            outcome_col="outcome",
+            confounder_cols=["confounder"],
+            n_folds=2,
+            embargo=1,
+            n_placebo=10,
+            block_size=101,
+            seed=7,
+            horizon=1,
+            time_col="timestamp",
+            entity_col="symbol",
+        )
+    except ValueError as error:
+        assert "block_size=101" in str(error)
+        assert "all 10 placebo draws" in str(error)
+    else:
+        raise AssertionError("a block longer than every contiguous run must fail")
+
+
+def test_one_identity_draw_does_not_abort_a_permutable_series() -> None:
+    """`rng.permutation` returns the identity by chance - one time in two at two
+    blocks. Failing on a single unchanged draw aborts runs that are structurally
+    fine, with a message asserting something false about the data. The condition is
+    every draw coming back unchanged, not any of them."""
+    frame = _two_entity_panel(n_dates=100)
+    n_placebo = 30
+
+    unchanged = 0
+    real_is_unchanged = causal._placebo_is_unchanged
+
+    def counting_is_unchanged(original, permuted):
+        nonlocal unchanged
+        verdict = real_is_unchanged(original, permuted)
+        unchanged += bool(verdict)
+        return verdict
+
+    causal._placebo_is_unchanged = counting_is_unchanged
+    try:
+        result = run_dml_analysis(
+            frame,
+            treatment_col="treatment",
+            outcome_col="outcome",
+            confounder_cols=["confounder"],
+            n_folds=2,
+            embargo=1,
+            n_placebo=n_placebo,
+            block_size=50,
+            seed=3,
+            horizon=1,
+            time_col="timestamp",
+            entity_col="symbol",
+        )
+    finally:
+        causal._placebo_is_unchanged = real_is_unchanged
+
+    # Without a draw that came back unchanged the run says nothing about the guard:
+    # it would pass under the per-draw abort this replaces.
+    assert 0 < unchanged < n_placebo, f"{unchanged} of {n_placebo} draws were the identity"
+    assert result["refutation"]["n_successful"] >= 10
+
+
+def test_the_placebo_guard_sees_through_missing_treatment_values() -> None:
+    """`np.array_equal` calls two arrays different wherever either holds a NaN, so
+    comparing raw would report every identity draw as a real permutation on any
+    frame the resolver's drop_nulls() never touched."""
+    treatment = np.array([1.0, np.nan, 3.0, 4.0])
+
+    assert _placebo_is_unchanged(treatment, treatment.copy())
+    assert not _placebo_is_unchanged(treatment, np.array([3.0, np.nan, 1.0, 4.0]))
+    assert not _placebo_is_unchanged(treatment, np.array([1.0, 2.0, 3.0, 4.0]))
+
+
+def test_an_explicit_gap_tolerance_moves_the_boundary() -> None:
+    """The default clears a weekend at four cadences. A caller that passes its own
+    tolerance decides where a series stops being contiguous."""
+    dates = pd.bdate_range("2024-01-01", periods=20).to_numpy()
+    treatment = np.arange(20, dtype=float)
+
+    tolerant = block_permute(
+        treatment,
+        block_size=8,
+        rng=np.random.default_rng(5),
+        groups=dates,
+        expected_step="1D",
+    )
+    strict = block_permute(
+        treatment,
+        block_size=8,
+        rng=np.random.default_rng(5),
+        groups=dates,
+        expected_step="1D",
+        gap_tolerance="1D",
+    )
+
+    assert not np.array_equal(tolerant, treatment)
+    assert np.array_equal(strict, treatment)
