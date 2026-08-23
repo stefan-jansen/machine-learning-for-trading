@@ -6,9 +6,11 @@ Provides:
 - prepare_cv_folds(): Preprocess data into train/val folds (impute, scale)
 - ModelingDataset: Container for joined data with detected schema
 
-Cross-sectional IC computation lives in the library — call
-``ml4t.diagnostic.metrics.cross_sectional_ic`` against a polars frame
-of (date, symbol, y_true, y_pred) directly.
+The cross-sectional IC itself is the library's: call
+``ml4t.diagnostic.metrics.cross_sectional_ic`` against a polars frame of
+(date, symbol, y_true, y_pred) directly. ``cross_sectional_ic_mean()`` below is
+the adapter for callers holding aligned numpy arrays instead, which is what a
+scikit-learn or Optuna objective has in hand inside a fold.
 
 Usage:
     from utils.modeling import load_modeling_dataset, load_configs, prepare_cv_folds
@@ -53,6 +55,50 @@ MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing
 # (6.1%) for fold 1. A stale artifact whose fold IDs have shifted presents as a
 # leading gap of roughly half the window, so this bound still rejects it.
 MAX_TEMPORAL_WARMUP_FRACTION = 0.10
+
+
+def cross_sectional_ic_mean(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    dates: np.ndarray,
+    entities: np.ndarray,
+    *,
+    min_obs: int = 10,
+) -> float:
+    """Mean cross-sectional Spearman IC over the dates where it is defined.
+
+    The library computes the per-date series from two polars frames. Model
+    evaluation reaches it holding four aligned numpy arrays instead - what a
+    scikit-learn or Optuna objective has in hand inside a fold - so this adapts
+    the one to the other. It is the only thing this function does: the
+    correlation itself is ``ml4t.diagnostic``'s.
+
+    A date carries no coefficient when fewer than ``min_obs`` entities are
+    priced, or when every prediction or every return ties. ml4t-diagnostic 0.1.2
+    and later report those as null; 0.1.1 returns NaN, which ``drop_nulls`` does
+    not remove and which turns the mean of the whole series into NaN. Both are
+    dropped here, so the value does not depend on which of the two is installed.
+
+    Returns NaN when no date has a defined coefficient - a real answer to "what
+    was the average IC", unlike 0.0, which reads as "measured, and it was zero".
+    """
+    # Local import: `ml4t.diagnostic` brings scikit-learn's OpenMP runtime up
+    # transitively, and this module is imported by notebooks that must load a
+    # gradient-boosting library first. See .github/scripts/check_openmp_import_order.py.
+    from ml4t.diagnostic.metrics import cross_sectional_ic_series
+
+    ic_per_date = cross_sectional_ic_series(
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "prediction": y_pred}),
+        pl.DataFrame({"timestamp": dates, "symbol": entities, "forward_return": y_true}),
+        pred_col="prediction",
+        ret_col="forward_return",
+        date_col="timestamp",
+        entity_col="symbol",
+        method="spearman",
+        min_obs=min_obs,
+    )
+    defined = ic_per_date.drop_nulls("ic").filter(pl.col("ic").is_finite())
+    return float(defined["ic"].mean()) if defined.height else float("nan")
 
 
 def seed_everything(seed: int = RANDOM_SEED) -> None:
