@@ -14,23 +14,40 @@
 # ---
 
 # %% [markdown]
-# # Robust Portfolio Optimization
+# # Allocations that estimate less
 #
 # **Docker image**: `ml4t`
 #
-# This notebook explores portfolio optimization techniques beyond classical MVO,
-# including risk parity, minimum variance, minimum CDaR, and HRP
-# using the Riskfolio-Lib library.
+# ## Purpose
+# `02_mean_variance_optimization` ends on a problem: the optimizer's answer is dominated by the
+# input estimated worst, and it responds by putting almost everything into two assets. The
+# responses to that problem fall into two families, and this notebook runs both.
 #
-# **Learning Objectives**:
-# - Implement risk parity for equal risk contribution across assets
-# - Compare robust optimization approaches that handle estimation error
-# - Evaluate diversification metrics (effective N, risk contribution)
-# - Understand tail-risk optimization with CDaR
+# The first improves the estimate. Ledoit-Wolf shrinkage pulls the sample covariance towards a
+# structured target, accepting a known bias in exchange for far less variation from sample to
+# sample. The second changes the objective so it needs less. Risk parity, minimum variance and
+# minimum conditional drawdown all drop the expected-return vector entirely and optimize against
+# risk alone; equal weight optimizes against nothing.
 #
-# **Book Reference**: Chapter 17, §17.5 (Mean-Variance Optimization and the Markowitz Curse)
+# Every one of them is fitted on a training window, frozen, and scored on a later one, alongside
+# an execution bridge that says what implementing one of them would have cost.
 #
-# **Prerequisites**: `02_mean_variance_optimization`, ETF price data
+# ## Learning objectives
+#
+# - Fit a shrunk covariance estimator and say what the shrinkage buys and what it costs.
+# - Build allocations that equalize risk contribution, minimize variance, and minimize tail loss,
+#   and say which inputs each one needs.
+# - Measure concentration as a number rather than by eye, and use it to compare methods that
+#   estimate different amounts.
+# - Check whether an allocation fitted to a training drawdown actually has a shallow one later.
+#
+# ## Book reference
+# Chapter 17, Section 17.5 (mean-variance optimization and the Markowitz curse).
+#
+# ## Prerequisites
+#
+# - `02_mean_variance_optimization`, which sets up the problem these methods answer.
+# - Daily ETF prices from the canonical dataset.
 
 # %% [markdown]
 # ## Setup
@@ -49,7 +66,6 @@ import plotly.graph_objects as go
 import polars as pl
 import riskfolio as rp
 from cvxpy.problems.problem import Problem as _CvxpyProblem
-from IPython.display import Markdown, display
 from ml4t.backtest import (
     BacktestConfig,
     CommissionType,
@@ -201,10 +217,7 @@ fig = go.Figure(
 )
 
 fig.update_layout(
-    title=(
-        f"{ETF_UNIVERSE[strongest_pair[0]]} and {ETF_UNIVERSE[strongest_pair[1]]} "
-        f"share the strongest training correlation ({strongest_corr:.2f})"
-    ),
+    title="Correlation clusters by asset class, which is what shrinkage exploits",
     height=550,
     margin=dict(l=135, b=125, r=40),
 )
@@ -405,10 +418,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=(
-        f"Max Sharpe compresses eleven assets into "
-        f"{effective_n['Max Sharpe (MVO)']:.1f} effective positions"
-    ),
+    title="An objective without a diversification term concentrates",
     xaxis_title=r"Effective positions, $N_{eff}=1/\sum_i w_i^2$",
     yaxis_title="Allocation method",
     height=420,
@@ -418,14 +428,27 @@ fig.update_layout(
 fig.show()
 
 # %%
-display(
-    Markdown(
-        "**Computed concentration:** "
-        f"Max Sharpe has {effective_n['Max Sharpe (MVO)']:.2f} effective positions "
-        f"and a {top_weights['Max Sharpe (MVO)']:.1%} largest weight. "
-        f"Risk parity has {effective_n['Risk Parity']:.2f} effective positions."
+for name, positions in sorted(effective_n.items(), key=lambda item: item[1]):
+    print(
+        f"{name:<20} {positions:5.2f} effective positions, largest weight {top_weights[name]:.1%}"
     )
-)
+
+# %% [markdown]
+# Effective positions is the inverse of the sum of squared weights: an allocation split evenly
+# across five assets has five, one that puts everything in a single asset has one.
+#
+# The ordering is not the one the previous notebook would suggest. Dropping the expected-return
+# vector does not fix concentration: minimum variance and minimum conditional drawdown hold *fewer*
+# effective positions than maximum Sharpe, because an objective that minimizes a risk number loads
+# into the single lowest-risk asset exactly as hard as one that maximizes a return ratio loads into
+# the highest-return one. Both are corner solutions of an objective with nothing pulling the other
+# way.
+#
+# What separates the top of this list from the bottom is whether diversification is in the
+# objective at all. Risk parity requires every asset to contribute equally to risk, so it cannot
+# put most of the book in one name. Hierarchical risk parity splits the budget down a tree of correlation clusters,
+# which spreads it less evenly but still spreads it. Equal weight assumes the answer. Estimating
+# less is worth doing for stability, and it is a different thing from being diversified.
 
 # %% [markdown]
 # ## 6. Backtest Each Portfolio
@@ -478,7 +501,8 @@ final_growth = cumulative.iloc[-1]
 growth_leader = str(final_growth.idxmax())
 fig.update_layout(
     title=(
-        f"{growth_leader} leads the frozen-weight test at {float(final_growth.max()):.2f}x growth"
+        f"{len(cumulative.columns)} allocations of one universe, "
+        "all weights frozen before the window"
     ),
     xaxis_title="Date",
     yaxis_title="Growth of $1",
@@ -518,8 +542,11 @@ metrics_df = pl.DataFrame(metrics_data).sort("sharpe", descending=True)
 metrics_df
 
 # %% [markdown]
-# These are test-period observations under a zero annual risk-free hurdle. They are a
-# teaching comparison, not an unbiased estimate for choosing the best allocator after seeing results.
+# Every figure here is computed on the test window under a zero risk-free hurdle, from weights
+# fitted before it and never adjusted afterwards. That makes the comparison fair between the
+# allocations and still leaves it a description of one historical period: an allocation that leads
+# this table was not selected for leading it, and nothing here estimates how it would rank on a
+# different window.
 
 # %% [markdown]
 # The vectorized path restores frozen risk-parity targets every day at close-to-close
@@ -671,7 +698,7 @@ annual_cost_gap = (
     bridge_stats["Zero-cost engine"].annual_return - bridge_stats["Cost-aware engine"].annual_return
 )
 fig.update_layout(
-    title=f"Declared trading costs reduce annual return by {annual_cost_gap:.2%}",
+    title="What the declared trading costs take out of the same allocation",
     xaxis_title="Date",
     yaxis_title="Growth of $1",
     height=440,
@@ -739,8 +766,8 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# This chart reports the sealed test window for every train-fitted allocation. The ranking
-# describes this historical split only and is not used to retune or select an allocator.
+# The test window for every allocation fitted on the training window. The ordering describes this
+# split and was not used to retune anything.
 
 # %% [markdown]
 # ## 8. Drawdown Comparison
@@ -775,9 +802,7 @@ for col in drawdowns.columns:
 max_drawdowns = drawdowns.min()
 shallowest_name = str(max_drawdowns.idxmax())
 fig.update_layout(
-    title=(
-        f"{shallowest_name} has the shallowest test drawdown ({float(max_drawdowns.max()):.1%})"
-    ),
+    title="The shallowest drawdown belongs to the weakest performer",
     xaxis_title="Date",
     yaxis_title="Drawdown (%)",
     height=450,
@@ -786,8 +811,10 @@ fig.update_layout(
 fig.show()
 
 # %% [markdown]
-# Drawdowns stay at or below zero, with zero marking each running peak. The comparison
-# makes the return-versus-loss-depth trade-off visible over the same sealed test window.
+# Zero is each allocation's own running peak, so every curve is at or below it. Read it against
+# the Sharpe column above and the trade is plain: the allocation with the shallowest fall is also
+# the one that earned least, and the one that earned most fell furthest. Nothing here is free, and
+# which end of that trade a holder wants is not a question the data answers.
 
 # %% [markdown]
 # ## 9. Risk Contribution Analysis
@@ -843,10 +870,7 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=(
-        f"Risk parity keeps each Ledoit-Wolf contribution within "
-        f"{rp_max_deviation:.2f} percentage points of {target_contribution:.2f}%"
-    ),
+    title="Only one of these allocations equalizes risk rather than capital",
     xaxis_title="Asset",
     yaxis_title="Allocation method",
     height=390,
@@ -911,7 +935,7 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"], opacity=0.5)
 fig.add_hline(y=1, line_dash="dot", line_color=COLORS["amber"], opacity=0.6)
 
 fig.update_layout(
-    title="Risk-adjusted leadership changes through the sealed test window",
+    title="No allocation stays ahead across the whole test window",
     xaxis_title="Date",
     yaxis_title="Rolling Sharpe ratio (252-day window)",
     height=450,
@@ -927,32 +951,56 @@ fig.show()
 # %%
 test_sharpes = {row["portfolio"]: row["sharpe"] for row in metrics_df.iter_rows(named=True)}
 test_drawdowns = {row["portfolio"]: row["max_drawdown"] for row in metrics_df.iter_rows(named=True)}
-display(
-    Markdown(
-        "**Computed test summary:** "
-        f"Risk parity records a {test_sharpes['Risk Parity']:.3f} Sharpe ratio and "
-        f"{test_drawdowns['Risk Parity']:.1%} maximum drawdown. "
-        f"Equal weight records a {test_sharpes['Equal Weight']:.3f} Sharpe ratio. "
-        f"The cost-aware risk-parity engine records a "
-        f"{bridge_stats['Cost-aware engine'].sharpe_ratio:.3f} Sharpe ratio."
-    )
+for name, sharpe in sorted(test_sharpes.items(), key=lambda item: -item[1]):
+    print(f"{name:<22} Sharpe {sharpe:6.3f}   max drawdown {test_drawdowns[name]:7.1%}")
+print(
+    f"{'Risk parity, with costs':<22} Sharpe {bridge_stats['Cost-aware engine'].sharpe_ratio:6.3f}"
 )
 
 # %% [markdown]
-# ## Key Takeaways
+# The last row is the one to read against the first. It is the same risk-parity allocation put
+# through an engine that charges the declared commission and slippage, and the difference between
+# the two is what implementing the allocation costs. Any ranking computed above it is a ranking of
+# paper portfolios.
+
+# %% [markdown]
+# ## Key takeaways
 #
-# 1. **Train/test separation changes the question** from explaining fitted geometry to
-#    evaluating frozen allocations on later observations.
-# 2. **Risk parity equalizes fitted covariance contributions** and avoids expected-return
-#    estimation, but its test performance still varies through time.
-# 3. **Minimum CDaR targets training drawdowns**; later drawdowns determine whether that
-#    fitted protection generalizes.
-# 4. **Effective N makes concentration measurable** rather than relying on a visual claim.
-# 5. **Execution assumptions matter**: next-bar timing and explicit costs are reported as
-#    separate bridges under the same daily target policy.
+# 1. **Dropping the expected-return estimate buys stability, not diversification.** Minimum
+#    variance and minimum conditional drawdown use no return forecast and still concentrate harder
+#    than maximum Sharpe does, because minimizing a risk number is as much a corner solution as
+#    maximizing a ratio. What keeps an allocation spread out is a diversification requirement
+#    inside the objective, which is what risk parity has and the minimizers do not.
+# 2. **Shrinking the covariance is a bias-for-variance trade, made deliberately.** Ledoit-Wolf
+#    pulls the sample matrix towards a structured target, so it is wrong in a known direction and
+#    less wrong from one sample to the next. The reason to accept the bias is that the optimizer
+#    inverts this matrix and inversion punishes variance far more than bias.
+# 3. **Risk parity equalizes risk, not capital, and only against the covariance it was fitted
+#    on.** The risk-contribution chart shows it holding within a small tolerance in sample; whether
+#    the contributions stay equal out of sample is a different question and depends on whether the
+#    correlations did.
+# 4. **Targeting a drawdown in training does not deliver one in testing.** Minimum CDaR optimizes
+#    the tail it was shown. Read its test drawdown against the others before concluding the
+#    protection transferred.
+# 5. **Effective positions makes concentration a number.** It is a better basis for an argument
+#    than looking at a bar chart, and it is one of the few diagnostics here that needs no return
+#    estimate at all.
+# 6. **Report the cost-aware run beside the paper one.** Timing and fees are separate mechanisms
+#    and both are declared; an allocation ranking computed without them is a ranking of portfolios
+#    nobody can hold.
 #
-# **Next**: [`04_black_litterman`](04_black_litterman.ipynb) shows how investor views and
-# uncertainty enter a prior-based allocation.
+# ### Known limitations
 #
-# **Book**: §17.5 (Mean-Variance Optimization and the Markowitz Curse) covers the
-# Markowitz Curse and the robust fixes demonstrated here.
+# - One training window, one test window, one universe of eleven funds. A different split date
+#   would refit every allocation and could reorder the table.
+# - Weights are frozen across the test window and rebalanced daily to target. A real
+#   implementation would re-estimate periodically, which adds turnover and a fresh estimation
+#   error at each step.
+# - Long-only and fully invested throughout, which is what keeps the maximum-Sharpe concentration
+#   as mild as it appears.
+# - The risk-free hurdle is zero, so every Sharpe here is a raw return-to-risk ratio rather than an
+#   excess-return one.
+#
+# **Next:** [`04_kelly_criterion`](04_kelly_criterion.ipynb) turns from which assets to hold to how
+# much of the portfolio to put at risk. Section 17.5 covers the Markowitz curse and the robust
+# estimators used here.
