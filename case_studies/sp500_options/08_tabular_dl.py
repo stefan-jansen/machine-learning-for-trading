@@ -18,11 +18,16 @@
 #
 # Gradient boosting has been the default answer for tabular data for a decade, and neural networks
 # have repeatedly failed to beat it there. TabM is one of the architectures built to close that
-# gap. It trains what behaves like an ensemble of multiple-layer networks while sharing almost all
-# of its weights between them: one backbone, plus a small per-member vector that scales the input
-# to each layer. The members therefore start from different initialisations and disagree with each
-# other, which is where the ensemble's benefit comes from, at close to the cost of training one
-# network.
+# gap, and it gets an ensemble's benefit without an ensemble's cost.
+#
+# Every member shares one two-layer network, so the features are transformed once. What separates
+# the members is applied after that: each owns a vector, the same length as the shared layer's
+# output, that multiplies those activations element by element, and its own final linear layer
+# mapping the scaled activations to a prediction. The vectors are randomly initialised and trained,
+# so each member reads a differently emphasised view of the same representation and reaches a
+# different answer; the model's prediction is their mean. Disagreement between members is where an
+# ensemble's benefit comes from, and here it is bought with one vector and one output layer per
+# member rather than a whole additional network.
 #
 # This notebook fits the three declared TabM sizes on the short-straddle return and publishes a
 # prediction set for every training epoch the configuration checkpoints at. The epoch is part of
