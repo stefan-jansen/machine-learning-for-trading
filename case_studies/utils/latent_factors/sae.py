@@ -10,6 +10,11 @@ import numpy as np
 from case_studies.utils.latent_factors.common import TaskType
 from case_studies.utils.latent_factors.library_bridge import run_sae_fold_with_library
 
+# Bumped when a change to this module would change a fitted SAE result. It enters
+# every sae training identity through `adapter._source_identity`, which declares behaviour
+# rather than hashing these bytes - see that function for why.
+SAE_RUNNER_VERSION = 1
+
 
 def run_sae_fold(
     chars_train: np.ndarray,

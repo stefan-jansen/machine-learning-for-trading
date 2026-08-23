@@ -12,6 +12,12 @@ from case_studies.utils.latent_factors.library_bridge import run_sdf_fold_with_l
 SDFOutputMode = Literal["weights", "expected_returns", "beta_network"]
 
 
+# Bumped when a change to this module would change a fitted SDF result. It enters
+# every sdf training identity through `adapter._source_identity`, which declares behaviour
+# rather than hashing these bytes - see that function for why.
+SDF_RUNNER_VERSION = 1
+
+
 def run_sdf_fold(
     chars_train: np.ndarray,
     returns_train: np.ndarray,

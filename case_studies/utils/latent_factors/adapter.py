@@ -27,6 +27,7 @@ from case_studies.utils.latent_factors.cv import (
     _expected_latent_checkpoints,
     _prepare_fold_inputs,
     _save_fold_extras,
+    latent_model_version,
     run_latent_factor_cv,
 )
 from case_studies.utils.latent_factors.library_bridge import (
@@ -39,6 +40,11 @@ if TYPE_CHECKING:
     from case_studies.research.workspace import Study
     from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
 
+
+# Bumped when a change to the shared latent machinery - this module, the panel and fold
+# preparation, the CV loop, the library bridge - would change a fitted result for every model.
+# A change confined to one model bumps that model's own version instead; see `_source_identity`.
+LATENT_RUNNER_VERSION = 1
 
 _LATENT_MODELS = {"cae", "ipca", "pca", "sae", "sdf"}
 _PREVIEW_FIELDS = {
@@ -98,26 +104,27 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _source_identity() -> dict[str, str]:
-    root = Path(__file__).parent
-    release_root = root.parents[2]
-    files = [
-        root / "adapter.py",
-        root / "cae.py",
-        root / "case_study.py",
-        root / "common.py",
-        root / "cv.py",
-        root / "ipca.py",
-        root / "library_bridge.py",
-        root / "macro_context.py",
-        root / "panel.py",
-        root / "pca.py",
-        root / "sae.py",
-        root / "sdf.py",
-        release_root / "utils" / "artifact_specs.py",
-        release_root / "utils" / "modeling.py",
-    ]
-    return {path.relative_to(release_root).as_posix(): _sha256(path) for path in files}
+def _source_identity(model_name: str) -> dict[str, int]:
+    """The behaviour of this family's runner, declared rather than fingerprinted.
+
+    This used to be the SHA-256 of fourteen files, and it sat inside the hashed ``computation``.
+    Every edit to any of them - a comment in ``panel.py``, a log line in ``cv.py``, a fix to a
+    model no other model calls - invalidated every latent-factor result ever registered, and it
+    coupled the five models to each other: an SAE change refit IPCA. That is unworkable against
+    the rule that a fix which does not change a result must not force a refit. ``linear.py`` and
+    ``gbm.py`` retired the same scheme for the same reason; this finishes it.
+
+    What replaces it is two declarations. ``LATENT_RUNNER_VERSION`` covers the shared machinery
+    every model runs through, and the per-model version covers the one model being fitted, so a
+    change confined to ``sae.py`` moves SAE identities and nothing else. The model's name is
+    already in ``computation["model"]["class"]``, so the version alone is unambiguous.
+    ``tests/test_latent_factors_identity.py`` pins what these versions claim to describe and fails
+    when it moves without a bump, so the declaration is checked rather than trusted.
+    """
+    return {
+        "latent_runner": LATENT_RUNNER_VERSION,
+        "latent_model": latent_model_version(model_name),
+    }
 
 
 def _runtime_identity() -> dict[str, str | None]:
@@ -509,7 +516,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "num_threads": num_threads,
         },
         "sampling": {"max_symbols": max_symbols},
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
@@ -582,7 +589,7 @@ def reconstruct_locked_request(
         "feature_artifacts": case.input_data_spec["files"],
         "feature_names": list(case.feature_names),
         "input_data_spec": case.input_data_spec,
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
         "task": {
             "type": case.task_type,

@@ -56,6 +56,16 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
 
+# Bumped when a change to this module would change a fitted TabM result. See
+# `_tabm_source_identity` for why this is a declaration rather than a digest.
+TABM_RUNNER_VERSION = 1
+# The same, for the checkpoint state a TabM prediction is restored from. Declared here rather than
+# in `deep_model_state.py` on purpose: `deep_learning.py` still hashes that file's bytes into its
+# own identities, so adding a constant to it would refit eleven registered sequence-model rows to
+# say something only TabM reads. It moves back beside the code it describes when `deep_learning`
+# and `causal` migrate off the digest scheme too.
+DEEP_MODEL_STATE_VERSION = 1
+
 _TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
@@ -95,16 +105,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tabm_source_identity() -> dict[str, str]:
-    from case_studies.utils import deep_model_state
+def _tabm_source_identity() -> dict[str, int]:
+    """The behaviour of this runner, declared rather than fingerprinted.
 
-    deep_model_state_file = deep_model_state.__file__
-    if deep_model_state_file is None:
-        raise RuntimeError("deep_model_state has no source file")
-    deep_model_state_path = Path(deep_model_state_file)
+    This used to be the SHA-256 of ``tabular_dl.py`` and ``deep_model_state.py``. Both digests sat
+    inside the hashed ``computation``, so every edit to either file - a comment, a log line,
+    threading a provenance field through - invalidated every TabM result ever registered. That is
+    unworkable against the rule that a fix which does not change a result must not force a refit.
+    ``linear.py`` and ``gbm.py`` retired the same scheme for the same reason; this finishes it for
+    one of the two families left on it.
+
+    What replaces it is a declaration. ``TABM_RUNNER_VERSION`` is bumped when a change to this
+    module would change a fitted result, and ``DEEP_MODEL_STATE_VERSION`` covers the checkpoint
+    state a prediction is read back from. ``tests/test_tabular_dl_identity.py`` pins what these
+    versions claim to describe and fails when it moves without a bump, so the declaration is
+    checked rather than trusted.
+    """
     return {
-        Path(__file__).name: _sha256(Path(__file__)),
-        deep_model_state_path.name: _sha256(deep_model_state_path),
+        "tabm_runner": TABM_RUNNER_VERSION,
+        "deep_model_state": DEEP_MODEL_STATE_VERSION,
     }
 
 
