@@ -2215,11 +2215,19 @@ def _apply_allocation(
                 "conformal_weighted allocation requires prediction_hash; "
                 "caller must pass it through _apply_allocation."
             )
-        from case_studies.utils.conformal import load_conformal_widths
+        from case_studies.utils.conformal import (
+            CALIBRATION_VERSION,
+            DEFAULT_ALPHA,
+            DEFAULT_MIN_CALIBRATION_N,
+            load_conformal_widths,
+        )
 
-        alpha = float(alloc_spec.get("alpha", 0.20))
-        min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
-        calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
+        alpha = float(alloc_spec.get("alpha", DEFAULT_ALPHA))
+        min_calibration_n = int(alloc_spec.get("min_calibration_n", DEFAULT_MIN_CALIBRATION_N))
+        # The default has to track the constant. Pinning the string here meant a version
+        # bump left this branch asking for widths that the writer no longer produces, and
+        # the failure surfaced as "no widths for calibration_version" on a fresh artifact.
+        calibration_version = str(alloc_spec.get("calibration_version", CALIBRATION_VERSION))
         widths = conformal_widths
         if widths is None:
             widths = load_conformal_widths(
@@ -2228,6 +2236,7 @@ def _apply_allocation(
                 alpha=alpha,
                 min_calibration_n=min_calibration_n,
                 calibration_version=calibration_version,
+                label=label or None,
             )
         # Conformal widths are keyed by the timestamps stored in predictions.parquet,
         # which keep their original time zone; `normalize_prediction_columns` has
