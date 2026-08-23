@@ -99,6 +99,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "6f061b802c3f"
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -225,8 +226,15 @@ plan.select(
 # `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
 # the contract with them and not a label of convenience. A run that narrows the member set
 # has to pass its own.
+#
+# `SUPERSEDES_POPULATION` names the earlier snapshot this one replaces. A population is
+# hashed over its members *and* over what it supersedes, so the default carries the hash the
+# published snapshot actually superseded: leaving it empty would compute a different
+# population and the registry would refuse it against the one on record.
 population_name = POPULATION_NAME or "sp500-options-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")
