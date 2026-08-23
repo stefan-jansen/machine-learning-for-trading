@@ -639,9 +639,10 @@ if ridge.height:
     else:
         gap = float(shared_alpha.get_column("spread").min())
         dominance = (
-            f"the closest two lines come at any shared penalty is {gap:.4f}, wider than the "
-            f"{sweep_span:.4f} the most penalty-sensitive line covers over the whole sweep, so "
-            "the label a line belongs to matters more than where on the line it sits"
+            f"the closest two lines come within {gap:.4f} of each other at any shared penalty, "
+            f"wider than the {sweep_span:.4f} the most penalty-sensitive line covers over the "
+            "whole sweep, so the label a line belongs to matters more than where on the line "
+            "it sits"
             if gap > sweep_span
             else (
                 f"the most penalty-sensitive line covers {sweep_span:.4f} across the sweep "
