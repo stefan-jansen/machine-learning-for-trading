@@ -62,7 +62,7 @@ from plotly.subplots import make_subplots
 from sklearn.covariance import LedoitWolf
 
 from data import load_etfs, load_ff_factors
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 START_DATE = "2010-01-01"
@@ -70,7 +70,26 @@ END_DATE = "2024-01-01"
 ROLLING_WINDOW = 252
 COVARIANCE_WINDOW = 63
 HAC_LAGS = 5
+ATTRIBUTION_LAG = 1
 RESIDUAL_CORR_THRESHOLD = 0.15
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `START_DATE` and `END_DATE` bound the sample. It begins after the 2008 crisis, so the factor
+#   exposures describe a long expansion and one short shock rather than a full cycle.
+# - `ROLLING_WINDOW` is the window every rolling exposure is estimated over, about a trading year.
+#   It sets how quickly a drifting exposure becomes visible against how noisy each estimate is.
+# - `COVARIANCE_WINDOW` is the shorter window used where the question is how factor relationships
+#   move together, which needs to respond faster than a beta estimate does.
+# - `HAC_LAGS` is the Newey-West bandwidth: how many lags of autocorrelation the standard errors
+#   are made robust to. Daily return residuals carry some, and ignoring it makes every t-statistic
+#   in the notebook too large. Every regression here uses this same value, including the library
+#   calls, which would otherwise choose their own from the sample size.
+# - `ATTRIBUTION_LAG` delays the beta used to attribute each period's return, so an attribution
+#   never uses a coefficient estimated from the period it is explaining.
+# - `RESIDUAL_CORR_THRESHOLD` is the residual correlation above which the notebook treats a pair of
+#   assets as sharing something the factor model has not captured.
 
 # %% [markdown]
 # ## 1. Load Factor Data
@@ -78,7 +97,7 @@ RESIDUAL_CORR_THRESHOLD = 0.15
 # The canonical factor parquets preserve a reproducible local snapshot of Ken
 # French's data library. Both factor sets are validated before alignment.
 
-# %%
+# %% tags=["results"]
 FF3_COLUMNS = ["Mkt-RF", "SMB", "HML", "RF"]
 FF5_COLUMNS = ["Mkt-RF", "SMB", "HML", "RMW", "CMA", "RF"]
 ff3_pl = load_ff_factors("ff3", "daily", START_DATE, END_DATE).sort("timestamp")
@@ -107,7 +126,7 @@ display(
 # %% [markdown]
 # ## 2. Load Portfolio Data
 
-# %%
+# %% tags=["results"]
 SYMBOLS = ["SPY", "QQQ", "IWM", "VTV", "VUG"]
 etf_filtered = load_etfs(symbols=SYMBOLS, start_date=START_DATE, end_date=END_DATE).sort(
     ["symbol", "timestamp"]
@@ -227,7 +246,10 @@ fig.update_layout(
     yaxis_title="Beta",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of market beta and annualized alpha per ETF from the single-factor regression, with the betas clustered near one and the alphas small by comparison.",
+)
 
 # %% [markdown]
 # ## 4. Fama-French 3-Factor Analysis
@@ -311,7 +333,10 @@ fig = px.bar(
     color_discrete_sequence=ml4t_palette(3, categorical=True),
 )
 fig.update_layout(height=400)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of factor loadings per ETF under the three-factor model. Market loadings dominate; the size and value loadings separate the growth and value funds in opposite directions.",
+)
 
 # %% [markdown]
 # ## 5. Fama-French 5-Factor Analysis
@@ -392,7 +417,10 @@ fig = px.bar(
     color_discrete_sequence=ml4t_palette(3, categorical=True),
 )
 fig.update_layout(height=400)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of five-factor loadings per ETF, with the two additional factors adding modest loadings that differ in sign across the funds.",
+)
 
 # %% [markdown]
 # ## 6. Rolling Factor Exposures
@@ -484,13 +512,16 @@ fig.update_yaxes(title_text="Beta", row=1, col=1)
 fig.update_yaxes(title_text="Beta", row=1, col=2)
 fig.update_yaxes(title_text="Beta", row=2, col=1)
 fig.update_yaxes(title_text="Annualized alpha (%)", row=2, col=2)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Rolling factor betas over time, one line per factor. The market beta is stable near one while the style betas drift and reverse across the sample.",
+)
 
 # %% [markdown]
 # The endpoint comparison translates the visual drift into the hedge-design
 # implication.
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"The trailing HML beta moves from **{rolling_iwm['beta_hml'].iloc[0]:.2f}** to "
@@ -603,7 +634,10 @@ fig.update_layout(
     yaxis_title="Cumulative arithmetic contribution (percentage points)",
     height=500,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of annualized factor contribution with confidence intervals. Some intervals straddle zero and others clear it.",
+)
 
 # %%
 annual_attribution = attribution_spy.mean() * 252 * 100
@@ -736,14 +770,15 @@ fig = go.Figure(
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
-    title=(
-        f"{', '.join(informative_factors) or 'No factor'} excludes zero under HAC delta intervals"
-    ),
+    title="Only some factor contributions are distinguishable from zero",
     xaxis_title="Annualized contribution (%, 95% interval)",
     yaxis_title="Factor",
     height=400,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of residual correlations between the ETFs after the factor model, with off-diagonal cells showing what the factors did not absorb.",
+)
 
 # %% [markdown]
 # These intervals quantify sampling uncertainty in both the estimated loading
@@ -754,9 +789,13 @@ fig.show()
 # %% [markdown]
 # ## 10. Residual Clustering Diagnostic
 #
-# If idiosyncratic residuals from the factor model are correlated, the model
-# leaves common structure unexplained. We flag pairs where
-# $|\rho_{ij}| > 0.15$ as a screening rule, not a significance threshold.
+# A factor model claims to have captured everything the assets share, leaving each asset's
+# residual to be its own business. If two residuals are correlated, that claim is false: something
+# moves both assets and is not among the factors.
+#
+# Pairs whose absolute residual correlation exceeds `RESIDUAL_CORR_THRESHOLD` are flagged. That is
+# a screening rule for deciding where to look, not a test - no null distribution is being compared
+# against, and with this many pairs some will clear any fixed bar by chance.
 
 # %%
 # Compute FF5 residuals for each asset
@@ -805,16 +844,16 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=(
-        f"{strongest_pair['asset_1']}-{strongest_pair['asset_2']} has the strongest residual "
-        f"correlation ({strongest_pair['residual_correlation']:+.2f})"
-    ),
+    title="Residual correlation shows what the factor model left behind",
     xaxis_title="ETF",
     yaxis_title="ETF",
     height=430,
     width=560,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two lines of covariance condition number over time on a log axis, sample against shrunk. The shrunk series is lower and far less spiky throughout.",
+)
 
 # %% [markdown]
 # A residual correlation is evidence of omitted shared structure, not proof of
@@ -828,8 +867,8 @@ fig.show()
 # Mahalanobis spikes mix two mechanisms: tail observations and covariance
 # estimation error. They cannot identify an unstable inverse by themselves.
 # The covariance condition number directly measures the numerical sensitivity
-# of the inverse. We compare each trailing 63-session sample covariance with a
-# Ledoit-Wolf estimate on the same information set.
+# of the inverse. Each trailing sample covariance, taken over the shorter `COVARIANCE_WINDOW`, is
+# compared with a Ledoit-Wolf estimate built from the same information.
 
 # %% [markdown]
 # The helper returns one condition number per decision date. A lower value means
@@ -883,13 +922,16 @@ fig.add_trace(
     )
 )
 fig.update_layout(
-    title=f"Shrinkage lowers median covariance conditioning by {condition_reduction:.0%}",
+    title="Shrinkage keeps the covariance matrix better conditioned throughout",
     xaxis_title="Decision date",
     yaxis_title="Covariance condition number (log scale)",
     yaxis_type="log",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of annualized contribution by factor coordinate under the original and rotated bases. Individual bars move substantially while their sum is unchanged.",
+)
 
 # %% [markdown]
 # Both estimates use exactly the prior 63 sessions. The comparison isolates
@@ -970,7 +1012,7 @@ fig = px.bar(
     color="basis",
     barmode="group",
     color_discrete_sequence=ml4t_palette(2, categorical=True),
-    title="A fixed basis rotation preserves total contribution but reallocates its components",
+    title="Rotating the factors moves the attribution, not the total",
     labels={
         "factor": "Factor coordinate",
         "contribution_pct": "Annualized contribution (%)",
@@ -979,7 +1021,10 @@ fig = px.bar(
 )
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(height=430)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of risk contribution by factor from the library decomposition, with the market factor dominating and the residual share small.",
+)
 
 # %% [markdown]
 # Both models have identical fitted values and total factor contribution, but
@@ -1023,13 +1068,21 @@ print(f"Observations: {len(ff3_data.returns):,}")
 # %% [markdown]
 # ### Static factor model with HAC standard errors
 #
-# Compare with the manual OLS in sections 3-5. The library uses Newey-West HAC
-# errors by default, which account for autocorrelation in return residuals.
+# This is the same regression the manual sections ran, through the library instead. For the
+# comparison to isolate the implementation, every setting that both sides expose is passed
+# explicitly rather than left at a default: the bandwidth here is the notebook's `HAC_LAGS`, and
+# the rolling calls below take the notebook's `ROLLING_WINDOW`.
+#
+# Left at their defaults the library would pick its own bandwidth from the sample size - the
+# Andrews rule, which on this many observations lands well above `HAC_LAGS` - and its own
+# sixty-three-session rolling window. Both are defensible choices and neither is the one the
+# manual sections made, so a comparison run that way would report a difference and attribute it to
+# the wrong thing.
 
 # %%
 port_aligned = portfolio_returns.values
 
-model = compute_factor_model(port_aligned, ff3_data, hac=True)
+model = compute_factor_model(port_aligned, ff3_data, hac=True, max_lags=HAC_LAGS)
 
 print("Static FF3 Model (HAC standard errors)")
 print(f"Alpha (daily): {model.alpha:.6f}  (t={model.alpha_t:.2f}, p={model.alpha_p:.3f})")
@@ -1054,9 +1107,9 @@ hac_df
 # stability diagnostics (sign consistency, max step change).
 
 # %%
-rolling = compute_rolling_exposures(port_aligned, ff3_data, window=63)
+rolling = compute_rolling_exposures(port_aligned, ff3_data, window=ROLLING_WINDOW)
 
-print("Rolling Beta Stability Diagnostics (63-day window)")
+print(f"Rolling beta stability over {ROLLING_WINDOW}-session windows")
 print(f"Mean R²: {rolling.stability.r_squared_mean:.3f} ± {rolling.stability.r_squared_std:.3f}")
 
 stability_df = pd.DataFrame(
@@ -1075,8 +1128,10 @@ stability_df
 # The library uses `lag=1` by default so that today's attribution uses
 # yesterday's betas - no look-ahead bias, unlike the naive manual approach.
 
-# %%
-attr = compute_return_attribution(port_aligned, ff3_data, window=63, lag=1)
+# %% tags=["results"]
+attr = compute_return_attribution(
+    port_aligned, ff3_data, window=ROLLING_WINDOW, lag=ATTRIBUTION_LAG
+)
 
 total_return = attr.cumulative_total[-1] * 100
 arithmetic_components = {
@@ -1098,8 +1153,10 @@ return_attr_df = pd.DataFrame(
 display(
     Markdown(
         f"The lagged library path compounds to **{total_return:+.2f}% excess return**. "
-        "The table reports additive arithmetic shares, which sum to 100%; independently "
-        "compounded component paths are not additive attribution."
+        "The shares in the table are arithmetic and sum to one by construction. Compounding each "
+        "factor's contribution separately and comparing the results would not: products of sums "
+        "are not sums of products, so component paths compounded independently do not add back "
+        "to the portfolio path."
     )
 )
 return_attr_df
@@ -1131,10 +1188,18 @@ risk_attr_df = pd.DataFrame(
 risk_attr_df
 
 # %% [markdown]
-# The library results should closely match the manual OLS from earlier sections
-# (differences arise from HAC standard errors and Ledoit-Wolf shrinkage).
-# In production, prefer the library API: it handles alignment, HAC, and
-# look-ahead prevention automatically.
+# With the bandwidth and the window matched, the library's static regression reproduces the manual
+# one: same coefficients, same standard errors, same t-statistics. That is the point of running
+# both - a wrapper worth using is one you can check against the thing it wraps.
+#
+# The risk decomposition has no manual counterpart above and does not reproduce anything. It
+# applies Ledoit-Wolf shrinkage to the factor covariance matrix, pulling the sample estimate
+# toward a structured target, which is a different estimate rather than a different way of
+# computing the same one.
+#
+# What the library adds beyond convenience is the parts that are easy to get wrong by hand:
+# alignment between returns and factors, the lag that keeps attribution free of look-ahead, and
+# bootstrap intervals.
 
 # %% [markdown]
 # ## 14. Key Takeaways
@@ -1142,7 +1207,7 @@ risk_attr_df
 # The final summary is computed from the executed results so revised factor
 # vintages cannot leave stale numbers in the reader-facing conclusions.
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""

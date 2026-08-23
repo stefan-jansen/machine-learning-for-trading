@@ -18,18 +18,30 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook implements the two most common execution benchmarks:
+# An order too large to send at once is broken into **child orders** and worked across the session.
+# The rule deciding how much to send in each interval is an execution **schedule**, and the two
+# schedules everything else is measured against are:
 #
-# - **TWAP (Time-Weighted Average Price)**: Equal slices over time
-# - **VWAP (Volume-Weighted Average Price)**: Slices proportional to expected volume
+# - **TWAP**, the time-weighted average price, which sends the same number of shares every
+#   interval. It needs no forecast of anything.
+# - **VWAP**, the volume-weighted average price, which sends shares in proportion to how much the
+#   market is expected to trade in each interval. It needs a forecast of the day's volume shape.
+#
+# Each is also a **benchmark**: a desk's execution is scored by how close its average fill price
+# came to the day's actual volume-weighted average price. This notebook builds both schedules,
+# estimates the volume forecast VWAP needs from real minute bars, runs both against real NASDAQ-100
+# sessions the forecast was not estimated on, and compares how tightly each tracks that benchmark.
 #
 # **Learning Objectives**
-# - Build TWAP and VWAP schedules from execution constraints and volume forecasts
-# - Simulate realized execution prices against a benchmark VWAP path
-# - Quantify when VWAP improves benchmark tracking relative to TWAP
-# - Translate schedule shapes into practical execution guidance
+# - Turn an order size and a session into a TWAP schedule, and a volume forecast into a VWAP one
+# - Estimate an intraday volume profile from minute bars on one window and apply it on another, so
+#   the forecast is tested rather than fitted
+# - Simulate what a schedule would have paid on a real session, with impact charged against the
+#   volume actually available in each interval
+# - Compare two schedules by the distribution of their benchmark slippage across many sessions
+#   rather than by one session's outcome, and separate a schedule's bias from its dispersion
 #
-# **Book Reference:** Chapter 18: Section 18.5 (Execution Algorithms as Controls)
+# **Book Reference:** Chapter 18, Section 18.5
 #
 # **Prerequisites:** Read [`03_market_impact_calibration`](03_market_impact_calibration.ipynb) for impact assumptions
 # and [`05_almgren_chriss_optimal_execution`](05_almgren_chriss_optimal_execution.ipynb) for the transition from control
@@ -38,16 +50,18 @@
 # %% [markdown]
 # ## Why TWAP and VWAP?
 #
-# These algorithms serve as:
-# - **Execution benchmarks**: Performance measured against a declared schedule
-# - **Impact control**: Spread execution across the available liquidity
-# - **Market impact control**: Avoid moving markets with large orders
-# - **Passive strategies**: Execute without alpha view
+# Both exist to solve the problem the previous notebook measured: impact grows with the share of an
+# interval's volume an order takes, so the same order costs less spread over a session than sent at
+# once. Neither tries to predict where the price is going. A schedule is fixed before trading
+# starts, which is what makes it auditable - a desk can be held to it - and what makes it a
+# benchmark other execution can be scored against.
 #
-# | Algorithm | Best For | Key Assumption |
-# |-----------|----------|----------------|
-# | TWAP | Stable liquidity, weak volume forecast | Equal time slices are acceptable |
-# | VWAP | Liquid stocks, predictable patterns | Historical volume predicts intraday |
+# The difference between them is what they assume:
+#
+# | Schedule | Assumes | Fails when |
+# |---|---|---|
+# | TWAP | Every interval is as good as any other | Liquidity varies through the day, so equal slices take a larger share of the quiet intervals |
+# | VWAP | Today's volume shape resembles the recent average | The day is unusual - news, an index event, an unexpected halt |
 
 # %% [markdown]
 # ## Imports & Settings
@@ -55,7 +69,7 @@
 # %%
 """VWAP and TWAP Execution - Algorithm implementation and evaluation on real NASDAQ-100 sessions."""
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import numpy as np
 import plotly.graph_objects as go
@@ -64,24 +78,41 @@ from plotly.subplots import make_subplots
 
 from data import load_nasdaq100_bars
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-# Real AlgoSeek NASDAQ-100 minute bars drive both the volume profile and the
-# execution evaluation. The intraday volume forecast is estimated on one window
-# and execution is evaluated on a disjoint window so the VWAP forecast is
-# strictly out-of-sample.
 EXEC_SYMBOL = "AAPL"
 TAQ_START_DATE = "2021-10-01"
 TAQ_END_DATE = "2021-12-31"
 PROFILE_END_DATE = "2021-11-15"
-INTERVAL_MINUTES = 15  # execution grid; 09:30-16:00 gives 26 half-open intervals
+INTERVAL_MINUTES = 15
 ORDER_SHARES = 100_000
-IMPACT_BPS = 5.0  # illustrative square-root impact coefficient
+IMPACT_BPS = 5.0
 SEED = 42
 
 # %%
 set_global_seeds(SEED)
+
+SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE = 9, 30
+SESSION_CLOSE_HOUR = 16
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `EXEC_SYMBOL` is the stock both schedules trade. One liquid name keeps the volume profile and
+#   the session-by-session comparison readable; the code takes a list of symbols.
+# - `TAQ_START_DATE` and `TAQ_END_DATE` bound the minute bars read, and `PROFILE_END_DATE` splits
+#   them. Sessions on or before it estimate the volume profile; sessions after it are the ones both
+#   schedules are run on. The split is a fixed calendar date rather than a fraction of the sample,
+#   so extending the data cannot move the estimation window under a result.
+# - `INTERVAL_MINUTES` is how often a child order is sent. Fifteen minutes divides the 09:30-16:00
+#   session into 26 intervals. A finer grid tracks the volume shape more closely and sends smaller,
+#   more numerous orders; a coarser one is easier to supervise and matches the profile less well.
+# - `ORDER_SHARES` is the size of the parent order. It matters only through its ratio to the
+#   volume available, which is what the impact model charges against.
+# - `IMPACT_BPS` scales the square-root impact charged in the simulation: it is the cost in basis
+#   points of a slice equal to an interval's entire volume. It is a stated figure, not one
+#   calibrated from executions, and it moves both schedules' costs together.
 
 # %% [markdown]
 # ## Part 1: TWAP Algorithm
@@ -90,14 +121,10 @@ set_global_seeds(SEED)
 #
 # $$\text{Trade Size}_t = \frac{\text{Total Order}}{\text{Number of Intervals}}$$
 #
-# Advantages:
-# - Simple to implement
-# - No volume prediction needed
-# - Avoids relying on an unstable volume forecast
-#
-# Disadvantages:
-# - Ignores intraday volume patterns
-# - May execute at low-volume times (higher impact)
+# The only inputs are the order size and the number of intervals, so nothing about the schedule can
+# be wrong in the way a forecast can be wrong. What it gives up is that an interval carrying two
+# percent of the day's volume receives the same number of shares as one carrying eight, and by the
+# square-root model the first of those slices costs twice as much per share.
 
 
 # %%
@@ -219,10 +246,25 @@ class TWAPAlgorithm:
         return summarize_twap(self)
 
 
+# %% [markdown]
+# ### The Session Clock
+#
+# Every schedule and every chart below runs on the same 09:30-16:00 grid. The helper builds it for
+# a named session, so an axis showing a day's execution carries that day's date rather than a
+# placeholder.
+
+
 # %%
-# Example TWAP schedule
-start = datetime(2024, 1, 15, 9, 30)
-end = datetime(2024, 1, 15, 16, 0)
+def session_grid(day: date) -> tuple[datetime, datetime]:
+    """Return the regular-session open and close for one date."""
+    return (
+        datetime.combine(day, time(SESSION_OPEN_HOUR, SESSION_OPEN_MINUTE)),
+        datetime.combine(day, time(SESSION_CLOSE_HOUR, 0)),
+    )
+
+
+# %%
+start, end = session_grid(date.fromisoformat(TAQ_START_DATE))
 
 twap = TWAPAlgorithm(
     total_shares=100_000,
@@ -231,64 +273,61 @@ twap = TWAPAlgorithm(
     interval_minutes=15,
 )
 
-assert twap.get_target_at_time(start - timedelta(seconds=1)) == 0
-assert twap.get_target_at_time(start) == twap.schedule["cumulative"].item(0)
-assert twap.get_target_at_time(start + timedelta(minutes=7)) == twap.schedule["cumulative"].item(0)
-assert twap.get_target_at_time(twap.schedule["timestamp"].item(-1)) == twap.total_shares
-
 print("TWAP Schedule Summary:")
 for k, v in twap.summary().items():
     print(f"  {k}: {v}")
 
-assert twap.schedule["shares"].sum() == twap.total_shares
+if twap.schedule["shares"].sum() != twap.total_shares:
+    raise ValueError("The TWAP schedule must allocate exactly the parent order")
 
 # %% [markdown]
-# **Finding**: The TWAP summary confirms that the schedule is intentionally blind
-# to liquidity conditions. Equal slice sizes are a feature when the desk wants
-# robustness, but they also guarantee trading through the session's thin spots.
+# **Reading the summary**: The whole schedule is described by four numbers, none of which came
+# from the market. That is the point of TWAP: there is nothing in it that can be estimated wrong.
 
 # %%
-# Visualize the TWAP child orders and completion path.
-fig = go.Figure()
-
-times = twap.schedule["timestamp"].to_list()
-shares = twap.schedule["shares"].to_list()
-
-fig.add_bar(
-    x=times,
-    y=shares,
-    name="Shares per Interval",
-    marker_color=COLORS["blue"],
+fig = make_subplots(
+    rows=2,
+    cols=1,
+    shared_xaxes=True,
+    subplot_titles=["Shares sent per interval", "Order completed"],
+    vertical_spacing=0.12,
 )
+times = twap.schedule["timestamp"].to_list()
 
-fig.add_scatter(
+_ = fig.add_bar(
+    x=times,
+    y=twap.schedule["shares"].to_list(),
+    marker_color=COLORS["blue"],
+    row=1,
+    col=1,
+)
+_ = fig.add_scatter(
     x=times,
     y=twap.schedule["pct_complete"].to_list(),
     mode="lines",
-    name="Cumulative %",
-    yaxis="y2",
     line=dict(color=COLORS["amber"], width=2),
+    row=2,
+    col=1,
 )
-
+fig.update_yaxes(title_text=f"Shares per {twap.interval_minutes}-minute interval", row=1, col=1)
+fig.update_yaxes(title_text="Order completed", tickformat=".0%", range=[0, 1], row=2, col=1)
+fig.update_xaxes(title_text="Execution time (ET)", tickformat="%H:%M", row=2, col=1)
 fig.update_layout(
-    title=f"TWAP allocates the order evenly across {len(twap.schedule)} intervals",
-    xaxis_title="Execution time (ET)",
-    yaxis_title=f"Shares per {twap.interval_minutes}-minute interval",
-    yaxis2=dict(
-        title="Order completed",
-        overlaying="y",
-        side="right",
-        tickformat=".0%",
-        range=[0, 1],
-    ),
-    height=400,
+    title="TWAP sends the same number of shares every interval",
+    height=520,
+    showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Upper panel: bars of equal height across every interval of the session. Lower panel: the "
+    "resulting completion curve, a straight line from zero to fully filled.",
+)
 
 # %% [markdown]
-# **Finding**: TWAP creates a flat schedule in share space and a linear ramp in
-# cumulative completion. That makes the algorithm robust when volume forecasts are
-# unreliable, but it also guarantees activity during the midday liquidity trough.
+# **Finding**: Equal bars in the upper panel become a straight line in the lower one. The schedule
+# is fully determined before the session starts and takes no input from the market, which is what
+# makes it robust to a bad volume forecast and what guarantees it trades through the quiet part of
+# the day at the same rate as the busy part.
 
 # %% [markdown]
 # ## Part 2: VWAP Algorithm
@@ -297,14 +336,14 @@ fig.show()
 #
 # $$\text{Trade Size}_t = \text{Total Order} \times \frac{\text{Expected Volume}_t}{\text{Total Expected Volume}}$$
 #
-# Advantages:
-# - Reduces impact by trading when liquidity is high
-# - Better benchmark tracking
-# - Industry standard for passive execution
+# Sending shares in proportion to expected volume holds the participation rate roughly constant
+# through the day, which is what the square-root model says minimizes total impact for a fixed
+# order worked over a fixed horizon. It also tracks the VWAP benchmark by construction, since the
+# benchmark is itself a volume-weighted average.
 #
-# Disadvantages:
-# - Requires volume prediction
-# - May front-run predictable patterns
+# The cost is that the schedule is only as good as the forecast. And because the shape is
+# predictable, a large VWAP order is something other participants can anticipate and trade ahead
+# of - the schedule's predictability is a liability as well as a control.
 
 # %% [markdown]
 # ### Intraday Volume Patterns from Real Minute Bars
@@ -324,8 +363,8 @@ def load_intraday_panel(
     interval_minutes: int,
 ) -> pl.DataFrame:
     """Aggregate minute bars by symbol, session, and execution-grid bucket."""
-    session_start = 9 * 60 + 30  # 09:30 as minute-of-day
-    session_end = 16 * 60  # 16:00
+    session_start = SESSION_OPEN_HOUR * 60 + SESSION_OPEN_MINUTE
+    session_end = SESSION_CLOSE_HOUR * 60
     panel = (
         load_nasdaq100_bars(
             start_date=start_date,
@@ -359,7 +398,9 @@ def load_intraday_panel(
 
 
 # %%
-N_BUCKETS = (16 * 60 - (9 * 60 + 30)) // INTERVAL_MINUTES
+N_BUCKETS = (
+    SESSION_CLOSE_HOUR * 60 - (SESSION_OPEN_HOUR * 60 + SESSION_OPEN_MINUTE)
+) // INTERVAL_MINUTES
 panel = load_intraday_panel([EXEC_SYMBOL], TAQ_START_DATE, TAQ_END_DATE, INTERVAL_MINUTES)
 print(
     f"Loaded {panel.height:,} interval rows for {panel['symbol'].n_unique()} symbols "
@@ -386,9 +427,15 @@ def day_paths(panel: pl.DataFrame, symbol: str, n_buckets: int) -> dict:
     return out
 
 
+# %% [markdown]
+# ### Split the Sessions Before Estimating Anything
+#
+# The sessions are divided at the calendar date declared in the settings. Everything on or before
+# it estimates the volume profile; everything after it is where both schedules run. Splitting on a
+# date rather than on a fraction of the sample means that adding more data later extends the test
+# window instead of silently moving the estimation window under a result already reported.
+
 # %%
-# Split sessions at a fixed calendar boundary so appending future data cannot
-# move the estimation window. The schedule is fixed before execution begins.
 profile_symbol = EXEC_SYMBOL
 paths_by_day = day_paths(panel, profile_symbol, N_BUCKETS)
 all_days = sorted(paths_by_day)
@@ -409,7 +456,8 @@ print(
 # %%
 # Plot the measured average profile against the actual per-day realizations.
 fig = go.Figure()
-bucket_times = build_time_grid(start, end, INTERVAL_MINUTES)
+profile_start, profile_end = session_grid(estimation_days[0])
+bucket_times = build_time_grid(profile_start, profile_end, INTERVAL_MINUTES)
 for d in estimation_days:
     daily = paths_by_day[d][1] / paths_by_day[d][1].sum()
     _ = fig.add_scatter(
@@ -434,15 +482,28 @@ fig.update_layout(
     height=450,
 )
 fig.update_xaxes(tickformat="%H:%M")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "One faint line per estimation session showing that day's share of volume by interval, with "
+    "the average across them drawn heavy on top. The average traces a U: highest at the open, "
+    "falling to a midday floor, rising into the close. The individual days scatter widely around "
+    "it, most so at the open.",
+)
 
 # %%
-open_share = base_curve[: max(1, N_BUCKETS // 6)].sum()
-midday_share = base_curve[N_BUCKETS // 3 : 2 * N_BUCKETS // 3].sum()
-close_share = base_curve[-max(1, N_BUCKETS // 6) :].sum()
-print(f"Open hour:   {open_share:.1%} of volume")
-print(f"Midday:      {midday_share:.1%} of volume")
-print(f"Close hour:  {close_share:.1%} of volume")
+open_slice = base_curve[: max(1, N_BUCKETS // 6)]
+midday_slice = base_curve[N_BUCKETS // 3 : 2 * N_BUCKETS // 3]
+close_slice = base_curve[-max(1, N_BUCKETS // 6) :]
+even_share = 1 / N_BUCKETS
+for label, part in (
+    ("Opening hour", open_slice),
+    ("Midday", midday_slice),
+    ("Closing hour", close_slice),
+):
+    print(
+        f"{label:<13} {len(part):>2} intervals, {part.sum():>5.1%} of the day's volume, "
+        f"{part.mean() / even_share:>4.1f}x an evenly traded interval"
+    )
 
 # %% [markdown]
 # **Finding**: The measured profile concentrates volume near the open and close
@@ -583,22 +644,17 @@ vwap = VWAPAlgorithm(
     interval_minutes=15,
 )
 
-assert vwap.get_target_at_time(start - timedelta(seconds=1)) == 0
-assert vwap.get_target_at_time(start) == vwap.schedule["cumulative"].item(0)
-assert vwap.get_target_at_time(start + timedelta(minutes=7)) == vwap.schedule["cumulative"].item(0)
-assert vwap.get_target_at_time(vwap.schedule["timestamp"].item(-1)) == vwap.total_shares
-
 print("VWAP Schedule Summary:")
 for k, v in vwap.summary().items():
     print(f"  {k}: {v}")
 
-assert vwap.schedule["shares"].sum() == vwap.total_shares
+if vwap.schedule["shares"].sum() != vwap.total_shares:
+    raise ValueError("The VWAP schedule must allocate exactly the parent order")
 
 # %% [markdown]
-# **Finding**: The VWAP summary is the schedule-level counterpart to the U-curve.
-# It converts a volume forecast into child-order sizes, which means its quality is
-# only as good as the forecast feeding it. The example and held-out evaluation
-# use the same half-open 09:30-16:00 grid.
+# **Reading the summary**: The gap between the largest and smallest interval is the U-curve
+# turned into share counts. Every one of those counts came out of the forecast, so the schedule
+# inherits whatever the forecast got wrong.
 
 # %%
 # Compare TWAP vs VWAP schedules
@@ -663,7 +719,12 @@ fig.update_layout(
     height=600,
     barmode="group",
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Upper panel: paired bars per interval, TWAP flat and VWAP taller at the open and close and "
+    "shorter through midday. Lower panel: their completion curves, TWAP a straight line and VWAP "
+    "steeper at both ends and flatter in the middle.",
+)
 
 # %% [markdown]
 # **Finding**: VWAP reduces share count in the lunch-hour trough and shifts risk
@@ -719,8 +780,9 @@ def execute_day(
     if (price_path <= 0).any() or (volume_path < 0).any():
         raise ValueError("prices must be positive and volumes nonnegative")
     interval_volume = np.maximum(volume_path.astype(float), 1.0)
-    participation = np.sqrt(np.maximum(shares, 0) / interval_volume)
-    exec_price = price_path * (1 + impact_bps / 10000 * participation)
+    participation = np.maximum(shares, 0) / interval_volume
+    impact_fraction = impact_bps / 10_000 * np.sqrt(participation)
+    exec_price = price_path * (1 + impact_fraction)
     realized_vwap = float((exec_price * shares).sum() / shares.sum())
     return realized_vwap, exec_price
 
@@ -751,6 +813,8 @@ vwap_shares = shares_from_profile(base_curve, ORDER_SHARES)
 
 demo_day = execution_days[0]
 demo_price, demo_volume = paths_by_day[demo_day]
+demo_start, demo_end = session_grid(demo_day)
+demo_times = build_time_grid(demo_start, demo_end, INTERVAL_MINUTES)
 
 market_vwap = market_vwap_of(demo_price, demo_volume)
 twap_realized, twap_exec_price = execute_day(twap_shares, demo_price, demo_volume, IMPACT_BPS)
@@ -766,9 +830,10 @@ print(f"TWAP Realized:  ${twap_realized:.4f} ({twap_vs_benchmark:+.1f} bps vs VW
 print(f"VWAP Realized:  ${vwap_realized:.4f} ({vwap_vs_benchmark:+.1f} bps vs VWAP)")
 
 # %% [markdown]
-# **Finding**: On this real session the benchmark comparison separates schedule
-# quality from market direction. The absolute benchmark gaps identify the closer
-# schedule; neither schedule forecasts price direction.
+# **Reading the comparison**: Both schedules traded the same shares on the same day, so the gap
+# between them is entirely down to when each one traded. The sign says which side of the day's
+# average each finished on, and the size says by how much - but on a single session, either could
+# land closer by chance, which is why Part 4 runs all of them.
 
 # %%
 # Visualize execution against the real session
@@ -781,7 +846,7 @@ fig = make_subplots(
 )
 
 _ = fig.add_scatter(
-    x=bucket_times,
+    x=demo_times,
     y=demo_price,
     mode="lines",
     name="Market Price",
@@ -800,7 +865,7 @@ for name, value, color, dash in (
     (f"VWAP realized ({vwap_vs_benchmark:+.1f} bps)", vwap_realized, COLORS["blue"], "dash"),
 ):
     fig.add_scatter(
-        x=[bucket_times[0], bucket_times[-1]],
+        x=[demo_times[0], demo_times[-1]],
         y=[value, value],
         mode="lines",
         name=name,
@@ -815,7 +880,7 @@ for name, value, color, dash in (
 
 # %%
 _ = fig.add_scatter(
-    x=bucket_times,
+    x=demo_times,
     y=np.cumsum(twap_shares) / ORDER_SHARES,
     mode="lines",
     name="TWAP Fill",
@@ -824,7 +889,7 @@ _ = fig.add_scatter(
     col=1,
 )
 _ = fig.add_scatter(
-    x=bucket_times,
+    x=demo_times,
     y=np.cumsum(vwap_shares) / ORDER_SHARES,
     mode="lines",
     name="VWAP Fill",
@@ -835,21 +900,22 @@ _ = fig.add_scatter(
 fig.update_xaxes(title_text="Execution time (ET)", tickformat="%H:%M", row=2, col=1)
 fig.update_yaxes(title_text="Execution price (USD)", tickprefix="$", row=1, col=1)
 fig.update_yaxes(title_text="Order completed", tickformat=".0%", row=2, col=1)
-demo_tracking_gain = abs(twap_vs_benchmark) - abs(vwap_vs_benchmark)
-demo_winner = "VWAP" if demo_tracking_gain > 0 else "TWAP"
 fig.update_layout(
-    title=(
-        f"{demo_winner} finishes {abs(demo_tracking_gain):.1f} bps closer to market VWAP "
-        f"on {demo_day}"
-    ),
+    title=f"Both schedules against one held-out session, {demo_day}",
     height=600,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Upper panel: the session's price path with three horizontal lines marking the market VWAP "
+    "and each schedule's realized average price. Lower panel: cumulative fill against time, with "
+    "the VWAP curve steeper at the open and close and flatter through midday than the straight "
+    "TWAP line.",
+)
 
 # %% [markdown]
-# **Finding**: VWAP clusters fills around the high-liquidity open and close
-# buckets. The computed title identifies which fixed schedule lands closer to
-# market VWAP on this session; that difference is benchmark slippage, not alpha.
+# **Reading the chart**: The lower panel shows where each schedule chose to be exposed. VWAP
+# completes a larger share of the order early and late, so it holds less of the position through
+# the middle of the day and more of its fills happen when the benchmark itself is being set.
 
 # %% [markdown]
 # ## Part 4: Cross-Session Distribution
@@ -895,9 +961,10 @@ session_results = run_across_days(
 )
 
 # %% [markdown]
-# **Finding**: The cross-session distribution matters more than any single day.
-# Signed mean slippage measures bias, while standard deviation, mean absolute error,
-# and the worst absolute deviation measure how tightly a schedule tracks the benchmark.
+# The four measures answer different questions and can disagree. The signed mean says whether a
+# schedule systematically pays above or below the benchmark. The standard deviation, the mean
+# absolute error and the worst single session say how far it strays, regardless of direction. A
+# schedule can have a mean near zero because it misses by a lot in both directions equally.
 
 # %% [markdown]
 # ### Benchmark Tracking Metrics
@@ -982,54 +1049,85 @@ fig.add_vline(x=vwap_mean, line_dash="dash", line_color=COLORS["blue"], row=1, c
 
 fig.update_xaxes(title_text="Slippage vs market VWAP (bps)", range=[hist_start, hist_end])
 fig.update_yaxes(title_text="Held-out sessions", row=1, col=1)
-tracking_winner = tracking_summary.sort("tracking_std_bps")["algorithm"][0]
 fig.update_layout(
-    title=f"{tracking_winner} has the tighter held-out benchmark-slippage distribution",
+    title="Held-out benchmark slippage, one session per observation",
     height=400,
     showlegend=False,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two histograms of slippage against market VWAP on a shared axis, TWAP on the left and VWAP "
+    "on the right. Both centre near zero; the VWAP distribution is visibly narrower and its tails "
+    "reach less far in both directions.",
+)
 
 # %% [markdown]
-# **Finding**: The shared axes and zero lines make benchmark distance comparable.
-# The computed title identifies the tighter held-out distribution; that is evidence
-# about tracking, not alpha or a guarantee of lower cost on every session.
+# **Reading the histograms**: The two panels share an axis, so their widths are directly
+# comparable. The dotted line is exact benchmark tracking and the dashed one is each schedule's
+# own average. What separates the two distributions is their width, not their centre - and a
+# narrower distribution means a more predictable execution price, not a cheaper one.
 
 # %% [markdown]
-# ## Part 5: When to Use TWAP vs VWAP
+# ## Part 5: Choosing Between Them, and What Comes After
 #
-# ### Use TWAP When:
-# - Volume patterns are unpredictable
-# - Intraday liquidity is reasonably stable
-# - Schedule certainty and auditability matter
-# - Simple, robust execution needed
+# The choice turns on one question: is there a volume forecast worth having? A liquid stock with a
+# stable daily pattern gives VWAP something to work with. A thinly traded name, a day with a
+# scheduled event, or a market whose shape shifts with the news does not, and TWAP's indifference
+# to all of it becomes an advantage rather than a limitation.
 #
-# ### Use VWAP When:
-# - Volume patterns are predictable
-# - Tracking VWAP benchmark matters
-# - Stock is liquid with stable patterns
-# - Reducing market impact is priority
+# Three variants relax an assumption each:
 #
-# ### Hybrid Approaches:
-# - **Adaptive VWAP**: Update volume predictions intraday
-# - **Percent of Volume (POV)**: Maintain constant participation rate
-# - **Implementation Shortfall**: Optimize for IS, not VWAP
+# - **Adaptive VWAP** re-estimates the remaining day's volume shape as the session unfolds, instead
+#   of committing to a forecast made before the open. `08_ml_dynamic_execution` builds one.
+# - **Percent of volume** abandons a fixed schedule and instead trades a constant fraction of
+#   whatever volume actually prints. The participation rate is then exactly controlled and the
+#   completion time is not, so an order can fail to finish on a quiet day.
+# - **Implementation shortfall** changes the benchmark rather than the schedule. It scores execution
+#   against the price when the decision was made, not against the day's average, which makes
+#   trading slowly a risk rather than a virtue - a price that moves away while an order is being
+#   worked is a cost under that benchmark and invisible under this one.
+#   `05_almgren_chriss_optimal_execution` optimizes against exactly that trade-off.
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Impact is participation-rate driven**: Because each
-#    slice's impact scales with $\sqrt{\text{shares}/\text{interval volume}}$,
-#    VWAP's volume-tracking schedule reduces modeled impact by routing more shares into
-#    high-liquidity intervals - the mechanism the cross-session test quantifies.
+# 1. **Spread an order in proportion to the liquidity available, not in proportion to time.**
+#    Impact scales with $\sqrt{\text{shares}/\text{interval volume}}$, so a slice sent into a
+#    quiet interval costs more per share than the same slice sent into a busy one. Matching the
+#    volume shape holds that ratio roughly constant across the session.
 #
-# 2. **VWAP trades simplicity for forecast dependence**: Matching the historical
-#    profile can tighten benchmark tracking only when that volume forecast remains
-#    reliable. A bad volume forecast erases the advantage.
+# 2. **Estimate the volume forecast on one window and test it on another.** A profile fitted on
+#    the same days it is evaluated on will always look good. Splitting at a fixed calendar date
+#    is what turns the comparison in this notebook into evidence about a forecast rather than a
+#    description of one.
 #
-# 3. **Neither algorithm "beats the market"**: TWAP and VWAP are
-#    benchmark-tracking schedules, not alpha strategies. Choosing between
-#    them is a risk-management decision about execution-cost variance.
+# 3. **Judge a schedule on the distribution of its outcomes, not on one session.** Any single day
+#    can favour either schedule by chance. Report the spread across sessions and read bias
+#    separately from dispersion: a schedule can sit close to the benchmark on average while
+#    missing it widely in both directions.
 #
-# **Next**: `05_almgren_chriss_optimal_execution` derives the cost-variance
-# optimal trajectory; `08_ml_dynamic_execution` makes the schedule adaptive.
+# 4. **A tighter benchmark distribution is not a better price.** Both schedules are scored against
+#    the day's own volume-weighted average, so tracking it closely means being average, reliably.
+#    Under a benchmark set at the decision price instead, trading slowly is itself a risk.
+#
+# 5. **Predictability is what makes a schedule auditable and what makes it exploitable.** The same
+#    property that lets a desk be held to a VWAP schedule lets other participants anticipate a
+#    large one.
+#
+# ### Known limitations
+#
+# - One symbol, one quarter, one order size. A less liquid name would have a noisier volume
+#   profile and a larger participation rate for the same order.
+# - The impact coefficient is stated rather than calibrated, and it applies to both schedules
+#   identically, so it moves the level of the comparison and not its direction.
+# - Impact is charged against the volume that actually traded in each interval, which includes the
+#   order's own hypothetical shares. A real order of this size would change the volume it is
+#   measured against.
+# - The simulation fills every slice at the interval's volume-weighted price. Real fills arrive at
+#   individual prints, and a slice can go unfilled.
+# - The volume profile is a single average over the estimation window, with no adjustment for
+#   weekday, index events, or expiry.
+#
+# **Next**: `05_almgren_chriss_optimal_execution` derives the schedule that optimizes cost against
+# timing risk rather than tracking a benchmark; `08_ml_dynamic_execution` re-estimates the forecast
+# as the session unfolds.

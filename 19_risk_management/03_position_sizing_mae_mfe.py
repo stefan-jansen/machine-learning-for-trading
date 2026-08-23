@@ -55,7 +55,7 @@ from plotly.subplots import make_subplots
 
 from data import load_etfs
 from utils.paths import get_output_dir
-from utils.style import COLORS, ml4t_palette
+from utils.style import COLORS, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
 # Production defaults; Papermill injects overrides for CI
@@ -116,9 +116,14 @@ print(f"Loaded {len(close_prices):,} aligned daily bars from canonical data")
 # histories, so the MAE/MFE examples reflect diversified risk assets rather than a
 # single idiosyncratic name.
 
+# %% [markdown]
+# ### Volatility, Lagged
+#
+# Every weight below is dated to a session and computed from a window ending the session before.
+# Without that shift, a weight for day t would be built from day t's own volatility - which is only
+# known once the day has closed, by which point the position it sizes has already been held.
+
 # %%
-# The one-step shift makes this a next-session control: a weight dated t uses
-# returns observed through t-1.
 returns = close_prices.pct_change()
 volatility = returns.rolling(20, min_periods=20).std().shift(1) * np.sqrt(252)
 latest_volatility = volatility.dropna().iloc[-1]
@@ -273,7 +278,7 @@ assert np.isclose(inverse_volatility_weights.sum(), 1.0)
 inverse_volatility_df
 
 # %% [markdown]
-# **Interpretation**: The normalized weights sum to 100%. The least volatile ETF
+# **Interpretation**: The normalized weights sum to one by construction. The least volatile ETF
 # receives the largest allocation, but correlations are absent, so this remains a
 # standalone-volatility heuristic rather than a risk-parity solution.
 
@@ -295,7 +300,10 @@ fig.update_layout(
     height=400,
     yaxis={"categoryorder": "total ascending"},
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of position size by stop distance, falling as the stop widens because a fixed risk budget buys fewer shares the further away the stop sits.",
+)
 
 # %% [markdown]
 # **Interpretation**: The chart makes the ranking and budget constraint visible.
@@ -380,10 +388,8 @@ def apply_scale_out_targets(
     exits: list[dict],
     executed_targets: set[int],
 ) -> tuple[float, float]:
-    # Each tranche fires at most once: skip any tranche index already in
-    # executed_targets so a target that stays in-the-money on later bars fires
-    # only on its first crossing, instead of re-firing every bar and draining
-    # the position.
+    # A tranche fires on its first crossing only. Without the guard, a target that stays above its
+    # level on later bars re-fires every bar and drains the position.
     for tranche_idx, (target_return, exit_fraction) in enumerate(config.tranches):
         if (
             tranche_idx in executed_targets
@@ -613,16 +619,17 @@ scale_out_mean = np.mean(scale_out_returns) * 100
 leading_policy = "Full exits" if full_exit_mean >= scale_out_mean else "Scale-outs"
 mean_return_gap = abs(full_exit_mean - scale_out_mean)
 fig.update_layout(
-    title=(
-        f"{leading_policy} lead by {mean_return_gap:.2f} percentage points in the future sample"
-    ),
+    title="Scaling out narrows the return distribution at both ends",
     xaxis_title="Trade Return (%)",
     yaxis_title="Future trades",
     barmode="overlay",
     height=400,
 )
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Bars of inverse-volatility weight per ETF, tallest for the least volatile fund and shortest for the most volatile.",
+)
 
 # %% [markdown]
 # **Interpretation**: The zero line and common bins show whether the policy changes
@@ -755,7 +762,7 @@ excursion_summary
 
 # %% [markdown]
 # **Interpretation**: The split-specific table shows whether the calibration pattern
-# survives into future trades. MAE/MFE remains a post-hoc diagnostic: the future
+# holds on trades the calibration never saw. MAE/MFE remains a post-hoc diagnostic: the future
 # outcome label organizes the evidence but never enters a pre-trade feature.
 
 # %%
@@ -774,7 +781,7 @@ fig = px.scatter(
     y="trade_return",
     color="outcome",
     color_discrete_map={"Winner": COLORS["positive"], "Loser": COLORS["negative"]},
-    title=f"Future losers absorb {future_mae_gap:.1f} points more adverse excursion",
+    title="Losing trades travel further against the entry before they close",
     labels={"mae_pct": "MAE (%)", "trade_return": "Trade return (%)", "outcome": "Outcome"},
 )
 
@@ -782,7 +789,10 @@ fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 fig.add_vline(x=0, line_dash="dash", line_color=COLORS["neutral"])
 
 fig.update_layout(height=450)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two return distributions on shared axes, full exits against scale-outs. The scale-out distribution is narrower at both ends.",
+)
 
 # %% [markdown]
 # **Interpretation**: The future scatter tests whether adverse excursion remains
@@ -801,14 +811,17 @@ fig = px.scatter(
     y="trade_return",
     color="outcome",
     color_discrete_map={"Winner": COLORS["positive"], "Loser": COLORS["negative"]},
-    title=f"Future winners reach {future_mfe_gap:.1f} points more favorable excursion",
+    title="Winning trades reach further in their favour before they close",
     labels={"mfe_pct": "MFE (%)", "trade_return": "Trade return (%)", "outcome": "Outcome"},
 )
 
 fig.add_hline(y=0, line_dash="dash", line_color=COLORS["neutral"])
 
 fig.update_layout(height=450)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of trade return against maximum adverse excursion, coloured by outcome. Losing trades cluster at deeper adverse excursions and the two groups overlap substantially in the middle.",
+)
 
 # %% [markdown]
 # **Interpretation**: The favorable-excursion gap describes the future sample. It
@@ -816,12 +829,18 @@ fig.show()
 # PnL objective and cost-aware forward evaluation.
 
 # %% [markdown]
-# ### 6.1 Descriptive MAE Separation
+# ### Choosing a Stop Distance from Adverse Excursions
 #
-# For each distance, compare the share of eventual losers and winners whose paths
-# breach that level. Their difference is a class-separation score, not financial
-# net benefit. We select on calibration trades and report the frozen distance on
-# future trades.
+# A stop distance is worth setting where the trades that end badly have already travelled past it
+# and the trades that end well mostly have not. For each candidate distance, the code below counts
+# the share of eventually-losing trades whose worst excursion breached it, and the share of
+# eventually-profitable trades that also breached it. The difference between those two shares says
+# how much the distance discriminates.
+#
+# What that difference is not is a profit. It counts breaches, not the money a stop would have
+# saved or the gains it would have cut short, and a distance that discriminates well can still lose
+# money once execution is priced. The distance is chosen on the calibration trades and then frozen,
+# so the future column is a test rather than a second look.
 
 
 # %%
@@ -870,9 +889,10 @@ stop_analysis.write_parquet(OUTPUT_DIR / "stop_calibration_tradeoff.parquet")
 threshold_summary
 
 # %% [markdown]
-# **Interpretation**: The calibration row chooses the distance with the largest
-# descriptive winner/loser separation; the future row shows whether that frozen
-# distinction persists. Neither row measures the PnL effect of executing a stop.
+# **Interpretation**: The first row is the distance that discriminated best on the calibration
+# trades. The second applies that same distance, unchanged, to trades from a later period. If the
+# two rows are close, the distance describes something about how this instrument moves rather than
+# something about the particular trades it was chosen on. Neither row prices the stop.
 
 # %%
 fig = go.Figure()
@@ -902,12 +922,15 @@ fig.add_vline(
     annotation_text=f"Calibration choice: {selected_stop_distance:.1f}%",
 )
 fig.update_layout(
-    title=f"The frozen MAE threshold retains {future_selected_score:.1f} points of future separation",
+    title="The distance chosen on calibration still separates on future trades",
     xaxis_title="Stop distance (%)",
     yaxis_title="Loser minus winner breach rate (percentage points)",
     height=450,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A scatter of trade return against maximum favorable excursion, coloured by outcome. Winning trades reach further in their favour, with overlap near the origin.",
+)
 
 # %% [markdown]
 # **Interpretation**: A stable future separation supports the threshold as a
@@ -915,7 +938,7 @@ fig.show()
 # still required before the distance can be judged by return or utility.
 
 # %% [markdown]
-# ### 6.2 Calibration-Window Close-Path Percentiles
+# ### Excursion Percentiles by Horizon
 #
 # The trade-level MAE/MFE analysis above uses intraday highs and lows for specified
 # entries. The complementary close-path distribution uses only bars after a close
@@ -1021,13 +1044,13 @@ fig.update_xaxes(title_text="Horizon (bars)")
 fig.update_yaxes(title_text="Excursion (%)")
 fig.add_hline(y=0, line_dash="dot", line_color=COLORS["neutral"])
 fig.update_layout(
-    title=(
-        f"At 60 bars, future paths reach {future_60['mfe_p75_pct']:.1f}% favorable "
-        f"and {future_60['mae_p25_pct']:.1f}% adverse excursions"
-    ),
+    title="Both excursions widen with the horizon, and not symmetrically",
     height=430,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two curves of separation score against stop distance, calibration and future, with a dotted line at the distance chosen on calibration. Both rise to a broad maximum and the future curve is the noisier of the two.",
+)
 
 # %% [markdown]
 # **Interpretation**: Solid calibration curves and dashed future curves make the
@@ -1037,7 +1060,7 @@ fig.show()
 # %% [markdown]
 # **Trade-level vs path-level analysis**:
 #
-# | Aspect | Trade MAE/MFE (§6) | Close-path percentiles (§6.2) |
+# | Aspect | Trade MAE/MFE | Close-path percentiles |
 # |---|---|---|
 # | Purpose | Post-hoc trade diagnostics | Horizon-conditioned historical priors |
 # | Input | Entry, exit, future highs/lows | Close paths after a close entry |
@@ -1096,17 +1119,21 @@ fig = go.Figure(
     )
 )
 fig.update_layout(
-    title=f"Maximum conviction doubles the {base_pct:.0%} base allocation",
+    title="Conviction scales the position between half and double the base",
     xaxis_title="Conviction score",
     yaxis_title="Position size (% of portfolio)",
     height=350,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Excursion percentile bands widening with the holding horizon, favorable above zero and adverse below, with the adverse side widening faster.",
+)
 
 # %% [markdown]
-# **Interpretation**: The deterministic mapping spans 1%-10% for a 5% base allocation.
-# The formula validates its input range, but the score itself still needs calibration
-# before larger values can justify more capital.
+# **Interpretation**: The mapping is a deterministic function of the score, bounded above and
+# below so that no single conviction reading can concentrate the book. What it cannot supply is
+# the score. A conviction number that has not been shown to relate to realized outcomes will size
+# positions confidently in the wrong direction, and the bounds are what limit the damage.
 
 # %% [markdown]
 # ## 8. Conformal Prediction Intervals and Position Sizing
@@ -1128,33 +1155,49 @@ fig.show()
 # %% [markdown]
 # ## 9. Key Takeaways
 #
-# ### Position Sizing Methods
+# 1. **Size a position from the loss you will accept, not the gain you hope for.** Fixed-fractional
+#    sizing starts from a stop distance and a risk budget and solves for the share count. That
+#    ordering is what makes the risk per trade a decision rather than a consequence.
 #
-# | Method | Best For | Key Parameter |
-# |--------|----------|---------------|
-# | **Fixed Fractional** | General use | Risk per trade % |
-# | **Inverse Volatility** | Transparent standalone-risk heuristic | Lagged volatility |
-# | **Kelly Criterion** | Maximizing growth | Win rate, W/L ratio (Ch17) |
-# | **Conviction-Based** | Signal-driven strategies | Signal strength |
-# | **Conformal-Adjusted** | Uncertainty-aware sizing | Versioned interval width (Ch11/Ch17) |
+# 2. **Round to whole shares before reporting the risk.** The share count that can actually be sent
+#    is an integer, and rounding it changes both the position's value and the loss the stop would
+#    realize. Reporting the unrounded figure overstates how precisely the risk budget was hit.
 #
-# ### MAE/MFE Insights
+# 3. **Name a sizing heuristic by what it does.** Weighting by the inverse of each asset's own
+#    volatility equalizes standalone risk contributions and ignores the correlations between them.
+#    That is a different thing from risk parity, and calling it risk parity implies a covariance
+#    calculation nobody performed.
 #
-# - **MAE/MFE describes realized paths**: Entry timing excludes pre-entry bar extremes
-# - **Class separation is not financial value**: A stop requires an execution-aware PnL objective
-# - **Calibration must precede evaluation**: Freeze the threshold before testing future trades
-# - **Close-path percentiles are priors**: Future rows reveal whether the distribution drifts
+# 4. **Lag every input to an adaptive control.** A weight dated to a session must be computed from
+#    a window ending the session before, because the session's own volatility is not known until it
+#    has closed.
 #
-# ### Best Practices
+# 5. **Measure excursions from the bar after entry.** A position opened at the close cannot
+#    experience that bar's earlier high or low, and including them inflates both excursions and
+#    makes every stop look more likely to have been hit than it was.
 #
-# 1. **Risk first**: Size positions based on acceptable loss, not profit potential
-# 2. **Lag adaptive controls**: A decision at $t$ uses information available by $t-1$
-# 3. **Name heuristics precisely**: Inverse volatility is not portfolio risk targeting
-# 4. **Reconcile execution units**: Integer shares determine position value and realized stop risk
-# 5. **Evaluate policies forward**: Threshold selection and assessment belong to separate windows
-# 6. **Next**: Continue to [`04_factor_exposure`](04_factor_exposure.ipynb) to measure portfolio risk sources.
-
-# %% [markdown]
-# ---
-# *Notebook: position_sizing_mae_mfe*
-# *ML4T 3rd Edition - Chapter 19: Risk Management*
+# 6. **Separation is not profit.** Counting how much more often losing trades breach a distance
+#    than winning ones says whether the distance discriminates. It says nothing about what
+#    executing the stop would have earned or cost, which needs the trades re-run with the rule
+#    applied and its costs charged.
+#
+# 7. **Choose a threshold on one window and test it on a later one.** Reporting the distance that
+#    scored best on the trades used to pick it is not evidence about anything. The value of the
+#    calibration-then-future structure here is that the second column can disappoint.
+#
+# ### Known limitations
+#
+# - The excursion analysis runs on one symbol from a four-ETF panel, over one calibration window
+#   and one future window. A single future window can agree with the calibration by chance.
+# - Trades are opened on a fixed schedule and held for a fixed number of sessions, so the
+#   excursion distributions describe holding periods rather than a strategy's actual trades.
+# - No cost is charged anywhere in this notebook. A scale-out policy that exits in three tranches
+#   pays three times the fixed costs of a single exit, which is enough to reverse the comparison in
+#   Section 5 at realistic cost levels.
+# - The conviction mapping is a stated function of a score the notebook does not produce or
+#   validate. It bounds the position; it does not make the score informative.
+# - Inverse-volatility weights use a trailing window and are reported at one date, so they show the
+#   construction rather than how the allocation would have turned over.
+#
+# **Next**: [`04_factor_exposure`](04_factor_exposure.ipynb) asks what a portfolio sized this way is
+# actually exposed to, which is a different question from how much of it to hold.

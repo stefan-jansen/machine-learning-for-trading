@@ -597,3 +597,32 @@ def test_partial_and_preview_results_are_rejected_from_canonical_sets(tmp_path: 
     with pytest.raises(KeyError):
         Result.open(study, preview.hash)
     assert Result.open(study, preview.hash, include_preview=True).hash == preview.hash
+
+
+def test_fitted_states_come_back_in_fold_order_not_filename_order(tmp_path: Path) -> None:
+    """A lexicographic sort puts fold_10 before fold_2, and one case study declares 16 splits."""
+    import joblib
+
+    from case_studies.research import TrainingResult
+
+    study = _study(tmp_path)
+    db = _open_registry(study.root)
+    try:
+        db.execute(
+            "INSERT INTO training_runs "
+            "(training_hash, family, label, spec_json, created_at) VALUES (?,?,?,?,?)",
+            ("many-folds", "linear", "fwd_ret_21d", "{}", "2024-01-01"),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    models = study.root / "run_log" / "training" / "many-folds" / "models"
+    models.mkdir(parents=True)
+    for fold in range(12):
+        joblib.dump({"fold": fold}, models / f"fold_{fold}.joblib")
+
+    reopened = Result.open(study, "many-folds")
+
+    assert isinstance(reopened, TrainingResult)
+    assert [state["fold"] for state in reopened.fitted_states()] == list(range(12))

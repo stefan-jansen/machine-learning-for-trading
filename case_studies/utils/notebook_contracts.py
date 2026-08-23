@@ -11,6 +11,25 @@ _BACKTEST_EXCLUDED_FAMILIES: set[str] = {"causal_dml"}
 # coefficient for a date. 5 at every case-study call site; the library default is 10.
 IC_MIN_OBS = 5
 
+
+def defined_ic(frame: pl.DataFrame, ic_col: str = "ic") -> pl.DataFrame:
+    """Drop the dates of an IC series whose coefficient is undefined.
+
+    A date with fewer than `IC_MIN_OBS` names, or with every prediction or every
+    return tied, has no rank correlation. ml4t-diagnostic 0.1.2 and later report
+    such a date as null, but polars treats null and NaN as different values and
+    `daily_metrics.parquet` files written before that release carry NaN instead.
+    A `drop_nulls` alone therefore leaves the NaN in place, and one NaN turns any
+    mean, std or rolling mean taken afterwards into NaN.
+
+    Use this wherever an IC series is read back from disk or crosses into a
+    statistic, rather than `drop_nulls(ic_col)`.
+    """
+    if ic_col not in frame.columns:
+        return frame
+    return frame.filter(pl.col(ic_col).is_not_null() & pl.col(ic_col).is_finite())
+
+
 # The predictions parquet schema is not uniform across the nine case studies, so the
 # validity rule has to resolve its own column names before it can count anything.
 # Measured: etfs / fx_pairs / us_firm_characteristics use prediction+actual+symbol,

@@ -639,12 +639,12 @@ show_plotly_with_alt(
 #
 # **For a penalized linear model, direction is a far easier target than size, and the gap is not
 # small.** Read
-# `best_ic` down the label frame. On `fwd_ret_8h` the best configuration reaches under a
-# thousandth and four of twenty-eight clear zero; on `fwd_dir_8h`, which is the sign of that same
-# return at that same horizon, the best reaches about 0.032 and every one of the twelve
-# configurations is above zero. The three-class cut behaves the same way. These are the same
-# features, the same folds, the same contracts and the same timestamps - the only thing that
-# changed is whether the target is the move or its sign.
+# `best_ic` and `above_zero` down the `labels_reached` frame. On `fwd_ret_8h` the leading configuration
+# reaches a fraction of a thousandth and most of the grid sits below zero; on `fwd_dir_8h`,
+# which is the sign of that same return at that same horizon, it reaches an order of magnitude
+# more and the whole grid is above zero. The three-class cut behaves the same way. These are
+# the same features, the same folds, the same contracts and the same timestamps - the only
+# thing that changed is whether the target is the move or its sign.
 #
 # The candidate explanation is where the predictable part of the return sits. Ranking magnitudes
 # requires getting the size of each move roughly right, and if the cross-section of returns is
@@ -654,15 +654,15 @@ show_plotly_with_alt(
 # test it; what the grid establishes is the gap, not its cause.
 #
 # What the gap is not is a change of scale. IC is a rank correlation in both cases, computed the
-# same way over the same timestamps against the same continuous outcome, so 0.032 against 0.0008
-# is a comparison of like with like. The AUC column agrees at its own scale: the best direction
-# configuration scores 0.513 where a coin scores 0.5, which is the pairwise reading of the same
-# small edge.
+# same way over the same timestamps against the same continuous outcome, so the two columns are
+# a comparison of like with like. The AUC column agrees at its own scale: the leading direction
+# configuration scores a little above the half a coin scores, which is the pairwise reading of
+# the same small edge.
 #
 # This is the comparison the case study was set up to make and could not make until the notebook
-# fitted every label in one run. It does not say the direction models are worth trading: an IC of
-# 0.032 over fewer than 20 contracts and two folds is still small, and `13_backtest` is where it
-# has to survive costs and funding.
+# fitted every label in one run. It does not say the direction models are worth trading: a few
+# hundredths of rank correlation over fewer than 20 contracts and two folds is still small, and
+# `13_backtest` is where it has to survive costs and funding.
 #
 # Nor does it generalize past this family. [`07_gbm`](07_gbm.ipynb) fits the same four labels with
 # a tree ensemble and the gap closes: both formulations land in the same place. So what is
@@ -670,7 +670,8 @@ show_plotly_with_alt(
 # about which target is predictable at this horizon.
 #
 # **On `fwd_ret_8h` the L1 path reduces to one column, and the ranking stops moving exactly where
-# it does.** Past `alpha_frac` 0.7 the non-zero coefficient count for that label reaches one, and
+# it does.** Past `alpha_frac = 0.7`, a declared point on the grid, the non-zero coefficient
+# count for that label reaches one, and
 # from there the information coefficient is identical across configurations. That is the
 # mechanical signature of a path that has run out: once a single coefficient is left, more penalty
 # scales it without changing the order it induces, and a rank correlation only sees the order. The
