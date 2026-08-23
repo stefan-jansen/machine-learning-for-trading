@@ -14,31 +14,38 @@
 # ---
 
 # %% [markdown]
-# # Canonical Engine Parity: VectorBT OSS
+# # Same money, different trades
 #
 # **Docker image**: `ml4t`
 #
-# The earlier Chapter 16 parity notebooks established two stronger results:
+# ## Purpose
+# The other two parity notebooks in this chapter compare event-driven engines, and both reach
+# agreement on the trade count and on the terminal value. This one compares a vectorized engine,
+# and the result is split: the two accounts finish on the same dollar to fourteen decimal places
+# and they get there through a slightly different number of trades.
 #
-# - `15_lean_engine_parity`: LEAN matches `ml4t-backtest[lean]` on the canonical benchmark
-# - `17_backtrader_zipline_engine_parity`: Backtrader and Zipline now match the same benchmark
+# That combination is worth a notebook on its own, because it is the case where the two obvious
+# summary statistics disagree about whether the engines match. Which of them is the right answer
+# depends on what the comparison is for, and the notebook is about making that choice explicitly
+# rather than picking whichever number is more flattering.
 #
-# VectorBT OSS is different. The canonical benchmark reaches **exact terminal-value
-# parity** but still keeps a small **trade-count residual**. That is still useful
-# to readers because it shows the distinction between:
+# ## Learning objectives
 #
-# - matching the economic outcome
-# - matching the exact order decomposition
+# - Read a parity result where the economic outcome matches and the order decomposition does not,
+#   and say which surface matters for a given purpose.
+# - Recognise that a lower trade count is not automatically better or worse, and what would have to
+#   be measured to know.
+# - Check an artifact against the same contract its sibling notebooks check, rather than trusting
+#   whatever the file happens to contain.
 #
-# **Learning Objectives**:
-# - Inspect the canonical VectorBT OSS parity benchmark used by `ml4t-backtest`
-# - Compare trade-gap, value-gap, and runtime between VectorBT OSS and `ml4t-backtest`
-# - Understand why exact terminal-value parity can coexist with a small trade residual
-# - Re-run the benchmark locally when `vectorbt` is installed
+# ## Book reference
+# Chapter 16, Section 16.3 (vectorized and event-driven backtesting).
 #
-# **Book Reference**: Chapter 16, Section 16.3 (Vectorized and Event-Driven Backtesting)
+# ## Prerequisites
 #
-# **Prerequisites**: `07_engine_divergence_anatomy` and `17_backtrader_zipline_engine_parity`
+# - `07_engine_divergence_anatomy`, for what makes two engines differ.
+# - `17_backtrader_zipline_engine_parity`, which reaches agreement on both surfaces and so gives
+#   this notebook something to contrast against.
 
 # %% [markdown]
 # ## Setup
@@ -48,25 +55,23 @@
 
 import importlib.util
 import json
+import math
+import os
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
-import matplotlib.pyplot as plt
 import ml4t.backtest as ml4t_backtest_pkg
 import polars as pl
 
 from utils.paths import get_chapter_dir, get_output_dir
-from utils.style import COLORS
 
 # %% tags=["parameters"]
-# Production defaults — Papermill injects overrides after this cell
+# Production defaults - Papermill injects overrides after this cell
 RUN_LIVE = False
 SCENARIO_ID = "multi_250_20yr"
 REAL_DATA_PATH = ""
+ARTIFACT_SCENARIO_LABEL = "250 assets, 20 years daily"
 
 # %%
 OUTPUT_DIR = get_output_dir(16, "vectorbt_engine_parity")
@@ -74,7 +79,7 @@ CACHED_ARTIFACT_PATH = get_chapter_dir(16) / "resources" / "vectorbt_parity_resu
 LIVE_ARTIFACT_PATH = OUTPUT_DIR / "vectorbt_parity_results_live.json"
 
 # %% [markdown]
-# ## 1. Source of Truth
+# ## 1. What produced the numbers
 #
 # This notebook uses the same validation source of truth as the other external
 # engine notebooks: `ml4t-backtest/validation/benchmark_suite.py`.
@@ -90,21 +95,21 @@ LIVE_ARTIFACT_PATH = OUTPUT_DIR / "vectorbt_parity_results_live.json"
 
 # %%
 def resolve_backtest_repo() -> Path | None:
-    """Resolve the sibling ml4t-backtest repository root.
+    """Find a checkout carrying the validation harness, or None if there is not one.
 
-    Returns None when the validation harness is not available (e.g. CI),
-    which disables the live rerun path but lets the cached artifact work.
+    `ML4T_BACKTEST_REPO` names it explicitly; failing that the installed package's own
+    ancestry is searched, which finds it in an editable install. Nothing guesses at a path
+    under the home directory: a resolver that knows where a repository lives on the author's
+    machine fails silently and differently on everybody else's.
     """
-    package_path = Path(ml4t_backtest_pkg.__file__).resolve()
-    for parent in package_path.parents:
-        if (parent / "validation" / "benchmark_suite.py").exists():
-            return parent
-
-    fallback = Path.home() / "ml4t" / "libraries" / "ml4t-backtest"
-    if (fallback / "validation" / "benchmark_suite.py").exists():
-        return fallback
-
-    return None
+    candidates: list[Path] = []
+    override = os.environ.get("ML4T_BACKTEST_REPO")
+    if override:
+        candidates.append(Path(override).expanduser())
+    candidates.extend(Path(ml4t_backtest_pkg.__file__).resolve().parents)
+    return next(
+        (c for c in candidates if (c / "validation" / "benchmark_suite.py").is_file()), None
+    )
 
 
 # %% [markdown]
@@ -115,19 +120,17 @@ def resolve_backtest_repo() -> Path | None:
 
 # %%
 def find_real_data_path(explicit_path: str) -> Path | None:
-    """Locate the real daily equity parquet used by the benchmark harness."""
+    """Locate the daily equity parquet the benchmark reads, via the notebook parameter or
+    the canonical data root. There is no third place to look."""
     candidates: list[Path] = []
     if explicit_path:
         candidates.append(Path(explicit_path).expanduser())
-
-    candidates.append(
-        Path.home() / "Dropbox" / "ml4t" / "data" / "equities" / "us_equities.parquet"
-    )
-
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
+    data_root = os.environ.get("ML4T_DATA_PATH")
+    if data_root:
+        candidates.append(
+            Path(data_root) / "equities" / "market" / "us_equities" / "us_equities.parquet"
+        )
+    return next((path for path in candidates if path.is_file()), None)
 
 
 # %%
@@ -135,12 +138,12 @@ BACKTEST_REPO = resolve_backtest_repo()
 BENCHMARK_SUITE = BACKTEST_REPO / "validation" / "benchmark_suite.py" if BACKTEST_REPO else None
 REAL_DATA_FILE = find_real_data_path(REAL_DATA_PATH)
 
-print(f"Backtest repo:   {BACKTEST_REPO or 'not found (cached artifact only)'}")
-print(f"Benchmark suite: {BENCHMARK_SUITE or 'not found'}")
-print(f"Real data:       {REAL_DATA_FILE if REAL_DATA_FILE else 'not found'}")
+print(f"Validation harness: {'found' if BACKTEST_REPO else 'not found (cached artifact only)'}")
+print(f"Benchmark suite:    {BENCHMARK_SUITE.name if BENCHMARK_SUITE else 'not found'}")
+print(f"Real data:          {REAL_DATA_FILE.name if REAL_DATA_FILE else 'not found'}")
 
 # %% [markdown]
-# ## 2. Runtime Prerequisites
+# ## 2. What a live rerun would need
 #
 # The cached artifact path should always work. A live rerun requires:
 #
@@ -158,12 +161,12 @@ def check_live_prerequisites() -> pl.DataFrame:
         {
             "requirement": "benchmark_suite.py",
             "ready": BENCHMARK_SUITE is not None and BENCHMARK_SUITE.exists(),
-            "detail": BENCHMARK_SUITE.as_posix() if BENCHMARK_SUITE else "not found",
+            "detail": BENCHMARK_SUITE.name if BENCHMARK_SUITE else "set ML4T_BACKTEST_REPO",
         },
         {
             "requirement": "real daily parquet",
             "ready": REAL_DATA_FILE is not None,
-            "detail": REAL_DATA_FILE.as_posix() if REAL_DATA_FILE else "not found",
+            "detail": REAL_DATA_FILE.name if REAL_DATA_FILE else "set ML4T_DATA_PATH",
         },
         {
             "requirement": "vectorbt",
@@ -178,26 +181,77 @@ prereq_df = check_live_prerequisites()
 prereq_df
 
 # %% [markdown]
-# ## 3. Load the Cached Parity Snapshot
+# ## 3. Load the artifact and check what it can support
 #
-# The committed artifact captures the latest live canonical benchmark rerun.
-# The current result is important because it shows a narrow but real distinction:
-#
-# - trade-count parity is not exact
-# - final-value parity is exact to floating-point noise
+# The committed artifact records a benchmark run. As in the sibling notebooks, reading a recorded
+# result is weaker than reproducing one, and what can still be done is check the file against a
+# contract: that it describes the scenario it claims, and that its summary reproduces from its own
+# primitives.
 
 
 # %%
 def load_parity_artifact(path: Path) -> dict:
-    """Load a cached or live parity artifact."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Load an artifact and check everything it can be checked on from inside itself.
+
+    The same contract the other parity notebooks in this chapter apply: the file names the
+    scenario it claims, carries one row for the engine pair it claims, and every derived
+    figure in that row reproduces from the primitives beside it. A summary that was edited,
+    or that came from different primitives, fails the last check.
+    """
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    if artifact.get("scenario_id") != SCENARIO_ID:
+        raise ValueError(
+            f"artifact scenario is {artifact.get('scenario_id')!r}, expected {SCENARIO_ID!r}"
+        )
+    if artifact.get("scenario_label") != ARTIFACT_SCENARIO_LABEL:
+        raise ValueError(f"artifact scenario label is {artifact.get('scenario_label')!r}")
+    if artifact.get("data_source") != "real":
+        raise ValueError("this comparison is only meaningful on real market data")
+    results = artifact.get("results", [])
+    if len(results) != 1 or results[0].get("engine_id") != "vectorbt":
+        raise ValueError("artifact must contain exactly one VectorBT row")
+
+    result = results[0]
+    for field in ("ml4t_num_trades", "reference_num_trades"):
+        value = result.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{field} must be a positive integer")
+    for field in (
+        "ml4t_final_value",
+        "reference_final_value",
+        "ml4t_runtime_sec",
+        "reference_runtime_sec",
+    ):
+        value = result.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{field} must be numeric")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{field} must be positive and finite")
+
+    ml4t_trades, reference_trades = result["ml4t_num_trades"], result["reference_num_trades"]
+    value_gap = abs(result["ml4t_final_value"] - result["reference_final_value"])
+    derived = {
+        "trade_gap": ml4t_trades - reference_trades,
+        "trade_gap_pct": (ml4t_trades - reference_trades) / reference_trades,
+        "final_value_gap_abs": value_gap,
+        "final_value_gap_pct": value_gap / abs(result["reference_final_value"]),
+        "runtime_speedup": result["reference_runtime_sec"] / result["ml4t_runtime_sec"],
+    }
+    for field, expected in derived.items():
+        if not math.isclose(
+            float(result.get(field, math.nan)), expected, rel_tol=1e-9, abs_tol=1e-12
+        ):
+            raise ValueError(f"{field} does not reproduce from the primitives in its own row")
+    return artifact
 
 
 payload = load_parity_artifact(CACHED_ARTIFACT_PATH)
-payload["artifact_source"], payload["scenario_label"]
+print(f"Artifact:   {CACHED_ARTIFACT_PATH.name}")
+print(f"Scenario:   {payload['scenario_label']}")
+print("Contents:   one engine pair, identity and derived figures verified")
 
 # %% [markdown]
-# ## 4. Optional Live Rerun
+# ## 4. Reproducing it here instead
 #
 # When `RUN_LIVE = True`, the notebook reruns the canonical benchmark for:
 #
@@ -235,11 +289,10 @@ def run_framework_benchmark(
 
 
 # %% [markdown]
-# `build_live_payload` assembles the parity-comparison row from two live
-# benchmark results — ml4t-backtest (strict VectorBT profile) and VectorBT
-# OSS — and computes trade-gap, value-gap, and runtime-speedup metrics
-# expressed as fractions (the prose displays them in bps with explicit
-# `× 10_000` derivations).
+# `build_live_payload` takes the two live benchmark results, one from ml4t-backtest under its
+# strict VectorBT profile and one from VectorBT itself, and derives the trade gap, the value gap
+# and the runtime ratio. All three are stored as fractions and displayed in basis points, so the
+# artifact and the table cannot drift apart in units.
 
 
 # %%
@@ -286,7 +339,7 @@ def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) ->
     return {
         "artifact_source": "live benchmark_suite.py rerun",
         "scenario_id": scenario_id,
-        "scenario_label": ml4t_result["scenario"],
+        "scenario_label": ARTIFACT_SCENARIO_LABEL,
         "data_source": "real",
         "cached": False,
         "limitations": [
@@ -303,30 +356,30 @@ def build_live_payload(ml4t_result: dict, vbt_result: dict, scenario_id: str) ->
 
 
 ready_for_live = bool(prereq_df["ready"].all())
-if RUN_LIVE and ready_for_live and REAL_DATA_FILE is not None:
-    ml4t_json = OUTPUT_DIR / "ml4t_vbt_strict_live.json"
-    vbt_json = OUTPUT_DIR / "vbt_oss_live.json"
-
-    ml4t_result = run_framework_benchmark("ml4t-vbt-strict", SCENARIO_ID, ml4t_json, REAL_DATA_FILE)
-    vbt_result = run_framework_benchmark("vbt-oss", SCENARIO_ID, vbt_json, REAL_DATA_FILE)
+if RUN_LIVE:
+    if not ready_for_live or REAL_DATA_FILE is None:
+        raise RuntimeError(
+            "Live rerun requested with missing prerequisites: "
+            + ", ".join(prereq_df.filter(~pl.col("ready"))["requirement"].to_list())
+        )
+    ml4t_result = run_framework_benchmark(
+        "ml4t-vbt-strict", SCENARIO_ID, OUTPUT_DIR / "ml4t_vbt_strict_live.json", REAL_DATA_FILE
+    )
+    vbt_result = run_framework_benchmark(
+        "vbt-oss", SCENARIO_ID, OUTPUT_DIR / "vbt_oss_live.json", REAL_DATA_FILE
+    )
     payload = build_live_payload(ml4t_result, vbt_result, SCENARIO_ID)
     LIVE_ARTIFACT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"Saved live artifact: {LIVE_ARTIFACT_PATH}")
-elif RUN_LIVE and not ready_for_live:
-    print("Live rerun requested, but prerequisites are incomplete. Using cached artifact instead.")
+    print(f"Saved a live artifact: {LIVE_ARTIFACT_PATH.name}")
 else:
-    print("Using cached parity artifact.")
+    print("Reading the committed artifact; no live benchmark was requested.")
 
 # %% [markdown]
-# ## 5. Build the Comparison Table
+# ## 5. The comparison
 #
-# The relevant parity surface here is slightly different from LEAN, Backtrader,
-# and Zipline:
-#
-# - trade-gap percentage is still small but non-zero
-# - final-value-gap percentage is effectively zero
-# - runtime speedup is below `1x`, meaning native VectorBT OSS is faster on
-#   this particular canonical vectorized benchmark
+# Three columns are worth reading together, because they do not all point the same way: the trade
+# gap is small and not zero, the value gap is zero to the precision a float can express, and the
+# speedup is below one, meaning the vectorized engine finished this fixture first.
 
 
 # %%
@@ -353,129 +406,74 @@ comparison_df = (
 comparison_df
 
 # %% [markdown]
-# ### Gap summary
+# ## 6. What the residual is and is not
 #
-# The benchmark shows a very tight economic match with a small order-count
-# residual.
-
+# The two accounts end within a fifteenth decimal place of each other, and they took a different
+# number of trades to get there. Nothing about that is contradictory. Two engines can hold the same
+# positions on the same days and disagree about how many orders it took, if one of them bundles
+# adjacent moves in the same instrument and the other does not, or if one emits a zero-quantity
+# order the other suppresses.
+#
+# What the trade-count difference does *not* tell you is which engine is right, and it is worth
+# being clear about why. A lower count could mean orders were bundled, which is a reporting
+# difference and costs nothing. It could equally mean fills were missed, which is an execution
+# difference and costs something. Distinguishing the two needs the fills, and this artifact does
+# not carry them - so the honest statement is that the accounts agree economically and their order
+# decompositions differ by an amount nobody here has attributed.
+#
+# The runtime is the other asymmetry, and it points the other way from the event-driven notebooks.
+# A vectorized engine on a benchmark built out of dense array operations is playing to its
+# strength. That is a statement about this fixture, not about either engine in general.
 
 # %%
 row = payload["results"][0]
-print(f"Engine:              {row['engine_label']}")
-print(f"Profile:             {row['profile']}")
-print(f"Trade gap:           {row['trade_gap']:,} ({row['trade_gap_pct']:.4%})")
-print(f"Final value gap:     ${row['final_value_gap_abs']:,.6f} ({row['final_value_gap_pct']:.4%})")
-print(f"ml4t speedup:        {row['runtime_speedup']:.2f}x")
-print(f"Status:              {row['status']}")
-
-# %% [markdown]
-# ## 6. Visual Comparison
-#
-# The chart below highlights the asymmetry of the current VectorBT result:
-# nearly identical terminal value, but a small residual trade gap.
-
-
-# %%
-labels = ["Trade gap (bps)", "Value gap (bps)", "ml4t speedup (x)"]
-values = [
-    row["trade_gap_pct"] * 10_000,
-    row["final_value_gap_pct"] * 10_000,
-    row["runtime_speedup"],
-]
-
-fig, axes = plt.subplots(1, 3, figsize=(11, 4))
-_panel_colors = [COLORS["amber"], COLORS["slate"], COLORS["blue"]]
-for ax_i, (lbl, val, color) in enumerate(zip(labels, values, _panel_colors)):
-    axes[ax_i].bar([""], [val], color=color, width=0.4)
-    axes[ax_i].set_title(lbl)
-    axes[ax_i].axhline(0.0, color=COLORS["neutral"], linewidth=1.0)
-    axes[ax_i].set_ylabel(lbl.split("(")[-1].rstrip(")") if "(" in lbl else "")
-    axes[ax_i].text(
-        0,
-        val,
-        f"{val:.2f}",
-        ha="center",
-        va="bottom" if val >= 0 else "top",
-        fontsize=10,
-        color=COLORS["slate"],
-    )
-fig.suptitle("Canonical VectorBT OSS Parity")
-fig.tight_layout()
-fig.show()
-
-# %% [markdown]
-# ## 7. Interpret the Residual
-#
-# VectorBT OSS is the cleanest example in the chapter of why "same final PnL"
-# is not always the same thing as "same trade decomposition."
-
-
-# %%
-_gap_direction = "more" if row["trade_gap"] >= 0 else "fewer"
-_trade_gap_str = (
-    f"{abs(int(row['trade_gap'])):,} {_gap_direction} ml4t trades "
-    f"than {int(row['reference_num_trades']):,} benchmark trades"
-    f" ({row['trade_gap_pct'] * 10_000:.3f} bps)"
-)
-interpretation_df = pl.DataFrame(
+pl.DataFrame(
     {
-        "dimension": [
-            "execution surface",
-            "share model",
-            "timing model",
-            "economic result",
-            "remaining mismatch",
+        "surface": [
+            "terminal value",
+            "trade count",
+            "runtime",
         ],
-        "state": [
-            "vectorized target-percent orders",
-            "fractional shares",
-            "same-bar close",
-            "exact terminal-value parity",
-            _trade_gap_str,
+        "result": [
+            "agrees to float64 precision",
+            f"{abs(row['trade_gap'])} of {row['reference_num_trades']:,} trades differ",
+            "the vectorized engine is faster on this fixture",
         ],
-        "reader_takeaway": [
-            "Both engines are operating on a fully vectorized canonical benchmark.",
-            "Integer-share rounding is not the dominant issue here.",
-            "The calibrated profile is aligned to VectorBT's same-bar close semantics.",
-            "The portfolio-level outcome is matched to floating-point noise.",
-            "The residual likely reflects order bundling / signal processing edge cases, not economic drift.",
+        "what_it_supports": [
+            "The two accounts held the same positions and paid the same costs.",
+            "The order decompositions differ. Attributing that needs the fills, which this "
+            "artifact does not carry.",
+            "Nothing about either engine beyond this benchmark, whose shape favours dense "
+            "array operations.",
         ],
     }
 )
-interpretation_df
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# All numeric claims below are sourced from the loaded payload (`row`) so
-# they remain consistent with the displayed table.
+# 1. **Two summary statistics can disagree about whether engines match.** Terminal value says yes
+#    to fourteen decimal places; trade count says no. Neither is wrong, and which one the
+#    comparison is *for* has to be decided before either is quoted.
+# 2. **A trade-count difference is not self-interpreting.** Fewer trades can mean bundled orders,
+#    which costs nothing, or missed fills, which costs something. The artifact records the count
+#    and not the fills, so the difference here is measured and not explained.
+# 3. **Economic parity is the weaker claim and often the sufficient one.** If the question is
+#    whether a strategy's returns can be reproduced, matching the account is what matters. If the
+#    question is whether an execution model is faithful, the order decomposition is what matters.
+# 4. **Runtime comparisons are about the fixture.** A benchmark built from dense array operations
+#    flatters a vectorized engine, and this one does. Reading a speed ratio from it as a general
+#    property of either engine is reading the fixture, not the engines.
 #
-# 1. **VectorBT OSS has tight terminal-value parity on the canonical benchmark.**
-#    The displayed table reports the final-value gap in basis points (the
-#    `final_value_gap_bps` row).
+# ### Known limitations
 #
-# 2. **Trade-count parity is not exact.** The residual trade gap and benchmark
-#    trade count are printed by the displayed table (`trade_gap` /
-#    `trade_gap_bps`).
+# - One scenario, one asset class, one frequency, and a fixture whose shape is unusually
+#   favourable to vectorization.
+# - The artifact carries conclusions and not fills, so the trade-count residual cannot be
+#   attributed here to bundling, to suppression, or to a real difference in what filled.
+# - The default path reads a recorded result. Reproducing it needs the validation harness and
+#   `vectorbt` installed, which is what `RUN_LIVE` is for.
 #
-# 3. **This is still a useful validation result.** It demonstrates that the
-#    calibrated `vectorbt_strict` profile reproduces the benchmark economics
-#    even though the exact order decomposition is not fully matched yet.
-#
-# 4. **VectorBT is faster on this benchmark.** Expected: the canonical
-#    benchmark is highly compatible with a vectorized execution surface, and
-#    `row['runtime_speedup']` quantifies the speedup for this run.
-#
-# The committed `resources/vectorbt_parity_results.json` holds the genuine
-# canonical-benchmark rerun (`ml4t-vbt-strict` vs `vbt-oss` on real
-# 250×20yr daily data). Every claim above is computed from `row`, so setting
-# `RUN_LIVE = True` refreshes the numbers and the prose stays consistent.
-#
-# **Next**: [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb)
-# and [`15_lean_engine_parity`](15_lean_engine_parity.ipynb) show the stronger
-# event-level parity results for the other external engines.
-
-# %% [markdown]
-# ---
-# *Notebook: 18_vectorbt_engine_parity*
-# *ML4T 3rd Edition - Chapter 16: Strategy Simulation*
+# **Next:** [`15_lean_engine_parity`](15_lean_engine_parity.ipynb) and
+# [`17_backtrader_zipline_engine_parity`](17_backtrader_zipline_engine_parity.ipynb) show what
+# agreement on both surfaces looks like, which is the contrast this notebook is against.

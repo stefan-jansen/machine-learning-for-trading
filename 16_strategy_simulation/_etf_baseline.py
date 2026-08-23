@@ -1,13 +1,15 @@
-"""Shared ETF baseline construction for the §16.4–§16.6 teaching notebooks.
+"""The ETF momentum baseline, shared by the chapter's economic diagnostics.
 
-The NB01 (§16.4) "auditable non-ML baseline" defines the working example used by the
-§16.6 economic-diagnostic notebooks (cost sensitivity, baseline comparison, regime
-slicing). This module exposes the underlying ingredients — universe, signal, weighting
-rules, simulator, metrics — so each diagnostic notebook can stay focused on its
-diagnostic rather than re-deriving the baseline from scratch.
+`01_backtest_first_principles` builds a fixed-rule ETF momentum strategy from scratch and
+explains every step. The diagnostic notebooks that follow need the same strategy but should
+not restate it, so this module holds the pieces: the universe, the signal, the weighting
+rule, the simulator and the metric set.
 
-The simulator and metrics here intentionally match NB01 numerically; calling
-`run_baseline()` produces the same Sharpe (0.65) and MaxDD (-31.9%) as Table 16.4.
+The simulator here is the one `01_backtest_first_principles` derives, ported rather than
+reimplemented. Orders are sized at the next session's open, sells are filled before buys so
+their proceeds are available to spend, purchases are scaled to the cash on hand, and equity
+is marked at the close. Running the baseline through it reproduces that notebook's numbers,
+which is asserted by `tests/test_etf_baseline_parity.py` rather than claimed here.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import polars as pl
+from ml4t.diagnostic.metrics import sharpe_ratio, sortino_ratio
 
 from data import load_etfs, load_macro
 
@@ -33,9 +36,10 @@ INITIAL_CASH: float = 100_000.0
 
 @dataclass
 class Panel:
-    """Aligned daily close prices and 10y-2y yield-curve slope for the ETF universe."""
+    """Aligned daily open and close prices plus the 10y-2y slope, for the ETF universe."""
 
     prices: pd.DataFrame
+    opens: pd.DataFrame
     yc_slope: pd.Series
 
     @property
@@ -45,33 +49,40 @@ class Panel:
 
 
 def load_panel(start: str = DEFAULT_START, end: str = DEFAULT_END) -> Panel:
-    """Load close prices for the 10-ETF universe plus aligned yield-curve slope."""
+    """Load open and close prices for the ETF universe plus the aligned yield-curve slope.
+
+    Both price surfaces are needed: closes carry the signal and mark the account, opens are
+    where orders fill. Loading them from one frame keeps them on a common date index.
+    """
     etf_pl = load_etfs().filter(
         pl.col("symbol").is_in(ETF_UNIVERSE)
         & (pl.col("timestamp") >= pl.lit(start).str.to_date())
         & (pl.col("timestamp") <= pl.lit(end).str.to_date())
     )
-    prices = (
-        etf_pl.pivot(on="symbol", index="timestamp", values="close")
-        .sort("timestamp")
-        .to_pandas()
-        .set_index("timestamp")
-    )
+
+    def _pivot(field: str) -> pd.DataFrame:
+        return (
+            etf_pl.pivot(on="symbol", index="timestamp", values=field)
+            .sort("timestamp")
+            .to_pandas()
+            .set_index("timestamp")
+        )
+
+    prices = _pivot("close")
+    opens = _pivot("open")
     available = [s for s in ETF_UNIVERSE if s in prices.columns]
     prices = prices[available].ffill()
+    opens = opens[available].ffill()
+    common = prices.dropna().index.intersection(opens.dropna().index)
+    prices, opens = prices.loc[common], opens.loc[common]
 
     macro = load_macro()
-    if "YIELD_CURVE_SLOPE" in macro.columns:
-        yc_pl = macro.select(
-            [pl.col("timestamp"), (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")]
-        ).drop_nulls()
-    else:
-        yc_pl = macro.select(
-            [pl.col("timestamp"), ((pl.col("dgs10") - pl.col("dgs2")) / 100).alias("slope")]
-        ).drop_nulls()
+    yc_pl = macro.select(
+        [pl.col("timestamp"), (pl.col("YIELD_CURVE_SLOPE") / 100).alias("slope")]
+    ).drop_nulls()
     yc = yc_pl.to_pandas().set_index("timestamp")["slope"]
     yc_aligned = yc.reindex(prices.index, method="ffill")
-    return Panel(prices=prices, yc_slope=yc_aligned)
+    return Panel(prices=prices, opens=opens, yc_slope=yc_aligned)
 
 
 def momentum_score(prices: pd.DataFrame, lookback: int = DEFAULT_LOOKBACK) -> pd.DataFrame:
@@ -82,13 +93,20 @@ def momentum_score(prices: pd.DataFrame, lookback: int = DEFAULT_LOOKBACK) -> pd
 
 
 def monthly_rebalance_dates(prices: pd.DataFrame) -> pd.DatetimeIndex:
-    """Last trading day of each calendar month in `prices`."""
-    periods = prices.index.to_period("M")
-    # The "last trading day in each month" is the index entry whose month
-    # period is not followed by the same period — avoids the pandas≥2.2
-    # FutureWarning on groupby(...).apply(scalar).
-    is_last = ~periods.duplicated(keep="last")
-    return prices.index[is_last]
+    """Last trading day of each calendar month in `prices`, where the signal is formed."""
+    return prices.index[~prices.index.to_period("M").duplicated(keep="last")]
+
+
+def fill_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Sessions on which a month-end signal is filled: the day after each month end.
+
+    Plus the first session of the sample, when the account is bought from cash. This is the
+    rebalance schedule `01_backtest_first_principles` uses, and it fires whether or not the
+    target moved: holdings drift with prices between rebalances, so restoring a constant
+    target still trades.
+    """
+    month_end = ~index.to_period("M").duplicated(keep="last")
+    return index[np.r_[True, month_end[:-1]]]
 
 
 def momentum_weights(
@@ -137,22 +155,16 @@ def momentum_weights(
 
 
 def equal_weights(prices: pd.DataFrame) -> pd.DataFrame:
-    """1/N across the full universe, monthly rebalance — uses all available ETFs."""
-    weights = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
+    """Equal weight across the whole universe, rebalanced monthly."""
     n = prices.shape[1]
-    rebalance_dates = monthly_rebalance_dates(prices)
-    weights.iloc[0, :] = 1.0 / n
-    for d in rebalance_dates:
-        weights.loc[d, :] = 1.0 / n
-    return weights.ffill()
+    return pd.DataFrame(1.0 / n, index=prices.index, columns=prices.columns)
 
 
 def inverse_vol_weights(prices: pd.DataFrame, lookback: int = DEFAULT_LOOKBACK) -> pd.DataFrame:
     """Inverse trailing-volatility weights across the full universe, monthly rebalance.
 
-    Like ``momentum_weights``, the signal is computed at each month-end close
-    and *executes* at the next trading day's open (one-bar shift) — the first
-    trading day of the next month for these month-end rebalance dates.
+    Like ``momentum_weights``, the signal is read at each month-end close and the returned
+    weights are shifted one session so they are executable at the next open.
     """
     vol = prices.pct_change().rolling(lookback).std() * np.sqrt(252)
     inv_vol = 1.0 / vol.replace(0, np.nan)
@@ -173,7 +185,7 @@ def inverse_vol_weights(prices: pd.DataFrame, lookback: int = DEFAULT_LOOKBACK) 
 
 
 def static_60_40(prices: pd.DataFrame, equity: str = "SPY", bond: str = "AGG") -> pd.DataFrame:
-    """Static 60% equity / 40% bond (no rebalance drift adjustment beyond simulator)."""
+    """A constant stock-bond split, restored to target on each rebalance session."""
     weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
     weights[equity] = 0.60
     weights[bond] = 0.40
@@ -184,79 +196,104 @@ def static_60_40(prices: pd.DataFrame, equity: str = "SPY", bond: str = "AGG") -
 class SimResult:
     equity: pd.Series
     returns: pd.Series
-    trades_dollar: pd.Series  # gross dollar volume traded each rebalance day
+    trades_dollar: pd.Series  # dollars traded on each session, both legs summed
     holdings_value: pd.DataFrame  # per-asset dollar value at each bar (post-trade)
 
 
 def simulate(
-    prices: pd.DataFrame,
+    panel: Panel,
     weights: pd.DataFrame,
     *,
     initial_cash: float = INITIAL_CASH,
     fees: float = DEFAULT_FEES,
     rebalance_dates: pd.DatetimeIndex | None = None,
 ) -> SimResult:
-    """Bar-by-bar simulator with per-leg proportional costs.
+    """Fill already-executable target weights at the open, mark the account at the close.
 
-    Mirrors NB01 §16.4: cost = |trade_dollar| * fees per leg. Rebalance dates
-    default to the days when target weights change by >1% (matches NB01); pass
-    explicit dates (e.g. monthly grid from `monthly_rebalance_dates`) to force
-    rebalancing for allocators whose targets are constant by construction.
+    This is the simulator `01_backtest_first_principles` derives, and the event order is the
+    part that matters. On a rebalance session the book is valued at that session's opening
+    prices; sells are filled first, their proceeds net of the fee become available cash, and
+    purchases are then scaled down if the cash they need exceeds the cash on hand. Equity is
+    marked at the close.
+
+    `weights` must already be executable: row *t* is the target the account is moved to at
+    session *t*'s open, which means it was formed no later than session *t-1*'s close. Every
+    weight builder in this module returns weights in that form.
+
+    Rebalances default to `fill_dates`, the session after each month end plus the first
+    session of the sample. Passing an explicit index overrides that.
     """
-    n = len(prices)
-    pv = np.zeros(n)
-    trades_dollar = np.zeros(n)
-    holdings_value = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
-    holdings = pd.Series(0.0, index=prices.columns)
+    closes, opens = panel.prices, panel.opens
+    index = closes.index
+    if rebalance_dates is None:
+        rebalance_dates = fill_dates(index)
+    scheduled = set(rebalance_dates)
+
+    equity = np.zeros(len(index))
+    traded = np.zeros(len(index))
+    holdings_value = pd.DataFrame(0.0, index=index, columns=closes.columns)
+    holdings = pd.Series(0.0, index=closes.columns)
     cash = initial_cash
 
-    if rebalance_dates is None:
-        weight_change = weights.diff().abs().sum(axis=1)
-        rebalance_dates = weight_change[weight_change > 0.01].index
-    if prices.index[0] not in rebalance_dates:
-        rebalance_dates = rebalance_dates.insert(0, prices.index[0])
+    for i, day in enumerate(index):
+        if day in scheduled:
+            open_px = opens.loc[day]
+            open_values = holdings * open_px
+            target_values = weights.loc[day] * (cash + open_values.sum())
 
-    for i, d in enumerate(prices.index):
-        cp = prices.loc[d]
-        hv = (holdings * cp).sum()
-        total = cash + hv
-        pv[i] = total
+            sells = (open_values - target_values).clip(lower=0.0)
+            holdings -= sells / open_px
+            cash += sells.sum() * (1 - fees)
 
-        if d in rebalance_dates:
-            target_value = weights.loc[d] * total
-            current_value = holdings * cp
-            trade_dollar = target_value - current_value
-            for asset in prices.columns:
-                t = trade_dollar[asset]
-                if abs(t) > 1.0:
-                    cash -= abs(t) * fees
-                    holdings[asset] += t / cp[asset]
-                    cash -= t
-                    trades_dollar[i] += abs(t)
-        holdings_value.iloc[i, :] = (holdings * cp).values
+            requested = (target_values - holdings * open_px).clip(lower=0.0)
+            required = requested.sum() * (1 + fees)
+            scale = min(1.0, cash / required) if required > 0 else 0.0
+            buys = requested * scale
+            holdings += buys / open_px
+            cash -= buys.sum() * (1 + fees)
+            traded[i] = float(sells.sum() + buys.sum())
 
-    equity = pd.Series(pv, index=prices.index)
+        if cash < -1e-8:
+            raise RuntimeError(f"cash went negative on {day:%Y-%m-%d}: {cash}")
+        cash = max(cash, 0.0)
+        close_values = holdings * closes.loc[day]
+        holdings_value.iloc[i, :] = close_values.to_numpy()
+        equity[i] = cash + float(close_values.sum())
+
+    equity_series = pd.Series(equity, index=index)
+    # The first session earns a return too: the account was bought at that session's open and
+    # is marked at its close. `pct_change` cannot see it, so it is seeded from the starting
+    # cash. Dropping it would leave the return series one observation short of the account's.
+    returns = equity_series.pct_change()
+    returns.iloc[0] = equity_series.iloc[0] / initial_cash - 1.0
     return SimResult(
-        equity=equity,
-        returns=equity.pct_change().dropna(),
-        trades_dollar=pd.Series(trades_dollar, index=prices.index),
+        equity=equity_series,
+        returns=returns,
+        trades_dollar=pd.Series(traded, index=index),
         holdings_value=holdings_value,
     )
 
 
-def metrics(equity: pd.Series, periods_per_year: int = 252) -> dict[str, float]:
-    """Standard metric set: total return, CAGR, vol, Sharpe, Sortino, MaxDD, Calmar."""
-    r = equity.pct_change().dropna()
-    total = float(equity.iloc[-1] / equity.iloc[0] - 1)
-    cagr = float((1 + total) ** (periods_per_year / len(r)) - 1) if len(r) else 0.0
-    vol = float(r.std() * np.sqrt(periods_per_year))
-    sharpe = cagr / vol if vol > 0 else 0.0
-    downside = r[r < 0]
-    dvol = float(downside.std() * np.sqrt(periods_per_year)) if len(downside) else 0.0
-    sortino = cagr / dvol if dvol > 0 else 0.0
-    cum = equity / equity.iloc[0]
-    rmax = cum.expanding().max()
-    mdd = float(((cum - rmax) / rmax).min())
+def metrics(result: SimResult, periods_per_year: int = 252) -> dict[str, float]:
+    """Growth, risk and risk-adjusted metrics for one simulated account.
+
+    Sharpe and Sortino come from `ml4t.diagnostic`, which is also what
+    `01_backtest_first_principles` calls, so the three notebooks that report this strategy
+    report the same statistic. Both put the mean periodic excess return in the numerator.
+    The compound growth rate is reported beside them and is deliberately not substituted
+    into either: the arithmetic mean exceeds the geometric one by roughly half the variance,
+    so a Sharpe built from a growth rate is a different and smaller number wearing the same
+    name.
+    """
+    returns = result.returns
+    equity = result.equity
+    total = float(np.prod(1.0 + returns.to_numpy()) - 1.0)
+    cagr = float((1 + total) ** (periods_per_year / len(returns)) - 1) if len(returns) else 0.0
+    vol = float(returns.std(ddof=1) * np.sqrt(periods_per_year))
+    sharpe = float(sharpe_ratio(returns.to_numpy(), periods_per_year=periods_per_year))
+    sortino = float(sortino_ratio(returns.to_numpy(), periods_per_year=periods_per_year))
+    cum = np.cumprod(1.0 + returns.to_numpy())
+    mdd = float(np.min(cum / np.maximum.accumulate(np.r_[1.0, cum])[1:] - 1.0))
     calmar = cagr / abs(mdd) if mdd != 0 else 0.0
     return {
         "total_return": total,
@@ -270,7 +307,7 @@ def metrics(equity: pd.Series, periods_per_year: int = 252) -> dict[str, float]:
 
 
 def annualized_turnover(result: SimResult, periods_per_year: int = 252) -> float:
-    """Annualized one-way turnover = sum(|trade_$|) / mean(equity) / years."""
+    """Dollars traded per dollar of capital per year, counting both legs of a rebalance."""
     years = len(result.equity) / periods_per_year
     if years <= 0 or result.equity.mean() <= 0:
         return 0.0
@@ -278,12 +315,12 @@ def annualized_turnover(result: SimResult, periods_per_year: int = 252) -> float
 
 
 def break_even_cost_bp(result_zero_cost: SimResult, periods_per_year: int = 252) -> float:
-    """Per-leg cost (in bp) at which gross return == 0.
+    """Per-leg cost, in basis points, that would consume the whole gross growth rate.
 
-    Approximation: BE = (annualized gross return) / (annualized turnover) * 10000.
-    Uses the zero-cost simulation result.
+    Growth rate divided by turnover. It ignores compounding, so it sits above the cost at
+    which a re-simulated strategy actually reaches zero; `14_cost_sensitivity` shows both.
     """
-    m = metrics(result_zero_cost.equity, periods_per_year)
+    m = metrics(result_zero_cost, periods_per_year)
     turn = annualized_turnover(result_zero_cost, periods_per_year)
     if turn <= 0:
         return float("inf")
@@ -299,5 +336,5 @@ def run_baseline(
     """Convenience: load panel, build NB01 momentum weights, simulate. Returns all three."""
     panel = load_panel(start, end)
     weights = momentum_weights(panel)
-    result = simulate(panel.prices, weights, fees=fees)
+    result = simulate(panel, weights, fees=fees)
     return panel, weights, result
