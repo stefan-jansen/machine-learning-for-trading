@@ -30,11 +30,13 @@
 #
 # **TabM is an ensemble, and the ensemble is the point.** Averaging several independently
 # initialized networks is the standard way to make a neural fit on a small table less erratic, and
-# it costs several networks. TabM trains what is nearly one: the members share every weight matrix,
-# and each owns a small number of per-member scaling vectors that multiply the shared weights
-# element-wise. A member is a rescaled view of one shared network rather than a separate network,
-# so *k* members cost close to one network's parameters and one network's training time, and the
-# predictions are averaged over members.
+# it costs several networks. TabM trains what is nearly one. All *k* members share a single
+# two-layer backbone, which holds almost every parameter. What a member owns is a scaling vector
+# as long as the hidden layer is wide, applied element-wise to the backbone's output activations,
+# and its own linear output head; the *k* member predictions are then averaged. So a member is a
+# rescaled reading of one shared representation rather than a separate network, and the parameter
+# count grows slowly with `n_members` instead of multiplying by it - on the configurations
+# declared here the per-member parameters come to around a tenth of the backbone's.
 #
 # **A neural fit has a meaningful state after every epoch**, in the way a boosted model has one
 # after every iteration and a linear fit does not. An **epoch** is one pass over the training rows.
@@ -72,10 +74,10 @@
 # **What it writes**: one training run per configuration and one complete validation prediction set
 # per configuration, label and epoch checkpoint, in `run_log/registry.db` and under
 # `run_log/training/` and `run_log/predictions/`, grouped under a named population.
-# [`13_model_analysis`](13_model_analysis.ipynb) compares that population against the other
-# families, and [`14_backtest`](14_backtest.ipynb) backtests every member and selects on validation
-# backtest Sharpe. **Selection happens there, not here.** The ranking below shows what capacity and
-# training length do to a ranking measure; it decides nothing.
+# [`13_model_analysis`](13_model_analysis.ipynb) compares this family against the others and
+# [`14_backtest`](14_backtest.ipynb) backtests these predictions and selects on validation backtest
+# Sharpe. **Selection happens there, not here.** The ranking below shows what capacity and training
+# length do to a ranking measure; it decides nothing.
 
 # %%
 """Fit the declared option-analytics TabM population on the walk-forward folds."""
@@ -128,7 +130,7 @@ declared_labels(study, "tabular_dl")
 # %% [markdown]
 # Each name in the menu resolves to a preset in `case_studies/config/tabm/`. `hidden_dim` is the
 # width of the shared network - how many units each of its layers has - and `n_members` is how many
-# rescaled views of that network are averaged together. The declared configurations step both dials
+# rescaled readings of that network are averaged together. The declared configurations step both dials
 # at once, so the grid asks whether a bigger and more heavily averaged model reads this surface
 # better; it does not separate width from ensemble size, and a difference between two rows cannot
 # be attributed to either. `dropout` is the fraction of units switched off at random on each
@@ -250,16 +252,28 @@ plan.select(
 # Step 4 is what makes one training run produce eight results. The fold predictions are concatenated
 # into one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity. Preparing a fold - slicing the window, imputing,
-# standardizing - depends on the data and not on the network, so it happens once per fold and is
-# shared by the configurations trained on it.
+# standardizing - depends on the data and not on the network, so nothing about it changes between
+# the configurations of one label. Each resolved request nonetheless carries its own prepared
+# folds, because resolving is what prepares them and this notebook resolves every request before
+# the run so it can show the plan above. The sharing is available on the other path, where
+# unresolved requests go to the family's batch runner and one prepared fold set serves every
+# configuration of a label; it is worth taking on a panel large enough for the duplication to
+# matter, and this one is not.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it is
 # going to produce. The list is computed from the resolved specifications before the first fit and
 # written down, and afterwards every member must exist and be complete. That is what makes the
-# downstream comparison well defined - `14_backtest` backtests this population, not whatever
-# predictions happen to be in the registry - and it is why a configuration that raises fails the
-# whole call rather than publishing a population one member short. Everything that finished stays
-# registered, and re-running trains only what is missing.
+# member set well defined: it is the 72 identities named here rather than whatever tabular_dl rows
+# the registry happens to hold. It is also why a configuration that raises fails the whole call
+# rather than publishing a population one member short. Everything that finished stays registered,
+# and re-running trains only what is missing.
+#
+# Worth being exact about what that does and does not reach today. The population is the record of
+# which prediction sets this run owes and a check that it produced them. It is not yet a filter on
+# what the downstream notebooks read: `13_model_analysis` loads every registry metric row for the
+# case study and `14_backtest` loads every prediction matching its label and split, so neither is
+# restricted to these 72 identities. Both are being migrated to resolve the population by name, and
+# until they are, the guarantee this call gives is completeness rather than exclusivity.
 #
 # `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
 # the first generation published under this name. A population is the set of prediction identities,
@@ -268,9 +282,9 @@ plan.select(
 # refuses to write it without being told which snapshot it supersedes. That lineage is the only
 # record of which generation is which.
 #
-# The default name is the contract with the notebooks downstream - `13_model_analysis` and
-# `14_backtest` resolve this population by name - rather than a label of convenience, which is why a
-# run that narrows the member set or changes the device has to pass its own.
+# The default name is the one the downstream notebooks will resolve, rather than a label of
+# convenience, which is why a run that narrows the member set or changes the device has to pass its
+# own instead of overwriting it.
 
 # %%
 population_name = POPULATION_NAME or "sp500_equity_option_analytics-tabular_dl-validation-v1"
