@@ -26,8 +26,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OVERRIDES = REPO_ROOT / "tests" / "overrides.yaml"
 
-# `research_preview_parameters` folds these into PREVIEW_REDUCTIONS rather than passing
-# them through, so a notebook declaring PREVIEW_REDUCTIONS reads them by that route.
+# `research_preview_parameters` pops these and folds them into PREVIEW_REDUCTIONS rather than
+# passing them through, so a notebook declaring PREVIEW_REDUCTIONS reads them by that route and
+# must not be flagged. This is why the same name can be exempt on a model notebook and a finding
+# on a backtest notebook: the model notebooks take the preview path and the backtest notebooks
+# take the verbatim one. It is the run path that differs, not the rule.
 _TRANSLATED = frozenset({"MAX_FOLDS", "MAX_SYMBOLS", "TRAIN_SAMPLE_FRAC"})
 _PARAMS_CELL = re.compile(r'^# %% tags=\["parameters"\]\n(.*?)(?=^# %%)', re.S | re.M)
 
