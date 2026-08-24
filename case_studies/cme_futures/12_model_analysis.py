@@ -133,6 +133,18 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # conditioned on the configured confounders, and HAC uncertainty follows the decision-time order.
 # A covariance-estimator failure is not relabeled as HAC. The shared runner must return a finite HAC
 # standard error for a result to be complete.
+#
+# **The `refutation_p` column below is not evidence that these effects survived a placebo test.**
+# The refutation permutes contiguous blocks within each product, and the shared runner sizes those
+# blocks from the label buffer rather than from the treatment: `block_size` is set equal to
+# `embargo`, so the registered rows carry a 21-period block for `fwd_ret_21d` and a 5-period block
+# for `fwd_ret_5d`. Neither length is a property of `carry_pct`. Measured on this case study's own
+# feature panel, `carry_pct` has a lag-1 autocorrelation of 0.943, an AR(1) half-life of 11.8
+# trading days, and autocorrelation still at 0.44 by lag 21 and 0.17 by lag 63. Blocks of 5 and 21
+# periods therefore destroy serial dependence that the real treatment has. That narrows the placebo
+# distribution relative to the true null and pushes the empirical p-value toward zero whether or not
+# the effect is real, which is what both labels report. Read the DML point estimate and its HAC
+# standard error. The refutation column is recorded for completeness and carries no evidence here.
 
 # %%
 causal_rows = []
