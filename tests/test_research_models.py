@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 import json
-import os
 import weakref
 from copy import deepcopy
 from types import SimpleNamespace

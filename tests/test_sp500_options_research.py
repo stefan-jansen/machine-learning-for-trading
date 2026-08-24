@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +68,7 @@ def _prediction(
     *,
     execution_tier: str = "canonical",
     alpha: float = 1.0,
+    split: str = "validation",
 ):
     spec = _resolved_spec(alpha=alpha)
     spec["label"] = "ret_to_expiry"
@@ -88,7 +90,7 @@ def _prediction(
         training,
         checkpoint_kind="final",
         checkpoint_value=None,
-        split="validation",
+        split=split,
         predictions=frame,
         expected_keys=frame.select("symbol", "timestamp", "fold"),
     )
@@ -1307,3 +1309,104 @@ def test_the_liquid_filter_moves_the_decision_to_an_earlier_session(
 
     assert decision_dates.to_list() == [thursday]
     assert option_trade_calendar(decision_dates).get_column("decision_date").to_list() == [thursday]
+
+
+def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal has to come first, or a run that cannot register still writes calibration.
+
+    `compute_holdout_conformal_widths(..., write=True)` publishes widths keyed by the holdout
+    prediction. A supplied lifecycle the identity does not account for makes the run unable to
+    register, so reaching the widths write first leaves an artifact behind that no registered
+    backtest explains.
+    """
+    import json
+
+    from case_studies.research import strategy as strategy_module
+    from case_studies.sp500_options import _htm_backtest, research_workflow
+    from case_studies.utils import cv_window
+
+    class _WidthsWritten(Exception):
+        pass
+
+    study = _study(tmp_path)
+    labels_dir = tmp_path / "labels"
+    raw_dir = tmp_path / "raw"
+    labels_dir.mkdir()
+    _contract_returns().write_parquet(labels_dir / "contract_returns.parquet")
+    _write_raw_options(raw_dir)
+    monkeypatch.setattr(research_workflow, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(_htm_backtest, "option_data_paths", lambda: (labels_dir, raw_dir))
+    monkeypatch.setattr(cv_window, "canonical_window", lambda *args, **kwargs: None)
+    prices = pl.DataFrame(
+        {
+            "symbol": ["A"],
+            "timestamp": [datetime(2024, 1, 5)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+        }
+    )
+    signal = {"method": "equal_weight_top_k", "top_k": 1}
+    allocation = {"method": "conformal_weighted", "alpha": 0.2, "min_calibration_n": 2}
+
+    validation = _prediction(study)
+    validation_decision = publish_short_straddle_decisions(validation, prices=prices, signal=signal)
+    locked_spec = study.strategy(
+        prediction=validation,
+        signal=signal,
+        decision=validation_decision,
+        allocation=allocation,
+    ).resolve(prices=prices)
+    # The lock stores the strategy, not the runtime object the projection drops from both sides.
+    locked_spec.pop("_runtime_backtest_config", None)
+
+    holdout = _prediction(study, split="holdout")
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO research_locks (lock_hash, lock_json, state, created_at) "
+            "VALUES (?, ?, 'LOCKED', '2024-01-06T00:00:00Z')",
+            (
+                "lockhash00000001",
+                json.dumps(
+                    {
+                        "holdout_training_hash": holdout.registry_record()["training_hash"],
+                        "checkpoint_kind": "final",
+                        "checkpoint_value": None,
+                        "prediction_hash": validation.hash,
+                        "strategy_spec": locked_spec,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    holdout_decision = publish_short_straddle_decisions(holdout, prices=prices, signal=signal)
+    lifecycle = _load_option_lifecycle(holdout_decision.load(), raw_dir)
+    lifecycle_source = option_source_identity(labels_dir, raw_dir)["raw_lifecycle"]
+
+    def _widths(*args, **kwargs):
+        raise _WidthsWritten
+
+    monkeypatch.setattr(strategy_module, "compute_holdout_conformal_widths", _widths)
+    # No reviewed embargo is registered for this case study and label; the ordering under test
+    # is the engine's, not that table's.
+    monkeypatch.setattr(strategy_module, "holdout_conformal_embargo_steps", lambda *a, **k: 0)
+    monkeypatch.setattr(strategy_module, "load_backtest_prices_for", lambda *a, **k: prices)
+    strategy = study.strategy(
+        prediction=holdout,
+        signal=signal,
+        decision=holdout_decision,
+        allocation=allocation,
+    )
+
+    with pytest.raises(ValueError, match="declare the raw files"):
+        strategy.run(option_lifecycle=lifecycle)
+
+    # The widths branch is live in this setup, so the refusal above ran ahead of it rather
+    # than the branch simply never being reached.
+    with pytest.raises(_WidthsWritten):
+        strategy.run(option_lifecycle=lifecycle, option_lifecycle_source=lifecycle_source)

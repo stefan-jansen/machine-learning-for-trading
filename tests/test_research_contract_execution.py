@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -1278,3 +1277,24 @@ def test_a_workspace_causal_result_wins_over_the_release_it_supersedes(tmp_path:
     fallback = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
 
     assert fallback.hash == "causalreleasedaa"
+
+
+def test_a_release_registry_without_causal_runs_reports_nothing_rather_than_erroring(
+    tmp_path: Path,
+) -> None:
+    """A release seeded before any causal run holds a registry with no `causal_runs` table.
+
+    Naming an absent table in a SELECT is an error rather than an empty result, so the fallback
+    that exists to reach the release turns "no causal artifact anywhere" into an OperationalError
+    from sqlite unless the lookup checks the table is there.
+    """
+    from case_studies.research import CausalResult
+
+    release = _seed_release(tmp_path)
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    with pytest.raises(ValueError, match="resolved to 0 identities"):
+        CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    with pytest.raises(KeyError, match="unknown causal result"):
+        CausalResult.open(study, "causalmissing001")

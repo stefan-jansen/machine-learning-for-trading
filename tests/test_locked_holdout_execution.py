@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import os
 import sqlite3
 from copy import deepcopy
 from datetime import date
