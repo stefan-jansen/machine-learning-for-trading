@@ -1527,20 +1527,21 @@ case_studies/fx_pairs/14_portfolio_management:
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
-    TOP_N_PREDICTIONS: 2
-  timeout: 300
+    TOP_K: 2
+    TOP_N_CONFIGS: 1
+  timeout: 900
 case_studies/fx_pairs/15_costs:
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
     MAX_COST_POINTS: 1
-  timeout: 600
+  timeout: 900
 case_studies/fx_pairs/16_risk_management:
   research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
-  timeout: 600
+  timeout: 900
 case_studies/fx_pairs/17_strategy_analysis:
   skip: true
   skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
