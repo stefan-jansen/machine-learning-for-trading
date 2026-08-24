@@ -570,9 +570,11 @@ def test_unusable_parameters_does_not_take_a_function_local_for_a_read(tmp_path:
 
 
 def test_unusable_parameters_ignores_a_committed_injected_parameters_cell(tmp_path: Path) -> None:
-    """`case_studies/etfs/11a_pca` has one: a leftover from a papermill run, which
-    the next run replaces. Reading it as notebook code would report the notebook
-    overwriting exactly what papermill is about to inject."""
+    """Papermill writes such a cell into any notebook it executes, and the next run
+    replaces it, so reading it as notebook code would report the notebook overwriting
+    exactly what papermill is about to inject. `case_studies/etfs/11a_pca` and
+    `11b_ipca` carried one committed each - the last two in the repo - until their
+    migrations rewrote the parameters cell; the helper still has to ignore one."""
     py = _notebook(
         tmp_path,
         '# %% tags=["parameters"]\nUSE_CACHE = True\n\n'

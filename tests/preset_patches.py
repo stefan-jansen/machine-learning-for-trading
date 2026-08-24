@@ -38,7 +38,12 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
+    # No n_epochs or checkpoint_interval here, unlike every other entry. IPCA has no
+    # epochs, `_expected_latent_checkpoints` returns `(0,)` for it whatever they say, and
+    # the request path refuses a non-zero interval outright
+    # (latent_factors/adapter.py:236-239). They were inert on the legacy runner and fatal
+    # on the migrated one, which is a patch declaring something the estimator does not have.
+    "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
