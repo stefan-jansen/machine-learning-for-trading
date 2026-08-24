@@ -271,6 +271,19 @@ pytorch_result = run_dl_cv(
     register=True,
     force_retrain=FORCE_RETRAIN,
     prediction_split=PREDICTION_SPLIT,
+    # feature_names is in the identity, not only in the training call. Without identity_params or
+    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
+    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
+    # so changing what the model trains on leaves the spec hash where it was. With
+    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
+    # skips it, and the notebook reports the old model's numbers under the new feature set. A
+    # clean registry retrains and looks correct, which is why this is invisible locally.
+    #
+    # This still does not capture the input artifact digests the way the shared path does through
+    # input_data_spec; 12 reads the parquet files directly rather than through
+    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
+    # that path.
+    identity_params={"feature_names": feature_names},
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
 )
@@ -343,6 +356,19 @@ darts_result = run_dl_cv(
     max_train_sequences=MAX_TRAIN_SEQUENCES,
     register=True,
     force_retrain=FORCE_RETRAIN,
+    # feature_names is in the identity, not only in the training call. Without identity_params or
+    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
+    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
+    # so changing what the model trains on leaves the spec hash where it was. With
+    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
+    # skips it, and the notebook reports the old model's numbers under the new feature set. A
+    # clean registry retrains and looks correct, which is why this is invisible locally.
+    #
+    # This still does not capture the input artifact digests the way the shared path does through
+    # input_data_spec; 12 reads the parquet files directly rather than through
+    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
+    # that path.
+    identity_params={"feature_names": feature_names},
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
     prediction_split=PREDICTION_SPLIT,
