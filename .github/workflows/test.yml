@@ -759,6 +759,86 @@ jobs:
             -q --tb=short --timeout=600 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------
+  # Unit tests that need the test-data checkout.
+  #
+  # test-unit deliberately checks out no test-data and holds no secrets, so it
+  # stays a fast per-commit gate. That left 13 tests in two files running in no
+  # job at all: they skip in test-unit for want of data, and the cs-* jobs run
+  # only tests/test_case_studies.py. Measured 2026-08-24 by running both files
+  # under a runner-shaped environment (empty HOME, ML4T_DATA_PATH at the repo's
+  # own data/): 19 passed, 13 skipped. With the checkout, 32 passed.
+  #
+  # The dependency set is test-unit's, verbatim, and it is enough: both files
+  # were run green against a real test-data checkout in a venv built from
+  # exactly this list. Nothing here pulls torch or an ml4t-* model package.
+  # ---------------------------------------------------------------------------
+  test-unit-data:
+    runs-on: ubuntu-latest
+    # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
+    # so the checkout below cannot succeed there. Skip rather than fail red on a
+    # contribution that has done nothing wrong. This job is not a required
+    # context, so a skip blocks nothing.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+      - name: Checkout test data
+        uses: actions/checkout@v6
+        with:
+          repository: ml4t/third-edition-test-data
+          path: test-data
+          ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
+          lfs: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - name: Install minimal test deps
+        run: |
+          uv venv --python 3.14
+          uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
+            scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
+            "ml4t-diagnostic>=0.1.2"
+      # The precondition is the load-bearing half, the same shape as the
+      # data-root anchoring step above. Every test in this job skips politely
+      # when the data is absent, so a checkout that silently produced an empty
+      # tree would turn the job green while running nothing.
+      - name: The data this job exists for is actually here
+        run: |
+          test -d test-data/data || { echo "test-data/data missing"; exit 1; }
+          test -d test-data/intermediates || { echo "test-data/intermediates missing"; exit 1; }
+          echo "data: $(du -sh test-data/data | cut -f1), intermediates: $(du -sh test-data/intermediates | cut -f1)"
+      - name: Run data-dependent unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          MPLBACKEND: Agg
+        run: |
+          # ML4T_DATA_PATH comes from the workflow-level env and already points at
+          # test-data/data; tests/conftest.py resolves the intermediates from its
+          # parent. ML4T_OUTPUT_DIR is left alone: unlike the sweep in test-unit,
+          # nothing here reads a case study's config through the redirect.
+          .venv/bin/python -m pytest \
+            tests/test_eoa_universe_roster.py \
+            tests/test_fixture_registry_identity.py \
+            -v --tb=short -rs --junitxml=unit-data.xml
+      # A skip here is a failure: these tests run in this job and nowhere else,
+      # so one that skips is back to being covered by nothing. The step above
+      # exits 0 on a full sheet of skips, which is exactly the state that let
+      # 13 tests sit unrun without anything going red.
+      - name: No test in this job skipped
+        if: always()
+        run: |
+          .venv/bin/python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse("unit-data.xml").getroot().iter("testcase"))
+          skipped = [c.get("name") for c in cases if c.find("skipped") is not None]
+          if skipped:
+              sys.exit(
+                  "this job exists to run these against real data and they skipped: "
+                  + ", ".join(skipped)
+              )
+          print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
+          PY
+  # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)
   #
   # Runs the same Python 3.14 environment that readers use.
