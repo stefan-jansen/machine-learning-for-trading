@@ -396,7 +396,12 @@ def open_study(
     case_dir = release_root / "case_studies" / case_study
     generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
     if not all(path.is_symlink() for path in generated):
-        return Study.open(case_study, workspace=workspace, release_root=release_root)
+        return Study.open(
+            case_study,
+            workspace=workspace,
+            release_root=release_root,
+            entry_point=entry_point,
+        )
 
     # A maintainer worktree links its generated directories to shared data, which
     # `create_experiment` cannot copy. Read those inputs in place and redirect every write.
