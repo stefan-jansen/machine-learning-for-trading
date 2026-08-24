@@ -49,10 +49,10 @@ from case_studies.research import (
     plan_backtests,
     run_backtests,
 )
+from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
-    warmup_periods_for,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -206,13 +206,29 @@ shortlist.select(
 # cannot disappear from the allocation population.
 
 # %%
-# Prices are loaded with the warmup prefix the declared allocators need. get_allocators injects
-# vol_window 63 for inverse_vol, risk_parity and hrp, and lookback 126 for mvo_ledoit_wolf, and
-# warmup_periods_for resolves the maximum of those from setup.yaml (126 here). Loading with the
-# default warmup_periods=0 leaves an allocator estimating a 126-day covariance from whatever bars
-# happen to precede the first decision date - an estimate over a truncated history that completes
-# and reports rather than failing.
-WARMUP_PERIODS = warmup_periods_for(CASE_STUDY_ID)
+# Prices are cached by (label, warmup) rather than loaded once per label. Strategy._build_spec
+# (research/strategy.py:389) digests exactly the frame it is handed, and strategy_warmup_periods
+# (:201-211) resolves a different prefix per allocator: 0 for the non-moment methods, vol_window
+# for inverse_vol / risk_parity / hrp, lookback for mvo and mvo_ledoit_wolf. Handing every member
+# of a label the same 126-bar frame stamps a price digest that 20_strategy_analysis recomputes at
+# the member's own warmup (20:157-169) and then rejects as "does not use canonical validation
+# prices" - and lifecycle.evaluate_holdout (lifecycle.py:342-368) applies the same rule, so the
+# holdout inherits it. cme_futures/research_workflow.py:674-682 caches on the same key.
+_price_cache: dict[tuple[str, int], object] = {}
+
+
+def prices_for(label, warmup_periods):
+    key = (str(label), int(warmup_periods))
+    if key not in _price_cache:
+        _price_cache[key] = load_backtest_prices_for(
+            CASE_STUDY_ID,
+            label,
+            split="validation",
+            max_symbols=MAX_SYMBOLS,
+            warmup_periods=int(warmup_periods),
+        )
+    return _price_cache[key]
+
 
 allocators = [
     config for config in get_allocators(CASE_STUDY_ID) if config["method"] != "equal_weight"
@@ -271,19 +287,14 @@ def plan_allocation_member(label, prices, allocation, baseline_row):
 
 # %%
 for label in shortlist.get_column("label").unique().sort().to_list():
-    prices = load_backtest_prices_for(
-        CASE_STUDY_ID,
-        label,
-        split="validation",
-        max_symbols=MAX_SYMBOLS,
-        warmup_periods=WARMUP_PERIODS,
-    )
     for baseline_row in shortlist.filter(pl.col("label") == label).iter_rows(named=True):
         for allocation in allocators:
+            prices = prices_for(
+                label, strategy_warmup_periods({"strategy": {"allocation": allocation}})
+            )
             request, row = plan_allocation_member(label, prices, allocation, baseline_row)
             planned_requests.append(request)
             plan_rows.append(row)
-    del prices
 
 # %%
 planned_population = pl.DataFrame(plan_rows).sort(
@@ -336,15 +347,12 @@ def execute_allocation_member(prices, request):
 
 # %% tags=["results"]
 for label in shortlist.get_column("label").unique().sort().to_list():
-    prices = load_backtest_prices_for(
-        CASE_STUDY_ID,
-        label,
-        split="validation",
-        max_symbols=MAX_SYMBOLS,
-        warmup_periods=WARMUP_PERIODS,
-    )
     for request in (item for item in planned_requests if item["label"] == label):
         try:
+            prices = prices_for(
+                label,
+                strategy_warmup_periods({"strategy": {"allocation": request["allocation"]}}),
+            )
             execution_rows.append(execute_allocation_member(prices, request))
         except Exception as error:
             failure_rows.append(
@@ -357,7 +365,6 @@ for label in shortlist.get_column("label").unique().sort().to_list():
                     "error": str(error),
                 }
             )
-    del prices
 
 # %% tags=["results"]
 execution_diagnostics = pl.DataFrame(
