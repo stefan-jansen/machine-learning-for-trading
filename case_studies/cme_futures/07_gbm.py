@@ -91,6 +91,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -265,16 +266,28 @@ plan.select(
 # is what lets this notebook re-run and resolve to the population it published rather than to a
 # new one.
 #
-# **It is canonical-only.** A preview population is discarded with its workspace, so it has no
-# lineage to extend and `run_model_population` refuses one that carries a hash. A default that is a
-# real hash rather than empty therefore has to be gated on the tier: passing it unconditionally
-# fails every preview of this notebook before it reaches a fit, which is how the reduced-scale
-# preview that gates the production run would go red for a reason that has nothing to do with the
-# model.
+# **A default that is a real hash rather than empty cannot be passed unconditionally**, and
+# `supersedes_for_run` is where the three cases that must drop it are decided. A preview population
+# is discarded with its workspace, so it has no lineage to extend and `run_model_population`
+# refuses one that carries a hash - passing it would fail every preview of this notebook before it
+# reached a fit, which is how the reduced-scale preview that gates the production run would go red
+# for a reason that has nothing to do with the model. The other two are runs where the population
+# does not exist yet: `run_log/` is not in the repository, so a reader running this from a fresh
+# checkout is writing a first version, and so is anyone narrowing a run under a `POPULATION_NAME`
+# of their own. `OfficialPopulation.create` refuses a first version that supersedes anything, so
+# without this the default would break both.
+#
+# Where a generation does exist the declared hash is passed through even if it disagrees with the
+# one on record. That refusal belongs to the registry, and its message names the hash required.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
-supersedes = SUPERSEDES_POPULATION or None if EXECUTION_TIER == "canonical" else None
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
     study,
     resolved,

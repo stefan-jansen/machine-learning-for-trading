@@ -27,9 +27,11 @@ from case_studies.cme_futures.research_workflow import (
 )
 from case_studies.research import (
     DecisionArtifact,
+    OfficialPopulation,
     ResolvedModelRequest,
     StateTransitionPolicy,
     Study,
+    supersedes_for_run,
 )
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
@@ -984,4 +986,104 @@ def test_every_declared_model_population_is_published_by_a_notebook() -> None:
     assert not declared - published, (
         f"MODEL_POPULATION_NAMES declares populations no notebook publishes: "
         f"{sorted(declared - published)}"
+    )
+
+
+def _population(study: Study, name: str, member: str, supersedes: str | None = None):
+    return OfficialPopulation.create(
+        study, name=name, member_kind="prediction", members=[member], supersedes=supersedes
+    )
+
+
+def test_declared_supersedes_is_dropped_where_the_population_does_not_exist(tmp_path: Path):
+    """06_linear and 07_gbm declare a real supersedes hash; a first run must not pass it.
+
+    The hash is a literal in the parameter cell so that running the committed .py
+    reproduces the population on record. `run_log/` is not in the repository, so a
+    reader's first canonical run finds an empty registry and is the first version of
+    its population - and `OfficialPopulation.create` refuses a first version that
+    supersedes anything, before any fit happens.
+    """
+    study = _study(tmp_path)
+    declared = "8337482ecb59"
+    name = "cme_futures-linear-validation-v1"
+
+    resolved = supersedes_for_run(
+        study, population_name=name, declared=declared, execution_tier="canonical"
+    )
+    assert resolved is None
+
+    # The resolution is what makes the reader's run possible: the declared value is
+    # refused outright, and what the notebook actually passes is accepted.
+    prediction = _prediction(study)
+    with pytest.raises(ValueError, match="first population version cannot supersede"):
+        _population(study, name, prediction, supersedes=declared)
+    assert _population(study, name, prediction, supersedes=resolved).supersedes is None
+
+
+def test_declared_supersedes_is_passed_through_once_a_generation_exists(tmp_path: Path):
+    """Where the name already has a snapshot, the declared hash must reach the registry."""
+    study = _study(tmp_path)
+    name = "cme_futures-linear-validation-v1"
+    first = _population(study, name, _prediction(study))
+
+    resolved = supersedes_for_run(
+        study, population_name=name, declared=first.hash, execution_tier="canonical"
+    )
+    assert resolved == first.hash
+
+    second = _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
+    assert second.supersedes == first.hash
+    assert OfficialPopulation.one(study, name=name).hash == second.hash
+
+
+def test_a_disagreeing_supersedes_is_left_for_the_registry_to_refuse(tmp_path: Path):
+    """The resolution must not second-guess a wrong hash into a right one.
+
+    The registry's refusal names the snapshot required; suppressing it here would
+    let a changed population overwrite the record silently.
+    """
+    study = _study(tmp_path)
+    name = "cme_futures-linear-validation-v1"
+    first = _population(study, name, _prediction(study))
+    stale = "0" * 12
+
+    assert (
+        supersedes_for_run(study, population_name=name, declared=stale, execution_tier="canonical")
+        == stale
+    )
+    with pytest.raises(ValueError, match=f"must explicitly supersedes {first.hash}"):
+        _population(study, name, _current_prediction(study, alpha=2.0), supersedes=stale)
+
+
+def test_a_narrowed_run_under_its_own_population_name_drops_the_builtin_hash(tmp_path: Path):
+    """The notebooks document publishing a narrowed run under a caller-chosen name.
+
+    That name is its own first generation whatever the built-in default says, so the
+    default must not follow it there.
+    """
+    study = _study(tmp_path)
+    _population(study, "cme_futures-linear-validation-v1", _prediction(study))
+
+    assert (
+        supersedes_for_run(
+            study,
+            population_name="my-linear-v1",
+            declared="8337482ecb59",
+            execution_tier="canonical",
+        )
+        is None
+    )
+
+
+def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
+    """A preview population is discarded with its workspace and has no lineage to extend."""
+    study = _study(tmp_path)
+    name = "cme_futures-linear-validation-v1"
+    first = _population(study, name, _prediction(study))
+    assert (
+        supersedes_for_run(
+            study, population_name=name, declared=first.hash, execution_tier="preview"
+        )
+        is None
     )

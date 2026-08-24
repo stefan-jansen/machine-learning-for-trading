@@ -86,6 +86,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -282,12 +283,28 @@ plan.select(
 # part of what the snapshot is hashed over, so a run that left it empty would compute a different
 # population and be refused against the one on record.
 #
-# It is canonical-only. A preview population is discarded with its workspace, so it has no lineage
-# to extend and `run_model_population` refuses one that carries a hash.
+# **A default that is a real hash only means something where a population of that name already
+# exists**, and two ordinary situations reach this cell where one does not. `run_log/` is not in
+# the repository, so a reader running this notebook from a fresh checkout is writing the first
+# version of its population; and a run narrowed under a `POPULATION_NAME` of the caller's choosing,
+# which the worked example below does, is the first version of that name whatever the built-in
+# default says. In both, a hash passed here is refused by `OfficialPopulation.create` as a first
+# version that cannot supersede anything, before any fit happens. `supersedes_for_run` drops it in
+# exactly those two cases and in a preview, where a population is discarded with its workspace and
+# has no lineage to extend.
+#
+# What it does not do is second-guess a disagreement. Where a generation exists, the declared hash
+# is passed through even when it is not the one on record, because that refusal is the registry's
+# to make and its message names the hash required.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-linear-validation-v1"
-supersedes = SUPERSEDES_POPULATION or None if EXECUTION_TIER == "canonical" else None
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )

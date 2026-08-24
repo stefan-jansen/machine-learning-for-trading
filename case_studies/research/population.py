@@ -140,6 +140,18 @@ class OfficialPopulation:
         return cls(study, population_hash, name, member_kind, normalized, supersedes)
 
     @classmethod
+    def has_generation(cls, study: Study, *, name: str) -> bool:
+        """Whether this name already has a snapshot, so a run under it could supersede one."""
+        db = _open_registry(study.root)
+        try:
+            row = db.execute(
+                "SELECT 1 FROM official_populations WHERE name = ? LIMIT 1", (name,)
+            ).fetchone()
+        finally:
+            db.close()
+        return row is not None
+
+    @classmethod
     def one(cls, study: Study, *, name: str) -> OfficialPopulation:
         """Resolve the current immutable population by name, without a hash handoff.
 
@@ -203,3 +215,43 @@ class OfficialPopulation:
                 f"official population {self.hash} is incomplete: {', '.join(failures)}"
             )
         return self.members
+
+
+def supersedes_for_run(
+    study: Study,
+    *,
+    population_name: str,
+    declared: str | None,
+    execution_tier: str,
+) -> str | None:
+    """Resolve the `supersedes` hash a run should actually pass.
+
+    A notebook declares the hash its published population replaced, as a literal in the
+    parameter cell rather than a papermill override, so that running the committed `.py`
+    as it stands recomputes the population that is on record. The hash is part of what
+    the snapshot is hashed over, so an empty value there would compute a different
+    population and be refused against the published one.
+
+    That literal is only meaningful where a population of that name already exists. Two
+    situations reach the same notebook where one does not, and in both, passing the hash
+    is refused by `OfficialPopulation.create` before any fit happens:
+
+    - **A reader's first run.** `run_log/` is not in the repository, so a fresh checkout
+      starts with an empty registry and the run is the first version of its population.
+    - **A run under a different `POPULATION_NAME`.** The notebooks document narrowing a
+      run by publishing it under a name of the caller's choosing; that name has no
+      earlier generation either, whatever the built-in default says.
+
+    The declared value is passed through whenever a generation does exist, including when
+    it disagrees with the one on record - that disagreement is the registry's refusal to
+    make, not this function's, and its message names the hash required.
+    """
+    if execution_tier != "canonical":
+        # A preview population is discarded with its workspace, so it has no lineage to
+        # extend and `run_model_population` refuses one that carries a hash.
+        return None
+    if not declared:
+        return None
+    if not OfficialPopulation.has_generation(study, name=population_name):
+        return None
+    return declared
