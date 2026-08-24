@@ -38,6 +38,11 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
+
+# Columns a schema migration added, which an immutable row may therefore be missing
+# through no change of its own. Nothing else is filled on NULL: see the comment at the
+# backfill itself for why a nullable column is not the same as a migrated one.
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -1716,6 +1721,7 @@ def register_causal_run(
     naive_effect: float | None,
     confounding_bias_pct: float | None,
     refutation_p: float | None,
+    refutation_n_successful: int | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -1737,10 +1743,25 @@ def register_causal_run(
     immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
+        comparable_columns = (
+            "label",
+            "treatment",
+            "confounders_json",
+            "embargo",
+            "n_folds",
+            "n_obs",
+            "dml_effect",
+            "dml_se_hac",
+            "p_value_hac",
+            "naive_effect",
+            "confounding_bias_pct",
+            "refutation_p",
+            "refutation_n_successful",
+            "spec_json",
+            "notebook",
+        )
         existing = db.execute(
-            "SELECT label, treatment, confounders_json, embargo, n_folds, n_obs, "
-            "dml_effect, dml_se_hac, p_value_hac, naive_effect, confounding_bias_pct, "
-            "refutation_p, spec_json, notebook FROM causal_runs WHERE causal_hash = ?",
+            f"SELECT {', '.join(comparable_columns)} FROM causal_runs WHERE causal_hash = ?",
             (causal_hash,),
         ).fetchone()
         expected = (
@@ -1756,13 +1777,52 @@ def register_causal_run(
             naive_effect,
             confounding_bias_pct,
             refutation_p,
+            refutation_n_successful,
             spec_json,
             notebook,
         )
         if immutable and existing is not None:
-            if existing != expected:
-                raise ValueError(f"immutable causal result conflict for {causal_hash}")
-            return
+            # A row written before a column existed carries NULL there, and filling it in
+            # is not a conflict: nothing about the run changed, the registry simply had no
+            # place to record that fact yet. Treating it as one would make an upgrade break
+            # re-registration of results that are identical - the same shape as a fix that
+            # forces a refit without changing a number.
+            #
+            # Only a column a migration added is filled this way. The other comparable
+            # columns are nullable for reasons that have nothing to do with the schema:
+            # refutation_p is None whenever the refutation produced too few successful
+            # placebos, so a later run that does produce one has genuinely changed and must
+            # still conflict. Filling on NULL alone would write that over an immutable row
+            # and refresh its execution provenance on the way through.
+            stored = list(existing)
+            backfilled_positions: set[int] = set()
+            for position, value in enumerate(expected):
+                if comparable_columns[position] not in MIGRATION_BACKFILLED_COLUMNS:
+                    continue
+                if stored[position] is None and value is not None:
+                    stored[position] = value
+                    backfilled_positions.add(position)
+            backfilled = bool(backfilled_positions)
+            if tuple(stored) != expected:
+                # Excluded because it was filled, not because of its name. A migrated
+                # column whose stored value is not NULL - a recording convention that
+                # changes 1000 to 998, or a re-registration passing None where 10 was
+                # stored - is a genuine difference, and excluding it by name would raise
+                # naming nothing. That empty message is the same defect this branch
+                # already fixed once, reached from the other side.
+                conflicting = [
+                    name
+                    for position, (name, was, now) in enumerate(
+                        zip(comparable_columns, existing, expected, strict=True)
+                    )
+                    if was != now and position not in backfilled_positions
+                ]
+                raise ValueError(
+                    f"immutable causal result conflict for {causal_hash}: "
+                    f"{', '.join(conflicting)} would change"
+                )
+            if not backfilled:
+                return
         # ON CONFLICT DO UPDATE rather than INSERT OR REPLACE — consistent with
         # register_paired_metrics, avoids the implicit DELETE that triggers
         # FK cascades and loses the original created_at timestamp.
@@ -1772,8 +1832,9 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
+                refutation_n_successful,
                 spec_json, notebook, started_at, elapsed_s, git_commit, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -1787,6 +1848,7 @@ def register_causal_run(
                 naive_effect=excluded.naive_effect,
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
+                refutation_n_successful=excluded.refutation_n_successful,
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -1804,6 +1866,7 @@ def register_causal_run(
                OR causal_runs.naive_effect IS NOT excluded.naive_effect
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
                OR causal_runs.refutation_p IS NOT excluded.refutation_p
+               OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
             """,
@@ -1821,6 +1884,7 @@ def register_causal_run(
                 naive_effect,
                 confounding_bias_pct,
                 refutation_p,
+                refutation_n_successful,
                 spec_json,
                 notebook,
                 started_at,

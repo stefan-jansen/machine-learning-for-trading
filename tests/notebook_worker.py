@@ -167,7 +167,7 @@ def main() -> None:
             sync_policy=args.sync_policy,
         )
     else:
-        from tests.pm_helpers import run_notebook
+        from tests.pm_helpers import REPO_ROOT, get_overrides, run_notebook
 
         result = run_notebook(
             py_path=path,
@@ -176,7 +176,12 @@ def main() -> None:
             output_dir=output_dir,
             data_dir=data_dir,
             extra_env=extra_env,
-            research_preview=True,
+            # Same rule as tests/test_case_studies.py: a notebook that only READS at
+            # the tier it is handed cannot run preview in a fresh workspace, because
+            # nothing wrote preview rows there. overrides.yaml decides per notebook.
+            research_preview=get_overrides(str(path.relative_to(REPO_ROOT).with_suffix(""))).get(
+                "research_preview", True
+            ),
         )
     elapsed = time.perf_counter() - started
 

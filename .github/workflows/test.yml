@@ -328,8 +328,24 @@ jobs:
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-sp500opt }}" == "true" ]]; then
             add_cs "sp500_options"
           fi
+          # us_equities_panel is DEFERRED and does not enroll, even on a push to
+          # main. It is the most expensive case study in the corpus - the runtime
+          # reference puts one tabular_dl configuration at 4.1 hours - and its
+          # rebuild is scheduled after the other eight complete. Until then its
+          # notebooks fail CI for reasons nobody is working on, which trains
+          # readers of this workflow to expect a red job and to stop reading it.
+          #
+          # A deferred case study must not also be a permanently red one. Enroll
+          # it again by deleting CS_DEFERRED below; nothing else needs changing,
+          # and the notice in the log names the condition so the skip cannot be
+          # forgotten silently.
+          CS_DEFERRED="us_equities_panel"
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-usequity }}" == "true" ]]; then
-            add_cs "us_equities_panel"
+            if [[ " $CS_DEFERRED " == *" us_equities_panel "* ]]; then
+              echo "::notice title=us_equities_panel deferred::case-study job skipped by design while its rebuild is descheduled; re-enroll by clearing CS_DEFERRED in .github/workflows/test.yml"
+            else
+              add_cs "us_equities_panel"
+            fi
           fi
 
           echo "case_matrix=$cases" >> "$GITHUB_OUTPUT"
@@ -449,6 +465,16 @@ jobs:
         # and stage-04 helpers below. Neither pulls torch or an ml4t-* package,
         # so this stays a fast per-commit gate.
         #
+        # ml4t-backtest, ml4t-data, ml4t-engineer and databento are what the
+        # whole-directory sweep at the end of this job needs. They are the import
+        # surface of case_studies/utils/backtest_presets.py, the download CLIs,
+        # the feature kernels, and the CME futures download round-trip; adding
+        # them brings 8 more test files and 121 more tests into a required gate
+        # for a couple of hundred MB. torch is the line: 25 files sit behind it,
+        # `case_studies/utils/gbm.py` imports it at module scope so the LightGBM
+        # files are behind it too, and installing it would cost gigabytes on
+        # every commit. Those stay quarantined and named in the file below.
+        #
         # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
         # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
         # variant-geometry guard hangs off exactly that frame, so without pyarrow
@@ -457,9 +483,9 @@ jobs:
         # inspection: the helper-level tests never reach the conversion and passed.
         run: |
           uv venv --python 3.14
-          uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
+          uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2"
+            "ml4t-diagnostic>=0.1.2" ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -480,6 +506,30 @@ jobs:
             tests/test_compose_mounts.py \
             tests/test_download_coverage.py \
             tests/test_plotly_renderer.py \
+            -v --tb=short
+      # model_viz.py rendered the model-analysis figures for seven case studies
+      # through fig.show(), which emits an <img> with no alternative text, so all
+      # seven published figures a screen reader cannot describe. Alt text lives in
+      # output metadata, so it only reaches a notebook by executing it, and these
+      # notebooks execute rarely - which is exactly why the plumbing has to be
+      # gated rather than checked by eye. The tests require the alt text to change
+      # when the plotted data changes, so a canned sentence fails them.
+      - name: Run model-analysis figure alt-text tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MPLBACKEND: Agg
+          # Importing case_studies.utils pulls in utils.config, which hard-fails at
+          # import when ML4T_DATA_PATH does not exist. The workflow-level default
+          # points at test-data this job does not check out. `data/` is tracked and
+          # the unconditional download-logic step above already writes the `.env`
+          # that utils.config also requires, so pointing at the repo's own `data/`
+          # is all this needs. These tests build every frame inline and read
+          # nothing from disk.
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_model_viz_alt_text.py \
             -v --tb=short
       # The Chapter 21 environments reached readers as broken imports partly
       # because no job ran the tests that name them: test_import_coverage.py
@@ -519,6 +569,8 @@ jobs:
             tests/test_create_test_data.py \
             tests/test_sample_registry_for_tests.py \
             tests/test_toolchain_pins.py \
+            tests/test_conformal_embargo_coverage.py \
+            tests/test_training_runtime_records_cores.py \
             -v --tb=short
       # A two-tailed p-value written as `2 * (1 - dist.cdf(abs(t)))` returns
       # exactly 0.0 above |t| ~8.35, so a notebook teaching inference printed
@@ -666,6 +718,48 @@ jobs:
             tests/test_data_root_anchor.py \
             tests/test_sitecustomize_data_root.py \
             -v --tb=short -rs
+
+      # Everything else under tests/, by subtraction rather than by enumeration.
+      #
+      # Every step above names the files it runs, and a file nobody added to one
+      # of those lists ran nowhere: 118 of the repo's 163 test files, 1529 tests,
+      # in no CI job at all (measured 2026-08-24 on f911cf36). Several had been
+      # broken for months with nothing going red, which is the same shape as the
+      # defects they were written to catch. Naming what runs cannot fix that,
+      # because the list and the directory drift apart silently; naming what does
+      # NOT run can, because a new file is gated the day it is committed.
+      #
+      # .github/ci/unit-test-quarantine.txt is that list, with a reason per entry.
+      # A bare path becomes --ignore, a path with :: becomes --deselect. The steps
+      # above stay: they carry the per-file record of what each guard was written
+      # for, and they fail with -v before this one runs.
+      - name: Every other test file
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+          MPLBACKEND: Agg
+        run: |
+          # The workflow-level ML4T_OUTPUT_DIR points every get_case_study_dir()
+          # call at /tmp/ml4t-test-output, which the jobs that check out test-data
+          # seed and this one does not. Under it a test resolving a case study's
+          # config/setup.yaml reads a directory that is not there, and 26 tests
+          # across five files failed on exactly that. Unset it here and the same
+          # calls resolve against the source tree, which is what this job has.
+          # The steps above never hit it because none of them reads a case-study
+          # config through the redirect.
+          unset ML4T_OUTPUT_DIR
+          args=()
+          while read -r entry || [ -n "$entry" ]; do
+            case "$entry" in
+              ''|'#'*) continue ;;
+              *'::'*) args+=("--deselect=$entry") ;;
+              *)      args+=("--ignore=$entry") ;;
+            esac
+          done < .github/ci/unit-test-quarantine.txt
+          printf 'excluded: %s\n' "${args[@]}"
+          .venv/bin/python -m pytest tests/ "${args[@]}" \
+            -q --tb=short --timeout=600 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------
   # Chapter notebook tests — inside Docker (ml4t/ml4t:latest)

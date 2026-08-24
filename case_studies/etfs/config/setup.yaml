@@ -203,19 +203,28 @@ backtest:
       allocation: 10            # top-10 model configs by equal-weight baseline Sharpe
       cost_sensitivity: 1       # top-1 of {signal+allocation} per label
       risk_overlay: 1           # top-1 of {signal+allocation} per label
-    # ETFs only: each advancing config contributes its best TWO checkpoints.
-    # latent_factors/sdf reaches its highest allocation-stage Sharpe on its
-    # second-best checkpoint; at 1 that prediction never enters the sweep.
-    checkpoints_per_config: 2
+    # Each advancing config contributes its single best checkpoint by baseline
+    # Sharpe, so ten distinct (family, config_name) fill the ten allocation slots
+    # and no model occupies two of them. Only the checkpoint is fixed here: the
+    # allocation stage re-sweeps the whole top_k_grid for every advancing config
+    # (15_portfolio_management.py:122-168), including mappings that lost the
+    # baseline stage, so a config advances with its checkpoint chosen and its
+    # top_k still open.
+    checkpoints_per_config: 1
     # Skip MVO/HRP when allocator runtime is the bottleneck (intraday CSes).
     expensive_allocators_skip: false
     # All other alternative allocators take the cheap path.
     # Ch16 equal-weight baseline selection. Long-only top-k. Percentile
     # and quantile axes are commented out; uncomment to add them for any
     # label and the loader will synthesize the schemes automatically.
+    # k is a concentration choice and only means anything against the tradeable
+    # cross-section, which here is 99 names at the median decision date (p10 82).
+    # 5 / 10 / 20 is 5% / 10% / 20% of that: a genuinely concentrated low end and a
+    # diversified high end that still selects. The grid was [10, 20] and had no 5%
+    # end, which is where every comparable case study starts.
     top_k_grid:
-      fwd_ret_21d: [10, 20]
-      fwd_ret_5d:  [10, 20]
+      fwd_ret_21d: [5, 10, 20]
+      fwd_ret_5d:  [5, 10, 20]
     # percentile_grid:
     #   fwd_ret_21d: [80, 90, 95]
     # quantile_grid:
