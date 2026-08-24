@@ -385,12 +385,26 @@ def load_classification_metrics(
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:
-            # `auc` is all-null for a registry that computes no cross-sectional AUC, which polars
-            # reads back as the Null dtype. The concat below is over registries, and one of them
-            # returning Null where another returns Float64 raises rather than widening.
+            # Any of these is all-null for a registry that does not compute it, which polars
+            # reads back as the Null dtype: `auc` where no cross-section yields one, and
+            # `auc_pr` / `log_loss` / `brier_score` for the multiclass rows that never emit
+            # them. The concat below is over registries, and one returning Null where another
+            # returns Float64 raises rather than widening. Casting rather than relaxing the
+            # concat also keeps the returned schema the same when every registry is null.
             frames.append(
                 df.with_columns(
-                    pl.col("auc").cast(pl.Float64),
+                    *(
+                        pl.col(column).cast(pl.Float64, strict=False)
+                        for column in (
+                            "auc",
+                            "auc_roc",
+                            "accuracy",
+                            "balanced_accuracy",
+                            "log_loss",
+                            "brier_score",
+                            "auc_pr",
+                        )
+                    ),
                     pl.lit(cs_id).alias("case_study"),
                 )
             )

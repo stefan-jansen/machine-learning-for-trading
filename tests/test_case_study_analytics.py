@@ -503,6 +503,11 @@ def test_a_legacy_and_a_current_registry_load_together(seeded_registries) -> Non
     with sqlite3.connect(str(etfs_db)) as conn:
         conn.execute("ALTER TABLE prediction_metrics ADD COLUMN auc_mean_daily REAL")
         conn.execute("UPDATE prediction_metrics SET auc_mean_daily = 0.58")
+        # `auc` is not the only column a registry can leave empty throughout: the multiclass
+        # rows in `nasdaq100_microstructure` carry `auc_roc` and `accuracy` and leave `auc_pr`,
+        # `log_loss` and `brier_score` null on every row, so the same concat meets Null against
+        # Float64 under a different name.
+        conn.execute("UPDATE prediction_metrics SET log_loss = 0.61")
         conn.commit()
 
     # Both orders: the concat widens a Null column onto a Float64 one but not the reverse, so
@@ -515,9 +520,13 @@ def test_a_legacy_and_a_current_registry_load_together(seeded_registries) -> Non
 
         assert set(df["case_study"].to_list()) == {"etfs", "crypto_perps_funding"}
         assert df.schema["auc"] == pl.Float64
+        assert df.schema["log_loss"] == pl.Float64
         by_case = dict(zip(df["case_study"], df["auc"], strict=True))
         assert by_case["etfs"] == 0.58
         assert by_case["crypto_perps_funding"] is None
+        by_case_log_loss = dict(zip(df["case_study"], df["log_loss"], strict=True))
+        assert by_case_log_loss["etfs"] == 0.61
+        assert by_case_log_loss["crypto_perps_funding"] is None
 
 
 # -----------------------------------------------------------------------------
