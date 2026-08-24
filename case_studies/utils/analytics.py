@@ -385,7 +385,15 @@ def load_classification_metrics(
         """
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:
-            frames.append(df.with_columns(pl.lit(cs_id).alias("case_study")))
+            # `auc` is all-null for a registry that computes no cross-sectional AUC, which polars
+            # reads back as the Null dtype. The concat below is over registries, and one of them
+            # returning Null where another returns Float64 raises rather than widening.
+            frames.append(
+                df.with_columns(
+                    pl.col("auc").cast(pl.Float64),
+                    pl.lit(cs_id).alias("case_study"),
+                )
+            )
 
     if not frames:
         return pl.DataFrame()
