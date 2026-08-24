@@ -472,8 +472,8 @@ summary = {
 
 # %% [markdown]
 # Every argument below that changes what the estimate is enters the hashed causal specification,
-# so a run at a different block size, placebo count, seed, bandwidth, row cap or development cutoff
-# registers as its own result rather than overwriting the one before it. Leaving one out is not a
+# so a run at a different block size, placebo count, seed, bandwidth, row cap, entity cap or
+# development cutoff registers as its own result rather than overwriting the one before it. Leaving one out is not a
 # smaller record: it is two runs sharing an identity, and the registry cannot tell them apart
 # afterwards.
 
@@ -493,6 +493,7 @@ register_causal_run(
     seed=RANDOM_SEED,
     horizon=HAC_HORIZON,
     max_samples=ROW_CAP,
+    max_symbols=MAX_SYMBOLS,
     development_end=str(DEVELOPMENT_CUTOFF.date()),
     notebook="12_causal_dml",
 )

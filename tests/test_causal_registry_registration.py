@@ -90,6 +90,7 @@ def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path) 
         "seed": 42,
         "horizon": 10,
         "max_samples": 50_000,
+        "max_symbols": 100,
         "development_end": "2020-01-01",
     }
     baseline = _causal_hash(case_dir, **base)
@@ -101,6 +102,9 @@ def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path) 
         ("seed", 7),
         ("horizon", 5),
         ("max_samples", 10_000),
+        ("max_symbols", 25),
         ("development_end", "2019-01-01"),
     ):
         assert _causal_hash(case_dir, **{**base, knob: other}) != baseline, knob
+
+    assert (case_dir / "run_log" / "registry.db").is_file()
