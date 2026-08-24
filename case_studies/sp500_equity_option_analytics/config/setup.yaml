@@ -236,6 +236,13 @@ backtest:
       - {name: risk_parity,     method: risk_parity}
       - {name: mvo_ledoit_wolf, method: mvo_ledoit_wolf, lookback: 126}
       - {name: hrp,             method: hrp}
+      # Sizes each position by the width of its conformal prediction interval rather than by a
+      # moment of returns, so it is the one allocator here that reads the model's own
+      # uncertainty. It was absent while etfs, cme_futures and fx_pairs declared it, which made
+      # this case study's sweep narrower than theirs for no stated reason. 13_model_analysis
+      # measures the coverage those widths come from, so a run of this allocator is also the
+      # test of whether that calibration is good enough to size with.
+      - {name: conformal_weighted, method: conformal_weighted}
     # Ch18 cost sensitivity (bps regime — headline). A companion per-share
     # regime is run from Ch18 cost notebooks for regime comparison; for
     # sp500_eoa it is exploratory only because flat-default half-spread on
