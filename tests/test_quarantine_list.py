@@ -22,34 +22,54 @@ from pathlib import Path
 
 import pytest
 
-QUARANTINE = Path(".github/ci/unit-test-quarantine.txt")
+# Anchored to this file, not to the cwd. The workflow step reads the list from the
+# repo root and so did an earlier version of this module, which made
+# `pytest tests/test_quarantine_list.py` from anywhere else a collection error
+# instead of the failure the assertions below describe.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+QUARANTINE = REPO_ROOT / ".github/ci/unit-test-quarantine.txt"
+
+
+def _raw_lines() -> list[str]:
+    return QUARANTINE.read_text().splitlines() if QUARANTINE.is_file() else []
 
 
 def _entries() -> list[str]:
     """Parse the list the way the workflow step parses it, trailing comments included."""
     out = []
-    for line in QUARANTINE.read_text().splitlines():
+    for line in _raw_lines():
         entry = line.split("#", 1)[0].strip()
         if entry:
             out.append(entry)
     return out
 
 
+RAW_LINES = _raw_lines()
 ENTRIES = _entries()
 
 
-def test_the_list_is_not_empty() -> None:
-    """Guard the guard: an unreadable or relocated file would pass everything below."""
+def test_the_parser_sees_every_line_that_names_a_path() -> None:
+    """Guard the guard, without pinning how long the list is.
+
+    A count threshold would read a legitimate shortening as a parser failure: the
+    torch block is 25 of the current entries and is meant to go away, which would
+    have turned that cleanup red under a message blaming the parser. What actually
+    needs guarding is that the parser does not drop a line the file writes down, so
+    compare it against an independent count of the lines that name a `.py` path.
+    """
     assert QUARANTINE.is_file(), f"{QUARANTINE} is missing; the workflow step reads it by path"
-    assert len(ENTRIES) > 20, (
-        f"only {len(ENTRIES)} entries parsed from {QUARANTINE}; the parser and the file "
-        "have diverged, and every check below would pass vacuously"
+    assert ENTRIES, f"{QUARANTINE} parsed to nothing; every check below would pass vacuously"
+    naming_a_path = [line for line in RAW_LINES if ".py" in line.split("#", 1)[0]]
+    assert len(ENTRIES) == len(naming_a_path), (
+        f"{len(naming_a_path)} lines in {QUARANTINE} name a .py path but the parser "
+        f"produced {len(ENTRIES)} entries; the two have diverged and whatever it "
+        "dropped is running ungated"
     )
 
 
 @pytest.mark.parametrize("entry", ENTRIES, ids=ENTRIES)
 def test_every_entry_names_a_file_that_exists(entry: str) -> None:
-    path = Path(entry.split("::", 1)[0])
+    path = REPO_ROOT / entry.split("::", 1)[0]
     assert path.is_file(), (
         f"{entry} names {path}, which does not exist. pytest accepts an --ignore or "
         "--deselect that matches nothing, so this entry excludes nothing and the file "
@@ -64,7 +84,7 @@ NODEIDS = [e for e in ENTRIES if "::" in e]
 @pytest.mark.parametrize("entry", NODEIDS, ids=NODEIDS)
 def test_every_deselected_test_is_defined_where_it_says(entry: str) -> None:
     path_part, _, test_name = entry.partition("::")
-    path = Path(path_part)
+    path = REPO_ROOT / path_part
     if not path.is_file():
         pytest.skip("covered by test_every_entry_names_a_file_that_exists")
     # The name as written, without a parametrization suffix: --deselect on the bare
