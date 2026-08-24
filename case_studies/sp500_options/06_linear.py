@@ -94,6 +94,7 @@ from case_studies.research import (
     resolved_model_plan,
     run_model_population,
 )
+from utils.cv_splits import load_evaluation_config
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -317,9 +318,13 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # **Measured on the development sample only.** The label artifact on disk runs to the end of the
 # data, holdout included, and `02_labels` says so: the files carry the sealed sessions and no
 # diagnostic reads them. Describing the target across all of it would put a statistic computed
-# partly on sealed outcomes into a validation-stage notebook, so the rows are cut at the
-# development boundary the fits above were resolved against, taken from the plan rather than
-# re-derived from `setup.yaml`.
+# partly on sealed outcomes into a validation-stage notebook.
+#
+# The cut is on the date each straddle settles, not the date its signal is observed. A straddle
+# entered in December 2020 expires in January, and its return is decided by prices inside the
+# holdout however early the signal was read; a cut on the signal date keeps it. `02_labels` and
+# `05_evaluation` both apply the settlement rule, and the artifact carries `dte_calendar`, so the
+# same rule is available here.
 #
 # Two features of it matter. There is a hard ceiling: the most a short straddle can earn is the
 # premium it collected, so nothing exceeds a return of one. There is no floor: a large enough move
@@ -331,16 +336,22 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # The label the strategy trades, read from `setup.yaml` rather than from a constant here, so
 # this section describes the same target the sweep publishes against.
 primary = primary_label(study)
-development_end = plan.get_column("validation_end").max()
-label_values = (
-    study.labels.get(primary, execution_tier=EXECUTION_TIER)
-    .load()
-    .filter(pl.col("timestamp") <= development_end)
-    .get_column(primary)
-    .drop_nulls()
-    .to_numpy()
+holdout_start = (
+    pl.Series([str(load_evaluation_config("sp500_options")["holdout_start"])]).str.to_date().item()
 )
-print(f"{len(label_values):,} straddles resolved on or before {development_end}")
+labels = study.labels.get(primary, execution_tier=EXECUTION_TIER).load()
+if "dte_calendar" not in labels.columns or labels.get_column("dte_calendar").null_count():
+    raise ValueError("the primary label artifact carries no expiry horizon to settle on")
+settlement = pl.col("timestamp") + pl.duration(days=pl.col("dte_calendar"))
+development = labels.with_columns(settlement.alias("settles")).filter(
+    pl.col("settles") < holdout_start
+)
+label_values = development.get_column(primary).drop_nulls().to_numpy()
+last_settlement = development.get_column("settles").max()
+print(
+    f"{len(label_values):,} straddles settling before the {holdout_start} holdout, "
+    f"the last of them on {last_settlement:%Y-%m-%d}"
+)
 
 summary = pl.DataFrame(
     {
