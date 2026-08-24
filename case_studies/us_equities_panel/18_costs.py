@@ -50,7 +50,7 @@ from case_studies.research import (
     plan_backtests,
     run_backtests,
 )
-from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.backtest_loaders import load_backtest_prices_for, warmup_periods_for
 from case_studies.utils.sweep_config import (
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
@@ -164,6 +164,14 @@ if eligible.is_empty() or not ineligible.is_empty():
 # checkpoint, signal, and allocation decisions remain fixed across every cost value.
 
 # %% tags=["results"]
+# Prices are loaded with the warmup prefix the declared allocators need. get_allocators injects
+# vol_window 63 for inverse_vol, risk_parity and hrp, and lookback 126 for mvo_ledoit_wolf, and
+# warmup_periods_for resolves the maximum of those from setup.yaml (126 here). Loading with the
+# default warmup_periods=0 leaves an allocator estimating a 126-day covariance from whatever bars
+# happen to precede the first decision date - an estimate over a truncated history that completes
+# and reports rather than failing.
+WARMUP_PERIODS = warmup_periods_for(CASE_STUDY_ID)
+
 top_n = get_top_n_predictions(CASE_STUDY_ID, "cost_sensitivity")
 selected_parts = []
 for label in eligible.get_column("label").unique().sort().to_list():
@@ -306,6 +314,7 @@ for label in selected_sources.get_column("label").unique().sort().to_list():
         label,
         split="validation",
         max_symbols=MAX_SYMBOLS,
+        warmup_periods=WARMUP_PERIODS,
     )
     for source_row in selected_sources.filter(pl.col("label") == label).iter_rows(named=True):
         for cost_request in cost_requests:
@@ -372,6 +381,7 @@ for label in selected_sources.get_column("label").unique().sort().to_list():
         label,
         split="validation",
         max_symbols=MAX_SYMBOLS,
+        warmup_periods=WARMUP_PERIODS,
     )
     for request in (item for item in planned_requests if item["label"] == label):
         try:
@@ -444,9 +454,17 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
+        # The set spans model families within one label, which is what the funnel ranks over, and
+        # families do not share a feature lineage: latent_factors builds feature_artifacts from
+        # input_lineage["files"] (latent_factors/adapter.py:463) while linear, gbm, tabular_dl and
+        # deep_learning use input_lineage["artifacts"]. Without a contract CandidateSet.create
+        # treats every differing protocol field as undeclared and refuses the set, so the freeze
+        # would raise on any label carrying both. `label_artifact` is deliberately NOT comparable:
+        # the set is per label, and that is what keeps 20_strategy_analysis ranking within one.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-cost-sensitivity-v1",
+            comparison_contract={"comparable_fields": ["cv", "feature_artifacts"]},
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}

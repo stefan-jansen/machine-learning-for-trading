@@ -95,14 +95,20 @@ if research_lock.record["candidate_set_hash"] != validation_set.hash:
 # one-day-horizon Sharpe against a twenty-one-day one and spend the holdout on a cross-horizon
 # comparison, which is not the question the funnel asks. `reference/CASE_STUDY_PIPELINE.md`
 # section 4 runs the funnel per label and every other case study compares within one label; this
-# notebook is held to the same rule. Requiring `label_artifact`, `feature_artifacts` and `cv` to be
-# constant across the set is how that is enforced, and it is why the set this notebook opens is one
-# of the per-label sets rather than a union of them.
+# notebook is held to the same rule. Requiring `label_artifact` to be constant across the set is how
+# that is enforced, and it is why the set this notebook opens is one of the per-label sets rather
+# than a union of them. `feature_artifacts` and `cv` are allowed to vary: within a label the funnel
+# ranks model families against each other, and they do not share a feature lineage.
 
 # %% tags=["results"]
-IDENTITY_PROTOCOL_FIELDS = {"label_artifact", "feature_artifacts", "cv"}
+# One label, many families. `label_artifact` must be constant across the set - that is what makes
+# the ranking a within-label one - while `feature_artifacts` and `cv` may vary, because the funnel
+# ranks model families against each other and they do not share a feature lineage: latent_factors
+# builds feature_artifacts from input_lineage["files"] and the rest from ["artifacts"]. Requiring
+# all three constant would reject every set the funnel actually produces.
+CONSTANT_IDENTITY_FIELDS = {"label_artifact"}
 comparable_fields = set(validation_set.comparison_contract.get("comparable_fields", ()))
-varying_identity_fields = IDENTITY_PROTOCOL_FIELDS & comparable_fields
+varying_identity_fields = CONSTANT_IDENTITY_FIELDS & comparable_fields
 if varying_identity_fields:
     raise ValueError(
         "validation set varies identity fields, so one ranking would compare across labels: "
@@ -110,7 +116,7 @@ if varying_identity_fields:
     )
 validation_protocol = validation_set.comparison_contract.get("protocol", {})
 missing_identity_fields = {
-    field for field in IDENTITY_PROTOCOL_FIELDS if not validation_protocol.get(field)
+    field for field in CONSTANT_IDENTITY_FIELDS if not validation_protocol.get(field)
 }
 if missing_identity_fields:
     raise ValueError(f"validation set lacks identity fields {sorted(missing_identity_fields)}")
@@ -132,7 +138,9 @@ for candidate_hash in validation_set.members:
         raise ValueError(f"{candidate_hash} is not a complete backtest result")
     candidate_protocol = candidate.protocol()
     missing_identity_fields = {
-        field for field in IDENTITY_PROTOCOL_FIELDS if not candidate_protocol.get(field)
+        field
+        for field in ("label_artifact", "feature_artifacts", "cv")
+        if not candidate_protocol.get(field)
     }
     if missing_identity_fields:
         raise ValueError(
@@ -140,7 +148,7 @@ for candidate_hash in validation_set.members:
         )
     if any(
         candidate_protocol.get(field) != validation_protocol[field]
-        for field in (*IDENTITY_PROTOCOL_FIELDS, "split", "execution_tier")
+        for field in (*CONSTANT_IDENTITY_FIELDS, "split", "execution_tier")
     ):
         raise ValueError(f"{candidate_hash} differs from the validation input protocol")
     training_spec = candidate.lineage()["training_spec"]
