@@ -1206,19 +1206,34 @@ case_studies/cme_futures/08_tabular_dl:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had. The CI fixture is the reduction here.
   timeout: 300
 case_studies/cme_futures/09_dl_lstm:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had.
+    #
+    # `gpu: true` skips this on every runner without a card, which is every CI runner, so the
+    # sequence family currently has no coverage at all. The two reasons recorded here before
+    # were both measured and both wrong. A preview does not fail the next notebook: it takes
+    # the `run_resolved_model_requests` branch, publishes no official population, and CI runs
+    # notebooks independently in any case. And the fit does not need a card - with CUDA hidden
+    # and `device: cpu`, all four configurations complete on CPU with the 60-step lookback
+    # untouched:
+    #
+    #   folds [0], max_symbols 5                          nlinear 18.2s  lstm_h64 245.7s  total 542.0s
+    #   folds [0], max_symbols 5, max_train_sequences 2000 nlinear  4.2s  lstm_h64  52.6s  total 130.2s
+    #
+    # Both runs published 80 complete prediction sets inside the preview root. The recurrent
+    # architecture is 91% of the cost, so capping training sequences is the reduction that
+    # matters here and cutting symbols further is not.
+    #
+    # What still blocks CPU coverage is neither of those: the notebook hard-codes
+    # `overrides={"device": "cuda"}` at its resolve call and raises when preview is requested
+    # without an explicit WORKSPACE, and this file is static YAML that cannot supply a
+    # per-run temporary path. Enabling it needs a DEVICE parameter and a decision about that
+    # guard, which is queued behind the pending 09 refit rather than done here.
   timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
