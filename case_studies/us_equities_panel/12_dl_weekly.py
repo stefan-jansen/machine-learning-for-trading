@@ -220,6 +220,7 @@ print(f"Running {len(pytorch_configs)} PyTorch configs on {device}...")
 with open(LOG_FILE, "a") as f:
     f.write("=== PyTorch direct regression (weekly) ===\n")
 
+# %%
 pytorch_result = run_dl_cv(
     dataset_pd,
     splits,
@@ -239,6 +240,7 @@ pytorch_result = run_dl_cv(
     notebook=NOTEBOOK,
 )
 
+# %%
 print("\nPyTorch results:")
 print(f"  Best config: {pytorch_result['best_config_name']}")
 print(f"  Best epoch: {pytorch_result['best_epoch']}")
@@ -254,9 +256,9 @@ with open(LOG_FILE, "a") as f:
         f.write(f"  {r['config_name']}: IC={r['best_ic']:.4f} epoch={r['best_epoch']}\n")
 
 # %% [markdown]
-# ## Run DARTS N-BEATS (1-Step Forecasting)
+# ## Run Darts `NBEATSModel` (1-Step Forecasting)
 #
-# With `darts_output_chunk_length=1`, N-BEATS predicts a single weekly
+# With `darts_output_chunk_length=1`, `NBEATSModel` predicts a single weekly
 # return — eliminating the error compounding that degrades multi-step
 # daily forecasting. This is the fair comparison: same horizon, same data,
 # but the forecasting formulation vs direct regression.
@@ -288,6 +290,7 @@ print(f"Running DARTS N-BEATS (1-step weekly forecasting) on {device}...")
 with open(LOG_FILE, "a") as f:
     f.write("\n=== DARTS N-BEATS (weekly, 1-step) ===\n")
 
+# %%
 darts_result = run_dl_cv(
     dataset_pd,
     splits,
@@ -307,6 +310,7 @@ darts_result = run_dl_cv(
     prediction_split=PREDICTION_SPLIT,
 )
 
+# %%
 print("\nDARTS N-BEATS results:")
 print(f"  Best epoch: {darts_result['best_epoch']}")
 print(f"  Best IC: {darts_result['best_ic']:.4f}")
@@ -317,7 +321,7 @@ with open(LOG_FILE, "a") as f:
 # %% [markdown]
 # ## Summary
 #
-# Compare direct regression (LSTM, NLinear) against 1-step N-BEATS forecasting,
+# Compare direct regression (LSTM, NLinear) against 1-step `NBEATSModel` forecasting,
 # and against the tabular baselines (GBM, Ridge, TabM) already in the registry.
 
 # %%
@@ -348,6 +352,7 @@ all_results.append(
 results_df = pl.DataFrame(all_results).sort("ic", descending=True)
 print(results_df)
 
+# %%
 # Compare against registry baselines
 import sqlite3
 
