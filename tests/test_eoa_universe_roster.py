@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 from data import load_sp500_daily_bars, load_sp500_options_surface
+from data.exceptions import DataNotFoundError
 from utils.paths import get_case_study_dir
 
 CASE_STUDY_ID = "sp500_equity_option_analytics"
@@ -44,20 +45,30 @@ def declared_n_assets() -> int:
     return setup["universe"]["n_assets"]
 
 
+# The module docstring says this file skips when the dataset is absent, and it did
+# not: an absent dataset makes the loader raise DataNotFoundError, so the
+# is_empty() check below was never reached and all seven tests errored at setup
+# instead. The distinction only shows up in a checkout with no data at all, which
+# is every CI job outside the case-study matrix - and this file ran in no job, so
+# nothing ever exercised the guard.
+def _or_skip(load, what: str) -> pl.DataFrame:
+    try:
+        frame = load()
+    except DataNotFoundError:
+        pytest.skip(f"no {what} in this data checkout")
+    if frame.is_empty():
+        pytest.skip(f"no {what} in this data checkout")
+    return frame
+
+
 @pytest.fixture(scope="module")
 def surface(populated_data_dir):
-    frame = load_sp500_options_surface()
-    if frame.is_empty():
-        pytest.skip("no sp500 option surface in this data checkout")
-    return frame
+    return _or_skip(load_sp500_options_surface, "sp500 option surface")
 
 
 @pytest.fixture(scope="module")
 def bars(populated_data_dir):
-    frame = load_sp500_daily_bars()
-    if frame.is_empty():
-        pytest.skip("no sp500 daily bars in this data checkout")
-    return frame
+    return _or_skip(load_sp500_daily_bars, "sp500 daily bars")
 
 
 def test_the_unbounded_roster_is_the_declared_universe(surface, declared_n_assets):

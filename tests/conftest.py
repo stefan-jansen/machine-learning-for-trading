@@ -9,6 +9,7 @@ Two modes of operation:
 import json
 import os
 import shutil
+import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +33,50 @@ CASE_STUDY_IDS = [
     "sp500_options",
     "us_equities_panel",
 ]
+
+
+# Set by ``seeded_output_dir`` so the per-test restore below knows the value the
+# session deliberately installed, rather than reverting it.
+_SESSION_OUTPUT_DIR: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def restore_output_root():
+    """No test leaves ML4T_OUTPUT_DIR pointing at its own tmp_path.
+
+    ``Study.activate()`` sets ML4T_OUTPUT_DIR for the whole process and caches the
+    root it installed, which is what a notebook wants and what makes the test corpus
+    order-dependent: the last test to activate leaves every later test resolving
+    ``config/setup.yaml`` under a tmp_path pytest has since deleted.
+
+    Measured on 2026-08-24: ``tests/test_sweep_config_seam.py`` passes 22 on its own
+    and fails 19 when it runs after ``tests/test_sp500_options_research.py``, on
+    ``FileNotFoundError: .../test_official_population_is_sn0/workspace/
+    us_firm_characteristics/config/setup.yaml``. Six test files already carry a
+    module-level ``os.environ.pop("ML4T_OUTPUT_DIR", None)`` against this; each one
+    protects only the file that remembers to write it, and only against a leak from
+    a file that ran earlier.
+
+    The module-level cache has to be cleared with the variable. ``activate()`` skips
+    the write when the root it is asked for equals the one it last installed, so
+    restoring the environment alone leaves the next activation of the same root
+    silently doing nothing.
+    """
+    before = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    target = _SESSION_OUTPUT_DIR if _SESSION_OUTPUT_DIR is not None else before
+    if os.environ.get("ML4T_OUTPUT_DIR") == target:
+        return
+    if target is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = target
+    # Only if the workspace module was imported: touching it otherwise would pull the
+    # research package into every test in the corpus.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is not None:
+        workspace._ACTIVE_OUTPUT_ROOT = None
+        workspace._clear_root_sensitive_caches()
 
 
 def generated_env_contents(repo_root: Path, environ: Mapping[str, str]) -> str:
@@ -235,7 +280,9 @@ def seeded_output_dir(tmp_path_factory):
         output_dir = tmp_path_factory.mktemp("ml4t_output")
 
     # Set the env var so notebooks see this worker's output dir
+    global _SESSION_OUTPUT_DIR
     os.environ["ML4T_OUTPUT_DIR"] = str(output_dir)
+    _SESSION_OUTPUT_DIR = str(output_dir)
 
     cs_root = REPO_ROOT / "case_studies"
 
