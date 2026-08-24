@@ -760,9 +760,13 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
     resolved = (
         cast(
             "object",
-            SimpleNamespace(spec={"execution_tier": "canonical"}),
+            SimpleNamespace(
+                family="pca",
+                spec={"execution_tier": "canonical", "label": "fwd_ret_5d", "config_name": "pca"},
+            ),
         ),
     )
+    catalog = pl.DataFrame({"family": ["pca"], "label": ["fwd_ret_5d"], "config_name": ["pca"]})
     monkeypatch.setattr(research_workflow, "OfficialPopulation", SimpleNamespace(create=_create))
     monkeypatch.setattr(research_workflow, "expected_prediction_hashes", lambda _requests: ("h1",))
     monkeypatch.setattr(
@@ -775,7 +779,7 @@ def test_official_model_catalog_forwards_the_population_it_supersedes(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        catalog,
         population_name="cme-pca-validation-v1",
         resolved_requests=resolved,
         supersedes="2d252634bffb",
@@ -806,9 +810,14 @@ def test_official_model_catalog_defaults_to_superseding_nothing(
 
     research_workflow.run_official_model_catalog(
         cast("object", SimpleNamespace()),
-        pl.DataFrame(),
+        pl.DataFrame({"family": ["pca"], "label": ["fwd_ret_5d"], "config_name": ["pca"]}),
+        resolved_requests=(
+            SimpleNamespace(
+                family="pca",
+                spec={"execution_tier": "canonical", "label": "fwd_ret_5d", "config_name": "pca"},
+            ),
+        ),
         population_name="cme-pca-validation-v1",
-        resolved_requests=(SimpleNamespace(spec={"execution_tier": "canonical"}),),
     )
 
     assert seen["supersedes"] is None

@@ -179,14 +179,47 @@ def expected_prediction_hashes(
     return tuple(hashes)
 
 
+def _require_resolved_requests_cover_the_catalog(
+    request_catalog: pl.DataFrame,
+    resolved: tuple[ResolvedModelRequest, ...],
+) -> None:
+    """Refuse a snapshot built from a resolved set that is not the declared catalog.
+
+    Supplying ``resolved_requests`` is how a caller avoids resolving twice, not a way to narrow
+    what the population contains. Without this check, a stale or partial set snapshots under the
+    catalog's name and reports complete, and every configuration it omitted silently leaves the
+    comparison the population exists to define.
+    """
+    declared = set(request_catalog.select("family", "label", "config_name").unique().iter_rows())
+    submitted = {
+        (request.family, request.spec["label"], request.spec.get("config_name"))
+        for request in resolved
+    }
+    if submitted != declared:
+        missing = sorted(declared - submitted)
+        extra = sorted(submitted - declared)
+        raise ValueError(
+            f"resolved requests do not match the declared catalog: missing={missing}, extra={extra}"
+        )
+
+
 def run_official_model_catalog(
     study: Study,
     request_catalog: pl.DataFrame,
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
 ) -> tuple[ModelExecution, OfficialPopulation]:
-    """Snapshot and execute one complete canonical model population."""
+    """Snapshot and execute one complete canonical model population.
+
+    ``supersedes`` names the population hash this run replaces, and it is a value a person sets
+    after reading the registry rather than one the notebook can derive. It belongs in the
+    snapshot, so passing it changes the population identity: a re-run that supplies it registers
+    a new population recording what it replaced, not the old one again. Where a population
+    already exists under this name and the membership has changed, ``OfficialPopulation.create``
+    refuses without it and names the hash required.
+    """
     resolved = tuple(resolved_requests or ())
     if not resolved:
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
@@ -195,6 +228,7 @@ def run_official_model_catalog(
         request_catalog,
         population_name=population_name,
         resolved_requests=resolved,
+        supersedes=supersedes,
     )
     execution, population = run_official_model_subset(
         study,
@@ -211,6 +245,7 @@ def snapshot_official_model_catalog(
     *,
     population_name: str,
     resolved_requests: Iterable[ResolvedModelRequest] | None = None,
+    supersedes: str | None = None,
 ) -> OfficialPopulation:
     """Snapshot every expected canonical prediction before any member executes."""
     resolved = tuple(resolved_requests or ())
@@ -218,12 +253,14 @@ def snapshot_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
+    _require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     return OfficialPopulation.create(
         study,
         name=population_name,
         member_kind="prediction",
         members=expected,
+        supersedes=supersedes,
     )
 
 
@@ -828,7 +865,7 @@ def run_official_backtest_requests(
         else None
     )
     labels_dir, raw_options_dir = option_data_paths()
-    del labels_dir
+    lifecycle_source = option_source_identity(labels_dir, raw_options_dir)["raw_lifecycle"]
     lifecycle = _load_option_lifecycle(pl.concat(all_decisions), raw_options_dir)
     results = []
     rows = []
@@ -842,7 +879,11 @@ def run_official_backtest_requests(
             chapter=row.get("chapter"),
             decision=decision,
         )
-        result = strategy.run(prices=prices, option_lifecycle=lifecycle)
+        result = strategy.run(
+            prices=prices,
+            option_lifecycle=lifecycle,
+            option_lifecycle_source=lifecycle_source,
+        )
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)

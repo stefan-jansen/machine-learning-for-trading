@@ -279,29 +279,61 @@ def test_hold_to_expiry_selection_does_not_require_a_ten_day_exit_quote() -> Non
     )
 
 
-def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: Path) -> None:
-    study = _study(tmp_path)
-    source_hash = "released-source"
-    source_path = (
-        study.release_root
-        / "case_studies"
-        / "sp500_options"
-        / "run_log"
-        / "predictions"
-        / source_hash
-        / "predictions.parquet"
-    )
-    source_path.parent.mkdir(parents=True)
+def _release_prediction(study: Study, *, label: str = "ret_to_expiry") -> str:
+    """Register a complete canonical validation prediction in the release registry."""
+    from case_studies.utils.registry import register_prediction_set, register_training_run
+
+    case_dir = study.release_root / "case_studies" / "sp500_options"
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = label
+    spec["execution_tier"] = "canonical"
+    training_hash = register_training_run("sp500_options", spec, case_dir=case_dir)
     timestamps = [datetime(2024, 1, day) for day in range(2, 7)]
-    pl.DataFrame(
+    frame = pl.DataFrame(
         {
-            "symbol": [symbol for timestamp in timestamps for symbol in ("A", "B", "C")],
+            "symbol": [symbol for _ in timestamps for symbol in ("A", "B", "C")],
             "timestamp": [timestamp for timestamp in timestamps for _ in range(3)],
             "fold": [0] * 15,
             "prediction": [float(index) / 100 for index in range(15)],
             "actual": [float(index) / 200 for index in range(15)],
         }
-    ).write_parquet(source_path)
+    )
+    return register_prediction_set(
+        "sp500_options",
+        training_hash,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+        case_dir=case_dir,
+    )
+
+
+def test_the_fixture_refuses_a_source_that_is_not_a_released_ret_to_expiry_prediction(
+    tmp_path: Path,
+) -> None:
+    """The fixture republishes its source as a complete `ret_to_expiry` validation prediction.
+
+    It used to read whatever parquet sat at the constructed path, so an artifact scored on
+    another label entered the registry under a `ret_to_expiry` identity with new lineage and
+    nothing said otherwise.
+    """
+    study = _study(tmp_path)
+    wrong_label_hash = _release_prediction(study, label="fwd_ret_5d")
+
+    with pytest.raises(ValueError, match="the fixture requires"):
+        _seed_real_preview_prediction(
+            study,
+            source_prediction_hash=wrong_label_hash,
+            max_symbols=2,
+            max_sessions=5,
+        )
+
+
+def test_real_prediction_subset_is_identity_covered_and_preview_only(tmp_path: Path) -> None:
+    study = _study(tmp_path)
+    source_hash = _release_prediction(study)
 
     prediction = _seed_real_preview_prediction(
         study,
@@ -581,12 +613,17 @@ def test_typed_decision_runs_through_registered_option_backtest_path(
         signal=signal,
     )
     lifecycle = _load_option_lifecycle(decision.load(), raw_dir)
+    lifecycle_source = option_source_identity(labels_dir, raw_dir)["raw_lifecycle"]
 
-    result = study.strategy(
-        prediction=prediction,
-        signal=signal,
-        decision=decision,
-    ).run(prices=prices, option_lifecycle=lifecycle)
+    strategy = study.strategy(prediction=prediction, signal=signal, decision=decision)
+    # A frame the identity does not account for cannot be the one the returns are computed from.
+    with pytest.raises(ValueError, match="declare the raw files"):
+        strategy.run(prices=prices, option_lifecycle=lifecycle)
+    result = strategy.run(
+        prices=prices,
+        option_lifecycle=lifecycle,
+        option_lifecycle_source=lifecycle_source,
+    )
     spec = result.spec()
 
     assert result.complete
@@ -1180,3 +1217,46 @@ def test_a_preview_pair_is_found_in_the_preview_namespace(tmp_path: Path) -> Non
     )
 
     assert paired.row(0, named=True)["n_periods"] == 4
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    A stale or partial set used to snapshot under the catalog's name and report complete, so
+    every configuration it omitted left the comparison the population exists to define without
+    anything saying so.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["linear", "linear"],
+            "label": ["ret_to_expiry", "ret_to_expiry"],
+            "config_name": ["ridge_a1.0", "ridge_a10.0"],
+        }
+    )
+    partial = (
+        SimpleNamespace(
+            family="linear",
+            spec={
+                "execution_tier": "canonical",
+                "label": "ret_to_expiry",
+                "config_name": "ridge_a1.0",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.snapshot_official_model_catalog(
+            SimpleNamespace(),
+            catalog,
+            population_name="sp500-options-linear-validation-v1",
+            resolved_requests=partial,
+        )

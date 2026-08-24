@@ -630,7 +630,16 @@ class Strategy:
         *,
         prices: pl.DataFrame | None = None,
         option_lifecycle: pl.DataFrame | None = None,
+        option_lifecycle_source: dict[str, Any] | None = None,
     ) -> BacktestResult:
+        """Execute this strategy and register the result.
+
+        ``option_lifecycle`` lets a caller running many requests load the paired option quotes
+        once instead of per request. It changes the returns, while the identity records the
+        digest of the canonical lifecycle files, so ``option_lifecycle_source`` has to name the
+        files the frame was built from: without it, two different lifecycles register different
+        results under one backtest hash.
+        """
         self.study.require_writable()
         if self.split == "holdout" and prices is not None:
             raise ValueError("locked holdout strategy must load canonical holdout prices")
@@ -667,6 +676,18 @@ class Strategy:
                 embargo_steps=holdout_conformal_embargo_steps(self.study.case_study, self.label),
                 write=True,
             )
+        if option_lifecycle is not None:
+            declared = spec.get("input_identity", {}).get("option_lifecycle")
+            supplied = (
+                compute_hash(canonical_json(option_lifecycle_source))
+                if option_lifecycle_source is not None
+                else None
+            )
+            if declared is None or supplied != declared:
+                raise ValueError(
+                    "a supplied option lifecycle must declare the raw files it was built from, "
+                    "and they must be the ones this backtest's identity records"
+                )
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
         decision_weights = self._decision_weights(resolved_prices)
