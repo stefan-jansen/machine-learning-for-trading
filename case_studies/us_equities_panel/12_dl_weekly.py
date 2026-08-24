@@ -38,7 +38,12 @@ import pandas as pd
 import polars as pl
 import torch
 
-from utils.modeling import RANDOM_SEED, load_configs, seed_everything
+from utils.modeling import (
+    RANDOM_SEED,
+    load_configs,
+    reduce_to_top_entities,
+    seed_everything,
+)
 from utils.paths import get_case_study_dir
 
 # %%
@@ -103,11 +108,27 @@ mb = (
 )
 print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols")
 
+# model_based.parquet is keyed on (symbol, timestamp, fold), not (symbol, timestamp): its three
+# columns are refitted inside each of the seventeen folds so that a fold sees only its own
+# training window. Joining it on (symbol, timestamp) alone did three things at once. It fanned
+# every weekly observation out to one row per fold, which left duplicate timestamps per symbol and
+# produced zero usable sequences - the "No valid folds created" this notebook died on. It put
+# every other fold's fitted values onto each row, so a fold's inputs carried a garch conditional
+# volatility estimated on windows that fold is not allowed to see. And because `fold` itself was
+# not excluded, the fold index went into the model as a feature.
+#
+# The runner already takes this artifact per fold: `temporal_by_fold` is selected one fold at a
+# time by `fold_temporal_frame` (utils/modeling.py:1454), which filters on `fold`, drops it, and
+# deduplicates on the join keys. Pass it there instead of pre-joining it here.
 feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
-mb_cols = [c for c in mb.columns if c not in ("symbol", "timestamp")]
-features = feat.join(mb, on=["symbol", "timestamp"], how="inner")
-feature_names = feat_cols + mb_cols
-print(f"  Combined: {features.shape[0]:,} rows, {len(feature_names)} features")
+temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp", "fold")]
+temporal_by_fold = mb
+features = feat
+feature_names = feat_cols
+print(
+    f"  Base features: {features.shape[0]:,} rows, {len(feature_names)} features; "
+    f"{len(temporal_feature_names)} temporal features joined per fold"
+)
 
 labels = (
     pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
@@ -117,13 +138,18 @@ labels = (
 print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
-del feat, mb, features, labels
+del feat, features, labels
 collect()
 
-# Subsample to symbol filter if needed
+# Subsample to symbol filter if needed. Selecting by name takes whichever symbols sort first,
+# which says nothing about how much history they carry: on this panel the alphabetical head is
+# A, AA, AAL, AAMC, AAN, and AAL and AAMC only list part-way through the fold range. A reduced
+# run then builds folds whose training window is empty for most of the universe, every fold falls
+# under the sequence floor in prepare_fold_sequence_stores, and the run dies on "No valid folds
+# created". reduce_to_top_entities takes the symbols with the most rows, ties broken by name, and
+# is what every other reduced notebook here uses.
 if MAX_SYMBOLS > 0:
-    symbols = dataset.select("symbol").unique().sort("symbol").head(MAX_SYMBOLS)
-    dataset = dataset.join(symbols, on="symbol")
+    dataset = reduce_to_top_entities(dataset, "symbol", MAX_SYMBOLS)
     print(f"  Filtered to {MAX_SYMBOLS} symbols: {dataset.shape[0]:,} rows")
 
 # Convert to pandas (pipeline expects pandas)
@@ -227,6 +253,9 @@ pytorch_result = run_dl_cv(
     configs=pytorch_configs,
     n_features=len(feature_names),
     feature_names=feature_names,
+    temporal_by_fold=temporal_by_fold,
+    temporal_keys=["symbol", "timestamp"],
+    temporal_feature_names=temporal_feature_names,
     label_col=PRIMARY_LABEL,
     date_col="timestamp",
     entity_col="symbol",
@@ -297,6 +326,9 @@ darts_result = run_dl_cv(
     configs=darts_configs,
     n_features=len(feature_names),
     feature_names=feature_names,
+    temporal_by_fold=temporal_by_fold,
+    temporal_keys=["symbol", "timestamp"],
+    temporal_feature_names=temporal_feature_names,
     label_col=PRIMARY_LABEL,
     date_col="timestamp",
     entity_col="symbol",
