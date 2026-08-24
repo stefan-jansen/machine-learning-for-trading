@@ -72,6 +72,8 @@
 # %%
 """Fit the declared ETF instrumented-PCA population on the walk-forward folds."""
 
+import json
+
 import plotly.graph_objects as go
 import polars as pl
 
@@ -393,6 +395,73 @@ print(f"{catalog.height} candidate models across {len(ordered_labels)} labels")
 catalog.select("label", "checkpoint_value", "ic_mean", "ic_std", "ic_n_days", "n_folds")
 
 # %% [markdown]
+# ### What the headline number averages, and what the fit had to do to produce it
+#
+# `ic_mean` is one number over the whole validation period, and the eight folds behind it are
+# fitted on different training windows and scored on different years. The table below recomputes
+# each fold's mean IC from the published predictions, which is where the dispersion behind a
+# single figure becomes visible.
+#
+# Beside it, read back from the `fold_extras.json` the training run wrote, is how many alternations
+# each fold's fit took before the step fell below `tol`. That count is the only evidence that the
+# iteration cap in `config/setup.yaml` is a bound the estimator never meets rather than one it runs
+# into, and it comes from the stored artifact rather than from the runner's log so it is here
+# whether this execution fitted the folds or reused a fit already registered.
+
+# %%
+published = {result.hash: result for run in execution.runs for result in run.predictions}
+training_by_label = {
+    run.training.registry_record()["label"]: run.training for run in execution.runs
+}
+
+
+def _fold_ic(prediction_hash: str) -> pl.DataFrame:
+    """Mean daily rank correlation of prediction against realised return, within each fold."""
+    return (
+        published[prediction_hash]
+        .load()
+        .group_by("fold", "timestamp")
+        .agg(pl.corr("prediction", "actual", method="spearman").alias("ic"))
+        .group_by("fold")
+        .agg(pl.col("ic").mean().alias("fold_ic"))
+        .sort("fold")
+    )
+
+
+def _fold_solver(label: str) -> pl.DataFrame:
+    training = training_by_label[label]
+    extras_path = training.root / "run_log" / "training" / training.hash / "fold_extras.json"
+    return pl.DataFrame(
+        [
+            {
+                "fold": int(extra["fold_id"]),
+                "iterations": int(extra["iterations"]),
+                "iteration_cap": int(extra["max_iter"]),
+                "converged": bool(extra["converged"]),
+            }
+            for extra in json.loads(extras_path.read_text())
+        ]
+    ).sort("fold")
+
+
+by_fold = {
+    row["label"]: _fold_ic(row["prediction_hash"]).join(_fold_solver(row["label"]), on="fold")
+    for row in catalog.iter_rows(named=True)
+}
+for label in ordered_labels:
+    folds = by_fold[label]
+    ic = folds.get_column("fold_ic")
+    iterations = folds.get_column("iterations")
+    print(
+        f"{label}: mean {ic.mean():+.4f}, standard deviation across folds {ic.std():.4f}, "
+        f"{(ic < 0).sum()} of {folds.height} folds negative; "
+        f"{iterations.min()}-{iterations.max()} alternations against a cap of "
+        f"{folds.get_column('iteration_cap').max()}"
+    )
+
+by_fold[ordered_labels[0]]
+
+# %% [markdown]
 # ### The prediction moves within a fold, and that is the whole difference
 #
 # [`11a_pca`](11a_pca.ipynb) checked that each fund carried exactly one predicted value for the
@@ -405,7 +474,6 @@ catalog.select("label", "checkpoint_value", "ic_mean", "ic_std", "ic_n_days", "n
 # reveal.
 
 # %%
-published = {result.hash: result for run in execution.runs for result in run.predictions}
 # The label whose predictions the rest of this section reads, named rather than taken by position:
 # `execution.runs` is ordered by how the requests were submitted, not by which label leads.
 charted_label = ordered_labels[0]
@@ -497,6 +565,55 @@ show_plotly_with_alt(
 
 # %% [markdown]
 # ## 5. What to notice
+#
+# **Letting the features set the exposures moves the average off zero, and not past the spread it
+# would have to clear.** The mean validation IC is **+0.041** on the primary label and **+0.035**
+# on the five-day variant, against **-0.033** and **+0.010** for the unconditioned decomposition in
+# [`11a_pca`](11a_pca.ipynb). Behind the primary number the eight fold ICs run -0.008, -0.018,
+# +0.118, +0.052, +0.150, +0.013, +0.157 and -0.133: three of the eight are negative, and their
+# standard deviation across folds is 0.099, about two and a half times the mean they average to.
+# Conditioning is worth something on both labels. It is not worth enough to make any one fold's
+# ordering dependable.
+#
+# **The ordering moves every day, and by very little.** The check above found no fund holding a
+# single predicted value through a fold, so the exposures are tracking the feature rows as
+# intended. The day-over-day rank correlation says how far that gets: between **0.92 and 0.98** on
+# every one of the eight folds. Two things follow, and they point in opposite directions for a
+# reader deciding what to do with this model. A strategy trading it turns over slowly, which
+# [`16_costs`](16_costs.ipynb) will price as an advantage. And the 1,995 daily correlations behind
+# `ic_mean` are nowhere near 1,995 independent readings, because consecutive dates are scoring
+# almost the same ordering against a different day of returns, so `ic_std / sqrt(ic_n_days)`
+# understates the uncertainty on `ic_mean` here much as it did for the forecast that was frozen
+# within a fold. It understates it by less; it does not stop understating it.
+#
+# **The iteration counts are a result, and this case study had never read them.** The primary
+# label's eight folds settle at 85, 97, 110, 107, 69, 59, 53 and 77 alternations against
+# `tol = 1e-05`; the five-day label settles between 28 and 61. `config/setup.yaml` declared a cap
+# of 100 alternations, which sits inside the primary label's own distribution and above all of the
+# five-day label's - two folds of one label needed more than the budget while the other label never
+# came close to it. The cap is now 1000, set off these counts. No prediction was ever published
+# from a truncated fit: `_require_ipca_convergence` refuses the whole run when any fold stops at
+# the cap, which is why the wrong number surfaced as a failure rather than as eight plausible
+# ICs. What made it survive being wrong is that nothing had fitted this estimator at production
+# width in this case study before, so the declared cap had never been asked to hold.
+#
+# **What this establishes for the rest of the family.** PCA and IPCA differ in one thing: whether
+# a fund's exposure is a fixed number or a function of that fund's 71 feature values on the day.
+# Both fit the same panel over the same folds, both average their factor returns over the same
+# training windows, and both publish one checkpoint. The gap between -0.033 and +0.041 on the
+# primary label is what that one difference is worth with a **linear** map from features to
+# exposures. [`11c_conditional_autoencoder`](11c_conditional_autoencoder.ipynb) keeps the two-stage
+# structure and replaces that map with a network, so the comparison that follows isolates the map
+# rather than the idea of conditioning.
+#
+# **Known limitations.** `n_factors` is declared at five rather than chosen, and nothing here tests
+# whether a different count orders the cross-section better - that would be a search over
+# validation IC, which this notebook is arranged to avoid. Five factors against roughly 96 funds is
+# a comfortable ratio but not a large one, and the panel narrows as the folds roll forward: the
+# last fold prices 90 funds where the first prices 96, so the eight fold ICs are not eight readings
+# of one experiment. The ridge strengths are declared too, and a ridge that binds changes what
+# converges. And every number here is measured on validation folds that have been read many times
+# over by the time a case study reaches this notebook.
 
 # %% [markdown]
 # **Next**: [`11c_conditional_autoencoder`](11c_conditional_autoencoder.ipynb) keeps this exact
