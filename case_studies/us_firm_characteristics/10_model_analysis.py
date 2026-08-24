@@ -1055,10 +1055,6 @@ else:
 # than replacing the first. Both rows are real runs, and the table below is read as this
 # case study's causal evidence, so it shows the run under the configuration currently
 # declared and counts the superseded identities rather than mixing them in.
-#
-# The declared run is identified by the knobs the configuration sets rather than by the
-# preset name, because the recorded spec names every causal run in the fleet after the
-# original single preset whatever configuration produced it.
 
 # %% tags=["results"]
 declared_causal = load_configs(CASE_STUDY, PRIMARY_LABEL, "causal_dml")[0]
@@ -1075,20 +1071,12 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
 
 if causal_rows:
     all_causal = pl.DataFrame(causal_rows).with_columns(
+        config_name=pl.col("spec_json").str.json_path_match("$.config_name"),
         max_samples=pl.col("spec_json").str.json_path_match("$.params.max_samples").cast(pl.Int64),
-        spec_n_placebo=pl.col("spec_json").str.json_path_match("$.params.n_placebo").cast(pl.Int64),
-        spec_n_folds=pl.col("spec_json").str.json_path_match("$.n_folds").cast(pl.Int64),
-        spec_seed=pl.col("spec_json").str.json_path_match("$.seed").cast(pl.Int64),
-    )
-    is_declared = (
-        (pl.col("max_samples") == int(declared_causal["max_samples"]))
-        & (pl.col("spec_n_placebo") == int(declared_causal["n_placebo"]))
-        & (pl.col("spec_n_folds") == int(declared_causal["n_folds"]))
-        & (pl.col("spec_seed") == int(declared_causal["seed"]))
     )
     causal_df = (
-        all_causal.filter(is_declared)
-        .drop("spec_json", "spec_n_placebo", "spec_n_folds", "spec_seed")
+        all_causal.filter(pl.col("config_name") == declared_causal["config_name"])
+        .drop("spec_json")
         .with_columns(
             significant_hac=pl.col("p_value_hac") < 0.05,
             refutation_passes=pl.col("refutation_p") < 0.05,

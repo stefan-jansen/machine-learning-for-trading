@@ -52,6 +52,7 @@ from case_studies.utils.causal import (
     register_causal_run,
     run_dml_analysis,
 )
+from utils.artifact_specs import resolve_label_horizon
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, add_message_title
@@ -98,11 +99,15 @@ treatment_col = causal_cfg["treatment"]
 confounder_cols = causal_cfg["confounders"]
 holdout_start = setup["evaluation"]["holdout_start"]
 periods_per_year = int(setup["evaluation"]["periods_per_year"])
-label_horizon = embargo_from_buffer(
+label_buffer_periods = embargo_from_buffer(
     setup["labels"]["buffer"],
     periods_per_year=periods_per_year,
 )
-embargo_periods = label_horizon
+embargo_periods = label_buffer_periods
+outcome_horizon = embargo_from_buffer(
+    resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, setup),
+    periods_per_year=periods_per_year,
+)
 development_cutoff = (
     pl.Series([holdout_start]).str.to_date().dt.offset_by(f"-{embargo_periods}mo")[0]
 )
@@ -168,7 +173,7 @@ if decision_months < min_decision_months:
         f"{ROW_CAP:,} selects whole months, so raising it is what buys more of them."
     )
 
-block_size = label_horizon
+block_size = label_buffer_periods
 cadence = observation_step(analysis, date_col)
 schema_bytes = "|".join(f"{name}:{dtype}" for name, dtype in analysis.schema.items()).encode()
 row_hash_bytes = analysis.hash_rows(seed=0).to_numpy().tobytes()
@@ -190,18 +195,26 @@ sample_audit = pl.DataFrame(
 sample_audit
 
 # %% [markdown]
-# ### The embargo and the permutation block answer different questions
+# ### The embargo, the permutation block and the outcome horizon answer different questions
 #
 # The **embargo** separates a fold's training months from its test months, so a label still running
 # at the end of training cannot also be scored in test. The **permutation block** is the scale of
 # serial dependence the placebo has to leave intact: shuffling in blocks shorter than the label
 # horizon pulls overlapping labels apart, and the placebo degrades towards an independent draw,
-# which is the permutation that is too easy to pass and therefore establishes nothing.
+# which is the permutation that is too easy to pass and therefore establishes nothing. The
+# **outcome horizon** is how far past its own timestamp a label resolves, and it sets the floor on
+# the Newey-West bandwidth, because that is the span over which consecutive outcomes overlap.
 #
-# Both come to one month here because the same `1M` label buffer sets both, and they are assigned
-# separately so that stays a fact about this case study rather than an assumption buried in a
-# shared name. At a one-month horizon consecutive forward returns do not overlap, so there is no
-# label-induced dependence for a longer block to preserve. The treatment is a 12-to-2-month
+# The first two come to one month here because the same `1M` label buffer sets both, and they are
+# assigned separately so that stays a fact about this case study rather than an assumption buried
+# in a shared name. The third is a different quantity and the setup file declares it separately:
+# this release pairs characteristics observed at the close of one month with the return earned over
+# the next and dates the row by the month the return was earned, so the outcome is already realised
+# on the timestamp its row carries and no two labels overlap at all. The buffer stays a month
+# regardless, because separating a training window from the validation window that follows it is a
+# different decision from when an outcome becomes known. Reading the buffer as the horizon would
+# claim an overlap the data does not have. With no overlap the bandwidth falls to the sample-size
+# rule, which is what the run reports. The treatment is a 12-to-2-month
 # momentum measure and does carry month-to-month dependence of its own, which a one-month block
 # breaks; the placebo therefore tests the timing of the treatment against the outcome, and not
 # whether a slowly moving characteristic could have produced the estimate.
@@ -232,7 +245,7 @@ results = run_dml_analysis(
     n_placebo=PLACEBO_REPS,
     block_size=block_size,
     seed=RANDOM_SEED,
-    horizon=label_horizon,
+    horizon=outcome_horizon,
     time_col=date_col,
     entity_col=entity_col,
     expected_step=cadence,
@@ -307,9 +320,12 @@ fig.show()
 #
 # Causal DML has its own registry table because it estimates a treatment effect rather than a
 # cross-sectional prediction score. Everything that would change the estimate is named in the
-# identity: the fold and embargo geometry, the placebo design and its seed, the label horizon, and
-# the row cap and cutoff that decide which months are in the sample. Two runs that differ in any of
-# them are two identities rather than one row overwriting another.
+# identity: the fold and embargo geometry, the placebo design and its seed, the outcome horizon,
+# the configuration the case study declares, and the row cap, entity cap and cutoff that decide
+# which rows are in the sample. Two runs that differ in any of them are two identities rather than
+# one row overwriting another. The entity cap matters as much as the row cap: it is a papermill
+# parameter, so a reduced run and a full-panel run are the same command with one number changed,
+# and without it in the identity the second would overwrite the first in place.
 
 # %%
 causal_hash = register_causal_run(
@@ -324,9 +340,11 @@ causal_hash = register_causal_run(
     block_size=block_size,
     n_placebo=PLACEBO_REPS,
     seed=RANDOM_SEED,
-    horizon=label_horizon,
+    horizon=outcome_horizon,
     max_samples=ROW_CAP,
+    max_symbols=MAX_SYMBOLS,
     development_end=str(development_cutoff),
+    config_name=dml_cfg["config_name"],
     notebook="09_causal_dml",
 )
 print(f"Registered causal identity: {causal_hash}")

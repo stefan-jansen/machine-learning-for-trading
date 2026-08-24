@@ -154,6 +154,13 @@ def embargo_from_buffer(
     if not match:
         raise ValueError(f"Cannot parse label_buffer: {label_buffer}")
     value, unit = int(match.group(1)), match.group(2)
+    # A zero-length buffer is zero periods whatever the unit. The per-unit conversions
+    # below divide by the value and are evaluated eagerly, so every unit raises on a
+    # zero, including the D branch that would otherwise return it unchanged. A case
+    # study whose outcome resolves on the row's own timestamp declares exactly that,
+    # for example `labels.horizons` in us_firm_characteristics.
+    if value == 0:
+        return 0
     return {
         "D": value,
         "H": max(1, 24 // value),
@@ -1261,7 +1268,9 @@ def register_causal_run(
     seed: int | None = None,
     horizon: int | None = None,
     max_samples: int | None = None,
+    max_symbols: int | None = None,
     development_end: str | None = None,
+    config_name: str = "dml",
     notebook: str = "causal_dml",
     case_dir=None,
     started_at: str | None = None,
@@ -1309,12 +1318,18 @@ def register_causal_run(
         causal_params["horizon"] = horizon
     if max_samples is not None:
         causal_params["max_samples"] = max_samples
+    if max_symbols is not None:
+        causal_params["max_symbols"] = max_symbols
     if development_end is not None:
         causal_params["development_end"] = development_end
 
+    # The preset name was a literal here while `case_studies/config/dml/` held one file.
+    # A case study that declares a different preset would otherwise record a spec naming a
+    # configuration it did not run, and no consumer could select its run by name. The default
+    # keeps the identity of every case study still on the shared preset unchanged.
     spec = build_training_spec(
         "causal_dml",
-        "dml",
+        config_name,
         label,
         n_folds=n_folds,
         causal_params=causal_params,
@@ -1346,6 +1361,7 @@ def register_causal_run(
         notebook=notebook,
         started_at=started_at or results.get("started_at"),
         elapsed_s=elapsed_s if elapsed_s is not None else results.get("elapsed_s"),
+        case_dir=case_dir,
     )
 
     p_hac_display = f"{float(p_value_hac):.4f}" if p_value_hac is not None else "n/a"
