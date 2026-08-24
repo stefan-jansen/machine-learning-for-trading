@@ -896,6 +896,18 @@ def _overlay_fold_temporal_features(
     )
 
 
+def darts_forecast_reduction(params: dict[str, Any]) -> str:
+    """The reduction a config's forecasts are scored with.
+
+    A ``lagged_label`` target is already the whole horizon's return, so its forecast is read at
+    its terminal step; every other target is a per-period return whose path compounds. The fit
+    and the fitted-state reconstruction both resolve it here, because when they resolved it
+    separately the reconstruction silently scored ``expm1(path.sum())`` against a fit that had
+    published ``expm1(path[-1])``.
+    """
+    return "terminal" if params.get("darts_target") == "lagged_label" else "compound_path"
+
+
 def _predict_fold(
     model,
     fold_series: list[_FoldSeries],
@@ -903,7 +915,10 @@ def _predict_fold(
     date_col: str,
     entity_col: str,
     output_chunk_length: int,
-    forecast_reduction: str = "compound_path",
+    *,
+    # No default: the fit and the fitted-state reconstruction have to agree on this, and they
+    # drifted precisely because one of them could leave it out and take whatever the default was.
+    forecast_reduction: str,
 ) -> pl.DataFrame:
     frames: list[pl.DataFrame] = []
     for state in fold_series:
@@ -1192,11 +1207,7 @@ def run_darts_cv(
                     date_col,
                     entity_col,
                     output_chunk_length,
-                    forecast_reduction=(
-                        "terminal"
-                        if params.get("darts_target") == "lagged_label"
-                        else "compound_path"
-                    ),
+                    forecast_reduction=darts_forecast_reduction(params),
                 )
                 elapsed = time.perf_counter() - t0
                 if checkpoint_preds.height == 0:

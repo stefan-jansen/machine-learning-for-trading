@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -260,7 +260,9 @@ execution, population = run_model_population(
     supersedes=supersedes,
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]

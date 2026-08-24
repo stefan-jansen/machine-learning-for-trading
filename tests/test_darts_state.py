@@ -18,6 +18,7 @@ from case_studies.utils.darts_forecasting import (
     _predict_fold,
     _prepare_fold_series,
     darts_checkpoint_path,
+    darts_forecast_reduction,
     darts_validation_keys,
     load_darts_checkpoint,
     run_darts_cv,
@@ -520,7 +521,13 @@ def test_darts_segments_and_predicts_each_cme_contract_position() -> None:
             ]
 
     predictions = _predict_fold(
-        _OneStepModel(), states, 0, "timestamp", "product", output_chunk_length=1
+        _OneStepModel(),
+        states,
+        0,
+        "timestamp",
+        "product",
+        output_chunk_length=1,
+        forecast_reduction="compound_path",
     )
     assert {"product", "position"} <= set(predictions.columns)
     assert predictions.select("product", "position").n_unique() == 6
@@ -555,3 +562,22 @@ def test_cme_base_target_uses_only_finalized_panel_sessions(monkeypatch) -> None
 
     assert attached[BASE_TARGET_COL].isna().sum() == 1
     assert attached.loc[1, BASE_TARGET_COL] == pytest.approx(np.log(121.0 / 100.0))
+
+
+def test_the_reconstruction_scores_a_lagged_label_the_way_its_fit_did() -> None:
+    """Replaying a fitted checkpoint must not change the reduction the fit published under.
+
+    `run_darts_cv` scores a `lagged_label` forecast at its terminal step, because that target
+    already spans the whole horizon. The fitted-state reconstruction took `_predict_fold`'s
+    default and compounded the path instead, so a run that reused its fitted state republished a
+    different `y_score` for every row - and a locked holdout comparing the two could never agree.
+    Both now resolve the reduction through one function.
+    """
+    assert darts_forecast_reduction({"darts_target": "lagged_label"}) == "terminal"
+    assert darts_forecast_reduction({"darts_target": "one_period_return"}) == "compound_path"
+    assert darts_forecast_reduction({}) == "compound_path"
+
+    # `_predict_fold` no longer carries a default, so neither path can reach it without saying
+    # which reduction it means.
+    with pytest.raises(TypeError):
+        _predict_fold(object(), [], 0, "timestamp", "symbol", output_chunk_length=2)

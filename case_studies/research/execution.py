@@ -600,6 +600,16 @@ def run_official_model_subset(
     elif population.study != study:
         raise ValueError("official model population belongs to another study")
     if expected is None:
+        unresolved = [
+            request for request in resolved if not isinstance(request, ResolvedModelRequest)
+        ]
+        if unresolved:
+            # `expected_prediction_hashes` reads `request.spec`, which only a resolved request
+            # has. Saying so beats an AttributeError from three frames down.
+            raise ValueError(
+                "unresolved model requests cannot state their expected predictions; "
+                "pass `expected` or resolve the requests first"
+            )
         expected = expected_prediction_hashes(resolved)
     expected = tuple(expected)
     undeclared = sorted(set(expected) - set(population.members))

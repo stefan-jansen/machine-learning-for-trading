@@ -39,6 +39,24 @@ from tests.test_research_contract_catalog import _resolved_spec
 from utils.paths import REPO_ROOT
 
 
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    """`open_study` and `Study.activate` mutate process-global state; put it back.
+
+    Without this, a test that activates a preview tier leaves `ML4T_OUTPUT_DIR` and
+    `workspace._ACTIVE_OUTPUT_ROOT` pointing into its own tmp_path for every later test in the
+    same worker, and `get_case_study_dir` resolves there.
+    """
+    yield
+    import os
+
+    os.environ.pop("ML4T_OUTPUT_DIR", None)
+    from case_studies.research import workspace
+
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
+
+
 def _study(tmp_path: Path) -> Study:
     output_root = tmp_path / "workspace"
     root = output_root / "sp500_options"
@@ -129,12 +147,48 @@ def test_resolved_model_plan_accepts_flat_sequence_specs(tmp_path: Path) -> None
     ).row(0) == ("deep_learning", "nlinear", 2, 2, 1)
 
 
-def test_preview_study_activates_before_model_catalog_resolution(tmp_path: Path) -> None:
-    study = open_study(execution_tier="preview", workspace=tmp_path)
+def test_preview_study_activates_before_model_catalog_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preview tier is activated inside `open_study`, before anything resolves config.
+
+    The branch under test only runs when the generated artifact directories are symlinks, which
+    is true of a working checkout and false of a clean clone, so the precondition is built here
+    rather than depending on the machine. What activation does is redirect `ML4T_OUTPUT_DIR` at
+    the workspace's `.preview`; asserting `study.output_root` instead would hold with the
+    activation removed, because the constructor sets it either way.
+    """
+    import os
+
+    from case_studies.sp500_options import research_workflow
+
+    repo_root = tmp_path / "repo"
+    case_dir = repo_root / "case_studies" / "sp500_options"
+    case_dir.mkdir(parents=True)
+    (repo_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    generated = tmp_path / "generated"
+    for name in ("features", "labels", "run_log"):
+        (generated / name).mkdir(parents=True)
+        (case_dir / name).symlink_to(generated / name, target_is_directory=True)
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "sp500_options" / "config", target_is_directory=True
+    )
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(
+        research_workflow.subprocess, "check_output", lambda *_args, **_kwargs: "deadbeef\n"
+    )
+
+    workspace = tmp_path / "workspace"
+    study = open_study(execution_tier="preview", workspace=workspace)
 
     catalog = model_request_catalog("linear", config_names=["ridge_a1.0"])
 
-    assert study.output_root == tmp_path
+    assert os.environ["ML4T_OUTPUT_DIR"] == str(workspace / ".preview")
+    assert (workspace / ".preview" / "sp500_options" / "config").exists()
+    assert study.output_root == workspace
     assert catalog.to_dicts() == [
         {"family": "linear", "label": "ret_to_expiry", "config_name": "ridge_a1.0"}
     ]

@@ -925,6 +925,7 @@ def _reconstruct_darts_predictions(
         _prepare_fold_series,
         _resolve_chunk_lengths,
         darts_checkpoint_path,
+        darts_forecast_reduction,
         load_darts_checkpoint,
     )
 
@@ -1006,6 +1007,7 @@ def _reconstruct_darts_predictions(
                 context.date_col,
                 context.entity_col,
                 output_chunk_length,
+                forecast_reduction=darts_forecast_reduction(config.get("params", {})),
             ).with_columns(
                 pl.lit(config["config_name"]).alias("config"),
                 pl.lit(value).alias("epoch"),

@@ -341,12 +341,16 @@ def load_classification_metrics(
 
         params.append(split)
 
-        # A registry written before the cross-sectional block existed has no such column, and
-        # naming it in the SELECT is an error rather than a null. Fall back to the pooled value
-        # under the same output name so the caller reads one column either way.
+        # The cross-sectional value where a row has one, the pooled value otherwise, under one
+        # output name so the caller reads one column either way. Gating on whether the column
+        # exists would not do it: `_declare_uncertainty_columns` now ALTERs `auc_mean_daily` into
+        # every registry on open, so a registry written before the cross-sectional block gains
+        # the column with NULL on every row it already held, and a schema check reads that as
+        # "present" and hands back an all-NULL column ordered arbitrarily.
         has_daily = _has_column(db_path, "prediction_metrics", "auc_mean_daily")
-        auc_select = "pm.auc_mean_daily AS auc" if has_daily else "pm.auc_roc AS auc"
-        auc_order = "pm.auc_mean_daily" if has_daily else "pm.auc_roc"
+        auc_expression = "COALESCE(pm.auc_mean_daily, pm.auc_roc)" if has_daily else "pm.auc_roc"
+        auc_select = f"{auc_expression} AS auc"
+        auc_order = auc_expression
 
         sql = f"""
             SELECT

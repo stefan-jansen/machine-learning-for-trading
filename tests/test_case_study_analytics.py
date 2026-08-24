@@ -444,6 +444,27 @@ def test_load_classification_metrics_excludes_regression_rows(seeded_registries)
     assert df.filter(pl.col("auc_roc").is_null()).is_empty()
 
 
+def test_classification_auc_falls_back_when_the_daily_column_is_present_but_empty(
+    seeded_registries,
+) -> None:
+    """A declared-but-unwritten column must not stand in for the pooled AUC.
+
+    `_declare_uncertainty_columns` ALTERs `auc_mean_daily` into every registry when it is
+    opened, so a registry written before the cross-sectional block has the column with NULL on
+    every row it already held. Deciding on whether the column exists reads that as "present"
+    and returns an all-NULL `auc` ordered on an all-NULL key.
+    """
+    db_path = seeded_registries / "etfs" / "run_log" / "registry.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE prediction_metrics ADD COLUMN auc_mean_daily REAL")
+        conn.commit()
+
+    df = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
+
+    assert df.height == 1
+    assert df["auc"].to_list() == [0.62]
+
+
 # -----------------------------------------------------------------------------
 # load_best_ic_per_family
 # -----------------------------------------------------------------------------
