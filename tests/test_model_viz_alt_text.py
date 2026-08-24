@@ -257,6 +257,72 @@ def test_feature_importance_alt_counts_rows_shown_not_rows_available(captured):
     assert "0.75 to 0.95" in alt
 
 
+# ---------------------------------------------------------------------------
+# Regressions from the first version of the alt-text change. Each of these three
+# was a defect the computed description introduced: a count that did not match
+# what was drawn, or a reduction over an array the drawing code never reaches.
+# ---------------------------------------------------------------------------
+
+
+def test_rolling_daily_ic_returns_when_every_day_is_undefined(captured):
+    """`defined_ic` can empty a frame that passed the height guard above it."""
+    n = 12
+    daily = pl.DataFrame(
+        {
+            "fold_id": [0] * n,
+            "date": pl.date_range(
+                pl.date(2024, 1, 1), pl.date(2024, 1, 12), interval="1d", eager=True
+            ),
+            "ic": [None] * n,
+            "n_obs": [100] * n,
+        },
+        schema_overrides={"ic": pl.Float64},
+    )
+
+    # Reducing over the empty date array raises; the pre-alt-text version rendered
+    # an empty figure, so raising here would be a regression in the notebook cell.
+    model_viz.plot_rolling_daily_ic(daily, window=5)
+
+    assert captured == []
+
+
+def test_hac_leaderboard_does_not_count_an_interval_it_did_not_draw(captured):
+    """A row with a valid CI and no point estimate is skipped by the drawing loop."""
+    metrics = pl.DataFrame(
+        {
+            "family": ["gbm", "linear"],
+            "config_name": ["a", "b"],
+            "ic_mean_daily": [0.05, None],
+            "ic_ci_lo": [0.03, 0.01],
+            "ic_ci_hi": [0.07, 0.09],
+        },
+        schema_overrides={"ic_mean_daily": pl.Float64},
+    )
+    model_viz.plot_hac_ci_leaderboard(metrics)
+
+    # Both rows have finite intervals, but only the first is drawn.
+    assert "1 of the 1 intervals drawn exclude zero" in captured[0]
+
+
+def test_learning_curves_counts_only_configs_in_the_plotted_families(captured):
+    """`cp_data` may carry families the caller did not ask to plot."""
+    cp = pl.DataFrame(
+        {
+            "family": ["gbm", "gbm", "linear", "linear"],
+            "config_name": ["a", "a", "b", "b"],
+            "checkpoint_value": [10, 20, 10, 20],
+            "ic_mean_daily": [0.01, 0.02, 0.30, 0.40],
+        }
+    )
+    model_viz.plot_learning_curves(cp, ["gbm"])
+
+    alt = captured[0]
+    # One panel, one config drawn - `linear` is in the frame and not on the chart.
+    assert "1 configurations" in alt
+    assert "+0.010 to +0.020" in alt
+    assert "0.400" not in alt
+
+
 def test_no_helper_still_calls_fig_show():
     """The defect was `fig.show()`; a new helper must not reintroduce it."""
     from pathlib import Path

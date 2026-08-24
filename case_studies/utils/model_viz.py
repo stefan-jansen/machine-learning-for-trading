@@ -399,6 +399,7 @@ def plot_learning_curves(
 
     n_panels = len(cp_families)
     plotted_ic: list[np.ndarray] = []
+    n_configs = 0
     fig, axes = plt.subplots(n_panels, 1, figsize=(12, 4 * n_panels), squeeze=False)
 
     for idx, family in enumerate(sorted(cp_families)):
@@ -412,6 +413,7 @@ def plot_learning_curves(
 
             ax.plot(x, y, marker=".", label=config, linewidth=1.5)
             plotted_ic.append(y)
+            n_configs += 1
 
             if "ic_std" in cfg_data.columns:
                 y_std = cfg_data["ic_std"].to_numpy()
@@ -427,7 +429,6 @@ def plot_learning_curves(
         ax.legend(fontsize=7, loc="lower right")
 
     fig.tight_layout()
-    n_configs = cp_data["config_name"].n_unique()
     show_with_alt(
         fig,
         f"{n_panels} stacked line charts, one per model family "
@@ -711,11 +712,14 @@ def plot_hac_ci_leaderboard(
     ax.set_title(title)
     ax.grid(axis="x", alpha=0.3, zorder=0)
     fig.tight_layout()
-    ics = df[ic_col].to_numpy()
+    ics = df[ic_col].to_numpy().astype(float)
     if {lo_col, hi_col}.issubset(df.columns):
         los = df[lo_col].to_numpy().astype(float)
         his = df[hi_col].to_numpy().astype(float)
-        finite = np.isfinite(los) & np.isfinite(his)
+        # The drawing loop above skips any row whose point estimate is missing or
+        # non-finite, so a row with a valid interval and no `ic` is never drawn.
+        # Counting it here would describe a bar that is not on the chart.
+        finite = np.isfinite(los) & np.isfinite(his) & np.isfinite(ics)
         excludes_zero = int(np.sum(finite & ((los > 0) | (his < 0))))
         ci_clause = (
             f" {excludes_zero} of the {int(finite.sum())} intervals drawn exclude zero, "
@@ -869,6 +873,11 @@ def plot_rolling_daily_ic(
         return
 
     df = defined_ic(daily_metrics).sort("date")
+    if df.height == 0:
+        # The guard above tests the input; `defined_ic` is what drops undefined days,
+        # and it can drop all of them. Reducing over the empty date array raises, so
+        # this returns where the pre-alt-text version rendered an empty figure.
+        return
     if df.height < window:
         window = max(5, df.height // 4)
 

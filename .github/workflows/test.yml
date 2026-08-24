@@ -507,8 +507,19 @@ jobs:
       - name: Run model-analysis figure alt-text tests
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # Agg because the job has no display; without it matplotlib picks an
+          # interactive backend and the import fails.
           MPLBACKEND: Agg
+          # Importing case_studies.utils pulls in utils.config, which hard-fails at
+          # import when ML4T_DATA_PATH does not exist. This job checks out no
+          # test-data, so the workflow default points at a directory that is not
+          # there. These tests build every frame inline and read nothing from it.
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
         run: |
+          printf 'ML4T_PATH=%s\nML4T_DATA_PATH=%s/data\n' \
+            "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" > .env
+          mkdir -p "$GITHUB_WORKSPACE/data"
           .venv/bin/python -m pytest \
             tests/test_model_viz_alt_text.py \
             -v --tb=short
