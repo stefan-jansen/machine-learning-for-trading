@@ -1690,24 +1690,42 @@ case_studies/sp500_equity_option_analytics/08_tabular_dl:
       max_symbols: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
-  # BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration
-  # knobs. The notebook plans through the shared catalog and binds none of them, so
-  # test_every_declared_parameter_reaches_its_notebook rejects them.
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl above: the device is
+  # part of the training identity, so a CPU run declares a different member set and the
+  # notebook makes it name its own population rather than write into the published one.
   #
-  # gpu, rather than the DEVICE: cpu that 08_tabular_dl takes. The epoch budget is
-  # handled either way - preset_patches.py patches lstm and nlinear to n_epochs 2 at
-  # checkpoint_interval 1 - but the 60-observation lookback is not patched, and no
-  # sequence preview reduction narrows it (_SEQUENCE_PREVIEW_FIELDS is folds,
-  # max_symbols and max_train_sequences). A fixture short enough to leave no stock a
-  # full window would yield an empty population rather than a small one. The migrated
-  # siblings in cme_futures and crypto_perps_funding take the same route.
-  gpu: true
-  timeout: 300
+  # This entry said gpu: true until the notebook was measured on CPU. The reason recorded
+  # was the sixty-observation lookback, which no sequence preview reduction narrows
+  # (_SEQUENCE_PREVIEW_FIELDS is folds, max_symbols and max_train_sequences). That was not
+  # the binding constraint. The fixture carries about five years of daily rows per stock, so
+  # a sixty-step window costs eligibility nothing, and the notebook finishes on CPU in under
+  # a minute with the lookback left alone. What gpu: true did was skip the test outright
+  # wherever no card is present, which is every CI runner, so the sequence family had no
+  # coverage at all. On CPU the run fits six configurations across the three declared labels
+  # and publishes twelve prediction sets, all inside the preview root.
+  #
+  # The epoch budget comes from tests/preset_patches.py, which patches lstm and nlinear to
+  # two epochs at checkpoint_interval one. Declaring N_EPOCHS here would override that patch
+  # rather than add to it. BATCH_SIZE, LOOKBACK, MAX_FOLDS and MAX_SYMBOLS name nothing the
+  # migrated notebook binds, so test_every_declared_parameter_reaches_its_notebook rejects
+  # them; a reduction reaches this notebook only under PREVIEW_REDUCTIONS. That reduction is
+  # stated rather than left to the max_symbols the harness would substitute, so the preview
+  # identity records what it narrowed.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sequence-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/10_dl_patchtst:
-  # Same reasoning as 09_dl_lstm: the pre-migration knobs name nothing the notebook
-  # binds, and the lookback the sequence windows need is not reducible from here.
-  gpu: true
-  timeout: 300
+  # Same reasoning as 09_dl_lstm, and the same measured outcome on CPU. Its own population
+  # name keeps the patchtst slice separate from the population 09 declares.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-patchtst-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca:
