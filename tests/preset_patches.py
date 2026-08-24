@@ -45,7 +45,12 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # notebook in CI - etfs, sp500_equity_option_analytics, us_equities_panel and
     # us_firm_characteristics - at the cell that builds the request rather than anywhere
     # the value could be read as a budget.
-    "ipca": {"n_epochs": 2, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
+    # No n_epochs either: it reduces nothing here. `_expected_latent_checkpoints` returns
+    # (0,) unconditionally for pca and ipca (`cv.py:114-115`), `runner_kwargs` forwards
+    # n_epochs only for cae and sae (`cv.py:703`), and `run_ipca_fold` has no such
+    # parameter. Left in, it reached the training-spec identity alone and read as a budget
+    # reduction that does not exist. factor_ridge and gamma_ridge do reach the runner.
+    "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
