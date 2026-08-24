@@ -210,10 +210,33 @@ def block_permute(
         Block-permuted array.
     """
     arr = np.asarray(arr)
-    n = len(arr)
     if rng is None:
         rng = np.random.default_rng()
 
+    segments = _permutation_segments(len(arr), groups, units, expected_step, gap_tolerance)
+    result = np.array(arr, copy=True)
+    for idx in segments:
+        result[idx] = _permute_one_segment(arr[idx], block_size, rng)
+    return result
+
+
+def _permutation_segments(
+    n: int,
+    groups: np.ndarray | None,
+    units: np.ndarray | None,
+    expected_step: str | pd.Timedelta | None,
+    gap_tolerance: str | pd.Timedelta | None,
+) -> list[np.ndarray]:
+    """The maximal stretches of rows a block permutation may reorder within.
+
+    One entity's uninterrupted run of decision times is one segment. Blocks never cross
+    a segment boundary, because the rows on either side are not adjacent in time - they
+    belong to different entities, or to the same entity either side of a gap.
+
+    This is the single definition of where the series is cut. ``block_permute`` permutes
+    within these segments and ``_immobile_masks`` counts what they leave standing, so
+    the two can never disagree about the segmentation.
+    """
     if units is not None:
         if groups is None:
             raise ValueError("groups are required when units are supplied")
@@ -221,21 +244,17 @@ def block_permute(
         unit_arr = np.asarray(units)
         if len(group_arr) != n or len(unit_arr) != n:
             raise ValueError("groups and units must have the same length as arr")
-        result = np.empty_like(arr)
+        segments: list[np.ndarray] = []
         for unit in pd.unique(unit_arr):
             idx = np.flatnonzero(unit_arr == unit)
             unit_groups = group_arr[idx]
             if len(unit_groups) > 1 and np.any(unit_groups[1:] <= unit_groups[:-1]):
                 raise ValueError("groups must be strictly increasing within each unit")
-            result[idx] = block_permute(
-                arr[idx],
-                block_size,
-                rng=rng,
-                groups=unit_groups,
-                expected_step=expected_step,
-                gap_tolerance=gap_tolerance,
+            segments.extend(
+                idx[bounds]
+                for bounds in _contiguous_runs(unit_groups, expected_step, gap_tolerance)
             )
-        return result
+        return segments
 
     if groups is not None:
         group_arr = np.asarray(groups)
@@ -245,28 +264,45 @@ def block_permute(
             raise ValueError("units are required when decision times contain multiple rows")
         if n > 1 and np.any(group_arr[1:] <= group_arr[:-1]):
             raise ValueError("groups must be strictly increasing")
-        if expected_step is not None and n > 1:
-            cadence = pd.Timedelta(expected_step)
-            tolerance = (
-                pd.Timedelta(gap_tolerance)
-                if gap_tolerance is not None
-                else GAP_TOLERANCE_CADENCES * cadence
-            )
-            timestamps = pd.to_datetime(group_arr, utc=True)
-            steps = np.asarray(timestamps[1:] - timestamps[:-1])
-            boundaries = np.flatnonzero(steps > tolerance) + 1
-            if boundaries.size:
-                result = np.empty_like(arr)
-                starts = np.r_[0, boundaries]
-                stops = np.r_[boundaries, n]
-                for start, stop in zip(starts, stops, strict=True):
-                    result[start:stop] = block_permute(
-                        arr[start:stop],
-                        block_size,
-                        rng=rng,
-                    )
-                return result
+        positions = np.arange(n)
+        return [
+            positions[bounds]
+            for bounds in _contiguous_runs(group_arr, expected_step, gap_tolerance)
+        ]
 
+    return [np.arange(n)]
+
+
+def _contiguous_runs(
+    group_arr: np.ndarray,
+    expected_step: str | pd.Timedelta | None,
+    gap_tolerance: str | pd.Timedelta | None,
+) -> list[slice]:
+    """Split one entity's ordered decision times wherever the gap exceeds the tolerance."""
+    n = len(group_arr)
+    if expected_step is None or n <= 1:
+        return [slice(0, n)]
+    cadence = pd.Timedelta(expected_step)
+    tolerance = (
+        pd.Timedelta(gap_tolerance)
+        if gap_tolerance is not None
+        else GAP_TOLERANCE_CADENCES * cadence
+    )
+    timestamps = pd.to_datetime(group_arr, utc=True)
+    steps = np.asarray(timestamps[1:] - timestamps[:-1])
+    boundaries = np.flatnonzero(steps > tolerance) + 1
+    if not boundaries.size:
+        return [slice(0, n)]
+    starts = np.r_[0, boundaries]
+    stops = np.r_[boundaries, n]
+    return [slice(int(a), int(b)) for a, b in zip(starts, stops, strict=True)]
+
+
+def _permute_one_segment(
+    values: np.ndarray, block_size: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Reorder whole blocks within one uninterrupted stretch."""
+    n = len(values)
     n_blocks = n // block_size
     if n_blocks < 2:
         # Not enough room for two blocks, so there is no permutation to make at this
@@ -276,21 +312,46 @@ def block_permute(
         # of a daily series. A caller that permutes nothing at all is caught by
         # `_assert_placebo_permutation_possible`, not here: inside a panel, one short unit staying
         # put while the others move is correct.
-        return np.array(arr, copy=True)
+        return np.array(values, copy=True)
 
-    block_indices = rng.permutation(n_blocks)
+    pieces = [
+        values[idx * block_size : (idx + 1) * block_size] for idx in rng.permutation(n_blocks)
+    ]
 
-    result = []
-    for idx in block_indices:
-        start = idx * block_size
-        result.append(arr[start : start + block_size])
-
-    # Handle remainder
+    # The trailing rows that do not fill a whole block stay where they are. This is a
+    # property of block permutation itself, not of the data: it happens to any segment
+    # whose length is not a multiple of the block size, however long the segment is.
     remainder_start = n_blocks * block_size
     if remainder_start < n:
-        result.append(arr[remainder_start:])
+        pieces.append(values[remainder_start:])
 
-    return np.concatenate(result)
+    return np.concatenate(pieces)
+
+
+def _immobile_masks(
+    n: int, block_size: int, segments: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Which rows no draw can move, split by the two unrelated reasons.
+
+    The first mask is rows in a segment too short to hold two blocks. Those are frozen
+    because of how the data is shaped against the block size, they carry their observed
+    values into every placebo, and a large share of them makes the refutation
+    uninformative - which is worth telling the caller about.
+
+    The second is the trailing remainder of a segment whose length is not a multiple of
+    the block size. Those rows also never move, but for a reason intrinsic to block
+    permutation that no choice of gap tolerance can remove, and shrinking the block size
+    to chase them is the wrong response. They are reported, not warned about.
+    """
+    short = np.zeros(n, dtype=bool)
+    remainder = np.zeros(n, dtype=bool)
+    for idx in segments:
+        n_blocks = len(idx) // block_size
+        if n_blocks < 2:
+            short[idx] = True
+        elif n_blocks * block_size < len(idx):
+            remainder[idx[n_blocks * block_size :]] = True
+    return short, remainder
 
 
 def _walk_forward_indices(
@@ -547,6 +608,28 @@ def _placebo_is_unchanged(original: np.ndarray, permuted: np.ndarray) -> bool:
     return not _placebo_moved_mask(original, permuted).any()
 
 
+def _placebo_moved_fraction(original: np.ndarray, permuted: np.ndarray) -> float:
+    """The share of comparable rows this draw actually moved.
+
+    Separate from `_placebo_moved_mask` on purpose. That one answers "are these the same
+    series at all", so a disagreement in null positions means every row counts as moved;
+    here that convention would report a frozen panel as fully permuted the moment one
+    draw shifted a missing value. Rows that are null on either side are simply not
+    comparable, so they are left out of both the count and the denominator.
+    """
+    original = np.asarray(original)
+    permuted = np.asarray(permuted)
+    if original.shape != permuted.shape:
+        return 0.0
+    if not np.issubdtype(original.dtype, np.floating):
+        comparable = np.ones(original.shape, dtype=bool)
+    else:
+        comparable = ~np.isnan(original) & ~np.isnan(permuted)
+    if not comparable.any():
+        return 0.0
+    return float(np.mean(original[comparable] != permuted[comparable]))
+
+
 def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarray:
     """Which comparable rows the permutation actually moved.
 
@@ -570,7 +653,7 @@ def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarra
 
 
 def _assert_placebo_permutation_possible(
-    unchanged_draws: int, n_draws: int, block_size: int, frozen_fraction: float = 0.0
+    unchanged_draws: int, n_draws: int, block_size: int, short_segment_fraction: float = 0.0
 ) -> None:
     """A refutation whose every placebo equals the observed treatment measures nothing.
 
@@ -596,15 +679,14 @@ def _assert_placebo_permutation_possible(
             "the data's contiguous runs or the gap tolerance is splitting the series "
             "too finely."
         )
-    if n_draws and frozen_fraction > 0:
+    if n_draws and short_segment_fraction > 0:
         warnings.warn(
-            f"block permutation with block_size={block_size} never moved "
-            f"{frozen_fraction:.1%} of the treatment rows in any of {n_draws} placebo "
-            "draws: those rows sit in segments too short to hold two blocks, so the "
-            "placebo distribution holds them at their observed values and the "
-            "refutation p-value is biased toward 1. Read placebo_frozen_fraction "
-            "alongside the p-value, and lower block_size or widen gap_tolerance if "
-            "the frozen share is large.",
+            f"block permutation with block_size={block_size} cannot move "
+            f"{short_segment_fraction:.1%} of the treatment rows: they sit in segments "
+            "too short to hold two blocks, so the placebo distribution holds them at "
+            "their observed values and the refutation p-value is biased toward 1. Read "
+            "placebo_frozen_fraction alongside the p-value, and lower block_size or "
+            "widen gap_tolerance if the frozen share is large.",
             UserWarning,
             stacklevel=3,
         )
@@ -821,8 +903,16 @@ def run_dml_analysis(
         placebo_effects = []
         placebo_n_obs = []
         unchanged_draws = 0
-        ever_moved = np.zeros(np.shape(T), dtype=bool)
         moved_fractions: list[float] = []
+        # What no draw can move is a property of the segmentation and the block size, so
+        # it is computed from them rather than inferred from what the draws happened to
+        # do. The two reasons a row never moves are unrelated and only one of them is
+        # worth a warning: see `_immobile_masks`.
+        short_frozen, remainder_frozen = _immobile_masks(
+            len(T),
+            block_size,
+            _permutation_segments(len(T), groups, units, expected_step, None),
+        )
         for _ in range(n_placebo):
             T_perm = block_permute(
                 T,
@@ -832,10 +922,8 @@ def run_dml_analysis(
                 units=units,
                 expected_step=expected_step,
             )
-            moved = _placebo_moved_mask(T, T_perm)
-            ever_moved |= moved
-            moved_fractions.append(float(moved.mean()))
-            unchanged_draws += not moved.any()
+            moved_fractions.append(_placebo_moved_fraction(T, T_perm))
+            unchanged_draws += _placebo_is_unchanged(T, T_perm)
             perm_result = manual_dml_timeseries(
                 Y,
                 T_perm,
@@ -857,11 +945,8 @@ def run_dml_analysis(
                 placebo_effects.append(perm_result["theta"])
                 placebo_n_obs.append(int(perm_result["n_obs"]))
 
-        # A row that can move will have moved in at least one of the draws; one that
-        # never moves sits in a segment too short to hold two blocks. Reading it off the
-        # draws rather than re-deriving the segmentation keeps one implementation of
-        # where a series is cut.
-        frozen_fraction = float(1.0 - ever_moved.mean()) if ever_moved.size else 0.0
+        frozen_fraction = float(short_frozen.mean()) if short_frozen.size else 0.0
+        remainder_fraction = float(remainder_frozen.mean()) if remainder_frozen.size else 0.0
         _assert_placebo_permutation_possible(
             unchanged_draws, n_placebo, block_size, frozen_fraction
         )
@@ -881,6 +966,7 @@ def run_dml_analysis(
                 "placebo_std": p_std,
                 "n_successful": len(placebo_effects),
                 "placebo_frozen_fraction": frozen_fraction,
+                "placebo_remainder_fraction": remainder_fraction,
                 "placebo_moved_fraction": float(np.mean(moved_fractions))
                 if moved_fractions
                 else 0.0,
@@ -1263,7 +1349,9 @@ def run_resolved_causal_request(
     dml = results["dml_result"]
     if not all(math.isfinite(float(dml[name])) for name in ("theta", "se_hac")):
         raise ValueError("DML fit did not produce a finite effect and HAC standard error")
-    refutation_p = results.get("refutation", {}).get("empirical_p")
+    refutation = results.get("refutation", {})
+    refutation_p = refutation.get("empirical_p")
+    refutation_n = refutation.get("n_successful")
     case_dir = study.storage_root(spec["execution_tier"])
     register_record(
         study.case_study,
@@ -1280,6 +1368,7 @@ def run_resolved_causal_request(
         naive_effect=float(results["naive_effect"]),
         confounding_bias_pct=float(results["confounding_bias_pct"]),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
+        refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         spec_json=canonical_json(spec),
         notebook="case_studies.utils.causal",
         started_at=results.get("started_at"),
@@ -1379,6 +1468,7 @@ def register_causal_run(
     # significant result, and ``or 1.0`` would flip its meaning.
     p_value_hac = results.get("p_value_hac")
     refutation_p = ref.get("empirical_p")
+    refutation_n = ref.get("n_successful")
 
     _register_causal_run(
         case_study_id,
@@ -1395,6 +1485,7 @@ def register_causal_run(
         naive_effect=float(results.get("naive_effect", 0.0)),
         confounding_bias_pct=float(results.get("confounding_bias_pct", 0.0)),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
+        refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         spec_json=canonical_json(spec),
         notebook=notebook,
         started_at=started_at or results.get("started_at"),

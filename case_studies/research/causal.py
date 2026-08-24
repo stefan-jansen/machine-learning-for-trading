@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from case_studies.utils.causal import classify_refutation
 from case_studies.utils.registry.specs import (
     IDENTITY_VERSION,
     SUPPORTED_IDENTITY_VERSIONS,
@@ -85,13 +86,13 @@ class CausalResult:
             with sqlite3.connect(db_path) as db:
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-                    "confounding_bias_pct, refutation_p, spec_json "
+                    "confounding_bias_pct, refutation_p, refutation_n_successful, spec_json "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
             if row is None:
                 continue
-            spec = json.loads(row[7])
+            spec = json.loads(row[8])
             tier = str(spec.get("execution_tier", namespace))
             return cls(
                 study=study,
@@ -105,6 +106,14 @@ class CausalResult:
                     "naive_effect": row[4],
                     "confounding_bias_pct": row[5],
                     "refutation_p": row[6],
+                    "refutation_n_successful": row[7],
+                    # Derived here so every reader gets the same verdict from the same
+                    # rule. A p-value alone cannot say whether the draws could have
+                    # rejected at all, so a caller that re-applies a bare threshold
+                    # publishes "Fails" for runs that were merely underpowered.
+                    "refutation_class": (
+                        classify_refutation(row[6], row[7]) if row[6] is not None else None
+                    ),
                 },
                 execution_tier=tier,
             )

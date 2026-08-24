@@ -1716,6 +1716,7 @@ def register_causal_run(
     naive_effect: float | None,
     confounding_bias_pct: float | None,
     refutation_p: float | None,
+    refutation_n_successful: int | None = None,
     spec_json: str,
     notebook: str | None,
     started_at: str | None,
@@ -1740,7 +1741,8 @@ def register_causal_run(
         existing = db.execute(
             "SELECT label, treatment, confounders_json, embargo, n_folds, n_obs, "
             "dml_effect, dml_se_hac, p_value_hac, naive_effect, confounding_bias_pct, "
-            "refutation_p, spec_json, notebook FROM causal_runs WHERE causal_hash = ?",
+            "refutation_p, refutation_n_successful, spec_json, notebook "
+            "FROM causal_runs WHERE causal_hash = ?",
             (causal_hash,),
         ).fetchone()
         expected = (
@@ -1756,6 +1758,7 @@ def register_causal_run(
             naive_effect,
             confounding_bias_pct,
             refutation_p,
+            refutation_n_successful,
             spec_json,
             notebook,
         )
@@ -1772,8 +1775,9 @@ def register_causal_run(
                 causal_hash, label, treatment, confounders_json, embargo,
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
+                refutation_n_successful,
                 spec_json, notebook, started_at, elapsed_s, git_commit, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -1787,6 +1791,7 @@ def register_causal_run(
                 naive_effect=excluded.naive_effect,
                 confounding_bias_pct=excluded.confounding_bias_pct,
                 refutation_p=excluded.refutation_p,
+                refutation_n_successful=excluded.refutation_n_successful,
                 spec_json=excluded.spec_json,
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
@@ -1804,6 +1809,7 @@ def register_causal_run(
                OR causal_runs.naive_effect IS NOT excluded.naive_effect
                OR causal_runs.confounding_bias_pct IS NOT excluded.confounding_bias_pct
                OR causal_runs.refutation_p IS NOT excluded.refutation_p
+               OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
             """,
@@ -1821,6 +1827,7 @@ def register_causal_run(
                 naive_effect,
                 confounding_bias_pct,
                 refutation_p,
+                refutation_n_successful,
                 spec_json,
                 notebook,
                 started_at,
