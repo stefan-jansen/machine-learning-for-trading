@@ -619,14 +619,18 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
 
     # A notebook declaring PREVIEW_REDUCTIONS receives these by translation rather than by name -
     # `research_preview_parameters` folds them in - so the source never mentions them and the
-    # "never reads it" test below would report every one of them unreachable.
+    # "never reads it" test below would report every one of them unreachable. The question is not
+    # dropped, it is redirected: the value lands in PREVIEW_REDUCTIONS, so that is the name whose
+    # reachability decides whether the override reaches anything. Exempting the name outright would
+    # pass a notebook that declares the mapping and never reads it, which is the exact condition
+    # this helper exists to catch.
     cell_declares = (
         {name for name, line in _top_level_bindings(tree) if tagged[-1][1] <= line <= injected_at}
         if tagged
         else set()
     )
     translated = (
-        set(PREVIEW_TRANSLATED_PARAMETERS) if "PREVIEW_REDUCTIONS" in cell_declares else set()
+        set(PREVIEW_TRANSLATED_PARAMETERS) if TRANSLATION_TARGET in cell_declares else set()
     )
 
     events: list[tuple[str, str, int]] = []
@@ -650,19 +654,21 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
 
     problems = {}
     for name in names:
-        if name in translated:
-            continue
+        # A translated name is analysed through the mapping it is folded into, and any problem is
+        # reported against that mapping, because that is where the override actually has to land.
+        analysed = TRANSLATION_TARGET if name in translated else name
+        via = f" (it reaches the notebook as {TRANSLATION_TARGET})" if analysed != name else ""
         reads = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
-            if kind == "read" and bound == name and live(line)
+            if kind == "read" and bound == analysed and live(line)
         ]
         binds = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
-            if kind == "bind" and bound == name and live(line)
+            if kind == "bind" and bound == analysed and live(line)
         ]
-        if name in opaque or name in readers:
+        if analysed in opaque or analysed in readers:
             # A function that reads the name is normally enough to leave the
             # entry alone: it may be called before any binding below, and the
             # tree does not say which happens first. The exception is a binding
@@ -675,11 +681,11 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
             reaching = [
                 seq
                 for seq, (kind, bound, line) in enumerate(events)
-                if kind == "call" and bound in readers.get(name, set()) and live(line)
+                if kind == "call" and bound in readers.get(analysed, set()) and live(line)
             ]
             first = min((seq for seq, _ in blocking), default=None)
             reachable = (
-                name in opaque
+                analysed in opaque
                 or first is None
                 or any(seq < first for seq in [*(r for r, _ in reads), *reaching])
             )
@@ -688,15 +694,15 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
             problems[name] = (
                 f"the binding on line {min(line for _, line in blocking)} overwrites the "
                 f"injected value before anything below {where} can call a function that "
-                "reads it"
+                f"reads it{via}"
             )
         elif not reads:
-            problems[name] = f"the notebook never reads it below {where}"
+            problems[name] = f"the notebook never reads it below {where}{via}"
         elif all(any(reaches(b, r) for b in binds) for r in reads):
             problems[name] = (
                 f"the binding on line {min(line for _, line in binds)} overwrites the "
                 f"injected value: every read below {where} is on a path that rebinds "
-                "the name first"
+                f"the name first{via}"
             )
     return problems
 
@@ -904,6 +910,8 @@ def research_preview_parameters(
 # stating this list separately is what let one of them go stale: measured on
 # agent/us-equities-panel-notebooks, `06_linear` and `07_gbm` declare PREVIEW_REDUCTIONS and were
 # reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
+TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
+
 PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "MAX_FOLDS": ("folds", lambda value: list(range(int(value)))),
     "MAX_SYMBOLS": ("max_symbols", int),

@@ -1131,3 +1131,44 @@ def test_injected_parameters_keeps_preview_reductions_under_the_preview_tier(
     )
     assert resolved["PREVIEW_REDUCTIONS"]["max_samples"] == 5000
     assert resolved["EXECUTION_TIER"] == "preview"
+
+
+def test_unusable_parameters_catches_a_preview_mapping_the_notebook_never_reads(
+    tmp_path: Path,
+) -> None:
+    """Declaring PREVIEW_REDUCTIONS is not on its own proof the reduction reaches anything.
+
+    The translated names are analysed through the mapping they are folded into. A notebook that
+    declares the mapping and then never reads it discards every reduction, so the preview run is a
+    canonical run wearing the preview label - which is what this helper exists to catch. Exempting
+    the translated names outright would have passed it.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint("nothing reads it")\n',
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "never reads it" in reason
+        assert "PREVIEW_REDUCTIONS" in reason, name
+
+
+def test_unusable_parameters_catches_a_preview_mapping_rebound_before_any_read(
+    tmp_path: Path,
+) -> None:
+    """A mapping rebound below the parameters cell throws the injected reductions away.
+
+    Same condition as the overwrite check on an ordinary name, reached through the translation:
+    every read below the parameters cell is on a path that rebinds PREVIEW_REDUCTIONS first, so
+    nothing the harness folded in survives to be read.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n'
+        "# %%\nPREVIEW_REDUCTIONS = {}\nprint(PREVIEW_REDUCTIONS)\n",
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "overwrites the injected value" in reason, name
