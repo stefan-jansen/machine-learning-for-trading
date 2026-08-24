@@ -422,21 +422,7 @@ def _select_cohorts(
         )
 
     if method == "score_weighted_top_k":
-        cohorts = (
-            cohorts.with_columns(
-                _pos_score=pl.max_horizontal(pl.col("y_score"), pl.lit(0.0)),
-            )
-            .with_columns(
-                _score_sum=pl.col("_pos_score").sum().over("timestamp"),
-                _n=pl.len().over("timestamp"),
-            )
-            .with_columns(
-                weight=pl.when(pl.col("_score_sum") > 0)
-                .then(pl.col("_pos_score") / pl.col("_score_sum"))
-                .otherwise(1.0 / pl.col("_n").cast(pl.Float64)),
-            )
-            .drop(["_pos_score", "_score_sum", "_n"])
-        )
+        cohorts = _score_proportional_weights(cohorts)
     else:
         cohorts = (
             cohorts.with_columns(
@@ -934,35 +920,58 @@ def _load_underlying_price_panel(
     return panel.sort(["timestamp", "symbol"])
 
 
+def _score_proportional_weights(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add a positive-score-proportional `weight` within each entry date.
+
+    A date whose scores are all non-positive has no proportion to size by, so
+    it falls back to equal weight for that date alone. Shared by the entry
+    method `score_weighted_top_k` and the allocator `score_weighted`, which
+    have to agree on what score-proportional means.
+    """
+    return (
+        frame.with_columns(
+            _pos_score=pl.max_horizontal(pl.col("y_score"), pl.lit(0.0)),
+        )
+        .with_columns(
+            _score_sum=pl.col("_pos_score").sum().over("timestamp"),
+            _n=pl.len().over("timestamp"),
+        )
+        .with_columns(
+            weight=pl.when(pl.col("_score_sum") > 0)
+            .then(pl.col("_pos_score") / pl.col("_score_sum"))
+            .otherwise(1.0 / pl.col("_n").cast(pl.Float64)),
+        )
+        .drop(["_pos_score", "_score_sum", "_n"])
+    )
+
+
 def _apply_cohort_allocator(
     cohorts: pl.DataFrame,
     raw_options_dir: Path,
     allocation_spec: dict,
+    *,
+    prediction_hash: str | None = None,
 ) -> pl.DataFrame:
     """Replace cohort `weight` column with allocator-derived weights.
 
     For each cohort entry date, treats the cohort's symbols as the asset
-    selection and computes per-symbol weights from a rolling window of
-    underlying-stock returns using one of the standard allocators.
+    selection and computes per-symbol weights: from the predicted score
+    (`score_weighted`), from the width of each conformal prediction interval
+    (`conformal_weighted`), or from a rolling window of underlying-stock
+    returns (`inverse_vol`, `risk_parity`, `mvo_ledoit_wolf`, `hrp`).
 
-    Returns `cohorts` unchanged for `equal_weight` / `score_weighted` (no-op
-    methods). Raises for `long_short=True`, an empty underlying price panel,
-    an empty allocator output, or any unrecognized method — never falls
-    through silently to equal-weight under an allocator-named run.
+    Returns `cohorts` unchanged only for `equal_weight`, which is the weighting
+    `_select_cohorts` has already applied. Raises for `long_short=True`, an
+    empty underlying price panel, an empty allocator output, or any
+    unrecognized method - never falls through silently to equal-weight under
+    an allocator-named run.
     """
     method = allocation_spec.get("method", "equal_weight")
-    if method in ("equal_weight", "score_weighted"):
+    if method == "equal_weight":
         return cohorts
 
-    from case_studies.utils.allocation import (
-        compute_hrp_weights,
-        compute_inverse_vol_weights,
-        compute_mvo_weights,
-        compute_risk_parity_weights,
-    )
-
     if bool(allocation_spec.get("long_short", False)):
-        # HTM cohort accounting models holding a basket to expiry — a single
+        # HTM cohort accounting models holding a basket to expiry - a single
         # cohort's weights must be non-negative and sum to 1. The downstream
         # `.abs()` + renorm would silently strip a short leg and persist the
         # run as `long_short=True` while realizing a long-only series. Refuse.
@@ -972,12 +981,6 @@ def _apply_cohort_allocator(
             "vectorized path or set long_short=False."
         )
 
-    # Independent defaults preserve the prior numerics: `vol_window=63`
-    # (used by inverse_vol/risk_parity/hrp's rolling-stdev window) and
-    # `lookback=126` (covariance window for MVO). The panel-backfill formula
-    # below uses max(vol_window, lookback) so it covers the larger of the two.
-    vol_window = int(allocation_spec.get("vol_window", 63))
-    lookback = int(allocation_spec.get("lookback", 126))
     max_weight = float(allocation_spec.get("max_weight", 0.0))
 
     # Build predictions df from cohorts (already filtered to top-K per Friday).
@@ -987,63 +990,131 @@ def _apply_cohort_allocator(
         pl.col("y_score"),
     ).unique(subset=["timestamp", "symbol"])
 
-    symbols = preds["symbol"].unique().to_list()
-    date_min = preds["timestamp"].min()
-    date_max = preds["timestamp"].max()
-    # Backfill window for covariance estimation: 2× the longest lookback used.
-    if not isinstance(date_min, (date, datetime)) or not isinstance(date_max, (date, datetime)):
-        raise TypeError("option allocation timestamps must contain dates")
-    # Pull ~1 year prior to earliest cohort to ensure rolling-window coverage.
-    backfill_days = max(vol_window, lookback) * 2
-    panel_start = date_min - timedelta(days=backfill_days + 30)
-
-    prices = _load_underlying_price_panel(raw_options_dir, symbols, panel_start, date_max)
-    if prices.is_empty():
-        # Refuse to silently fall through to equal-weight under a non-EW
-        # allocator label — that would persist a run record claiming
-        # `method=hrp/mvo/etc.` while realizing equal_weight, breaking
-        # downstream allocator-comparison analysis.
-        raise RuntimeError(
-            f"HTM allocator '{method}' requires an underlying price panel; "
-            f"none available for {len(symbols)} symbols in [{panel_start}, "
-            f"{date_max}]. Refuse to silently fall back to equal-weight."
-        )
-
-    # Dtype harmonization: predictions/cohorts use Date for timestamp; allocators
-    # do internal pct_change which needs sortable timestamps — Date works.
-    if prices["timestamp"].dtype != preds["timestamp"].dtype:
-        prices = prices.cast({"timestamp": preds["timestamp"].dtype})
-
     max_cohort_size = cast(int, preds.group_by("timestamp").len()["len"].max())
     top_k_for_alloc = max(int(allocation_spec.get("top_k", 0)), max_cohort_size)
 
-    if method == "inverse_vol":
-        weights = compute_inverse_vol_weights(
-            preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+    if method == "score_weighted":
+        # The signal stage may have selected the cohort under any entry method,
+        # so the weighting has to be computed here rather than assumed. Reading
+        # it off the signal is what let a `score_weighted` run realize equal
+        # weight whenever the signal was `equal_weight_top_k`.
+        weights = _score_proportional_weights(preds).select("timestamp", "symbol", "weight")
+    elif method == "conformal_weighted":
+        from case_studies.utils.allocation import compute_conformal_weights
+        from case_studies.utils.conformal import (
+            CALIBRATION_VERSION,
+            DEFAULT_ALPHA,
+            DEFAULT_MIN_CALIBRATION_N,
+            load_conformal_widths,
         )
-    elif method == "risk_parity":
-        weights = compute_risk_parity_weights(
-            preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+
+        if not prediction_hash:
+            raise ValueError(
+                "conformal_weighted sizes each position by the width of its conformal "
+                "prediction interval, which is calibrated per prediction set; the caller "
+                "must pass prediction_hash."
+            )
+        widths = load_conformal_widths(
+            CASE_STUDY_ID,
+            prediction_hash,
+            alpha=float(allocation_spec.get("alpha", DEFAULT_ALPHA)),
+            min_calibration_n=int(
+                allocation_spec.get("min_calibration_n", DEFAULT_MIN_CALIBRATION_N)
+            ),
+            calibration_version=str(
+                allocation_spec.get("calibration_version", CALIBRATION_VERSION)
+            ),
         )
-    elif method in ("mvo", "mvo_ledoit_wolf"):
-        weights = compute_mvo_weights(
+        if widths["timestamp"].dtype != preds["timestamp"].dtype:
+            widths = widths.cast({"timestamp": preds["timestamp"].dtype})
+        # An entry date earlier than the first calibration window has no
+        # prior-only width, so it cannot be sized this way. Drop those cohorts
+        # rather than filling them with the equal weights this allocator exists
+        # to replace; the vectorized path drops the same decision dates.
+        calibrated = widths.select("timestamp").unique()
+        cohorts = cohorts.join(calibrated, on="timestamp", how="inner")
+        preds = preds.join(calibrated, on="timestamp", how="inner")
+        if preds.is_empty():
+            raise RuntimeError(
+                "conformal_weighted: no cohort entry date has prior-only calibrated "
+                "widths. Refuse to silently fall back to equal-weight."
+            )
+        weights = compute_conformal_weights(
             preds,
-            prices,
+            widths,
             top_k_for_alloc,
-            lookback=lookback,
-            max_weight=max_weight if max_weight > 0 else 0.15,
             long_short=False,
-        )
-    elif method == "hrp":
-        weights = compute_hrp_weights(
-            preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+            floor_quantile=float(allocation_spec.get("floor_quantile", 0.01)),
         )
     else:
-        raise ValueError(
-            f"HTM dispatch: unsupported allocation method '{method}'. "
-            "Supported: equal_weight, score_weighted, inverse_vol, risk_parity, "
-            "mvo, mvo_ledoit_wolf, hrp."
+        from case_studies.utils.allocation import (
+            compute_hrp_weights,
+            compute_inverse_vol_weights,
+            compute_mvo_weights,
+            compute_risk_parity_weights,
         )
+
+        # Independent defaults preserve the prior numerics: `vol_window=63`
+        # (used by inverse_vol/risk_parity/hrp's rolling-stdev window) and
+        # `lookback=126` (covariance window for MVO). The panel-backfill formula
+        # below uses max(vol_window, lookback) so it covers the larger of the two.
+        vol_window = int(allocation_spec.get("vol_window", 63))
+        lookback = int(allocation_spec.get("lookback", 126))
+
+        symbols = preds["symbol"].unique().to_list()
+        date_min = preds["timestamp"].min()
+        date_max = preds["timestamp"].max()
+        # Backfill window for covariance estimation: 2x the longest lookback used.
+        if not isinstance(date_min, (date, datetime)) or not isinstance(date_max, (date, datetime)):
+            raise TypeError("option allocation timestamps must contain dates")
+        # Pull ~1 year prior to earliest cohort to ensure rolling-window coverage.
+        backfill_days = max(vol_window, lookback) * 2
+        panel_start = date_min - timedelta(days=backfill_days + 30)
+
+        prices = _load_underlying_price_panel(raw_options_dir, symbols, panel_start, date_max)
+        if prices.is_empty():
+            # Refuse to silently fall through to equal-weight under a non-EW
+            # allocator label - that would persist a run record claiming
+            # `method=hrp/mvo/etc.` while realizing equal_weight, breaking
+            # downstream allocator-comparison analysis.
+            raise RuntimeError(
+                f"HTM allocator '{method}' requires an underlying price panel; "
+                f"none available for {len(symbols)} symbols in [{panel_start}, "
+                f"{date_max}]. Refuse to silently fall back to equal-weight."
+            )
+
+        # Dtype harmonization: predictions/cohorts use Date for timestamp; allocators
+        # do internal pct_change which needs sortable timestamps - Date works.
+        if prices["timestamp"].dtype != preds["timestamp"].dtype:
+            prices = prices.cast({"timestamp": preds["timestamp"].dtype})
+
+        if method == "inverse_vol":
+            weights = compute_inverse_vol_weights(
+                preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+            )
+        elif method == "risk_parity":
+            weights = compute_risk_parity_weights(
+                preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+            )
+        elif method in ("mvo", "mvo_ledoit_wolf"):
+            weights = compute_mvo_weights(
+                preds,
+                prices,
+                top_k_for_alloc,
+                lookback=lookback,
+                max_weight=max_weight if max_weight > 0 else 0.15,
+                long_short=False,
+            )
+        elif method == "hrp":
+            weights = compute_hrp_weights(
+                preds, prices, top_k_for_alloc, vol_window=vol_window, long_short=False
+            )
+        else:
+            raise ValueError(
+                f"HTM dispatch: unsupported allocation method '{method}'. "
+                "Supported: equal_weight, score_weighted, conformal_weighted, "
+                "inverse_vol, risk_parity, mvo, mvo_ledoit_wolf, hrp."
+            )
 
     if weights.is_empty():
         raise RuntimeError(
@@ -1053,7 +1124,7 @@ def _apply_cohort_allocator(
         )
 
     # Apply max_weight cap (consistent with vectorized path). Both MVO variants
-    # cap internally inside compute_mvo_weights — skip the external cap so we
+    # cap internally inside compute_mvo_weights - skip the external cap so we
     # don't double-cap (which would produce different tails vs. equal max_weight).
     if max_weight > 0 and method not in ("mvo", "mvo_ledoit_wolf"):
         from case_studies.utils.allocation import _cap_weights
@@ -1109,6 +1180,7 @@ def run_htm_daily_mtm(
     decisions: pl.DataFrame | None = None,
     option_lifecycle: pl.DataFrame | None = None,
     option_spread_fraction: float = 1.0,
+    prediction_hash: str | None = None,
 ) -> dict:
     """Run the HTM daily-MTM short-straddle backtest and return a result dict.
 
@@ -1136,6 +1208,7 @@ def run_htm_daily_mtm(
             method=method,
             top_k=top_k,
             percentile=percentile,
+            raw_options_dir=raw_options_dir,
         )
     else:
         required = {
@@ -1168,7 +1241,9 @@ def run_htm_daily_mtm(
     # standard `case_studies.utils.allocation` helpers, which already
     # implement covariance-shrinkage MVO, hierarchical risk parity, etc.
     if allocation_spec and decisions is None:
-        cohorts = _apply_cohort_allocator(cohorts, raw_options_dir, allocation_spec)
+        cohorts = _apply_cohort_allocator(
+            cohorts, raw_options_dir, allocation_spec, prediction_hash=prediction_hash
+        )
 
     contract_mids = (
         option_lifecycle

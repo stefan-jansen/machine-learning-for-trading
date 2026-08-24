@@ -410,7 +410,9 @@ def resolve_short_straddle_decisions(
         raw_options_dir=raw_options_dir,
     )
     if allocation:
-        decisions = _apply_cohort_allocator(decisions, raw_options_dir, allocation)
+        decisions = _apply_cohort_allocator(
+            decisions, raw_options_dir, allocation, prediction_hash=prediction.hash
+        )
     fold_columns = [column for column in ("fold", "fold_id") if column in predictions.columns]
     if len(fold_columns) != 1:
         raise ValueError("option predictions require exactly one fold column")

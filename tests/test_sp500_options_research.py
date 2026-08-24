@@ -14,9 +14,11 @@ from case_studies.research import (
     Study,
 )
 from case_studies.sp500_options._htm_backtest import (
+    _apply_cohort_allocator,
     _compute_cohort_daily_pnl,
     _load_option_lifecycle,
     _select_cohorts,
+    option_source_identity,
     run_htm_daily_mtm,
 )
 from case_studies.sp500_options.research_workflow import (
@@ -477,7 +479,10 @@ def test_reader_boundary_publishes_contracts_consumed_by_strategy(
     )
     declared_inputs = canonical.spec["source_identity"]["declared_inputs"]
     assert declared_inputs["option_contract_returns"]
-    assert "option_sources" not in declared_inputs
+    # The raw option chain is a declared input, not just the labels table: the decision
+    # reads strikes and quotes straight out of it, so a replay against a different chain
+    # is reading different data and must be refused rather than silently republished.
+    assert declared_inputs["option_sources"] == option_source_identity(labels_dir, raw_dir)
     assert canonical.spec["source_identity"]["holdout_replay"] == {
         "version": 1,
         "function": "resolve_short_straddle_decisions",
@@ -776,3 +781,55 @@ def test_official_population_is_snapshotted_before_option_execution(
     population = OfficialPopulation.one(study, name=population_name)
     with pytest.raises(ValueError, match="incomplete"):
         population.require_complete()
+
+
+def _equal_weight_cohorts() -> pl.DataFrame:
+    """Two symbols entered on one date at equal weight, with unequal scores."""
+    return pl.DataFrame(
+        {
+            "timestamp": [date(2024, 1, 5), date(2024, 1, 5)],
+            "symbol": ["A", "B"],
+            "y_score": [0.3, 0.1],
+            "weight": [0.5, 0.5],
+        }
+    )
+
+
+def test_score_weighted_allocation_reweights_an_equal_weight_entry(tmp_path: Path) -> None:
+    """The allocator sizes by score even when the signal selected at equal weight.
+
+    The allocator sweep pairs one baseline against several weighting rules and copies
+    the baseline's signal verbatim, so `score_weighted` has to compute its own weights.
+    Reading them off the signal made the run realize equal weight while being published
+    as score-weighted.
+    """
+    weighted = _apply_cohort_allocator(
+        _equal_weight_cohorts(),
+        tmp_path,
+        {"method": "score_weighted", "top_k": 2},
+    )
+
+    weights = dict(zip(weighted["symbol"], weighted["weight"], strict=True))
+    assert weights["A"] == pytest.approx(0.75)
+    assert weights["B"] == pytest.approx(0.25)
+
+
+def test_equal_weight_allocation_leaves_the_signal_weights_alone(tmp_path: Path) -> None:
+    cohorts = _equal_weight_cohorts()
+    unchanged = _apply_cohort_allocator(cohorts, tmp_path, {"method": "equal_weight"})
+
+    assert unchanged.equals(cohorts)
+
+
+def test_conformal_weighted_allocation_is_dispatched_not_refused(tmp_path: Path) -> None:
+    """The declared allocator menu lists `conformal_weighted`, so the path must run it.
+
+    Without a prediction hash there are no calibrated widths to size by, and the
+    failure has to say that rather than report the method as unsupported.
+    """
+    with pytest.raises(ValueError, match="must pass prediction_hash"):
+        _apply_cohort_allocator(
+            _equal_weight_cohorts(),
+            tmp_path,
+            {"method": "conformal_weighted", "top_k": 2},
+        )

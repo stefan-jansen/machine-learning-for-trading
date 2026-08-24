@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -173,7 +173,9 @@ shortlist.select(
 #   structured target, the shrinkage being what keeps an estimate from a short window usable.
 # - **conformal_weighted** sizes each position by the width of its conformal prediction interval,
 #   so capital follows how precise the model's forecast is rather than any moment of past returns.
-#   It is the only rule here that reads the model's own uncertainty.
+#   It is the only rule here that reads the model's own uncertainty, and the only one that trades
+#   a shorter history than the baseline: an entry date before the first calibration window has no
+#   prior-only interval to size by, so those cohorts are dropped rather than quietly equal-weighted.
 #
 # The volatility and covariance windows are all the same length, set once at the case-study level,
 # so no allocator is advantaged by seeing more history than another. Equal weight is absent from
