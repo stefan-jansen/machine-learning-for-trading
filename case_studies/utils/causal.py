@@ -739,9 +739,11 @@ def run_dml_analysis(
                 "run_dml_analysis: no horizon or hac_maxlags given; the second-stage "
                 "HAC bandwidth falls back to the horizon-blind cube-root rule, which "
                 "under-lags overlapping labels of horizon >= ~10 and overstates the "
-                "t-statistic. Pass the outcome horizon, from "
-                "embargo_from_buffer(resolve_label_horizon(case_study_id, label, setup)) "
-                "- not the CV buffer, which can be longer.",
+                "t-statistic. Pass the outcome horizon in observation periods: read the "
+                "horizon with resolve_label_horizon(case_study_id, label, setup) - not the "
+                "CV buffer, which can be longer - and convert it against the panel's own "
+                "cadence. embargo_from_buffer without observed_step applies per-unit "
+                "defaults instead, which read 24H as one period on an eight-hour panel.",
                 stacklevel=2,
             )
 
@@ -1055,6 +1057,22 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             resolve_label_horizon(study.case_study, label_ref.name, setup) or mds.label_buffer
         ).replace("H", "h")
     )
+    # The block size and the pre-holdout cutoff below both take the buffer on the
+    # grounds that it is the longer of the two. Nothing enforces that: both values are
+    # hand-authored in setup.yaml and `resolve_label_horizon` promises only that the
+    # horizon *may* be shorter. Until this change the two were one number and the
+    # ordering held structurally; now it holds by configuration, and a case study that
+    # declared a horizon longer than its buffer would get a permutation block shorter
+    # than the dependence it exists to hold fixed and a cutoff that leaves outcomes
+    # reaching into the holdout, both silently.
+    if outcome_delta > buffer_delta:
+        raise ValueError(
+            f"outcome horizon {outcome_delta} exceeds the CV buffer {buffer_delta} for "
+            f"{label_ref.name!r}. The buffer bounds the pre-holdout window and sizes the "
+            "placebo block, so it cannot be shorter than the outcome it is holding clear. "
+            "Raise labels.buffer (or labels.variant_buffers) in setup.yaml, or correct "
+            "labels.horizons."
+        )
     date_dtype = mds.dataset.schema[mds.date_col]
     endpoint_cutoff = holdout - buffer_delta
     analysis = (

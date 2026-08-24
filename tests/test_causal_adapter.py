@@ -587,3 +587,29 @@ def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
     assert computation["estimand"]["outcome_horizon"] == str(pd.Timedelta("8h"))
     assert computation["refutation"]["block_size"] == 3
     assert resolved._context.horizon == 1
+
+
+def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> None:
+    """The block size and the pre-holdout cutoff assume the buffer is the longer one.
+
+    Both values are hand-authored in setup.yaml and nothing pairs them, so the
+    ordering that used to hold structurally now holds by configuration. Reversed,
+    the placebo block would be shorter than the dependence it holds fixed and the
+    cutoff would leave outcomes reaching into the holdout, neither with a symptom.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", label_horizon="24H"
+    )
+
+    with pytest.raises(ValueError, match="exceeds the CV buffer"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()
