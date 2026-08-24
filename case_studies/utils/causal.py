@@ -35,6 +35,7 @@ import importlib.metadata
 import json
 import platform
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -543,20 +544,33 @@ def _placebo_is_unchanged(original: np.ndarray, permuted: np.ndarray) -> bool:
     identity draw as a real permutation. Compare the non-null positions and require
     the null positions to agree.
     """
+    return not _placebo_moved_mask(original, permuted).any()
+
+
+def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarray:
+    """Which comparable rows the permutation actually moved.
+
+    ``True`` where the row differs, ``False`` where it sits still. Rows whose original
+    value is missing are never comparable, so they are reported as unmoved rather than
+    counted as evidence either way. A shape or null-position mismatch means the two are
+    not the same series at all, so every row counts as moved.
+    """
     original = np.asarray(original)
     permuted = np.asarray(permuted)
     if original.shape != permuted.shape:
-        return False
+        return np.ones(original.shape, dtype=bool)
     if not np.issubdtype(original.dtype, np.floating):
-        return bool(np.array_equal(original, permuted))
+        return original != permuted
     missing = np.isnan(original)
     if not np.array_equal(missing, np.isnan(permuted)):
-        return False
-    return bool(np.array_equal(original[~missing], permuted[~missing]))
+        return np.ones(original.shape, dtype=bool)
+    moved = np.zeros(original.shape, dtype=bool)
+    moved[~missing] = original[~missing] != permuted[~missing]
+    return moved
 
 
 def _assert_placebo_permutation_possible(
-    unchanged_draws: int, n_draws: int, block_size: int
+    unchanged_draws: int, n_draws: int, block_size: int, frozen_fraction: float = 0.0
 ) -> None:
     """A refutation whose every placebo equals the observed treatment measures nothing.
 
@@ -581,6 +595,18 @@ def _assert_placebo_permutation_possible(
             "the series holds two blocks of that size. Either the block size exceeds "
             "the data's contiguous runs or the gap tolerance is splitting the series "
             "too finely."
+        )
+    if n_draws and frozen_fraction > 0:
+        warnings.warn(
+            f"block permutation with block_size={block_size} never moved "
+            f"{frozen_fraction:.1%} of the treatment rows in any of {n_draws} placebo "
+            "draws: those rows sit in segments too short to hold two blocks, so the "
+            "placebo distribution holds them at their observed values and the "
+            "refutation p-value is biased toward 1. Read placebo_frozen_fraction "
+            "alongside the p-value, and lower block_size or widen gap_tolerance if "
+            "the frozen share is large.",
+            UserWarning,
+            stacklevel=3,
         )
 
 
@@ -612,14 +638,25 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
     return (1.0 + at_least_as_extreme) / (1.0 + placebo.size)
 
 
-def classify_refutation(empirical_p: float) -> str:
-    """Binary pass/fail of the block-permutation refutation test at 5 %.
+def classify_refutation(empirical_p: float, n_successful: int | None = None) -> str:
+    """Pass, fail, or too few draws to tell, at the 5 % level.
 
-    Returns "Passes" if the empirical placebo p-value is below 5 %
-    (the observed effect cannot be reproduced by permutation in
-    most placebo runs); "Fails" otherwise. Always read the raw
-    `empirical_p` alongside the label.
+    Returns "Passes" if the empirical placebo p-value is below 5 % (the observed effect
+    cannot be reproduced by permutation in most placebo runs), and "Fails" otherwise.
+
+    "Underpowered" is the third answer, and it is the honest one whenever the number of
+    successful draws puts "Passes" out of reach. The plus-one correction floors the
+    reported p-value at ``1 / (n + 1)``, so at 19 successful draws or fewer the smallest
+    value the test can produce is already at or above 5 % and "Fails" would be published
+    whatever the data said - untrue by construction in the same way ``p = 0.000`` was at
+    the other end. The preview tier runs ten draws, so this is the ordinary case there,
+    not an exotic one.
+
+    ``n_successful`` is optional so that a caller holding only a p-value keeps the
+    two-way answer; pass it wherever the draw count is known.
     """
+    if n_successful is not None and 1.0 / (n_successful + 1) >= REFUTATION_ALPHA:
+        return "Underpowered"
     return "Passes" if empirical_p < REFUTATION_ALPHA else "Fails"
 
 
@@ -784,6 +821,8 @@ def run_dml_analysis(
         placebo_effects = []
         placebo_n_obs = []
         unchanged_draws = 0
+        ever_moved = np.zeros(np.shape(T), dtype=bool)
+        moved_fractions: list[float] = []
         for _ in range(n_placebo):
             T_perm = block_permute(
                 T,
@@ -793,7 +832,10 @@ def run_dml_analysis(
                 units=units,
                 expected_step=expected_step,
             )
-            unchanged_draws += _placebo_is_unchanged(T, T_perm)
+            moved = _placebo_moved_mask(T, T_perm)
+            ever_moved |= moved
+            moved_fractions.append(float(moved.mean()))
+            unchanged_draws += not moved.any()
             perm_result = manual_dml_timeseries(
                 Y,
                 T_perm,
@@ -815,7 +857,14 @@ def run_dml_analysis(
                 placebo_effects.append(perm_result["theta"])
                 placebo_n_obs.append(int(perm_result["n_obs"]))
 
-        _assert_placebo_permutation_possible(unchanged_draws, n_placebo, block_size)
+        # A row that can move will have moved in at least one of the draws; one that
+        # never moves sits in a segment too short to hold two blocks. Reading it off the
+        # draws rather than re-deriving the segmentation keeps one implementation of
+        # where a series is cut.
+        frozen_fraction = float(1.0 - ever_moved.mean()) if ever_moved.size else 0.0
+        _assert_placebo_permutation_possible(
+            unchanged_draws, n_placebo, block_size, frozen_fraction
+        )
 
         refutation = {}
         if len(placebo_effects) >= 10:
@@ -824,13 +873,17 @@ def run_dml_analysis(
             p_std = np.std(placebo_arr)
             z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
             emp_p = empirical_permutation_p(placebo_arr, dml_effect)
-            ref_class = classify_refutation(emp_p)
+            ref_class = classify_refutation(emp_p, len(placebo_effects))
             refutation = {
                 "z_score": z,
                 "empirical_p": emp_p,
                 "placebo_mean": p_mean,
                 "placebo_std": p_std,
                 "n_successful": len(placebo_effects),
+                "placebo_frozen_fraction": frozen_fraction,
+                "placebo_moved_fraction": float(np.mean(moved_fractions))
+                if moved_fractions
+                else 0.0,
                 "n_folds": n_folds,
                 "placebo_n_obs": placebo_n_obs,
                 "placebo_effects": placebo_effects,

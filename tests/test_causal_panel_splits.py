@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.dummy import DummyRegressor
 
 from case_studies.utils import causal
@@ -369,15 +370,15 @@ def test_one_identity_draw_does_not_abort_a_permutable_series() -> None:
     n_placebo = 30
 
     unchanged = 0
-    real_is_unchanged = causal._placebo_is_unchanged
+    real_moved_mask = causal._placebo_moved_mask
 
-    def counting_is_unchanged(original, permuted):
+    def counting_moved_mask(original, permuted):
         nonlocal unchanged
-        verdict = real_is_unchanged(original, permuted)
-        unchanged += bool(verdict)
-        return verdict
+        moved = real_moved_mask(original, permuted)
+        unchanged += not moved.any()
+        return moved
 
-    causal._placebo_is_unchanged = counting_is_unchanged
+    causal._placebo_moved_mask = counting_moved_mask
     try:
         result = run_dml_analysis(
             frame,
@@ -394,7 +395,7 @@ def test_one_identity_draw_does_not_abort_a_permutable_series() -> None:
             entity_col="symbol",
         )
     finally:
-        causal._placebo_is_unchanged = real_is_unchanged
+        causal._placebo_moved_mask = real_moved_mask
 
     # Without a draw that came back unchanged the run says nothing about the guard:
     # it would pass under the per-draw abort this replaces.
@@ -437,3 +438,51 @@ def test_an_explicit_gap_tolerance_moves_the_boundary() -> None:
 
     assert not np.array_equal(tolerant, treatment)
     assert np.array_equal(strict, treatment)
+
+
+def test_a_partly_frozen_panel_reports_how_much_never_moved() -> None:
+    """A unit too short to hold two blocks is returned intact, which is right for that
+    unit and invisible in the result unless it is measured. Those rows sit at their
+    observed values in every placebo, so the placebo effects cluster on the observed
+    effect and the p-value is pulled toward 1 - a "Fails" that looks measured. The
+    all-draws-unchanged guard does not fire, because most of the panel does move."""
+    rng = np.random.default_rng(11)
+    long_dates = pd.date_range("2020-01-01", periods=200, freq="B")
+    short_dates = long_dates[:10]
+    frames = []
+    for symbol, dates in (("LONG", long_dates), ("SHORT", short_dates)):
+        confounder = rng.normal(size=len(dates))
+        treatment = 0.4 * confounder + rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "timestamp": dates,
+                    "symbol": symbol,
+                    "treatment": treatment,
+                    "outcome": 0.3 * treatment + 0.2 * confounder + rng.normal(size=len(dates)),
+                    "confounder": confounder,
+                }
+            )
+        )
+    frame = pd.concat(frames, ignore_index=True).sort_values(["timestamp", "symbol"])
+
+    with pytest.warns(UserWarning, match="never moved"):
+        result = run_dml_analysis(
+            frame,
+            treatment_col="treatment",
+            outcome_col="outcome",
+            confounder_cols=["confounder"],
+            n_folds=2,
+            embargo=1,
+            n_placebo=20,
+            block_size=20,
+            seed=5,
+            horizon=1,
+            time_col="timestamp",
+            entity_col="symbol",
+        )
+
+    refutation = result["refutation"]
+    # The ten SHORT rows cannot hold two blocks of twenty; the two hundred LONG ones can.
+    assert refutation["placebo_frozen_fraction"] == pytest.approx(10 / 210, abs=1e-9)
+    assert 0 < refutation["placebo_moved_fraction"] < 1
