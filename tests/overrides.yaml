@@ -1569,9 +1569,6 @@ case_studies/nasdaq100_microstructure/05_evaluation:
 case_studies/nasdaq100_microstructure/06_linear:
   timeout: 120
 case_studies/nasdaq100_microstructure/07_gbm:
-  parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
   timeout: 600
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   parameters:
