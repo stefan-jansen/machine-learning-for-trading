@@ -23,8 +23,11 @@ overrides.yaml schema (per-notebook, all optional):
         way the test runs at production scale while this file states a reduction.
         ``unusable_parameters`` is the detector and tests/test_pm_helpers.py
         fails the build on what it finds, with no allowlist.
-    research_preview: bool — default true. The harness runs a notebook that declares
-        both EXECUTION_TIER and WORKSPACE at the preview tier in a fresh workspace,
+    research_preview: bool — default true. Chooses the TIER only; the isolated
+        workspace is injected either way, and there is deliberately no way to ask the
+        harness for the in-place production path. The harness runs a notebook that
+        declares both EXECUTION_TIER and WORKSPACE at the preview tier in a fresh
+        workspace,
         because that pair means "this notebook can run self-contained at reduced
         scale". That is exact for a notebook that WRITES at the tier it is given: a
         model notebook fits something small and registers it into the workspace it
@@ -32,9 +35,12 @@ overrides.yaml schema (per-notebook, all optional):
         that only READS at that tier - it is self-contained only if its producer ran
         into the same workspace, and the per-notebook suite runs each notebook alone,
         so it filters for preview rows nobody wrote and stops at its first cell. Set
-        this false for a reader, and it runs against the canonical rows the fixture
-        seeds, which is real coverage rather than a skip. Do NOT instead seed
-        preview-tier rows: that fabricates predictions at a tier nothing fitted.
+        this false for a reader, and it runs at its declared tier, in an isolated
+        workspace, against the canonical rows the fixture seeds - the third combination
+        `open_study`'s docstring names, "the same computation at full scale writing to an
+        isolated registry ... without being able to damage" the published one. Real
+        coverage rather than a skip. Do NOT instead seed preview-tier rows: that
+        fabricates predictions at a tier nothing fitted.
     skip: bool — hard skip in uv-native run (Docker tests ignore)
     skip_reason: str
     requires_import: str | list[str]
@@ -885,6 +891,30 @@ def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[
     return kernel_name, root
 
 
+def _declares_tier_and_workspace(py_path: Path) -> bool:
+    """Whether a notebook's parameters cell declares both EXECUTION_TIER and WORKSPACE.
+
+    The pair is what makes a notebook addressable by tier and workspace at all. It is read
+    here rather than inside `research_preview_parameters` because both the preview path and
+    the canonical-with-a-workspace path need the same answer.
+    """
+    source = py_path.read_text(encoding="utf-8")
+    bounds = next(
+        (
+            (first_line, last_line)
+            for header, first_line, last_line in _percent_cell_bounds(source)
+            if PARAMETERS_CELL_MARKER in header
+        ),
+        None,
+    )
+    if bounds is None:
+        return False
+    first_line, last_line = bounds
+    tree = ast.parse(source, filename=str(py_path))
+    declared = {name for name, line in _top_level_bindings(tree) if first_line <= line <= last_line}
+    return {"EXECUTION_TIER", "WORKSPACE"} <= declared
+
+
 def research_preview_parameters(
     py_path: Path,
     parameters: dict | None,
@@ -971,9 +1001,25 @@ def injected_parameters(
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
-    if parameters and "PREVIEW_REDUCTIONS" in parameters:
-        return {k: v for k, v in parameters.items() if k != "PREVIEW_REDUCTIONS"}
-    return parameters
+    resolved = dict(parameters or {})
+    resolved.pop("PREVIEW_REDUCTIONS", None)
+    # Declining the preview tier must NOT decline the isolated workspace. They are two
+    # decisions and this flag used to collapse them: false left WORKSPACE at the
+    # notebook's declared "", `open_study` took the `workspace=None` branch
+    # (workspace.py:374) into `Study.regenerate`, and that is the in-place production
+    # path - which in a maintainer worktree, where case_studies/*/run_log links to the
+    # shared artifacts, writes to the real registry. It also calls activate(), resetting
+    # ML4T_OUTPUT_DIR for everything after it. Measured 2026-08-24: a test run of
+    # fx_pairs 13-16 wrote 13 official populations, 1 candidate set and 269 backtest runs
+    # into the published fx_pairs registry, and froze one population incomplete.
+    #
+    # Canonical-tier-with-a-workspace is the third combination `open_study`'s own
+    # docstring names: the same computation at full scale against an isolated registry,
+    # unable to damage the published one. That is what a reader under test needs, and the
+    # harness must never be able to reach the in-place path.
+    if output_dir is not None and _declares_tier_and_workspace(py_path):
+        resolved["WORKSPACE"] = str(output_dir.resolve())
+    return resolved or None
 
 
 def run_notebook(

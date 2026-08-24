@@ -123,5 +123,14 @@ def test_declining_the_preview_tier_suppresses_the_injection(tmp_path) -> None:
     )
 
     declined = injected_parameters(py_path, {}, tmp_path, research_preview=False) or {}
-    assert "EXECUTION_TIER" not in declined
-    assert "WORKSPACE" not in declined
+    assert "EXECUTION_TIER" not in declined, "declining must leave the declared tier alone"
+    # But it must NOT decline the isolated workspace. Leaving WORKSPACE empty sends
+    # open_study down the workspace=None branch into Study.regenerate, which is the
+    # in-place production path: in a maintainer worktree that writes the published
+    # registry. Measured 2026-08-24 - a test run put 13 official populations, 1 candidate
+    # set and 269 backtest runs into the real fx_pairs registry and froze one population
+    # incomplete. The harness must not be able to reach that path at all.
+    assert declined.get("WORKSPACE") == str(tmp_path.resolve()), (
+        "declining the preview tier must still isolate the workspace, or the run writes "
+        "to the maintainer's published artifacts"
+    )
