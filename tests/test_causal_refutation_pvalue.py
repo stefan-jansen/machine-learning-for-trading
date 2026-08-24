@@ -21,13 +21,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from case_studies.utils.causal import (
     REFUTATION_UNRESOLVED,
+    _treatment_persistence_steps,
     block_permute,
     classify_refutation,
     empirical_permutation_p,
 )
+from utils.paths import REPO_ROOT
 
 
 class TestEmpiricalPermutationP:
@@ -137,3 +140,47 @@ class TestClassificationResolution:
         """Seven case-study notebooks call this with the p-value alone."""
         assert classify_refutation(0.01) == "Passes"
         assert classify_refutation(0.5) == "Fails"
+
+
+class TestTreatmentWindowLookup:
+    """`features.windows` is not one shape across the fleet, and the resolver is shared.
+
+    Crypto declares suffix-keyed maps (`premium_zscore: {14d: 42}`), but etfs
+    declares a bare int (`skip_recent: 21`) and lists (`momentum: [5, 10, 21,
+    ...]`), and sp500_options mixes all three. A lookup that assumes the mapping
+    raises AttributeError inside the shared DML resolver for a case study that
+    declared nothing wrong.
+    """
+
+    def test_a_suffix_keyed_window_is_read(self) -> None:
+        setup = {"features": {"windows": {"premium_zscore": {"7d": 21, "14d": 42}}}}
+
+        assert _treatment_persistence_steps(setup, "premium_zscore_14d") == 42
+
+    @pytest.mark.parametrize(
+        ("windows", "treatment"),
+        [
+            ({"skip_recent": 21}, "skip_recent_6_1"),
+            ({"momentum": [5, 10, 21, 42]}, "momentum_21d"),
+            ({"vrp": None}, "vrp_21d"),
+        ],
+    )
+    def test_a_shape_that_cannot_name_this_column_returns_none_instead_of_raising(
+        self, windows: dict, treatment: str
+    ) -> None:
+        """Guessing which list element built the treatment would put a wrong number
+        behind a right-looking block size, which is the defect this whole change fixes."""
+        assert _treatment_persistence_steps({"features": {"windows": windows}}, treatment) is None
+
+    def test_an_absent_register_is_not_an_error(self) -> None:
+        assert _treatment_persistence_steps({}, "anything_14d") is None
+
+    def test_the_real_crypto_register_resolves_the_declared_treatment(self) -> None:
+        """The case that shipped wrong: an 8h horizon against a 42-bar treatment."""
+        setup = yaml.safe_load(
+            (REPO_ROOT / "case_studies/crypto_perps_funding/config/setup.yaml").read_text()
+        )
+
+        steps = _treatment_persistence_steps(setup, setup["causal"]["treatment"])
+
+        assert steps == 42

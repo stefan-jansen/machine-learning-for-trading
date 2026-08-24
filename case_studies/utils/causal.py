@@ -950,7 +950,15 @@ def _treatment_persistence_steps(setup: dict[str, Any], treatment: str) -> int |
         prefix = f"{family}_"
         if not treatment.startswith(prefix):
             continue
-        declared = (suffixes or {}).get(treatment[len(prefix) :])
+        # Only the suffix-keyed mapping says which window *this* column carries.
+        # The register also holds bare ints and lists of bar counts for families
+        # whose columns are named some other way (etfs `skip_recent: 21`, and
+        # `momentum: [5, 10, 21, ...]`), and guessing which element a treatment
+        # was built from would put a wrong block size behind a right-looking
+        # number. Those return None, and the caller warns.
+        if not isinstance(suffixes, dict):
+            continue
+        declared = suffixes.get(treatment[len(prefix) :])
         if declared is not None:
             return max(1, int(declared))
     return None

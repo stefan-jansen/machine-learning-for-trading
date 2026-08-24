@@ -68,10 +68,23 @@ pl.DataFrame(
         "outcome_horizon": [computation["estimand"]["outcome_horizon"]],
         "n_folds": [computation["cv"]["n_folds"]],
         "embargo_periods": [computation["cv"]["embargo_periods"]],
+        "block_size": [computation["refutation"]["block_size"]],
+        "block_size_basis": [computation["refutation"]["block_size_basis"]],
         "gap_policy": [computation["refutation"]["temporal_gap_policy"]],
         "eligible_rows": [computation["analysis_population"]["n_rows"]],
     }
 )
+
+# %% [markdown]
+# `block_size` is the parameter the refutation lives or dies on, so it is on the
+# table rather than buried in the spec. The placebo permutes contiguous blocks
+# within each symbol; a block of one bar is an iid shuffle, which destroys the
+# serial dependence the placebo is meant to keep and makes the test trivially
+# easy to pass. Two things create that dependence and the block spans the longer
+# of them: the overlapping labels span the outcome horizon, and the treatment
+# spans its own construction window. Here the horizon is a single 8-hour bar
+# while `premium_zscore_14d` is a 42-bar rolling statistic, so the treatment
+# window sets the block and `block_size_basis` says so.
 
 # %% [markdown]
 # ## Execute the separate causal result

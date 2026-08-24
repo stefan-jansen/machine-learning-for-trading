@@ -169,14 +169,32 @@ causal_summary
 # rather than formatted. A run whose refutation did not produce an empirical p-value is a
 # weaker result, and saying so is more useful than omitting the sentence or failing to render.
 _refutation = causal.metrics["refutation_p"]
-_refutation_text = (
-    f"The temporal refutation p-value is **{_refutation:.3f}**."
-    if _refutation is not None
-    else "No temporal refutation p-value was registered for this estimate."
-)
+_n_placebo = causal.spec["computation"]["refutation"]["n_placebo"]
+_floor = 1.0 / (_n_placebo + 1)
+if _refutation is None:
+    _refutation_text = "No temporal refutation p-value was registered for this estimate."
+elif _refutation <= _floor:
+    # At the floor the test has run out of resolution: no placebo reached the observed
+    # effect, so all the permutations establish is p <= 1/(n+1). Reporting the number
+    # without that reads as a strong result when it is an unresolved one.
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, which is the smallest "
+        f"value {_n_placebo} permutations can produce: no placebo reached the observed "
+        f"effect, so the test establishes p <= 1/{_n_placebo + 1} and nothing finer."
+    )
+else:
+    _refutation_text = f"The temporal refutation p-value is **{_refutation:.3f}**."
+
+_effect = causal.metrics["dml_effect"]
+_se = causal.metrics["dml_se_hac"]
+_t = _effect / _se if _se else float("nan")
 Markdown(
-    f"The registered DML estimate is **{causal.metrics['dml_effect']:+.4g}** with "
-    f"a HAC standard error of **{causal.metrics['dml_se_hac']:.4g}**. {_refutation_text} "
+    f"The registered DML estimate is **{_effect:+.4g}** with "
+    f"a HAC standard error of **{_se:.4g}**, a ratio of **{_t:.2f}**. {_refutation_text} "
+    "Read the two together: the placebo test asks whether the estimation procedure "
+    "manufactures this effect out of permuted treatment, and the standard error asks "
+    "whether the effect is separable from zero at all. Surviving the first while failing "
+    "the second is not evidence of a causal effect. "
     "This result describes the declared causal estimand and does not rank predictive models "
     "or trading strategies."
 )
