@@ -169,3 +169,20 @@ def test_a_nullable_column_gaining_a_value_is_still_a_conflict(tmp_path) -> None
         assert "refutation_p" in str(error)
     else:
         raise AssertionError("a refutation p-value appearing where there was none is a change")
+
+
+def test_a_migrated_column_that_changes_from_a_stored_value_names_itself(tmp_path) -> None:
+    """The backfill exists for NULL, not for the column. A migrated column whose stored
+    value is present and different - a recording convention that changes the count, or a
+    re-registration passing None where a number was stored - is a real difference, and
+    excluding it from the message by name raises naming nothing. That empty message is
+    what this file already fixed once from the NULL side."""
+    case_dir = tmp_path / "test_case"
+    _register_immutable(case_dir, refutation_n_successful=1000)
+
+    try:
+        _register_immutable(case_dir, refutation_n_successful=998, started_at="second")
+    except ValueError as error:
+        assert "refutation_n_successful" in str(error), f"the conflict named nothing: {error}"
+    else:
+        raise AssertionError("a changed draw count on an immutable row must not be accepted")

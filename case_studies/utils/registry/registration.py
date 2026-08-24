@@ -1795,18 +1795,27 @@ def register_causal_run(
             # still conflict. Filling on NULL alone would write that over an immutable row
             # and refresh its execution provenance on the way through.
             stored = list(existing)
-            backfilled = False
+            backfilled_positions: set[int] = set()
             for position, value in enumerate(expected):
                 if comparable_columns[position] not in MIGRATION_BACKFILLED_COLUMNS:
                     continue
                 if stored[position] is None and value is not None:
                     stored[position] = value
-                    backfilled = True
+                    backfilled_positions.add(position)
+            backfilled = bool(backfilled_positions)
             if tuple(stored) != expected:
+                # Excluded because it was filled, not because of its name. A migrated
+                # column whose stored value is not NULL - a recording convention that
+                # changes 1000 to 998, or a re-registration passing None where 10 was
+                # stored - is a genuine difference, and excluding it by name would raise
+                # naming nothing. That empty message is the same defect this branch
+                # already fixed once, reached from the other side.
                 conflicting = [
                     name
-                    for name, was, now in zip(comparable_columns, existing, expected, strict=True)
-                    if was != now and name not in MIGRATION_BACKFILLED_COLUMNS
+                    for position, (name, was, now) in enumerate(
+                        zip(comparable_columns, existing, expected, strict=True)
+                    )
+                    if was != now and position not in backfilled_positions
                 ]
                 raise ValueError(
                     f"immutable causal result conflict for {causal_hash}: "
