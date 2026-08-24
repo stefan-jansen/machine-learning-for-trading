@@ -23,6 +23,18 @@ overrides.yaml schema (per-notebook, all optional):
         way the test runs at production scale while this file states a reduction.
         ``unusable_parameters`` is the detector and tests/test_pm_helpers.py
         fails the build on what it finds, with no allowlist.
+    research_preview: bool — default true. The harness runs a notebook that declares
+        both EXECUTION_TIER and WORKSPACE at the preview tier in a fresh workspace,
+        because that pair means "this notebook can run self-contained at reduced
+        scale". That is exact for a notebook that WRITES at the tier it is given: a
+        model notebook fits something small and registers it into the workspace it
+        was handed, so it needs nothing else to be there. It is wrong for a notebook
+        that only READS at that tier - it is self-contained only if its producer ran
+        into the same workspace, and the per-notebook suite runs each notebook alone,
+        so it filters for preview rows nobody wrote and stops at its first cell. Set
+        this false for a reader, and it runs against the canonical rows the fixture
+        seeds, which is real coverage rather than a skip. Do NOT instead seed
+        preview-tier rows: that fabricates predictions at a tier nothing fitted.
     skip: bool — hard skip in uv-native run (Docker tests ignore)
     skip_reason: str
     requires_import: str | list[str]

@@ -84,3 +84,44 @@ def test_training_runs_follow_the_current_identity_version(seeded: Path) -> None
     with sqlite3.connect(seeded / "run_log" / "registry.db") as db:
         versions = {r[0] for r in db.execute("SELECT identity_version FROM training_runs")}
     assert versions == {IDENTITY_VERSION}
+
+
+def test_declining_the_preview_tier_suppresses_the_injection(tmp_path) -> None:
+    """`research_preview=False` must suppress the tier injection, not merely be accepted.
+
+    This covers the helper contract only. It passes with or without the two call sites
+    that read `overrides["research_preview"]`, which was true when it was first written
+    under a name claiming otherwise - the same vacuity this branch exists to remove. The
+    call sites are a one-line pass-through whose effect shows up as fx_pairs 13-16
+    executing; there is no seam to assert it at without running a notebook.
+
+    The harness injects the preview tier for any notebook declaring both
+    `EXECUTION_TIER` and `WORKSPACE`. That pair means "this runs self-contained at
+    reduced scale", which is true of a notebook that WRITES at the tier it is handed
+    and false of one that only READS at it: the reader is self-contained only if its
+    producer ran into the same workspace, and the per-notebook suite runs each
+    notebook alone. Without the opt-out such a notebook filters for preview rows
+    nothing wrote and stops at its first cell.
+    """
+    from tests.pm_helpers import injected_parameters
+
+    py_path = tmp_path / "13_backtest.py"
+    py_path.write_text(
+        '# %% tags=["parameters"]\n'
+        'CASE_STUDY_ID = "fx_pairs"\n'
+        'EXECUTION_TIER = "canonical"\n'
+        'WORKSPACE: str = ""\n'
+        "\n"
+        "# %%\n"
+        "print(EXECUTION_TIER)\n"
+    )
+
+    injected = injected_parameters(py_path, {}, tmp_path, research_preview=True)
+    assert injected["EXECUTION_TIER"] == "preview", (
+        "the pair must still opt a producer into the preview tier; if this stops "
+        "holding, the opt-out below is measuring nothing"
+    )
+
+    declined = injected_parameters(py_path, {}, tmp_path, research_preview=False) or {}
+    assert "EXECUTION_TIER" not in declined
+    assert "WORKSPACE" not in declined
