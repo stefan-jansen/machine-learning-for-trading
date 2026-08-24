@@ -19,8 +19,8 @@
 # This notebook asks whether 12-to-2-month momentum predicts next-month returns after conditioning
 # on four observed risk characteristics. It uses expanding-window double machine learning (DML),
 # keeps every firm at a decision month on the same side of each fold boundary, and leaves the final
-# 2016 holdout sealed. The corrected estimate is positive but clears neither the panel-robust
-# significance gate nor the entity-aware placebo gate.
+# 2016 holdout out of the analysis entirely. What the estimate and the two uncertainty checks come
+# to is read off the summary the notebook prints.
 #
 # **Learning objectives**
 #
@@ -34,7 +34,7 @@
 # **Prerequisites:** `03_financial_features` and `04_evaluation`.
 
 # %%
-"""Panel-aware causal DML with a sealed final holdout."""
+"""Panel-aware causal DML that leaves the final holdout out of the analysis."""
 
 import hashlib
 import warnings
@@ -43,12 +43,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import yaml
-from IPython.display import Markdown, display
 
 from case_studies.utils.causal import (
     classify_refutation,
     embargo_from_buffer,
     format_dml_summary,
+    observation_step,
     register_causal_run,
     run_dml_analysis,
 )
@@ -60,12 +60,14 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
-PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-RANDOM_SEED = 42
-CV_FOLDS = 5
-MAX_SAMPLES = 50_000
-N_PLACEBO = 100
+# Each of these is zero or empty for "take the declared value". A run that passes one overrides
+# the declaration; a run that passes none reproduces the published analysis.
+LABEL = ""
+SEED = 0
+N_FOLDS = 0
+MAX_SAMPLES = 0
+N_PLACEBO = 0
 
 # %% [markdown]
 # ## Resolve the declared design
@@ -73,36 +75,40 @@ N_PLACEBO = 100
 # The setup file supplies the label, holdout boundary, treatment, confounders, and annual frequency.
 # The training preset supplies the fixed DML budget. No holdout result or strategy metric enters
 # these choices.
+#
+# The parameters above are the request; the values the analysis runs on are resolved below and
+# carry different names, so neither can quietly overwrite the other. Precedence is: an injected
+# parameter wins, otherwise the case study's declaration. The declaration is read with `[...]`
+# rather than `.get(key, literal)`, because a literal default would substitute a number the case
+# study never declared, silently and only on the configurations that omit the key.
 
 # %%
 case_dir = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
+PRIMARY_LABEL = LABEL or setup["labels"]["primary"]
 
 dml_cfg = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "causal_dml")[0]
-for key, value in (
-    ("n_folds", CV_FOLDS),
-    ("n_placebo", N_PLACEBO),
-    ("max_samples", MAX_SAMPLES),
-    ("seed", RANDOM_SEED),
-):
-    dml_cfg[key] = value
+CV_FOLDS = N_FOLDS or int(dml_cfg["n_folds"])
+PLACEBO_REPS = N_PLACEBO or int(dml_cfg["n_placebo"])
+ROW_CAP = MAX_SAMPLES or int(dml_cfg["max_samples"])
+RANDOM_SEED = SEED or int(dml_cfg["seed"])
 
 causal_cfg = setup["causal"]
 treatment_col = causal_cfg["treatment"]
 confounder_cols = causal_cfg["confounders"]
 holdout_start = setup["evaluation"]["holdout_start"]
 periods_per_year = int(setup["evaluation"]["periods_per_year"])
-embargo_periods = embargo_from_buffer(
+label_horizon = embargo_from_buffer(
     setup["labels"]["buffer"],
     periods_per_year=periods_per_year,
 )
+embargo_periods = label_horizon
 development_cutoff = (
     pl.Series([holdout_start]).str.to_date().dt.offset_by(f"-{embargo_periods}mo")[0]
 )
 
-print(f"Configuration: {dml_cfg['config_name']} | folds={CV_FOLDS} | placebos={N_PLACEBO}")
+print(f"Configuration: {dml_cfg['config_name']} | folds={CV_FOLDS} | placebos={PLACEBO_REPS}")
+print(f"Row cap: {ROW_CAP:,} | seed: {RANDOM_SEED}")
 print(f"Treatment: {treatment_col} | confounders: {', '.join(confounder_cols)}")
 print(f"Holdout starts: {holdout_start}")
 
@@ -110,9 +116,8 @@ print(f"Holdout starts: {holdout_start}")
 # ## Build the development sample
 #
 # The label buffer closes development one month before the holdout so no forward return reaches
-# into 2016. The unchanged 50,000-row cap then selects the most recent complete monthly
-# cross-sections that fit below the limit. Conversion to pandas occurs only at the causal utility
-# boundary.
+# into 2016. The declared row cap then selects the most recent complete monthly cross-sections that
+# fit below the limit. Conversion to pandas occurs only at the causal utility boundary.
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
@@ -135,14 +140,15 @@ date_counts = (
     .sort(date_col, descending=True)
     .with_columns(pl.col("len").cum_sum().alias("cumulative_rows"))
 )
-selected_dates = date_counts.filter(pl.col("cumulative_rows") <= MAX_SAMPLES)[date_col]
+selected_dates = date_counts.filter(pl.col("cumulative_rows") <= ROW_CAP)[date_col]
 if selected_dates.is_empty():
-    raise ValueError(f"MAX_SAMPLES={MAX_SAMPLES:,} cannot fit one complete decision month")
+    raise ValueError(f"ROW_CAP={ROW_CAP:,} cannot fit one complete decision month")
 analysis = eligible.filter(pl.col(date_col).is_in(selected_dates)).sort(date_col, entity_col)
 if analysis.is_empty() or analysis[date_col].max() >= development_cutoff:
-    raise ValueError("Development sample is empty or crosses the sealed holdout boundary")
+    raise ValueError("Development sample is empty or crosses the holdout boundary")
 
-block_size = embargo_periods
+block_size = label_horizon
+cadence = observation_step(analysis, date_col)
 schema_bytes = "|".join(f"{name}:{dtype}" for name, dtype in analysis.schema.items()).encode()
 row_hash_bytes = analysis.hash_rows(seed=0).to_numpy().tobytes()
 input_digest = hashlib.sha256(schema_bytes + row_hash_bytes).hexdigest()
@@ -156,10 +162,31 @@ sample_audit = pl.DataFrame(
         "end": [analysis[date_col].max()],
         "development_cutoff": [development_cutoff],
         "embargo_months": [embargo_periods],
+        "block_months": [block_size],
         "input_digest": [input_digest[:16]],
     }
 )
 sample_audit
+
+# %% [markdown]
+# ### The embargo and the permutation block answer different questions
+#
+# The **embargo** separates a fold's training months from its test months, so a label still running
+# at the end of training cannot also be scored in test. The **permutation block** is the scale of
+# serial dependence the placebo has to leave intact: shuffling in blocks shorter than the label
+# horizon pulls overlapping labels apart, and the placebo degrades towards an independent draw,
+# which is the permutation that is too easy to pass and therefore establishes nothing.
+#
+# Both come to one month here because the same `1M` label buffer sets both, and they are assigned
+# separately so that stays a fact about this case study rather than an assumption buried in a
+# shared name. At a one-month horizon consecutive forward returns do not overlap, so there is no
+# label-induced dependence for a longer block to preserve. The treatment is a 12-to-2-month
+# momentum measure and does carry month-to-month dependence of its own, which a one-month block
+# breaks; the placebo therefore tests the timing of the treatment against the outcome, and not
+# whether a slowly moving characteristic could have produced the estimate.
+#
+# The observed cadence is passed as well, so a firm that leaves the panel and returns is permuted
+# as two histories rather than one continuous one.
 
 # %% [markdown]
 # ## Estimate on complete decision-month folds
@@ -177,12 +204,13 @@ results = run_dml_analysis(
     confounder_cols=confounder_cols,
     n_folds=CV_FOLDS,
     embargo=embargo_periods,
-    n_placebo=N_PLACEBO,
+    n_placebo=PLACEBO_REPS,
     block_size=block_size,
     seed=RANDOM_SEED,
-    horizon=embargo_periods,
+    horizon=label_horizon,
     time_col=date_col,
     entity_col=entity_col,
+    expected_step=cadence,
 )
 
 dml_result = results["dml_result"]
@@ -236,8 +264,11 @@ ax.set(xlabel="Monthly treatment effect (decimal return)", ylabel="Placebo runs"
 ax.legend(frameon=False)
 add_message_title(
     ax,
-    "Every entity-aware placebo exceeds the observed effect",
-    subtitle=f"{N_PLACEBO} block permutations within firms; empirical p={refutation['empirical_p']:.3f}",
+    "Permuting a firm's own months moves the estimated effect",
+    subtitle=(
+        f"{PLACEBO_REPS} within-firm block permutations at a {block_size}-month block; "
+        "monthly effect in decimal return"
+    ),
 )
 fig.tight_layout(rect=(0, 0, 1, 0.86))
 fig.show()
@@ -246,7 +277,10 @@ fig.show()
 # ## Register the corrected causal diagnostic
 #
 # Causal DML has its own registry table because it estimates a treatment effect rather than a
-# cross-sectional prediction score. The corrected identity records the one-month group embargo.
+# cross-sectional prediction score. Everything that would change the estimate is named in the
+# identity: the fold and embargo geometry, the placebo design and its seed, the label horizon, and
+# the row cap and cutoff that decide which months are in the sample. Two runs that differ in any of
+# them are two identities rather than one row overwriting another.
 
 # %%
 causal_hash = register_causal_run(
@@ -257,37 +291,56 @@ causal_hash = register_causal_run(
     confounder_cols=confounder_cols,
     n_folds=CV_FOLDS,
     embargo=embargo_periods,
+    time_col=date_col,
+    block_size=block_size,
+    n_placebo=PLACEBO_REPS,
+    seed=RANDOM_SEED,
+    horizon=label_horizon,
+    max_samples=ROW_CAP,
+    development_end=str(development_cutoff),
     notebook="09_causal_dml",
 )
-print(f"Registered corrected causal identity: {causal_hash}")
+print(f"Registered causal identity: {causal_hash}")
 
 # %% [markdown]
-# ## Takeaways
+# ## What the run produced
 #
-# The adjusted estimate is a robustness diagnostic for the momentum signal, while prediction and
-# strategy selection remain downstream tasks.
+# One cell, so every number this notebook publishes is in one place and moves together on a re-run.
+# `placebo_p_floor` is one over the number of successful placebo draws plus one, the smallest
+# p-value a permutation test of this size can report.
 
-# %%
-effect_bps = dml_result["theta"] * 10_000
-naive_bps = results["naive_effect"] * 10_000
+# %% tags=["results"]
 refutation_class = refutation.get(
     "refutation_class",
     classify_refutation(refutation["empirical_p"]),
 )
-display(
-    Markdown(
-        f"""
-- Across **{dml_result["n_periods"]}** out-of-fold decision months, the adjusted momentum estimate is
-  **{effect_bps:+.1f} basis points per month**, compared with **{naive_bps:+.1f} basis points** for
-  naive OLS on the same **{dml_result["n_obs"]:,}** observations.
-- Driscoll-Kraay inference gives standard error **{dml_result["se_hac"]:.4f}** and two-sided
-  **p={results["p_value_hac"]:.3f}**. The entity-aware placebo refutation **{refutation_class.lower()}**
-  at empirical **p={refutation["empirical_p"]:.3f}**.
-- The positive point estimate clears neither inferential gate. These data therefore do not support
-  a nonzero causal momentum effect after conditioning on Beta, IdioVol, LME, and Variance; any causal
-  interpretation also depends on the observed-confounding, overlap, and no-interference assumptions.
-- All folds operate on complete months with a **{embargo_periods}-month embargo**. The 2016 holdout
-  remains sealed for the final selected strategy.
-"""
-    )
+pl.DataFrame(
+    {
+        "decision_months": [dml_result["n_periods"]],
+        "observations": [dml_result["n_obs"]],
+        "dml_bps_per_month": [dml_result["theta"] * 10_000],
+        "naive_bps_per_month": [results["naive_effect"] * 10_000],
+        "se_hac": [dml_result["se_hac"]],
+        "p_hac": [results["p_value_hac"]],
+        "placebo_p": [refutation["empirical_p"]],
+        "placebo_p_floor": [1.0 / (refutation["n_successful"] + 1)],
+        "refutation_class": [refutation_class],
+    }
 )
+
+# %% [markdown]
+# ## Takeaways
+#
+# - This is a development-stage robustness diagnostic for the momentum signal. Prediction and
+#   strategy selection are downstream tasks and read different evidence.
+# - Read the coefficient against its Driscoll-Kraay standard error rather than against zero: that
+#   standard error allows for dependence along time and across firms at the same decision month,
+#   which an IID standard error on a panel this wide does not.
+# - Naive OLS and the adjusted estimate are computed on the same out-of-fold rows, so the gap
+#   between them measures sensitivity to the observed confounder set rather than two estimators
+#   reading different numbers of observations.
+# - The permutation p-value cannot fall below its floor however extreme the estimate is, so a value
+#   at the floor is a bound and not a measurement. A block permutation disturbs the timing of the
+#   treatment; it does not disturb confounding.
+# - Conditioning on Beta, IdioVol, LME and Variance does not establish that conditional
+#   ignorability, overlap or no-interference hold. Every step above ends before the 2016 holdout.
