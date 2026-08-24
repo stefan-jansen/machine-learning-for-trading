@@ -156,6 +156,12 @@ else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 include_preview = EXECUTION_TIER == "preview"
+# Metrics are read from the tier's own storage, not from `study.root`. Under preview in a
+# maintainer worktree `open_study` leaves `root` on the release case directory and redirects only
+# writes, so `case_dir=study.root` sends every metric lookup to the released registry while the
+# catalog rows come from the preview one - and every preview row reports as having no metrics.
+# `storage_root` is the accessor that answers "where does this tier's registry live".
+metrics_case_dir = study.storage_root(EXECUTION_TIER)
 prediction_sets = ()
 diagnostic_sets = ()
 official_populations = ()
@@ -394,7 +400,7 @@ for row in catalog.iter_rows(named=True):
     metrics = load_prediction_metrics(
         CASE_STUDY_ID,
         prediction_hash=row["prediction_hash"],
-        case_dir=study.root,
+        case_dir=metrics_case_dir,
     )
     if metrics.height != 1 or not required_metrics <= set(metrics.columns):
         raise ValueError(f"missing exact daily metrics for {row['prediction_hash']}")

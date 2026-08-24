@@ -70,6 +70,9 @@ if not VALIDATION_BACKTEST_SET_NAME or not RESEARCH_LOCK_HASH:
     raise ValueError("VALIDATION_BACKTEST_SET_NAME and RESEARCH_LOCK_HASH are required")
 
 study = Study.open(CASE_STUDY_ID)
+# 20 is read-only and canonical throughout, so this is `study.root`; naming it through
+# `storage_root` keeps the metric reads answering "this tier's registry" rather than assuming it.
+metrics_case_dir = study.storage_root()
 validation_set = CandidateSet.one(study, name=VALIDATION_BACKTEST_SET_NAME)
 research_lock = study.lifecycle.open(RESEARCH_LOCK_HASH)
 
@@ -218,7 +221,7 @@ for candidate_hash in validation_set.members:
     metrics = load_backtest_metrics(
         CASE_STUDY_ID,
         backtest_hash=candidate_hash,
-        case_dir=study.root,
+        case_dir=metrics_case_dir,
     )
     if metrics.height != 1 or not required_selection_metrics <= set(metrics.columns):
         raise ValueError(f"missing exact selection metrics for {candidate_hash}")
@@ -358,7 +361,7 @@ for period, result in (
     metrics = load_backtest_metrics(
         CASE_STUDY_ID,
         backtest_hash=result.hash,
-        case_dir=study.root,
+        case_dir=metrics_case_dir,
     )
     if metrics.height != 1 or not required_performance_metrics <= set(metrics.columns):
         raise ValueError(f"missing exact performance metrics for {result.hash}")
@@ -390,12 +393,12 @@ locked_performance
 holdout_pairs = load_paired_metrics(
     CASE_STUDY_ID,
     challenger_hash=holdout_backtest.hash,
-    case_dir=study.root,
+    case_dir=metrics_case_dir,
 )
 validation_pairs = load_paired_metrics(
     CASE_STUDY_ID,
     challenger_hash=selected_validation.hash,
-    case_dir=study.root,
+    case_dir=metrics_case_dir,
 )
 paired_identity_columns = {"benchmark_hash", "benchmark_kind"}
 if holdout_pairs.is_empty() or not paired_identity_columns <= set(holdout_pairs.columns):
