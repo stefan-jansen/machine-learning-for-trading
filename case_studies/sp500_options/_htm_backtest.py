@@ -165,6 +165,148 @@ def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str,
     }
 
 
+def _complete_lifecycle_contracts(
+    contract_returns: pl.DataFrame,
+    raw_options_dir: Path,
+) -> pl.DataFrame:
+    """Keep entry contracts with a complete, valid paired lifecycle through expiry."""
+    if contract_returns.is_empty():
+        return contract_returns
+    candidate_keys = ["feature_date", "symbol", "strike", "expiration", "entry_date"]
+    if contract_returns.n_unique(candidate_keys) != contract_returns.height:
+        raise ValueError("candidate option contracts are not unique by decision and entry keys")
+    candidates = contract_returns.with_row_index("_candidate_id")
+    entry_min = candidates["entry_date"].min()
+    exp_max = candidates["expiration"].max()
+    if not isinstance(entry_min, (date, datetime)) or not isinstance(exp_max, (date, datetime)):
+        raise TypeError("candidate option entry and expiration columns must contain dates")
+
+    contracts = candidates.select("symbol", "strike", "expiration").unique()
+    symbols = candidates.get_column("symbol").unique().to_list()
+    raw_parts = []
+    calendars = []
+    for year in range(entry_min.year, exp_max.year + 1):
+        parquet_path = raw_options_dir / f"year={year}.parquet"
+        if not parquet_path.exists():
+            continue
+        raw = pl.scan_parquet(parquet_path)
+        in_window = pl.col("date").is_between(entry_min, exp_max, closed="both")
+        raw_parts.append(
+            raw.select(
+                "date",
+                "symbol",
+                "strike",
+                "expiration",
+                "call_put",
+                "mid_price",
+                "bid",
+                "ask",
+                "delta",
+                "underlying_price",
+            )
+            .filter(pl.col("symbol").is_in(symbols) & in_window)
+            .join(contracts.lazy(), on=["symbol", "strike", "expiration"], how="semi")
+            .collect()
+        )
+        calendars.append(raw.select("date").filter(in_window).unique().collect())
+    if not raw_parts or not calendars:
+        raise FileNotFoundError(f"No raw option data in {raw_options_dir}")
+
+    raw_lookup = pl.concat(raw_parts)
+    calendar = pl.concat(calendars).unique().sort("date").with_row_index("_session")
+    bounds = (
+        candidates.join(
+            calendar.rename({"date": "entry_date", "_session": "_entry_session"}),
+            on="entry_date",
+            how="left",
+        )
+        .join(
+            calendar.rename({"date": "expiration", "_session": "_expiry_session"}),
+            on="expiration",
+            how="left",
+        )
+        .with_columns(
+            (pl.col("_expiry_session") - pl.col("_entry_session") + 1).alias("_expected_dates")
+        )
+    )
+
+    required_values = ["mid_price", "bid", "ask", "delta", "underlying_price"]
+    valid = raw_lookup.filter(
+        ~pl.any_horizontal(
+            [
+                pl.col(column).is_null() | ~pl.col(column).cast(pl.Float64).is_finite()
+                for column in required_values
+            ]
+        )
+        & (pl.col("mid_price") >= 0)
+        & (pl.col("bid") >= 0)
+        & (pl.col("ask") >= pl.col("bid"))
+        & (pl.col("underlying_price") > 0)
+    )
+    join_keys = ["date", "symbol", "strike", "expiration"]
+    calls = valid.filter(pl.col("call_put") == "C").select(
+        *join_keys,
+        pl.col("mid_price").alias("_raw_call_mid"),
+        pl.col("underlying_price").alias("_call_underlying"),
+    )
+    puts = valid.filter(pl.col("call_put") == "P").select(
+        *join_keys,
+        pl.col("mid_price").alias("_raw_put_mid"),
+        pl.col("underlying_price").alias("_put_underlying"),
+    )
+    paired = calls.join(puts, on=join_keys, how="inner").filter(
+        (pl.col("_call_underlying") - pl.col("_put_underlying")).abs() <= 1e-10
+    )
+
+    contract_join = ["symbol", "strike", "expiration"]
+    observed_legs = (
+        bounds.select("_candidate_id", "entry_date", *contract_join)
+        .join(raw_lookup.select("date", *contract_join), on=contract_join, how="left")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .group_by("_candidate_id")
+        .len(name="_observed_legs")
+    )
+    observed_pairs = (
+        bounds.select(
+            "_candidate_id",
+            "entry_date",
+            "entry_call_mid",
+            "entry_put_mid",
+            *contract_join,
+        )
+        .join(paired, on=contract_join, how="left")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .group_by("_candidate_id")
+        .agg(
+            pl.len().alias("_observed_dates"),
+            (
+                (pl.col("date") == pl.col("entry_date"))
+                & ((pl.col("_raw_call_mid") - pl.col("entry_call_mid")).abs() <= 1e-10)
+                & ((pl.col("_raw_put_mid") - pl.col("entry_put_mid")).abs() <= 1e-10)
+            )
+            .any()
+            .alias("_entry_matches"),
+        )
+    )
+    eligible_ids = (
+        bounds.join(observed_legs, on="_candidate_id", how="left")
+        .join(observed_pairs, on="_candidate_id", how="left")
+        .filter(
+            pl.col("_expected_dates").is_not_null()
+            & (pl.col("_expected_dates") > 0)
+            & (pl.col("_observed_legs") == 2 * pl.col("_expected_dates"))
+            & (pl.col("_observed_dates") == pl.col("_expected_dates"))
+            & pl.col("_entry_matches").fill_null(False)
+        )
+        .select("_candidate_id")
+    )
+    return (
+        candidates.join(eligible_ids, on="_candidate_id", how="semi")
+        .drop("_candidate_id")
+        .sort("feature_date", "symbol")
+    )
+
+
 def _select_cohorts(
     predictions: pl.DataFrame,
     contract_returns: pl.DataFrame,
@@ -172,6 +314,7 @@ def _select_cohorts(
     method: str = "equal_weight_top_k",
     top_k: int = TOP_K_DEFAULT,
     percentile: float = 90.0,
+    raw_options_dir: Path | None = None,
 ) -> pl.DataFrame:
     """For each weekly decision date, select symbols by the entry method and
     attach strike, expiration, entry quotes, and within-cohort weight.
@@ -198,6 +341,52 @@ def _select_cohorts(
     )
     pred = pred.filter(pl.col("date").is_in(weekly_dates.implode()))
 
+    cr = contract_returns.select(
+        pl.col("feature_date").alias("timestamp"),
+        "symbol",
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_straddle_mid",
+        "entry_call_mid",
+        "entry_call_bid",
+        "entry_call_ask",
+        "entry_put_mid",
+        "entry_put_bid",
+        "entry_put_ask",
+    )
+    if cr.n_unique(["timestamp", "symbol"]) != cr.height:
+        raise ValueError("contract-return rows are not unique by decision timestamp and symbol")
+    required_contract_values = (
+        "strike",
+        "expiration",
+        "entry_date",
+        "entry_straddle_mid",
+        "entry_call_mid",
+        "entry_call_bid",
+        "entry_call_ask",
+        "entry_put_mid",
+        "entry_put_bid",
+        "entry_put_ask",
+    )
+    cr = cr.filter(
+        ~pl.any_horizontal([pl.col(column).is_null() for column in required_contract_values])
+    )
+    if raw_options_dir is not None:
+        candidate_contracts = cr.rename({"timestamp": "feature_date"}).join(
+            pred.select(pl.col("date").alias("feature_date"), "symbol").unique(),
+            on=["feature_date", "symbol"],
+            how="semi",
+        )
+        cr = _complete_lifecycle_contracts(candidate_contracts, raw_options_dir).rename(
+            {"feature_date": "timestamp"}
+        )
+    pred = pred.join(
+        cr.select(pl.col("timestamp").alias("date"), "symbol"),
+        on=["date", "symbol"],
+        how="semi",
+    )
+
     if method == "cross_sectional_percentile":
         q = max(0.0, min(100.0, float(percentile))) / 100.0
         ranked = (
@@ -221,47 +410,6 @@ def _select_cohorts(
             f"equal_weight_top_k, score_weighted_top_k, cross_sectional_percentile."
         )
 
-    cr = contract_returns.select(
-        pl.col("feature_date").alias("timestamp"),
-        "symbol",
-        "strike",
-        "expiration",
-        "entry_date",
-        "entry_straddle_mid",
-        "entry_call_mid",
-        "entry_call_bid",
-        "entry_call_ask",
-        "entry_put_mid",
-        "entry_put_bid",
-        "entry_put_ask",
-    )
-    if cr.n_unique(["timestamp", "symbol"]) != cr.height:
-        raise ValueError("contract-return rows are not unique by decision timestamp and symbol")
-    invalid_contracts = cr.filter(
-        pl.any_horizontal(
-            [
-                pl.col(column).is_null()
-                for column in (
-                    "strike",
-                    "expiration",
-                    "entry_date",
-                    "entry_straddle_mid",
-                    "entry_call_mid",
-                    "entry_call_bid",
-                    "entry_call_ask",
-                    "entry_put_mid",
-                    "entry_put_bid",
-                    "entry_put_ask",
-                )
-            ]
-        )
-    )
-    if not invalid_contracts.is_empty():
-        cr = cr.join(
-            invalid_contracts.select("timestamp", "symbol"),
-            on=["timestamp", "symbol"],
-            how="anti",
-        )
     cohorts = ranked.join(cr, on=["timestamp", "symbol"], how="inner")
     missing = ranked.join(
         cohorts.select("timestamp", "symbol"),
