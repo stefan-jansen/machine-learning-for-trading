@@ -611,4 +611,58 @@ def test_holdout_seal_counts_sessions_not_calendar_days(tmp_path, monkeypatch) -
         (pl.col("timestamp") >= session_cutoff) & (pl.col("timestamp") < calendar_cutoff)
     )
     assert leaked.height > 0
-    assert computation["analysis_population"]["n_rows"] < retained.height + leaked.height
+    # The population the calendar construction would have produced, less exactly the rows
+    # whose outcomes reach past the holdout. Stated independently of the assertion above.
+    assert (
+        computation["analysis_population"]["n_rows"]
+        == frame.filter(pl.col("timestamp") < calendar_cutoff).height - leaked.height
+    )
+
+
+def test_holdout_seal_counts_each_entity_own_observations(tmp_path, monkeypatch) -> None:
+    """A product missing late sessions needs an earlier cutoff than the panel's.
+
+    The buffer advances by the entity's own observations. Counting distinct timestamps
+    across the panel reaches back five panel sessions, which is fewer than five of a
+    sparse product's own, so that product keeps rows resolving inside the holdout.
+    """
+    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    holdout = pd.Timestamp("2024-02-19", tz="UTC")
+    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
+    # S0 stops trading four sessions before the holdout; every other product runs through.
+    absent = set(pre_holdout[-4:])
+    sparse = frame.filter(~((pl.col("symbol") == "S0") & pl.col("timestamp").is_in(absent)))
+    sparse_mds = SimpleNamespace(
+        dataset=sparse,
+        feature_names=["feature", "treatment", "confounder"],
+        label_col="fwd_ret_5d",
+        label_buffer="5D",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: sparse_mds)
+    _set_holdout_start(study.root / "config" / "setup.yaml", "2024-02-19")
+
+    computation = study.causal(method="dml", label=label.name).resolve().spec["computation"]
+
+    # S0's own five-observations-back lands four sessions earlier than the panel's.
+    sparse_sessions = [timestamp for timestamp in pre_holdout if timestamp not in absent]
+    expected = sparse_sessions[-5]
+    panel_cutoff = pre_holdout[-5]
+    assert expected < panel_cutoff
+    assert computation["estimand"]["holdout_endpoint_cutoff"] == expected.isoformat()
+
+
+def test_holdout_seal_fails_closed_on_a_panel_shorter_than_its_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    """No entity can absorb the buffer, so the request refuses rather than estimating."""
+    study, label, _frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    # Three sessions precede this holdout, against a five-observation buffer.
+    _set_holdout_start(study.root / "config" / "setup.yaml", "2024-01-04")
+    with pytest.raises(ValueError, match="none can absorb the buffer"):
+        study.causal(method="dml", label=label.name).resolve()
