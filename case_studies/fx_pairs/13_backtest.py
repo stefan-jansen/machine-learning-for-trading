@@ -83,8 +83,17 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # predictions - and a reduced run over a canonical upstream, which is what the
 # test suite exercises, then resolved no rows at all.
 include_preview = EXECUTION_TIER == "preview"
+# `complete` and `artifact_available` are separate columns and the population needs both.
+# A frozen population is verified with require_complete, which opens each member and asks
+# PredictionResult.complete - and that requires predictions.parquet on disk, which the
+# catalog's `complete` conjunction does not. Selecting on `complete` alone freezes a
+# population that then fails its own completeness check one line later. 12_model_analysis
+# already guards the same distinction at :78.
 catalog = study.predictions.table(include_preview=include_preview).filter(
-    (pl.col("identity_status") == "current") & (pl.col("split") == SPLIT) & pl.col("complete")
+    (pl.col("identity_status") == "current")
+    & (pl.col("split") == SPLIT)
+    & pl.col("complete")
+    & pl.col("artifact_available")
 )
 if include_preview:
     catalog = catalog.filter(pl.col("execution_tier") == "preview")

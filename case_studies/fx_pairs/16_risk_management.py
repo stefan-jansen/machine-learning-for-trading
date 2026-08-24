@@ -118,6 +118,7 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current")
     & (pl.col("split") == SPLIT)
     & pl.col("complete")
+    & pl.col("artifact_available")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
 if LABEL:
