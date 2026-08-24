@@ -14,212 +14,336 @@
 # ---
 
 # %% [markdown]
-# # NLinear — US Equities Panel
+# # NLinear Models - US Equities Panel
 #
-# NLinear is the minimal temporal baseline for the broad US equities panel. It
-# asks whether simple last-value normalization plus a single linear map is
-# already enough to extract the tiny daily edge that becomes economically
-# relevant only because of breadth across thousands of names.
+# This notebook generates walk-forward validation predictions for the published NLinear
+# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
+# parameter overrides, and execution tier. Shared sequence code owns eligible-window construction,
+# fold preprocessing, fitting, checkpoint persistence, restart, coverage, metrics, and registry
+# writes.
 #
-# **Learning Objectives**:
-# - Establish a standalone DL baseline for the broad US equities panel
-# - Compare the simplest temporal model against prior linear and GBM results
-# - Prepare a clean provenance chain for later LSTM and TSMixer comparisons
+# The sequence implementation is in `case_studies/utils/deep_learning.py`, and the gap-aware window
+# construction is in `case_studies/utils/sequence_dataset.py`. Readers can change those ordinary
+# Python implementations while keeping the same request, result, and catalog boundary.
 #
-# **Book Reference**: Chapter 13
+# **Learning objectives**
 #
-# **Prerequisites**: [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb)
+# - Configure a gap-aware NLinear sequence experiment and its epoch checkpoints.
+# - Trace eligible windows, preprocessing state, and checkpoint persistence into result identities.
+# - Validate complete prediction coverage before publishing the catalog population.
+#
+# **Book reference**: Chapter 13
+#
+# **Prerequisites**: `05_evaluation.py` and the finalized financial and model-based feature
+# artifacts.
 
 # %%
-"""NLinear — us_equities_panel deep learning."""
+"""Generate NLinear validation predictions through the shared research interface."""
 
-import warnings
+import os
+from pathlib import Path
 
 import polars as pl
-import torch
 import yaml
 
-from case_studies.utils.analytics import load_best_ic_per_family
-from case_studies.utils.deep_learning import run_dl_cv
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
+from case_studies.research import Study, plan_models
+from utils.modeling import load_configs
+from utils.paths import REPO_ROOT, get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-MODEL = "nlinear"
 PRIMARY_LABEL = ""
+CONFIG_NAMES = []
+COMMON_OVERRIDES = {}
+CONFIG_OVERRIDES = {}
+DEVICE = "cuda"
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
 MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100
-LOOKBACK = 60
-BATCH_SIZE = 2048
-MAX_TRAIN_SEQUENCES = 200_000
-MAX_FOLDS = 0
 FOLD_IDS = []
+MAX_TRAIN_SEQUENCES = 0
+PREVIEW_N_EPOCHS = 0
+
+# %% [markdown]
+# ## Configure the experiment
+#
+# `CONFIG_NAMES = []` selects every published NLinear configuration. `COMMON_OVERRIDES` changes
+# validated model or runner parameters for every selected configuration. `CONFIG_OVERRIDES` adds
+# changes for one named configuration and takes precedence. Effective defaults and overrides are
+# retained in each resolved training specification.
+#
+# Canonical requests use CUDA, every eligible sequence, every fold, and the published checkpoint
+# schedule. A reduced check uses the preview tier and declares at least one data or fold reduction.
+# `PREVIEW_N_EPOCHS` shortens the identity-covered model schedule for that preview. Preview results
+# cannot enter official comparisons, candidate sets, locks, or holdout evaluation.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
+case_dir = get_case_study_dir(CASE_STUDY_ID)
+setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+label = PRIMARY_LABEL or setup["labels"]["primary"]
 
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
+all_sequence_configs = load_configs(CASE_STUDY_ID, label, family="deep_learning")
+published_configs = [
+    config
+    for config in all_sequence_configs
+    if config.get("params", {}).get("architecture") == "nlinear"
+]
+published_names = [str(config["config_name"]) for config in published_configs]
+selected_names = list(CONFIG_NAMES) if CONFIG_NAMES else published_names
+unknown_names = sorted(set(selected_names) - set(published_names))
+unknown_overrides = sorted(set(CONFIG_OVERRIDES) - set(selected_names))
+if not published_names:
+    raise ValueError("The published training menu has no NLinear configuration")
+if unknown_names:
+    raise ValueError(f"Unknown NLinear configurations: {unknown_names}")
+if unknown_overrides:
+    raise ValueError(f"Overrides supplied for unselected configurations: {unknown_overrides}")
+if len(selected_names) != len(set(selected_names)):
+    raise ValueError("CONFIG_NAMES contains duplicates")
+
+menu = pl.DataFrame(
+    {
+        "config_name": [config["config_name"] for config in published_configs],
+        "architecture": [config["params"]["architecture"] for config in published_configs],
+        "published_params": [str(config.get("params") or {}) for config in published_configs],
+        "n_epochs": [config.get("n_epochs") for config in published_configs],
+        "checkpoint_interval": [config.get("checkpoint_interval") for config in published_configs],
+        "selected": [config["config_name"] in selected_names for config in published_configs],
+    }
+)
+menu
+
+# %%
+preview_reductions = {}
+if MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
+if FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
+if MAX_TRAIN_SEQUENCES:
+    preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
+
+if EXECUTION_TIER == "canonical":
+    if preview_reductions or PREVIEW_N_EPOCHS:
+        raise ValueError("Canonical execution cannot declare preview reductions")
+    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+elif EXECUTION_TIER == "preview":
+    if not preview_reductions:
+        raise ValueError("Preview execution requires a data or fold reduction")
+    study = Study.open(
+        CASE_STUDY_ID,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        release_root=REPO_ROOT,
+    )
 else:
-    print(f"Label override: {PRIMARY_LABEL}")
-
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
-
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## 1. Load Data
+# ## Build the model requests
+#
+# Each selected NLinear configuration becomes one request with the declared sequence reductions.
 
 # %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
+requests = []
+for config_name in selected_names:
+    overrides = {
+        "device": DEVICE,
+        **COMMON_OVERRIDES,
+        **dict(CONFIG_OVERRIDES.get(config_name, {})),
+    }
+    if PREVIEW_N_EPOCHS:
+        overrides["n_epochs"] = int(PREVIEW_N_EPOCHS)
+    requests.append(
+        study.model(
+            family="deep_learning",
+            label=label,
+            config_name=config_name,
+            overrides=overrides,
+            execution_tier=EXECUTION_TIER,
+            preview_reductions=preview_reductions,
+        )
+    )
+requests = tuple(requests)
 
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits[:MAX_FOLDS] if MAX_FOLDS else mds.splits
-n_features = len(feature_names)
-
-print(f"Dataset: {len(dataset):,} rows × {n_features} features")
-print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
-
-dataset_pd = dataset.to_pandas()
-print(f"Entities: {dataset_pd[entity_col].nunique():,}")
+request_table = pl.DataFrame(
+    {
+        "family": [request.family for request in requests],
+        "label": [request.label for request in requests],
+        "config_name": [request.config_name for request in requests],
+        "overrides": [str(request.overrides) for request in requests],
+        "execution_tier": [request.execution_tier.value for request in requests],
+        "preview_reductions": [str(request.preview_reductions) for request in requests],
+    }
+)
+request_table
 
 # %% [markdown]
-# ## 2. Prior Baselines
+# ## Plan and execute the selected configurations
+#
+# The planner resolves every training and epoch-checkpoint identity before fitting and writes the
+# canonical checkpoint population first. Execution builds only sequences that follow the declared
+# observation calendar and excludes
+# windows that cross missing expected periods. Each epoch checkpoint stores the fitted
+# preprocessing state, model weights, predictions, and exact eligible-key evidence. A retry reuses
+# valid candidate-fold checkpoints and recomputes incomplete work.
 
 # %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print("  No prior results found — run 06_linear.py and 07_gbm.py first")
-
-# %% [markdown]
-# ## 3. NLinear
-
-# %%
-dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
-dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
-if not dl_configs:
-    raise ValueError(
-        f"No '{MODEL}' configs found — add '{MODEL}' under 'deep_learning:' in the label config"
+plan = plan_models(study, requests=requests)
+official_population = None
+if EXECUTION_TIER == "canonical":
+    official_population = plan.create_population(
+        name="us-equities-nlinear-checkpoints-v1",
     )
 
-for cfg in dl_configs:
-    cfg["n_epochs"] = N_EPOCHS
-    cfg["batch_size"] = BATCH_SIZE
-    cfg["params"]["lookback"] = LOOKBACK
-
-print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × "
-    f"{len(splits)} folds"
+planned_population = pl.DataFrame(
+    {
+        "family": [member.family for member in plan.members],
+        "config_name": [member.config_name for member in plan.members],
+        "checkpoint_kind": [member.checkpoint_kind for member in plan.members],
+        "checkpoint_value": [member.checkpoint_value for member in plan.members],
+        "training_hash": [member.training_hash for member in plan.members],
+        "prediction_hash": [member.prediction_hash for member in plan.members],
+    }
 )
-for cfg in dl_configs:
-    print(f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')}")
+planned_population
 
 # %%
-result = run_dl_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=dl_configs,
-    n_features=n_features,
-    device=device_str,
-    save_dir=CASE_DIR / "run_log" / "training" / "deep_learning",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook="09_dl_nlinear",
-    max_train_sequences=MAX_TRAIN_SEQUENCES,
-    selected_folds=FOLD_IDS or None,
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
-)
+execution = plan.run()
 
 # %% [markdown]
-# ## 4. Learning Curves
-
-# %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
-
-curves = result["all_learning_curves"]
-if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
-    display_cps = [cp for cp in checkpoints if cp % 20 == 0 or cp == checkpoints[-1]]
-
-    print(f"{'Config':15s}", end="")
-    for cp in display_cps:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(display_cps)))
-
-    for row in grid_results:
-        cfg_data = curves.filter(pl.col("config") == row["config_name"])
-        print(f"{row['config_name']:15s}", end="")
-        for cp in display_cps:
-            ep_row = cfg_data.filter(pl.col("epoch") == cp)
-            print(f" {ep_row['ic_mean'][0]:+7.4f}" if ep_row.height > 0 else "     N/A", end="")
-        print()
-
-# %% [markdown]
-# ## 5. Comparison
-
-# %%
-comparison_rows = [{"Model": name, "IC": ic} for name, ic in prior_baselines.items()]
-comparison_rows.append({"Model": best_name, "IC": best_ic})
-comparison = pl.DataFrame(comparison_rows).with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
-)
-comparison
-
-# %% [markdown]
-# ## 6. Save Results
-
-# %%
-predictions = result["predictions"]
-all_predictions = result["all_predictions"]
-fold_metrics = result["fold_metrics"]
-
-print(f"Predictions: {predictions.height:,} rows")
-print(f"All predictions: {all_predictions.height:,} rows")
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
-
-# %% [markdown]
-# ## 7. Key Takeaways
+# ## Inspect the resolved computation
 #
-# This notebook gives NLinear its own provenance in the US equities sequence.
-# If later architectures outperform it, that gap is now attributable to the
-# model family itself rather than to a hidden inline baseline.
+# These rows expose the feature, fold, sequence, runtime, model, and checkpoint settings used by
+# the runner, including defaults that were not repeated in the notebook parameters.
+
+# %%
+resolved_rows = []
+for run in execution.runs:
+    spec = run.training.spec()
+    computation = spec.get("computation", spec)
+    model = computation["model"]
+    resolved_rows.append(
+        {
+            "config_name": spec["config_name"],
+            "architecture": model["params"]["architecture"],
+            "features": len(computation["feature_names"]),
+            "folds": computation["expected_prediction_keys"]["n_folds"],
+            "eligible_rows": computation["expected_prediction_keys"]["n_rows"],
+            "lookback": model["params"]["lookback"],
+            "device": computation["numerics"]["device"],
+            "n_epochs": model["params"]["n_epochs"],
+            "checkpoints": [item["value"] for item in computation["checkpoint_schedule"]],
+            "training_hash": run.training.hash,
+        }
+    )
+
+resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
+resolved_table
+
+# %% [markdown]
+# ## Validate and inspect the handoff
+#
+# Each catalog row is one complete validation prediction set for one training identity and epoch.
+# Downstream notebooks filter these rows with Polars and pass the selected table directly to
+# backtesting. The hashes remain visible for exact provenance and artifact reads.
+
+# %% tags=["results"]
+catalog_columns = [
+    "family",
+    "config_name",
+    "label",
+    "split",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "execution_tier",
+    "complete",
+    "ic_mean",
+    "training_hash",
+    "prediction_hash",
+]
+catalog_rows = execution.catalog_rows.select(
+    column for column in catalog_columns if column in execution.catalog_rows.columns
+).sort("config_name", "checkpoint_value", "prediction_hash")
+catalog_rows
+
+# %%
+coverage_rows = []
+for run in execution.runs:
+    if not run.training.complete:
+        raise RuntimeError(f"Incomplete training result: {run.training.hash}")
+    for prediction in run.predictions:
+        record = prediction.registry_record()
+        coverage = prediction.coverage()
+        if not prediction.complete or coverage is None or coverage["status"] != "complete":
+            raise RuntimeError(f"Incomplete prediction result: {prediction.hash}")
+        coverage_rows.append(
+            {
+                "config_name": run.training.spec()["config_name"],
+                "checkpoint": record["checkpoint_value"],
+                "training_hash": run.training.hash,
+                "prediction_hash": prediction.hash,
+                "coverage_status": coverage["status"],
+                "expected_rows": coverage["n_expected"],
+                "actual_rows": coverage["n_actual"],
+                "training_artifacts": len(run.training.artifacts()),
+                "prediction_artifacts": len(prediction.artifacts()),
+            }
+        )
+
+coverage_table = pl.DataFrame(coverage_rows).sort("config_name", "checkpoint")
+if official_population is not None:
+    official_population.require_complete()
+coverage_table
+
+# %%
+execution_diagnostics = pl.DataFrame(execution.diagnostics)
+execution_diagnostics
+
+# %% [markdown]
+# ## Freeze the compatible result set
+#
+# A canonical default CUDA run freezes every returned NLinear prediction row under a stable name.
+# The same bounded family set supplies raw diagnostics because this notebook has one published
+# configuration. Preview and customized canonical requests do not publish an official set.
+
+# %% tags=["results"]
+set_rows = []
+is_published_population = (
+    EXECUTION_TIER == "canonical"
+    and selected_names == published_names
+    and not COMMON_OVERRIDES
+    and not CONFIG_OVERRIDES
+    and DEVICE == "cuda"
+)
+if is_published_population:
+    label_name = label.replace("_", "-")
+    full_set = study.predictions.freeze(
+        execution.catalog_rows,
+        name=f"us-equities-{label_name}-nlinear-v1",
+    )
+    set_rows = [
+        {
+            "role": "backtest and diagnostic population",
+            "set_name": full_set.name,
+            "members": len(full_set.members),
+        }
+    ]
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"role": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
+
+# %% [markdown]
+# `15_model_analysis.py` reopens the named set for descriptive analysis. `16_backtest.py` passes
+# every catalog row directly to the shared backtest runner. Model metrics do not choose a
+# configuration or checkpoint.
+
+# %% [markdown]
+# ## Key takeaways and limitations
+#
+# - Sequence eligibility follows the declared observation calendar and excludes windows that cross
+#   missing expected periods.
+# - Each epoch checkpoint retains fitted preprocessing, model state, predictions, and coverage.
+# - NLinear applies a linear mapping across a fixed lookback window; nonlinear temporal effects
+#   require a different sequence architecture.
+# - Validation predictions remain separate from the locked holdout assessment.

@@ -14,369 +14,336 @@
 # ---
 
 # %% [markdown]
-# # LSTM — US Equities Panel
+# # LSTM Models - US Equities Panel
 #
-# Can sequential memory capture dynamics that flat-feature models miss across
-# 3,199 stocks? The LSTM processes 60-day lookback windows of 71 features,
-# seeking temporal patterns in daily returns. On this panel, the linear baseline
-# exploits cross-sectional breadth --- the question is whether
-# looking back in time per stock adds information or just noise.
+# This notebook generates walk-forward validation predictions for the published LSTM
+# configurations and every declared epoch checkpoint. Readers choose the label, configurations,
+# parameter overrides, and execution tier. Shared sequence code owns eligible-window construction,
+# fold preprocessing, fitting, checkpoint persistence, restart, coverage, metrics, and registry
+# writes.
 #
-# **Learning Objectives**:
-# - Test whether temporal modeling improves on cross-sectional linear baselines
-# - Evaluate LSTM on the broadest universe in the book (3,199 stocks)
-# - Quantify the DL delta: does sequence modeling justify its complexity?
+# The sequence implementation is in `case_studies/utils/deep_learning.py`, and the gap-aware window
+# construction is in `case_studies/utils/sequence_dataset.py`. A new architecture can implement the
+# same ordinary Python request and result contract without changing downstream catalog selection.
 #
-# **Book Reference**: Chapter 13
+# **Learning objectives**
 #
-# **Prerequisites**: [`09_dl_nlinear`](09_dl_nlinear.ipynb),
-# [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb)
+# - Configure an LSTM sequence experiment and its epoch checkpoints.
+# - Trace gap-aware windows, preprocessing state, and recurrent model state into result identities.
+# - Validate complete prediction coverage before publishing the catalog population.
+#
+# **Book reference**: Chapter 13
+#
+# **Prerequisites**: `05_evaluation.py` and the finalized financial and model-based feature
+# artifacts.
 
 # %%
-"""LSTM — us_equities_panel deep learning."""
+"""Generate LSTM validation predictions through the shared research interface."""
 
-import warnings
+import os
+from pathlib import Path
 
-import numpy as np
 import polars as pl
-import torch
 import yaml
 
-from case_studies.utils.analytics import load_best_ic_per_family
-from case_studies.utils.deep_learning import (
-    create_model,
-    resolve_arch_name,
-    run_dl_cv,
-)
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
+from case_studies.research import Study, plan_models
+from utils.modeling import load_configs
+from utils.paths import REPO_ROOT, get_case_study_dir
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-MODEL = "lstm"
 PRIMARY_LABEL = ""
+CONFIG_NAMES = []
+COMMON_OVERRIDES = {}
+CONFIG_OVERRIDES = {}
+DEVICE = "cuda"
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
 MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100
-LOOKBACK = 60
-BATCH_SIZE = 2048
-MAX_TRAIN_SEQUENCES = 200_000
-MC_DROPOUT = False
-MAX_FOLDS = 0
 FOLD_IDS = []
-
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
-
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+MAX_TRAIN_SEQUENCES = 0
+PREVIEW_N_EPOCHS = 0
 
 # %% [markdown]
-# ## 1. Load Data
-
-# %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits
-if MAX_FOLDS:
-    splits = splits[:MAX_FOLDS]
-n_features = len(feature_names)
-
-print(f"Dataset: {len(dataset):,} rows × {n_features} features")
-print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
-
-dataset_pd = dataset.to_pandas()
-n_entities = dataset_pd[entity_col].nunique()
-print(f"Entities: {n_entities}")
-
-# %% [markdown]
-# ## 2. Prior Baselines
+# ## Configure the experiment
 #
-# Load IC results from earlier pipeline stages (Ch11 linear, Ch12 GBM)
-# rather than re-running them here.
-
-# %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print("  No prior results found — run 06_linear.py and 07_gbm.py first")
-
-# %% [markdown]
-# ## 3. LSTM
+# `CONFIG_NAMES = []` selects every published LSTM configuration. `COMMON_OVERRIDES` changes
+# validated model or runner parameters for every selected configuration. `CONFIG_OVERRIDES` adds
+# changes for one named configuration and takes precedence. Effective defaults and overrides are
+# retained in each resolved training specification.
 #
-# Primary architecture for this notebook.
+# Canonical requests use CUDA, every eligible sequence, every fold, and the published checkpoint
+# schedule. A reduced check uses the preview tier and declares at least one data or fold reduction.
+# `PREVIEW_N_EPOCHS` shortens the identity-covered model schedule for that preview. Preview results
+# cannot enter official comparisons, candidate sets, locks, or holdout evaluation.
 
 # %%
-dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
-dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
+case_dir = get_case_study_dir(CASE_STUDY_ID)
+setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+label = PRIMARY_LABEL or setup["labels"]["primary"]
 
-# Apply Papermill overrides to configs (test mode: fewer epochs)
-for cfg in dl_configs:
-    if cfg.get("n_epochs", 100) != N_EPOCHS:
-        cfg["n_epochs"] = N_EPOCHS
-    if cfg.get("batch_size", 2048) != BATCH_SIZE:
-        cfg["batch_size"] = BATCH_SIZE
-    if cfg["params"].get("lookback", 60) != LOOKBACK:
-        cfg["params"]["lookback"] = LOOKBACK
+all_sequence_configs = load_configs(CASE_STUDY_ID, label, family="deep_learning")
+published_configs = [
+    config
+    for config in all_sequence_configs
+    if config.get("params", {}).get("architecture") == "lstm"
+]
+published_names = [str(config["config_name"]) for config in published_configs]
+selected_names = list(CONFIG_NAMES) if CONFIG_NAMES else published_names
+unknown_names = sorted(set(selected_names) - set(published_names))
+unknown_overrides = sorted(set(CONFIG_OVERRIDES) - set(selected_names))
+if not published_names:
+    raise ValueError("The published training menu has no LSTM configuration")
+if unknown_names:
+    raise ValueError(f"Unknown LSTM configurations: {unknown_names}")
+if unknown_overrides:
+    raise ValueError(f"Overrides supplied for unselected configurations: {unknown_overrides}")
+if len(selected_names) != len(set(selected_names)):
+    raise ValueError("CONFIG_NAMES contains duplicates")
 
-print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × "
-    f"{len(splits)} folds"
+menu = pl.DataFrame(
+    {
+        "config_name": [config["config_name"] for config in published_configs],
+        "architecture": [config["params"]["architecture"] for config in published_configs],
+        "published_params": [str(config.get("params") or {}) for config in published_configs],
+        "n_epochs": [config.get("n_epochs") for config in published_configs],
+        "checkpoint_interval": [config.get("checkpoint_interval") for config in published_configs],
+        "selected": [config["config_name"] in selected_names for config in published_configs],
+    }
 )
-for cfg in dl_configs:
-    print(
-        f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')} "
-        f"({cfg.get('n_epochs', 100)} epochs)"
+menu
+
+# %%
+preview_reductions = {}
+if MAX_SYMBOLS:
+    preview_reductions["max_symbols"] = int(MAX_SYMBOLS)
+if FOLD_IDS:
+    preview_reductions["folds"] = [int(fold) for fold in FOLD_IDS]
+if MAX_TRAIN_SEQUENCES:
+    preview_reductions["max_train_sequences"] = int(MAX_TRAIN_SEQUENCES)
+
+if EXECUTION_TIER == "canonical":
+    if preview_reductions or PREVIEW_N_EPOCHS:
+        raise ValueError("Canonical execution cannot declare preview reductions")
+    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+elif EXECUTION_TIER == "preview":
+    if not preview_reductions:
+        raise ValueError("Preview execution requires a data or fold reduction")
+    study = Study.open(
+        CASE_STUDY_ID,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        release_root=REPO_ROOT,
     )
-
-# %%
-result = run_dl_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=dl_configs,
-    n_features=n_features,
-    device=device_str,
-    save_dir=CASE_DIR / "run_log" / "training" / "deep_learning",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook="10_dl_lstm",
-    max_train_sequences=MAX_TRAIN_SEQUENCES,
-    selected_folds=FOLD_IDS or None,
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
-)
+else:
+    raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
 
 # %% [markdown]
-# ## 4. Learning Curves
+# ## Build the model requests
+#
+# Each selected LSTM configuration becomes one request with the declared sequence reductions.
 
 # %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
+requests = []
+for config_name in selected_names:
+    overrides = {
+        "device": DEVICE,
+        **COMMON_OVERRIDES,
+        **dict(CONFIG_OVERRIDES.get(config_name, {})),
+    }
+    if PREVIEW_N_EPOCHS:
+        overrides["n_epochs"] = int(PREVIEW_N_EPOCHS)
+    requests.append(
+        study.model(
+            family="deep_learning",
+            label=label,
+            config_name=config_name,
+            overrides=overrides,
+            execution_tier=EXECUTION_TIER,
+            preview_reductions=preview_reductions,
+        )
+    )
+requests = tuple(requests)
 
-curves = result["all_learning_curves"]
-if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
-    display_cps = [cp for cp in checkpoints if cp % 20 == 0 or cp == checkpoints[-1]]
-
-    print(f"{'Config':15s}", end="")
-    for cp in display_cps:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(display_cps)))
-
-    for r in grid_results:
-        cfg_data = curves.filter(pl.col("config") == r["config_name"])
-        print(f"{r['config_name']:15s}", end="")
-        for cp in display_cps:
-            row = cfg_data.filter(pl.col("epoch") == cp)
-            if row.height > 0:
-                print(f" {row['ic_mean'][0]:+7.4f}", end="")
-            else:
-                print(f" {'N/A':>7s}", end="")
-        print()
+request_table = pl.DataFrame(
+    {
+        "family": [request.family for request in requests],
+        "label": [request.label for request in requests],
+        "config_name": [request.config_name for request in requests],
+        "overrides": [str(request.overrides) for request in requests],
+        "execution_tier": [request.execution_tier.value for request in requests],
+        "preview_reductions": [str(request.preview_reductions) for request in requests],
+    }
+)
+request_table
 
 # %% [markdown]
-# ## 5. MC Dropout Uncertainty (Optional)
+# ## Plan and execute the selected configurations
+#
+# The planner resolves every training and epoch-checkpoint identity before fitting and writes the
+# canonical checkpoint population first. Execution builds only sequences that follow the declared
+# observation calendar and excludes
+# windows that cross missing expected periods. Each epoch checkpoint stores the fitted
+# preprocessing state, model weights, predictions, and exact eligible-key evidence. A retry reuses
+# valid candidate-fold checkpoints and recomputes incomplete work.
 
 # %%
-if MC_DROPOUT:
-    from ml4t.diagnostic.metrics import cross_sectional_ic
-
-    from case_studies.utils.deep_learning import mc_dropout_predict
-    from case_studies.utils.sequence_dataset import (
-        materialize_sequences,
-        prepare_fold_sequence_stores,
+plan = plan_models(study, requests=requests)
+official_population = None
+if EXECUTION_TIER == "canonical":
+    official_population = plan.create_population(
+        name="us-equities-lstm-checkpoints-v1",
     )
 
-    dates_series = dataset_pd[date_col]
-    last_fold = splits[-1]
-    train_mask = (dates_series >= last_fold["train_start"]) & (
-        dates_series <= last_fold["train_end"]
+planned_population = pl.DataFrame(
+    {
+        "family": [member.family for member in plan.members],
+        "config_name": [member.config_name for member in plan.members],
+        "checkpoint_kind": [member.checkpoint_kind for member in plan.members],
+        "checkpoint_value": [member.checkpoint_value for member in plan.members],
+        "training_hash": [member.training_hash for member in plan.members],
+        "prediction_hash": [member.prediction_hash for member in plan.members],
+    }
+)
+planned_population
+
+# %%
+execution = plan.run()
+
+# %% [markdown]
+# ## Inspect the resolved computation
+#
+# These rows expose the feature, fold, sequence, runtime, model, and checkpoint settings used by
+# the runner, including defaults that were not repeated in the notebook parameters.
+
+# %%
+resolved_rows = []
+for run in execution.runs:
+    spec = run.training.spec()
+    computation = spec.get("computation", spec)
+    model = computation["model"]
+    resolved_rows.append(
+        {
+            "config_name": spec["config_name"],
+            "architecture": model["params"]["architecture"],
+            "features": len(computation["feature_names"]),
+            "folds": computation["expected_prediction_keys"]["n_folds"],
+            "eligible_rows": computation["expected_prediction_keys"]["n_rows"],
+            "lookback": model["params"]["lookback"],
+            "device": computation["numerics"]["device"],
+            "n_epochs": model["params"]["n_epochs"],
+            "checkpoints": [item["value"] for item in computation["checkpoint_schedule"]],
+            "training_hash": run.training.hash,
+        }
     )
-    val_mask = (dates_series >= last_fold["val_start"]) & (dates_series <= last_fold["val_end"])
 
-    train_store, val_store, _ = prepare_fold_sequence_stores(
-        dataset_pd,
-        train_mask=train_mask,
-        val_mask=val_mask,
-        feature_names=feature_names,
-        label_col=label_col,
-        date_col=date_col,
-        entity_col=entity_col,
-        lookback=LOOKBACK,
-    )
-    X_train_seq, y_train_seq, _, _ = materialize_sequences(train_store)
-    X_val_seq, y_val_seq, val_dates, val_entities = materialize_sequences(val_store)
+resolved_table = pl.DataFrame(resolved_rows).sort("config_name")
+resolved_table
 
-    if len(X_train_seq) > 0 and len(X_val_seq) > 0:
-        torch_device = torch.device(device_str)
-        best_cfg_dict = dl_configs[0]
-        arch_name = best_cfg_dict["params"].get(
-            "architecture", resolve_arch_name(best_cfg_dict["config_name"])
-        )
-        from case_studies.utils.deep_learning import build_arch_kwargs
+# %% [markdown]
+# ## Validate and inspect the handoff
+#
+# Each catalog row is one complete validation prediction set for one training identity and epoch.
+# Downstream notebooks filter these rows with Polars and pass the selected table directly to
+# backtesting. The hashes remain visible for exact provenance and artifact reads.
 
-        best_cfg = build_arch_kwargs(
-            best_cfg_dict, n_features, best_cfg_dict["params"].get("lookback", 60)
-        )
-        mc_model = create_model(arch_name, best_cfg).to(torch_device)
+# %% tags=["results"]
+catalog_columns = [
+    "family",
+    "config_name",
+    "label",
+    "split",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "execution_tier",
+    "complete",
+    "ic_mean",
+    "training_hash",
+    "prediction_hash",
+]
+catalog_rows = execution.catalog_rows.select(
+    column for column in catalog_columns if column in execution.catalog_rows.columns
+).sort("config_name", "checkpoint_value", "prediction_hash")
+catalog_rows
 
-        X_t = torch.FloatTensor(X_train_seq).to(torch_device)
-        y_t = torch.FloatTensor(y_train_seq).to(torch_device)
-        optimizer = torch.optim.AdamW(mc_model.parameters(), lr=1e-3)
-        criterion = torch.nn.MSELoss()
-
-        mc_model.train()
-        for ep in range(min(N_EPOCHS, 50)):
-            idx = torch.randperm(len(X_t))
-            for s in range(0, len(X_t), BATCH_SIZE):
-                batch = idx[s : s + BATCH_SIZE]
-                loss = criterion(mc_model(X_t[batch]), y_t[batch])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-        X_v = torch.FloatTensor(X_val_seq).to(torch_device)
-        mean_pred, std_pred = mc_dropout_predict(mc_model, X_v, n_samples=50)
-
-        median_unc = np.median(std_pred)
-        low_unc = std_pred <= median_unc
-        high_unc = std_pred > median_unc
-
-        low_frame = pl.DataFrame(
+# %%
+coverage_rows = []
+for run in execution.runs:
+    if not run.training.complete:
+        raise RuntimeError(f"Incomplete training result: {run.training.hash}")
+    for prediction in run.predictions:
+        record = prediction.registry_record()
+        coverage = prediction.coverage()
+        if not prediction.complete or coverage is None or coverage["status"] != "complete":
+            raise RuntimeError(f"Incomplete prediction result: {prediction.hash}")
+        coverage_rows.append(
             {
-                "date": val_dates[low_unc],
-                "symbol": val_entities[low_unc],
-                "y_true": y_val_seq[low_unc],
-                "y_pred": mean_pred[low_unc],
+                "config_name": run.training.spec()["config_name"],
+                "checkpoint": record["checkpoint_value"],
+                "training_hash": run.training.hash,
+                "prediction_hash": prediction.hash,
+                "coverage_status": coverage["status"],
+                "expected_rows": coverage["n_expected"],
+                "actual_rows": coverage["n_actual"],
+                "training_artifacts": len(run.training.artifacts()),
+                "prediction_artifacts": len(prediction.artifacts()),
             }
         )
-        ic_low = cross_sectional_ic(
-            low_frame,
-            low_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        high_frame = pl.DataFrame(
-            {
-                "date": val_dates[high_unc],
-                "symbol": val_entities[high_unc],
-                "y_true": y_val_seq[high_unc],
-                "y_pred": mean_pred[high_unc],
-            }
-        )
-        ic_high = cross_sectional_ic(
-            high_frame,
-            high_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        print("MC Dropout uncertainty analysis:")
-        print(f"  Low uncertainty IC:  {ic_low:+.4f} ({low_unc.sum():,} samples)")
-        print(f"  High uncertainty IC: {ic_high:+.4f} ({high_unc.sum():,} samples)")
-        print(f"  IC gap: {ic_low - ic_high:+.4f}")
 
-        del mc_model, X_t, y_t, X_v
-        torch.cuda.empty_cache()
-else:
-    print("MC Dropout disabled (set MC_DROPOUT=True to enable)")
-
-# %% [markdown]
-# ## 6. Comparison
+coverage_table = pl.DataFrame(coverage_rows).sort("config_name", "checkpoint")
+if official_population is not None:
+    official_population.require_complete()
+coverage_table
 
 # %%
-rows = [(name, ic) for name, ic in prior_baselines.items()]
-rows.append((best_name, best_ic))
+execution_diagnostics = pl.DataFrame(execution.diagnostics)
+execution_diagnostics
 
-comparison = pl.DataFrame({"Model": [r[0] for r in rows], "IC": [r[1] for r in rows]})
-comparison = comparison.with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
+# %% [markdown]
+# ## Freeze the compatible result set
+#
+# A canonical default CUDA run freezes every returned LSTM prediction row under a stable name. The
+# same bounded family set supplies raw diagnostics because this notebook has one published
+# configuration. Preview and customized canonical requests do not publish an official set.
+
+# %% tags=["results"]
+set_rows = []
+is_published_population = (
+    EXECUTION_TIER == "canonical"
+    and selected_names == published_names
+    and not COMMON_OVERRIDES
+    and not CONFIG_OVERRIDES
+    and DEVICE == "cuda"
 )
-comparison
-
-# %%
-ridge_ic = prior_baselines.get("Ridge (Ch11)", float("nan"))
-dl_delta = best_ic - ridge_ic
-print(f"DL delta over Ridge: {dl_delta:+.4f}")
-
-# %% [markdown]
-# ## 7. Save Results
-#
-# Predictions and fold metrics are registered by `run_dl_cv()`
-# during training. Here we record the pipeline results JSON.
-
-# %%
-predictions = result["predictions"]
-all_predictions = result["all_predictions"]
-fold_metrics = result["fold_metrics"]
-
-print(f"Predictions: {predictions.height:,} rows")
-print(f"All predictions: {all_predictions.height:,} rows")
-
-# %%
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
+if is_published_population:
+    label_name = label.replace("_", "-")
+    full_set = study.predictions.freeze(
+        execution.catalog_rows,
+        name=f"us-equities-{label_name}-lstm-v1",
+    )
+    set_rows = [
+        {
+            "role": "backtest and diagnostic population",
+            "set_name": full_set.name,
+            "members": len(full_set.members),
+        }
+    ]
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"role": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
 
 # %% [markdown]
-# ## 8. Key Takeaways
+# `15_model_analysis.py` reopens the named set for descriptive analysis. `16_backtest.py` passes
+# every catalog row directly to the shared backtest runner. Model metrics do not choose a
+# configuration or checkpoint.
+
+# %% [markdown]
+# ## Key takeaways and limitations
 #
-# LSTM **underperforms** linear with a negative DL delta.
-# With 3,199 stocks, the cross-sectional signal overwhelms any temporal signal:
-# looking back 60 days of individual stock history adds noise rather than
-# information when daily returns are predominantly driven by market-wide factors.
-# Fast convergence (best epoch 10) confirms the model learns very little temporal
-# structure before plateauing.
-#
-# This is the clearest case in the book of cross-sectional breadth being more
-# valuable than per-asset temporal depth. The panel is
-# too broad for per-stock temporal modeling to add value at the daily horizon.
-#
-# **Next**: [`11_dl_tsmixer`](11_dl_tsmixer.ipynb) tests whether a mixing
-# architecture fares
-# better than recurrence.
+# - The recurrent model consumes only sequence windows permitted by the declared observation
+#   calendar.
+# - Every epoch checkpoint has separate fitted-state and prediction provenance.
+# - The fixed lookback and hidden-state size constrain the temporal relationships the model can
+#   represent.
+# - Validation predictions remain separate from the locked holdout assessment.
