@@ -92,6 +92,14 @@ pool_size
 # each horizon. Later stages therefore hold far fewer candidates than the first, and the spread
 # within a stage shows how much of the outcome the sizing and risk rules decide once the model is
 # fixed.
+#
+# **The medians cannot be read across stages.** Each stage runs on the survivors of the one before,
+# chosen on the same validation Sharpe the table reports, so the pool shrinks from 496 to 60 to 14
+# by selecting on the quantity being summarized. On `fwd_ret_21d` the median rises from -0.392 to
+# 0.192 to 1.010 along that shrinking pool, and almost all of that movement is the selection, not
+# the allocators or the risk rules. What the stages do support is the comparison within a row: the
+# fourteen risk overlays share one model, one signal, and one sizing rule, and they still span
+# 0.322 to 1.274, which is the range the position rule alone is responsible for.
 
 # %%
 stage_summary = (
@@ -176,10 +184,10 @@ cost_curve = (
     .with_columns(
         (
             pl.col("spec_json")
-            .str.json_path_match("$.strategy.costs.commission_bps")
+            .str.json_path_match("$.decision_artifact.parameters.costs.commission_bps")
             .cast(pl.Float64)
             + pl.col("spec_json")
-            .str.json_path_match("$.strategy.costs.slippage_bps")
+            .str.json_path_match("$.decision_artifact.parameters.costs.slippage_bps")
             .cast(pl.Float64)
         ).alias("total_cost_bps")
     )
@@ -188,6 +196,15 @@ cost_curve = (
 )
 if cost_curve.is_empty():
     raise RuntimeError(f"the cost population contains no member for {selected_label!r}")
+# `json_path_match` returns null for a path that is not in the document rather than raising, and
+# null + null is null, so reading the grid value from the wrong place yields a full-height frame
+# whose cost axis is entirely missing. The emptiness check above passes on such a frame and the
+# curve below plots against nothing. Refuse it here instead.
+if cost_curve.get_column("total_cost_bps").null_count():
+    raise RuntimeError(
+        "cost members record no all-in cost at "
+        "$.decision_artifact.parameters.costs; the cost curve has no axis"
+    )
 
 # %% tags=["results"]
 cost_curve
