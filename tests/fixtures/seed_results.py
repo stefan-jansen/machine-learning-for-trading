@@ -446,7 +446,13 @@ def _upgrade_seeded_registry(cs_dir: Path) -> None:
                     n_folds,
                     n_folds,
                     json.dumps({"symbol": "String", "timestamp": "Date"}),
-                    _make_hash(f"artifact/{p_hash}"),
+                    # Empty, not NULL: prediction_coverage.artifact_digest is NOT NULL, and
+                    # under INSERT OR IGNORE a NULL silently drops the whole row rather
+                    # than raising - which is how the first version of this wrote zero
+                    # coverage rows and still passed a test asserting 23 of them.
+                    # `results.py:419` guards with `if recorded_digest:`, so "" reads as
+                    # "not recorded, backfill it" until the pass below fills it in.
+                    "",
                     "complete",
                 ),
             )
@@ -653,7 +659,13 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
                         2,
                         2,
                         json.dumps({"symbol": "String", "timestamp": "Date"}),
-                        _make_hash(f"artifact/{p_hash}"),
+                        # Empty, not NULL: prediction_coverage.artifact_digest is NOT NULL, and
+                        # under INSERT OR IGNORE a NULL silently drops the whole row rather
+                        # than raising - which is how the first version of this wrote zero
+                        # coverage rows and still passed a test asserting 23 of them.
+                        # `results.py:419` guards with `if recorded_digest:`, so "" reads as
+                        # "not recorded, backfill it" until the pass below fills it in.
+                        "",
                         "complete",
                     ),
                 )
@@ -863,6 +875,53 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
         fold.alias("fold"),
         _pl.col("actual"),
     )
+
+
+def _record_prediction_artifact_digests(cs_dir: Path) -> None:
+    """Record the digest the artifact actually has, once the artifact exists.
+
+    `PredictionResult.complete` verifies `value_digest(...)` of the parquet against
+    `prediction_coverage.artifact_digest` (`research/results.py:419-423`), and that check is
+    stricter than the catalog's `complete` column - which reads `coverage.status` and stops
+    there. So a population can freeze cleanly from the catalog and be rejected by
+    `require_complete` one line later, which is what happened here: the fixture wrote a
+    fabricated 12-character `_make_hash` value where `value_digest` produces 16, so no
+    seeded prediction could ever match and every path reaching the stricter definition saw
+    `complete=False`.
+
+    Recording the real digest is better than recording none. `results.py:412-418` treats a
+    NULL as "legacy, backfill it" rather than as a conflict, so NULL would also have worked -
+    but it makes the fixture silent about its artifacts where it can be truthful about them,
+    and a later change that starts requiring the digest would find nothing recorded.
+
+    Runs after `_backfill_all_prediction_parquets`, because the digest cannot be computed
+    before the file it describes exists.
+    """
+    db_path = cs_dir / "run_log" / "registry.db"
+    if not db_path.exists():
+        return
+    import polars as pl
+
+    from case_studies.utils.artifact_digest import value_digest
+
+    with sqlite3.connect(str(db_path)) as db:
+        rows = db.execute(
+            "SELECT prediction_hash FROM prediction_coverage "
+            "WHERE artifact_digest IS NULL OR artifact_digest = ''"
+        ).fetchall()
+        for (p_hash,) in rows:
+            artifact = cs_dir / "run_log" / "predictions" / p_hash / "predictions.parquet"
+            if not artifact.is_file():
+                continue
+            try:
+                digest = value_digest(pl.read_parquet(artifact))
+            except Exception:
+                continue
+            db.execute(
+                "UPDATE prediction_coverage SET artifact_digest = ? WHERE prediction_hash = ?",
+                (digest, p_hash),
+            )
+        db.commit()
 
 
 def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
@@ -1436,6 +1495,7 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         # Backfill prediction parquets for ALL hashes in registry
         # (must run AFTER _seed_registry_db, and also when registry was pre-seeded)
         _backfill_all_prediction_parquets(cs_dir, cs_id)
+        _record_prediction_artifact_digests(cs_dir)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry
         # so downstream notebooks (e.g., 17/01_portfolio_metrics) that resolve a

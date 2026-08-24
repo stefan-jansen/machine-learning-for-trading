@@ -134,3 +134,49 @@ def test_declining_the_preview_tier_suppresses_the_injection(tmp_path) -> None:
         "declining the preview tier must still isolate the workspace, or the run writes "
         "to the maintainer's published artifacts"
     )
+
+
+def test_every_prediction_has_a_coverage_row(seeded: Path) -> None:
+    """The count, because `INSERT OR IGNORE` turns a constraint violation into silence.
+
+    `prediction_coverage.artifact_digest` is `TEXT NOT NULL`. An earlier version of the
+    seeder inserted NULL there intending to fill it later; under `INSERT OR IGNORE` every
+    row was dropped without error, and the catalog test above still passed because it
+    asserts on the rows that exist rather than on how many there are.
+    """
+    with sqlite3.connect(seeded / "run_log" / "registry.db") as db:
+        n_pred = db.execute("SELECT COUNT(*) FROM prediction_sets").fetchone()[0]
+        n_cov = db.execute("SELECT COUNT(*) FROM prediction_coverage").fetchone()[0]
+    assert n_pred > 0
+    assert n_cov == n_pred, f"{n_pred} predictions but {n_cov} coverage rows"
+
+
+def test_recorded_artifact_digests_match_the_artifacts(seeded: Path) -> None:
+    """`PredictionResult.complete` is stricter than the catalog's `complete` column.
+
+    The catalog reads `coverage.status` and stops; `results.py:419-423` additionally
+    verifies `value_digest` of the parquet against the recorded digest. The fixture used to
+    record a fabricated 12-character `_make_hash` value where `value_digest` produces 16, so
+    no seeded prediction could satisfy the stricter check and a population would freeze
+    cleanly from the catalog and then fail its own `require_complete`.
+    """
+    import polars as pl
+
+    from case_studies.utils.artifact_digest import value_digest
+
+    with sqlite3.connect(seeded / "run_log" / "registry.db") as db:
+        rows = db.execute(
+            "SELECT prediction_hash, artifact_digest FROM prediction_coverage"
+        ).fetchall()
+
+    checked = 0
+    for p_hash, recorded in rows:
+        artifact = seeded / "run_log" / "predictions" / p_hash / "predictions.parquet"
+        if not artifact.is_file():
+            continue
+        assert recorded, f"{p_hash} has an artifact but no recorded digest"
+        assert value_digest(pl.read_parquet(artifact)) == recorded, (
+            f"{p_hash}: recorded {recorded!r} does not describe the artifact on disk"
+        )
+        checked += 1
+    assert checked > 0, "no seeded prediction had an artifact to check"
