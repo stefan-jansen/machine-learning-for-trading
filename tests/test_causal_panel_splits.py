@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.dummy import DummyRegressor
 
+from case_studies.utils import causal
 from case_studies.utils.causal import (
     _placebo_is_unchanged,
     _resolve_panel_columns,
@@ -365,36 +369,39 @@ def test_one_identity_draw_does_not_abort_a_permutable_series() -> None:
     fine, with a message asserting something false about the data. The condition is
     every draw coming back unchanged, not any of them."""
     frame = _two_entity_panel(n_dates=100)
+    n_placebo = 30
 
     unchanged = 0
-    rng = np.random.default_rng(3)
-    treatment = frame["treatment"].to_numpy()
-    for _ in range(200):
-        permuted = block_permute(
-            treatment,
+    real_moved_mask = causal._placebo_moved_mask
+
+    def counting_moved_mask(original, permuted):
+        nonlocal unchanged
+        moved = real_moved_mask(original, permuted)
+        unchanged += not moved.any()
+        return moved
+
+    causal._placebo_moved_mask = counting_moved_mask
+    try:
+        result = run_dml_analysis(
+            frame,
+            treatment_col="treatment",
+            outcome_col="outcome",
+            confounder_cols=["confounder"],
+            n_folds=2,
+            embargo=1,
+            n_placebo=n_placebo,
             block_size=50,
-            rng=rng,
-            groups=frame["timestamp"].to_numpy(),
-            units=frame["symbol"].to_numpy(),
+            seed=3,
+            horizon=1,
+            time_col="timestamp",
+            entity_col="symbol",
         )
-        unchanged += bool(np.array_equal(permuted, treatment))
-    assert unchanged > 0, "two blocks per entity must produce identity draws to test against"
+    finally:
+        causal._placebo_moved_mask = real_moved_mask
 
-    result = run_dml_analysis(
-        frame,
-        treatment_col="treatment",
-        outcome_col="outcome",
-        confounder_cols=["confounder"],
-        n_folds=2,
-        embargo=1,
-        n_placebo=30,
-        block_size=50,
-        seed=3,
-        horizon=1,
-        time_col="timestamp",
-        entity_col="symbol",
-    )
-
+    # Without a draw that came back unchanged the run says nothing about the guard:
+    # it would pass under the per-draw abort this replaces.
+    assert 0 < unchanged < n_placebo, f"{unchanged} of {n_placebo} draws were the identity"
     assert result["refutation"]["n_successful"] >= 10
 
 
@@ -433,6 +440,107 @@ def test_an_explicit_gap_tolerance_moves_the_boundary() -> None:
 
     assert not np.array_equal(tolerant, treatment)
     assert np.array_equal(strict, treatment)
+
+
+def _panel_of(spec: dict[str, pd.DatetimeIndex], seed: int = 11) -> pd.DataFrame:
+    """A panel whose entities carry the given decision times."""
+    rng = np.random.default_rng(seed)
+    frames = []
+    for symbol, dates in spec.items():
+        confounder = rng.normal(size=len(dates))
+        treatment = 0.4 * confounder + rng.normal(size=len(dates))
+        frames.append(
+            pd.DataFrame(
+                {
+                    "timestamp": dates,
+                    "symbol": symbol,
+                    "treatment": treatment,
+                    "outcome": 0.3 * treatment + 0.2 * confounder + rng.normal(size=len(dates)),
+                    "confounder": confounder,
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True).sort_values(["timestamp", "symbol"])
+
+
+def _refute(frame: pd.DataFrame, **kwargs):
+    defaults = dict(
+        treatment_col="treatment",
+        outcome_col="outcome",
+        confounder_cols=["confounder"],
+        n_folds=2,
+        embargo=1,
+        n_placebo=20,
+        seed=5,
+        horizon=1,
+        time_col="timestamp",
+        entity_col="symbol",
+        expected_step=pd.Timedelta(days=1),
+    )
+    return run_dml_analysis(frame, **{**defaults, **kwargs})
+
+
+def test_the_block_remainder_is_not_reported_as_a_frozen_series() -> None:
+    """Every segment whose length is not a multiple of the block size leaves a trailing
+    remainder in place, on every draw. That is a property of block permutation, not of
+    the data: no gap tolerance can remove it and shrinking the block size to chase it is
+    the wrong response. Counting it as frozen fires the warning on essentially every
+    real run - the resolver passes a cadence, so entities split into several segments
+    and each contributes a remainder - and tells the author a false cause."""
+    # 105 rows is five whole blocks and a remainder of five; 55 is two and a remainder
+    # of fifteen. Neither segment is short: both hold at least two blocks.
+    early = pd.bdate_range("2020-01-01", periods=105)
+    late = pd.bdate_range("2020-08-01", periods=55)
+    dates = early.append(late)
+    frame = _panel_of({"A": dates, "B": dates})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = _refute(frame, block_size=20)
+
+    refutation = result["refutation"]
+    assert refutation["placebo_frozen_fraction"] == 0.0
+    assert refutation["placebo_remainder_fraction"] == pytest.approx(40 / 320, abs=1e-9)
+    assert not [w for w in caught if "cannot move" in str(w.message)]
+
+
+def test_a_partly_frozen_panel_reports_how_much_never_moved() -> None:
+    """A unit too short to hold two blocks is returned intact, which is right for that
+    unit and invisible in the result unless it is measured. Those rows sit at their
+    observed values in every placebo, so the placebo effects cluster on the observed
+    effect and the p-value is pulled toward 1 - a "Fails" that looks measured. The
+    all-draws-unchanged guard does not fire, because most of the panel does move.
+
+    The long entity here is deliberately not a multiple of the block size, so the two
+    reasons a row never moves are both present and the test pins that they are counted
+    apart."""
+    frame = _panel_of(
+        {
+            "LONG": pd.bdate_range("2020-01-01", periods=205),
+            "SHORT": pd.bdate_range("2020-01-01", periods=10),
+        }
+    )
+
+    with pytest.warns(UserWarning, match="cannot move"):
+        result = _refute(frame, block_size=20)
+
+    refutation = result["refutation"]
+    # Ten SHORT rows cannot hold two blocks; five LONG rows are the block remainder.
+    assert refutation["placebo_frozen_fraction"] == pytest.approx(10 / 215, abs=1e-9)
+    assert refutation["placebo_remainder_fraction"] == pytest.approx(5 / 215, abs=1e-9)
+    assert 0 < refutation["placebo_moved_fraction"] < 1
+
+
+def test_movement_accounting_does_not_treat_a_shifted_null_as_a_moved_panel() -> None:
+    """`_placebo_moved_mask` answers "are these the same series at all", so a
+    disagreement in null positions makes every row count as moved. Reusing that for the
+    movement accounting would report a panel that barely moved as fully permuted the
+    moment one draw shifted a missing value."""
+    original = np.array([1.0, np.nan, 3.0, 4.0])
+    shifted_null = np.array([1.0, 2.0, 3.0, 4.0])
+
+    assert causal._placebo_moved_mask(original, shifted_null).all()
+    assert causal._placebo_moved_fraction(original, shifted_null) == 0.0
 
 
 def test_a_zero_length_buffer_is_zero_periods_in_every_unit() -> None:
