@@ -351,9 +351,8 @@ def conformal_coverage_for_selected_prediction(
         raise RegistrySelectionError(f"selected row missing conformal fields: {sorted(missing)}")
 
     spec = json.loads(selected["spec_json"])
-    computation = spec.get("computation") if isinstance(spec.get("computation"), dict) else spec
-    expected_prediction_keys = computation.get("expected_prediction_keys") or {}
-    n_folds = int(expected_prediction_keys.get("n_folds", computation.get("n_folds", 0)))
+    computation = spec.get("computation") or {}
+    n_folds = int((computation.get("expected_prediction_keys") or {}).get("n_folds", 0))
     if n_folds < 2:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "
