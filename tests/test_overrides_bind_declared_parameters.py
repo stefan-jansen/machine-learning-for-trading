@@ -68,7 +68,18 @@ def test_override_parameters_are_read_by_their_notebook(key: str, cfg: dict) -> 
             continue
         if name in _TRANSLATED and "PREVIEW_REDUCTIONS" in declared:
             continue
-        inert.append(f"{name}: not declared by the notebook")
+        # Which repair this needs is decided by what the notebook has, and the three cases look
+        # identical from the binding alone. No cell means the rewrite dropped the block and an
+        # axis has to be chosen and declared. A cell that declares nothing else means the same.
+        # A cell full of other names means the knobs were renamed or restructured, and the repair
+        # is to bind the ones that exist - a much smaller job that reads the same from here.
+        if not declared:
+            inert.append(f"{name}: notebook has no parameters cell")
+        else:
+            inert.append(
+                f"{name}: not declared; the cell declares "
+                f"{', '.join(sorted(declared))} - bind one of those instead"
+            )
     assert not inert, (
         f"{key} binds parameters it does not read, so the reduction is not applied and the "
         f"run proceeds at full scale:\n  " + "\n  ".join(inert)
