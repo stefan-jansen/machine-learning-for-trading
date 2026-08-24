@@ -122,11 +122,24 @@ def test_primary_label_purge_uses_each_rows_actual_expiry() -> None:
 
 def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
     """Exercise the alignment contract against the available production artifact."""
-    default_root = Path.home() / "ml4t/code/case_studies/sp500_options"
-    artifact_root = Path(os.environ.get("ML4T_SP500_OPTIONS_ARTIFACT_ROOT", default_root))
+    # Features come from the artifact store and the config from the repo, because they
+    # stopped living under one root on 2026-08-21 when the store moved out of ~/ml4t/code
+    # so that repo could be archived. This test kept the old single root and every path
+    # under it has been absent since, so it has skipped on the workstation too - the only
+    # place it can run, since the artifact store is in no CI job.
+    store = Path(
+        os.environ.get("ML4T_ARTIFACT_ROOT", Path.home() / "ml4t" / "artifacts" / "case_studies")
+    )
+    artifact_root = Path(
+        os.environ.get("ML4T_SP500_OPTIONS_ARTIFACT_ROOT", store / "sp500_options")
+    )
     financial_path = artifact_root / "features/financial.parquet"
     temporal_path = artifact_root / "features/model_based.parquet"
+    # An explicitly-pointed root may carry its own config; otherwise the repo's is the
+    # only copy there is.
     setup_path = artifact_root / "config/setup.yaml"
+    if not setup_path.exists():
+        setup_path = Path("case_studies/sp500_options/config/setup.yaml")
     if not all(path.exists() for path in (financial_path, temporal_path, setup_path)):
         pytest.skip("Full sp500_options artifacts are not available")
 
