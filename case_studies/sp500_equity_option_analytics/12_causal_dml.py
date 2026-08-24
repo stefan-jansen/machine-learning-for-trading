@@ -236,6 +236,13 @@ merged_clean = (
 BUFFER_PERIODS = embargo_from_buffer(mds.label_buffer)
 EMBARGO_PERIODS = BUFFER_PERIODS
 OUTCOME_HORIZON = embargo_from_buffer(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, setup))
+if OUTCOME_HORIZON > BUFFER_PERIODS:
+    raise ValueError(
+        f"Outcome horizon {OUTCOME_HORIZON} exceeds the label buffer {BUFFER_PERIODS}. "
+        "The cutoff below subtracts the buffer to keep development labels clear of the "
+        "holdout, so a longer outcome would still reach into it. Raise labels.buffer in "
+        "setup.yaml, or correct labels.horizons."
+    )
 if TREATMENT_COL != "ivrv_spread":
     raise ValueError(
         f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
