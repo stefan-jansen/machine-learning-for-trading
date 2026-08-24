@@ -1738,11 +1738,25 @@ def register_causal_run(
     immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
+        comparable_columns = (
+            "label",
+            "treatment",
+            "confounders_json",
+            "embargo",
+            "n_folds",
+            "n_obs",
+            "dml_effect",
+            "dml_se_hac",
+            "p_value_hac",
+            "naive_effect",
+            "confounding_bias_pct",
+            "refutation_p",
+            "refutation_n_successful",
+            "spec_json",
+            "notebook",
+        )
         existing = db.execute(
-            "SELECT label, treatment, confounders_json, embargo, n_folds, n_obs, "
-            "dml_effect, dml_se_hac, p_value_hac, naive_effect, confounding_bias_pct, "
-            "refutation_p, refutation_n_successful, spec_json, notebook "
-            "FROM causal_runs WHERE causal_hash = ?",
+            f"SELECT {', '.join(comparable_columns)} FROM causal_runs WHERE causal_hash = ?",
             (causal_hash,),
         ).fetchone()
         expected = (
@@ -1763,9 +1777,29 @@ def register_causal_run(
             notebook,
         )
         if immutable and existing is not None:
-            if existing != expected:
-                raise ValueError(f"immutable causal result conflict for {causal_hash}")
-            return
+            # A row written before a column existed carries NULL there, and filling it in
+            # is not a conflict: nothing about the run changed, the registry simply had no
+            # place to record that fact yet. Treating it as one would make an upgrade break
+            # re-registration of results that are identical - the same shape as a fix that
+            # forces a refit without changing a number.
+            stored = list(existing)
+            backfilled = False
+            for position, value in enumerate(expected):
+                if stored[position] is None and value is not None:
+                    stored[position] = value
+                    backfilled = True
+            if tuple(stored) != expected:
+                conflicting = [
+                    name
+                    for name, was, now in zip(comparable_columns, existing, expected, strict=True)
+                    if was != now and was is not None
+                ]
+                raise ValueError(
+                    f"immutable causal result conflict for {causal_hash}: "
+                    f"{', '.join(conflicting)} would change"
+                )
+            if not backfilled:
+                return
         # ON CONFLICT DO UPDATE rather than INSERT OR REPLACE — consistent with
         # register_paired_metrics, avoids the implicit DELETE that triggers
         # FK cascades and loses the original created_at timestamp.
