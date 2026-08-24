@@ -1534,6 +1534,9 @@ case_studies/fx_pairs/16_risk_management:
     MAX_RISK_VARIANTS: 3
   timeout: 600
 case_studies/fx_pairs/17_strategy_analysis:
+  skip: true
+  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
+  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
