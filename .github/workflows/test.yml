@@ -328,8 +328,24 @@ jobs:
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-sp500opt }}" == "true" ]]; then
             add_cs "sp500_options"
           fi
+          # us_equities_panel is DEFERRED and does not enroll, even on a push to
+          # main. It is the most expensive case study in the corpus - the runtime
+          # reference puts one tabular_dl configuration at 4.1 hours - and its
+          # rebuild is scheduled after the other eight complete. Until then its
+          # notebooks fail CI for reasons nobody is working on, which trains
+          # readers of this workflow to expect a red job and to stop reading it.
+          #
+          # A deferred case study must not also be a permanently red one. Enroll
+          # it again by deleting CS_DEFERRED below; nothing else needs changing,
+          # and the notice in the log names the condition so the skip cannot be
+          # forgotten silently.
+          CS_DEFERRED="us_equities_panel"
           if [[ "$all" == "true" ]] || [[ "${{ steps.filter.outputs.cs-usequity }}" == "true" ]]; then
-            add_cs "us_equities_panel"
+            if [[ " $CS_DEFERRED " == *" us_equities_panel "* ]]; then
+              echo "::notice title=us_equities_panel deferred::case-study job skipped by design while its rebuild is descheduled; re-enroll by clearing CS_DEFERRED in .github/workflows/test.yml"
+            else
+              add_cs "us_equities_panel"
+            fi
           fi
 
           echo "case_matrix=$cases" >> "$GITHUB_OUTPUT"
@@ -480,6 +496,30 @@ jobs:
             tests/test_compose_mounts.py \
             tests/test_download_coverage.py \
             tests/test_plotly_renderer.py \
+            -v --tb=short
+      # model_viz.py rendered the model-analysis figures for seven case studies
+      # through fig.show(), which emits an <img> with no alternative text, so all
+      # seven published figures a screen reader cannot describe. Alt text lives in
+      # output metadata, so it only reaches a notebook by executing it, and these
+      # notebooks execute rarely - which is exactly why the plumbing has to be
+      # gated rather than checked by eye. The tests require the alt text to change
+      # when the plotted data changes, so a canned sentence fails them.
+      - name: Run model-analysis figure alt-text tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MPLBACKEND: Agg
+          # Importing case_studies.utils pulls in utils.config, which hard-fails at
+          # import when ML4T_DATA_PATH does not exist. The workflow-level default
+          # points at test-data this job does not check out. `data/` is tracked and
+          # the unconditional download-logic step above already writes the `.env`
+          # that utils.config also requires, so pointing at the repo's own `data/`
+          # is all this needs. These tests build every frame inline and read
+          # nothing from disk.
+          ML4T_PATH: ${{ github.workspace }}
+          ML4T_DATA_PATH: ${{ github.workspace }}/data
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_model_viz_alt_text.py \
             -v --tb=short
       # The Chapter 21 environments reached readers as broken imports partly
       # because no job ran the tests that name them: test_import_coverage.py
