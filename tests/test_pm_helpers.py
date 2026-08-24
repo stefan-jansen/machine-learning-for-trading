@@ -9,6 +9,7 @@ import yaml
 
 from tests import pm_helpers
 from tests.pm_helpers import (
+    PREVIEW_TRANSLATED_PARAMETERS,
     RECORD_REPLAY,
     RECORD_REWRITE,
     TIER_ON_DEMAND,
@@ -595,6 +596,42 @@ def test_unusable_parameters_does_not_take_a_comprehension_target_for_a_rebind(
     )
 
     assert unusable_parameters(py, ["SYMBOLS"]) == {}
+
+
+def test_unusable_parameters_accepts_a_name_that_reaches_by_preview_translation(
+    tmp_path: Path,
+) -> None:
+    """A PREVIEW_REDUCTIONS notebook never names MAX_FOLDS; the harness folds it in.
+
+    `research_preview_parameters` pops the names in `PREVIEW_TRANSLATED_PARAMETERS` into the
+    PREVIEW_REDUCTIONS mapping, so the notebook reads the reduction and not the override name.
+    Measured on agent/us-equities-panel-notebooks: `06_linear` and `07_gbm` were reported
+    unreachable on MAX_FOLDS and MAX_SYMBOLS, both of which do reach them.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint(PREVIEW_REDUCTIONS)\n',
+    )
+    assert unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS)) == {}
+
+
+def test_unusable_parameters_still_rejects_an_untranslated_name_on_such_a_notebook(
+    tmp_path: Path,
+) -> None:
+    """The exemption covers the translated names only, not every name on the notebook."""
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint(PREVIEW_REDUCTIONS)\n',
+    )
+    assert "never reads it" in unusable_parameters(py, ["TOP_N_COMBOS"])["TOP_N_COMBOS"]
+
+
+def test_unusable_parameters_does_not_exempt_a_translated_name_without_the_mapping(
+    tmp_path: Path,
+) -> None:
+    """No PREVIEW_REDUCTIONS declared means no translation, so MAX_SYMBOLS must be read."""
+    py = _notebook(tmp_path, '# %% tags=["parameters"]\nLABELS = []\n\n# %%\nprint(LABELS)\n')
+    assert "never reads it" in unusable_parameters(py, ["MAX_SYMBOLS"])["MAX_SYMBOLS"]
 
 
 def test_unusable_parameters_rejects_a_notebook_with_no_parameters_cell(tmp_path: Path) -> None:
