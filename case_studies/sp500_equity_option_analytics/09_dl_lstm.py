@@ -14,543 +14,513 @@
 # ---
 
 # %% [markdown]
-# # LSTM: S&P 500 Equity Option Analytics
+# # S&P 500 Equity+Options: Sequence Models
 #
-# TabM achieved the best non-sequence IC on a flat feature snapshot. LSTM tests whether the temporal
-# dimension — looking back 60 days of IV evolution, volatility regime transitions, and
-# momentum dynamics — adds value beyond point-in-time features. The options-derived
-# signal may have temporal structure: IV term structure shifts and VRP mean-reversion
-# unfold over days to weeks, which gated memory can capture.
+# Every family so far has read one row at a time. A **sequence model** reads a window of rows
+# instead: for a stock and a decision date, the sixty trading days of that stock's own option
+# surface and price history that end before the date being predicted. The question this notebook
+# puts is whether that window carries anything the single row does not.
 #
-# **Learning Objectives**:
-# - Test whether 60-day lookback of IV dynamics improves equity return prediction
-# - Track validation IC and fold stability to assess overfitting with 2 CV folds and 630 symbols
-# - Compare LSTM against the full model progression: Linear → GBM → TabM
+# **Two architectures answer it, and the pairing is the point.** `nlinear` subtracts the last
+# observation from the window and fits one linear map from what is left to the target. It has no
+# memory and no notion of order beyond the positions in that map, and it exists in the sequence
+# literature because architectures with both are frequently unable to beat it. `lstm_h64` has both:
+# gated memory that carries state along the window and decides at each step what to keep. If the
+# gated model does not separate from the linear one here, then whatever is in the window is
+# reachable without memory, and the extra machinery bought nothing on this panel.
 #
-# **Book Reference**: Chapter 13 (Deep Learning for Time Series)
+# **A window is not free, and what it costs is rows.** A stock needs sixty prior observations before
+# its first prediction, so the earliest part of every fold's window is spent filling the lookback
+# rather than being predicted, and a stock that entered the roster late may never accumulate one.
+# The plan in section 2 reports the rows that survive that, which is the sample these models are
+# actually measured on.
 #
-# **Prerequisites**: `linear.py`, `gbm.py`, `tabular_dl.py` (baselines)
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what a sequence model reads that a tabular model does not, and what the lookback costs in
+#   rows before any fitting happens.
+# - Explain why a linear architecture with no memory is the baseline a recurrent one has to clear,
+#   rather than a weak alternative to it.
+# - Read a curve of out-of-sample ranking accuracy against training epoch and tell a model still
+#   learning apart from one fitting its training window.
+# - Say why comparing configurations at their own individual best epochs is a choice made after
+#   seeing the answer, and where in this case study that choice is legitimately made instead.
+#
+# **Book reference**: Chapter 13, Sections 13.3-13.5 (recurrent networks for time series), and
+# Chapter 6, Section 6.7 (Search accounting and run logging) for the run log this notebook writes
+# into.
+#
+# **Prerequisites**: [`03_financial_features`](03_financial_features.ipynb) and
+# [`04_model_based_features`](04_model_based_features.ipynb) have written the feature matrices,
+# [`05_evaluation`](05_evaluation.ipynb) established the walk-forward folds, and
+# [`08_tabular_dl`](08_tabular_dl.ipynb) fitted the point-in-time neural population this one is the
+# sequence counterpart to.
+#
+# **What it writes**: one training run per label-configuration pair and one complete validation
+# prediction set per pair and epoch checkpoint, in `run_log/registry.db` and under
+# `run_log/training/` and `run_log/predictions/`, grouped under a named population.
+# The `deep_learning` menu declares a third configuration, `patchtst`, on one label;
+# [`10_dl_patchtst`](10_dl_patchtst.ipynb) publishes that slice, and the two notebooks together
+# cover the declared family. **Selection happens in [`14_backtest`](14_backtest.ipynb), not here.**
 
 # %%
-"""LSTM — sp500_equity_option_analytics deep learning."""
+"""Fit the declared option-analytics sequence population on the walk-forward folds."""
 
-import sqlite3
-import warnings
-
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-import torch
-import yaml
+from plotly.subplots import make_subplots
 
-import utils.style as style
-from case_studies.utils.analytics import load_best_ic_per_family
-from case_studies.utils.deep_learning import (
-    _resolve_arch_name,
-    create_model,
-    run_dl_cv,
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    open_study,
+    primary_label,
+    resolved_model_plan,
+    run_model_population,
 )
-from case_studies.utils.registry import build_training_spec, training_hash_from_spec
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
-COLORS = style.COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "sp500_equity_option_analytics"
-MODEL = "lstm"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100
-LOOKBACK = 60
-BATCH_SIZE = 2048
-MC_DROPOUT = False
-MAX_FOLDS = 0
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+CONFIG_NAMES: list[str] = []
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
+DEVICE: str = ""
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
-
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+study = open_study(
+    "sp500_equity_option_analytics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
 
 # %% [markdown]
-# ## 1. Load Data
-
-# %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits
-if MAX_FOLDS:
-    splits = splits[:MAX_FOLDS]
-n_features = len(feature_names)
-
-print(f"Dataset: {len(dataset):,} rows × {n_features} features")
-print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
-
-dataset_pd = dataset.to_pandas()
-n_entities = dataset_pd[entity_col].nunique()
-print(f"Entities: {n_entities}")
-
-# %% [markdown]
-# ## 2. Prior Baselines
+# ## 1. Which labels, and which models
 #
-# Load IC results from earlier pipeline stages (Ch11 linear, Ch12 GBM and TabM)
-# rather than re-running them here. TabM is the strongest non-sequence model and the
-# reference LSTM has to beat to justify the temporal dimension.
+# The labels are the ones whose training menu declares `deep_learning`, and fitting all of them in
+# one run is what makes this population comparable against the linear, gradient boosting and TabM
+# ones: the families differ, the targets do not. `fwd_ret_5d` is the stock's total return over the
+# five trading days after the decision date, `fwd_ret_10d` the same over ten, and
+# `fwd_ret_risk_adj_5d` divides the five-day return by a measure of its own dispersion. The two
+# `fwd_dir_*` classification labels declare linear and gradient boosting only, so they are absent
+# here rather than dropped.
 
 # %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(["linear", "gbm", "tabular_dl"], case_studies=[CASE_STUDY_ID])
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-        elif row["family"] == "tabular_dl":
-            prior_baselines["TabM (Ch12)"] = row["ic_mean"]
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print("  No prior results found — run 06_linear.py, 07_gbm.py, 08_tabular_dl.py first")
+declared_labels(study, "deep_learning")
 
 # %% [markdown]
-# ## 3. LSTM
+# `SEQUENCE_CONFIGS` is this notebook's slice of the declared family. The menu declares three
+# architectures; the third, `patchtst`, is declared on one label only and is published by
+# [`10_dl_patchtst`](10_dl_patchtst.ipynb). Splitting them is a chapter decision rather than a
+# modelling one - the two notebooks resolve against the same menu and the same folds, and their
+# populations together are the declared family.
 #
-# Primary architecture for this notebook.
+# Each name resolves to a preset under `case_studies/config/`. `lookback` is how many prior
+# observations enter one input window and is the same across all three, so the sample they are
+# measured on is the same and a difference between them is a difference between architectures.
+# `hidden_size` is the width of the LSTM's state and `n_layers` how many recurrent layers it is
+# passed through. `dropout` is the fraction of units switched off at random on each training pass.
+#
+# `n_epochs` and `checkpoint_interval` are declared alongside the architecture rather than passed in
+# here, because they decide how many prediction sets each configuration owes: 100 epochs saved every
+# 5 is 20, and a run that quietly trained for fewer would publish a different population under the
+# same name.
 
 # %%
-dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
-dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
+SEQUENCE_CONFIGS = ("nlinear", "lstm_h64")
+declared = load_model_configs(study, "deep_learning", config_names=list(SEQUENCE_CONFIGS))
+configs = load_model_configs(
+    study,
+    "deep_learning",
+    labels=LABELS or None,
+    config_names=CONFIG_NAMES or list(SEQUENCE_CONFIGS),
+)
+configs
 
-# Apply Papermill overrides to configs (test mode: fewer epochs)
-for cfg in dl_configs:
-    if cfg.get("n_epochs", 100) != N_EPOCHS:
-        cfg["n_epochs"] = N_EPOCHS
-    if cfg.get("batch_size", 2048) != BATCH_SIZE:
-        cfg["batch_size"] = BATCH_SIZE
-    if cfg["params"].get("lookback", 60) != LOOKBACK:
-        cfg["params"]["lookback"] = LOOKBACK
+# %% [markdown]
+# `LABELS` and `CONFIG_NAMES` narrow the run below this notebook's own slice, and a narrowed run
+# declares a different set of members than the published population does. A population is immutable
+# once written, so such a run must publish under its own name: on a fresh workspace it would
+# otherwise register an incomplete snapshot under the published one, and where that population
+# already exists the registry refuses it. The comparison is over label-configuration pairs rather
+# than row counts, because two different subsets can have the same height.
+#
+# The device is checked in the same cell. A network trained on a GPU and the same network trained on
+# a CPU accumulate their sums in different orders and reach different weights, so the device is part
+# of what the fitted model is and is recorded inside the computation's identity rather than beside
+# it. The runner refuses to substitute a CPU for a requested GPU rather than publishing a different
+# model under the published name, so on a machine with no NVIDIA card this notebook stops at the
+# next cell; set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same grid there.
 
+# %%
+PUBLISHED_DEVICE = "cuda"
+device = DEVICE or PUBLISHED_DEVICE
+print(f"training device: {device}")
+
+narrows = set(zip(configs["label"], configs["config_name"], strict=True)) != set(
+    zip(declared["label"], declared["config_name"], strict=True)
+)
+if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
+    raise ValueError(
+        f"this run declares {configs.height} label-configuration pairs on device {device!r}, "
+        f"which is not this notebook's declared slice on {PUBLISHED_DEVICE!r}, so it cannot "
+        f"publish the sequence population; pass POPULATION_NAME to give it its own"
+    )
+
+# %% [markdown]
+# ## 2. Binding the declarations to the data
+#
+# A menu entry says which network to fit. It does not say which feature columns exist today, where
+# the walk-forward folds fall, or which symbol-date pairs have both a feature row and a label -
+# nor, for a sequence model, which of those pairs have sixty prior observations behind them.
+# **Resolving** a request goes and finds all of that.
+#
+# Resolving reads the inputs and fits nothing, so the plan can be inspected before any training
+# starts. Four things to check in it:
+#
+# - **`feature_count`, `eligible_entities` and `eligible_rows` agree across every row of a label.**
+#   They are the width of the design matrix, the number of stocks, and the number of symbol-date
+#   pairs to be predicted. A row that differs is a configuration measured on a different sample from
+#   its neighbours, and its results are not comparable with theirs. They differ *between* labels,
+#   because a ten-day forward window runs out earlier than a five-day one.
+# - **`eligible_rows` is below what a tabular family reports on the same label.** That gap is the
+#   lookback: the rows spent filling each stock's first window are not predicted. Comparing a
+#   sequence result with a tabular one is therefore comparing measurements on different samples,
+#   which is what `full_coverage` in section 4 marks within this family and what
+#   [`13_model_analysis`](13_model_analysis.ipynb) has to account for across families.
+# - **`folds` is the same everywhere**, and equals the number of walk-forward splits
+#   `05_evaluation` established.
+# - **`validation_start` and `validation_end` bracket the development sample.** The held-out tail
+#   must not appear here: it is scored once, at the end of the case study, and any of it visible in
+#   this window would mean it had been used to choose something.
+#
+# Each row also carries a `training_hash`: the identity of that computation, derived from everything
+# that can change its result, the device and the lookback included.
+# [`RUN_LOG.md`](../RUN_LOG.md#identity) sets out what goes into one and what follows from it.
+
+# %%
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    overrides={"device": device},
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+resolved = tuple(request.resolve() for request in requests)
+
+plan = resolved_model_plan(resolved)
+plan.select(
+    "label",
+    "config_name",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "checkpoints",
+    "validation_start",
+    "validation_end",
+)
+
+# %% [markdown]
+# ## 3. Fitting the population
+#
+# `run_model_population` fits every resolved request. For one request it walks the folds, and on
+# each one:
+#
+# 1. takes the rows inside that fold's training window and cuts them into overlapping windows of
+#    sixty observations, each belonging to one stock and ending before the timestamp it predicts,
+# 2. fills missing feature values with the training window's median for that column, then
+#    standardizes each column to zero mean and unit variance - both fitted on the training rows only
+#    and applied to the validation rows, so nothing from the validation window reaches the fit,
+# 3. trains for the declared number of epochs, writing the weights to disk every fifth,
+# 4. predicts the fold's validation rows from each saved set of weights.
+#
+# **A window never crosses a fold boundary or a stock.** Hidden state is reset between stocks and
+# between folds, so the sixty observations behind a prediction are always that stock's own and
+# always inside the same training window. Without that the model would carry state across the purge
+# gap the folds exist to impose.
+#
+# Step 4 is what makes one training run produce twenty results. The fold predictions are
+# concatenated into one series per checkpoint covering the whole validation period, and each becomes
+# its own registered prediction set with its own identity.
+#
+# **What the call publishes is a population**: a named, immutable list of the prediction sets it is
+# going to produce. The list is computed from the resolved specifications before the first fit and
+# written down, and afterwards every member must exist and be complete. That is what makes the
+# member set well defined: it is the identities named here rather than whatever `deep_learning` rows
+# the registry happens to hold. It is also why a configuration that raises fails the whole call
+# rather than publishing a population one member short. Everything that finished stays registered,
+# and re-running trains only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
+# the first generation published under this name. A population is the set of prediction identities,
+# so anything that moves a training identity - a changed epoch schedule, lookback or device as much
+# as a changed configuration menu - produces a different population under the same name, and the
+# registry refuses to write it without being told which snapshot it supersedes.
+
+# %%
+population_name = POPULATION_NAME or "sp500_equity_option_analytics-sequence-validation-v1"
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
+
+reused = sum(1 for item in execution.diagnostics if item.get("reused"))
 print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × {len(splits)} folds"
+    f"{len(execution.runs)} configurations: {len(execution.runs) - reused} trained, {reused} read"
 )
-for cfg in dl_configs:
-    print(
-        f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')} ({cfg.get('n_epochs', 100)} epochs)"
-    )
-
-# %%
-result = run_dl_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=dl_configs,
-    n_features=n_features,
-    device=device_str,
-    save_dir=CASE_DIR / "run_log" / "training" / "deep_learning",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook=f"dl_{MODEL}",
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
-)
-
-
-# %%
-def _load_dl_results_from_registry(case_study, configs, label, split, n_folds):
-    """Rebuild the leaderboard/curves/folds from the registry when every config SKIPs.
-
-    ``run_dl_cv`` returns an empty ``grid_results`` when all configs are already
-    complete (the reproduce path), so §4-§6 and the figures below need the stored
-    validation ICs reloaded from ``registry.db`` (the single source of truth).
-    """
-    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
-    con = sqlite3.connect(db_path)
-    try:
-        grid, curve_rows = [], []
-        for cfg in configs:
-            spec = build_training_spec(
-                cfg["family"],
-                cfg["config_name"],
-                label,
-                n_folds=n_folds,
-                n_epochs=cfg.get("n_epochs"),
-            )
-            thash = training_hash_from_spec(spec)
-            rows = con.execute(
-                "SELECT ps.checkpoint_value, pm.ic_mean, ps.prediction_hash "
-                "FROM prediction_sets ps "
-                "JOIN training_runs tr ON tr.training_hash = ps.training_hash "
-                "JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash "
-                "WHERE ps.training_hash = ? AND ps.split = ? "
-                "AND ps.created_at >= COALESCE(tr.started_at, tr.created_at) "
-                "ORDER BY ps.checkpoint_value",
-                (thash, split),
-            ).fetchall()
-            if not rows:
-                continue
-            elapsed = con.execute(
-                "SELECT elapsed_s FROM training_runs WHERE training_hash = ?", (thash,)
-            ).fetchone()
-            for ckpt, ic_mean, _ in rows:
-                curve_rows.append(
-                    {"config": cfg["config_name"], "epoch": int(ckpt), "ic_mean": float(ic_mean)}
-                )
-            best = max(rows, key=lambda r: r[1])
-            grid.append(
-                {
-                    "config_name": cfg["config_name"],
-                    "best_epoch": int(best[0]),
-                    "best_ic": float(best[1]),
-                    "best_prediction_hash": best[2],
-                    "elapsed_s": float(elapsed[0]) if elapsed and elapsed[0] is not None else 0.0,
-                }
-            )
-        grid.sort(key=lambda r: r["best_ic"], reverse=True)
-        best_row = grid[0] if grid else None
-        fold_rows = []
-        if best_row is not None:
-            for fid, ic, n_ent in con.execute(
-                "SELECT fold_id, ic, n_entities FROM fold_metrics "
-                "WHERE prediction_hash = ? ORDER BY fold_id",
-                (best_row["best_prediction_hash"],),
-            ).fetchall():
-                fold_rows.append(
-                    {"fold_id": int(fid), "ic_mean": float(ic), "n_symbols": int(n_ent or 0)}
-                )
-        return {
-            "grid_results": grid,
-            "best_config_name": best_row["config_name"] if best_row else None,
-            "best_epoch": best_row["best_epoch"] if best_row else 0,
-            "best_ic": best_row["best_ic"] if best_row else float("nan"),
-            "predictions": pl.DataFrame(),
-            "all_predictions": pl.DataFrame(),
-            "fold_metrics": pl.DataFrame(fold_rows),
-            "all_learning_curves": pl.DataFrame(curve_rows),
-            "training_log": pl.DataFrame(),
-        }
-    finally:
-        con.close()
-
-
-if not result["grid_results"]:
-    print("All configs SKIP'd - reloading the stored leaderboard from the registry.")
-    result = _load_dl_results_from_registry(
-        CASE_STUDY_ID, dl_configs, label_col, PREDICTION_SPLIT, len(splits)
-    )
+print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# ## 4. Validation IC and Fold Stability
+# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the registry
+# already holds the matching rows and the saved weights, and the runner returns the stored result
+# rather than training again.
+
+# %% [markdown]
+# ## 4. What came out
 #
-# A fresh training run displays its checkpoint-by-checkpoint validation IC below. A
-# reproduce run reloads only the selected checkpoint from the exact current registry
-# execution. It therefore confirms the registered selection but does not reconstruct a
-# learning curve from checkpoints written by earlier executions.
-
-# %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
-
-curves = result["all_learning_curves"]
-if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
-
-    print(f"{'Config':15s}", end="")
-    for cp in checkpoints:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(checkpoints)))
-
-    for r in grid_results:
-        cfg_data = curves.filter(pl.col("config") == r["config_name"])
-        print(f"{r['config_name']:15s}", end="")
-        for cp in checkpoints:
-            row = cfg_data.filter(pl.col("epoch") == cp)
-            if row.height > 0:
-                print(f" {row['ic_mean'][0]:+7.4f}", end="")
-            else:
-                print(f" {'N/A':>7s}", end="")
-        print()
-
-# %% [markdown]
-# The two walk-forward folds produce nearly identical positive ICs. That agreement is
-# encouraging, but two windows still provide too little temporal evidence to establish a
-# stable edge.
-
-# %%
-fold_metrics = result["fold_metrics"]
-if fold_metrics.height > 0:
-    _fm = fold_metrics.sort("fold_id")
-    _fold_ids = [f"Fold {i}" for i in _fm["fold_id"].to_list()]
-    _fold_ics = _fm["ic_mean"].to_list()
-    fig_folds = go.Figure()
-    fig_folds.add_trace(
-        go.Bar(
-            x=_fold_ids,
-            y=_fold_ics,
-            marker_color=[COLORS["blue"] if v >= 0 else COLORS["copper"] for v in _fold_ics],
-            text=[f"{v:+.4f}" for v in _fold_ics],
-            textposition="outside",
-        )
-    )
-    fig_folds.add_hline(y=best_ic, line=dict(color=COLORS["amber"], dash="dash"))
-    fig_folds.add_hline(y=0.0, line=dict(color="gray", dash="dot"))
-    _pad = max(abs(min(_fold_ics)), abs(max(_fold_ics))) * 1.35
-    fig_folds.update_yaxes(range=[-_pad, _pad])
-    fig_folds.update_layout(
-        title_text="Both validation folds produce a similar small positive IC"
-        f"<br><sup>{best_name} at epoch {best_epoch}, per-fold validation IC (fwd_ret_5d); "
-        f"dashed line = 2-fold mean {best_ic:+.4f}</sup>",
-        yaxis_title="Validation IC",
-        height=380,
-        showlegend=False,
-    )
-    fig_folds.show()
-
-# %% [markdown]
-# ## 5. MC Dropout Uncertainty (Optional)
-
-# %%
-if MC_DROPOUT:
-    from ml4t.diagnostic.metrics import cross_sectional_ic
-
-    from case_studies.utils.deep_learning import mc_dropout_predict
-    from case_studies.utils.sequence_dataset import (
-        materialize_sequences,
-        prepare_fold_sequence_stores,
-    )
-
-    dates_series = dataset_pd[date_col]
-    last_fold = splits[-1]
-    train_mask = (dates_series >= last_fold["train_start"]) & (
-        dates_series <= last_fold["train_end"]
-    )
-    val_mask = (dates_series >= last_fold["val_start"]) & (dates_series <= last_fold["val_end"])
-
-    train_store, val_store, _ = prepare_fold_sequence_stores(
-        dataset_pd,
-        train_mask=train_mask,
-        val_mask=val_mask,
-        feature_names=feature_names,
-        label_col=label_col,
-        date_col=date_col,
-        entity_col=entity_col,
-        lookback=LOOKBACK,
-    )
-    X_train_seq, y_train_seq, _, _ = materialize_sequences(train_store)
-    X_val_seq, y_val_seq, val_dates, val_entities = materialize_sequences(val_store)
-
-    if len(X_train_seq) > 0 and len(X_val_seq) > 0:
-        torch_device = torch.device(device_str)
-        best_cfg_dict = dl_configs[0]
-        arch_name = best_cfg_dict["params"].get(
-            "architecture", _resolve_arch_name(best_cfg_dict["config_name"])
-        )
-        from case_studies.utils.deep_learning import _build_arch_kwargs
-
-        best_cfg = _build_arch_kwargs(
-            best_cfg_dict, n_features, best_cfg_dict["params"].get("lookback", 60)
-        )
-        mc_model = create_model(arch_name, best_cfg).to(torch_device)
-
-        X_t = torch.FloatTensor(X_train_seq).to(torch_device)
-        y_t = torch.FloatTensor(y_train_seq).to(torch_device)
-        optimizer = torch.optim.AdamW(mc_model.parameters(), lr=1e-3)
-        criterion = torch.nn.MSELoss()
-
-        mc_model.train()
-        for ep in range(min(N_EPOCHS, 50)):
-            idx = torch.randperm(len(X_t))
-            for s in range(0, len(X_t), BATCH_SIZE):
-                batch = idx[s : s + BATCH_SIZE]
-                loss = criterion(mc_model(X_t[batch]), y_t[batch])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-        X_v = torch.FloatTensor(X_val_seq).to(torch_device)
-        mean_pred, std_pred = mc_dropout_predict(mc_model, X_v, n_samples=50)
-
-        median_unc = np.median(std_pred)
-        low_unc = std_pred <= median_unc
-        high_unc = std_pred > median_unc
-
-        low_frame = pl.DataFrame(
-            {
-                "date": val_dates[low_unc],
-                "symbol": val_entities[low_unc],
-                "y_true": y_val_seq[low_unc],
-                "y_pred": mean_pred[low_unc],
-            }
-        )
-        ic_low = cross_sectional_ic(
-            low_frame,
-            low_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        high_frame = pl.DataFrame(
-            {
-                "date": val_dates[high_unc],
-                "symbol": val_entities[high_unc],
-                "y_true": y_val_seq[high_unc],
-                "y_pred": mean_pred[high_unc],
-            }
-        )
-        ic_high = cross_sectional_ic(
-            high_frame,
-            high_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        print("MC Dropout uncertainty analysis:")
-        print(f"  Low uncertainty IC:  {ic_low:+.4f} ({low_unc.sum():,} samples)")
-        print(f"  High uncertainty IC: {ic_high:+.4f} ({high_unc.sum():,} samples)")
-        print(f"  IC gap: {ic_low - ic_high:+.4f}")
-
-        del mc_model, X_t, y_t, X_v
-        torch.cuda.empty_cache()
-else:
-    print("MC Dropout disabled (set MC_DROPOUT=True to enable)")
-
-# %% [markdown]
-# ## 6. Model Progression
+# One row per label, configuration and epoch checkpoint, read back from the registry and joined to
+# the declared parameters so the architecture stays visible beside its result. `ic_mean` is the
+# **information coefficient**: on each validation date, rank the stocks by the model's prediction,
+# rank them by the return they went on to earn, correlate the two rankings, and average that daily
+# correlation over the validation period. It measures whether the model orders the cross-section
+# correctly, on a scale where zero is no relationship.
 #
-# LSTM against the full pipeline it inherits: Ridge (Ch11) → GBM (Ch12) →
-# TabM (Ch12) → LSTM (Ch13).
+# `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
+# below are comparable with each other. A network that has settled into predicting nearly the same
+# value for every stock on a date gives that date no spread to rank, and the date drops out of the
+# average. `full_coverage` marks the rows measured on every date their own label offers, and
+# everything charted below is restricted to those.
+#
+# **Coverage is judged within a label, not across them**, and so is every aggregate here. A ten-day
+# forward window runs out earlier than a five-day one, so one global maximum would mark a whole
+# label incomplete for a reason that has nothing to do with any model.
 
-# %%
-rows = [(name, ic) for name, ic in prior_baselines.items()]
-rows.append(("LSTM (Ch13)", best_ic))
-
-comparison = pl.DataFrame({"Model": [r[0] for r in rows], "IC": [r[1] for r in rows]})
-comparison = comparison.with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
-)
-comparison
-
-
-# %%
-def _baseline_ic(prefix):
-    return next(
-        (v for k, v in prior_baselines.items() if k.lower().startswith(prefix)), float("nan")
+# %% tags=["results"]
+catalog = (
+    execution.catalog_rows.select(
+        "config_name",
+        "label",
+        "task",
+        "complete",
+        "checkpoint_value",
+        "ic_mean",
+        "ic_std",
+        "ic_n_days",
+        "auc_mean_daily",
+        "direction_label",
+        "n_folds",
+        "training_hash",
+        "prediction_hash",
     )
-
-
-ridge_ic = _baseline_ic("ridge")
-gbm_ic = prior_baselines.get("GBM (Ch12)", float("nan"))
-tabm_ic = prior_baselines.get("TabM (Ch12)", float("nan"))
-
-prog_labels = ["Ridge (Ch11)", "GBM (Ch12)", "TabM (Ch12)", "LSTM (Ch13)"]
-prog_ics = [ridge_ic, gbm_ic, tabm_ic, best_ic]
-prog_colors = [COLORS["slate"], COLORS["slate"], COLORS["amber"], COLORS["blue"]]
-
-fig_prog = go.Figure()
-fig_prog.add_trace(
-    go.Bar(
-        y=prog_labels,
-        x=prog_ics,
-        orientation="h",
-        marker_color=prog_colors,
-        text=[f"{v:+.4f}" for v in prog_ics],
-        textposition="outside",
-    )
+    .sort(["label", "ic_mean"], descending=[False, True])
+    .join(configs.select("config_name", "label", "params"), on=["config_name", "label"], how="left")
 )
-fig_prog.add_vline(x=0.0, line=dict(color="gray", dash="dot"))
-# categoryarray runs bottom->top; reverse pipeline order to put LSTM on top.
-fig_prog.update_yaxes(
-    type="category", categoryorder="array", categoryarray=list(reversed(prog_labels))
-)
-_xmax = max(prog_ics) * 1.3
-_xmin = min(0.0, min(prog_ics) * 1.4)
-fig_prog.update_xaxes(range=[_xmin, _xmax])
-fig_prog.update_layout(
-    title_text="LSTM trails the best tabular model - the temporal dimension adds no edge"
-    f"<br><sup>fwd_ret_5d, validation IC across the pipeline; "
-    f"LSTM {best_ic:+.4f} vs TabM {tabm_ic:+.4f}</sup>",
-    xaxis_title="Validation IC",
-    height=360,
-    margin=dict(l=130),
-    showlegend=False,
-)
-fig_prog.show()
 
-# %%
-print(f"LSTM delta over Ridge baseline: {best_ic - ridge_ic:+.4f}  (Ridge is negative here)")
-print(f"LSTM delta over TabM (best tabular baseline): {best_ic - tabm_ic:+.4f}")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("sequence execution returned a partial prediction set")
+if set(catalog.get_column("prediction_hash")) != set(population.members):
+    raise RuntimeError("the published catalog differs from the population declared before fitting")
+
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
+
+primary = primary_label(study)
+present = sorted(set(catalog.get_column("label")))
+# The primary label leads when it was fitted. A subset run that leaves it out orders the panels by
+# whichever label it did fit rather than by one that is not there.
+panel_labels = [label for label in [primary] if label in present] + [
+    label for label in present if label != primary
+]
+pairs = catalog.select("label", "config_name").unique().height
+print(f"{catalog.height} candidate models: {pairs} label-configuration pairs")
+print(f"at {catalog.n_unique('checkpoint_value')} checkpoints each, on {len(panel_labels)} labels")
+catalog.select(
+    "label",
+    "config_name",
+    "params",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "full_coverage",
+).head(12)
 
 # %% [markdown]
-# ## 7. Save Results
+# ### Memory against no memory, on each label
 #
-# Predictions and fold metrics are registered by `run_dl_cv()`
-# during training. On the reproduce path every config already has a complete
-# training hash, so `run_dl_cv()` re-registers nothing and the stored predictions
-# and fold metrics are read back from the registry (the single source of truth).
+# One row per label and architecture. The comparison the table invites is down the pair for a single
+# label: the two read the same windows over the same folds and differ only in whether state is
+# carried along the window. `configurations` is one apiece, so the spread in each row is a spread
+# over epochs rather than over a grid.
+#
+# `auc_mean_daily` is present where the label declares a direction sibling. A regression row has no
+# classes of its own and is scored as a ranking signal against that sibling's values -
+# `fwd_ret_5d` against `fwd_dir_5d`, `fwd_ret_10d` against `fwd_dir_10d` - and those siblings are
+# fitted in [`06_linear`](06_linear.ipynb) and [`07_gbm`](07_gbm.ipynb) rather than here.
+# `fwd_ret_risk_adj_5d` declares no sibling and carries no AUC; null there means not computed.
 
-# %%
-fold_metrics = result["fold_metrics"]
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
-print(f"Best config: {best_name} @ epoch {best_epoch}")
-print(f"Mean validation IC across {fold_metrics.height} folds: {val_ic_mean:+.4f}")
+# %% tags=["results"]
+by_architecture = (
+    catalog.filter("full_coverage")
+    .group_by("label", "config_name")
+    .agg(
+        checkpoints=pl.len(),
+        scored_dates=pl.col("ic_n_days").max(),
+        ic_high=pl.col("ic_mean").max(),
+        ic_low=pl.col("ic_mean").min(),
+        epoch_at_high=pl.col("checkpoint_value").sort_by("ic_mean").last(),
+        n_positive=(pl.col("ic_mean") > 0).sum(),
+        best_auc_daily=pl.col("auc_mean_daily").max(),
+    )
+    .sort("label", "config_name")
+)
+by_architecture
 
 # %% [markdown]
-# ## 8. Key Takeaways
+# **`epoch_at_high` is a diagnostic and not a result.** It says where on its own curve each
+# configuration happened to peak, and reading the two `ic_high` values as a contest between the
+# architectures compares each at the epoch chosen after seeing which epoch was best for it. That
+# comparison is made legitimately in [`14_backtest`](14_backtest.ipynb), where every checkpoint
+# of every family competes on one validation criterion, and what that contest returns is what
+# gets carried forward. Here the column is worth reading for a different reason: an architecture
+# whose high sits at the last checkpoint may not have finished learning, and one whose high sits
+# early has been fitting its training window since.
+
+# %% [markdown]
+# ### What more training does
 #
-# 1. **LSTM trails TabM**: selected validation IC is +0.0100 versus +0.0156 for
-#    TabM, a -0.0056 gap. The 60-day lookback of IV dynamics adds no edge over the
-#    point-in-time snapshot; the options signal here is primarily cross-sectional.
-# 2. **The edge is not distinguishable from zero**: the daily-IC HAC t-statistic is
-#    1.26 (p = 0.21) and the 95% confidence interval [-0.0055, +0.0254] straddles
-#    zero. The two fold ICs are similar (+0.0098 and +0.0101), but two windows are
-#    not enough to establish temporal stability.
-# 3. **Selection evidence**: the registry carries the selected checkpoint from the
-#    current execution. The fresh-run output above provides the checkpoint trajectory;
-#    a reproduce run does not infer that trajectory from historical registry rows.
-# 4. **Model progression**: Ridge to GBM to TabM lifts IC from negative to +0.0156,
-#    before LSTM falls back to +0.0100. The entire gain is captured by TabM; the
-#    sequence model neither improves on TabM nor turns the marginal IC significant.
-#    The FDR pattern from Ch11 holds: zero individually significant features still
-#    combine into a small positive IC, but that IC remains statistically fragile.
+# Each line traces one configuration's out-of-sample IC as epochs are added to it, in its own
+# label's panel. This is the figure the checkpoint dimension exists to produce, and it separates two
+# things a single end-of-training number cannot.
 #
-# **Next**: `10_dl_patchtst.py` tests whether PatchTST's patching mechanism captures
-# multi-scale IV dynamics; `11_latent_factors.py` then extracts latent factors from
-# the same feature set.
+# A line that rises and then falls has an interior optimum: the network was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# around zero without trend never had anything to learn in the first place, and its highest point is
+# wherever the noise happened to peak. Both produce a respectable-looking maximum, which is why the
+# maximum is not what a configuration is judged on.
+#
+# The panels share one vertical scale. Stacking them is what makes the labels comparable, and
+# rescaling each to fill its own row would make three different spreads look alike.
+
+# %%
+curves = catalog.filter("full_coverage").sort("label", "config_name", "checkpoint_value")
+charted = set(curves.get_column("config_name"))
+# Menu order, which is the order section 1 showed and the order that puts the memoryless baseline
+# first. Sorting on the formatted parameter string would order by architecture name instead.
+config_order = [
+    name
+    for name in configs.get_column("config_name").unique(maintain_order=True)
+    if name in charted
+]
+line_colors = [COLORS["blue"], COLORS["copper"], COLORS["amber"], COLORS["positive"]]
+if len(config_order) > len(line_colors):
+    raise ValueError(
+        f"{len(config_order)} configurations against {len(line_colors)} distinct line colours; "
+        "add colours rather than letting two configurations share one"
+    )
+color_of = dict(zip(config_order, line_colors, strict=False))
+
+fig_curves = make_subplots(
+    rows=len(panel_labels),
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.06,
+    subplot_titles=[
+        f"{label} ({'primary' if label == primary else 'variant'})" for label in panel_labels
+    ],
+)
+for row, label in enumerate(panel_labels, start=1):
+    panel = curves.filter(pl.col("label") == label)
+    for config_name in config_order:
+        series = panel.filter(pl.col("config_name") == config_name).sort("checkpoint_value")
+        if not series.height:
+            continue
+        fig_curves.add_trace(
+            go.Scatter(
+                x=series.get_column("checkpoint_value").to_list(),
+                y=series.get_column("ic_mean").to_list(),
+                mode="lines+markers",
+                name=config_name,
+                legendgroup=config_name,
+                showlegend=row == 1,
+                line=dict(color=color_of[config_name], width=2),
+                marker=dict(size=5, color=color_of[config_name]),
+            ),
+            row=row,
+            col=1,
+        )
+    fig_curves.add_hline(
+        y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"], row=row, col=1
+    )
+    fig_curves.update_yaxes(title_text="Mean IC (validation)", row=row, col=1)
+    # `shared_yaxes` matches axes across columns, so with one column it does nothing. Matching
+    # every row to the first is what puts the labels on one vertical scale.
+    if row > 1:
+        fig_curves.update_yaxes(matches="y", row=row, col=1)
+fig_curves.update_xaxes(title_text="Training epochs completed", row=len(panel_labels), col=1)
+fig_curves.update_layout(
+    title="Validation IC against training epoch, by architecture and label",
+    height=300 * len(panel_labels),
+    width=1000,
+    margin=dict(t=90),
+    legend=dict(title_text="Configuration"),
+)
+# The span of each panel and how many of its lines cross zero are facts about the frame, so the
+# description reads them rather than asserting a shape the next run may not have.
+panel_facts = {
+    row["label"]: row
+    for row in curves.group_by("label")
+    .agg(
+        lowest=pl.col("ic_mean").min(),
+        highest=pl.col("ic_mean").max(),
+        total=pl.col("config_name").n_unique(),
+        below=pl.col("config_name").filter(pl.col("ic_mean") < 0).n_unique(),
+    )
+    .to_dicts()
+}
+panel_text = ". ".join(
+    "The {} panel spans {:+.3f} to {:+.3f}, with {} of its {} lines dipping below zero at some "
+    "checkpoint".format(
+        label,
+        panel_facts[label]["lowest"],
+        panel_facts[label]["highest"],
+        panel_facts[label]["below"],
+        panel_facts[label]["total"],
+    )
+    for label in panel_labels
+)
+show_plotly_with_alt(
+    fig_curves,
+    "Stacked line charts, one panel per label sharing a vertical scale, of mean validation "
+    "information coefficient against training epochs completed, one line per architecture with a "
+    f"dashed zero line in each panel. Counted from the frame: {panel_text}.",
+)
+
+# %% [markdown]
+# ## 5. What to notice
+#
+# **The baseline is doing a job, not filling a slot.** `nlinear` removes the level of each window
+# and fits one linear map over what remains. Everything the recurrent model has that it does not -
+# state carried along the window, gates that decide what to keep - has to show up as a separation
+# between the two curves on the same label, or it did not earn its cost on this panel.
+#
+# **The lookback is a sample decision as much as a modelling one.** Sixty observations per window
+# means the earliest rows of each fold go unpredicted and short-lived names may not qualify at all,
+# so this family is measured on fewer rows than the tabular families are. That is visible in the
+# plan's `eligible_rows` and is why a cross-family IC comparison needs the coverage column rather
+# than the number alone.
+#
+# **Nothing here is selected.** Every checkpoint of both architectures on every declared label is
+# registered, and what advances is decided in [`14_backtest`](14_backtest.ipynb) on validation
+# backtest Sharpe after costs. The curves above show what training length does to a ranking measure;
+# they decide nothing.
+#
+# **Next**: [`10_dl_patchtst`](10_dl_patchtst.ipynb) publishes the remaining slice of the declared
+# family, and [`13_model_analysis`](13_model_analysis.ipynb) compares all of it against the other
+# families.

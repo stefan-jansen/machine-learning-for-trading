@@ -1690,21 +1690,24 @@ case_studies/sp500_equity_option_analytics/08_tabular_dl:
       max_symbols: 5
   timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
-  parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+  # BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS were the pre-migration
+  # knobs. The notebook plans through the shared catalog and binds none of them, so
+  # test_every_declared_parameter_reaches_its_notebook rejects them.
+  #
+  # gpu, rather than the DEVICE: cpu that 08_tabular_dl takes. The epoch budget is
+  # handled either way - preset_patches.py patches lstm and nlinear to n_epochs 2 at
+  # checkpoint_interval 1 - but the 60-observation lookback is not patched, and no
+  # sequence preview reduction narrows it (_SEQUENCE_PREVIEW_FIELDS is folds,
+  # max_symbols and max_train_sequences). A fixture short enough to leave no stock a
+  # full window would yield an empty population rather than a small one. The migrated
+  # siblings in cme_futures and crypto_perps_funding take the same route.
+  gpu: true
+  timeout: 300
 case_studies/sp500_equity_option_analytics/10_dl_patchtst:
-  parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 24
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+  # Same reasoning as 09_dl_lstm: the pre-migration knobs name nothing the notebook
+  # binds, and the lookback the sequence windows need is not reducible from here.
+  gpu: true
+  timeout: 300
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   timeout: 600
 case_studies/sp500_equity_option_analytics/11a_pca:

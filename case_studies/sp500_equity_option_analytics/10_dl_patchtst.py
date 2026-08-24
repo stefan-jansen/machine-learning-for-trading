@@ -14,569 +14,366 @@
 # ---
 
 # %% [markdown]
-# # PatchTST: S&P 500 Equity Option Analytics
+# # S&P 500 Equity+Options: Patched Attention
 #
-# LSTM trailed TabM on the corrected feature lineage. PatchTST tests whether its
-# multi-scale patching mechanism captures temporal patterns in IV dynamics that sequential
-# gating misses. The hypothesis: IV term structure shifts operate at multiple timescales
-# (daily, weekly, monthly), and PatchTST's patching should extract these hierarchical
-# patterns more efficiently than LSTM's step-by-step processing.
+# [`09_dl_lstm`](09_dl_lstm.ipynb) fitted the two sequence architectures that read a window one
+# observation at a time: a linear map with no memory, and gated memory carried along the window.
+# This notebook fits the third the menu declares, which reads the same window a different way.
 #
-# **Learning Objectives**:
-# - Test whether patch-based attention captures multi-scale IV dynamics
-# - Compare PatchTST against the full progression: Linear → GBM → TabM → LSTM
-# - Assess whether the marginal IV-equity signal survives a more expressive architecture
+# **A patched transformer cuts the window into contiguous blocks and treats each block as one
+# token.** Sixty observations become a handful of patches, and attention runs over those patches
+# rather than over the sixty steps. Two things follow. Attention compares every patch with every
+# other directly, so a relationship between the start of the window and its end does not have to
+# survive being carried step by step the way it does in a recurrent model. And the sequence the
+# attention layers see is short, which is what makes attention affordable on a window of this length
+# at all.
 #
-# **Book Reference**: Chapter 13 (Deep Learning for Time Series)
+# **The patch size is the modelling choice, and it is a coarseness decision.** Observations inside
+# one patch are summarized together before attention ever sees them, so structure finer than a patch
+# has to survive that summary. A larger patch buys a shorter sequence and loses resolution; a
+# smaller one keeps resolution and gives attention more to compare.
 #
-# **Prerequisites**: `linear.py`, `gbm.py`, `tabular_dl.py`, `dl_lstm.py` (baselines)
+# **This architecture is declared on one label, and that limits what the notebook can say.** The
+# menu declares `patchtst` for the primary label alone, so unlike its siblings this population has
+# no companion rows on the other two targets, and nothing here separates what the architecture does
+# from what this particular target rewards. Section 1 reports what the menu declares rather than
+# assuming it.
+#
+# **Learning objectives.** By the end of this notebook you will be able to:
+#
+# - Say what patching does to a window before attention sees it, and what a larger patch trades
+#   away.
+# - Explain why attention over patches is affordable where attention over raw steps would not be.
+# - Read a curve of out-of-sample ranking accuracy against training epoch and tell a model still
+#   learning apart from one fitting its training window.
+# - Say what a single-label population cannot establish, and where the comparison that needs more
+#   than one label is made instead.
+#
+# **Book reference**: Chapter 13, Section 13.6 (attention and transformer architectures for time
+# series), and Chapter 6, Section 6.7 (Search accounting and run logging) for the run log this
+# notebook writes into.
+#
+# **Prerequisites**: [`05_evaluation`](05_evaluation.ipynb) established the walk-forward folds, and
+# [`09_dl_lstm`](09_dl_lstm.ipynb) fitted the rest of the declared `deep_learning` family, whose
+# lookback and epoch schedule this configuration shares.
+#
+# **What it writes**: one training run and one complete validation prediction set per epoch
+# checkpoint, in `run_log/registry.db` and under `run_log/training/` and `run_log/predictions/`,
+# grouped under a named population. Together with `09_dl_lstm`'s population it covers the declared
+# family. **Selection happens in [`14_backtest`](14_backtest.ipynb), not here.**
 
 # %%
-"""PatchTST — sp500_equity_option_analytics deep learning."""
+"""Fit the declared option-analytics patched-transformer population on the walk-forward folds."""
 
-import sqlite3
-import warnings
-
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-import torch
-import yaml
 
-import utils.style as style
-from case_studies.utils.analytics import load_best_ic_per_family, load_model_ic
-from case_studies.utils.deep_learning import (
-    _resolve_arch_name,
-    create_model,
-    run_dl_cv,
+from case_studies.research import (
+    declared_labels,
+    load_model_configs,
+    model_requests,
+    open_study,
+    primary_label,
+    resolved_model_plan,
+    run_model_population,
 )
-from case_studies.utils.registry import build_training_spec, training_hash_from_spec
-from utils.modeling import load_configs, load_modeling_dataset
-from utils.paths import get_case_study_dir
-
-warnings.filterwarnings("ignore")
-COLORS = style.COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY_ID = "sp500_equity_option_analytics"
-MODEL = "patchtst"
-PRIMARY_LABEL = ""
-MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
-N_EPOCHS = 100
-LOOKBACK = 60
-BATCH_SIZE = 2048
-MC_DROPOUT = False
-MAX_FOLDS = 0
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+PREVIEW_REDUCTIONS: dict = {}
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
+DEVICE: str = ""
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
-
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+study = open_study(
+    "sp500_equity_option_analytics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
 
 # %% [markdown]
-# ## 1. Load Data
-
-# %%
-mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
-
-dataset = mds.dataset
-feature_names = mds.feature_names
-label_col = mds.label_col
-date_col = mds.date_col
-entity_col = mds.entity_cols[0] if mds.entity_cols else "symbol"
-splits = mds.splits
-if MAX_FOLDS:
-    splits = splits[:MAX_FOLDS]
-n_features = len(feature_names)
-
-print(f"Dataset: {len(dataset):,} rows × {n_features} features")
-print(f"Label: {label_col} | Entity: {entity_col} | Folds: {len(splits)}")
-
-dataset_pd = dataset.to_pandas()
-n_entities = dataset_pd[entity_col].nunique()
-print(f"Entities: {n_entities}")
-
-# %% [markdown]
-# ## 2. Prior Baselines
+# ## 1. Which labels, and which model
 #
-# Load IC results from earlier pipeline stages (Ch11 linear, Ch12 GBM and TabM, Ch13
-# LSTM) rather than re-running them here. TabM is the strongest model so far and the
-# reference PatchTST has to beat to justify its patch-attention machinery; LSTM is the
-# prior sequence model that already tied TabM without improving on it.
+# `declared_labels` reports every label whose training menu declares `deep_learning`. The
+# configuration frame below is the subset of that menu naming `patchtst`, and the gap between the
+# two is the fact this notebook has to live with: the other architectures in the family are declared
+# on all three regression labels and this one is not.
+#
+# `patch_size` is how many consecutive observations become one token, `d_model` the width of the
+# representation each token is embedded into, `n_heads` how many attention comparisons run in
+# parallel, and `n_layers` how many times the sequence is passed through the block. `lookback`
+# matches the rest of the family, so the input window is the same one `09_dl_lstm` read and a
+# difference between the populations is a difference between architectures rather than samples.
+#
+# `n_epochs` and `checkpoint_interval` come from the preset rather than from here, because they
+# decide how many prediction sets the configuration owes: 100 epochs saved every 5 is 20, and a run
+# that quietly trained for fewer would publish a different population under the same name.
 
 # %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(["linear", "gbm", "tabular_dl"], case_studies=[CASE_STUDY_ID])
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-        elif row["family"] == "tabular_dl":
-            prior_baselines["TabM (Ch12)"] = row["ic_mean"]
+declared_labels(study, "deep_learning")
 
-# LSTM (Ch13) is a deep_learning config; load_best_ic_per_family returns PatchTST for
-# that family (this notebook's own model), so read the best lstm_h64 checkpoint directly.
-_dl_ic = load_model_ic(["deep_learning"], split="validation", case_studies=[CASE_STUDY_ID])
-if not _dl_ic.is_empty():
-    _lstm = _dl_ic.filter((pl.col("label") == label_col) & (pl.col("config_name") == "lstm_h64"))
-    if not _lstm.is_empty():
-        prior_baselines["LSTM (Ch13)"] = float(_lstm["ic_mean"].max())
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print("  No prior results found — run 06_linear.py … 09_dl_lstm.py first")
+# %%
+configs = load_model_configs(
+    study,
+    "deep_learning",
+    labels=LABELS or None,
+    config_names=["patchtst"],
+)
+declared = load_model_configs(study, "deep_learning", config_names=["patchtst"])
+if not configs.height:
+    raise RuntimeError("no declared label names patchtst under deep_learning")
+configs
 
 # %% [markdown]
-# ## 3. PatchTST
+# `LABELS` narrows the run below what the menu declares, and a narrowed run declares a different set
+# of members than the published population does. A population is immutable once written, so such a
+# run must publish under its own name rather than registering an incomplete snapshot under the
+# published one.
 #
-# Primary architecture for this notebook.
+# The device is checked in the same cell. A network trained on a GPU and the same network trained on
+# a CPU accumulate their sums in different orders and reach different weights, so the device is part
+# of what the fitted model is and is recorded inside the computation's identity rather than beside
+# it. The runner refuses to substitute a CPU for a requested GPU rather than publishing a different
+# model under the published name, so on a machine with no NVIDIA card this notebook stops at the
+# next cell; set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same configuration there.
 
 # %%
-dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
-dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
+PUBLISHED_DEVICE = "cuda"
+device = DEVICE or PUBLISHED_DEVICE
+print(f"training device: {device}")
 
-if not dl_configs:
+narrows = set(zip(configs["label"], configs["config_name"], strict=True)) != set(
+    zip(declared["label"], declared["config_name"], strict=True)
+)
+if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
     raise ValueError(
-        f"No '{MODEL}' configs found — add '{MODEL}' under 'deep_learning:' in the label config"
+        f"this run declares {configs.height} label-configuration pairs on device {device!r}, "
+        f"which is not the declared patchtst catalog on {PUBLISHED_DEVICE!r}, so it cannot "
+        f"publish the patched-attention population; pass POPULATION_NAME to give it its own"
     )
 
-# Apply Papermill overrides to configs (test mode: fewer epochs)
-for cfg in dl_configs:
-    if cfg.get("n_epochs", 100) != N_EPOCHS:
-        cfg["n_epochs"] = N_EPOCHS
-    if cfg.get("batch_size", 2048) != BATCH_SIZE:
-        cfg["batch_size"] = BATCH_SIZE
-    if cfg["params"].get("lookback", 60) != LOOKBACK:
-        cfg["params"]["lookback"] = LOOKBACK
+# %% [markdown]
+# ## 2. Binding the declaration to the data
+#
+# A menu entry says which network to fit. It does not say which feature columns exist today, where
+# the walk-forward folds fall, or which symbol-date pairs have both a feature row and a label - nor,
+# for a sequence model, which of those pairs have a full lookback behind them. **Resolving** a
+# request goes and finds all of that, and fits nothing, so the plan can be inspected before any
+# training starts.
+#
+# - **`eligible_rows` is below what a tabular family reports on the same label.** That gap is the
+#   lookback: the rows spent filling each stock's first window are not predicted. It should match
+#   what `09_dl_lstm` reported for this label, because the two share a lookback - a difference there
+#   would mean the two populations are measured on different samples and their results are not
+#   directly comparable.
+# - **`folds` equals the number of walk-forward splits** `05_evaluation` established.
+# - **`validation_start` and `validation_end` bracket the development sample.** The held-out tail
+#   must not appear here: it is scored once, at the end of the case study.
+# - **`checkpoints` is the epoch schedule**, and multiplying it by the number of rows gives the
+#   number of candidate models this notebook is about to create.
+#
+# The `training_hash` on each row is the identity of that computation, derived from everything that
+# can change its result - the device, the lookback and the patch size included.
+# [`RUN_LOG.md`](../RUN_LOG.md#identity) sets out what goes into one.
 
+# %%
+requests = model_requests(
+    study,
+    configs,
+    execution_tier=EXECUTION_TIER,
+    overrides={"device": device},
+    preview_reductions=PREVIEW_REDUCTIONS,
+)
+resolved = tuple(request.resolve() for request in requests)
+
+plan = resolved_model_plan(resolved)
+plan.select(
+    "label",
+    "config_name",
+    "feature_count",
+    "eligible_entities",
+    "eligible_rows",
+    "folds",
+    "checkpoints",
+    "validation_start",
+    "validation_end",
+)
+
+# %% [markdown]
+# ## 3. Fitting the population
+#
+# `run_model_population` walks the folds. On each one it cuts the training rows into overlapping
+# windows belonging to one stock and ending before the timestamp they predict, fills missing feature
+# values with the training window's median and standardizes each column - both fitted on the
+# training rows only - then trains for the declared epochs, writing weights every fifth, and
+# predicts that fold's validation rows from each saved set.
+#
+# **A window never crosses a fold boundary or a stock.** The observations behind a prediction are
+# always that stock's own and always inside the same training window, so nothing is carried across
+# the purge gap the folds exist to impose.
+#
+# What the call publishes is a **population**: a named, immutable list of the prediction sets it is
+# going to produce, computed from the resolved specification before the first fit. Afterwards every
+# member must exist and be complete, which is why a failure fails the whole call rather than
+# publishing a population one member short. Everything that finished stays registered, and
+# re-running trains only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
+# the first generation under this name. Anything that moves a training identity - a changed epoch
+# schedule, lookback, patch size or device - produces a different population under the same name,
+# and the registry refuses to write it without being told which snapshot it supersedes.
+
+# %%
+population_name = POPULATION_NAME or "sp500_equity_option_analytics-patchtst-validation-v1"
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
+
+reused = sum(1 for item in execution.diagnostics if item.get("reused"))
 print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × {len(splits)} folds"
+    f"{len(execution.runs)} configurations: {len(execution.runs) - reused} trained, {reused} read"
 )
-for cfg in dl_configs:
-    print(
-        f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')} ({cfg.get('n_epochs', 100)} epochs)"
-    )
-
-# %%
-result = run_dl_cv(
-    dataset_pd,
-    splits,
-    feature_names=feature_names,
-    label_col=label_col,
-    date_col=date_col,
-    entity_col=entity_col,
-    configs=dl_configs,
-    n_features=n_features,
-    device=device_str,
-    save_dir=CASE_DIR / "run_log" / "training" / "deep_learning",
-    register=True,
-    force_retrain=FORCE_RETRAIN,
-    prediction_split=PREDICTION_SPLIT,
-    case_study=CASE_STUDY_ID,
-    notebook=f"dl_{MODEL}",
-    temporal_by_fold=mds.temporal_by_fold,
-    temporal_keys=mds.temporal_keys,
-    temporal_feature_names=mds.temporal_feature_names,
-)
-
-
-# %%
-def _load_dl_results_from_registry(case_study, configs, label, split, n_folds):
-    """Rebuild the leaderboard/curves/folds from the registry when every config SKIPs.
-
-    ``run_dl_cv`` returns an empty ``grid_results`` when all configs are already
-    complete (the reproduce path), so §4-§6 and the figures below need the stored
-    validation ICs reloaded from ``registry.db`` (the single source of truth).
-    """
-    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
-    con = sqlite3.connect(db_path)
-    try:
-        grid, curve_rows = [], []
-        for cfg in configs:
-            spec = build_training_spec(
-                cfg["family"],
-                cfg["config_name"],
-                label,
-                n_folds=n_folds,
-                n_epochs=cfg.get("n_epochs"),
-            )
-            thash = training_hash_from_spec(spec)
-            rows = con.execute(
-                "SELECT ps.checkpoint_value, pm.ic_mean, ps.prediction_hash "
-                "FROM prediction_sets ps "
-                "JOIN training_runs tr ON tr.training_hash = ps.training_hash "
-                "JOIN prediction_metrics pm ON pm.prediction_hash = ps.prediction_hash "
-                "WHERE ps.training_hash = ? AND ps.split = ? "
-                "AND ps.created_at >= COALESCE(tr.started_at, tr.created_at) "
-                "ORDER BY ps.checkpoint_value",
-                (thash, split),
-            ).fetchall()
-            if not rows:
-                continue
-            elapsed = con.execute(
-                "SELECT elapsed_s FROM training_runs WHERE training_hash = ?", (thash,)
-            ).fetchone()
-            for ckpt, ic_mean, _ in rows:
-                curve_rows.append(
-                    {"config": cfg["config_name"], "epoch": int(ckpt), "ic_mean": float(ic_mean)}
-                )
-            best = max(rows, key=lambda r: r[1])
-            grid.append(
-                {
-                    "config_name": cfg["config_name"],
-                    "best_epoch": int(best[0]),
-                    "best_ic": float(best[1]),
-                    "best_prediction_hash": best[2],
-                    "elapsed_s": float(elapsed[0]) if elapsed and elapsed[0] is not None else 0.0,
-                }
-            )
-        grid.sort(key=lambda r: r["best_ic"], reverse=True)
-        best_row = grid[0] if grid else None
-        fold_rows = []
-        if best_row is not None:
-            for fid, ic, n_ent in con.execute(
-                "SELECT fold_id, ic, n_entities FROM fold_metrics "
-                "WHERE prediction_hash = ? ORDER BY fold_id",
-                (best_row["best_prediction_hash"],),
-            ).fetchall():
-                fold_rows.append(
-                    {"fold_id": int(fid), "ic_mean": float(ic), "n_symbols": int(n_ent or 0)}
-                )
-        return {
-            "grid_results": grid,
-            "best_config_name": best_row["config_name"] if best_row else None,
-            "best_epoch": best_row["best_epoch"] if best_row else 0,
-            "best_ic": best_row["best_ic"] if best_row else float("nan"),
-            "predictions": pl.DataFrame(),
-            "all_predictions": pl.DataFrame(),
-            "fold_metrics": pl.DataFrame(fold_rows),
-            "all_learning_curves": pl.DataFrame(curve_rows),
-            "training_log": pl.DataFrame(),
-        }
-    finally:
-        con.close()
-
-
-if not result["grid_results"]:
-    print("All configs SKIP'd - reloading the stored leaderboard from the registry.")
-    result = _load_dl_results_from_registry(
-        CASE_STUDY_ID, dl_configs, label_col, PREDICTION_SPLIT, len(splits)
-    )
+print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# ## 4. Validation IC and Fold Stability
+# ## 4. What came out
 #
-# A fresh training run displays its checkpoint-by-checkpoint validation IC below. A
-# reproduce run reloads only the selected checkpoint from the exact current registry
-# execution. It therefore confirms the registered selection but does not reconstruct a
-# learning curve from checkpoints written by earlier executions.
+# One row per epoch checkpoint. `ic_mean` is the **information coefficient**: on each validation
+# date, rank the stocks by the model's prediction, rank them by the return they went on to earn,
+# correlate the two rankings, and average that daily correlation over the validation period. Zero is
+# no relationship.
+#
+# `ic_n_days` is how many validation dates produced a defined correlation. A network that has
+# settled into predicting nearly the same value for every stock on a date gives that date no spread
+# to rank, and the date drops out of the average - so a checkpoint with fewer scored dates has its
+# `ic_mean` taken over a different sample from its neighbours', and `full_coverage` marks the rows
+# measured on every date this label offers.
 
-# %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
+# %% tags=["results"]
+catalog = (
+    execution.catalog_rows.select(
+        "config_name",
+        "label",
+        "task",
+        "complete",
+        "checkpoint_value",
+        "ic_mean",
+        "ic_std",
+        "ic_n_days",
+        "auc_mean_daily",
+        "direction_label",
+        "n_folds",
+        "training_hash",
+        "prediction_hash",
+    )
+    .sort("label", "checkpoint_value")
+    .join(configs.select("config_name", "label", "params"), on=["config_name", "label"], how="left")
+)
 
-curves = result["all_learning_curves"]
-if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("patched-attention execution returned a partial prediction set")
+if set(catalog.get_column("prediction_hash")) != set(population.members):
+    raise RuntimeError("the published catalog differs from the population declared before fitting")
 
-    print(f"{'Config':15s}", end="")
-    for cp in checkpoints:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(checkpoints)))
+catalog = catalog.with_columns(
+    full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max().over("label")
+)
 
-    for r in grid_results:
-        cfg_data = curves.filter(pl.col("config") == r["config_name"])
-        print(f"{r['config_name']:15s}", end="")
-        for cp in checkpoints:
-            row = cfg_data.filter(pl.col("epoch") == cp)
-            if row.height > 0:
-                print(f" {row['ic_mean'][0]:+7.4f}", end="")
-            else:
-                print(f" {'N/A':>7s}", end="")
-        print()
+primary = primary_label(study)
+present = sorted(set(catalog.get_column("label")))
+print(f"{catalog.height} candidate models across {len(present)} label(s)")
+print(f"primary label fitted here: {primary in present}")
+catalog.select(
+    "label",
+    "params",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_n_days",
+    "auc_mean_daily",
+    "full_coverage",
+)
 
 # %% [markdown]
-# The mean validation IC is a fragile average of only two walk-forward folds. Splitting
-# it out shows how thin the signal is: one fold is strongly positive and one is slightly
-# negative, so the headline number rests on a single favourable window rather than a
-# stable edge.
+# ### What more training does
+#
+# The line traces out-of-sample IC as epochs are added. It separates two things a single
+# end-of-training number cannot.
+#
+# A line that rises and then falls has an interior optimum: the network was still learning, then
+# began fitting the training window at the expense of the validation folds. A line that wanders
+# around zero without trend never had anything to learn in the first place, and its highest point is
+# wherever the noise happened to peak. Both produce a respectable-looking maximum, which is why the
+# maximum is not what a configuration is judged on, and why every checkpoint is registered rather
+# than only the strongest.
 
 # %%
-fold_metrics = result["fold_metrics"]
-if fold_metrics.height > 0:
-    _fm = fold_metrics.sort("fold_id")
-    _fold_ids = [f"Fold {i}" for i in _fm["fold_id"].to_list()]
-    _fold_ics = _fm["ic_mean"].to_list()
-    fig_folds = go.Figure()
-    fig_folds.add_trace(
-        go.Bar(
-            x=_fold_ids,
-            y=_fold_ics,
-            marker_color=[COLORS["blue"] if v >= 0 else COLORS["copper"] for v in _fold_ics],
-            text=[f"{v:+.4f}" for v in _fold_ics],
-            textposition="outside",
+curve = catalog.filter("full_coverage").sort("label", "checkpoint_value")
+fig = go.Figure()
+for label in sorted(set(curve.get_column("label"))):
+    rows = curve.filter(pl.col("label") == label).sort("checkpoint_value")
+    fig.add_trace(
+        go.Scatter(
+            x=rows.get_column("checkpoint_value").to_list(),
+            y=rows.get_column("ic_mean").to_list(),
+            mode="lines+markers",
+            name=label,
+            line=dict(color=COLORS["blue"] if label == primary else COLORS["recede"], width=2),
+            marker=dict(size=5),
         )
     )
-    fig_folds.add_hline(y=best_ic, line=dict(color=COLORS["amber"], dash="dash"))
-    fig_folds.add_hline(y=0.0, line=dict(color=COLORS["slate"], dash="dot"))
-    _pad = max(abs(min(_fold_ics)), abs(max(_fold_ics))) * 1.35
-    fig_folds.update_yaxes(range=[-_pad, _pad])
-    fig_folds.update_layout(
-        title_text=f"The {best_ic:+.3f} mean hides fold instability: one fold positive, one negative"
-        f"<br><sup>{best_name} at epoch {best_epoch}, per-fold validation IC (fwd_ret_5d); "
-        f"dashed line = 2-fold mean {best_ic:+.4f}</sup>",
-        yaxis_title="Validation IC",
-        height=380,
-        showlegend=False,
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig.update_yaxes(title_text="Mean IC (validation)")
+fig.update_xaxes(title_text="Training epochs completed")
+fig.update_layout(
+    title="Validation IC against training epoch",
+    height=460,
+    width=880,
+    margin=dict(t=90),
+)
+# The span of the line and where it sits relative to zero are facts about the frame, so the
+# description counts them rather than asserting a shape the next run may not reproduce.
+spans = "; ".join(
+    "{} spans {:+.4f} to {:+.4f} with {} of {} checkpoints above zero".format(
+        row["label"], row["lo"], row["hi"], row["above"], row["total"]
     )
-    fig_folds.show()
+    for row in curve.group_by("label")
+    .agg(
+        lo=pl.col("ic_mean").min(),
+        hi=pl.col("ic_mean").max(),
+        above=(pl.col("ic_mean") > 0).sum(),
+        total=pl.len(),
+    )
+    .sort("label")
+    .iter_rows(named=True)
+)
+show_plotly_with_alt(
+    fig,
+    "Line chart of mean validation information coefficient against training epochs completed, one "
+    f"line per fitted label with a dashed zero line. Counted from the frame: {spans}.",
+)
 
 # %% [markdown]
-# ## 5. MC Dropout Uncertainty (Optional)
-
-# %%
-if MC_DROPOUT:
-    from ml4t.diagnostic.metrics import cross_sectional_ic
-
-    from case_studies.utils.deep_learning import mc_dropout_predict
-    from case_studies.utils.sequence_dataset import (
-        materialize_sequences,
-        prepare_fold_sequence_stores,
-    )
-
-    dates_series = dataset_pd[date_col]
-    last_fold = splits[-1]
-    train_mask = (dates_series >= last_fold["train_start"]) & (
-        dates_series <= last_fold["train_end"]
-    )
-    val_mask = (dates_series >= last_fold["val_start"]) & (dates_series <= last_fold["val_end"])
-
-    train_store, val_store, _ = prepare_fold_sequence_stores(
-        dataset_pd,
-        train_mask=train_mask,
-        val_mask=val_mask,
-        feature_names=feature_names,
-        label_col=label_col,
-        date_col=date_col,
-        entity_col=entity_col,
-        lookback=LOOKBACK,
-    )
-    X_train_seq, y_train_seq, _, _ = materialize_sequences(train_store)
-    X_val_seq, y_val_seq, val_dates, val_entities = materialize_sequences(val_store)
-
-    if len(X_train_seq) > 0 and len(X_val_seq) > 0:
-        torch_device = torch.device(device_str)
-        best_cfg_dict = dl_configs[0]
-        arch_name = best_cfg_dict["params"].get(
-            "architecture", _resolve_arch_name(best_cfg_dict["config_name"])
-        )
-        from case_studies.utils.deep_learning import _build_arch_kwargs
-
-        best_cfg = _build_arch_kwargs(
-            best_cfg_dict, n_features, best_cfg_dict["params"].get("lookback", 60)
-        )
-        mc_model = create_model(arch_name, best_cfg).to(torch_device)
-
-        X_t = torch.FloatTensor(X_train_seq).to(torch_device)
-        y_t = torch.FloatTensor(y_train_seq).to(torch_device)
-        optimizer = torch.optim.AdamW(mc_model.parameters(), lr=1e-3)
-        criterion = torch.nn.MSELoss()
-
-        mc_model.train()
-        for ep in range(min(N_EPOCHS, 50)):
-            idx = torch.randperm(len(X_t))
-            for s in range(0, len(X_t), BATCH_SIZE):
-                batch = idx[s : s + BATCH_SIZE]
-                loss = criterion(mc_model(X_t[batch]), y_t[batch])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-        X_v = torch.FloatTensor(X_val_seq).to(torch_device)
-        mean_pred, std_pred = mc_dropout_predict(mc_model, X_v, n_samples=50)
-
-        median_unc = np.median(std_pred)
-        low_unc = std_pred <= median_unc
-        high_unc = std_pred > median_unc
-
-        low_frame = pl.DataFrame(
-            {
-                "date": val_dates[low_unc],
-                "symbol": val_entities[low_unc],
-                "y_true": y_val_seq[low_unc],
-                "y_pred": mean_pred[low_unc],
-            }
-        )
-        ic_low = cross_sectional_ic(
-            low_frame,
-            low_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        high_frame = pl.DataFrame(
-            {
-                "date": val_dates[high_unc],
-                "symbol": val_entities[high_unc],
-                "y_true": y_val_seq[high_unc],
-                "y_pred": mean_pred[high_unc],
-            }
-        )
-        ic_high = cross_sectional_ic(
-            high_frame,
-            high_frame,
-            pred_col="y_pred",
-            ret_col="y_true",
-            date_col="date",
-            entity_col="symbol",
-            min_obs=5,
-        )["ic_mean"]
-        print("MC Dropout uncertainty analysis:")
-        print(f"  Low uncertainty IC:  {ic_low:+.4f} ({low_unc.sum():,} samples)")
-        print(f"  High uncertainty IC: {ic_high:+.4f} ({high_unc.sum():,} samples)")
-        print(f"  IC gap: {ic_low - ic_high:+.4f}")
-
-        del mc_model, X_t, y_t, X_v
-        torch.cuda.empty_cache()
-else:
-    print("MC Dropout disabled (set MC_DROPOUT=True to enable)")
-
-# %% [markdown]
-# ## 6. Model Progression
+# ## 5. What to notice
 #
-# PatchTST against the full pipeline it inherits: Ridge (Ch11) → GBM (Ch12) →
-# TabM (Ch12) → LSTM (Ch13) → PatchTST (Ch13).
-
-# %%
-rows = [(name, ic) for name, ic in prior_baselines.items()]
-rows.append(("PatchTST (Ch13)", best_ic))
-
-comparison = pl.DataFrame({"Model": [r[0] for r in rows], "IC": [r[1] for r in rows]})
-comparison = comparison.with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
-)
-comparison
-
-
-# %%
-def _baseline_ic(prefix):
-    return next(
-        (v for k, v in prior_baselines.items() if k.lower().startswith(prefix)), float("nan")
-    )
-
-
-ridge_ic = _baseline_ic("ridge")
-gbm_ic = prior_baselines.get("GBM (Ch12)", float("nan"))
-tabm_ic = prior_baselines.get("TabM (Ch12)", float("nan"))
-lstm_ic = prior_baselines.get("LSTM (Ch13)", float("nan"))
-
-prog_labels = ["Ridge (Ch11)", "GBM (Ch12)", "TabM (Ch12)", "LSTM (Ch13)", "PatchTST (Ch13)"]
-prog_ics = [ridge_ic, gbm_ic, tabm_ic, lstm_ic, best_ic]
-prog_colors = [
-    COLORS["slate"],
-    COLORS["slate"],
-    COLORS["amber"],
-    COLORS["slate"],
-    COLORS["blue"],
-]
-
-fig_prog = go.Figure()
-fig_prog.add_trace(
-    go.Bar(
-        y=prog_labels,
-        x=prog_ics,
-        orientation="h",
-        marker_color=prog_colors,
-        text=[f"{v:+.4f}" for v in prog_ics],
-        textposition="outside",
-    )
-)
-fig_prog.add_vline(x=0.0, line=dict(color=COLORS["slate"], dash="dot"))
-# categoryarray runs bottom->top; reverse pipeline order to put PatchTST on top.
-fig_prog.update_yaxes(
-    type="category", categoryorder="array", categoryarray=list(reversed(prog_labels))
-)
-_xmax = max(prog_ics) * 1.3
-_xmin = min(0.0, min(prog_ics) * 1.4)
-fig_prog.update_xaxes(range=[_xmin, _xmax])
-fig_prog.update_layout(
-    title_text="PatchTST trails both LSTM and the best tabular model - no net gain"
-    f"<br><sup>fwd_ret_5d, validation IC across the pipeline; "
-    f"PatchTST {best_ic:+.4f} vs TabM {tabm_ic:+.4f}</sup>",
-    xaxis_title="Validation IC",
-    height=380,
-    margin=dict(l=140),
-    showlegend=False,
-)
-fig_prog.show()
-
-# %%
-print(f"PatchTST delta over Ridge baseline: {best_ic - ridge_ic:+.4f}  (Ridge is negative here)")
-print(f"PatchTST delta over TabM (best tabular baseline): {best_ic - tabm_ic:+.4f}")
-print(f"PatchTST delta over LSTM (prior sequence model): {best_ic - lstm_ic:+.4f}")
-
-# %% [markdown]
-# ## 7. Save Results
+# **A single-label population cannot separate the architecture from the target.** The rest of the
+# family is fitted on three labels, so a pattern that holds across all three there is evidence about
+# the architecture. Here there is one, and whatever this curve does is a statement about this
+# architecture on this target, jointly. Reading it as a statement about patched attention in
+# general takes more than one label's worth of evidence out of one label.
 #
-# Predictions and fold metrics are registered by `run_dl_cv()`
-# during training. On the reproduce path every config already has a complete
-# training hash, so `run_dl_cv()` re-registers nothing and the stored predictions
-# and fold metrics are read back from the registry (the single source of truth).
-
-# %%
-fold_metrics = result["fold_metrics"]
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
-print(f"Best config: {best_name} @ epoch {best_epoch}")
-if val_ic_mean is not None:
-    print(f"Mean validation IC across {fold_metrics.height} folds: {val_ic_mean:+.4f}")
-
-# %% [markdown]
-# ## 8. Key Takeaways
+# **The patch size is not searched.** One value is declared and one is fitted, so nothing here says
+# whether a coarser or finer patch reads this surface better. Adding a second preset and listing it
+# under the label's `deep_learning` menu is what would make that a question this notebook answers;
+# as it stands the patch size is a fixed assumption rather than a tested one.
 #
-# 1. **PatchTST trails LSTM and TabM**: its selected validation IC is +0.0075, below
-#    LSTM (+0.0100) and the best non-sequence model, TabM (+0.0156). Its delta from
-#    TabM is -0.0081, so patch-based attention over multi-scale windows adds no edge
-#    over the point-in-time tabular snapshot.
-# 2. **The edge is not distinguishable from zero**: the daily-IC HAC t-statistic is
-#    0.73 (p = 0.47) and the 95% confidence interval [-0.0125, +0.0272] straddles
-#    zero. The +0.0075 fold mean averages just two walk-forward folds - one positive
-#    (+0.0168), one negative (-0.0019) - so the headline rests on a single
-#    favourable window rather than a stable edge.
-# 3. **Selection evidence**: the registry carries the selected checkpoint from the
-#    current execution. The fresh-run output provides the checkpoint trajectory; a
-#    reproduce run does not infer that trajectory or validation-loss behavior from
-#    historical registry rows.
-# 4. **Model progression**: Ridge to GBM to TabM lifts IC from negative to +0.0156;
-#    LSTM and PatchTST then fall back to +0.0100 and +0.0075. Neither sequence model
-#    improves on the tabular leader or turns the marginal IC significant. Architecture
-#    sophistication does not manufacture signal where the data holds little.
+# **Nothing here is selected.** Every checkpoint is registered, and what advances is decided in
+# [`14_backtest`](14_backtest.ipynb) on validation backtest Sharpe after costs.
 #
-# **Next**: `11_latent_factors.py` shifts from supervised prediction to unsupervised
-# factor extraction (PCA, IPCA, autoencoders, and a stochastic discount factor) on the
-# same feature set.
+# **Next**: [`11_latent_factors`](11_latent_factors.ipynb) turns to the latent-factor families, and
+# [`13_model_analysis`](13_model_analysis.ipynb) compares every family fitted so far.

@@ -113,7 +113,7 @@ study = open_study(
 declared_labels(study, "latent_factors")
 
 # %% [markdown]
-# ### Three budgets, and a checkpoint column that is not a column of epochs
+# ### Three budgets, and one checkpoint axis across two phases
 #
 # `case_studies/config/sdf/sdf.yaml` declares `n_epochs_unc: 256`, `n_epochs_moment: 64` and
 # `n_epochs_cond: 1024`. Training runs in phases: an unconditional phase in which the discount
