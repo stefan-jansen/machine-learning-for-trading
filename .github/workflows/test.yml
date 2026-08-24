@@ -738,10 +738,18 @@ jobs:
           # The steps above never hit it because none of them reads a case-study
           # config through the redirect.
           unset ML4T_OUTPUT_DIR
+          # A trailing comment is stripped rather than rejected. Without this an
+          # annotated entry becomes --ignore=<path plus prose>, which pytest
+          # accepts and matches nothing, so the file it names is silently no
+          # longer excluded. tests/test_quarantine_list.py is what catches an
+          # entry that stops resolving; this is what keeps the obvious edit from
+          # needing it.
           args=()
           while read -r entry || [ -n "$entry" ]; do
+            entry="${entry%%#*}"
+            entry="${entry%"${entry##*[![:space:]]}"}"
             case "$entry" in
-              ''|'#'*) continue ;;
+              '') continue ;;
               *'::'*) args+=("--deselect=$entry") ;;
               *)      args+=("--ignore=$entry") ;;
             esac

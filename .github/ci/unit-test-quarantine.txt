@@ -50,15 +50,26 @@ tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_runtime.py
 
 # ---------------------------------------------------------------------------
-# Executes notebooks through Papermill. These are what `test-chapters`,
-# `test-case-studies` and `test-benchmark` exist to run, against the reader's
-# image and the sub-sampled data; running them here would be the same work
-# twice and hours instead of minutes.
+# Executes notebooks through Papermill, against the reader's image and the
+# sub-sampled data. Running them here would be the same work twice and hours
+# instead of minutes. Each line names the job that does run it.
+#
+# Those jobs are NOT required contexts - only `guards`, `lint` and `test-unit`
+# gate a merge - so a red `cs-*` or `chNN` does not block. Excluding a file here
+# therefore moves it from "gated" to "watched", not to "covered". If the
+# per-case-study jobs are ever dropped or left red, these notebooks go unwatched
+# by a second route, and the subtraction below will not say so.
+#
+# The first three collect nothing but notebook executions, so the whole file
+# goes. `test_model_registry.py` does not: only `test_model_notebook` runs a
+# notebook, and its other nine tests are pure config assertions that finish in
+# 0.07s. Excluding the file threw those away, which is the same
+# exclude-more-than-you-meant defect the subtraction below exists to fix.
 # ---------------------------------------------------------------------------
-tests/test_case_studies.py
-tests/test_chapter_notebooks.py
-tests/test_docker_notebooks.py
-tests/test_model_registry.py
+tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
+tests/test_chapter_notebooks.py                  # chNN (test-chapters)
+tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
+tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other nine tests run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import
