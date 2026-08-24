@@ -174,16 +174,28 @@ _floor = 1.0 / (_n_placebo + 1)
 if _refutation is None:
     _refutation_text = "No temporal refutation p-value was registered for this estimate."
 elif _refutation <= _floor:
-    # At the floor the test has run out of resolution: no placebo reached the observed
-    # effect, so all the permutations establish is p <= 1/(n+1). Reporting the number
-    # without that reads as a strong result when it is an unresolved one.
+    # Reaching the floor is only possible when every placebo fit succeeded and none was
+    # as extreme as the observed effect: p = (1 + exceedances) / (1 + successful), which
+    # is at or below 1/(n+1) only when the numerator is 1 and the denominator is the full
+    # requested count. So the requested count is the right denominator on this branch even
+    # though `empirical_permutation_p` drops placebos whose second stage returned NaN.
+    #
+    # What the floor does NOT establish is that the underlying permutation tail probability
+    # is at most 1/(n+1). That is a property of all permutations; this is a sample of n of
+    # them, and zero exceedances in a sample bounds the sample, not the population.
     _refutation_text = (
-        f"The temporal refutation p-value is **{_refutation:.3f}**, which is the smallest "
-        f"value {_n_placebo} permutations can produce: no placebo reached the observed "
-        f"effect, so the test establishes p <= 1/{_n_placebo + 1} and nothing finer."
+        f"The temporal refutation p-value is **{_refutation:.3f}**, the smallest value "
+        f"{_n_placebo} permutations can produce: every placebo fit succeeded and none was "
+        f"as extreme as the observed effect. This is the Monte Carlo estimate sitting at "
+        f"its resolution floor of 1/{_n_placebo + 1}, not a bound on the permutation tail "
+        f"probability itself - resolving that finer needs more permutations, not a smaller "
+        f"reported number."
     )
 else:
-    _refutation_text = f"The temporal refutation p-value is **{_refutation:.3f}**."
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, a Monte Carlo estimate "
+        f"over {_n_placebo} requested permutations and no finer than that sample supports."
+    )
 
 _effect = causal.metrics["dml_effect"]
 _se = causal.metrics["dml_se_hac"]
