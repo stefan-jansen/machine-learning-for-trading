@@ -55,6 +55,7 @@ from case_studies.research import (
     OfficialPopulation,
     PredictionResult,
     Study,
+    open_study,
 )
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
@@ -146,8 +147,9 @@ elif EXECUTION_TIER == "preview":
         )
     if PREVIEW_MAX_DIAGNOSTICS > PREVIEW_MAX_PREDICTIONS:
         raise ValueError("Preview diagnostics cannot exceed the preview prediction population")
-    study = Study.open(
+    study = open_study(
         CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
         workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
     )
 else:

@@ -44,7 +44,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, plan_models
+from case_studies.research import Study, open_study, plan_models
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT, get_case_study_dir
 
@@ -104,17 +104,24 @@ if FOLD_IDS:
 if PREVIEW_N_FACTORS:
     preview_reductions["n_factors"] = int(PREVIEW_N_FACTORS)
 
+# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
+# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
+# `open_study` handles that by reading inputs in place - `root` stays the release case directory
+# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
+# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
+# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
+# one session then cannot both open a preview workspace.
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")
-    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
 elif EXECUTION_TIER == "preview":
     if not preview_reductions:
         raise ValueError("Preview execution requires at least one declared reduction")
-    study = Study.open(
+    study = open_study(
         CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
         workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-        release_root=REPO_ROOT,
     )
 else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")

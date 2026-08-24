@@ -44,6 +44,7 @@ from case_studies.research import (
     CandidateSet,
     OfficialPopulation,
     Study,
+    open_study,
     plan_backtests,
     run_backtests,
 )
@@ -87,21 +88,28 @@ MAX_SYMBOLS = 0
 
 # %%
 preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
+# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
+# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
+# `open_study` handles that by reading inputs in place - `root` stays the release case directory
+# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
+# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
+# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
+# one session then cannot both open a preview workspace.
 if EXECUTION_TIER == "canonical":
     if preview_filters or PREVIEW_MAX_PREDICTIONS or MAX_SYMBOLS:
         raise ValueError("Canonical execution cannot declare preview reductions")
     if not PREDICTION_SET_NAMES or len(PREDICTION_SET_NAMES) != len(set(PREDICTION_SET_NAMES)):
         raise ValueError("Canonical execution requires unique named prediction sets")
-    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
 elif EXECUTION_TIER == "preview":
     if not preview_filters or PREVIEW_MAX_PREDICTIONS < 1 or MAX_SYMBOLS < 1:
         raise ValueError(
             "Preview execution requires a catalog filter, prediction limit, and symbol limit"
         )
-    study = Study.open(
+    study = open_study(
         CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
         workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-        release_root=REPO_ROOT,
     )
 else:
     raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")

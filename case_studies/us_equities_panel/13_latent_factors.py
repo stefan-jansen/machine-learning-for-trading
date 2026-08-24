@@ -43,7 +43,7 @@ from pathlib import Path
 
 import polars as pl
 
-from case_studies.research import Study
+from case_studies.research import Study, open_study
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
@@ -62,8 +62,9 @@ WORKSPACE = "experiments"
 if EXECUTION_TIER == "canonical":
     study = Study.open(CASE_STUDY_ID)
 elif EXECUTION_TIER == "preview":
-    study = Study.open(
+    study = open_study(
         CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
         workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
     )
 else:

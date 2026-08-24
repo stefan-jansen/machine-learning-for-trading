@@ -46,7 +46,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, plan_models
+from case_studies.research import Study, open_study, plan_models
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT, get_case_study_dir
 
@@ -122,17 +122,24 @@ if PREVIEW_N_EPOCHS:
 if PREVIEW_CHECKPOINT_INTERVAL:
     preview_reductions["checkpoint_interval"] = int(PREVIEW_CHECKPOINT_INTERVAL)
 
+# Both tiers resolve the study through `open_study`, never `Study.open`/`Study.regenerate`
+# directly. In a maintainer worktree the generated directories are symlinks to shared data, and
+# `open_study` handles that by reading inputs in place - `root` stays the release case directory
+# and only writes are redirected to the workspace. `Study.open(workspace=...)` instead puts `root`
+# inside the workspace, so `source = self.root / "labels"` (workspace.py:274) resolves somewhere
+# else and `_ensure_input_link` rejects the link a sibling notebook already made. Two notebooks in
+# one session then cannot both open a preview workspace.
 if EXECUTION_TIER == "canonical":
     if preview_reductions:
         raise ValueError("Canonical execution cannot declare preview reductions")
-    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+    study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER)
 elif EXECUTION_TIER == "preview":
     if not preview_reductions:
         raise ValueError("Preview execution requires at least one declared reduction")
-    study = Study.open(
+    study = open_study(
         CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
         workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-        release_root=REPO_ROOT,
     )
 else:
     raise ValueError("EXECUTION_TIER must be 'canonical' or 'preview'")
@@ -263,6 +270,21 @@ catalog_rows = execution.catalog_rows.select(
     column for column in catalog_columns if column in execution.catalog_rows.columns
 ).sort("config_name", "checkpoint_value", "prediction_hash")
 catalog_rows
+
+# %%
+# %% [markdown]
+# A prediction set can be registered complete and still have scored no dates: cross-sectional IC
+# needs `min_obs` names on a date, so a reduced universe whose symbols do not overlap in time
+# yields `ic_n_days = 0` and a null IC for every checkpoint while coverage stays complete. That is
+# a run that reports nothing and passes. `11_dl_tsmixer` carried a pinned symbol whitelist to avoid
+# it, which repaired one panel and left the condition unchecked; this asserts it instead.
+
+# %% tags=["results"]
+scored = execution.catalog_rows.select("config_name", "checkpoint_value", "ic_mean", "ic_n_days")
+unscored = scored.filter(pl.col("ic_n_days").is_null() | (pl.col("ic_n_days") <= 0))
+if not unscored.is_empty():
+    raise RuntimeError(f"prediction sets scored no dates: {unscored.to_dicts()}")
+scored
 
 # %%
 coverage_rows = []
