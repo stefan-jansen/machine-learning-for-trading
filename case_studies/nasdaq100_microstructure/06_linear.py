@@ -100,7 +100,10 @@ SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study(
-    "nasdaq100_microstructure", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+    "nasdaq100_microstructure",
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="06_linear",
 )
 
 # %% [markdown]
