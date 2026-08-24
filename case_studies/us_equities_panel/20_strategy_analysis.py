@@ -88,17 +88,32 @@ if research_lock.record["candidate_set_hash"] != validation_set.hash:
 #
 # The official analysis restricts the general candidate-set abstraction to one canonical comparison
 # protocol. Each backtest must use the canonical validation price window plus its declared warmup.
+#
+# **The set must hold one label.** Selection here is the deterministic validation rule applied
+# once, and the holdout it leads to is used once - so what the ranking is taken over decides what
+# that single use buys. A set spanning `fwd_ret_1d`, `fwd_ret_5d` and `fwd_ret_21d` would rank a
+# one-day-horizon Sharpe against a twenty-one-day one and spend the holdout on a cross-horizon
+# comparison, which is not the question the funnel asks. `reference/CASE_STUDY_PIPELINE.md`
+# section 4 runs the funnel per label and every other case study compares within one label; this
+# notebook is held to the same rule. Requiring `label_artifact`, `feature_artifacts` and `cv` to be
+# constant across the set is how that is enforced, and it is why the set this notebook opens is one
+# of the per-label sets rather than a union of them.
 
 # %% tags=["results"]
 IDENTITY_PROTOCOL_FIELDS = {"label_artifact", "feature_artifacts", "cv"}
 comparable_fields = set(validation_set.comparison_contract.get("comparable_fields", ()))
-missing_comparable_fields = IDENTITY_PROTOCOL_FIELDS - comparable_fields
-if missing_comparable_fields:
+varying_identity_fields = IDENTITY_PROTOCOL_FIELDS & comparable_fields
+if varying_identity_fields:
     raise ValueError(
-        "validation set does not declare varying input protocols: "
-        f"{sorted(missing_comparable_fields)}"
+        "validation set varies identity fields, so one ranking would compare across labels: "
+        f"{sorted(varying_identity_fields)}"
     )
 validation_protocol = validation_set.comparison_contract.get("protocol", {})
+missing_identity_fields = {
+    field for field in IDENTITY_PROTOCOL_FIELDS if not validation_protocol.get(field)
+}
+if missing_identity_fields:
+    raise ValueError(f"validation set lacks identity fields {sorted(missing_identity_fields)}")
 if (
     validation_protocol.get("split") != "validation"
     or validation_protocol.get("execution_tier") != "canonical"
@@ -125,9 +140,9 @@ for candidate_hash in validation_set.members:
         )
     if any(
         candidate_protocol.get(field) != validation_protocol[field]
-        for field in ("split", "execution_tier")
+        for field in (*IDENTITY_PROTOCOL_FIELDS, "split", "execution_tier")
     ):
-        raise ValueError(f"{candidate_hash} differs from the shared validation protocol")
+        raise ValueError(f"{candidate_hash} differs from the validation input protocol")
     training_spec = candidate.lineage()["training_spec"]
     label = training_spec.get("label")
     if not label:
@@ -318,6 +333,27 @@ if holdout_backtest.spec().get("strategy") != research_lock.record["strategy_spe
 if not holdout_backtest.spec().get("input_identity", {}).get("prices"):
     raise ValueError("holdout backtest lacks canonical price identity")
 
+# %% [markdown]
+# ### Two kinds of check, and why they differ
+#
+# Everything above this point is an **identity** check and demands equality with the lock: the
+# training hash, the projected training specification, the checkpoint, the strategy specification,
+# the prediction lineage and the canonical price identity. Each of those can move a number, so a
+# difference means the holdout result does not belong to the locked research question and the run
+# must stop.
+#
+# The two below are **operational provenance** and demand only presence. `git_commit` and
+# `runtime_json` record which commit and which machine produced a result; they cannot change one.
+# The holdout is evaluated after the lock is written - that is the point of locking - so it
+# legitimately runs from a later commit on a differently-configured machine, and requiring them to
+# equal the lock's would forbid the sequence the protocol prescribes. Requiring them to exist is
+# what remains meaningful: a result with no recorded commit or runtime cannot be traced back to
+# anything.
+#
+# The distinction is not "strict versus lenient". Every field that can change the reported number
+# is checked exactly, and the two that cannot are checked for presence.
+
+# %% tags=["results"]
 holdout_training_record = holdout_training.registry_record()
 holdout_runtime_provenance = json.loads(holdout_training_record.get("runtime_json") or "{}")
 if not holdout_training_record.get("git_commit") or not holdout_runtime_provenance:
