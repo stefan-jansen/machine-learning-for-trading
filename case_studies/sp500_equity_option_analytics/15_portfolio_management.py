@@ -57,6 +57,7 @@ from case_studies.utils.backtest_loaders import (
 )
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.conformal import ensure_conformal_calibration_identity
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     read_predictions,
@@ -185,6 +186,9 @@ for pred_row in top_preds.iter_rows(named=True):
                 },
                 allocation={**alloc, "top_k": top_k, "long_short": bt_config.long_short},
             )
+            # run_backtest resolves the conformal calibration identity into the spec
+            # before registering, so hash the resolved spec or the cache never hits.
+            spec = ensure_conformal_calibration_identity(spec)
             planned.append(
                 {
                     "prediction_hash": pred_row["prediction_hash"],
@@ -255,22 +259,28 @@ alloc_comparison = explorer.compare_allocators(
 alloc_comparison
 
 # %% [markdown]
-# Risk parity has the strongest average Sharpe across the 30
-# prediction-by-concentration combinations. Score weighting is less consistent
-# on average but produces the highest individual allocation result.
+# The table pairs each allocator's mean Sharpe across its prediction-by-concentration
+# combinations with its single strongest one. Read the pair, not either column alone:
+# an allocator can lead on the mean while another owns the peak, and a mean over a
+# handful of combinations moves on one of them.
 
 # %%
 plot_alloc = alloc_comparison.sort("avg_sharpe")
 fig, ax = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
 y = range(len(plot_alloc))
-allocator_labels = {
-    "score_weighted": "Score weighted",
+_ALLOCATOR_NAMES = {
     "inverse_vol": "Inverse volatility",
-    "risk_parity": "Risk parity",
     "mvo_ledoit_wolf": "MVO (Ledoit-Wolf)",
     "hrp": "HRP",
 }
-labels = [allocator_labels[name] for name in plot_alloc["allocator"].to_list()]
+
+
+def allocator_label(method: str) -> str:
+    """Chart label for an allocator declared in `setup.yaml`."""
+    return _ALLOCATOR_NAMES.get(method, method.replace("_", " ").capitalize())
+
+
+labels = [allocator_label(name) for name in plot_alloc["allocator"].to_list()]
 ax.barh(y, plot_alloc["avg_sharpe"], color=COLORS["blue"], alpha=0.82, label="Mean")
 ax.scatter(plot_alloc["best_sharpe"], y, color=COLORS["amber"], s=48, zorder=3, label="Best")
 ax.set_yticks(list(y), labels)
@@ -278,8 +288,8 @@ ax.set_xlabel("Annualized validation Sharpe")
 ax.legend(frameon=False, loc="lower right")
 add_message_title(
     ax,
-    "Risk parity leads on average; score weighting owns the peak",
-    "Thirty primary-label combinations per alternative allocator",
+    "Mean and peak Sharpe for each declared allocator",
+    "Bars: mean across primary-label combinations; points: strongest single one",
 )
 fig.show()
 
@@ -315,9 +325,10 @@ print(f"Equal-weight baseline={baseline_sharpe:.3f}; allocation delta={allocatio
 top_rows.select("source", "prediction_hash", "sharpe", "cagr", "max_drawdown")
 
 # %% [markdown]
-# Five or ten selected stocks preserve NLinear's allocation edge across the
-# eligible alternatives. Expanding to twenty names lowers Sharpe for every
-# allocator, which is consistent with dilution of the cross-sectional ranking.
+# The curve below asks whether the allocation result depends on how many names are
+# held. A Sharpe that falls as the basket widens is what dilution of the
+# cross-sectional ranking looks like; one that is flat says the allocator, not the
+# concentration, is doing the work.
 
 # %%
 winner_curve = explorer.concentration_curve(winner.prediction_hash).filter(
@@ -341,7 +352,7 @@ for color, method in zip(palette, allocation_methods, strict=True):
         marker="o",
         linewidth=1.8,
         color=color,
-        label=allocator_labels[method],
+        label=allocator_label(method),
     )
 ax.axhline(baseline_sharpe, color=COLORS["neutral"], linestyle="--", linewidth=1.2)
 ax.set_xticks(TOP_K_VALUES)
@@ -377,10 +388,12 @@ fig.show()
 #    what allocation contributed. That comparison holds the predictions fixed, which is what
 #    isolates the allocator's effect from the signal's.
 #
-# 4. **`conformal_weighted` is the one allocator that reads the model's uncertainty.** The
-#    others weight by a moment of returns. Where the conformal intervals under-cover out of
-#    time - which `13_model_analysis` measures - this allocator inherits that miscalibration,
-#    so its result should be read beside that coverage rather than on its own.
+# 4. **The declared allocators read three different things.** Score weighting reads the
+#    point prediction, `conformal_weighted` reads the width of its interval, and inverse
+#    volatility, risk parity, MVO and HRP weight by a moment of returns. Where the conformal
+#    intervals under-cover out of time - which `13_model_analysis` measures - only the
+#    interval-width allocator inherits that miscalibration, so read its result beside that
+#    coverage rather than on its own.
 #
 # 5. **These are selection-stage results on a current-constituent universe**, so they carry
 #    survivorship bias and establish no out-of-sample edge. The holdout is untouched here.

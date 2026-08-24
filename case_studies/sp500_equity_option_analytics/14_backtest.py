@@ -512,7 +512,7 @@ fig.show()
 # Sharpe interval** asks whether one return path clears zero on its own. The **effective-rank
 # DSR** asks whether it still clears once the correlated variants tried within its own family
 # and label are counted, which is the number that accounts for the search. **PBO** asks how often
-# the in-sample leader underperforms out of sample; on two validation folds it takes very few
+# the in-sample leader underperforms out of sample; on two validation folds it has very low
 # resolution. These diagnostics support a validation candidate, not an
 # out-of-sample claim.
 

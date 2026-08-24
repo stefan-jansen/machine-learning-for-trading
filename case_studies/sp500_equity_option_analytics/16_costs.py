@@ -376,14 +376,33 @@ print(f"Loaded all {len(cost_results)} planned cost results")
 # smoothly across the grid says the result degrades with cost rather than depending on one cost
 # assumption being right; a curve with a cliff would say the opposite.
 #
-# The interval matters more than the point estimate here. Note the cost at which the lower bound
-# first reaches zero, which comes earlier than the point estimate's own crossing, and treat that
-# as the bound on what the curve supports. Bootstrap noise makes the lower bound non-monotonic
+# The interval matters more than the point estimate here. The cell below reports where each
+# first reaches zero inside the declared grid, and the lower bound's crossing is the one that
+# bounds what the curve supports - the point curve can stay above zero across the whole grid
+# while the band already straddles it. Bootstrap noise makes the lower bound non-monotonic
 # beyond its first crossing, so a later cost where it appears to recover is not a recovery.
 
 # %%
 bps_results = cost_results.filter(pl.col("regime") == "bps").sort("cost_value")
 per_share_results = cost_results.filter(pl.col("regime") == "per_share").sort("cost_value")
+
+
+def first_zero_cost(column: str) -> float | None:
+    """Lowest grid cost at which `column` reaches zero, or None if it never does."""
+    reached = bps_results.filter(pl.col(column) <= 0)
+    return reached["cost_value"].min() if reached.height else None
+
+
+def _crossing(column: str) -> str:
+    cost = first_zero_cost(column)
+    return f"{cost:.0f} bps" if cost is not None else "not within the grid"
+
+
+print(
+    f"Lower bound first reaches zero: {_crossing('sharpe_ci95_lo')}; "
+    f"point Sharpe first reaches zero: {_crossing('sharpe')}; "
+    f"grid runs to {bps_results['cost_value'].max():.0f} bps one-way"
+)
 
 fig, (ax_bps, ax_ps) = plt.subplots(
     2, 1, figsize=FIGSIZE["dual_v"], sharey=True, constrained_layout=True
@@ -451,9 +470,10 @@ fig.show()
 #    curve falls either side of it, because the declared value is itself an assumption.
 #
 # 3. **Read the bootstrap band, not only the point curve.** The cost at which the band's lower
-#    bound first reaches zero is a different and earlier number than the cost at which the point
-#    estimate does, and it is the one that bounds what can be claimed. A point Sharpe still above
-#    zero with a band straddling it is not a strategy shown to clear that cost.
+#    bound first reaches zero is the one that bounds what can be claimed, and the printout above
+#    reports it against the cost at which the point estimate reaches zero, which may lie beyond
+#    the declared grid. A point Sharpe still above zero with a band straddling it is not a
+#    strategy shown to clear that cost.
 #
 # 4. **The per-share convention is exploratory here and is not a second opinion.** A flat dollar
 #    half-spread applied to split-adjusted historical prices conflates split adjustment with

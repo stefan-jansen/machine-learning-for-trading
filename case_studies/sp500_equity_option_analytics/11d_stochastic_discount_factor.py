@@ -490,17 +490,22 @@ show_plotly_with_alt(
 # nothing else. This differs in what is being estimated, and the head that turns a discount factor
 # into a per-stock signal is an extra modelling choice sitting between the estimator and the IC.
 #
-# **Four of the published checkpoints per label were chosen by reading the validation split**, and
-# they are barred from selection for that reason. The library captures its best-validation-loss and
-# best-validation-Sharpe states in each phase, and the bridge publishes them as ordinary population
-# members. An entry whose definition is "the epoch where validation Sharpe was highest", entered
-# into a contest judged on validation Sharpe, wins by construction - and the number it wins with is
-# a maximum over many attempts reported as a single result. If it won, that configuration is what
-# would be replayed on the holdout, which is read once.
+# **Four of the published checkpoints per label were chosen by reading the validation split.** The
+# library captures its best-validation-loss and best-validation-Sharpe states in each phase, and
+# the bridge publishes them as ordinary population members. An entry whose definition is "the epoch
+# where validation Sharpe was highest", entered into a contest judged on validation Sharpe, wins by
+# construction - and the number it wins with is a maximum over many attempts reported as a single
+# result. If it won, that configuration is what would be replayed on the holdout, which is read
+# once.
 #
 # They stay published, because they are what the estimator produced and an edited population is a
-# worse record than an honest one with a rule attached. What changes is that they cannot be
-# selected: [`14_backtest`](14_backtest.ipynb) draws only from the scheduled checkpoints.
+# worse record than an honest one with a rule attached. The rule is that they are not eligible for
+# selection. Downstream ranking does not yet apply it: [`14_backtest`](14_backtest.ipynb) draws
+# from every published checkpoint, because the identifier that would carry the distinction is part
+# of the training and prediction identity, so tagging these rows today would refit every run and
+# re-register every prediction set. Until a provenance-only column carries it, the cell above is
+# where the four are named, and a reader comparing this family with its siblings applies the rule
+# from there.
 #
 # **An adversarial objective has no single stopping point to find.** Two networks improve against
 # each other, so a plateau in one is not a plateau in the system, and the epoch chart is where that
