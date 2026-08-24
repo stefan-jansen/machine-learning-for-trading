@@ -1567,9 +1567,33 @@ case_studies/nasdaq100_microstructure/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
-  timeout: 120
-case_studies/nasdaq100_microstructure/07_gbm:
+  parameters:
+    # Declared here rather than left to the harness default of max_symbols alone.
+    # This is a minute panel: planning resolves one prediction identity per
+    # (symbol, minute, fold), so the cost of the plan tracks the timestamp grid and
+    # cutting the cross-section does not touch it. `folds` is the reduction that does.
+    PREVIEW_REDUCTIONS:
+      folds: [0]
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured after the preview branch stopped re-resolving: slowest cell 211s (the fit),
+  # planning 121s, 342s end to end. Timeout is per cell, so this is ~2.8x the slowest.
+  tier: weekly
   timeout: 600
+case_studies/nasdaq100_microstructure/07_gbm:
+  parameters:
+    # As 06_linear, plus the two axes a boosted fit adds: 20 trees instead of 500,
+    # checkpointed every 10, so the run still exercises the checkpoint dimension the
+    # notebook is about rather than reducing it away.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0]
+      max_iterations: 20
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured the same way: slowest cell 362s, planning 147s, 515s end to end.
+  tier: weekly
+  timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   parameters:
     BATCH_SIZE: 32
