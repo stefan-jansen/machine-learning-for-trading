@@ -220,6 +220,7 @@ _refutation_spec = causal.spec["computation"]["refutation"]
 _block = _refutation_spec["block_size"]
 _window_steps = _refutation_spec["treatment_window_steps"]
 _horizon_steps = _refutation_spec["label_horizon_steps"]
+_n_timestamps = causal.spec["computation"]["analysis_population"]["n_timestamps"]
 if _window_steps is not None and _window_steps > _horizon_steps:
     _bandwidth_text = (
         f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
@@ -227,8 +228,13 @@ if _window_steps is not None and _window_steps > _horizon_steps:
         "quantity. Its HAC bandwidth is `max(label horizon - 1, cube root of the "
         f"decision-time count)`, whose horizon term is {_horizon_steps - 1} on this run. "
         "Neither term refers to the treatment, so whether the bandwidth happens to reach "
-        "across the block is incidental, and its realized value is not registered - "
-        "`causal_runs` stores neither `hac_maxlags` nor the decision-time count. Nor does "
+        "across the block is incidental, and its realized value is not registered. "
+        "`causal_runs` stores no `hac_maxlags`, and the count the cube root is taken over is "
+        "not the one in the spec: the bandwidth counts decision times that survive "
+        "cross-fitting, while the registered "
+        f"`analysis_population.n_timestamps` of {_n_timestamps} counts the whole analysis "
+        "frame, including the first walk-forward block, which yields no out-of-fold "
+        "residuals. Nor does "
         "the mismatch settle which way the standard error would move under a bandwidth that "
         "did span the block: a HAC estimate is not monotonic in its bandwidth, because the "
         "autocovariances a longer one admits can carry either sign, and the treatment's "
