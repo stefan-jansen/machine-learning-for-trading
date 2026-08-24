@@ -727,6 +727,15 @@ jobs:
           ML4T_DATA_PATH: ${{ github.workspace }}/data
           MPLBACKEND: Agg
         run: |
+          # The workflow-level ML4T_OUTPUT_DIR points every get_case_study_dir()
+          # call at /tmp/ml4t-test-output, which the jobs that check out test-data
+          # seed and this one does not. Under it a test resolving a case study's
+          # config/setup.yaml reads a directory that is not there, and 26 tests
+          # across five files failed on exactly that. Unset it here and the same
+          # calls resolve against the source tree, which is what this job has.
+          # The steps above never hit it because none of them reads a case-study
+          # config through the redirect.
+          unset ML4T_OUTPUT_DIR
           args=()
           while read -r entry || [ -n "$entry" ]; do
             case "$entry" in

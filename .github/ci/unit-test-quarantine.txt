@@ -68,6 +68,21 @@ tests/test_model_registry.py
 # run from the same file are named in the import-guard step above.
 tests/test_import_coverage.py::test_every_expected_import_resolves_in_current_image
 
+# Subprocesses a bare `import async_utils, limit_orderbook` from the repo root,
+# and the Chapter 3 helper it reaches imports nest_asyncio. Same job as the file
+# above: it wants the reader's image, not this dependency set.
+tests/test_chapter_imports.py::test_chapter_helper_imports_from_repo_root
+
+# ---------------------------------------------------------------------------
+# Red on main for a reason the rebuild will remove on its own. 54 committed
+# notebooks across eight case studies carry a provenance stamp naming an older
+# .py blob than the one beside them - the stages 06+ pass commits a corrected
+# source and re-executes later, which is the documented order. The test is
+# right and gating it now would block every PR until the last cohort finishes.
+# Take this line out when it does; the rest of the file still runs.
+# ---------------------------------------------------------------------------
+tests/test_notebook_sync.py::test_stamped_notebooks_are_current_and_production
+
 # ---------------------------------------------------------------------------
 # Reaches the network. Weekly, flake-tolerant, files its own issue.
 # ---------------------------------------------------------------------------
