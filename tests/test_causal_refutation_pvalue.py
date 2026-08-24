@@ -1,11 +1,19 @@
-"""The two properties the block-permutation refutation rests on.
+"""The three properties the block-permutation refutation rests on.
 
-Both were broken together, and the pair is what made the test easy to pass and
-its result impossible: `block_size` was taken from `embargo_periods`, so at the
-common `embargo_periods = 1` the "block" permutation was an iid shuffle that
-destroys exactly the serial dependence the placebo is supposed to keep; and the
-p-value omitted the plus-one correction, so a run in which no placebo reached
-the observed effect published `p = 0.000`.
+All three were broken together, which is what made the test easy to pass and its
+result impossible to read:
+
+- The block was sized by the label horizon alone. On this panel the horizon, the
+  embargo and the cadence all coincide at one bar, so the "block" permutation was
+  a full within-symbol shuffle - destroying exactly the serial dependence the
+  placebo exists to keep - even though the treatment is a 14-day z-score
+  autocorrelated over 42 bars. The block now spans the longer of the two scales;
+  `tests/test_causal_adapter.py` pins that resolution.
+- The p-value omitted the plus-one correction, so a run in which no placebo
+  reached the observed effect published `p = 0.000`.
+- The pass/fail label was emitted at placebo counts too small to produce it. With
+  the correction in place, fewer than 20 successful placebos cannot score below
+  5 %, so the label read "Fails" regardless of the data.
 """
 
 from __future__ import annotations
@@ -14,7 +22,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from case_studies.utils.causal import block_permute, empirical_permutation_p
+from case_studies.utils.causal import (
+    REFUTATION_UNRESOLVED,
+    block_permute,
+    classify_refutation,
+    empirical_permutation_p,
+)
 
 
 class TestEmpiricalPermutationP:
@@ -97,3 +110,30 @@ class TestBlockSizePreservesDependence:
         assert sorted(permuted) == sorted(arr)
         # Four blocks of six: five of every six steps stay contiguous.
         assert adjacent >= len(arr) - len(arr) // block - 1
+
+
+class TestClassificationResolution:
+    """A pass/fail label is only meaningful when the placebo count can produce it.
+
+    With the plus-one correction the smallest attainable p-value is
+    `1 / (n + 1)`, so below 20 successful placebos every run scores at or above
+    5 % and the label reads "Fails" whatever the data show.
+    """
+
+    @pytest.mark.parametrize("n_placebo", [1, 10, 19])
+    def test_too_few_placebos_report_no_resolution_rather_than_a_verdict(
+        self, n_placebo: int
+    ) -> None:
+        smallest_attainable = 1.0 / (n_placebo + 1)
+
+        assert classify_refutation(smallest_attainable, n_placebo) == REFUTATION_UNRESOLVED
+
+    def test_twenty_placebos_are_enough_to_decide(self) -> None:
+        """1/21 is below 5 %, so the smallest attainable p-value can now pass."""
+        assert classify_refutation(1.0 / 21, 20) == "Passes"
+        assert classify_refutation(0.5, 20) == "Fails"
+
+    def test_the_count_is_optional_so_the_notebook_callers_keep_working(self) -> None:
+        """Seven case-study notebooks call this with the p-value alone."""
+        assert classify_refutation(0.01) == "Passes"
+        assert classify_refutation(0.5) == "Fails"

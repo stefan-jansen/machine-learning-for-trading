@@ -69,6 +69,7 @@ from case_studies.utils.sequence_dataset import (
 # Configuration
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
+from utils.paths import REPO_ROOT
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
@@ -2394,7 +2395,14 @@ def run_dl_cv(
             _save_parquet(save_dir / "learning_curves.parquet", learning_curves)
         if training_log_df.height > 0:
             _save_parquet(save_dir / "training_log.parquet", training_log_df)
-        print(f"  Saved to {save_dir}")
+        # Relative to the repo when it sits under it: an absolute path here is the
+        # author's worktree name, which then ships inside the committed notebook
+        # outputs and points at a directory the reader does not have.
+        try:
+            shown = save_dir.resolve().relative_to(REPO_ROOT)
+        except ValueError:
+            shown = save_dir
+        print(f"  Saved to {shown}")
 
     # Note: per-config registration happens incrementally inside the per-config
     # aggregation loop above (right after each config's best_epoch is computed).

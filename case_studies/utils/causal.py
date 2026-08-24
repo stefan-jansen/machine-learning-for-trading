@@ -35,6 +35,7 @@ import importlib.metadata
 import json
 import platform
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -532,6 +533,8 @@ def manual_dml_timeseries(
 
 
 REFUTATION_ALPHA = 0.05
+# The label a refutation gets when the placebo count cannot resolve REFUTATION_ALPHA.
+REFUTATION_UNRESOLVED = "Below resolution"
 
 
 def _assert_placebo_moved(original: np.ndarray, permuted: np.ndarray, block_size: int) -> None:
@@ -582,14 +585,22 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
     return (1.0 + at_least_as_extreme) / (1.0 + placebo.size)
 
 
-def classify_refutation(empirical_p: float) -> str:
+def classify_refutation(empirical_p: float, n_placebo: int | None = None) -> str:
     """Binary pass/fail of the block-permutation refutation test at 5 %.
 
     Returns "Passes" if the empirical placebo p-value is below 5 %
     (the observed effect cannot be reproduced by permutation in
     most placebo runs); "Fails" otherwise. Always read the raw
     `empirical_p` alongside the label.
+
+    Pass ``n_placebo`` and the test reports when it has no resolution to decide
+    with. The plus-one correction puts the smallest attainable p-value at
+    ``1 / (n_placebo + 1)``, so below 20 successful placebos even a placebo
+    distribution that never reaches the observed effect scores above 5 % and the
+    label would read "Fails" whatever the data show.
     """
+    if n_placebo is not None and 1.0 / (n_placebo + 1) >= REFUTATION_ALPHA:
+        return REFUTATION_UNRESOLVED
     return "Passes" if empirical_p < REFUTATION_ALPHA else "Fails"
 
 
@@ -791,7 +802,7 @@ def run_dml_analysis(
             p_std = np.std(placebo_arr)
             z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
             emp_p = empirical_permutation_p(placebo_arr, dml_effect)
-            ref_class = classify_refutation(emp_p)
+            ref_class = classify_refutation(emp_p, len(placebo_effects))
             refutation = {
                 "z_score": z,
                 "empirical_p": emp_p,
@@ -847,7 +858,10 @@ def format_dml_summary(results: dict) -> str:
 
     ref = results.get("refutation", {})
     if ref:
-        ref_class = ref.get("refutation_class", classify_refutation(ref["empirical_p"]))
+        ref_class = ref.get(
+            "refutation_class",
+            classify_refutation(ref["empirical_p"], ref.get("n_successful")),
+        )
         lines += [
             "",
             "Refutation (block permutation):",
@@ -918,6 +932,28 @@ def _observed_cadence(frame, timestamp: str) -> pd.Timedelta:
     if cadence <= pd.Timedelta(0):
         raise ValueError("causal observation cadence must be positive")
     return pd.Timedelta(cadence)
+
+
+def _treatment_persistence_steps(setup: dict[str, Any], treatment: str) -> int | None:
+    """Bars the treatment's own construction window spans, from `features.windows`.
+
+    A 14-day z-score is autocorrelated over its whole window whatever the label
+    horizon is, so a placebo that permutes in blocks shorter than that window
+    destroys the dependence the permutation exists to preserve. `setup.yaml`
+    already declares every window once, keyed by the suffix the emitted column
+    carries, so the number is read from there rather than parsed out of the
+    column name. Returns None when the register declares no window for this
+    treatment, which the caller records rather than papers over.
+    """
+    windows = (setup.get("features") or {}).get("windows") or {}
+    for family, suffixes in windows.items():
+        prefix = f"{family}_"
+        if not treatment.startswith(prefix):
+            continue
+        declared = (suffixes or {}).get(treatment[len(prefix) :])
+        if declared is not None:
+            return max(1, int(declared))
+    return None
 
 
 def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], seed: int):
@@ -1022,6 +1058,26 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(analysis, mds.date_col)
     horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
+    # Two separate scales create the serial dependence the placebo has to
+    # preserve, and the block has to span the longer of them: the overlapping
+    # labels span the horizon, and the treatment's own construction window spans
+    # itself. On this panel the label horizon is one bar and the treatment is a
+    # 14-day z-score over 42, so sizing the block by the horizon alone would
+    # permute in blocks of one - the iid shuffle `block_permute` exists to avoid.
+    treatment_window_steps = _treatment_persistence_steps(setup, treatment)
+    if treatment_window_steps is None:
+        warnings.warn(
+            f"{study.case_study}: features.windows declares no construction window for "
+            f"treatment {treatment!r}, so the placebo block spans only the label horizon "
+            f"({horizon_steps} bars). If the treatment is a rolling statistic, declare its "
+            "window so the block can span it.",
+            UserWarning,
+            stacklevel=2,
+        )
+    block_size = max(horizon_steps, treatment_window_steps or 1)
+    block_size_basis = (
+        "treatment_window" if block_size == treatment_window_steps else "label_horizon"
+    )
     # The cadence is already measured on the frame being analysed, so the embargo
     # is counted against it rather than against an assumed bar size. Leaving the
     # fallback here would make the embargo short by the ratio between the two on
@@ -1067,9 +1123,13 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         "refutation": {
             "method": "within_symbol_contiguous_block_permutation",
             "n_placebo": n_placebo,
-            "block_size": horizon_steps,
+            "block_size": block_size,
+            "block_size_basis": block_size_basis,
+            "label_horizon_steps": horizon_steps,
+            "treatment_window_steps": treatment_window_steps,
             "seed": seed,
             "temporal_gap_policy": "reset",
+            "temporal_gap_tolerance_cadences": GAP_TOLERANCE_CADENCES,
             "observation_cadence": str(cadence),
         },
         "analysis_population": {
@@ -1104,19 +1164,12 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         n_folds=n_folds,
         embargo=embargo,
         n_placebo=n_placebo,
-        # The block spans the label horizon, because the overlapping labels are
-        # what create the serial dependence the permutation exists to preserve -
-        # the same scale the second-stage HAC bandwidth uses (L >= h - 1).
-        #
-        # It is named `horizon_steps` rather than `embargo` even though the two
-        # are equal here: `embargo` is `embargo_from_buffer(mds.label_buffer,
-        # observed_step=cadence)`, which is `horizon_steps` by construction, so
-        # this is a rename and no result moves. Naming it for the horizon is what
-        # keeps it correct if the embargo ever stops being derived from the label
-        # buffer. The five case-study notebooks that call `run_dml_analysis`
-        # directly take `BLOCK_SIZE = EMBARGO_PERIODS` from the *fallback*
-        # conversion, with no `observed_step`, and there the two can diverge.
-        block_size=horizon_steps,
+        # Resolved above as the longer of the label horizon and the treatment's
+        # own construction window, with the basis recorded in the spec. Sizing it
+        # by the horizon alone gave `block_size = 1` on this panel, because
+        # `embargo`, `horizon_steps` and the cadence all coincide at one bar there
+        # - a full within-symbol shuffle wearing the name of a block permutation.
+        block_size=block_size,
         seed=seed,
         horizon=horizon_steps,
         expected_step=cadence,
