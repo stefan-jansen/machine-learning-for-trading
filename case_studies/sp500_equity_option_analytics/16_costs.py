@@ -19,7 +19,7 @@
 # This notebook stress-tests the leading eligible allocation lineage under two
 # execution-cost conventions. The headline curve charges a percentage of
 # traded notional. The companion curve uses a per-share commission plus a flat
-# dollar half-spread. Both are validation-only diagnostics computed on validation data.
+# dollar half-spread. Both are diagnostics computed on validation data.
 #
 # **Learning objectives**
 #

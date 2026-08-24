@@ -125,12 +125,12 @@ declared_labels(study, "latent_factors")
 # unconditional budget: conditional epoch *e* is published as `256 + e`. The unconditional phase is
 # only 256 epochs long, so exactly one scheduled checkpoint falls inside it.
 #
-# **Four further checkpoints are published whose numbers are not epochs at all.** The library also
-# captures, in each phase, the state with the lowest validation loss and the state with the highest
-# validation Sharpe, and the bridge maps those onto zero and the negative integers. A row whose
-# `checkpoint_value` is `0`, `-1`, `-2` or `-3` is therefore one of those, and not something that
-# happened at an epoch. Section 4 separates them, and section 5 says why the distinction matters more
-# than a labelling convention.
+# **The library also keeps four states per fit that are not epochs, and none of them is published.**
+# It captures, in each phase, the state with the lowest validation loss and the state with the
+# highest validation Sharpe. `library_bridge.py:691-701` maps those onto zero and the negative
+# integers so that two training phases fit on one axis, but the schedule that decides what gets
+# registered is built from the physical epochs alone, so the four are computed and discarded. Section
+# 5 says why that is the right disposal and why the axis they were packed onto is still a trap.
 #
 # `config/setup.yaml` restates `checkpoint_epochs` under `modeling.latent_factors.model_kwargs.sdf`
 # along with `beta_checkpoint_epochs` and `beta_default_checkpoint`, which govern the separate head
@@ -199,9 +199,9 @@ print("macro context: resolved by the adapter for sdf, and hashed into the reque
 #   [`05_evaluation`](05_evaluation.ipynb) established.
 # - **`validation_start` and `validation_end` bracket the development sample**, with none of the
 #   held-out 2021 tail visible.
-# - **`checkpoints` counts both kinds** - the scheduled epochs and the validation-selected states -
-#   so it is larger than the four entries `checkpoint_epochs` declares. Read it here rather than
-#   inferring it from the configuration.
+# - **`checkpoints` is larger than the four entries `checkpoint_epochs` declares**, because both
+#   training phases draw from that one list and the conditional phase's epochs are published offset
+#   by the unconditional budget. Read it here rather than inferring it from the configuration.
 
 # %%
 requests = model_requests(
@@ -335,48 +335,37 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # `fwd_dir_10d`. `fwd_ret_risk_adj_5d` declares no sibling and carries no AUC; null there means not
 # computed, not zero.
 #
-# `checkpoint_selection` is added here rather than read from the registry. It separates the rows
-# whose checkpoint number is an epoch from the four per label whose number encodes a state the
-# library chose by reading the validation split.
-#
-# **It is derived from the sign of `checkpoint_value`, which is a weaker thing to depend on than it
-# looks.** The four validation-selected states are packed onto the non-positive integers by
-# `library_bridge.py:691-701`, and that packing is a consequence of flattening two training phases
-# onto one axis - not something the registry records or promises. A provenance column naming them
-# is the durable form of this distinction and is being added upstream; this expression is what it
-# replaces.
+# Every published `checkpoint_value` has to be a positive epoch, and the cell below refuses the
+# catalog if one is not. The four validation-chosen states are packed onto zero and the negative
+# integers, so a non-positive value here would mean one of them reached the registry - and it would
+# then compete, on validation IC and later on validation Sharpe, against epochs that were not chosen
+# by reading that split.
 #
 # The published catalog is checked against the population planned before fitting rather than against
 # its own row count, because a run that lost a member would otherwise report a shorter table and
 # nothing else.
 
 # %% tags=["results"]
-catalog = (
-    execution.catalog_rows.select(
-        "config_name",
-        "label",
-        "task",
-        "complete",
-        "checkpoint_kind",
-        "checkpoint_value",
-        "ic_mean",
-        "ic_std",
-        "ic_t",
-        "ic_n_days",
-        "auc_mean_daily",
-        pl.col("direction_label").alias("auc_scored_against"),
-        "n_folds",
-        "training_hash",
-        "prediction_hash",
-    )
-    .with_columns(
-        # Reads the packing, not a field. See the note above.
-        checkpoint_selection=pl.when(pl.col("checkpoint_value") > 0)
-        .then(pl.lit("scheduled epoch"))
-        .otherwise(pl.lit("validation-selected"))
-    )
-    .sort("label", "checkpoint_value")
-)
+catalog = execution.catalog_rows.select(
+    "config_name",
+    "label",
+    "task",
+    "complete",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "ic_mean",
+    "ic_std",
+    "ic_t",
+    "ic_n_days",
+    "auc_mean_daily",
+    pl.col("direction_label").alias("auc_scored_against"),
+    "n_folds",
+    "training_hash",
+    "prediction_hash",
+).sort("label", "checkpoint_value")
+
+if catalog.filter(pl.col("checkpoint_value") <= 0).height:
+    raise RuntimeError("a validation-chosen SDF state reached the published population")
 
 if set(catalog.get_column("prediction_hash")) != set(plan.expected_prediction_hashes):
     raise RuntimeError("the published catalog differs from the population planned before fitting")
@@ -396,7 +385,6 @@ print(f"{catalog.height} candidate models across {len(ordered_labels)} labels")
 catalog.select(
     "label",
     "checkpoint_value",
-    "checkpoint_selection",
     "ic_mean",
     "ic_std",
     "ic_t",
@@ -406,46 +394,18 @@ catalog.select(
 )
 
 # %% [markdown]
-# ### The two kinds of checkpoint, side by side
-#
-# One row per label and kind. The comparison the table invites is between the two `ic_mean` columns
-# for the same label: the validation-selected states were chosen to be good on the very split the IC
-# is measured on, so they should be at least as strong as the scheduled epochs. Whether they are is
-# a check on the machinery and not a result about the model.
-#
-# `ic_t` is a Newey-West HAC statistic on the daily IC series. It is a diagnostic and not a
-# selection rule - the series is short, overlapping multi-day returns make successive days
-# dependent, and the folds have been read many times over by the time a case study reaches this
-# notebook.
-
-# %% tags=["results"]
-by_selection = (
-    catalog.group_by("label", "checkpoint_selection")
-    .agg(
-        checkpoints=pl.len(),
-        ic_high=pl.col("ic_mean").max(),
-        ic_low=pl.col("ic_mean").min(),
-        ic_t_at_high=pl.col("ic_t").sort_by("ic_mean").last(),
-        scored_dates=pl.col("ic_n_days").first(),
-    )
-    .sort("label", "checkpoint_selection")
-)
-by_selection
-
-# %% [markdown]
 # ### Where the schedule went
 #
-# Scheduled checkpoints only, one line per label, against the published epoch number. The four
-# validation-selected states have no position on this axis and are left out rather than placed at
-# zero, which would put a state chosen on validation data in the middle of a training trajectory and
-# invite it to be read as an epoch. The shared axis keeps the distance between labels readable
-# instead of each panel filling itself.
+# One line per label, against the published epoch number. `ic_t` in the table above is a Newey-West
+# HAC statistic on the daily IC series; it is a diagnostic and not a selection rule, because the
+# series is short, overlapping multi-day returns make successive days dependent, and the folds have
+# been read many times over by the time a case study reaches this notebook. The shared axis keeps
+# the distance between labels readable instead of each panel filling itself.
 
 # %%
-scheduled = catalog.filter(pl.col("checkpoint_selection") == "scheduled epoch")
 fig = go.Figure()
 for label in ordered_labels:
-    rows = scheduled.filter(pl.col("label") == label).sort("checkpoint_value")
+    rows = catalog.filter(pl.col("label") == label).sort("checkpoint_value")
     fig.add_trace(
         go.Scatter(
             x=rows.get_column("checkpoint_value").to_list(),
@@ -469,7 +429,7 @@ fig.update_layout(
 # a shape the next run may not reproduce.
 spans = "; ".join(
     f"{row['label']} spans {row['lo']:+.4f} to {row['hi']:+.4f}"
-    for row in scheduled.group_by("label")
+    for row in catalog.group_by("label")
     .agg(lo=pl.col("ic_mean").min(), hi=pl.col("ic_mean").max())
     .sort("label")
     .iter_rows(named=True)
@@ -477,7 +437,7 @@ spans = "; ".join(
 show_plotly_with_alt(
     fig,
     "Line chart of mean validation information coefficient against the published checkpoint number, "
-    "scheduled checkpoints only, one line per label on one axis, the primary target in dark navy "
+    "one line per label on one axis, the primary target in dark navy "
     f"and the two variants in light slate, with a dashed zero line. Counted from the frame: {spans}.",
 )
 
@@ -490,22 +450,20 @@ show_plotly_with_alt(
 # nothing else. This differs in what is being estimated, and the head that turns a discount factor
 # into a per-stock signal is an extra modelling choice sitting between the estimator and the IC.
 #
-# **Four of the published checkpoints per label were chosen by reading the validation split.** The
-# library captures its best-validation-loss and best-validation-Sharpe states in each phase, and
-# the bridge publishes them as ordinary population members. An entry whose definition is "the epoch
-# where validation Sharpe was highest", entered into a contest judged on validation Sharpe, wins by
-# construction - and the number it wins with is a maximum over many attempts reported as a single
-# result. If it won, that configuration is what would be replayed on the holdout, which is read
-# once.
+# **The four states the library chose by reading validation are not in the population, and that is
+# the point.** An entry whose definition is "the epoch where validation Sharpe was highest", entered
+# into a contest judged on validation Sharpe, wins by construction - and the number it wins with is
+# a maximum over many attempts reported as a single result. If it won, that configuration is what
+# would be replayed on the holdout, which is read once. The schedule that decides what gets
+# registered is built from the physical epochs alone, so this cannot happen, and the guard in
+# section 3 fails the catalog rather than trusting that it stayed true.
 #
-# They stay published, because they are what the estimator produced and an edited population is a
-# worse record than an honest one with a rule attached. The rule is that they are not eligible for
-# selection. Downstream ranking does not yet apply it: [`14_backtest`](14_backtest.ipynb) draws
-# from every published checkpoint, because the identifier that would carry the distinction is part
-# of the training and prediction identity, so tagging these rows today would refit every run and
-# re-register every prediction set. Until a provenance-only column carries it, the cell above is
-# where the four are named, and a reader comparing this family with its siblings applies the rule
-# from there.
+# **The axis those states were packed onto is still a trap, and the sign of `checkpoint_value` is
+# not a safe test.** `library_bridge.py:691-701` flattens two training phases onto one integer, which
+# puts one validation-chosen state on `0` - the same value IPCA legitimately publishes for its single
+# fit. A `< 0` filter would keep the most dangerous of the four and a `<= 0` filter would throw away
+# a sibling's only checkpoint. Anything that needs to identify a checkpoint's kind reads the
+# library's named constants, never the arithmetic.
 #
 # **An adversarial objective has no single stopping point to find.** Two networks improve against
 # each other, so a plateau in one is not a plateau in the system, and the epoch chart is where that

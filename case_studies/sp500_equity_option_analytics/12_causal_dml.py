@@ -205,13 +205,20 @@ merged_clean = (
 # Two quantities follow from the label buffer, and they answer different questions. The
 # **embargo** separates a fold's training window from its test window, so a label measured in
 # training cannot still be running when testing starts. The **permutation block size** is the
-# scale of the dependence the placebo has to preserve: shuffling in blocks shorter than the
-# label horizon pulls overlapping labels apart, and the placebo degrades towards an
-# independent draw - the permutation that is too easy to pass and therefore proves nothing.
+# scale of the dependence the placebo has to preserve: shuffling in blocks shorter than that
+# scale pulls dependent observations apart, and the placebo degrades towards an independent
+# draw - the permutation that is too easy to pass and therefore proves nothing.
 #
-# They are equal in this case study because the same buffer sets both. They are assigned
-# separately below so that stays a fact about this case study rather than an assumption
-# buried in a shared name.
+# **Two scales qualify, and the block size below covers only one of them.** The label horizon is
+# how long an outcome stays open. The treatment has its own persistence: `ivrv_spread` carries a
+# rolling realized-volatility window, so consecutive values are dependent over that window
+# regardless of the label. A block sized to the label horizon alone is shorter than the
+# treatment's own dependence, and a refutation run at that size is easier to pass than the
+# estimate deserves. Read the refutation below with that in mind.
+#
+# The embargo and the block size are equal in this case study because the same buffer sets both.
+# They are assigned separately below so that stays a fact about this case study rather than an
+# assumption buried in a shared name.
 
 # %%
 LABEL_HORIZON = embargo_from_buffer(mds.label_buffer)

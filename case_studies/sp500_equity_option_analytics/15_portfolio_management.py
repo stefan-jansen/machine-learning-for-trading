@@ -16,16 +16,16 @@
 # %% [markdown]
 # # S&P 500 Equity+Options: Portfolio Allocation
 #
-# This notebook advances the ten best primary-label model configurations from
-# the equal-weight baseline and tests five point-in-time allocation methods. It
-# asks whether portfolio sizing improves validation performance without
-# changing the prediction model or consulting the holdout.
+# This notebook advances the highest-ranked primary-label model configurations
+# from the equal-weight baseline and tests the point-in-time allocation methods
+# `setup.yaml` declares. It asks whether portfolio sizing improves validation
+# performance without changing the prediction model or consulting the holdout.
 #
 # **Learning objectives**
 #
 # 1. Apply the top-ten, one-checkpoint-per-configuration selection funnel.
-# 2. Compare score weighting, inverse volatility, risk parity, MVO, and HRP on
-#    the same validation predictions.
+# 2. Compare score weighting, conformal weighting, inverse volatility, risk
+#    parity, MVO and HRP on the same validation predictions.
 # 3. Measure how the number of selected stocks changes allocation performance.
 # 4. Separate a validation improvement from evidence of out-of-sample efficacy.
 #
@@ -367,7 +367,7 @@ ax.legend(
 )
 add_message_title(
     ax,
-    "Most allocators preserve NLinear's edge at five to ten names",
+    "How each allocator's Sharpe moves as the basket widens",
     f"Dashed line: equal-weight baseline Sharpe {baseline_sharpe:.3f}",
 )
 fig.show()

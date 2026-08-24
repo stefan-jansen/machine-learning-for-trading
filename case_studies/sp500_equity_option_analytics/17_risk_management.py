@@ -490,7 +490,7 @@ ax_tradeoff.set_ylabel("Annualized validation Sharpe")
 ax_tradeoff.legend(frameon=False)
 add_message_title(
     ax_tradeoff,
-    "Where each rule lands on return against drawdown depth",
+    "Where each rule lands on Sharpe against drawdown depth",
     "Higher is better; farther left means a shallower drawdown",
 )
 
