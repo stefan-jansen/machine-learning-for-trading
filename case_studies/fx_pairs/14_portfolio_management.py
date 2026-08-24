@@ -389,23 +389,15 @@ def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:
     return {prefix: value}
 
 
-def _non_allocation_projection(spec: dict[str, Any]) -> dict[str, Any]:
+def _non_allocation_projection(spec: dict[str, Any], *, drop_prices: bool) -> dict[str, Any]:
     projected = deepcopy(spec)
     projected.pop("chapter", None)
     projected.pop("_runtime_backtest_config", None)
-    allocation = projected.get("strategy", {}).pop("allocation", None)
+    projected.get("strategy", {}).pop("allocation", None)
     metadata = projected.get("backtest_config", {}).get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
-    # input_identity.prices is a function of the allocation, not something held constant
-    # across it. A moment allocator declares a warmup, load_backtest_prices_for leaves the
-    # start of the window unconstrained by that many periods, and the frame it returns
-    # therefore digests differently from the equal-weight baseline's - by design, and the
-    # extra prefix is consumed by the rolling window without entering return aggregation.
-    # Comparing it for those allocators reports the warmup as a changed input. Where the
-    # allocator declares no warmup both sides load the same window, and there the digest is
-    # a real check that the allocation did not move the price input, so it is still made.
-    if allocation and strategy_warmup_periods({"allocation": allocation}):
+    if drop_prices:
         projected.get("input_identity", {}).pop("prices", None)
     return projected
 
@@ -423,8 +415,26 @@ for result in allocation_results:
         raise RuntimeError(
             f"allocation {result.hash} resolved to {len(siblings)} equal-weight siblings"
         )
-    allocation_projection = _non_allocation_projection(result.spec())
-    baseline_projection = _non_allocation_projection(siblings[0].spec())
+    # input_identity.prices is a function of the allocation, not something held constant
+    # across it. A moment allocator declares a warmup, load_backtest_prices_for leaves the
+    # start of the load window unconstrained by that many periods, and the frame it returns
+    # digests differently from the equal-weight baseline's - by design, with the extra
+    # prefix consumed by the rolling window and excluded from return aggregation.
+    #
+    # The decision is taken once, from the allocation, and applied to both sides. Asking
+    # each spec about its own allocation drops the key from the allocation projection and
+    # keeps it in the baseline's, so the two differ on the key's presence rather than its
+    # value - a comparison made unequal by the very step meant to make it fair.
+    #
+    # Where the allocator declares no warmup both sides load the same window, and the
+    # digest is a real check that the allocation did not move the price input.
+    drop_prices = bool(
+        strategy_warmup_periods({"allocation": result.spec()["strategy"].get("allocation")})
+        if result.spec()["strategy"].get("allocation")
+        else 0
+    )
+    allocation_projection = _non_allocation_projection(result.spec(), drop_prices=drop_prices)
+    baseline_projection = _non_allocation_projection(siblings[0].spec(), drop_prices=drop_prices)
     if allocation_projection != baseline_projection:
         # Naming the fields is the difference between a check and a diagnosis. The
         # projections are nested, so compare the flattened leaves and report only the
