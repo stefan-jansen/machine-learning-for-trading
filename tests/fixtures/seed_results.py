@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from case_studies.utils.registry.specs import IDENTITY_VERSION
-from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
+from case_studies.utils.registry.store import _open_registry
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 CS_ROOT = REPO_ROOT / "case_studies"
@@ -391,10 +391,75 @@ def _add_cohort_metrics_table(db_path: Path) -> None:
     db.close()
 
 
+def _upgrade_seeded_registry(cs_dir: Path) -> None:
+    """Bring a registry copied out of test-data up to the canonical schema and identity.
+
+    `_open_registry` is the function production uses to open any registry: it migrates
+    an old one, then runs REGISTRY_SCHEMA_SQL, then declares the uncertainty columns. So
+    the tables and columns a shipped registry lacks are added by the same code that
+    would add them in a real run, rather than by a copy of it that can drift.
+
+    What the schema cannot supply is the values. A registry written before
+    `identity_version` existed carries NULL there, which the catalog reads as "legacy"
+    and therefore never complete, and it has no coverage row at all. Both are backfilled
+    here for rows that lack them, and only for those - a row that already records its
+    identity is left alone.
+    """
+    db = _open_registry(cs_dir)
+    try:
+        db.execute(
+            "UPDATE training_runs SET identity_version = ? WHERE identity_version IS NULL",
+            (IDENTITY_VERSION,),
+        )
+        db.execute(
+            "UPDATE training_runs SET execution_tier = 'canonical' WHERE execution_tier IS NULL"
+        )
+        uncovered = db.execute(
+            """SELECT p.prediction_hash, COUNT(f.fold_id)
+               FROM prediction_sets p
+               LEFT JOIN fold_metrics f ON f.prediction_hash = p.prediction_hash
+               WHERE p.prediction_hash NOT IN (SELECT prediction_hash FROM prediction_coverage)
+               GROUP BY p.prediction_hash"""
+        ).fetchall()
+        for p_hash, n_folds in uncovered:
+            # n_folds_expected must equal the fold_metrics rows actually present: the
+            # catalog compares the two, so a constant here would mark a row incomplete
+            # for the opposite reason.
+            db.execute(
+                """INSERT OR IGNORE INTO prediction_coverage
+                   (prediction_hash, expected_key_digest, actual_key_digest,
+                    n_expected, n_actual, n_duplicates, n_missing, n_extra,
+                    n_null, n_non_finite, n_folds_expected, n_folds_actual,
+                    schema_json, artifact_digest, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    p_hash,
+                    _make_hash(f"keys/{p_hash}"),
+                    _make_hash(f"keys/{p_hash}"),
+                    100,
+                    100,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    n_folds,
+                    n_folds,
+                    json.dumps({"symbol": "String", "timestamp": "Date"}),
+                    _make_hash(f"artifact/{p_hash}"),
+                    "complete",
+                ),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
 def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
     """Create a minimal registry.db with entries for all families and stages.
 
-    The schema IS REGISTRY_SCHEMA_SQL, executed directly, so it cannot drift from it.
+    The schema comes from `_open_registry`, the function production uses, so it cannot
+    drift from the canonical one.
     Creates entries that utils.case_study_analytics and utils.model_analysis
     can query without crashing.
     """
@@ -427,7 +492,14 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
             )
 
             if has_core and has_all_tables and bm_wide and fm_wide and pm_wide:
-                return  # Fully current schema — don't overwrite
+                # NOT a return. "Fully current" here is five hand-picked columns, and
+                # every one of the nine registries shipped in test-data satisfies all
+                # five while missing thirteen tables and two columns. Returning on that
+                # check is why #893's first fix changed nothing: the canonical DDL below
+                # is only reached when no registry was copied in, which is not the path
+                # conftest takes. Bring the copied registry up to schema instead.
+                _upgrade_seeded_registry(cs_dir)
+                return
 
             # Schema present but missing cohort_metrics — add it without
             # rebuilding the entire registry (preserves seeded rows).
@@ -454,14 +526,13 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
             db_path.unlink(missing_ok=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    db = sqlite3.connect(str(db_path))
+    db = _open_registry(cs_dir)
     # The canonical schema itself, not a restatement of it. This block used to repeat
     # nine CREATE TABLE statements under a docstring promising they matched
     # REGISTRY_SCHEMA_SQL "exactly", with nothing checking that promise. They had
     # drifted by thirteen tables - every research-boundary table, prediction_coverage
     # among them - and by training_runs.identity_version, so a notebook on the research
     # API resolved an empty catalog from a fixture that looked fully populated (#893).
-    db.executescript(REGISTRY_SCHEMA_SQL)
 
     # IC values per family (realistic ordering: gbm > linear > dl > others)
     ic_values = {
