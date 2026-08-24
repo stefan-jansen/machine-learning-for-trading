@@ -226,7 +226,9 @@ if catalog.height != requests.height or catalog.filter(~pl.col("complete")).heig
 # Read each line for its slope rather than its level. The slope is how much of the result is a
 # claim about execution quality; the gap between the two universes at the same fraction is what
 # the liquidity restriction buys. Whether any line clears zero by enough to matter needs the
-# interval around each point, which `16_strategy_analysis` reports.
+# interval around each point, which no stage computes for this sweep: every point here is a
+# single Sharpe estimate, and the comparison it supports is between assumptions, not against
+# zero.
 
 # %%
 cost_curve = (

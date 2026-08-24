@@ -867,3 +867,24 @@ def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) ->
         _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
     # The cohort the screen refused is A's, so the ranking was not handed to the runner-up.
     assert "'symbol': 'A'" in str(refusal.value)
+
+
+def test_a_missing_entry_quote_does_not_shape_the_decision_universe() -> None:
+    """The quote read on the session after the decision cannot decide what was rankable.
+
+    A outscores B and has no entry call quote. Dropping A before the ranking would hand the
+    cohort to B and say nothing; the selection must still be A's, and the refusal must name it.
+    """
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [
+            _contract_returns().with_columns(entry_call_mid=pl.lit(None, dtype=pl.Float64)),
+            _contract_returns().with_columns(symbol=pl.lit("B")),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="no complete entry quote") as refusal:
+        _select_cohorts(predictions, contract_returns, top_k=1)
+    assert "'symbol': 'A'" in str(refusal.value)

@@ -363,9 +363,13 @@ def _select_cohorts(
     )
     if cr.n_unique(["timestamp", "symbol"]) != cr.height:
         raise ValueError("contract-return rows are not unique by decision timestamp and symbol")
-    required_contract_values = (
-        "strike",
-        "expiration",
+    # What the decision date knows: the chain names a contract for this symbol. `entry_date` is
+    # the session after the decision and the entry quotes are read on it, so a missing quote
+    # cannot be allowed to decide what was rankable - it would drop the higher-scored name and
+    # hand its place to the runner-up with nothing said. Those columns are checked on the
+    # selection instead, below.
+    decision_time_keys = ("strike", "expiration")
+    entry_values = (
         "entry_date",
         "entry_straddle_mid",
         "entry_call_mid",
@@ -375,11 +379,11 @@ def _select_cohorts(
         "entry_put_bid",
         "entry_put_ask",
     )
-    cr = cr.filter(
-        ~pl.any_horizontal([pl.col(column).is_null() for column in required_contract_values])
+    eligible = cr.filter(
+        ~pl.any_horizontal([pl.col(column).is_null() for column in decision_time_keys])
     )
     pred = pred.join(
-        cr.select(pl.col("timestamp").alias("date"), "symbol"),
+        eligible.select(pl.col("timestamp").alias("date"), "symbol"),
         on=["date", "symbol"],
         how="semi",
     )
@@ -410,6 +414,15 @@ def _select_cohorts(
     # `pred` was already restricted to symbols `cr` carries a contract for, and `cr` holds one
     # row per (timestamp, symbol), so this join keeps every ranked row.
     cohorts = ranked.join(cr, on=["timestamp", "symbol"], how="inner")
+    incomplete = cohorts.filter(
+        pl.any_horizontal([pl.col(column).is_null() for column in entry_values])
+    )
+    if not incomplete.is_empty():
+        raise ValueError(
+            f"{incomplete.height} of {cohorts.height} selected option decisions have no complete "
+            f"entry quote on the session after the decision "
+            f"(first: {incomplete.select('timestamp', 'symbol').head(5).to_dicts()})"
+        )
     if raw_options_dir is not None:
         # Completeness is checked on what was selected, never on what could be selected. The
         # screen reads quotes from entry through expiration, so applying it to the candidate

@@ -38,9 +38,6 @@
 # - Read uncertainty-aware backtest metrics for an options strategy whose
 #   signal is statistically null (Sharpe and IC both straddle zero) under
 #   HTM cost accounting on full per-leg friction.
-# - Read the cost curve `14_costs` publishes as backtest results, where the
-#   standard bps cost-grid convention does not apply (options costs are
-#   denominated in % of premium, not bps of notional).
 # - Surface a holdout decay reading without invoking champion/winner/
 #   verdict language, and a holdout-vs-EW comparison for the same window.
 #
