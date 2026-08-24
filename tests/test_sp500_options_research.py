@@ -45,12 +45,18 @@ def _restore_output_root():
 
     Without this, a test that activates a preview tier leaves `ML4T_OUTPUT_DIR` and
     `workspace._ACTIVE_OUTPUT_ROOT` pointing into its own tmp_path for every later test in the
-    same worker, and `get_case_study_dir` resolves there.
+    same worker, and `get_case_study_dir` resolves there. Restored rather than deleted:
+    `conftest.py::seeded_output_dir` is session-scoped, so a variable this teardown removes is
+    gone for the rest of the worker and nothing sets it again.
     """
-    yield
     import os
 
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
     from case_studies.research import workspace
 
     workspace._ACTIVE_OUTPUT_ROOT = None
@@ -1260,3 +1266,68 @@ def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
             population_name="sp500-options-linear-validation-v1",
             resolved_requests=partial,
         )
+
+
+def test_the_liquid_filter_moves_the_decision_to_an_earlier_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A week whose Friday the filter empties is entered on the Thursday.
+
+    `resolve_short_straddle_decisions` applies the declared universe filter before ranking, so
+    the frame the engine resolves `weekly_friday` from is the filtered one. Resolving the
+    displayed schedule from the unfiltered predictions names a Friday nothing enters on.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    study = _study(tmp_path)
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = "ret_to_expiry"
+    training = study.results.register_training(spec)
+    thursday, friday = date(2024, 1, 11), date(2024, 1, 12)
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "timestamp": [datetime(2024, 1, 11), datetime(2024, 1, 12)],
+            "fold": [0, 0],
+            "actual": [0.01, 0.02],
+            "prediction": [0.02, 0.03],
+        }
+    )
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+    )
+
+    # Five symbols each session, so the tightest one clears the 0.20 quantile on its own. A is
+    # tightest on Thursday and widest on Friday, which is the only difference between the days.
+    universe = ["A", "B", "C", "D", "E"]
+    prices = pl.DataFrame(
+        {
+            "symbol": universe * 2,
+            "timestamp": [datetime(2024, 1, 11)] * 5 + [datetime(2024, 1, 12)] * 5,
+            "close": [100.0] * 10,
+            "instr_rel_spread": [0.01, 0.02, 0.03, 0.04, 0.05, 0.09, 0.02, 0.03, 0.04, 0.05],
+        }
+    )
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    _week_of_candidates([thursday, friday]).write_parquet(labels_dir / "contract_returns.parquet")
+    monkeypatch.setattr(
+        research_workflow, "option_data_paths", lambda: (labels_dir, tmp_path / "raw")
+    )
+
+    decision_dates = option_decision_dates(
+        study,
+        [prediction.hash],
+        prices=prices,
+        signal={"universe_filter": "liquid"},
+    )
+
+    assert decision_dates.to_list() == [thursday]
+    assert option_trade_calendar(decision_dates).get_column("decision_date").to_list() == [thursday]

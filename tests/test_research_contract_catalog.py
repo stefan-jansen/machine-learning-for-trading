@@ -17,8 +17,18 @@ from tests.test_research_workspace import _seed_release
 
 @pytest.fixture(autouse=True)
 def _restore_output_root():
+    """Put ML4T_OUTPUT_DIR back rather than removing it.
+
+    `conftest.py::seeded_output_dir` is session-scoped, so a variable this teardown deletes stays
+    deleted for the rest of the worker and every later module resolving through
+    `get_case_study_dir` silently reads the committed tree instead of the seeded output dir.
+    """
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
     yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
     from case_studies.research import workspace
 
     workspace._ACTIVE_OUTPUT_ROOT = None

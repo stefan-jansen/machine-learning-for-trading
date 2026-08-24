@@ -1220,3 +1220,59 @@ def test_a_workspace_resolves_the_released_canonical_causal_result(tmp_path: Pat
 
     assert result.hash == "causalreleased01"
     assert result.metrics["dml_effect"] == pytest.approx(-0.03)
+
+
+def test_a_workspace_causal_result_wins_over_the_release_it_supersedes(tmp_path: Path) -> None:
+    """The nearer registry answers; the release is a fallback, not a second opinion.
+
+    Merging the two makes a workspace that re-derived the result under a corrected input read
+    as two current identities against the release's prior one, and refuse rather than return
+    the result the workspace just wrote.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    def _spec() -> str:
+        return json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        )
+
+    release = _seed_release(tmp_path)
+    common = dict(
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=_spec(),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+    )
+    register_causal_run(
+        "etfs",
+        "causalreleasedaa",
+        dml_effect=-0.03,
+        case_dir=release / "case_studies" / "etfs",
+        **common,
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+    register_causal_run("etfs", "causalworkspace1", dml_effect=-0.07, case_dir=study.root, **common)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalworkspace1"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.07)

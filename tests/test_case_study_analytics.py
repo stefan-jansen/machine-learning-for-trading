@@ -465,6 +465,33 @@ def test_classification_auc_falls_back_when_the_daily_column_is_present_but_empt
     assert df["auc"].to_list() == [0.62]
 
 
+def test_a_current_row_without_a_daily_auc_is_not_given_the_pooled_one(
+    seeded_registries,
+) -> None:
+    """`auc` says cross-sectional; a registry that computes it must not fill in the pooled value.
+
+    The metric pass leaves `auc_mean_daily` null on a row with too few dated AUCs to average
+    while `auc_roc` still exists. Coalescing would present that pooled number, and rank on it,
+    under the name of the method the cross-sectional column was added to replace.
+    """
+    db_path = seeded_registries / "etfs" / "run_log" / "registry.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("ALTER TABLE prediction_metrics ADD COLUMN auc_mean_daily REAL")
+        # Another row in the same registry does carry one, which is what says this registry
+        # computes the metric at all.
+        conn.execute(
+            "UPDATE prediction_metrics SET auc_mean_daily = 0.58 "
+            "WHERE prediction_hash != 'ph_lin_c_val'"
+        )
+        conn.commit()
+
+    df = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
+
+    assert df.height == 1
+    assert df["auc_roc"].to_list() == [0.62]
+    assert df["auc"].to_list() == [None]
+
+
 # -----------------------------------------------------------------------------
 # load_best_ic_per_family
 # -----------------------------------------------------------------------------

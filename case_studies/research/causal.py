@@ -49,18 +49,19 @@ class CausalResult:
     ) -> CausalResult:
         """Resolve one causal result by declared label and execution tier."""
         tier = ExecutionTier(execution_tier)
+        # Nearest registry that holds anything for this label wins outright. Merging them would
+        # make a workspace that has re-derived the result under a corrected input read as two
+        # current identities against the release's prior one, and refuse.
         rows: list[tuple[str, str]] = []
-        seen: set[str] = set()
         for db_path in _registry_paths(study, tier):
             with sqlite3.connect(db_path) as db:
-                for causal_hash, spec_json in db.execute(
+                rows = db.execute(
                     "SELECT causal_hash, spec_json FROM causal_runs "
                     "WHERE label = ? ORDER BY causal_hash",
                     (label,),
-                ).fetchall():
-                    if causal_hash not in seen:
-                        seen.add(causal_hash)
-                        rows.append((causal_hash, spec_json))
+                ).fetchall()
+            if rows:
+                break
         current = [
             causal_hash
             for causal_hash, spec_json in rows

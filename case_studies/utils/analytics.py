@@ -135,6 +135,25 @@ def registry_path(case_study: str) -> Path:
     return _cs_dir(case_study) / case_study / "run_log" / "registry.db"
 
 
+def _has_values(db_path: Path, table: str, column: str) -> bool:
+    """Whether ``table`` in this registry holds a non-null value in ``column`` anywhere.
+
+    Distinct from :func:`_has_column`, which the metric-column declaration made unusable as a
+    signal: the column now exists in every registry, including one written before the metric
+    behind it did, where it is null on every row.
+    """
+    if not _has_column(db_path, table, column):
+        return False
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+            row = db.execute(
+                f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL LIMIT 1"  # noqa: S608
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def _has_column(db_path: Path, table: str, column: str) -> bool:
     """Whether ``table`` in this registry carries ``column``.
 
@@ -341,14 +360,15 @@ def load_classification_metrics(
 
         params.append(split)
 
-        # The cross-sectional value where a row has one, the pooled value otherwise, under one
-        # output name so the caller reads one column either way. Gating on whether the column
-        # exists would not do it: `_declare_uncertainty_columns` now ALTERs `auc_mean_daily` into
-        # every registry on open, so a registry written before the cross-sectional block gains
-        # the column with NULL on every row it already held, and a schema check reads that as
-        # "present" and hands back an all-NULL column ordered arbitrarily.
-        has_daily = _has_column(db_path, "prediction_metrics", "auc_mean_daily")
-        auc_expression = "COALESCE(pm.auc_mean_daily, pm.auc_roc)" if has_daily else "pm.auc_roc"
+        # Which value `auc` carries turns on whether this registry computes the cross-sectional
+        # one at all, not on whether a row has it. A registry written before the cross-sectional
+        # block holds it nowhere, and `_declare_uncertainty_columns` ALTERs the column into every
+        # registry on open, so a schema check reads that registry as having it and returns an
+        # all-NULL column ordered arbitrarily. A registry that does compute it leaves it null on
+        # a row with too few dated AUCs to average, and coalescing there would present the pooled
+        # value under a name that says cross-sectional.
+        computes_daily = _has_values(db_path, "prediction_metrics", "auc_mean_daily")
+        auc_expression = "pm.auc_mean_daily" if computes_daily else "pm.auc_roc"
         auc_select = f"{auc_expression} AS auc"
         auc_order = auc_expression
 
