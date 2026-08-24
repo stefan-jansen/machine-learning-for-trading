@@ -153,7 +153,12 @@ def test_canonical_causal_uses_the_full_declared_population(tmp_path, monkeypatc
 
     canonical_population = canonical.spec["computation"]["analysis_population"]
     preview_population = preview.spec["computation"]["analysis_population"]
-    assert canonical_population["n_rows"] == frame.height
+    # "Full" means the declared panel less the buffer the endpoint cutoff removes, which at
+    # an 8H buffer on 8-hour bars is one observation across the fixture's symbols. It does
+    # not mean every row: asserting `frame.height` would encode this fixture's labels being
+    # non-null through its final bar, which a forward return never is.
+    trimmed = frame.get_column("symbol").n_unique()
+    assert canonical_population["n_rows"] == frame.height - trimmed
     assert canonical_population["max_samples"] == 0
     assert "preview_reductions" not in canonical.spec["computation"]
     assert preview_population["n_rows"] == 60
@@ -390,7 +395,7 @@ def test_canonical_causal_ignores_a_sample_cap_declared_in_the_preset(
     population = resolved.spec["computation"]["analysis_population"]
 
     assert population["max_samples"] == 0
-    assert population["n_rows"] == frame.height
+    assert population["n_rows"] == frame.height - frame.get_column("symbol").n_unique()
 
     with pytest.raises(ValueError, match="canonical causal requests cannot declare preview"):
         study.causal(

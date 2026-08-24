@@ -1085,32 +1085,37 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     # constructions agreed wherever anyone had checked.
     #
     # The cadence therefore has to be measured before the cutoff rather than after it,
-    # on the pre-holdout observations the panel actually carries.
+    # and on the pre-holdout observations alone: `_observed_cadence` takes the mode of the
+    # gaps, so a panel whose spacing changes across the holdout boundary would otherwise
+    # size the buffer, the block and the embargo from rows the analysis never touches.
     populated = mds.dataset.select(columns).drop_nulls()
-    observations = populated.select(mds.date_col).unique().sort(mds.date_col)
-    if observations.is_empty():
+    pre_holdout = (
+        populated.filter(
+            pl.col(mds.date_col) < pl.lit(holdout.to_pydatetime()).cast(date_dtype, strict=False)
+        )
+        .select(mds.date_col)
+        .unique()
+        .sort(mds.date_col)
+    )
+    if pre_holdout.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
-    cadence = _observed_cadence(observations, mds.date_col)
+    cadence = _observed_cadence(pre_holdout, mds.date_col)
     buffer_steps = max(1, int(np.ceil(buffer_delta / cadence)))
     outcome_horizon_steps = max(1, int(np.ceil(outcome_delta / cadence)))
-    timestamps = observations.get_column(mds.date_col)
-    n_pre_holdout = observations.filter(
-        pl.col(mds.date_col) < pl.lit(holdout.to_pydatetime()).cast(date_dtype, strict=False)
-    ).height
-    if n_pre_holdout == 0:
-        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
-    if n_pre_holdout == len(timestamps):
-        # The panel stops before the holdout, so no retained outcome can reach it. A row
-        # whose window runs off the end of the panel has no label to begin with and left
-        # in `drop_nulls` above.
-        endpoint_cutoff = holdout
-    elif n_pre_holdout <= buffer_steps:
+    # The trim is unconditional. Making it depend on whether the panel reaches the holdout
+    # would rest on the last populated row's window resolving inside the panel, which is a
+    # property of how a label was built rather than anything this function can see: a label
+    # column that is non-null through the final observation resolves past it. Cutting where
+    # the panel already stops short costs rows that carry no information about the holdout
+    # either way, and it is the same rule 12_causal_dml applies.
+    if pre_holdout.height <= buffer_steps:
         raise ValueError(
-            f"the panel holds {n_pre_holdout} observations before {holdout.date()}, which "
+            f"the panel holds {pre_holdout.height} observations before {holdout.date()}, which "
             f"cannot absorb a {buffer_steps}-observation buffer and leave anything to analyse"
         )
-    else:
-        endpoint_cutoff = pd.Timestamp(timestamps[n_pre_holdout - buffer_steps])
+    endpoint_cutoff = pd.Timestamp(
+        pre_holdout.get_column(mds.date_col)[pre_holdout.height - buffer_steps]
+    )
     analysis = populated.filter(
         pl.col(mds.date_col)
         < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
