@@ -1417,14 +1417,18 @@ case_studies/etfs/10_dl_tsmixer:
     N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
-  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no override they ran on the
+  # max_symbols must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no reduction they ran on the
   # full fixture universe while the artifact covered 5 symbols, so the CV splits
   # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
   # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-pca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
   parameters:
