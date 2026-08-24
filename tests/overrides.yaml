@@ -1517,21 +1517,25 @@ case_studies/fx_pairs/11_causal_dml:
 case_studies/fx_pairs/12_model_analysis:
   timeout: 300
 case_studies/fx_pairs/13_backtest:
+  research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight-baselines
     TOP_K: 2
   timeout: 600
 case_studies/fx_pairs/14_portfolio_management:
+  research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight-allocations
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/fx_pairs/15_costs:
+  research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight-costs
     MAX_COST_POINTS: 1
   timeout: 600
 case_studies/fx_pairs/16_risk_management:
+  research_preview: false
   parameters:
     POPULATION_NAME: fx_pairs:preflight-risk
     MAX_RISK_VARIANTS: 3

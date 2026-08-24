@@ -41,6 +41,7 @@ from case_studies.research import (
     OfficialPopulation,
     open_study,
     plan_backtests,
+    research_name,
     run_backtests,
 )
 from case_studies.utils.sweep_config import get_top_k_values_for
@@ -104,7 +105,11 @@ if catalog.is_empty():
 # once written, so such a run must publish under its own name rather than register a
 # partial snapshot under the canonical one. The tier is a separate question: a canonical
 # run may legitimately be narrowed, it just may not claim to be the whole population.
-if (TOP_K or TOP_N_PREDICTIONS is not None) and not include_preview and not POPULATION_NAME:
+if (
+    (TOP_K or TOP_N_PREDICTIONS is not None or LABEL)
+    and not include_preview
+    and not POPULATION_NAME
+):
     raise ValueError(
         "this run narrows the baseline sweep, so it cannot publish the canonical "
         "population; pass POPULATION_NAME to give it its own"
@@ -115,7 +120,7 @@ if catalog.get_column("prediction_hash").n_unique() != catalog.height:
 if not include_preview:
     prediction_population = OfficialPopulation.create(
         study,
-        name=POPULATION_NAME or f"{CASE_STUDY_ID}:validation-predictions",
+        name=research_name(CASE_STUDY_ID, "validation-predictions", scope=POPULATION_NAME),
         member_kind="prediction",
         members=catalog.get_column("prediction_hash").to_list(),
     )
@@ -209,9 +214,7 @@ baseline_population = None
 if not include_preview:
     baseline_population = OfficialPopulation.create(
         study,
-        name=f"{POPULATION_NAME}-baselines"
-        if POPULATION_NAME
-        else f"{CASE_STUDY_ID}:equal-weight-baselines",
+        name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
         member_kind="backtest",
         members=planned_hashes,
     )

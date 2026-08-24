@@ -47,6 +47,7 @@ from case_studies.research import (
     Result,
     open_study,
     plan_backtests,
+    research_name,
     run_backtests,
 )
 from case_studies.utils.sweep_config import (
@@ -105,7 +106,7 @@ include_preview = EXECUTION_TIER == "preview"
 # publish under its own name rather than register a partial snapshot of the cost sweep
 # under the canonical one.
 if (
-    (TOP_K or TOP_N_PREDICTIONS is not None or MAX_COST_POINTS)
+    (TOP_K or TOP_N_PREDICTIONS is not None or MAX_COST_POINTS or LABEL)
     and not include_preview
     and not POPULATION_NAME
 ):
@@ -154,6 +155,8 @@ def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
         (pl.col("stage") == "allocation")
         & (pl.col("execution_tier") == "preview")
         & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        & (pl.col("identity_status") == "current")
+        & pl.col("complete")
     )
     if registered.is_empty():
         raise RuntimeError(
@@ -176,16 +179,24 @@ if include_preview:
         selected_by_label[label] = _preview_leader(catalog.filter(pl.col("label") == label))
 else:
     baselines = _open_backtests(
-        OfficialPopulation.one(study, name=f"{CASE_STUDY_ID}:equal-weight-baselines")
+        OfficialPopulation.one(
+            study,
+            name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
+        )
     )
     allocations = _open_backtests(
-        OfficialPopulation.one(study, name=f"{CASE_STUDY_ID}:allocation-backtests")
+        OfficialPopulation.one(
+            study,
+            name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
+        )
     )
     for label in sorted(catalog.get_column("label").unique()):
         members = [result for result in [*baselines, *allocations] if _label(result) == label]
         candidates = CandidateSet.create(
             study,
-            name=f"{CASE_STUDY_ID}:{label}:pre-cost-strategies",
+            name=research_name(
+                CASE_STUDY_ID, f"{label}:pre-cost-strategies", scope=POPULATION_NAME
+            ),
             members=members,
         )
         candidate_sets[label] = candidates
@@ -292,7 +303,7 @@ cost_population = None
 if not include_preview:
     cost_population = OfficialPopulation.create(
         study,
-        name=POPULATION_NAME or f"{CASE_STUDY_ID}:cost-sensitivity-backtests",
+        name=research_name(CASE_STUDY_ID, "cost-sensitivity-backtests", scope=POPULATION_NAME),
         member_kind="backtest",
         members=planned_hashes,
     )

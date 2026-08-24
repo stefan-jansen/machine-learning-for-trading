@@ -49,6 +49,7 @@ from case_studies.research import (
     Result,
     open_study,
     plan_backtests,
+    research_name,
     run_backtests,
 )
 from case_studies.utils.sweep_config import (
@@ -108,7 +109,7 @@ include_preview = EXECUTION_TIER == "preview"
 # publish under its own name rather than register a partial snapshot of the allocation sweep
 # under the canonical one.
 if (
-    (TOP_K or TOP_N_PREDICTIONS is not None or TOP_N_CONFIGS)
+    (TOP_K or TOP_N_PREDICTIONS is not None or TOP_N_CONFIGS or LABEL)
     and not include_preview
     and not POPULATION_NAME
 ):
@@ -155,6 +156,8 @@ def _preview_baselines(rows: pl.DataFrame) -> list[BacktestResult]:
         (pl.col("stage") == "signal")
         & (pl.col("execution_tier") == "preview")
         & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        & (pl.col("identity_status") == "current")
+        & pl.col("complete")
     )
     if registered.is_empty():
         raise RuntimeError(
@@ -168,7 +171,8 @@ if include_preview:
     baseline_results = _preview_baselines(catalog)
 else:
     baseline_population = OfficialPopulation.one(
-        study, name=f"{CASE_STUDY_ID}:equal-weight-baselines"
+        study,
+        name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
     )
     baseline_population.require_complete()
     baseline_results = _open_backtests(baseline_population.members)
@@ -198,7 +202,9 @@ for label in sorted(catalog.get_column("label").unique()):
     else:
         candidates = CandidateSet.create(
             study,
-            name=f"{CASE_STUDY_ID}:{label}:equal-weight-candidates",
+            name=research_name(
+                CASE_STUDY_ID, f"{label}:equal-weight-candidates", scope=POPULATION_NAME
+            ),
             members=label_results,
         )
         candidate_sets[label] = candidates
@@ -305,7 +311,7 @@ allocation_population = None
 if not include_preview:
     allocation_population = OfficialPopulation.create(
         study,
-        name=POPULATION_NAME or f"{CASE_STUDY_ID}:allocation-backtests",
+        name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
         member_kind="backtest",
         members=planned_hashes,
     )
