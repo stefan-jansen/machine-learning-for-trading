@@ -250,12 +250,17 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # the stored result rather than fitting again.
 #
 # **There are no fold counts above, and their absence is the honest reading rather than an
-# omission.** [`05_linear`](05_linear.ipynb), [`06_gbm`](06_gbm.ipynb) and
-# [`07_tabular_dl`](07_tabular_dl.ipynb) each print folds fitted against folds served from the
-# registry, because their runners record `fitted_folds` and `reused_folds` per run. The
-# latent-factor runner records neither - its result carries no diagnostics at all, so the only
-# per-run keys are the status and the training hash. Printing two zeros here would say every fold
-# came from cache, which is the opposite of what nothing-recorded means.
+# omission.** [`05_linear`](05_linear.ipynb) and [`06_gbm`](06_gbm.ipynb) print folds fitted
+# against folds served from the registry, because the linear and GBM runners record
+# `fitted_folds` and `reused_folds` on every path they take. The latent-factor runner records
+# neither - its result carries no diagnostics at all, so the only per-run keys are the status and
+# the training hash. Printing two zeros here would say every fold came from cache, which is the
+# opposite of what nothing-recorded means.
+#
+# [`07_tabular_dl`](07_tabular_dl.ipynb) sits between the two and says so at run time. Its runner
+# records fold counts when it fits and none when it serves a whole configuration from the
+# registry, so on a re-run it reports how many of its runs recorded counts instead of printing a
+# split it was never given.
 #
 # ### Running configurations of your own
 #

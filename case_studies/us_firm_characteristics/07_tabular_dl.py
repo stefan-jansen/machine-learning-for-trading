@@ -279,12 +279,13 @@ execution, population = run_model_population(
 )
 
 # The runner's paths do not all record the same diagnostics, so the split below is printed only
-# when every run recorded it. A run fitted or resolved fold by fold carries `fitted_folds` and
-# `reused_folds`; one served whole from the registry, and one taken through the single-request
-# path, carry neither - they prepared no folds, so they have none to count. Indexing the keys
-# raises `KeyError` on those, and defaulting them to zero is worse: it reports every fold as
-# served from the registry, which is the opposite of what nothing-recorded means, and it does so
-# in a number a reader cannot tell from a measurement.
+# when every run recorded it. A run that prepared folds - fitted or resolved, batch or single
+# request - carries `fitted_folds` and `reused_folds`. A configuration served whole from the
+# registry carries neither, because it prepared no folds and so has none to count, and neither
+# does the latent-factor runner, which records nothing at all. Indexing the keys raises
+# `KeyError` on those, and defaulting them to zero is worse: it reports every fold as served from
+# the registry, which is the opposite of what nothing-recorded means, and it does so in a number
+# a reader cannot tell from a measurement.
 with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
 print(f"{len(execution.runs)} configurations, fitted or served from the registry")
 if with_folds and len(with_folds) == len(execution.diagnostics):

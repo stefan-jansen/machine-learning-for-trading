@@ -2128,7 +2128,7 @@ case_studies/us_firm_characteristics/08d_supervised_autoencoder:
   timeout: 300
 case_studies/us_firm_characteristics/09_causal_dml:
   parameters:
-    CV_FOLDS: 2
+    N_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
     N_PLACEBO: 10

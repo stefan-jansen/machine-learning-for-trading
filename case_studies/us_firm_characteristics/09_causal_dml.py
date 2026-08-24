@@ -199,8 +199,12 @@ sample_audit
 # breaks; the placebo therefore tests the timing of the treatment against the outcome, and not
 # whether a slowly moving characteristic could have produced the estimate.
 #
-# The observed cadence is passed as well, so a firm that leaves the panel and returns is permuted
-# as two histories rather than one continuous one.
+# The observed cadence is passed as well, which is what lets a hole in a firm's history end a
+# block rather than be permuted across. The boundary is a gap wider than `GAP_TOLERANCE_CADENCES`
+# cadences, four by declaration, and the cadence here is one month - so a firm absent for a few
+# months is still permuted as one continuous history and only a longer gap splits it. That
+# threshold is the shared default; `run_dml_analysis` takes no argument to tighten it, so it is
+# reported here rather than chosen here.
 
 # %% [markdown]
 # ## Estimate on complete decision-month folds
