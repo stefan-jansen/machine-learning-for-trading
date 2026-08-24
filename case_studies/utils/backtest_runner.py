@@ -974,6 +974,14 @@ def run_backtest(
     _bt_started_at = datetime.now(UTC).isoformat()
     _bt_t0 = time.perf_counter()
 
+    # Ahead of everything, including the skip-if-complete branch that returns a cached result
+    # without touching the engine. A guard placed after that branch validates the first run and
+    # lets every later read of the same rows through, which is the route the fifty-six no-op
+    # crypto_perps_funding overlay rows are still on disk behind. Ahead of ensure_backtest_spec
+    # too, so a spec that cannot produce the overlay it names is refused before the canonical
+    # form is derived from it.
+    _reject_inert_risk_spec((strategy_spec.get("strategy") or {}).get("risk") or {})
+
     # 0. Normalize prediction columns to canonical schema, then for
     # classification labels replace the binary y_true with the underlying
     # continuous return so weight × y_true produces economic P&L rather
@@ -1022,11 +1030,6 @@ def run_backtest(
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     strategy = strategy_view(strategy_spec)
-    # Before the skip-if-complete branch below, not after it. A rule-less risk block that already
-    # has registered artifacts would otherwise be served from cache and never validated, which is
-    # the exact route the fifty-six no-op overlay rows this guard was written against are still
-    # readable through.
-    _reject_inert_risk_spec(strategy.get("risk", {}))
     signal_config = strategy["signal"]
     allow_short = resolved_allow_short_selling(strategy_spec, precomputed_weights)
     strategy_spec["backtest_config"]["account"]["allow_short_selling"] = allow_short

@@ -372,11 +372,12 @@ show_plotly_with_alt(
     fig_breadth,
     "Line chart of the number of perpetual contracts scored at each eight-hour decision over the "
     "validation period, with two horizontal reference lines at ten and twenty contracts marking "
-    "what a five-a-side and a ten-a-side long-short book need. The series rises over the period, "
-    "from five contracts at the start to nineteen by the end. It stays below the twenty line "
-    "throughout, so the ten-a-side rule is never fillable, and it dips below the ten line at 186 "
-    "of the 2,189 decisions, where the five-a-side rule truncates to whatever the cross-section "
-    "holds rather than failing.",
+    "what a five-a-side and a ten-a-side long-short book need. The series starts at fourteen "
+    "contracts in January 2022 and ends at nineteen, but the path between is not a rise: it "
+    "collapses to five from 2 October 2022 before recovering. It stays below the twenty line "
+    "throughout, so the ten-a-side rule is never fillable, and it is below the ten line at 186 "
+    "of the 2,189 decisions - all inside that collapse - where the five-a-side rule truncates to "
+    "whatever the cross-section holds rather than failing.",
 )
 
 # %% [markdown]
@@ -488,6 +489,16 @@ signal_grid = (
     .sort("label", "entry_rule")
 )
 signal_grid
+
+# %% [markdown]
+# **`entry_rule` is what was requested, not what every decision traded.** The label is read from
+# `strategy.signal.top_k` in the registered specification, so a `top-5 a side` row is named for
+# the book it asked for. At the 186 decisions the figure above shows below ten contracts, the
+# allocator took `min(k, n/2)` and the book was narrower than its name. The turnover, trade count
+# and Sharpe spread in this table are therefore aggregated over rows whose realised breadth
+# varies, under a label that does not vary. That is a caveat on reading the table, not a defect in
+# the results: every configuration within a label met the same cross-section on the same dates, so
+# the comparison between rows holds even where the name overstates the book.
 
 # %% [markdown]
 # ### The spread the baseline produces
