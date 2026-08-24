@@ -818,8 +818,9 @@ jobs:
           #
           # ML4T_OUTPUT_DIR has to go, for the same reason the sweep in test-unit
           # unsets it. test_eoa_universe_roster.py reads a case study's setup.yaml
-          # and a notebook's own source through get_case_study_dir (:41, :143),
-          # which returns $ML4T_OUTPUT_DIR/<id> whenever that is set. Nothing in
+          # and a notebook's own source through get_case_study_dir - in the
+          # declared_n_assets fixture and in _roster_source_call - and that
+          # returns $ML4T_OUTPUT_DIR/<id> whenever it is set. Nothing in
           # this job seeds it - seeded_output_dir is not autouse and neither file
           # requests it - so the redirect points at an empty directory and the
           # reads raise. Measured: 3 failed, 5 errors, every run. Unset, the same
