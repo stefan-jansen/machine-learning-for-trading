@@ -302,7 +302,7 @@ if not alloc_comparison.is_empty():
     add_message_title(
         ax,
         "Sizing rule moves the average less than the grid around it",
-        subtitle="Validation months only, before trading costs",
+        subtitle="Validation months, net of the declared commission and slippage",
     )
     fig.tight_layout()
     fig.show()
@@ -359,11 +359,13 @@ print(top10.select("source", "allocator", "names_per_side", "sharpe", "cagr", "m
 # the trial count the strategy analysis notebook has to deflate by, and neither
 # number is visible in a Sharpe read off the table above.
 #
-# Nothing here has been charged trading costs. That matters more for this stage than
-# for the last one, because an allocator that changes weights every month trades more
-# than one that does not, and the sweep does not price that difference. The costs
-# notebook does, which is why it comes next rather than after a decision has been
-# taken here.
+# Every Sharpe here is already net of the commission and slippage `setup.yaml`
+# declares, charged on turnover at each rebalance. What has not been tested is
+# whether that one cost assumption is the right one. That matters more at this stage
+# than at the last, because the allocators differ in how much they trade: a rule that
+# re-sizes every position each month turns over more than one that only changes which
+# names are held, so a cost assumption that is too low flatters the more active rule
+# specifically. A comparison run at a single cost level cannot show that.
 #
-# **Next:** the costs notebook charges the sweep at realistic commission and
-# slippage, and asks which of these results survive it.
+# **Next:** the costs notebook re-runs these strategies across a range of cost
+# assumptions and asks which results hold their ordering as costs rise.

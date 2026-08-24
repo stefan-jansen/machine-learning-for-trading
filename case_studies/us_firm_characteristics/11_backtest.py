@@ -374,10 +374,15 @@ for reason, count in failures.most_common():
 # at any time to analyze existing results.
 #
 # Two questions the sweep can answer: whether the predictions translate into
-# positive validation Sharpe at all, and how tightly a model's rank correlation
-# with the outcome maps onto what a portfolio built from that ranking earned.
-# The second is the one worth watching, because a model can rank well and still
-# leave nothing for a top-*k* portfolio to capture.
+# positive validation Sharpe at all, and how tightly a model's rank correlation with
+# the outcome maps onto what a portfolio built from that ranking earned.
+#
+# The second is worth watching, and it has to be asked *within* a family rather than
+# across all of them at once. Families sit at different levels on both axes, so
+# pooling them produces a positive correlation out of that separation alone, whether
+# or not IC and Sharpe move together inside any one family. This is why the scatter
+# below is coloured: the pooled cloud and the coloured groups can say opposite
+# things, and only the coloured version answers the question that was asked.
 
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
@@ -393,9 +398,11 @@ print(repr(explorer))
 # of the tail rather than as a selection: these are the ten largest draws from a
 # sweep of hundreds, so the largest is biased upward by however many were tried.
 # The deflated Sharpe below is the first correction for that, and the strategy
-# analysis notebook is where the selection is confronted properly. Nothing here
-# has passed through portfolio construction, costs or a risk overlay yet - each
-# of the next three notebooks adds one of those.
+# analysis notebook is where the selection is confronted properly. These are already
+# net of the commission and slippage `setup.yaml` declares, charged on turnover at
+# each rebalance; what has not been applied is portfolio construction, any cost
+# assumption other than that one, and a risk overlay. The next three notebooks add
+# those in turn.
 
 # %% tags=["results"]
 top = explorer.best(stage="signal", top_n=10)
@@ -454,8 +461,8 @@ if not all_signal.is_empty():
     axes[0].set_ylabel("Strategies")
     add_message_title(
         axes[0],
-        "Equal-weight baselines spread wide on either side of zero",
-        subtitle="Validation months only, before costs, allocation or a risk overlay",
+        "Almost every baseline earned a positive validation Sharpe",
+        subtitle="Net of the declared commission and slippage; no allocation or risk overlay",
     )
 
     # A prediction whose IC was never computed has no position on this axis. Filling
@@ -486,7 +493,7 @@ if not all_signal.is_empty():
     axes[1].legend(frameon=False, fontsize=8)
     add_message_title(
         axes[1],
-        "Ranking skill and portfolio Sharpe move together",
+        "Higher IC does not mean higher Sharpe inside a family",
         subtitle="One point per prediction set and entry scheme, coloured by model family",
     )
     print(f"Strategies plotted: {scored.height:,} | dropped for no computed IC: {unscored:,}")
@@ -551,14 +558,14 @@ if not top.is_empty():
 # rather than from the engine.
 #
 # Everything else is a surface, not a result. Every prediction set was traded at
-# every concentration and the outcome registered, which is what the later
-# notebooks read. Two properties of that surface are worth carrying forward. It
-# is a cohort: hundreds of configurations were tried against one validation
-# period, so the largest Sharpe in it is the largest of many draws and is biased
-# upward by the count. And it is a baseline: no portfolio construction, no
-# trading costs and no risk overlay have been applied, so these numbers are the
-# ceiling the next three notebooks work down from rather than an estimate of what
-# the strategy would have earned.
+# every concentration and the outcome registered, which is what the later notebooks
+# read. Two properties of that surface are worth carrying forward. It is a cohort:
+# hundreds of configurations were tried against one validation period, so the largest
+# Sharpe in it is the largest of many draws and is biased upward by the count. And it
+# is a baseline in a specific sense - the declared commission and slippage are
+# charged, but every position is weighted equally, only one cost assumption has been
+# tested, and no risk overlay is applied. Each of the next three notebooks relaxes
+# one of those.
 #
 # The correction for the first property needs the whole funnel - the number of
 # trials is not known until the last stage has run - which is why the deflated
