@@ -152,3 +152,20 @@ def test_a_registry_written_before_the_draw_count_existed_gains_the_column(tmp_p
         assert "refutation_n_successful" in {
             row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()
         }
+
+
+def test_a_nullable_column_gaining_a_value_is_still_a_conflict(tmp_path) -> None:
+    """`refutation_p` is NULL whenever the refutation produced too few successful
+    placebos, so a stored NULL there means "this run could not answer", not "the registry
+    had nowhere to put it". A later run that does produce a p-value has changed. Only a
+    column a migration added may be filled on NULL; widening that to every nullable column
+    writes a changed result onto an immutable row."""
+    case_dir = tmp_path / "test_case"
+    _register_immutable(case_dir, refutation_p=None)
+
+    try:
+        _register_immutable(case_dir, refutation_p=0.01, started_at="second")
+    except ValueError as error:
+        assert "refutation_p" in str(error)
+    else:
+        raise AssertionError("a refutation p-value appearing where there was none is a change")

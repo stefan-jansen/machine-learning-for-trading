@@ -38,6 +38,11 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 VALID_PREDICTION_SPLITS = frozenset({"validation", "holdout"})
+
+# Columns a schema migration added, which an immutable row may therefore be missing
+# through no change of its own. Nothing else is filled on NULL: see the comment at the
+# backfill itself for why a nullable column is not the same as a migrated one.
+MIGRATION_BACKFILLED_COLUMNS = frozenset({"refutation_n_successful"})
 MAX_PREDICTION_STD_RATIO = 100.0
 
 
@@ -1782,9 +1787,18 @@ def register_causal_run(
             # place to record that fact yet. Treating it as one would make an upgrade break
             # re-registration of results that are identical - the same shape as a fix that
             # forces a refit without changing a number.
+            #
+            # Only a column a migration added is filled this way. The other comparable
+            # columns are nullable for reasons that have nothing to do with the schema:
+            # refutation_p is None whenever the refutation produced too few successful
+            # placebos, so a later run that does produce one has genuinely changed and must
+            # still conflict. Filling on NULL alone would write that over an immutable row
+            # and refresh its execution provenance on the way through.
             stored = list(existing)
             backfilled = False
             for position, value in enumerate(expected):
+                if comparable_columns[position] not in MIGRATION_BACKFILLED_COLUMNS:
+                    continue
                 if stored[position] is None and value is not None:
                     stored[position] = value
                     backfilled = True
@@ -1792,7 +1806,7 @@ def register_causal_run(
                 conflicting = [
                     name
                     for name, was, now in zip(comparable_columns, existing, expected, strict=True)
-                    if was != now and was is not None
+                    if was != now and name not in MIGRATION_BACKFILLED_COLUMNS
                 ]
                 raise ValueError(
                     f"immutable causal result conflict for {causal_hash}: "
