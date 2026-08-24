@@ -118,7 +118,6 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current")
     & (pl.col("split") == SPLIT)
     & pl.col("complete")
-    & pl.col("artifact_available")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
 if LABEL:
@@ -176,8 +175,30 @@ def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
 selected_by_label: dict[str, BacktestResult] = {}
 candidate_sets: dict[str, CandidateSet] = {}
 if include_preview:
-    for label in sorted(catalog.get_column("label").unique()):
-        selected_by_label[label] = _preview_leader(catalog.filter(pl.col("label") == label))
+    # The labels come from what the upstream preview registered, the same rule the
+    # canonical branch below follows. Enumerating this notebook's own catalog asks
+    # _preview_leader for labels 14_portfolio_management was configured not to allocate,
+    # and it raises "no preview allocation backtests are registered" for each - reporting
+    # a reduction the run was told to make as a missing upstream.
+    covered = catalog.filter(
+        pl.col("prediction_hash").is_in(
+            study.backtests.table(include_preview=True)
+            .filter(
+                (pl.col("stage") == "allocation")
+                & (pl.col("execution_tier") == "preview")
+                & (pl.col("identity_status") == "current")
+                & pl.col("complete")
+            )
+            .get_column("prediction_hash")
+        )
+    )
+    if covered.is_empty():
+        raise RuntimeError(
+            "no preview allocation backtests cover this prediction catalog; "
+            "run 14_portfolio_management at the same reduction first"
+        )
+    for label in sorted(covered.get_column("label").unique()):
+        selected_by_label[label] = _preview_leader(covered.filter(pl.col("label") == label))
 else:
     baselines = _open_backtests(
         OfficialPopulation.one(
