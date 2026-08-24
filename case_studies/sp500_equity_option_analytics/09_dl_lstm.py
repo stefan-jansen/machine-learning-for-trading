@@ -364,8 +364,8 @@ catalog.select(
 #
 # One row per label and architecture. The comparison the table invites is down the pair for a single
 # label: the two read the same windows over the same folds and differ only in whether state is
-# carried along the window. `configurations` is one apiece, so the spread in each row is a spread
-# over epochs rather than over a grid.
+# carried along the window. Grouping on label and configuration name puts one configuration in each
+# row by construction, so the spread a row reports is a spread over epochs rather than over a grid.
 #
 # `auc_mean_daily` is present where the label declares a direction sibling. A regression row has no
 # classes of its own and is scored as a ranking signal against that sibling's values -

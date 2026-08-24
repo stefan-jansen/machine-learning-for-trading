@@ -68,6 +68,7 @@ from case_studies.utils.causal import (
     register_causal_run,
     run_dml_analysis,
 )
+from utils.artifact_specs import resolve_label_horizon
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -202,36 +203,45 @@ merged_clean = (
 # outcome interval crosses into the holdout.
 
 # %% [markdown]
-# Two quantities follow from the label buffer and from the treatment, and they answer different
-# questions. The **embargo** separates a fold's training window from its test window, so a label
-# measured in training cannot still be running when testing starts; the label buffer alone sets
-# it. The **permutation block size** is the scale of the dependence the placebo has to preserve:
-# shuffling in blocks shorter than that scale pulls dependent observations apart, and the placebo
-# degrades towards an independent draw - the permutation that is too easy to pass and therefore
-# proves nothing.
+# Three quantities decide how this estimate is measured, and they answer different questions.
 #
-# **Two scales qualify, and the block size has to cover both.** The label horizon is how long an
-# outcome stays open. The treatment has its own persistence: `ivrv_spread` subtracts a rolling
-# realized volatility from implied, so consecutive values share most of their input and stay
-# dependent over that rolling window whatever the label does. That window is the first entry of
-# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two here.
-# The block size below takes the larger scale, so the placebo keeps whichever dependence runs
-# longer; the embargo stays on the label buffer, which is the only scale it answers to.
+# The **embargo** separates a fold's training window from its test window, so a label measured in
+# training cannot still be running when testing starts. `labels.buffer` sets it, and that buffer is
+# declared deliberately longer than the outcome it protects, so it is not a statement about the
+# outcome. The **outcome horizon** is how long one outcome stays open: `labels.horizons` names it
+# per label, and for the primary label it is the shorter of the two. The **permutation block size** is the scale of the dependence
+# the placebo has to preserve: shuffling in blocks shorter than that scale pulls dependent
+# observations apart, and the placebo degrades towards an independent draw - the permutation that
+# is too easy to pass and therefore proves nothing.
+#
+# **Two scales qualify for the block size, and it has to cover both.** One is the outcome horizon.
+# The other is the treatment's own persistence: `ivrv_spread` subtracts a rolling realized
+# volatility from implied, so consecutive values share most of their input and stay dependent over
+# that rolling window whatever the label does. That window is the first entry of
+# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two here. The
+# block size below takes the larger, so the placebo keeps whichever dependence runs longer.
 #
 # The treatment's persistence does not follow from `causal.treatment` alone - it follows from how
 # that column is built in the feature stage. The assignment below therefore names the treatment it
 # knows how to read and refuses any other, rather than applying a window that may not describe it.
+#
+# The **Newey-West bandwidth** in the second stage has to cover the overlap between successive
+# outcomes, and the notebook hands it the longer of the outcome horizon and the buffer. A bandwidth
+# shorter than the overlap understates the standard error; a longer one costs power and nothing
+# else, so where the two disagree the notebook takes the longer.
 
 # %%
-LABEL_HORIZON = embargo_from_buffer(mds.label_buffer)
-EMBARGO_PERIODS = LABEL_HORIZON
+BUFFER_PERIODS = embargo_from_buffer(mds.label_buffer)
+EMBARGO_PERIODS = BUFFER_PERIODS
+OUTCOME_HORIZON = embargo_from_buffer(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, setup))
 if TREATMENT_COL != "ivrv_spread":
     raise ValueError(
         f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
         "The block size below follows how ivrv_spread is built in 03_financial_features.py."
     )
 TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
-BLOCK_SIZE = max(LABEL_HORIZON, TREATMENT_PERSISTENCE)
+BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
+HAC_HORIZON = max(OUTCOME_HORIZON, BUFFER_PERIODS)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
 
@@ -278,7 +288,8 @@ print(f"Holdout begins: {HOLDOUT_START.date()}")
 print(f"Development cutoff after label buffer: {DEVELOPMENT_CUTOFF.date()}")
 print(
     f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE} "
-    f"(label horizon {LABEL_HORIZON}, treatment window {TREATMENT_PERSISTENCE})"
+    f"(outcome horizon {OUTCOME_HORIZON}, treatment window {TREATMENT_PERSISTENCE}) | "
+    f"HAC horizon: {HAC_HORIZON}"
 )
 if entity_cols:
     print(f"Entities: {merged_clean[entity_cols[0]].nunique()}")
@@ -302,7 +313,7 @@ results = run_dml_analysis(
     n_placebo=PLACEBO_REPS,
     block_size=BLOCK_SIZE,
     seed=RANDOM_SEED,
-    horizon=EMBARGO_PERIODS,
+    horizon=HAC_HORIZON,
     time_col=date_col,
     entity_col=entity_cols[0] if entity_cols else None,
 )
@@ -460,8 +471,11 @@ summary = {
 }
 
 # %% [markdown]
-# Registration writes only the corrected v3.1 candidate. The frozen v3.0
-# registry remains read-only for publication comparison.
+# Every argument below that changes what the estimate is enters the hashed causal specification,
+# so a run at a different block size, placebo count, seed, bandwidth, row cap or development cutoff
+# registers as its own result rather than overwriting the one before it. Leaving one out is not a
+# smaller record: it is two runs sharing an identity, and the registry cannot tell them apart
+# afterwards.
 
 # %%
 register_causal_run(
@@ -473,6 +487,13 @@ register_causal_run(
     confounder_cols=CONFOUNDER_COLS,
     n_folds=CV_FOLDS,
     embargo=EMBARGO_PERIODS,
+    time_col=date_col,
+    block_size=BLOCK_SIZE,
+    n_placebo=PLACEBO_REPS,
+    seed=RANDOM_SEED,
+    horizon=HAC_HORIZON,
+    max_samples=ROW_CAP,
+    development_end=str(DEVELOPMENT_CUTOFF.date()),
     notebook="12_causal_dml",
 )
 
@@ -494,7 +515,7 @@ register_causal_run(
 #    two estimators reading different numbers of rows.
 #
 # 4. **The permutation disturbs timing, not confounding**: its block size is the longer of the
-#    label horizon and the treatment's own rolling window, so the placebo series retain whichever
+#    outcome horizon and the treatment's own rolling window, so the placebo series retain whichever
 #    dependence runs longer and the null they generate is not narrowed by the shuffle itself. Its
 #    p-value still has a floor of one over the number of placebo draws plus one, so a run of this
 #    size cannot report zero however extreme the estimate is, and it does not override the

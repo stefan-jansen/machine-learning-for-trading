@@ -790,7 +790,11 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     complete_predictions = tuple(
         result for result in predictions if isinstance(result, PredictionResult)
     )
-    return ModelRun(training=training, predictions=complete_predictions)
+    return ModelRun(
+        training=training,
+        predictions=complete_predictions,
+        diagnostics={"reused": True},
+    )
 
 
 def _predict_reconstructed_sequence(
@@ -1160,7 +1164,11 @@ def run_resolved_request(
                 float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
             )
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=prediction_results)
+    return ModelRun(
+        training=training,
+        predictions=prediction_results,
+        diagnostics={"reused": reused_fitted_state},
+    )
 
 
 def validate_locked_run(
