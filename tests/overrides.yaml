@@ -1330,18 +1330,23 @@ case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
 case_studies/crypto_perps_funding/13_backtest:
   timeout: 600
+# 14-16 declare no MAX_SYMBOLS or MAX_RISK_VARIANTS. They were carried over from the notebooks
+# these replaced and bound nothing after the phase-2 rewrite: Papermill injects an unused name and
+# the run proceeds at full scale, so the reduction read as applied and was not. LABELS is the
+# axis these notebooks actually reduce on. Two of them, not one - 14 concatenates per-label frames
+# and a single-label run has no counterpart for that concat, which is how a schema mismatch across
+# labels reached production green from a preview.
 case_studies/crypto_perps_funding/14_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    LABELS: [fwd_ret_8h, fwd_dir_8h]
   timeout: 300
 case_studies/crypto_perps_funding/15_costs:
   parameters:
-    MAX_SYMBOLS: 5
+    LABELS: [fwd_ret_8h, fwd_dir_8h]
   timeout: 600
 case_studies/crypto_perps_funding/16_risk_management:
   parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
+    LABELS: [fwd_ret_8h, fwd_dir_8h]
   timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
   skip: true

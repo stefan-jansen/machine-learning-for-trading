@@ -1022,6 +1022,11 @@ def run_backtest(
     # spec ($100K) — halting the strategy before any trade is placed.
     initial_cash = float(strategy_spec["backtest_config"]["cash"]["initial"])
     strategy = strategy_view(strategy_spec)
+    # Before the skip-if-complete branch below, not after it. A rule-less risk block that already
+    # has registered artifacts would otherwise be served from cache and never validated, which is
+    # the exact route the fifty-six no-op overlay rows this guard was written against are still
+    # readable through.
+    _reject_inert_risk_spec(strategy.get("risk", {}))
     signal_config = strategy["signal"]
     allow_short = resolved_allow_short_selling(strategy_spec, precomputed_weights)
     strategy_spec["backtest_config"]["account"]["allow_short_selling"] = allow_short
@@ -1155,8 +1160,6 @@ def run_backtest(
             "commission_bps": float(commission_block["rate"]) * 10_000.0,
             "slippage_bps": float(slippage_block["rate"]) * 10_000.0,
         }
-
-    _reject_inert_risk_spec(strategy.get("risk", {}))
 
     if rebal_spec["mode"] == "vectorized":
         if funding_rates is not None:

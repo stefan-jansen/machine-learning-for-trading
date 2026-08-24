@@ -72,12 +72,7 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v2"
-SUPERSEDES: dict[str, str] = {
-    "fwd_ret_8h": "c16541d50dc3",
-    "fwd_ret_24h": "c2ba920126f4",
-    "fwd_dir_8h": "ae309637a66d",
-    "fwd_dir_8h_3c": "1c89e121f894",
-}
+SUPERSEDES: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -440,9 +435,10 @@ show_plotly_with_alt(
 #
 # `SUPERSEDES` names the generation of each set this run replaces, which the freeze refuses to do
 # implicitly. `17_strategy_analysis` resolves these four sets by name, so two live generations of
-# one name would leave it unable to say which comparison a result came from. The hashes here are
-# the sets frozen by the run in which every control registered without its position rule; the
-# error raised on a changed set names the predecessor to pass.
+# one name would leave it unable to say which comparison a result came from. It defaults to empty,
+# because a first run has nothing to replace and a set whose members are unchanged returns the
+# existing one without consulting it. Pass it only for a re-run that admits different members;
+# the error raised then names the predecessor hash to supply.
 
 # %%
 for label in labels:

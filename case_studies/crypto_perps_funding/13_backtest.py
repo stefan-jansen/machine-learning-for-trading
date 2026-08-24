@@ -277,13 +277,20 @@ pl.DataFrame(
 # Both are long-short, and a long-short book cannot hold the same contract on both sides, so a
 # top-k rule needs `2k` distinct contracts quoting at every timestamp it trades. The universe here
 # is nineteen perpetual contracts and it is unbalanced - a contract enters the panel when it is
-# listed, so early timestamps carry fewer than nineteen. The declared grid asks for k of 5 and
-# k of 10; ten a side needs twenty names and there are nineteen at the very best, so that member
-# is not a strategy that performs badly, it is a request the cross-section cannot fill.
+# listed, so early timestamps carry fewer than nineteen. The declared grid asks for k of 3, 5 and
+# 10; ten a side needs twenty names and there are nineteen at the very best, so that member is
+# not a strategy that performs badly, it is a request the cross-section cannot fill.
 #
 # `get_entry_schemes_for` applies that arithmetic and returns the feasible members. Reading which
 # ones it dropped is worth doing explicitly: a rule silently missing from a sweep looks exactly
 # like a rule that was never declared.
+#
+# **Feasible is not the same as filled at every decision.** The selector asks whether a rule can
+# ever be filled, against the nineteen contracts the universe declares. Whether it is filled at
+# one particular timestamp is a different question, and the answer varies across the period: the
+# allocator computes `min(k, n/2)` per timestamp, so a rule the selector kept still takes fewer
+# names than it asked for wherever the cross-section is thin. The figure below is what separates
+# the two questions, and neither the feasibility table nor the backtest reports it.
 
 # %%
 n_assets = int(setup["universe"]["n_assets"])
@@ -365,9 +372,11 @@ show_plotly_with_alt(
     fig_breadth,
     "Line chart of the number of perpetual contracts scored at each eight-hour decision over the "
     "validation period, with two horizontal reference lines at ten and twenty contracts marking "
-    "what a five-a-side and a ten-a-side long-short book need. The series rises over the period "
-    "and stays between the two lines throughout, so the five-a-side rule is always fillable and "
-    "the ten-a-side rule never is.",
+    "what a five-a-side and a ten-a-side long-short book need. The series rises over the period, "
+    "from five contracts at the start to nineteen by the end. It stays below the twenty line "
+    "throughout, so the ten-a-side rule is never fillable, and it dips below the ten line at 186 "
+    "of the 2,189 decisions, where the five-a-side rule truncates to whatever the cross-section "
+    "holds rather than failing.",
 )
 
 # %% [markdown]
