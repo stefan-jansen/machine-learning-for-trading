@@ -433,6 +433,12 @@ catalog = (
 if catalog.filter(~pl.col("complete")).height:
     raise RuntimeError("linear execution returned a partial prediction set")
 
+# %% [markdown]
+# The catalog now holds one row per configuration, with the sweep's own declarations joined onto
+# what the run measured. What remains is to mark which rows were measured on every validation
+# date, refuse a shape these figures cannot draw, and show the ranking.
+
+# %% tags=["results"]
 # Coverage is judged against each label's own maximum. The sweep declares one label today, so
 # this is the same number either way; it is written per label because adding a variant to
 # `setup.yaml` is all it takes for a global maximum to mark a whole grid incomplete for a reason
