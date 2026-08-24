@@ -84,9 +84,25 @@ class CausalResult:
             if not db_path.is_file():
                 continue
             with sqlite3.connect(db_path) as db:
+                # `refutation_n_successful` arrived with a migration, and this read does
+                # not go through the migrating opener - deliberately, because a read that
+                # rewrites the schema of a registry it was only asked to look at is a
+                # write. Naming the column unconditionally instead raises
+                # OperationalError on any registry written before it existed, and the
+                # cache probe in `run_resolved_causal_request` catches only KeyError, so
+                # the error escapes, the registering write that would have migrated the
+                # database never happens, and re-running the notebook fails identically.
+                columns = {
+                    row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()
+                }
+                draws_column = (
+                    "refutation_n_successful"
+                    if "refutation_n_successful" in columns
+                    else "NULL AS refutation_n_successful"
+                )
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-                    "confounding_bias_pct, refutation_p, refutation_n_successful, spec_json "
+                    f"confounding_bias_pct, refutation_p, {draws_column}, spec_json "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
@@ -110,9 +126,15 @@ class CausalResult:
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have
                     # rejected at all, so a caller that re-applies a bare threshold
-                    # publishes "Fails" for runs that were merely underpowered.
+                    # publishes "Fails" for runs that were merely underpowered. An
+                    # unknown draw count is the same problem one step back: a row written
+                    # before the column existed carries NULL there, and classifying it on
+                    # the p-value alone reports exactly the verdict this derivation is
+                    # here to prevent. No count, no verdict.
                     "refutation_class": (
-                        classify_refutation(row[6], row[7]) if row[6] is not None else None
+                        classify_refutation(row[6], row[7])
+                        if row[6] is not None and row[7] is not None
+                        else None
                     ),
                 },
                 execution_tier=tier,
