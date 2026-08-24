@@ -325,7 +325,13 @@ def option_trade_calendar() -> pl.DataFrame:
     interval traded is the interval the label measures: the decision uses information up
     to its own session close, the position opens at the next session close, and it is held
     until the contracts expire.
+
+    Restricted to the weekly decision dates the engine rebalances on. The artifact carries
+    a candidate for every session, but the strategy only ever enters on those dates, so the
+    intervals from the rest are not intervals anything can hold.
     """
+    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
     labels_dir, _raw_options_dir = option_data_paths()
     calendar = pl.read_parquet(labels_dir / "contract_returns.parquet").select(
         pl.col("feature_date").alias("decision_date"),
@@ -333,6 +339,13 @@ def option_trade_calendar() -> pl.DataFrame:
         "entry_date",
         "expiration",
     )
+    rebalance_dates = resolve_rebalance_timestamps(
+        calendar.get_column("decision_date").unique().sort(),
+        "weekly_friday",
+    )
+    calendar = calendar.filter(pl.col("decision_date").is_in(rebalance_dates.implode()))
+    if calendar.is_empty():
+        raise ValueError("no option candidate falls on a weekly rebalance date")
     if calendar.n_unique(["decision_date", "symbol"]) != calendar.height:
         raise ValueError("option candidates are not unique by decision date and symbol")
     if calendar.filter(pl.col("entry_date") <= pl.col("decision_date")).height:

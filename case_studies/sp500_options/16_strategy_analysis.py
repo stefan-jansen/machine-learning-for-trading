@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -25,10 +25,10 @@
 # is applied first, then the complete 342-row baseline grid is ranked.
 # All `ret_to_expiry` backtests dispatch
 # through the HTM daily-MTM cohort engine (`_run_htm_daily_mtm`): entry on
-# the final available session of each Friday week, daily delta hedge through
-# the underlying, settle at intrinsic value at expiration, full per-leg
-# costs (entry-side option spread, daily underlying hedge spread, no
-# exit-leg option trade). Every metric is reported with its
+# the final available session of each Friday week, the underlying delta
+# hedged whenever it breaches its threshold, settle at intrinsic value at
+# expiration, full per-leg costs (entry-side option spread, underlying hedge
+# spread on each session the hedge trades, no exit-leg option trade). Every metric is reported with its
 # block-bootstrap 95% CI; paired holdout comparisons via
 # `backtest_paired_metrics` are required before the notebook reports them.
 # Cross-case-study comparison is reserved for Chapter 20.
@@ -38,18 +38,17 @@
 # - Read uncertainty-aware backtest metrics for an options strategy whose
 #   signal is statistically null (Sharpe and IC both straddle zero) under
 #   HTM cost accounting on full per-leg friction.
-# - Use the HTM-specific cost-sensitivity artefact (`14_costs`'s
-#   `htm_cost_sensitivity.parquet`) where the standard bps cost-grid
-#   convention does not apply (options costs are denominated in % of
-#   premium, not bps of notional).
+# - Read the cost curve `14_costs` publishes as backtest results, where the
+#   standard bps cost-grid convention does not apply (options costs are
+#   denominated in % of premium, not bps of notional).
 # - Surface a holdout decay reading without invoking champion/winner/
 #   verdict language, and a holdout-vs-EW comparison for the same window.
 #
 # **Book reference**: Chapter 20, §20.1 - sp500_options anchors the
 # "cost model validity" theme in the cross-case-study synthesis.
 #
-# **Prerequisites**: case-study pipeline through `12_backtest`, `14_costs`
-# (for `htm_cost_sensitivity.parquet`); the locked registry at
+# **Prerequisites**: case-study pipeline through `12_backtest` and
+# `14_costs`; the locked registry at
 # `case_studies/sp500_options/run_log/registry.db`.
 #
 # **Scope**: registry-read only - no training, no re-backtesting, no

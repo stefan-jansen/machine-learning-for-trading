@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -22,14 +22,16 @@
 # those case studies a position is a quantity of one instrument and its risk moves with that
 # quantity.
 #
-# A short straddle does not have that shape. Its exposure is two option legs whose sensitivity
-# changes as the underlying moves and as expiration approaches, plus a hedge position in the
-# underlying that is rebalanced daily against exactly that drift. Scaling a target weight would
-# leave the leg pairing, the settlement and the hedge accounting untouched, so the resulting
-# position would be a different instrument from the one whose risk was being managed. The controls
-# that do govern this strategy - the delta-hedge threshold, the settlement convention, the entry
-# cost model, how many weekly cohorts run at once - are part of the strategy specification itself
-# and were set in `12_backtest` and `14_costs`.
+# A short straddle does not have that shape here. Scaling the number of contracts would in fact
+# scale the legs, the hedge, the costs and the dollar Greeks together, so the objection is not that
+# option risk is independent of quantity. It is that the option engine never sees a quantity. It
+# holds five weekly cohorts at a fixed fifth of capital each and normalizes the weights inside a
+# cohort to sum to one, so an overlay that scales those weights down is renormalized straight back
+# up: there is no cash position for the book to move into. The execution path therefore refuses a
+# risk block rather than accept one it would silently discard. The controls that do govern this
+# strategy - the delta-hedge threshold, the settlement convention, the entry cost model, how many
+# weekly cohorts run at once - are part of the strategy specification itself and were set in
+# `12_backtest` and `14_costs`.
 #
 # So this case study declares no risk-overlay variants, and this notebook is where that is
 # checked rather than assumed. It resolves the candidate set that came out of
@@ -52,7 +54,7 @@
 
 import polars as pl
 
-from case_studies.research import CandidateSet
+from case_studies.research import CandidateSet, Result
 from case_studies.sp500_options.research_workflow import (
     open_study,
     run_official_backtest_requests,
@@ -126,19 +128,24 @@ risk_requests
 # The refusal lives in the execution path, not in this notebook, so it holds for a reader who
 # writes their own request as well. The cell below builds one against the highest-Sharpe candidate
 # and confirms it is rejected before anything is fitted or written.
+#
+# The probe opens that candidate and copies its strategy verbatim, so the risk block is the only
+# thing about the request that is new. Substituting a signal of the notebook's own would make the
+# refusal a statement about that substitute rather than about a candidate the pipeline produced.
 
 # %%
 probe_member = members.sort("sharpe", "backtest_hash", descending=[True, False]).row(0, named=True)
+probe_strategy = Result.open(study, probe_member["backtest_hash"]).spec()["strategy"]
 probe = strategy_request_frame(
     [
         {
             "request_name": "risk-overlay-probe",
             "prediction_hash": probe_member["prediction_hash"],
             "label": probe_member["label"],
-            "signal": {"method": "equal_weight_top_k", "top_k": 5, "universe_filter": "liquid"},
-            "allocation": None,
+            "signal": probe_strategy["signal"],
+            "allocation": probe_strategy.get("allocation"),
             "risk": {"name": "position_cap", "method": "max_weight", "max_weight": 0.1},
-            "costs": None,
+            "costs": probe_strategy.get("costs"),
             "chapter": "ch19",
         }
     ]
@@ -179,9 +186,9 @@ pl.DataFrame(
 # %% [markdown]
 # ## Key takeaways
 #
-# - A portfolio control is defined against a representation of a position. When the instrument's
-#   risk lives in a leg structure and a rebalancing hedge rather than in a quantity, a
-#   target-weight overlay changes the position without changing its risk.
+# - A portfolio control is defined against a representation of a position. When the engine holds a
+#   fully invested book of normalized cohort weights, there is no quantity for a target-weight
+#   overlay to act on, whatever the instrument.
 # - A stage that produces nothing still has to prove it, and the proof is the store's contents
 #   before and after, not a statement in the notebook.
 # - Refusing an unsupported request in the shared execution path, rather than in the notebook, is

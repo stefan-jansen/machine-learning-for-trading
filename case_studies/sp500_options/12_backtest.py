@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -25,8 +25,9 @@
 # weekly decision date it ranks the predicted return, keeps the highest-scoring symbols,
 # restricts them to the liquid option universe, and sells one at-the-money straddle - a call
 # and a put at the same strike and expiration - on each, equally weighted. Each straddle is
-# held to expiration and settled in cash at intrinsic value, with the underlying delta hedged
-# daily. Only the number of symbols held varies across requests.
+# held to expiration and settled in cash at intrinsic value, with the underlying delta measured
+# at every session close and hedged when it breaches its threshold. Only the number of symbols
+# held varies across requests.
 #
 # The run publishes a named, immutable population of backtest results. `13_portfolio_management`
 # and `14_costs` resolve that population by name and build on it, and `16_strategy_analysis` is
@@ -135,9 +136,9 @@ population_summary
 # - **Expiration** - where the position is closed, in cash, at the intrinsic value of the two
 #   legs. There is no exit trade and therefore no exit-side option spread.
 #
-# The underlying position that hedges the straddle's delta is rebalanced at every session close
-# in between, so the price series the backtest marks against is the daily underlying close over
-# exactly the entry-to-expiration window.
+# The net delta of the straddle is measured at every session close in between, and the underlying
+# hedge is traded only when that delta breaches its threshold, so the price series the backtest
+# marks against is the daily underlying close over exactly the entry-to-expiration window.
 
 # %%
 trade_calendar = option_trade_calendar()
@@ -261,7 +262,8 @@ print(f"{requests.height} requests: {predictions.height} prediction sets x {len(
 # as a decision artifact before any accounting happens, so what was traded is recorded
 # independently of what it earned. The engine then values the paired legs daily at their
 # midpoint, settles them at intrinsic value, carries the hedge position between sessions, and
-# charges the entry-side option spread and the daily underlying hedge spread.
+# charges the entry-side option spread plus the underlying hedge spread on each session the hedge
+# actually trades.
 #
 # In a canonical run the population's membership is computed and written before the first
 # backtest executes. An interrupted run therefore resumes into the same population instead of
@@ -311,10 +313,10 @@ baseline_spread
 
 # %%
 sharpe_figure = px.strip(
-    published.sort("family", "top_k"),
+    published.with_columns(concentration=pl.col("top_k").cast(pl.String)).sort("family", "top_k"),
     x="sharpe",
     y="family",
-    color=published.get_column("top_k").cast(pl.String),
+    color="concentration",
     hover_data=["config_name", "backtest_hash"],
     color_discrete_sequence=[COLORS["blue"], COLORS["amber"], COLORS["copper"]],
 )

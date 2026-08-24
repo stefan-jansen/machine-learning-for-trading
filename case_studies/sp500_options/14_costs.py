@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -128,8 +128,8 @@ representatives.select(
 # midpoint, which is roughly what measured effective-to-quoted spread ratios imply for algorithmic
 # execution in at-the-money equity options; the grid printed below gives both ends and the values
 # in between. Every other cost - the per-contract
-# option commission, the per-share equity commission, the half-spread paid on each daily hedge
-# rebalance of the underlying - is held at its configured value, so the fraction is the only field
+# option commission, the per-share equity commission, the half-spread paid whenever the delta
+# hedge trades the underlying - is held at its configured value, so the fraction is the only field
 # that moves along a curve.
 #
 # The **universe** axis is the second rung of the same question. `full` prices the strategy on the
@@ -290,5 +290,5 @@ show_plotly_with_alt(
 #
 # **Known limitations**: the spread fractions are declared assumptions calibrated from published
 # execution studies, not fills this strategy achieved, so the curve says what the result would be
-# under each assumption and not which assumption holds. The daily hedge spread and both commissions
+# under each assumption and not which assumption holds. The hedge spread and both commissions
 # are held fixed, so their contribution is inside every point rather than resolved along an axis.
