@@ -83,6 +83,15 @@ CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
 SPLIT = "validation"
 TOP_K = 20
+# Reduces the price panel and nothing else. The vectorized backtest computes its
+# return as weight x y_true from the predictions frame, so the universe and the
+# P&L both come from the predictions rather than from these prices; what the price
+# panel supplies is the rebalance calendar, and that is the same 110 month-ends
+# whichever symbols are in it. Measured on this notebook: 300 symbols and the full
+# 3,708 give bit-identical Sharpe, CAGR and drawdown on all 32 backtests of an
+# 8-prediction sweep, in 21 s against 19 s. It is kept because the fleet's
+# notebooks share this parameter, but it does not reduce a run here.
+# TOP_N_PREDICTIONS is the knob that does.
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False  # Set True to re-backtest even if a complete backtest_hash exists
 TOP_N_PREDICTIONS = None
