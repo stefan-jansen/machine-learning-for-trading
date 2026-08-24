@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # US equities panel: what a penalized linear map of 3,199 names is worth
+# # US equities panel: what a penalized linear map of the cross-section is worth
 #
 # This is the first model fitted in the case study, and deliberately the simplest one that can use
 # the whole feature set: a linear map from the features observed at one close to the return over
