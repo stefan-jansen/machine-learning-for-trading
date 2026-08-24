@@ -169,7 +169,13 @@ def _complete_lifecycle_contracts(
     contract_returns: pl.DataFrame,
     raw_options_dir: Path,
 ) -> pl.DataFrame:
-    """Keep entry contracts with a complete, valid paired lifecycle through expiry."""
+    """Return the entry contracts with a complete, valid paired lifecycle through expiry.
+
+    Reads quotes from entry through expiration, so every input date is later than the decision
+    it belongs to. Apply it to a selection to check that the engine can account for what was
+    chosen; applying it to the candidate universe would decide the decision-time universe from
+    data that does not exist yet.
+    """
     if contract_returns.is_empty():
         return contract_returns
     candidate_keys = ["feature_date", "symbol", "strike", "expiration", "entry_date"]
@@ -372,15 +378,6 @@ def _select_cohorts(
     cr = cr.filter(
         ~pl.any_horizontal([pl.col(column).is_null() for column in required_contract_values])
     )
-    if raw_options_dir is not None:
-        candidate_contracts = cr.rename({"timestamp": "feature_date"}).join(
-            pred.select(pl.col("date").alias("feature_date"), "symbol").unique(),
-            on=["feature_date", "symbol"],
-            how="semi",
-        )
-        cr = _complete_lifecycle_contracts(candidate_contracts, raw_options_dir).rename(
-            {"feature_date": "timestamp"}
-        )
     pred = pred.join(
         cr.select(pl.col("timestamp").alias("date"), "symbol"),
         on=["date", "symbol"],
@@ -420,6 +417,31 @@ def _select_cohorts(
         raise ValueError(
             f"selected option decisions have no complete entry contract: {missing.height} rows"
         )
+    if raw_options_dir is not None:
+        # Completeness is checked on what was selected, never on what could be selected. The
+        # screen reads quotes from entry through expiration, so applying it to the candidate
+        # universe would let a data gap that opens after the decision date decide what the model
+        # was allowed to rank on that date.
+        complete = _complete_lifecycle_contracts(
+            cohorts.rename({"timestamp": "feature_date"}), raw_options_dir
+        )
+        if complete.height != cohorts.height:
+            gaps = (
+                cohorts.rename({"timestamp": "feature_date"})
+                .join(
+                    complete.select("feature_date", "symbol"),
+                    on=["feature_date", "symbol"],
+                    how="anti",
+                )
+                .select("feature_date", "symbol")
+                .head(5)
+                .to_dicts()
+            )
+            raise ValueError(
+                f"{cohorts.height - complete.height} of {cohorts.height} selected option "
+                f"decisions have no complete paired lifecycle from entry through expiration "
+                f"(first: {gaps})"
+            )
 
     if method == "score_weighted_top_k":
         cohorts = _score_proportional_weights(cohorts)

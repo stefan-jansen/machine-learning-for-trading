@@ -833,3 +833,25 @@ def test_conformal_weighted_allocation_is_dispatched_not_refused(tmp_path: Path)
             tmp_path,
             {"method": "conformal_weighted", "top_k": 2},
         )
+
+
+def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) -> None:
+    """A quote gap after the decision date must not decide what could be ranked on it.
+
+    The screen reads the paired chain from entry through expiration, so every date it looks
+    at is later than the decision it would filter. Selecting first and reporting the gap
+    afterwards keeps the decision-time universe made of decision-time information.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    # Drop one leg of one session: the session still exists in the chain, so the gap is the
+    # contract's own rather than a hole in the calendar every contract shares.
+    gap = (pl.col("date") == date(2024, 1, 9)) & (pl.col("call_put") == "C")
+    chain.filter(~gap).write_parquet(raw_dir / "year=2024.parquet")
+
+    ranked = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+    assert ranked.get_column("symbol").to_list() == ["A"]
+
+    with pytest.raises(ValueError, match="complete paired lifecycle"):
+        _select_cohorts(_predictions(), _contract_returns(), top_k=1, raw_options_dir=raw_dir)

@@ -832,78 +832,16 @@ if fold_df.height > 1:
 # bad-vol regime can wipe out cumulative premium.
 
 # %% [markdown]
-# ## §5 Friction budget - the HTM cost-sensitivity grid
+# ## §5 Friction budget
 #
-# The standard `BacktestExplorer.cost_sensitivity()` curve is denominated
-# in bps per leg, which is the right convention for equities and futures
-# but the wrong unit for options: a 10% spread on a 4% premium is 40 bps
-# of notional, well within the "positive Sharpe" zone of any equity
-# sweep, but catastrophic for the actual P&L. § 14 (`14_costs`) ran an
-# HTM-specific cost grid in % of half-spread per trade, monotonicity-
-# checked, and saved the result to
-# `evaluation/htm_cost_sensitivity.parquet`. We read that artefact here
-# rather than recomputing.
-
-# %%
-_cost_path = CASE_DIR / "evaluation" / "htm_cost_sensitivity.parquet"
-if _cost_path.exists():
-    cost_sens = pl.read_parquet(_cost_path)
-    print("HTM cost-sensitivity table (from `14_costs`):")
-    print(cost_sens)
-
-    cost_table = cost_sens.pivot(
-        on="cost_fraction", index=["family", "universe"], values="sharpe"
-    ).sort("family", "universe")
-    print()
-    print("HTM net Sharpe by cost fraction (equal-weight top-K, weekly entry):")
-    print(cost_table)
-else:
-    cost_sens = None
-    print(
-        f"htm_cost_sensitivity.parquet not present at {_cost_path}; § 5 quantitative read is unavailable."
-    )
-
-# %%
-if cost_sens is not None:
-    family_style = {
-        "deep_learning": ("Deep learning (LSTM)", "#1565C0", "o"),
-        "gbm": ("Gradient boosting", "#43A047", "s"),
-        "linear": ("Linear", "#F57C00", "^"),
-        "tabular_dl": ("Tabular DL (TabM)", "#7B1FA2", "D"),
-    }
-    universes = sorted(cost_sens["universe"].unique().to_list())
-    fig, axes = plt.subplots(1, len(universes), figsize=(12, 4), sharey=True)
-    for axis, universe in zip(axes, universes, strict=True):
-        subset = cost_sens.filter(pl.col("universe") == universe)
-        for family in sorted(subset["family"].unique().to_list()):
-            line = subset.filter(pl.col("family") == family).sort("cost_fraction")
-            label, color, marker = family_style[family]
-            axis.plot(
-                line["cost_fraction"],
-                line["sharpe"],
-                color=color,
-                marker=marker,
-                label=label,
-                linewidth=1.5,
-                markersize=5,
-            )
-        axis.axhline(0, color="#9E9E9E", linewidth=0.8, linestyle="--")
-        axis.set_xlabel("Fraction of quoted half-spread")
-        axis.set_title(f"{universe.title()} universe")
-        axis.legend(loc="lower left", fontsize=7, frameon=False)
-    axes[0].set_ylabel("Net Sharpe (HTM, EW top-K)")
-    fig.suptitle("Costs leave every family-universe curve below zero")
-    fig.tight_layout()
-    fig.show()
-
-# %% [markdown]
-# The HTM cost grid begins at the favorable 20.3% execution fraction and
-# ends at the full quoted half-spread. Every registered cost row is
-# negative, and Sharpe decreases monotonically within all eight
-# family-universe curves. Liquidity changes both spreads and selected
-# trades, so it improves only two of the 16 matched comparisons. The
-# cost surface therefore reinforces, rather than rescues, the current
-# validation conclusion.
+# The standard `BacktestExplorer.cost_sensitivity()` curve is denominated in bps per leg, which is
+# the right convention for equities and futures but the wrong unit for options: a 10% spread on a
+# 4% premium is 40 bps of notional, well inside the "positive Sharpe" zone of any equity sweep and
+# ruinous for the actual P&L. `14_costs` runs the cost sweep in fractions of the quoted half-spread
+# instead, executes it through the same engine as every other backtest, and publishes it as the
+# named population `sp500-options-cost-sensitivity-validation-v1`. It reports the resulting Sharpe
+# surface across families, universes and spread fractions there, so this notebook does not repeat
+# it.
 
 # %% [markdown]
 # ## §6 Holdout closure with paired bootstrap
