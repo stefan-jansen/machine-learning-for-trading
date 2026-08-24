@@ -295,14 +295,15 @@ execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )
 
-# The runner's paths do not all record the same diagnostics, so the split below is printed only
-# when every run recorded it. A run that prepared folds - fitted or resolved, batch or single
-# request - carries `fitted_folds` and `reused_folds`. A configuration served whole from the
-# registry carries neither, because it prepared no folds and so has none to count, and neither
-# does the latent-factor runner, which records nothing at all. Indexing the keys raises
-# `KeyError` on those, and defaulting them to zero is worse: it reports every fold as served from
-# the registry, which is the opposite of what nothing-recorded means, and it does so in a number
-# a reader cannot tell from a measurement.
+# The runner is shared across model families and its paths do not all record the same
+# diagnostics, so the split below is printed only when every run recorded it. Every linear path
+# records it: a batch fit, a single request and a configuration served whole from the registry
+# each carry `fitted_folds` and `reused_folds`, so on this population the split is what prints.
+# The guard is for the runner rather than for this notebook. A TabM configuration served whole
+# from the registry records `reused` and no fold lists, and the latent-factor runner records
+# nothing at all. Indexing the keys raises `KeyError` on those, and defaulting them to zero is
+# worse: it reports every fold as served from the registry, which is the opposite of what
+# nothing-recorded means, and it does so in a number a reader cannot tell from a measurement.
 with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
 print(f"{len(execution.runs)} configurations, fitted or served from the registry")
 if with_folds and len(with_folds) == len(execution.diagnostics):
