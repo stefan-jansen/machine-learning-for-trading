@@ -102,7 +102,7 @@ requests.select("request_name", "prediction_hash", "label", "signal", "allocatio
 execution = run_official_backtest_requests(
     study,
     requests,
-    population_name="cme-allocation-validation-v1",
+    population_name="cme_futures-allocation-validation-v1",
 )
 candidate_sets = create_label_candidate_sets(
     study,

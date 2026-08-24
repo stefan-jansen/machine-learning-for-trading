@@ -168,7 +168,7 @@ pl.DataFrame(
 # shows how the validation result changes as the assumed fill gets worse.
 
 # %%
-cost_population = OfficialPopulation.one(study, name="cme-cost-validation-v1")
+cost_population = OfficialPopulation.one(study, name="cme_futures-cost-validation-v1")
 cost_members = cost_population.require_complete()
 cost_curve = (
     study.backtests.table()

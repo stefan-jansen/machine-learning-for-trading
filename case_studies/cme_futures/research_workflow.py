@@ -822,7 +822,7 @@ def shortlist_signal_configurations(
     limit: int,
 ) -> tuple[BacktestResult, ...]:
     """Select the strongest signal result for each distinct model configuration."""
-    candidates = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
+    candidates = CandidateSet.one(study, name=f"cme_futures-signal-{label}-v1")
     selected = []
     configurations = set()
     for result in candidates.ranked_validation_sharpe():
@@ -844,8 +844,8 @@ def shortlist_signal_configurations(
 
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
-    signal = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
-    allocation = CandidateSet.one(study, name=f"cme-allocation-{label}-v1")
+    signal = CandidateSet.one(study, name=f"cme_futures-signal-{label}-v1")
+    allocation = CandidateSet.one(study, name=f"cme_futures-allocation-{label}-v1")
     members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
     return CandidateSet.create(study, f"cme-pre-overlay-{label}-v1", members)
 
@@ -853,9 +853,9 @@ def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
 def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
-    risk = CandidateSet.one(study, name=f"cme-risk-{label}-v1")
+    risk = CandidateSet.one(study, name=f"cme_futures-risk-{label}-v1")
     members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
-    return CandidateSet.create(study, f"cme-final-validation-{label}-v1", members)
+    return CandidateSet.create(study, f"cme_futures-final-validation-{label}-v1", members)
 
 
 def final_selection_candidate_set(study: Study) -> CandidateSet:
@@ -876,7 +876,7 @@ def final_selection_candidate_set(study: Study) -> CandidateSet:
         members.extend(Result.open(study, value) for value in pool.members)
     return CandidateSet.create(
         study,
-        "cme-final-selection-v1",
+        "cme_futures-final-selection-v1",
         members,
         comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
     )

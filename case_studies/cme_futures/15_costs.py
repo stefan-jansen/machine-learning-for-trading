@@ -87,7 +87,7 @@ requests.select("request_name", "prediction_hash", "label", "costs")
 execution = run_official_backtest_requests(
     study,
     requests,
-    population_name="cme-cost-validation-v1",
+    population_name="cme_futures-cost-validation-v1",
 )
 
 # %% tags=["results"]
