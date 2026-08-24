@@ -124,10 +124,16 @@ feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
 temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp", "fold")]
 temporal_by_fold = mb
 features = feat
-feature_names = feat_cols
+# The temporal names belong in feature_names even though their values arrive per fold rather than
+# in `dataset`. prepare_fold_sequence_stores builds `use_cols` from feature_names and applies it
+# AFTER replace_temporal_columns has merged the fold's rows in (sequence_dataset.py:546,568), so a
+# temporal column absent from this list is merged and then immediately dropped - the model would
+# train on the financial features alone and report nothing about it. load_modeling_dataset carries
+# its temporal names in feature_names for the same reason.
+feature_names = feat_cols + temporal_feature_names
 print(
-    f"  Base features: {features.shape[0]:,} rows, {len(feature_names)} features; "
-    f"{len(temporal_feature_names)} temporal features joined per fold"
+    f"  Base features: {features.shape[0]:,} rows, {len(feat_cols)} financial "
+    f"+ {len(temporal_feature_names)} temporal joined per fold = {len(feature_names)} features"
 )
 
 labels = (
