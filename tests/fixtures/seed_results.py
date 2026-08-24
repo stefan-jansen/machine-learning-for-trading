@@ -19,6 +19,9 @@ from pathlib import Path
 
 import yaml
 
+from case_studies.utils.registry.specs import IDENTITY_VERSION
+from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
+
 REPO_ROOT = Path(__file__).parent.parent.parent
 CS_ROOT = REPO_ROOT / "case_studies"
 
@@ -391,7 +394,7 @@ def _add_cohort_metrics_table(db_path: Path) -> None:
 def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
     """Create a minimal registry.db with entries for all families and stages.
 
-    Schema matches utils/registry.py REGISTRY_SCHEMA_SQL exactly.
+    The schema IS REGISTRY_SCHEMA_SQL, executed directly, so it cannot drift from it.
     Creates entries that utils.case_study_analytics and utils.model_analysis
     can query without crashing.
     """
@@ -452,118 +455,13 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     db = sqlite3.connect(str(db_path))
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS training_runs (
-            training_hash TEXT PRIMARY KEY, family TEXT NOT NULL,
-            label TEXT NOT NULL, config_name TEXT,
-            spec_json TEXT, created_at TEXT NOT NULL,
-            git_commit TEXT, entry_point TEXT
-        );
-        CREATE TABLE IF NOT EXISTS prediction_sets (
-            prediction_hash TEXT PRIMARY KEY,
-            training_hash TEXT NOT NULL REFERENCES training_runs(training_hash),
-            checkpoint_value INTEGER, checkpoint_kind TEXT,
-            split TEXT NOT NULL, created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS prediction_metrics (
-            prediction_hash TEXT PRIMARY KEY REFERENCES prediction_sets(prediction_hash),
-            computed_at TEXT NOT NULL,
-            ic_mean REAL, ic_std REAL, ic_t REAL, n_folds REAL, n_obs REAL,
-            n_periods REAL, pct_positive REAL, task_type REAL,
-            accuracy REAL, balanced_accuracy REAL, auc_roc REAL, auc_pr REAL,
-            log_loss REAL, brier_score REAL
-        );
-        CREATE TABLE IF NOT EXISTS fold_metrics (
-            prediction_hash TEXT NOT NULL REFERENCES prediction_sets(prediction_hash),
-            fold_id INTEGER NOT NULL,
-            computed_at TEXT NOT NULL,
-            ic REAL, ic_std REAL, n_periods REAL, n_obs REAL, n_entities REAL,
-            rmse REAL, mae REAL,
-            accuracy REAL, balanced_accuracy REAL, auc_roc REAL, auc_pr REAL,
-            log_loss REAL, brier_score REAL,
-            PRIMARY KEY (prediction_hash, fold_id)
-        );
-        CREATE TABLE IF NOT EXISTS backtest_runs (
-            backtest_hash TEXT PRIMARY KEY,
-            prediction_hash TEXT NOT NULL REFERENCES prediction_sets(prediction_hash),
-            spec_json TEXT, stage TEXT, created_at TEXT NOT NULL, git_commit TEXT
-        );
-        CREATE TABLE IF NOT EXISTS backtest_metrics (
-            backtest_hash TEXT PRIMARY KEY REFERENCES backtest_runs(backtest_hash),
-            computed_at TEXT NOT NULL,
-            sharpe REAL, sortino REAL, total_return REAL, max_drawdown REAL,
-            cagr REAL, volatility REAL, calmar REAL, omega REAL, stability REAL,
-            tail_ratio REAL, win_rate REAL, kurtosis REAL, skewness REAL,
-            var_95 REAL, cvar_95 REAL, n_periods REAL,
-            num_trades REAL, total_commission REAL, total_slippage REAL, avg_turnover REAL
-        );
-        CREATE TABLE IF NOT EXISTS backtest_fold_metrics (
-            backtest_hash TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-            fold_id INTEGER NOT NULL, metric TEXT NOT NULL,
-            value REAL, computed_at TEXT NOT NULL,
-            PRIMARY KEY (backtest_hash, fold_id, metric)
-        );
-        CREATE TABLE IF NOT EXISTS cohort_metrics (
-            cohort_type   TEXT NOT NULL,
-            stage         TEXT,
-            label         TEXT NOT NULL,
-            family        TEXT,
-            leader_hash   TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-            k_variants                  INTEGER NOT NULL,
-            periods_per_year            REAL NOT NULL,
-            computed_at                 TEXT NOT NULL,
-            n_trials_effective_mp       REAL,
-            n_trials_effective_er       REAL,
-            dsr_raw                     REAL, dsr_raw_pvalue REAL,
-            expected_max_sharpe_raw     REAL, min_trl_periods_raw REAL,
-            dsr_mp                      REAL, dsr_mp_pvalue  REAL,
-            expected_max_sharpe_mp      REAL, min_trl_periods_mp  REAL,
-            dsr_er                      REAL, dsr_er_pvalue  REAL,
-            expected_max_sharpe_er      REAL, min_trl_periods_er  REAL,
-            ras_leader                  REAL,
-            ras_complexity              REAL,
-            ras_n_strategies            REAL,
-            ras_pvalue                  REAL,
-            reality_check_pvalue        REAL,
-            reality_check_statistic     REAL,
-            reality_check_k             REAL,
-            pbo                         REAL,
-            pbo_n_combinations          REAL,
-            pbo_median_oos_rank         REAL,
-            pbo_mean_degradation        REAL,
-            pbo_n_folds                 REAL,
-            leader_sharpe               REAL,
-            leader_sortino              REAL,
-            leader_min_trl              REAL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_cohort_unique
-            ON cohort_metrics(cohort_type, COALESCE(stage, ''), label, COALESCE(family, ''));
-        CREATE INDEX IF NOT EXISTS idx_cohort_leader ON cohort_metrics(leader_hash);
-        CREATE TABLE IF NOT EXISTS backtest_paired_metrics (
-            challenger_hash       TEXT NOT NULL REFERENCES backtest_runs(backtest_hash),
-            benchmark_hash        TEXT NOT NULL,
-            benchmark_kind        TEXT,
-            periods_per_year      INTEGER,
-            bootstrap_block_length INTEGER,
-            bootstrap_n           INTEGER,
-            sharpe_diff           REAL,
-            sharpe_diff_ci95_lo   REAL,
-            sharpe_diff_ci95_hi   REAL,
-            ret_diff              REAL,
-            ret_diff_ci95_lo      REAL,
-            ret_diff_ci95_hi      REAL,
-            max_dd_diff           REAL,
-            max_dd_diff_ci95_lo   REAL,
-            max_dd_diff_ci95_hi   REAL,
-            info_ratio            REAL,
-            info_ratio_ci95_lo    REAL,
-            info_ratio_ci95_hi    REAL,
-            prob_challenger_wins  REAL,
-            p_value               REAL,
-            computed_at           TEXT NOT NULL,
-            PRIMARY KEY (challenger_hash, benchmark_hash)
-        );
-    """)
+    # The canonical schema itself, not a restatement of it. This block used to repeat
+    # nine CREATE TABLE statements under a docstring promising they matched
+    # REGISTRY_SCHEMA_SQL "exactly", with nothing checking that promise. They had
+    # drifted by thirteen tables - every research-boundary table, prediction_coverage
+    # among them - and by training_runs.identity_version, so a notebook on the research
+    # API resolved an empty catalog from a fixture that looked fully populated (#893).
+    db.executescript(REGISTRY_SCHEMA_SQL)
 
     # IC values per family (realistic ordering: gbm > linear > dl > others)
     ic_values = {
@@ -604,8 +502,9 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
                 spec = {"family": family, "config_name": config_name, "label": label}
                 db.execute(
                     """INSERT OR IGNORE INTO training_runs
-                       (training_hash, family, label, config_name, spec_json, created_at, git_commit, entry_point)
-                       VALUES (?,?,?,?,?,?,?,?)""",
+                       (training_hash, family, label, config_name, spec_json, created_at,
+                        git_commit, entry_point, identity_version, execution_tier)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (
                         t_hash,
                         family,
@@ -615,6 +514,13 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
                         FIXTURE_TS,
                         "fixture",
                         "fixture",
+                        # Without this the catalog resolves every seeded row as "legacy"
+                        # and therefore incomplete, so a notebook that filters on the
+                        # current identity sees nothing. Reading IDENTITY_VERSION rather
+                        # than writing 3 means the fixture follows the next bump instead
+                        # of silently going legacy again the day it lands.
+                        IDENTITY_VERSION,
+                        "canonical",
                     ),
                 )
                 db.execute(
@@ -625,30 +531,61 @@ def _seed_registry_db(cs_dir: Path, cs_id: str, primary_label: str) -> None:
                 )
                 db.execute(
                     """INSERT OR IGNORE INTO prediction_metrics
-                       (prediction_hash, computed_at, ic_mean, ic_std, n_folds, n_obs)
+                       (prediction_hash, computed_at, ic_mean, ic_std, ic_t, n_folds)
                        VALUES (?,?,?,?,?,?)""",
-                    (p_hash, FIXTURE_TS, ic, ic * 0.3, 2, 100),
+                    (p_hash, FIXTURE_TS, ic, ic * 0.3, ic / (ic * 0.3), 2),
                 )
                 # Fold metrics (2 folds) — wide format matching production schema
                 for fold_id in range(2):
                     fold_ic = ic + (0.002 if fold_id == 0 else -0.002)
                     db.execute(
                         """INSERT OR IGNORE INTO fold_metrics
-                           (prediction_hash, fold_id, computed_at, ic, ic_std, n_periods, n_obs, n_entities, rmse, mae)
-                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                           (prediction_hash, fold_id, computed_at, ic, ic_std, n_entities, rmse, mae)
+                           VALUES (?,?,?,?,?,?,?,?)""",
                         (
                             p_hash,
                             fold_id,
                             FIXTURE_TS,
                             fold_ic,
                             fold_ic * 0.3,
-                            50,
-                            100,
                             5,
                             0.05,
                             0.03,
                         ),
                     )
+
+                # `complete` is a conjunction (research/catalog.py:308-313): current
+                # identity, a coverage row saying complete, a prediction_metrics row,
+                # fold_metrics matching n_folds_expected, and the artifact on disk. The
+                # fixture supplied three of the five, so every row read as partial. The
+                # two fold_metrics rows above are what n_folds_expected must equal; the
+                # digest is filled by _backfill_all_prediction_parquets, which writes
+                # the artifact.
+                db.execute(
+                    """INSERT OR IGNORE INTO prediction_coverage
+                       (prediction_hash, expected_key_digest, actual_key_digest,
+                        n_expected, n_actual, n_duplicates, n_missing, n_extra,
+                        n_null, n_non_finite, n_folds_expected, n_folds_actual,
+                        schema_json, artifact_digest, status)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        p_hash,
+                        _make_hash(f"keys/{p_hash}"),
+                        _make_hash(f"keys/{p_hash}"),
+                        100,
+                        100,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        2,
+                        2,
+                        json.dumps({"symbol": "String", "timestamp": "Date"}),
+                        _make_hash(f"artifact/{p_hash}"),
+                        "complete",
+                    ),
+                )
 
                 if label == primary_label and ic > best_ic:
                     best_ic = ic
