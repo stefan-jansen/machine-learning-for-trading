@@ -1172,3 +1172,27 @@ def test_unusable_parameters_catches_a_preview_mapping_rebound_before_any_read(
     assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
     for name, reason in problems.items():
         assert "overwrites the injected value" in reason, name
+        assert "PREVIEW_REDUCTIONS" in reason, name
+
+
+def test_unusable_parameters_catches_a_preview_mapping_rebound_above_every_reader(
+    tmp_path: Path,
+) -> None:
+    """A helper that reads the mapping does not save it when the rebind runs before every call.
+
+    The deferred-reader exemption asks whether anything can observe the injected value. Here the
+    unconditional rebind sits above the only call site, so every read the helper performs sees the
+    notebook's own mapping and none see the reductions the harness folded in. Reached through the
+    translation, so it also pins that the redirect keeps the reader analysis rather than bypassing
+    it.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n'
+        "# %%\ndef fit():\n    return dict(PREVIEW_REDUCTIONS)\n\n"
+        "# %%\nPREVIEW_REDUCTIONS = {}\nprint(fit())\n",
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "PREVIEW_REDUCTIONS" in reason, name
