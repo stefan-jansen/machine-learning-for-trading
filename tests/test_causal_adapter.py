@@ -136,7 +136,12 @@ def test_canonical_causal_uses_the_full_declared_population(tmp_path, monkeypatc
 
     canonical_population = canonical.spec["computation"]["analysis_population"]
     preview_population = preview.spec["computation"]["analysis_population"]
-    assert canonical_population["n_rows"] == frame.height
+    # "Full" means the declared panel less the buffer the endpoint cutoff removes, which at
+    # an 8H buffer on 8-hour bars is one observation across the fixture's symbols. It does
+    # not mean every row: asserting `frame.height` would encode this fixture's labels being
+    # non-null through its final bar, which a forward return never is.
+    trimmed = frame.get_column("symbol").n_unique()
+    assert canonical_population["n_rows"] == frame.height - trimmed
     assert canonical_population["max_samples"] == 0
     assert "preview_reductions" not in canonical.spec["computation"]
     assert preview_population["n_rows"] == 60
@@ -373,7 +378,7 @@ def test_canonical_causal_ignores_a_sample_cap_declared_in_the_preset(
     population = resolved.spec["computation"]["analysis_population"]
 
     assert population["max_samples"] == 0
-    assert population["n_rows"] == frame.height
+    assert population["n_rows"] == frame.height - frame.get_column("symbol").n_unique()
 
     with pytest.raises(ValueError, match="canonical causal requests cannot declare preview"):
         study.causal(
@@ -515,3 +520,95 @@ def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch
                 "n_placebo": 10,
             },
         ).resolve()
+
+
+def _session_causal_fixture(tmp_path, monkeypatch):
+    """A weekday-only panel, where a calendar buffer and a session buffer disagree."""
+    study = Study.open(
+        "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+    )
+    setup_path = study.root / "config" / "setup.yaml"
+    setup_path.write_text(
+        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
+    )
+    sessions = [
+        timestamp
+        for timestamp in pd.date_range("2024-01-01", "2024-03-01", freq="D", tz="UTC")
+        if timestamp.weekday() < 5
+    ]
+    rows = []
+    for session_index, timestamp in enumerate(sessions):
+        for symbol_index in range(6):
+            rows.append(
+                {
+                    "symbol": f"S{symbol_index}",
+                    "timestamp": timestamp.to_pydatetime(),
+                    "feature": float(symbol_index),
+                    "treatment": float(symbol_index) + session_index / 100,
+                    "confounder": float(session_index % 5),
+                    "fwd_ret_5d": (symbol_index - 2.5) / 100 + session_index / 10000,
+                }
+            )
+    frame = pl.DataFrame(rows).with_columns(pl.col("timestamp").dt.replace_time_zone("UTC"))
+    label = study.labels.publish(
+        LabelDefinition("fwd_ret_5d", "regression", "5D"),
+        frame.select("symbol", "timestamp", "fwd_ret_5d"),
+    )
+    mds = SimpleNamespace(
+        dataset=frame,
+        feature_names=["feature", "treatment", "confounder"],
+        label_col="fwd_ret_5d",
+        label_buffer="5D",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *args, **kwargs: mds)
+    monkeypatch.setattr(
+        "utils.modeling.load_configs",
+        lambda *args, **kwargs: [
+            {
+                "config_name": "dml",
+                "family": "causal_dml",
+                "n_folds": 5,
+                "n_placebo": 100,
+                "params": {"max_depth": 3, "max_iter": 50},
+                "seed": 42,
+            }
+        ],
+    )
+    return study, label, frame, sessions
+
+
+def test_holdout_seal_counts_sessions_not_calendar_days(tmp_path, monkeypatch) -> None:
+    """A 5D buffer means five observations, and on a gapped calendar those differ.
+
+    The panel trades Monday to Friday, so five calendar days back from a Monday holdout
+    reaches the Wednesday before, while five observations back reaches the Monday before
+    that. The two sessions between them carry outcomes that resolve inside the holdout.
+    """
+    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    _set_holdout_start(study.root / "config" / "setup.yaml", "2024-02-19")
+
+    computation = study.causal(method="dml", label=label.name).resolve().spec["computation"]
+
+    holdout = pd.Timestamp("2024-02-19", tz="UTC")
+    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
+    session_cutoff = pre_holdout[-5]
+    calendar_cutoff = holdout - pd.Timedelta("5D")
+    # The fixture is only meaningful while the two constructions actually disagree.
+    assert session_cutoff < calendar_cutoff
+
+    assert computation["estimand"]["holdout_endpoint_cutoff"] == session_cutoff.isoformat()
+    retained = frame.filter(pl.col("timestamp") < session_cutoff)
+    assert computation["analysis_population"]["n_rows"] == retained.height
+    # Rows the calendar cutoff would have kept, whose own five-session outcome resolves
+    # inside the holdout. This is the difference the seal exists to remove.
+    leaked = frame.filter(
+        (pl.col("timestamp") >= session_cutoff) & (pl.col("timestamp") < calendar_cutoff)
+    )
+    assert leaked.height > 0
+    assert computation["analysis_population"]["n_rows"] < retained.height + leaked.height

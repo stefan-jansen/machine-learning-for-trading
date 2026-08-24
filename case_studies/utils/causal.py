@@ -930,14 +930,46 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     holdout = pd.Timestamp(setup["evaluation"]["holdout_start"], tz="UTC")
     horizon_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
     date_dtype = mds.dataset.schema[mds.date_col]
-    endpoint_cutoff = holdout - horizon_delta
-    analysis = (
-        mds.dataset.select(columns)
-        .drop_nulls()
-        .filter(
-            pl.col(mds.date_col)
-            < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
+    # The cutoff steps back a count of observations, not a calendar duration. The horizons
+    # these buffers describe are counted in the panel's own observations, so subtracting the
+    # buffer as calendar time answers a different question on any gapped calendar. A 21D
+    # buffer is roughly fifteen sessions on a five-session week, which left the last few
+    # retained rows resolving their returns inside the holdout, silently. The two
+    # constructions agree only on a continuous panel, which is why this held wherever anyone
+    # had checked it.
+    #
+    # The cadence therefore has to be measured before the cutoff rather than after it, and on
+    # the pre-holdout observations alone: `_observed_cadence` takes the mode of the gaps, so a
+    # panel whose spacing changes across the holdout boundary would otherwise size the buffer
+    # and the embargo from rows the analysis never touches.
+    populated = mds.dataset.select(columns).drop_nulls()
+    pre_holdout = (
+        populated.filter(
+            pl.col(mds.date_col) < pl.lit(holdout.to_pydatetime()).cast(date_dtype, strict=False)
         )
+        .select(mds.date_col)
+        .unique()
+        .sort(mds.date_col)
+    )
+    if pre_holdout.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    cadence = _observed_cadence(pre_holdout, mds.date_col)
+    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
+    # The trim is unconditional. Making it depend on whether the panel reaches the holdout
+    # would rest on the last populated row's window resolving inside the panel, which is a
+    # property of how a label was built rather than anything this function can see: a label
+    # column that is non-null through the final observation resolves past it.
+    if pre_holdout.height <= horizon_steps:
+        raise ValueError(
+            f"the panel holds {pre_holdout.height} observations before {holdout.date()}, which "
+            f"cannot absorb a {horizon_steps}-observation buffer and leave anything to analyse"
+        )
+    endpoint_cutoff = pd.Timestamp(
+        pre_holdout.get_column(mds.date_col)[pre_holdout.height - horizon_steps]
+    )
+    analysis = populated.filter(
+        pl.col(mds.date_col)
+        < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
     )
     analysis = _whole_timestamp_tail(
         analysis,
@@ -947,13 +979,11 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     )
     if analysis.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
-    cadence = _observed_cadence(analysis, mds.date_col)
-    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
-    # The cadence is already measured on the frame being analysed, so the embargo
+    # The cadence is measured on the pre-holdout observations above, so the embargo
     # is counted against it rather than against an assumed bar size. Leaving the
     # fallback here would make the embargo short by the ratio between the two on
     # any panel whose real cadence differs from its declared one, while the
-    # horizon computed on the line above stayed right. A month buffer has no
+    # horizon computed from that same cadence stayed right. A month buffer has no
     # fixed length and keeps the calendar branch.
     try:
         embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
