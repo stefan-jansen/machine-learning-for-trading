@@ -668,3 +668,60 @@ def test_the_endpoint_cutoff_steps_back_sessions_not_calendar_days(tmp_path, mon
     # The calendar construction would have stopped at 2024-01-31, keeping two sessions
     # whose five-session return resolves on or after the holdout.
     assert len(pre_holdout) - 5 < sum(1 for v in pre_holdout if v < holdout - pd.Timedelta("5D"))
+
+
+def test_the_cutoff_anchors_on_the_first_session_at_or_after_the_holdout(
+    tmp_path, monkeypatch
+) -> None:
+    """A holdout_start that is not itself a session must not shift the cut.
+
+    Configured holdout boundaries land on holidays and weekends, and where they do
+    the closure widens the gap the calendar construction mismeasures. Counting
+    observations rather than duration is what makes the boundary irrelevant: the
+    last retained row's window has to end on the final session before the holdout,
+    whatever the calendar did around it.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    holdout = pd.Timestamp("2024-01-01")  # a Monday holiday; the panel skips it
+    setup_path = study.root / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    setup["evaluation"]["holdout_start"] = holdout.date().isoformat()
+    setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
+
+    sessions = [
+        value for value in pd.bdate_range("2023-11-01", "2024-02-16").to_list() if value != holdout
+    ]
+    rows = [
+        {
+            "symbol": f"S{symbol_index}",
+            "timestamp": timestamp,
+            "feature": float(symbol_index),
+            "treatment": float(symbol_index) + session_index / 100,
+            "confounder": float(session_index % 5),
+            "fwd_ret_8h": (symbol_index - 2.5) / 100 + session_index / 10000,
+        }
+        for session_index, timestamp in enumerate(sessions)
+        for symbol_index in range(6)
+    ]
+    mds = SimpleNamespace(
+        dataset=pl.DataFrame(rows),
+        feature_names=["feature", "treatment", "confounder"],
+        label_col="fwd_ret_8h",
+        label_buffer="5D",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *args, **kwargs: mds)
+
+    resolved = study.causal(method="dml", label=label.name).resolve()
+    retained = resolved.spec["computation"]["analysis_population"]["n_rows"] // 6
+
+    pre_holdout = [value for value in sessions if value < holdout]
+    # The last retained session's five-session window has to land on the final session
+    # before the holdout, not past it.
+    assert sessions[retained - 1 + 5] == pre_holdout[-1]
+    assert sessions[retained + 5] >= holdout
