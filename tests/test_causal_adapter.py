@@ -28,7 +28,7 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol"):
+def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer: str = "8H"):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -59,14 +59,14 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol"):
             )
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
-        LabelDefinition("fwd_ret_8h", "regression", "8H"),
+        LabelDefinition("fwd_ret_8h", "regression", label_buffer),
         frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
         dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_8h",
-        label_buffer="8H",
+        label_buffer=label_buffer,
         date_col="timestamp",
         entity_cols=[entity],
         input_lineage={
@@ -503,6 +503,32 @@ def test_causal_resolver_accepts_either_canonical_entity_key(tmp_path, monkeypat
     ).resolve()
 
     assert resolved.spec["computation"]["analysis_population"]["n_rows"] > 0
+
+
+@pytest.mark.parametrize(
+    ("label_buffer", "expected_block"),
+    [("8H", 1), ("24H", 3), ("48H", 6)],
+)
+def test_the_placebo_block_spans_the_label_horizon(
+    tmp_path, monkeypatch, label_buffer, expected_block
+) -> None:
+    """The resolved spec's block size is the label horizon in bars, not the embargo.
+
+    On 8-hour bars a 24-hour label overlaps three observations, so a block of one
+    would leave the placebo free to break exactly the dependence the overlap
+    creates. Reverting the resolver to `block_size=embargo` passes only while the
+    embargo happens to be derived from the same buffer; this pins the horizon.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, label_buffer=label_buffer)
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    assert resolved.spec["computation"]["refutation"]["block_size"] == expected_block
 
 
 def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
