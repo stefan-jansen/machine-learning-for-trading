@@ -205,10 +205,17 @@ if (
     raise ValueError("locked checkpoint differs from the selected prediction")
 if selected_validation.spec() != research_lock.record["strategy_spec"]:
     raise ValueError("locked strategy differs from the selected validation strategy")
+# The lock builds these three from the training spec's `computation` block
+# (research/lifecycle.py:248-250), so they are compared against the same projection.
 for field in ("label_artifact", "feature_artifacts", "cv"):
     if selected_training_computation.get(field) != research_lock.record[field]:
         raise ValueError(f"locked {field} differs from selected training")
-if selected_training_computation.get("source_identity") != research_lock.record["source_identity"]:
+# `source_identity` is NOT from that block, and the two must not be unified. The lock stores the
+# registry row's `git_commit` under that name (lifecycle.py:259) - a commit string - while
+# `computation["source_identity"]` is the runner's own declaration, a dict of component versions
+# such as {"linear_runner": ..., "fold_preparation": ...}. Comparing the dict against the string
+# can never be equal, so it raises on every lineage that is in fact correct.
+if selected_training_record.get("git_commit") != research_lock.record["source_identity"]:
     raise ValueError("locked source identity differs from selected training")
 if (
     json.loads(selected_training_record.get("runtime_json") or "{}")
