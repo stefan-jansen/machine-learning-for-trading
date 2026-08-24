@@ -142,7 +142,23 @@ def _label(result: BacktestResult) -> str:
     return str(result.lineage()["training_spec"]["label"])
 
 
-def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
+def _registered_preview_allocations() -> pl.DataFrame:
+    """The allocation backtests an upstream preview registered.
+
+    One predicate, read once. Stating it twice - once to decide which labels are covered
+    and once to pick a label's leader - makes the two required to agree forever: tighten
+    one and the other admits a label whose backtests it then rejects, which is exactly the
+    "no preview allocation backtests are registered" failure this exists to prevent.
+    """
+    return study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "allocation")
+        & (pl.col("execution_tier") == "preview")
+        & (pl.col("identity_status") == "current")
+        & pl.col("complete")
+    )
+
+
+def _preview_leader(rows: pl.DataFrame, registered_allocations: pl.DataFrame) -> BacktestResult:
     """One allocation backtest for this label, read from what 14 registered.
 
     Rebuilding the identity restated two of the upstream run's choices - its `top_k` and
@@ -151,12 +167,8 @@ def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
     and a guess that is wrong looks for a hash nothing wrote instead of reporting the
     disagreement.
     """
-    registered = study.backtests.table(include_preview=True).filter(
-        (pl.col("stage") == "allocation")
-        & (pl.col("execution_tier") == "preview")
-        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
-        & (pl.col("identity_status") == "current")
-        & pl.col("complete")
+    registered = registered_allocations.filter(
+        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
     )
     if registered.is_empty():
         raise RuntimeError(
@@ -180,17 +192,9 @@ if include_preview:
     # _preview_leader for labels 14_portfolio_management was configured not to allocate,
     # and it raises "no preview allocation backtests are registered" for each - reporting
     # a reduction the run was told to make as a missing upstream.
+    registered_allocations = _registered_preview_allocations()
     covered = catalog.filter(
-        pl.col("prediction_hash").is_in(
-            study.backtests.table(include_preview=True)
-            .filter(
-                (pl.col("stage") == "allocation")
-                & (pl.col("execution_tier") == "preview")
-                & (pl.col("identity_status") == "current")
-                & pl.col("complete")
-            )
-            .get_column("prediction_hash")
-        )
+        pl.col("prediction_hash").is_in(registered_allocations.get_column("prediction_hash"))
     )
     if covered.is_empty():
         raise RuntimeError(
@@ -198,7 +202,9 @@ if include_preview:
             "run 14_portfolio_management at the same reduction first"
         )
     for label in sorted(covered.get_column("label").unique()):
-        selected_by_label[label] = _preview_leader(covered.filter(pl.col("label") == label))
+        selected_by_label[label] = _preview_leader(
+            covered.filter(pl.col("label") == label), registered_allocations
+        )
 else:
     baselines = _open_backtests(
         OfficialPopulation.one(
