@@ -147,6 +147,20 @@ analysis = eligible.filter(pl.col(date_col).is_in(selected_dates)).sort(date_col
 if analysis.is_empty() or analysis[date_col].max() >= development_cutoff:
     raise ValueError("Development sample is empty or crosses the holdout boundary")
 
+# The folds are built from complete decision months, not rows, and the row cap decides how many
+# months survive. Below the minimum every fold's test window comes back empty, the second stage
+# fits nothing, and the run reports a NaN effect over zero observations rather than failing - so
+# the count of months is checked here, before an hour of placebo fits, rather than read off the
+# result afterwards.
+decision_months = analysis[date_col].n_unique()
+min_decision_months = CV_FOLDS + embargo_periods + 1
+if decision_months < min_decision_months:
+    raise ValueError(
+        f"{decision_months} decision months cannot fill {CV_FOLDS} expanding folds with a "
+        f"{embargo_periods}-month embargo; {min_decision_months} is the minimum. The row cap of "
+        f"{ROW_CAP:,} selects whole months, so raising it is what buys more of them."
+    )
+
 block_size = label_horizon
 cadence = observation_step(analysis, date_col)
 schema_bytes = "|".join(f"{name}:{dtype}" for name, dtype in analysis.schema.items()).encode()
@@ -218,6 +232,10 @@ if dml_result["covariance_type"] != "driscoll_kraay":
     raise ValueError(f"Expected panel-robust covariance, found {dml_result['covariance_type']}")
 if results["naive_n_obs"] != dml_result["n_obs"]:
     raise ValueError("Naive and adjusted estimates use different comparison samples")
+# An empty second stage satisfies both checks above - the covariance type is still the one that
+# was asked for, and zero equals zero - so what the estimate has to be is asserted directly.
+if dml_result["n_obs"] == 0 or not np.isfinite([dml_result["theta"], dml_result["se_hac"]]).all():
+    raise ValueError("DML produced no out-of-fold observations or no finite effect")
 print(format_dml_summary(results))
 
 # %% [markdown]
