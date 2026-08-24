@@ -231,6 +231,13 @@ merged_clean = (
 # how far apart two outcomes stop sharing a return window. A bandwidth shorter than the overlap
 # understates the standard error, and a longer one moves it in whichever direction the extra
 # sample autocovariances happen to point, so the notebook passes the horizon itself.
+#
+# The **development cutoff** is counted in sessions, because that is the unit the labels are
+# built in. `forward_return` in `02_labels.py` takes the close a fixed number of sessions ahead
+# and keeps a row only where the session index spans exactly that many. Subtracting the buffer
+# as a calendar duration answers a different question: ten days is about seven sessions on this
+# calendar, so the notebook delivered seven where it declared ten, and a label variant whose
+# horizon exceeded seven resolved its return inside the holdout with nothing to show it.
 
 # %%
 BUFFER_PERIODS = embargo_from_buffer(mds.label_buffer)
@@ -251,7 +258,13 @@ if TREATMENT_COL != "ivrv_spread":
 TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
 BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
-DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
+pre_holdout = np.sort(merged_clean.loc[merged_clean[date_col] < HOLDOUT_START, date_col].unique())
+if len(pre_holdout) <= BUFFER_PERIODS:
+    raise ValueError(
+        f"The panel holds {len(pre_holdout)} sessions before {HOLDOUT_START.date()}, which "
+        f"cannot absorb a {BUFFER_PERIODS}-session buffer and leave anything to analyse."
+    )
+DEVELOPMENT_CUTOFF = pd.Timestamp(pre_holdout[-BUFFER_PERIODS])
 
 # Labels at or after this cutoff can overlap the holdout return window.
 merged_clean = merged_clean.loc[merged_clean[date_col] < DEVELOPMENT_CUTOFF].copy()
