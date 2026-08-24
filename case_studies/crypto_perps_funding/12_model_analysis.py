@@ -203,39 +203,43 @@ _t = _effect / _se if _se else float("nan")
 # The block and the bandwidth are sized by different rules and the reader is being asked to
 # weigh a ratio built from the second. The bandwidth is not statsmodels': it requires an
 # explicit `maxlags` for both `HAC` and `hac-groupsum` and supplies no default. The
-# cube-root-of-decision-times rule is this repository's own fallback in `run_dml_analysis`,
-# applied because no `hac_maxlags` is passed (`case_studies/utils/causal.py:467-472`), and
-# raised only to `horizon - 1`. The realized bandwidth is not registered - `causal_runs`
-# stores neither `hac_maxlags` nor `n_periods` - so the notebook states the rule rather than
-# a number it cannot read back.
+# cube-root-of-decision-times rule is this repository's own fallback, in
+# `manual_dml_timeseries` (`case_studies/utils/causal.py:467-472`, inside the function that
+# starts at :340 - `run_dml_analysis` at :624 only warns and forwards), applied because no
+# `hac_maxlags` is passed and then raised to `horizon - 1`. The realized bandwidth is not
+# registered - `causal_runs` stores neither `hac_maxlags` nor `n_periods` - so the notebook
+# states the rule rather than a number it cannot read back.
 #
-# The caveat is worded off `block_size_basis`, not off `block_size` alone. The block is
-# `max(horizon_steps, treatment_window_steps or 1)`, so on a run whose treatment declares no
-# window it collapses to the label horizon - and then the block is not treatment persistence
-# and the bandwidth no longer covers fewer lags than it, since `hac_maxlags >= horizon - 1`.
-# Saying so unconditionally would invert the moment someone re-runs this against a treatment
-# the resolver cannot size.
+# The two window quantities decide the wording, not `block_size_basis`. The basis string
+# cannot carry it: `block_size = max(horizon_steps, treatment_window_steps or 1)` and the
+# basis is resolved by equality, so `label_horizon` covers both an undeclared window and a
+# declared one shorter than the horizon, while `treatment_window` includes the case where the
+# two are equal and the bandwidth already covers the block to within a lag. Only
+# `treatment_window_steps > label_horizon_steps` is the situation the caveat describes.
 _refutation_spec = causal.spec["computation"]["refutation"]
 _block = _refutation_spec["block_size"]
-_basis = _refutation_spec["block_size_basis"]
-if _basis == "treatment_window":
+_window_steps = _refutation_spec["treatment_window_steps"]
+_horizon_steps = _refutation_spec["label_horizon_steps"]
+if _window_steps is not None and _window_steps > _horizon_steps:
     _bandwidth_text = (
         f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
         "persistence, but the standard error behind this ratio does not. Its HAC bandwidth "
         "is this repository's cube-root-of-decision-times fallback raised to cover the label "
-        "horizon, and nothing ties it to the treatment's window, so it covers materially "
-        "fewer lags than the block. Which way that moves the standard error is not something "
-        "the mismatch settles: a HAC estimate is not monotonic in its bandwidth, because the "
-        "autocovariances a longer bandwidth admits can carry either sign, and the treatment's "
-        "construction window is an argument for the block rather than a derivation of the "
-        "right bandwidth. Read the ratio as provisional until the estimate is recomputed "
-        "across a range of defensible bandwidths. "
+        f"horizon of {_horizon_steps}, and nothing ties it to the treatment's window, so it "
+        "covers materially fewer lags than the block. Which way that moves the standard error "
+        "is not something the mismatch settles: a HAC estimate is not monotonic in its "
+        "bandwidth, because the autocovariances a longer bandwidth admits can carry either "
+        "sign, and the treatment's construction window is an argument for the block rather "
+        "than a derivation of the right bandwidth. Read the ratio as provisional until the "
+        "estimate is recomputed across a range of defensible bandwidths. "
     )
 else:
     _bandwidth_text = (
-        f"The placebo block spans **{_block}** bars on the label horizon, the resolver having "
-        "found no declared construction window for the treatment, so the block is not sized "
-        "by treatment persistence and the standard error's bandwidth already covers it. "
+        f"The placebo block spans **{_block}** bars, sized by the label horizon, which is at "
+        "least as long as any construction window declared for the treatment"
+        + (" - none is declared here. " if _window_steps is None else f" ({_window_steps}). ")
+        + "So the block does not exceed the label horizon, and the standard error's "
+        "bandwidth covers it to within a lag rather than falling short of it. "
     )
 Markdown(
     f"The registered DML estimate is **{_effect:+.4g}** with "
