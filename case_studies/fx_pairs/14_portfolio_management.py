@@ -232,9 +232,26 @@ for label in baseline_labels:
     if len(selected_configs[label]) != min(top_n, len(set(ordered_configs))):
         raise RuntimeError(f"configuration selection for {label} is incomplete")
 
+# Restoring every checkpoint of a selected configuration is the intended behaviour, but the
+# checkpoints have to come from what the upstream run actually backtested. Taking them from
+# this notebook's own catalog restores predictions 13_backtest never produced a baseline for,
+# and the equal-weight sibling check below then finds none - so a narrowed upstream fails
+# here rather than at the point the mismatch was introduced. In a full canonical run the two
+# sets are identical and this filter removes nothing, which is why the unscoped case asserts
+# it instead of trusting it.
+baseline_predictions = {result.registry_record()["prediction_hash"] for result in baseline_results}
+if not POPULATION_NAME:
+    missing = set(catalog.get_column("prediction_hash")) - baseline_predictions
+    if missing:
+        raise RuntimeError(
+            "the canonical baseline population does not cover every prediction in the "
+            f"catalog: {len(missing)} uncovered"
+        )
+covered = catalog.filter(pl.col("prediction_hash").is_in(list(baseline_predictions)))
+
 selected_rows = []
 for label, configs in selected_configs.items():
-    label_rows = catalog.filter(pl.col("label") == label)
+    label_rows = covered.filter(pl.col("label") == label)
     for family, config_name in sorted(configs):
         members = label_rows.filter(
             (pl.col("family") == family) & (pl.col("config_name") == config_name)
