@@ -1345,7 +1345,7 @@ case_studies/crypto_perps_funding/16_risk_management:
   timeout: 600
 case_studies/crypto_perps_funding/17_strategy_analysis:
   skip: true
-  skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction — same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
+  skip_reason: "Signed pre-holdout freeze pins an exact production registry snapshot (whole-file md5 + production-scale table counts, e.g. backtest_runs: 698) that a reduced CI fixture cannot reproduce by construction - same class as us_firm_characteristics/08a_ipca, not a fixable reduction."
 case_studies/etfs/01_feasibility_analysis:
   # ADV_THRESHOLD is the only name this notebook declares that an override can reach.
   # MAX_SYMBOLS, N_SPLITS, TRAIN_YEARS and TEST_YEARS named nothing in it; START_DATE
@@ -1868,17 +1868,17 @@ case_studies/sp500_options/12_backtest:
   # and never by registry presence. The fixture has no preview model run to name, so
   # there is nothing for this notebook to resolve until one exists.
   skip: true
-  skip_reason: "Needs the exact PREVIEW_PREDICTION_HASHES of a preview model run; the fixture has none to name."
+  skip_reason: "Needs the exact PREVIEW_PREDICTION_HASHES of a preview model run. Seeding one needs a released source prediction under run_log/predictions/, and the rebuilt registry holds none yet; this entry becomes runnable when it does."
 case_studies/sp500_options/13_portfolio_management:
   skip: true
-  skip_reason: "Depends on 12_backtest signal-stage results — see that entry's skip_reason."
+  skip_reason: "Depends on 12_backtest signal-stage results - see that entry's skip_reason."
 case_studies/sp500_options/14_costs: {}
 case_studies/sp500_options/15_risk_management:
   skip: true
-  skip_reason: "Depends on 13_portfolio_management allocation-stage results — see 12_backtest entry."
+  skip_reason: "Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry."
 case_studies/sp500_options/16_strategy_analysis:
   skip: true
-  skip_reason: 'Depends on 13_portfolio_management allocation-stage results — see 12_backtest entry.'
+  skip_reason: 'Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry.'
 case_studies/sp500_options/90_ic_diagnostic:
   parameters:
     MAX_SYMBOLS: 5
