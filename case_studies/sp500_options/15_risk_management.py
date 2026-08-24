@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -153,6 +153,13 @@ probe = strategy_request_frame(
 try:
     run_official_backtest_requests(study, probe, population_name=None)
 except ValueError as refusal:
+    # The refusal has to name the risk overlay. The request also carries the candidate's costs
+    # block, which this path refuses separately, so accepting any ValueError would let a refusal
+    # about costs be reported as the risk boundary holding.
+    if "risk overlay" not in str(refusal):
+        raise RuntimeError(
+            f"the request was refused for something other than risk: {refusal}"
+        ) from refusal
     print(f"risk request refused: {refusal}")
 else:
     raise RuntimeError("the option execution path accepted a risk overlay it cannot represent")

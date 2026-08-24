@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -52,6 +52,7 @@ import polars as pl
 from case_studies.research import CandidateSet, OfficialPopulation, Result
 from case_studies.sp500_options.research_workflow import (
     open_study,
+    paired_sharpe_on_common_support,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -264,35 +265,40 @@ strategy_candidates = (
 # spread within one colour is how much the answer depends on which model the allocator was handed.
 # Neither is a selection - that needs the interval around each estimate, which
 # `16_strategy_analysis` reports.
+#
+# Both Sharpe ratios in a pair are recomputed over the dates the two results share, rather than
+# read from the registry where each covers its own series. `conformal_weighted` trades a shorter
+# history, so its registered number is measured over a different stretch of market than the
+# baseline's and the difference between them would carry the period as well as the allocator. The
+# summary reports the shortest common support against the baseline's own length, which is how much
+# of the record a comparison in that row is made on.
 
 # %%
-allocation_sharpe = (
-    study.backtests.table(include_preview=EXECUTION_TIER == "preview")
-    .select(pl.col("backtest_hash"), pl.col("sharpe").alias("allocation_sharpe"))
-    .join(
-        catalog.select("request_name", "backtest_hash"),
-        on="backtest_hash",
-        how="inner",
-    )
+pairs = (
+    catalog.select("request_name", "backtest_hash")
     .join(
         requests.select("request_name", "baseline_hash", "allocation_method"),
         on="request_name",
         how="inner",
     )
     .join(
-        baseline_table.select(
-            pl.col("backtest_hash").alias("baseline_hash"),
-            pl.col("sharpe").alias("baseline_sharpe"),
-            "family",
-        ),
+        baseline_table.select(pl.col("backtest_hash").alias("baseline_hash"), "family"),
         on="baseline_hash",
         how="inner",
     )
 )
-if allocation_sharpe.height != catalog.height:
+if pairs.height != catalog.height:
     raise RuntimeError("an allocation result did not pair with its baseline")
-if allocation_sharpe.get_column("allocation_sharpe").null_count():
-    raise RuntimeError("an allocation result carries no Sharpe ratio")
+# Both sides are recomputed on the dates they share. `conformal_weighted` has no weight for an
+# entry date with no prior-only calibration window, so it starts trading later than the baseline
+# it is built from, and its registered Sharpe covers a different stretch of market.
+allocation_sharpe = pairs.join(
+    paired_sharpe_on_common_support(study, pairs),
+    on=["backtest_hash", "baseline_hash"],
+    how="inner",
+)
+if allocation_sharpe.height != pairs.height:
+    raise RuntimeError("a pair did not resolve a Sharpe on common support")
 
 # %% tags=["results"]
 allocation_summary = (
@@ -301,6 +307,8 @@ allocation_summary = (
         backtests=pl.len(),
         sharpe_median=pl.col("allocation_sharpe").median(),
         improved_on_baseline=(pl.col("allocation_sharpe") > pl.col("baseline_sharpe")).sum(),
+        shortest_common_support=pl.col("n_periods").min(),
+        baseline_sessions=pl.col("baseline_periods").max(),
     )
     .sort("allocation_method")
 )

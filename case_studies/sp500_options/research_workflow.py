@@ -317,7 +317,34 @@ def official_prediction_catalog(
     )
 
 
-def option_trade_calendar() -> pl.DataFrame:
+def option_decision_dates(study: Study, prediction_hashes: Iterable[str]) -> pl.Series:
+    """Return the weekly decision dates the engine will enter on, over these predictions.
+
+    The engine resolves its schedule from the prediction frame it is handed, not from the
+    contract artifact: ``weekly_friday`` means the last session present in each ISO week of
+    *those* timestamps. A prediction set missing a Friday therefore rebalances on that
+    week's Thursday, and a schedule read off the complete artifact would name a session the
+    engine cannot trade.
+
+    Prediction sets do not share one schedule. A sequence model needs its lookback window
+    before it scores anything, so its first weeks are absent and its schedule starts later.
+    The union is returned: every date on which some prediction set in the request enters.
+    """
+    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
+
+    schedules: list[pl.Series] = []
+    for prediction_hash in prediction_hashes:
+        result = Result.open(study, str(prediction_hash), include_preview=True)
+        if not isinstance(result, PredictionResult):
+            raise TypeError(f"{prediction_hash} is not a prediction result")
+        timestamps = result.load().get_column("timestamp").cast(pl.Date).unique().sort()
+        schedules.append(resolve_rebalance_timestamps(timestamps, "weekly_friday"))
+    if not schedules:
+        raise ValueError("no prediction set was given to resolve a decision schedule from")
+    return pl.concat(schedules).unique().sort()
+
+
+def option_trade_calendar(decision_dates: pl.Series) -> pl.DataFrame:
     """Return the decision, entry and expiration date of every candidate straddle.
 
     One row per ``(decision date, symbol)`` in the option artifact the strategy chooses
@@ -326,12 +353,11 @@ def option_trade_calendar() -> pl.DataFrame:
     to its own session close, the position opens at the next session close, and it is held
     until the contracts expire.
 
-    Restricted to the weekly decision dates the engine rebalances on. The artifact carries
-    a candidate for every session, but the strategy only ever enters on those dates, so the
-    intervals from the rest are not intervals anything can hold.
+    ``decision_dates`` is the schedule the engine resolved from the predictions it trades,
+    from :func:`option_decision_dates`. The artifact carries a candidate for every session,
+    and the intervals from the sessions the engine never enters on are not intervals
+    anything can hold.
     """
-    from case_studies.utils.backtest_loaders import resolve_rebalance_timestamps
-
     labels_dir, _raw_options_dir = option_data_paths()
     calendar = pl.read_parquet(labels_dir / "contract_returns.parquet").select(
         pl.col("feature_date").alias("decision_date"),
@@ -339,13 +365,11 @@ def option_trade_calendar() -> pl.DataFrame:
         "entry_date",
         "expiration",
     )
-    rebalance_dates = resolve_rebalance_timestamps(
-        calendar.get_column("decision_date").unique().sort(),
-        "weekly_friday",
+    calendar = calendar.filter(
+        pl.col("decision_date").is_in(decision_dates.cast(pl.Date).implode())
     )
-    calendar = calendar.filter(pl.col("decision_date").is_in(rebalance_dates.implode()))
     if calendar.is_empty():
-        raise ValueError("no option candidate falls on a weekly rebalance date")
+        raise ValueError("no option candidate falls on a decision date the engine enters on")
     if calendar.n_unique(["decision_date", "symbol"]) != calendar.height:
         raise ValueError("option candidates are not unique by decision date and symbol")
     if calendar.filter(pl.col("entry_date") <= pl.col("decision_date")).height:
@@ -353,6 +377,71 @@ def option_trade_calendar() -> pl.DataFrame:
     if calendar.filter(pl.col("expiration") < pl.col("entry_date")).height:
         raise ValueError("an option expires before it is entered")
     return calendar.sort("decision_date", "symbol")
+
+
+def paired_sharpe_on_common_support(
+    study: Study,
+    pairs: pl.DataFrame,
+) -> pl.DataFrame:
+    """Recompute each pair's two Sharpe ratios over the dates both backtests actually traded.
+
+    ``pairs`` carries ``baseline_hash`` and ``backtest_hash``. An allocator that needs a
+    prior-only calibration window has no weight for the entry dates before its first one, so
+    its return series starts later than the baseline it is built from. The registered Sharpe
+    of each is computed over its own series, so comparing the two registered numbers mixes
+    the allocator with the period. Both sides are recomputed here over the intersection of
+    their dates, and ``n_periods`` says how much of the baseline the comparison kept.
+    """
+    from case_studies.utils.backtest_runner import compute_portfolio_metrics
+
+    def _returns(backtest_hash: str) -> pl.DataFrame:
+        result = Result.open(study, backtest_hash)
+        if not isinstance(result, BacktestResult):
+            raise TypeError(f"{backtest_hash} is not a backtest result")
+        frame = pl.read_parquet(
+            result.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+        )
+        value = next(
+            column for column in ("daily_return", "ret", "return") if column in frame.columns
+        )
+        return frame.select(
+            pl.col("timestamp").cast(pl.Date).alias("timestamp"),
+            pl.col(value).cast(pl.Float64).alias("ret"),
+        ).unique(subset="timestamp", keep="first")
+
+    cache: dict[str, pl.DataFrame] = {}
+    rows = []
+    for pair in pairs.iter_rows(named=True):
+        baseline_hash, variant_hash = str(pair["baseline_hash"]), str(pair["backtest_hash"])
+        for candidate in (baseline_hash, variant_hash):
+            if candidate not in cache:
+                cache[candidate] = _returns(candidate)
+        common = cache[baseline_hash].join(
+            cache[variant_hash], on="timestamp", how="inner", suffix="_variant"
+        )
+        if common.height < 2:
+            raise ValueError(
+                f"backtests {baseline_hash} and {variant_hash} share fewer than two dates"
+            )
+        rows.append(
+            {
+                "backtest_hash": variant_hash,
+                "baseline_hash": baseline_hash,
+                "baseline_sharpe": compute_portfolio_metrics(
+                    common.get_column("ret").to_numpy(),
+                    periods_per_year=252,
+                    uncertainty=False,
+                )["sharpe"],
+                "allocation_sharpe": compute_portfolio_metrics(
+                    common.get_column("ret_variant").to_numpy(),
+                    periods_per_year=252,
+                    uncertainty=False,
+                )["sharpe"],
+                "n_periods": common.height,
+                "baseline_periods": cache[baseline_hash].height,
+            }
+        )
+    return pl.DataFrame(rows)
 
 
 def selected_prediction(study: Study, catalog_row: dict[str, Any]) -> PredictionResult:

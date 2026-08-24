@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -55,6 +55,7 @@ import polars as pl
 from case_studies.sp500_options.research_workflow import (
     official_prediction_catalog,
     open_study,
+    option_decision_dates,
     option_trade_calendar,
     run_official_backtest_requests,
     strategy_request_frame,
@@ -129,8 +130,9 @@ population_summary
 # scored over. Here the two are tied together by construction, and the table below states the
 # convention each date follows:
 #
-# - **Decision date** - the Friday session whose close is the last piece of information the
-#   model is allowed to use. The prediction is scored on this date.
+# - **Decision date** - the last session of the week present in the prediction set, whose close
+#   is the last piece of information the model is allowed to use. That is a Friday whenever the
+#   set reaches one, and the session before it otherwise. The prediction is scored on this date.
 # - **Entry date** - the next session's close, where the straddle is actually sold. Nothing
 #   trades at the price that produced the signal.
 # - **Expiration** - where the position is closed, in cash, at the intrinsic value of the two
@@ -139,9 +141,15 @@ population_summary
 # The net delta of the straddle is measured at every session close in between, and the underlying
 # hedge is traded only when that delta breaches its threshold, so the price series the backtest
 # marks against is the daily underlying close over exactly the entry-to-expiration window.
+#
+# The schedule comes from the predictions being traded, because that is where the engine reads it
+# from: `weekly_friday` is the last session present in each week of a prediction set, so a set that
+# does not reach a Friday enters on that week's Thursday. The contract artifact carries every
+# session, and the sessions no prediction set reaches are ones nothing enters on.
 
 # %%
-trade_calendar = option_trade_calendar()
+decision_dates = option_decision_dates(study, predictions.get_column("prediction_hash"))
+trade_calendar = option_trade_calendar(decision_dates)
 prices = load_backtest_prices_for(CASE_STUDY, PRIMARY_LABEL, split="validation")
 sessions = prices.get_column("timestamp").cast(pl.Date).unique().sort().to_frame("session")
 # A straddle entered near the end of the window expires after the last priced session, so the

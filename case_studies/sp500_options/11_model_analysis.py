@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -211,9 +211,14 @@ fig.show()
 # ## Causal DML artifact
 #
 # The causal result is not mixed into the predictive population or its checkpoint summaries.
+#
+# It is resolved as canonical whatever tier this notebook runs at, because the populations above
+# are canonical whatever tier this notebook runs at. Asking a preview run for a preview causal
+# artifact would make the notebook fail unless `10_causal_dml` happened to have run in the same
+# workspace first, and would pair a preview estimate with canonical predictions if it had.
 
 # %% tags=["results"]
-causal = CausalResult.one(study, label="ret_to_expiry", execution_tier=EXECUTION_TIER)
+causal = CausalResult.one(study, label="ret_to_expiry", execution_tier="canonical")
 if not causal.complete:
     raise RuntimeError("the causal DML artifact is incomplete")
 causal_summary = pl.DataFrame(

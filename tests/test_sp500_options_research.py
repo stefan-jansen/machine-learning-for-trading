@@ -24,6 +24,9 @@ from case_studies.sp500_options._htm_backtest import (
 from case_studies.sp500_options.research_workflow import (
     model_request_catalog,
     open_study,
+    option_decision_dates,
+    option_trade_calendar,
+    paired_sharpe_on_common_support,
     publish_short_straddle_decisions,
     resolved_model_plan,
     run_official_backtest_requests,
@@ -888,3 +891,177 @@ def test_a_missing_entry_quote_does_not_shape_the_decision_universe() -> None:
     with pytest.raises(ValueError, match="no complete entry quote") as refusal:
         _select_cohorts(predictions, contract_returns, top_k=1)
     assert "'symbol': 'A'" in str(refusal.value)
+
+
+def _week_of_candidates(sessions: list[date]) -> pl.DataFrame:
+    """A contract-returns artifact with one candidate on each of the given decision dates."""
+    return pl.DataFrame(
+        {
+            "feature_date": sessions,
+            "symbol": ["A"] * len(sessions),
+            "strike": [100.0] * len(sessions),
+            "expiration": [date(2024, 1, 19)] * len(sessions),
+            "entry_date": [date(2024, 1, 16)] * len(sessions),
+            "entry_straddle_mid": [10.0] * len(sessions),
+        }
+    )
+
+
+def test_the_displayed_calendar_follows_the_schedule_the_predictions_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prediction set that stops short of Friday enters on Thursday, and the table says so.
+
+    The engine resolves ``weekly_friday`` from the prediction frame it is handed, so a week
+    whose Friday is absent from the predictions rebalances on the Thursday. Reading the
+    schedule off the complete contract artifact instead would display the Friday - a session
+    no backtest here enters on - and hide the Thursday it does.
+    """
+    from case_studies.sp500_options import research_workflow
+
+    study = _study(tmp_path)
+    spec = _resolved_spec(alpha=1.0)
+    spec["label"] = "ret_to_expiry"
+    training = study.results.register_training(spec)
+    thursday, friday = date(2024, 1, 11), date(2024, 1, 12)
+    frame = pl.DataFrame(
+        {
+            "symbol": ["A", "A"],
+            "timestamp": [datetime(2024, 1, 10), datetime(2024, 1, 11)],
+            "fold": [0, 0],
+            "actual": [0.01, 0.02],
+            "prediction": [0.02, 0.03],
+        }
+    )
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold"),
+    )
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    # The artifact carries the Friday the predictions never reach.
+    _week_of_candidates([date(2024, 1, 10), thursday, friday]).write_parquet(
+        labels_dir / "contract_returns.parquet"
+    )
+    monkeypatch.setattr(
+        research_workflow, "option_data_paths", lambda: (labels_dir, tmp_path / "raw")
+    )
+
+    decision_dates = option_decision_dates(study, [prediction.hash])
+    calendar = option_trade_calendar(decision_dates)
+
+    assert decision_dates.to_list() == [thursday]
+    assert calendar.get_column("decision_date").to_list() == [thursday]
+
+
+def test_conformal_weighted_sizes_by_width_and_drops_uncalibrated_dates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calibrated dates get inverse-width weights; the uncalibrated one is removed.
+
+    An entry date earlier than the first calibration window has no prior-only width, so it
+    cannot be sized this way. Filling it with equal weight would publish a run as
+    conformal-weighted while realizing the weighting the allocator exists to replace, so
+    those cohorts leave the result instead.
+    """
+    from case_studies.utils import conformal
+
+    prediction_hash = "conformalfixture01"
+    calibrated, uncalibrated = date(2024, 1, 12), date(2024, 1, 5)
+    widths_dir = tmp_path / "case" / "run_log" / "predictions" / prediction_hash
+    widths_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "timestamp": [calibrated, calibrated],
+            "symbol": ["A", "B"],
+            # B's interval is three times as wide, so it takes a quarter of the cohort.
+            "width": [1.0, 3.0],
+            "alpha": [conformal.DEFAULT_ALPHA, conformal.DEFAULT_ALPHA],
+            "calibration_version": [conformal.CALIBRATION_VERSION] * 2,
+        }
+    ).write_parquet(widths_dir / "conformal_widths.parquet")
+    monkeypatch.setattr(conformal, "get_case_study_dir", lambda _case: tmp_path / "case")
+
+    cohorts = pl.DataFrame(
+        {
+            "timestamp": [uncalibrated, uncalibrated, calibrated, calibrated],
+            "symbol": ["A", "B", "A", "B"],
+            "y_score": [0.3, 0.1, 0.3, 0.1],
+            "weight": [0.5, 0.5, 0.5, 0.5],
+        }
+    )
+
+    sized = _apply_cohort_allocator(
+        cohorts,
+        tmp_path / "raw",
+        {"method": "conformal_weighted", "top_k": 2, "floor_quantile": 0.0},
+        prediction_hash=prediction_hash,
+    )
+
+    assert sized.get_column("timestamp").unique().to_list() == [calibrated]
+    weights = dict(zip(sized["symbol"], sized["weight"], strict=True))
+    assert weights["A"] == pytest.approx(0.75)
+    assert weights["B"] == pytest.approx(0.25)
+
+
+def test_a_pair_is_compared_on_the_dates_both_backtests_traded(tmp_path: Path) -> None:
+    """An allocator that starts trading later is not credited with the period it skipped.
+
+    `conformal_weighted` has no weight for an entry date with no prior-only calibration
+    window, so its series starts later than the baseline it is built from. Reading each
+    registered Sharpe compares two different stretches of market; both sides are recomputed
+    on the dates they share.
+    """
+    from case_studies.utils.registry.registration import register_backtest_run
+
+    study = _study(tmp_path)
+    prediction = _prediction(study)
+    sessions = [datetime(2024, 1, day) for day in range(2, 12)]
+    # The baseline loses money over the first half and makes it over the second. A comparison
+    # on its full series would read a different baseline than the one the variant competed with.
+    baseline_returns = [-0.05, -0.03, -0.06, -0.04, -0.05, 0.02, 0.03, 0.01, 0.04, 0.02]
+    baseline_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=pl.DataFrame({"timestamp": sessions, "return": baseline_returns}),
+        metrics={"sharpe": 0.1},
+        case_dir=study.root,
+    )
+    variant_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {
+                "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                "allocation": {"method": "conformal_weighted"},
+            },
+        },
+        stage="allocation",
+        returns=pl.DataFrame({"timestamp": sessions[5:], "return": [0.03, 0.05, 0.02, 0.06, 0.04]}),
+        metrics={"sharpe": 5.0},
+        case_dir=study.root,
+    )
+
+    paired = paired_sharpe_on_common_support(
+        study,
+        pl.DataFrame({"baseline_hash": [baseline_hash], "backtest_hash": [variant_hash]}),
+    )
+
+    row = paired.row(0, named=True)
+    assert row["n_periods"] == 5
+    assert row["baseline_periods"] == 10
+    # The baseline's own series straddles zero; on the common support it is the winning half.
+    assert row["baseline_sharpe"] > 0
