@@ -1099,3 +1099,57 @@ def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
         )
         is None
     )
+
+
+def test_sdf_checkpoints_chosen_on_validation_never_reach_the_selection_pool() -> None:
+    """The four fitted-state aliases are excluded from what 13_backtest can select.
+
+    The stochastic discount factor keeps four checkpoints the library picked by reading the
+    validation split: best validation loss and best validation Sharpe, in each of its two
+    training phases. Selection downstream ranks on validation Sharpe, so publishing them as
+    ordinary members would let a checkpoint win the pool on the same data that chose it.
+
+    The exclusion is asserted against the library's named checkpoints, not against the sign
+    of the published value: `_sdf_checkpoint_label` packs both phases onto one integer axis,
+    so the signs are an artifact of that packing rather than a contract.
+    """
+    from ml4t.models.stochastic_discount_factor.model import (
+        VAL_BEST_LOSS_CONDITIONAL,
+        VAL_BEST_LOSS_UNCONDITIONAL,
+        VAL_BEST_SHARPE_CONDITIONAL,
+        VAL_BEST_SHARPE_UNCONDITIONAL,
+    )
+
+    from case_studies.utils.latent_factors.cv import _expected_latent_checkpoints
+    from case_studies.utils.latent_factors.library_bridge import _sdf_checkpoint_label
+
+    setup = yaml.safe_load(
+        (Path(research_workflow.__file__).parent / "config" / "setup.yaml").read_text()
+    )
+    model_kwargs = setup["modeling"]["latent_factors"]["model_kwargs"]["sdf"]
+    n_epochs_unc = int(model_kwargs.get("n_epochs_unc", 256))
+    chosen_on_validation = {
+        _sdf_checkpoint_label(checkpoint, n_epochs_unc=n_epochs_unc)
+        for checkpoint in (
+            VAL_BEST_LOSS_UNCONDITIONAL,
+            VAL_BEST_SHARPE_UNCONDITIONAL,
+            VAL_BEST_LOSS_CONDITIONAL,
+            VAL_BEST_SHARPE_CONDITIONAL,
+        )
+    }
+    n_epochs = max(int(value) for value in model_kwargs["checkpoint_epochs"])
+    published = set(
+        _expected_latent_checkpoints("sdf", n_epochs=n_epochs, model_kwargs=model_kwargs)
+    )
+    fitted = set(
+        _expected_latent_checkpoints(
+            "sdf",
+            n_epochs=n_epochs,
+            model_kwargs=model_kwargs,
+            include_internal_aliases=True,
+        )
+    )
+
+    assert published
+    assert not published & chosen_on_validation
+    assert fitted - published == chosen_on_validation
