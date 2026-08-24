@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import CausalResult, LabelDefinition, Study
 from case_studies.utils import causal
@@ -28,7 +29,13 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer: str = "8H"):
+def _causal_fixture(
+    tmp_path,
+    monkeypatch,
+    entity: str = "symbol",
+    label_buffer: str = "8H",
+    label_horizon: str | None = None,
+):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -36,6 +43,16 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer:
     setup_path.write_text(
         setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
     )
+    if label_horizon is not None:
+        # `resolve_label_horizon` reads the declared horizon from setup.yaml when no
+        # label spec declares one, which is how the case studies carry it. Merged into
+        # the existing `labels` mapping rather than appended: a second top-level
+        # `labels:` key would win outright and take `primary` and `variants` with it.
+        setup = yaml.safe_load(setup_path.read_text()) or {}
+        labels_section = setup.setdefault("labels", {})
+        horizons = labels_section.setdefault("horizons", {})
+        horizons["fwd_ret_8h"] = label_horizon
+        setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
     rows = []
     for timestamp_index, timestamp in enumerate(
         pl.datetime_range(
@@ -59,7 +76,7 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer:
             )
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
-        LabelDefinition("fwd_ret_8h", "regression", label_buffer),
+        LabelDefinition("fwd_ret_8h", "regression", label_horizon or label_buffer),
         frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
@@ -541,3 +558,32 @@ def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch
                 "n_placebo": 10,
             },
         ).resolve()
+
+
+def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    """The two are different quantities, and only one of them describes outcome overlap.
+
+    The buffer keeps a fold's training rows clear of its validation labels; the
+    outcome horizon is how long one outcome stays open, which is what makes
+    successive outcomes overlap and therefore what the Newey-West bandwidth has to
+    cover. They agree in most case studies here, so a resolver that derives both
+    from the buffer passes everywhere except where they differ. On 8-hour bars a
+    24-hour buffer over an 8-hour label is three bars against one.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H"
+    )
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    computation = resolved.spec["computation"]
+    assert computation["estimand"]["outcome_horizon"] == str(pd.Timedelta("8h"))
+    assert computation["refutation"]["block_size"] == 3
+    assert resolved._context.horizon == 1
