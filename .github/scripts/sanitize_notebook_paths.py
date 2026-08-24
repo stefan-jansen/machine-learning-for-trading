@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -122,12 +123,40 @@ BINARY_MIME = frozenset(
 )
 
 
+def _ignored_notebooks() -> set[Path]:
+    """Untracked notebooks git is configured to ignore, so ones no reader ever gets.
+
+    Papermill stages every execution as `.<name>.papermill.<pid>.ipynb` beside the
+    notebook and leaves it behind when a run is killed. Those are gitignored scratch
+    carrying the `tags: []` and the machine paths of a run in progress, and the
+    guards here had been reading them as if they were part of the repository: a
+    working copy that had executed a notebook recently failed the gate while CI,
+    which clones fresh, passed. A file that is ignored but nonetheless tracked stays
+    in scope, because it does reach readers. Outside a git checkout nothing is
+    ignored and every notebook is scanned.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "*.ipynb"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    return {REPO_ROOT / name for name in listed.split("\0") if name}
+
+
 def _iter_notebooks() -> list[Path]:
+    ignored = _ignored_notebooks()
     out = []
     for p in REPO_ROOT.rglob("*.ipynb"):
         if SKIP_PARTS & set(p.parts):
             continue
         if p.name.startswith("_executed_"):
+            continue
+        if p in ignored:
             continue
         out.append(p)
     return sorted(out)
