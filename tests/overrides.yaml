@@ -2088,7 +2088,7 @@ case_studies/us_equities_panel/20_strategy_analysis:
   # notebook is exercised by the production run instead.
   #
   # This entry used to carry a second obstacle - that VALIDATION_BACKTEST_SET_NAME had no producer.
-  # 19_risk_management.py:487-490 now freezes exactly that name per label, so it is closed, and the
+  # 19_risk_management.py:488-491 now freezes exactly that name per label, so it is closed, and the
   # sentence is gone rather than left standing next to the one that is still true.
   skip_reason: >-
     Reads a research lock, which cannot be built from preview ancestry
