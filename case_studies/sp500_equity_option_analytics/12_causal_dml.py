@@ -202,34 +202,36 @@ merged_clean = (
 # outcome interval crosses into the holdout.
 
 # %% [markdown]
-# Two quantities follow from the label buffer, and they answer different questions. The
-# **embargo** separates a fold's training window from its test window, so a label measured in
-# training cannot still be running when testing starts. The **permutation block size** is the
-# scale of the dependence the placebo has to preserve: shuffling in blocks shorter than that
-# scale pulls dependent observations apart, and the placebo degrades towards an independent
-# draw - the permutation that is too easy to pass and therefore proves nothing.
+# Two quantities follow from the label buffer and from the treatment, and they answer different
+# questions. The **embargo** separates a fold's training window from its test window, so a label
+# measured in training cannot still be running when testing starts; the label buffer alone sets
+# it. The **permutation block size** is the scale of the dependence the placebo has to preserve:
+# shuffling in blocks shorter than that scale pulls dependent observations apart, and the placebo
+# degrades towards an independent draw - the permutation that is too easy to pass and therefore
+# proves nothing.
 #
-# **Two scales qualify, and the block size below covers only one of them.** The label horizon is how
-# long an outcome stays open. The treatment has its own persistence: `ivrv_spread` subtracts a
-# rolling realized volatility from implied, so consecutive values share most of their input and stay
+# **Two scales qualify, and the block size has to cover both.** The label horizon is how long an
+# outcome stays open. The treatment has its own persistence: `ivrv_spread` subtracts a rolling
+# realized volatility from implied, so consecutive values share most of their input and stay
 # dependent over that rolling window whatever the label does. That window is the first entry of
-# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two scales
-# here - but nothing carries it to the block size, which is set from the label buffer alone.
+# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two here.
+# The block size below takes the larger scale, so the placebo keeps whichever dependence runs
+# longer; the embargo stays on the label buffer, which is the only scale it answers to.
 #
-# Blocks that short cut through the dependence the permutation exists to keep. The placebo draws
-# come out closer to an independent series than the real treatment is, so the null distribution is
-# narrower than it should be and the estimate looks more extreme against it than it has earned. The
-# refutation below is therefore not yet a test the estimate can fail; read it as a placeholder
-# rather than as evidence.
-#
-# The embargo and the block size are equal in this case study because the same buffer sets both.
-# They are assigned separately below so that stays a fact about this case study rather than an
-# assumption buried in a shared name.
+# The treatment's persistence does not follow from `causal.treatment` alone - it follows from how
+# that column is built in the feature stage. The assignment below therefore names the treatment it
+# knows how to read and refuses any other, rather than applying a window that may not describe it.
 
 # %%
 LABEL_HORIZON = embargo_from_buffer(mds.label_buffer)
 EMBARGO_PERIODS = LABEL_HORIZON
-BLOCK_SIZE = LABEL_HORIZON
+if TREATMENT_COL != "ivrv_spread":
+    raise ValueError(
+        f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
+        "The block size below follows how ivrv_spread is built in 03_financial_features.py."
+    )
+TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
+BLOCK_SIZE = max(LABEL_HORIZON, TREATMENT_PERSISTENCE)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
 
@@ -274,7 +276,10 @@ print(f"\nAnalysis data: {len(merged_clean):,} rows")
 print(f"Date range: {merged_clean[date_col].min()} to {merged_clean[date_col].max()}")
 print(f"Holdout begins: {HOLDOUT_START.date()}")
 print(f"Development cutoff after label buffer: {DEVELOPMENT_CUTOFF.date()}")
-print(f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE}")
+print(
+    f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE} "
+    f"(label horizon {LABEL_HORIZON}, treatment window {TREATMENT_PERSISTENCE})"
+)
 if entity_cols:
     print(f"Entities: {merged_clean[entity_cols[0]].nunique()}")
 
@@ -488,14 +493,12 @@ register_causal_run(
 #    out-of-fold sample, which is what stops an apparent large correction that is really
 #    two estimators reading different numbers of rows.
 #
-# 4. **The permutation result is not yet a test the estimate can fail**: its block size comes
-#    from the label buffer and not from the treatment's own rolling window, which is the longer
-#    of the two. Blocks that short break dependence the placebo is supposed to retain, so the
-#    placebo series are closer to independent than the treatment is and the null they generate
-#    is too narrow. Its p-value also has a floor of one over the number of placebo draws plus
-#    one, so a run of this size cannot report zero however extreme the estimate is. It does not
-#    override the coefficient's own uncertainty, and a block permutation disturbs timing rather
-#    than confounding.
+# 4. **The permutation disturbs timing, not confounding**: its block size is the longer of the
+#    label horizon and the treatment's own rolling window, so the placebo series retain whichever
+#    dependence runs longer and the null they generate is not narrowed by the shuffle itself. Its
+#    p-value still has a floor of one over the number of placebo draws plus one, so a run of this
+#    size cannot report zero however extreme the estimate is, and it does not override the
+#    coefficient's own uncertainty.
 #
 # 5. **Diagnostics do not establish identification**: Complete-date cross-fitting
 #    and both uncertainty checks strengthen the sensitivity analysis, but a

@@ -30,10 +30,13 @@
 # reachable without memory, and the extra machinery bought nothing on this panel.
 #
 # **A window is not free, and what it costs is rows.** A stock needs sixty prior observations before
-# its first prediction, so the earliest part of every fold's window is spent filling the lookback
-# rather than being predicted, and a stock that entered the roster late may never accumulate one.
-# The plan in section 2 reports the rows that survive that, which is the sample these models are
-# actually measured on.
+# its first prediction. Inside a fold's training window the earliest rows are spent reaching that
+# depth rather than being predicted. The validation rows keep theirs: each stock's validation
+# history is primed with the observations immediately before the validation window opens, so its
+# first validation date is predicted like any other. What a stock can lose is every row - one that
+# entered the roster too late, or whose history has a hole inside the window, never accumulates a
+# usable one. The plan in section 2 reports the rows that survive that, which is the sample these
+# models are actually measured on.
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
@@ -185,8 +188,9 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 #   pairs to be predicted. A row that differs is a configuration measured on a different sample from
 #   its neighbours, and its results are not comparable with theirs. They differ *between* labels,
 #   because a ten-day forward window runs out earlier than a five-day one.
-# - **`eligible_rows` is below what a tabular family reports on the same label.** That gap is the
-#   lookback: the rows spent filling each stock's first window are not predicted. Comparing a
+# - **`eligible_rows` is below what a tabular family reports on the same label.** A prediction needs
+#   a full, gap-free window of prior observations behind it, so what drops out is a stock too new to
+#   have accumulated one, or a stretch where the calendar has a hole inside the window. Comparing a
 #   sequence result with a tabular one is therefore comparing measurements on different samples,
 #   which is what `full_coverage` in section 4 marks within this family and what
 #   [`13_model_analysis`](13_model_analysis.ipynb) has to account for across families.
@@ -231,16 +235,20 @@ plan.select(
 #
 # 1. takes the rows inside that fold's training window and cuts them into overlapping windows of
 #    sixty observations, each belonging to one stock and ending before the timestamp it predicts,
-# 2. fills missing feature values with the training window's median for that column, then
-#    standardizes each column to zero mean and unit variance - both fitted on the training rows only
-#    and applied to the validation rows, so nothing from the validation window reaches the fit,
+# 2. replaces missing feature values with zero, then standardizes each column to zero mean and unit
+#    variance - the mean and scale are measured on the training rows after that replacement and
+#    applied unchanged to the validation rows, so nothing measured on the validation window reaches
+#    the fit,
 # 3. trains for the declared number of epochs, writing the weights to disk every fifth,
 # 4. predicts the fold's validation rows from each saved set of weights.
 #
-# **A window never crosses a fold boundary or a stock.** Hidden state is reset between stocks and
-# between folds, so the sixty observations behind a prediction are always that stock's own and
-# always inside the same training window. Without that the model would carry state across the purge
-# gap the folds exist to impose.
+# **A window never crosses a stock, and it reads only what was observable.** Hidden state is reset
+# between stocks and between folds, so the sixty observations behind a prediction are always that
+# stock's own. They are not confined to the training window: each stock's validation history is
+# primed with the rows immediately preceding the validation window, and later validation dates read
+# earlier validation rows. What a window carries is feature values already on the table at the
+# timestamp being predicted, never a label from the interval that prediction covers, so the purge
+# gap the folds impose on labels is not crossed.
 #
 # Step 4 is what makes one training run produce twenty results. The fold predictions are
 # concatenated into one series per checkpoint covering the whole validation period, and each becomes

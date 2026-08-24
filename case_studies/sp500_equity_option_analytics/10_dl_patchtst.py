@@ -163,9 +163,10 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 # request goes and finds all of that, and fits nothing, so the plan can be inspected before any
 # training starts.
 #
-# - **`eligible_rows` is below what a tabular family reports on the same label.** That gap is the
-#   lookback: the rows spent filling each stock's first window are not predicted. It should match
-#   what `09_dl_lstm` reported for this label, because the two share a lookback - a difference there
+# - **`eligible_rows` is below what a tabular family reports on the same label.** A prediction needs
+#   a full, gap-free window of prior observations behind it, so what drops out is a stock too new to
+#   have accumulated one, or a stretch where the calendar has a hole inside the window. It should
+#   match what `09_dl_lstm` reported for this label, because the two share a lookback - a difference
 #   would mean the two populations are measured on different samples and their results are not
 #   directly comparable.
 # - **`folds` equals the number of walk-forward splits** `05_evaluation` established.
@@ -205,14 +206,17 @@ plan.select(
 # ## 3. Fitting the population
 #
 # `run_model_population` walks the folds. On each one it cuts the training rows into overlapping
-# windows belonging to one stock and ending before the timestamp they predict, fills missing feature
-# values with the training window's median and standardizes each column - both fitted on the
-# training rows only - then trains for the declared epochs, writing weights every fifth, and
-# predicts that fold's validation rows from each saved set.
+# windows belonging to one stock and ending before the timestamp they predict, replaces missing
+# feature values with zero and standardizes each column - the mean and scale measured on the
+# training rows and applied unchanged to validation - then trains for the declared epochs, writing
+# weights every fifth, and predicts that fold's validation rows from each saved set.
 #
-# **A window never crosses a fold boundary or a stock.** The observations behind a prediction are
-# always that stock's own and always inside the same training window, so nothing is carried across
-# the purge gap the folds exist to impose.
+# **A window never crosses a stock, and it reads only what was observable.** The observations behind
+# a prediction are always that stock's own. They are not confined to the training window: each
+# stock's validation history is primed with the rows immediately preceding it, and later validation
+# dates read earlier validation rows - feature values already on the table at the timestamp being
+# predicted, never a label from the interval that prediction covers. The purge gap the folds impose
+# on labels is not crossed.
 #
 # What the call publishes is a **population**: a named, immutable list of the prediction sets it is
 # going to produce, computed from the resolved specification before the first fit. Afterwards every
