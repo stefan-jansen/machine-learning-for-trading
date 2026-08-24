@@ -628,8 +628,12 @@ separation_text = (
     "every label below it"
     if not touching
     else "; ".join(
+        # The shared interval starts at the higher of the two floors, not at the upper label's.
+        # Sorting by `best_ic` fixes which ceiling is lower but says nothing about the floors, so
+        # taking `upper["worst_ic"]` reported a wider overlap than the two grids actually share
+        # whenever the upper label reached further down.
         f"{upper['label']} and {lower['label']} overlap between "
-        f"{upper['worst_ic']:.4f} and {lower['best_ic']:.4f}"
+        f"{max(upper['worst_ic'], lower['worst_ic']):.4f} and {lower['best_ic']:.4f}"
         for lower, upper in touching
     )
 )

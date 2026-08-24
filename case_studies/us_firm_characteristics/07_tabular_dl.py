@@ -36,10 +36,11 @@
 #
 # **What TabM is.** A conventional deep ensemble trains several independent networks and averages
 # them, which costs several networks. TabM keeps one shared backbone and gives each ensemble
-# member a small adapter of its own - one learned scaling vector per layer, so a member costs a
-# row of parameters rather than a matrix. The members train together in one forward pass and
-# diverge only through those vectors, and averaging them cancels the part of each member's error
-# that its own scaling made independent. `n_members` is how many adapters there are, and it is
+# member a small adapter of its own - one learned scaling vector, applied to the backbone's output
+# rather than inside it, so a member costs a row of parameters rather than a matrix. Each member
+# also carries its own output head. The members train together in one forward pass and diverge
+# only through those vectors, and averaging them cancels the part of each member's error that its
+# own scaling made independent. `n_members` is how many adapters there are, and it is
 # the axis that separates the three presets alongside hidden width.
 #
 # **Learning objectives**

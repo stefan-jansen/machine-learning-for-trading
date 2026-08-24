@@ -242,7 +242,7 @@ execution, population = run_model_population(
     study, plan, population_name=population_name, supersedes=supersedes
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+print(f"{len(execution.runs)} configurations, fitted or served from the registry")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
