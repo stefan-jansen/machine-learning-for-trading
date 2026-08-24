@@ -26,16 +26,17 @@
 #    tightening windows for four reference allocations (60/40, All Weather,
 #    Aggressive Equity, Defensive).
 # 2. Define hand-authored simultaneous-shock scenarios and apply them via a weighted sum.
-# 3. Run a symmetric Student-t Monte Carlo with kurtosis-matched degrees of freedom and
-#    read 95%/99% VaR plus 95% CVaR over a 20-day horizon.
+# 3. Run a symmetric Student-t Monte Carlo with kurtosis-matched degrees of freedom and read the
+#    resulting loss quantiles and expected shortfall over a multi-week horizon.
 # 4. Compare regime-conditional return statistics (Bull / Calm / High Vol / Bear).
 #
 # **Book reference**: §19.6 (Stress Testing and Scenario Analysis); also cited
 # from §19.1 and §19.2.
 #
-# **Prerequisites**: Portfolio returns and drawdown metrics from `01_var_cvar`,
-# Chapter 17 portfolio construction, and comfort treating stress tables as
-# decision support rather than point forecasts.
+# **Prerequisites**: `01_var_cvar` for what VaR and CVaR measure and how a drawdown is defined,
+# Chapter 17 for portfolio construction, and comfort treating stress tables as decision support
+# rather than point forecasts. This notebook loads its own price panel and reads no artifact from
+# any other.
 #
 # **Data**: Canonical ETF panel via `data.load_etfs()` for SPY, EFA, EEM, AGG,
 # TLT, GLD, VNQ; window 2007-01-01 to 2024-01-01.
@@ -59,14 +60,36 @@ from scipy import stats
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS, ml4t_diverging, ml4t_palette
+from utils.style import COLORS, ml4t_diverging, ml4t_palette, show_plotly_with_alt
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
 SEED = 42
+N_SIMULATIONS = 10_000
+HORIZON_DAYS = 20
+CONFIDENCE_LEVELS = (0.95, 0.99, 0.999)
+REGIME_LOOKBACK = 60
+BEAR_TREND_THRESHOLD = -0.05
+BULL_TREND_THRESHOLD = 0.10
+HIGH_VOL_MULTIPLE = 1.3
 
 # %%
 set_global_seeds(SEED)
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `N_SIMULATIONS` and `HORIZON_DAYS` size the Monte Carlo: how many paths are drawn and how far
+#   ahead each runs. The horizon is a few trading weeks, which is the span over which a risk
+#   committee would ask what a bad outcome looks like.
+# - `CONFIDENCE_LEVELS` are the loss quantiles reported. The deepest of them is estimated from a
+#   handful of the drawn paths, so it moves noticeably between seeds and should be read as an
+#   order of magnitude.
+# - `REGIME_LOOKBACK` is the window the market state is read from - both the trailing volatility
+#   and the trend. It also sets how long the classifier waits before labelling anything.
+# - `BEAR_TREND_THRESHOLD` and `BULL_TREND_THRESHOLD` are the annualized trailing returns that
+#   separate a falling market from a rising one, and `HIGH_VOL_MULTIPLE` is how far above its own
+#   historical median trailing volatility has to sit before a day counts as stressed. All three are
+#   round numbers chosen to split this sample into usable groups, not estimated boundaries.
 
 # %% [markdown]
 # `max_drawdown` returns the most negative point of the equity curve
@@ -344,11 +367,15 @@ fig.update_xaxes(
     tickangle=-20,
     automargin=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars of return by allocation for each historical crisis window. The ordering of the allocations differs between the equity-led selloffs and the 2022 rate-led one.",
+)
 
 # %% [markdown]
-# The grouped bars make an important point for governance: diversification helps, but the mix of
-# winners and losers changes materially by crisis type, so one historical event is not enough.
+# The grouped bars make an important point for governance: which allocations hold up and which
+# give way changes materially by crisis type, so one historical event is not enough to size a
+# risk limit on.
 
 # %% [markdown]
 # ## 3. Portfolio Comparison Under Stress
@@ -434,7 +461,10 @@ fig.update_yaxes(
     ticktext=list(STRESS_PLOT_LABELS.values()),
     automargin=True,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of allocation against crisis window, coloured by return, with the deepest losses concentrated in the equity-heavy allocations during the equity-led crises.",
+)
 
 # %% [markdown]
 # The heatmap is the compact committee view: it shows immediately which portfolios are robust
@@ -619,7 +649,10 @@ fig.update_layout(
     margin={"l": 135},
 )
 fig.update_yaxes(automargin=True)
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "A heatmap of allocation against hand-authored scenario, coloured by modelled impact. The rate-shock row separates the allocations differently from the equity-shock rows.",
+)
 
 # %% [markdown]
 # The hypothetical heatmap complements the historical one: it shows the same diversification
@@ -632,8 +665,9 @@ fig.show()
 # Student-t distribution fitted to full-sample mean, variance, and excess kurtosis. Daily draws are
 # iid: the model omits serial dependence, volatility clustering, regime transitions, and changing
 # cross-asset dependence. Constant weights imply daily rebalancing before costs. Student-t support
-# is unbounded below even though simple returns cannot fall below -100%; the implementation fails
-# if a seeded sample violates that boundary rather than compounding an invalid path.
+# is unbounded below, while a simple return cannot fall below losing everything; the
+# implementation raises if a seeded sample crosses that boundary rather than compounding an
+# impossible path.
 
 
 # %%
@@ -683,8 +717,9 @@ def simulate_student_t_paths(
 
 
 # %% [markdown]
-# Tail summarization is separate from sampling so quantile and expected-shortfall conventions are
-# visible. VaR is the lower return quantile; CVaR averages outcomes at or below 95% VaR.
+# Tail summarization is separate from sampling so the conventions stay visible. VaR is the lower
+# quantile of the simulated cumulative returns; CVaR is the mean of every path at or below the
+# first of the configured confidence levels.
 
 
 # %%
@@ -716,10 +751,10 @@ def summarize_simulated_returns(
 def monte_carlo_stress_test(
     returns: pl.DataFrame,
     portfolio_weights: dict[str, float],
-    n_simulations: int = 10000,
-    horizon_days: int = 20,
-    confidence_levels: tuple[float, ...] = (0.95, 0.99, 0.999),
-    seed: int = 42,
+    n_simulations: int = N_SIMULATIONS,
+    horizon_days: int = HORIZON_DAYS,
+    confidence_levels: tuple[float, ...] = CONFIDENCE_LEVELS,
+    seed: int = SEED,
 ) -> dict:
     """
     Univariate portfolio-return Student-t Monte Carlo for tail VaR/CVaR.
@@ -754,12 +789,12 @@ def monte_carlo_stress_test(
 
 # %%
 # Run Monte Carlo for each portfolio
-print("Monte Carlo Stress Test (20-day horizon, 10,000 simulations)")
+print(f"Monte Carlo stress test: {N_SIMULATIONS:,} paths over {HORIZON_DAYS} trading days")
 print("=" * 70)
 
 mc_results = {}
 for port_name, weights in PORTFOLIOS.items():
-    result = monte_carlo_stress_test(returns, weights, horizon_days=20)
+    result = monte_carlo_stress_test(returns, weights)
     mc_results[port_name] = result
 
     print(f"\n{port_name}:")
@@ -796,7 +831,10 @@ fig.update_layout(
     height=450,
     colorway=ml4t_palette(4, categorical=True),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four overlapping histograms of simulated twenty-day cumulative return, one per allocation, with a dashed line at zero. The equity-heavy distributions are visibly wider on both sides.",
+)
 
 # %% [markdown]
 # These simulated distributions are most useful for ranking tail severity across allocations.
@@ -809,7 +847,7 @@ fig.show()
 # variance because $\operatorname{Var}(T)=s^2\nu/(\nu-2)$. Lower $\nu$ means
 # heavier tails. Skew is diagnostic only because the fitted law is symmetric.
 
-# %%
+# %% tags=["results"]
 mc_df_table = pl.DataFrame(
     [
         {
@@ -883,10 +921,12 @@ weight_range = np.linspace(0.20, 0.80, 13)
 sensitivity_df = sensitivity_analysis(returns, base_60_40, "SPY", weight_range, "AGG")
 sensitivity_pd = sensitivity_df.to_pandas()
 
+# %% [markdown]
+# The four metrics are drawn as separate panels on a shared horizontal axis. They are measured in
+# different units and are not comparable to each other; putting them on one vertical scale would
+# suggest otherwise.
+
 # %%
-# Visualize all four sensitivity metrics only after the panel is complete. Shared x-axis units and
-# explicit y-axis units keep the different scales legible without implying that they are directly
-# comparable.
 fig = make_subplots(
     rows=2,
     cols=2,
@@ -963,7 +1003,10 @@ fig.update_yaxes(
 fig.update_layout(
     title="Equity weight exposes the return-drawdown tradeoff", height=650, showlegend=False
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Four panels of sensitivity metrics against shock size on a shared horizontal axis, each with its own vertical units, showing how each allocation degrades as the shock deepens.",
+)
 
 # %% [markdown]
 # This panel treats stress management as a frontier problem rather than a single optimum. It shows
@@ -981,7 +1024,7 @@ fig.show()
 
 
 # %%
-def classify_regime(returns: pl.DataFrame, lookback: int = 60) -> pl.DataFrame:
+def classify_regime(returns: pl.DataFrame, lookback: int = REGIME_LOOKBACK) -> pl.DataFrame:
     """Classify day t from SPY state available through the close of t-1."""
 
     values = returns["SPY"].to_numpy()
@@ -997,11 +1040,11 @@ def classify_regime(returns: pl.DataFrame, lookback: int = 60) -> pl.DataFrame:
         trend = values[t - lookback : t].mean() * 252
         volatility = trailing_vol[t - 1]
         vol_reference = np.median(historical_vol)
-        if trend < -0.05:
+        if trend < BEAR_TREND_THRESHOLD:
             labels[t] = "Bear"
-        elif trend > 0.10 and volatility < vol_reference:
+        elif trend > BULL_TREND_THRESHOLD and volatility < vol_reference:
             labels[t] = "Bull"
-        elif volatility > vol_reference * 1.3:
+        elif volatility > vol_reference * HIGH_VOL_MULTIPLE:
             labels[t] = "High Vol"
         else:
             labels[t] = "Calm"
@@ -1009,7 +1052,7 @@ def classify_regime(returns: pl.DataFrame, lookback: int = 60) -> pl.DataFrame:
     return pl.DataFrame({"timestamp": returns["timestamp"], "regime": labels})
 
 
-# %%
+# %% tags=["results"]
 # Classify regimes using SPY
 regimes = classify_regime(returns.select("timestamp", "SPY"))
 
@@ -1051,7 +1094,7 @@ def analyze_by_regime(
     )
 
 
-# %%
+# %% tags=["results"]
 # Analyze each portfolio by regime
 print("\nPerformance by Market Regime")
 print("=" * 70)
@@ -1081,7 +1124,7 @@ display(regime_summary.to_pandas().round(2))
 # simulated tail metrics for each allocation without recomputing or repeating earlier sections.
 
 
-# %%
+# %% tags=["results"]
 summary_rows = []
 for portfolio_name in PORTFOLIOS:
     historical = (
@@ -1110,44 +1153,75 @@ display(stress_report.to_pandas().round(2))
 
 # %% [markdown]
 # ## Key Takeaways
-#
-# The close summarizes the current execution rather than copying result literals into prose.
 
-# %%
+# %% tags=["results"]
 gfc = pivot_return_pd.loc["2008 GFC Selloff"]
 tightening = pivot_return_pd.loc["2022 Tightening Jan-to-Oct Selloff"]
 tail_cvar = {name: result["CVaR_95"] * 100 for name, result in mc_results.items()}
 aggressive_bear = (
     regime_results["Aggressive Equity"].filter(pl.col("Regime") == "Bear").row(0, named=True)
 )
-
 gfc_best, gfc_worst = gfc.idxmax(), gfc.idxmin()
 tightening_best, tightening_worst = tightening.idxmax(), tightening.idxmin()
 tail_best = max(tail_cvar, key=tail_cvar.get)
 tail_worst = min(tail_cvar, key=tail_cvar.get)
-bear_sharpe = aggressive_bear["Sharpe"]
-bear_worst_day = aggressive_bear["Worst Day"]
-
 display(
     Markdown(
-        f"""
-1. **Historical outcomes depend on the shock.** During the defined GFC selloff,
-   {gfc_best} returns {gfc[gfc_best]:+.1f}% versus {gfc_worst}'s {gfc[gfc_worst]:+.1f}%.
-2. **Rate stress changes the defensive ranking.** In the 2022 tightening window,
-   {tightening_best} returns {tightening[tightening_best]:+.1f}% while {tightening_worst}
-   returns {tightening[tightening_worst]:+.1f}%.
-3. **The symmetric iid Student-t lens ranks tail severity, not crisis probability.** The mildest
-   simulated 95% CVaR is {tail_best} at {tail_cvar[tail_best]:.1f}%; the most severe is
-   {tail_worst} at {tail_cvar[tail_worst]:.1f}%.
-4. **Lagged regimes expose conditional weakness without inventing a regime-only wealth path.**
-   Aggressive Equity's Bear-state Sharpe is {bear_sharpe:.2f}, and its worst observed Bear day is
-   {bear_worst_day:.1f}%.
-"""
+        f"In the 2008 selloff, {gfc_best} returned {gfc[gfc_best]:+.1f}% against "
+        f"{gfc_worst}'s {gfc[gfc_worst]:+.1f}%. In the 2022 tightening the ordering changed: "
+        f"{tightening_best} returned {tightening[tightening_best]:+.1f}% and "
+        f"{tightening_worst} returned {tightening[tightening_worst]:+.1f}%. Simulated expected "
+        f"shortfall runs from {tail_cvar[tail_best]:.1f}% for {tail_best} to "
+        f"{tail_cvar[tail_worst]:.1f}% for {tail_worst}. Aggressive Equity's worst observed day "
+        f"in a Bear state was {aggressive_bear['Worst Day']:.1f}%."
     )
 )
 
 # %% [markdown]
-# **Next**: `07_drift_detection` moves from offline scenario tests to online monitoring of feature
-# and prediction drift.
+# 1. **Replay more than one crisis, because they are not the same shock.** In 2008 the assets that
+#    protected a portfolio were the ones with no equity exposure; in 2022 those same assets were
+#    the source of the loss, because the shock was to rates rather than to growth. An allocation
+#    tested against a single historical window is tested against a single mechanism.
 #
-# **Book reference**: §19.6 (Stress Testing and Scenario Analysis).
+# 2. **Write scenarios down as simultaneous shocks to every asset, not to one.** A crisis moves
+#    everything at once and moves correlations with it. Shocking one holding and leaving the rest
+#    at their historical relationships understates the loss precisely because it preserves the
+#    diversification that a crisis removes.
+#
+# 3. **Match the simulation's tails to the data before reading its quantiles.** A normal draw
+#    calibrated to the same mean and variance will understate every tail loss here, because daily
+#    returns have far more mass in the extremes than it allows. Matching the degrees of freedom to
+#    the observed excess kurtosis and rescaling to preserve the variance is the minimum.
+#
+# 4. **State what a simulation leaves out.** Independent daily draws contain no volatility
+#    clustering, no regime shifts and no change in cross-asset dependence, which is to say none of
+#    the mechanisms that make a real crisis a crisis. The result maps moments into a tail range; it
+#    is not a distribution of what happens next.
+#
+# 5. **Classify the market state from information that predates the day it labels.** Both the
+#    trend and the volatility here end at the previous close, and the reference level they are
+#    compared against expands through time. A state label that uses the day's own return will make
+#    any conditional risk number look far better than it is.
+#
+# 6. **Keep the deepest quantile in proportion to the number of paths behind it.** The most extreme
+#    confidence level reported here rests on a handful of the drawn paths, so it moves between
+#    seeds. Report it as an order of magnitude, or draw enough paths to pin it.
+#
+# ### Known limitations
+#
+# - The historical windows are hand-dated. Moving a boundary by a few weeks moves every return in
+#   the replay, and nothing here tests how sensitive the comparison is to those dates.
+# - The hand-authored scenarios are judgements about what a shock would look like. They are
+#   internally consistent and are not calibrated to anything.
+# - The simulation fits one symmetric distribution to the whole sample. Real returns are skewed,
+#   the skew is reported as a diagnostic, and the symmetric fit does not use it.
+# - Constant weights imply the portfolio is rebalanced every day at no cost. Rebalancing daily
+#   through a crisis means trading the most in the least liquid conditions, which
+#   `18_transaction_costs` prices and this notebook does not.
+# - The regime thresholds are round numbers on this sample's own volatility distribution, so the
+#   states are relative to what this period contained.
+#
+# **Next**: `07_drift_detection` moves from offline scenario tests to monitoring a live model for
+# the moment its inputs stop resembling what it was trained on.
+#
+# **Book reference**: Chapter 19, Section 19.6.

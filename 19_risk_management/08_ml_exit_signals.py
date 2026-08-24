@@ -57,15 +57,19 @@ from sklearn.metrics import roc_auc_score
 from data import load_crypto_perps
 from utils.paths import get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
 # %% tags=["parameters"]
-# Production defaults - Papermill injects overrides for CI
 SEED = 42
 LGB_DEVICE = "cuda"
 FORWARD_HOURS = 24
 N_OOF_FOLDS = 5
 N_IMPORTANCE_REPEATS = 5
+TEST_FRACTION = 0.20
+ENTRY_QUANTILE = 0.95
+ENTRY_PROBABILITY_THRESHOLD = 0.5
+PROBABILITY_BIN_WIDTH = 0.02
+ENTRY_CONFIDENCE_DROP = 0.30
 
 # %%
 set_global_seeds(SEED)
@@ -178,7 +182,7 @@ df_feat.select(
     pl.col("fwd_return").mean().alias("Mean forward return"),
     pl.col("fwd_return").std().alias("Forward-return volatility"),
     pl.col("fwd_return").quantile(0.05).alias("5th percentile"),
-    pl.col("fwd_return").quantile(0.95).alias("95th percentile"),
+    pl.col("fwd_return").quantile(ENTRY_QUANTILE).alias("entry quantile"),
 )
 
 # %% [markdown]
@@ -189,14 +193,20 @@ df_feat.select(
 # %% [markdown]
 # ## 3. Chronological Split and Train-Only Labels
 #
-# The final 20% of timestamps is a fixed demonstration test interval. The preceding
-# 24 hours are purged because each label looks forward 24 hours. The entry threshold
-# is then estimated on the purged training interval only and applied unchanged to test.
-# This is a teaching split, not a sealed holdout used for model selection.
+# The split is chronological and the last part of the sample is the test interval. Between the two
+# sits a purge of `FORWARD_HOURS`: each label reads that far ahead, so without it the last training
+# rows would carry outcomes from inside the test window.
+#
+# The entry threshold is estimated on the training interval alone and then applied unchanged. That
+# ordering is what makes the test interval a test - a threshold picked to look good on the test
+# rows would report the fit of a choice made after seeing them.
+#
+# This is a single fixed interval used once for demonstration. Nothing here is selected on it, and
+# it is not large enough to distinguish two models whose scores are close.
 
 # %%
 timestamps = df_feat["timestamp"].unique().sort()
-test_start = timestamps[int(0.8 * len(timestamps))]
+test_start = timestamps[int((1 - TEST_FRACTION) * len(timestamps))]
 purge_start = test_start - timedelta(hours=FORWARD_HOURS)
 
 train_df = df_feat.filter(pl.col("timestamp") < purge_start).sort(["timestamp", "symbol"])
@@ -204,7 +214,7 @@ test_df = df_feat.filter(pl.col("timestamp") >= test_start).sort(["timestamp", "
 embargo_rows = df_feat.filter(
     (pl.col("timestamp") >= purge_start) & (pl.col("timestamp") < test_start)
 ).height
-top_5pct_threshold = train_df["fwd_return"].quantile(0.95)
+entry_return_threshold = train_df["fwd_return"].quantile(ENTRY_QUANTILE)
 
 
 # %% [markdown]
@@ -223,8 +233,8 @@ def add_labels(frame: pl.DataFrame, entry_threshold: float) -> pl.DataFrame:
 
 
 # %%
-train_df = add_labels(train_df, top_5pct_threshold)
-test_df = add_labels(test_df, top_5pct_threshold)
+train_df = add_labels(train_df, entry_return_threshold)
+test_df = add_labels(test_df, entry_return_threshold)
 
 X_train = train_df.select(FEATURE_COLS).to_numpy()
 X_test = test_df.select(FEATURE_COLS).to_numpy()
@@ -249,7 +259,7 @@ label_summary = pl.DataFrame(
         "Sample": ["Train", "Test"],
         "Entry positive share": [train_df["y_entry"].mean(), test_df["y_entry"].mean()],
         "Exit positive share": [train_df["y_exit"].mean(), test_df["y_exit"].mean()],
-        "Train-only entry threshold": [top_5pct_threshold, top_5pct_threshold],
+        "Train-only entry threshold": [entry_return_threshold, entry_return_threshold],
     }
 )
 label_summary
@@ -262,9 +272,17 @@ label_summary
 # %% [markdown]
 # ## 4. Train Entry Model
 #
-# Predicts exceptional positive returns (top 5%). The enhanced exit model must not
-# receive entry probabilities fitted on the same rows, so an expanding-window OOF
-# pass generates its training feature with a 24-hour purge at every fold boundary.
+# The entry model predicts an exceptional positive return - the top slice of the forward-return
+# distribution set by `ENTRY_QUANTILE`. Because the class is rare by construction, the model spends
+# most of its capacity learning what an ordinary bar looks like, and its probabilities are
+# correspondingly low almost everywhere.
+#
+# The exit model that follows will take the entry probability as one of its inputs. That creates a
+# trap: a probability produced by a model that was fitted on the same row is not the probability
+# that model would have produced in production, and an exit model trained on it learns a
+# relationship that will not exist live. The expanding-window out-of-fold pass below produces each
+# training row's entry probability from a model that never saw that row, with a purge at every
+# fold boundary for the same reason as the main split.
 
 
 # %%
@@ -355,7 +373,7 @@ def fold_entry_labels(ordered: pl.DataFrame, fit_rows: np.ndarray) -> tuple[np.n
     """Build binary entry labels from one fold's purged fit-return distribution."""
 
     fit_returns = ordered[fit_rows, "fwd_return"]
-    threshold = float(fit_returns.quantile(0.95))
+    threshold = float(fit_returns.quantile(ENTRY_QUANTILE))
     labels = (fit_returns >= threshold).cast(pl.Int8).to_numpy()
     if len(np.unique(labels)) != 2:
         raise ValueError("each OOF fit requires both entry-label classes")
@@ -492,12 +510,13 @@ improvement = (exit_auc_enhanced - exit_auc_basic) / exit_auc_basic * 100
 print(f"Enhanced Exit Model AUC-ROC: {exit_auc_enhanced:.4f}")
 print(f"AUC delta vs basic:          {improvement:+.2f}%")
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""**Interpretation**: The enhanced exit AUC is {exit_auc_enhanced:.3f} versus
 {exit_auc_basic:.3f} for the basic model, a relative change of {improvement:+.2f}%. These values
-describe one fixed demonstration test interval, not a sealed holdout or a model-selection result.
+describe one fixed test interval. Neither model was selected on it, and an interval this size
+cannot separate two AUCs this close.
 The realized trade-path comparison below is a separate operational diagnostic."""
     )
 )
@@ -528,7 +547,7 @@ comparison_summary = pl.DataFrame(
 )
 comparison_summary
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""**Interpretation**: Entry AUC is {entry_auc:.3f}; basic and enhanced exit AUC are
@@ -544,17 +563,26 @@ periods and compounded trade returns."""
 # How do entry and exit signals interact?
 
 # %% [markdown]
-# The entry label marks the top 5% of forward returns, so a 0.5 probability
-# threshold is deliberately severe: it admits only bars where the model is
-# more confident than not that a rare top-5% move is coming. This is a
-# sparse-entry policy by design: it trades coverage for precision rather
-# than trying to be in the market most of the time.
+# The entry label marks a rare event, so demanding a probability above one half before entering is
+# a severe filter: it admits only the bars where the model thinks a rare move is more likely than
+# not. Almost no bars clear it, which is the intent - the policy buys precision with coverage, and
+# spends most of the sample flat rather than trying to hold a position most of the time.
+
+# %% [markdown]
+# ### Three Ways to Say "Get Out"
+#
+# The exit rules compared below differ in what evidence they act on. One exits when the exit model
+# calls for it. One exits when the *entry* model's confidence has fallen far enough that the reason
+# for holding has gone, even if the exit model has said nothing. The third fires on either.
+#
+# `ENTRY_CONFIDENCE_DROP` is the level the entry probability must fall below for the second rule.
+# It sits well under the threshold required to open a position, so the rule asks whether the case
+# for the trade has collapsed rather than merely weakened.
 
 # %%
-# Create signal thresholds
-entry_threshold = 0.5
-exit_threshold = 0.5
-entry_confidence_drop = 0.3  # Exit if entry confidence drops below this
+entry_threshold = ENTRY_PROBABILITY_THRESHOLD
+exit_threshold = ENTRY_PROBABILITY_THRESHOLD
+entry_confidence_drop = ENTRY_CONFIDENCE_DROP
 
 # Classify signals
 entry_signal = entry_proba_test > entry_threshold
@@ -589,14 +617,15 @@ signal_counts = pl.DataFrame(
 )
 signal_counts
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""**Interpretation**: The confidence-drop clause fires on
 {exit_signal_confidence.mean():.1%} of test bars and the combined rule fires on
 {exit_signal_combined.mean():.1%}. Because the rare-event entry model usually assigns low
-probability, the fixed 0.30 confidence threshold can dominate the OR rule. The next section checks
-the resulting holding periods and trade returns rather than assuming that more exits are better."""
+probability, most bars sit below the confidence-drop level already, so that clause fires on nearly
+everything and the combined rule inherits its behaviour rather than the exit model's. The next
+section reads the holding periods and trade returns instead of assuming more exits are better."""
     )
 )
 
@@ -726,16 +755,20 @@ def simulate_strategy(
     return summarize_trades(trades)
 
 
+# %% [markdown]
+# The model's predictions are in the order `test_df` was built in, and the simulator needs the rows
+# regrouped so each symbol forms an independent path. Carrying an explicit row index through the
+# regrouping is what keeps every prediction attached to the bar it was made for; re-sorting without
+# it would silently pair predictions with other symbols' bars.
+
 # %%
-# Test predictions align with test_df's timestamp-major order. A row index preserves
-# that alignment while the simulator input is regrouped into independent symbol paths.
 bt_frame = test_df.with_row_index("model_row").sort(["symbol", "timestamp"])
 bt_pos = bt_frame["model_row"].to_numpy()
 bt_symbols = bt_frame["symbol"].to_numpy()
 bt_timestamps = bt_frame["timestamp"].to_numpy()
 actual_returns = bt_frame["realized_ret_1step"].to_numpy()
 entry_signal_bt = entry_signal[bt_pos]
-exit_basic_bt = (exit_proba_basic > 0.5)[bt_pos]
+exit_basic_bt = (exit_proba_basic > ENTRY_PROBABILITY_THRESHOLD)[bt_pos]
 exit_model_bt = exit_signal_model[bt_pos]
 exit_confidence_bt = exit_signal_confidence[bt_pos]
 exit_combined_bt = exit_signal_combined[bt_pos]
@@ -775,7 +808,7 @@ results_df = pl.DataFrame(
 )
 results_df
 
-# %%
+# %% tags=["results"]
 best_mean_row = results_df.sort("mean_return", descending=True).row(0, named=True)
 shortest_row = results_df.sort("avg_holding").row(0, named=True)
 display(
@@ -783,7 +816,8 @@ display(
         f"""**Interpretation**: {best_mean_row["Strategy"]} has the highest mean compounded trade
 return ({best_mean_row["mean_return"]:.2%}) on this fixed test interval. {shortest_row["Strategy"]}
 has the shortest average holding period ({shortest_row["avg_holding"]:.1f} hourly bars). These are
-descriptive trade-level metrics, not an annualized Sharpe ratio or a sealed strategy estimate."""
+descriptive trade-level metrics over a single test interval. They are not annualized, carry no
+cost, and are not an estimate of what the strategy would earn."""
     )
 )
 
@@ -906,9 +940,12 @@ fig.update_layout(
     showlegend=False,
 )
 fig.update_xaxes(title_text="Mean normalized gain importance (%)", range=[0, importance_xmax])
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Two histograms of predicted probability on a shared scale and bin width, entry above and exit below, each with its decision threshold marked. Nearly all the mass sits well below the threshold in both.",
+)
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""**Interpretation**: Across {N_IMPORTANCE_REPEATS} seeded GPU fits,
@@ -927,7 +964,7 @@ fig = make_subplots(
 fig.add_trace(
     go.Histogram(
         x=entry_proba_test,
-        xbins={"start": 0, "end": 1, "size": 0.02},
+        xbins={"start": 0, "end": 1, "size": PROBABILITY_BIN_WIDTH},
         name="Entry probability",
         marker_color=COLORS["blue"],
     ),
@@ -939,7 +976,7 @@ fig.add_vline(x=entry_threshold, line_dash="dash", line_color=COLORS["amber"], r
 fig.add_trace(
     go.Histogram(
         x=exit_proba_enhanced,
-        xbins={"start": 0, "end": 1, "size": 0.02},
+        xbins={"start": 0, "end": 1, "size": PROBABILITY_BIN_WIDTH},
         name="Exit probability",
         marker_color=COLORS["slate"],
     ),
@@ -949,17 +986,21 @@ fig.add_trace(
 fig.add_vline(x=exit_threshold, line_dash="dash", line_color=COLORS["amber"], row=1, col=2)
 
 fig.update_layout(
-    title="Fixed 0.50 rules select only the upper probability tail",
+    title="The fixed rules select only the upper tail of each distribution",
     height=400,
     showlegend=False,
 )
 fig.update_xaxes(title_text="Predicted probability", range=[0, 1])
 fig.update_yaxes(title_text="Test bars (count)")
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Grouped bars comparing the exit rules on mean trade return and average holding period, showing that the rules differ far more in how long they hold than in what they earn.",
+)
 
 # %% [markdown]
-# **Interpretation**: Both panels use identical 0.02-wide bins and a common [0, 1]
-# probability scale, so the fixed thresholds can be compared without auto-bin or axis effects.
+# **Interpretation**: Both panels share a bin width and a common probability scale. Letting each
+# panel choose its own bins would make two distributions look different because their histograms
+# were built differently, which is the wrong reason for a reader to see a difference.
 
 # %%
 signal_quintile_breaks = np.quantile(entry_proba_test, [0.2, 0.4, 0.6, 0.8])
@@ -976,7 +1017,7 @@ publication_df = pl.DataFrame(
 ).with_columns(
     pl.when(pl.col("fwd_return") < 0)
     .then(pl.lit("Adverse move"))
-    .when(pl.col("fwd_return") >= top_5pct_threshold)
+    .when(pl.col("fwd_return") >= entry_return_threshold)
     .then(pl.lit("Strong upside"))
     .otherwise(pl.lit("Neutral"))
     .alias("outcome")
@@ -1047,9 +1088,14 @@ ax_pub.set_title(outcome_title)
 ax_pub.set_ylim(0, 112)
 ax_pub.set_yticks(range(0, 101, 20))
 ax_pub.legend(loc="upper center", ncols=3, frameon=False)
-plt.show()
+show_with_alt(
+    fig_pub,
+    "Stacked bars of outcome share by signal quintile: adverse move, neutral, and strong upside. "
+    "The strong-upside share grows across the quintiles from near zero, while the adverse-move "
+    "share stays broadly flat.",
+)
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
         f"""**Interpretation**: Across test-sample probability quintiles, the strong-upside share
@@ -1063,7 +1109,7 @@ an independently validated trading rule."""
 # %% [markdown]
 # ## 11. Key Takeaways
 
-# %%
+# %% tags=["results"]
 takeaways = pl.DataFrame(
     {
         "Metric": [
@@ -1084,24 +1130,57 @@ takeaways = pl.DataFrame(
 )
 takeaways
 
-# %%
+# %% tags=["results"]
 display(
     Markdown(
-        f"""1. **The stacking feature is causal.** Purged expanding-window OOF predictions cover
-{meta_train_mask.sum():,} training rows, so the enhanced exit model never receives an in-sample
-entry prediction for its own row.
-2. **AUC and realized paths answer different questions.** Basic and enhanced exit AUC are
-{exit_auc_basic:.3f} and {exit_auc_enhanced:.3f}; {best_mean_row["Strategy"]} has the highest mean
-compounded trade return ({best_mean_row["mean_return"]:.2%}) on this demonstration test interval.
-3. **Rule calibration matters.** The fixed confidence-drop rule fires on
-{exit_signal_confidence.mean():.1%} of bars and produces an average holding period of
-{strategies["Entry Confidence Drop"]["avg_holding"]:.1f} hourly bars.
-4. **Importance is diagnostic, not causal.** Entry confidence ranks #{entry_prediction_rank} by
-mean normalized gain across seeded GPU repeats, with dispersion shown in the figure."""
+        f"The purged out-of-fold pass supplies an entry probability for "
+        f"**{meta_train_mask.sum():,} training rows** without any of them coming from a model that "
+        f"saw its own row. Basic and enhanced exit AUC are **{exit_auc_basic:.3f}** and "
+        f"**{exit_auc_enhanced:.3f}**. On the test interval, **{best_mean_row['Strategy']}** has "
+        f"the highest mean compounded trade return at **{best_mean_row['mean_return']:.2%}**, and "
+        f"**{shortest_row['Strategy']}** the shortest average hold at "
+        f"**{shortest_row['avg_holding']:.1f} bars**."
     )
 )
 
 # %% [markdown]
-# **Next**: [`11_systematic_risk_sweep`](11_systematic_risk_sweep.ipynb) compares
-# these adaptive exits to parameterized rule sweeps and MAE/MFE-calibrated stops
-# (Figures 19.6–19.8, §19.7).
+# 1. **A feature built from another model has to be produced out of sample.** The exit model takes
+#    the entry model's probability as an input. If that probability came from a model fitted on the
+#    same row, it is more accurate than anything production will ever supply, and the exit model
+#    learns to rely on an accuracy that will not be there. The expanding-window pass, with a purge
+#    at every fold boundary, is what makes the training feature resemble the live one.
+#
+# 2. **Purge wherever a forward-looking label meets a boundary.** Not only at the train-test split:
+#    every fold boundary inside the out-of-fold pass has the same problem, because the label on the
+#    last row of a fold reads into the next one.
+#
+# 3. **A better AUC is not a better strategy.** AUC scores the ranking of every bar. A trading rule
+#    acts on a threshold, holds a position for a while, and is judged on what the position earned.
+#    The two can move in opposite directions, which is why the comparison here reports both and
+#    reads the trade-level result rather than inferring it from the score.
+#
+# 4. **Check what a combined rule actually fires on.** Exiting when either of two conditions holds
+#    sounds like a compromise between them. When one condition is satisfied on almost every bar -
+#    as the confidence-drop clause is, because a rare-event model assigns low probability nearly
+#    everywhere - the combination is that condition, and the other contributes nothing.
+#
+# 5. **A threshold estimated on the training rows and applied unchanged is a test; one refitted on
+#    the test rows is not.** The entry cutoff here is a quantile of the training returns. Recomputing
+#    it on the test period would produce a better-looking result and measure nothing.
+#
+# ### Known limitations
+#
+# - One fixed test interval, used once. It is not large enough to separate two models whose AUCs
+#   differ in the third decimal, and nothing here reports how much of that difference is sampling.
+# - No cost is charged. The rules differ mainly in how often they exit, which is exactly the
+#   dimension trading costs price, so a cost-aware comparison could reorder them.
+# - The quintile cut points in the signal analysis are estimated from the test probabilities being
+#   displayed, so those bins describe this sample rather than defining a rule that could be applied
+#   forward.
+# - The entry policy is deliberately sparse and spends most of the sample flat. Trade-level
+#   averages therefore rest on relatively few positions.
+#
+# **Next**: `09_deep_hedging` replaces a rule that decides when to exit with a network that learns
+# how much to hold.
+#
+# **Book reference**: Chapter 19, Section 19.7.

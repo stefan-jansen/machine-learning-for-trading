@@ -16,6 +16,7 @@ import os
 import platform
 import resource
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -84,9 +85,15 @@ def peak_rss_bytes() -> int:
     the peak of the notebook rather than of the run that just finished. That is the number the
     concurrency policy needs - whether this notebook can share the machine - and it is recorded
     under a name that says so.
+
+    ``ru_maxrss`` carries no portable unit: Linux reports kilobytes and macOS reports bytes, so
+    the scale is read off the platform rather than assumed. Reading it as kilobytes on macOS
+    reports a peak 1024 times too large, and `scripts/pre_run_gate.py` prints that figure in GB
+    as a check it passes on.
     """
     usage = resource.getrusage(resource.RUSAGE_SELF)
-    return int(usage.ru_maxrss) * 1024
+    scale = 1 if sys.platform == "darwin" else 1024
+    return int(usage.ru_maxrss) * scale
 
 
 def cpu_seconds() -> float:

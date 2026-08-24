@@ -227,3 +227,6 @@ case_studies/*/catalog/*.json
 # roborev snapshots and the local review-agent config
 /.roborev/
 /.roborev.toml
+
+# generated preview fixtures (tests/generate_intermediates.py)
+case_studies/.preview/

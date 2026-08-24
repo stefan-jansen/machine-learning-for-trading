@@ -22,9 +22,10 @@
 # **Docker image**: `ml4t`
 #
 # This notebook compares OLS, Ridge (L2), LASSO (L1), and Elastic Net regression
-# for predicting 21-day forward returns on the ETF universe (99 series, after one
-# all-null series is dropped). All models share the same
-# 8-fold walk-forward CV from `setup.yaml`, ensuring apples-to-apples comparison.
+# for predicting 21-day forward returns on the ETF universe. Every model is fitted
+# on the same walk-forward folds, declared once in `setup.yaml` and loaded by
+# `generate_cv_splits`, so that any difference between them comes from the
+# penalty and not from the split.
 #
 # **Learning objectives**
 #
@@ -53,7 +54,7 @@
 # ## Setup
 
 # %% tags=[]
-"""Regularized Regression for Return Prediction — compare Ridge, LASSO, and Elastic Net via walk-forward CV."""
+"""Regularized Regression for Return Prediction - compare Ridge, LASSO, and Elastic Net via walk-forward CV."""
 
 import warnings
 
@@ -62,7 +63,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib.colors import ListedColormap
-from ml4t.diagnostic.metrics import cross_sectional_ic_series
 from scipy.stats import spearmanr
 from sklearn.linear_model import (
     ElasticNet,
@@ -76,9 +76,10 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
 from utils.cv_splits import generate_cv_splits
+from utils.modeling import cross_sectional_ic_mean
 from utils.paths import get_case_study_dir, get_chapter_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -95,7 +96,7 @@ set_global_seeds(SEED)
 # ## Load Features and Labels
 #
 # We load pre-computed ETF features from Ch8 and 21-day forward return labels
-# from Ch7. No synthetic fallback — if files are missing, run upstream notebooks.
+# from Ch7. No synthetic fallback - if files are missing, run upstream notebooks.
 
 # %% tags=[]
 CASE_DIR = get_case_study_dir("etfs")
@@ -176,38 +177,31 @@ train_sizes = [len(tr) for tr, _ in cv_splits]
 test_sizes = [len(te) for _, te in cv_splits]
 if cv_splits:
     print(
-        f"{len(cv_splits)} walk-forward folds — train size "
+        f"{len(cv_splits)} walk-forward folds - train size "
         f"{min(train_sizes):,}–{max(train_sizes):,}, test size "
         f"{min(test_sizes):,}–{max(test_sizes):,}"
     )
 else:
-    print("0 walk-forward folds — every candidate split failed the train/test size gate")
+    print("0 walk-forward folds - every candidate split failed the train/test size gate")
 
 # %% [markdown] tags=[]
 # ## Helper Functions
+#
+# Every model below is scored the same way: rank the cross-section on each
+# validation date, correlate that ranking with the realized forward return, and
+# average over the dates where that correlation exists. Two kinds of date have
+# none. A date with fewer symbols quoting than the minimum cross-section is not
+# scored at all. A date where the model gives every symbol the same prediction
+# has no ranking to correlate, so its Spearman coefficient is undefined. Strong
+# regularization produces exactly that: at a high enough alpha every coefficient
+# is zero and the model predicts one constant for everything.
+#
+# `utils.modeling.cross_sectional_ic_mean` is the shared implementation, and
+# dropping those dates is the part worth knowing about - a single undefined date
+# left in the series turns the average of the whole series into NaN.
 
 
 # %% tags=[]
-def cross_sectional_ic_mean(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    dates: np.ndarray,
-    symbols: np.ndarray,
-) -> float:
-    """Mean cross-sectional Spearman IC across dates in the test fold."""
-    pred_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "prediction": y_pred})
-    ret_df = pl.DataFrame({"timestamp": dates, "symbol": symbols, "forward_return": y_true})
-    ic_per_date = cross_sectional_ic_series(
-        pred_df,
-        ret_df,
-        pred_col="prediction",
-        ret_col="forward_return",
-        date_col="timestamp",
-        entity_col="symbol",
-    )
-    return float(ic_per_date.drop_nulls("ic")["ic"].mean())
-
-
 def evaluate_predictions(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -326,8 +320,10 @@ else:
 # %% [markdown] tags=[]
 # ## OLS Baseline
 #
-# Ordinary Least Squares provides an unregularized reference point.
-# With 57 features on noisy financial data, we expect overfitting.
+# Ordinary Least Squares provides the unregularized reference point every
+# penalty below is measured against. It minimizes squared error on the training
+# fold with nothing holding its coefficients back, which on this many correlated
+# features and this little signal is the condition overfitting needs.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -377,22 +373,41 @@ print(
 ridge_summary
 
 # %% [markdown] tags=[]
-# Ridge performance is stable across a wide range of $\alpha$ values, confirming the
-# bias-variance intuition: moderate regularization reduces variance without excessive
-# bias. The best IC typically occurs at high $\alpha$ (strong shrinkage), reflecting
-# the low signal-to-noise regime of return prediction.
+# Read the sweep for its shape rather than its maximum. A flat stretch means the
+# penalty is doing little; a rise means shrinkage is buying more in variance than
+# it costs in bias; a fall at the far end means the coefficients have been
+# crushed to the point where the model has stopped ranking. Where the turn comes
+# is a property of how much signal the features carry, which is why a sweep this
+# wide is worth running on a new dataset rather than reusing an alpha from an
+# old one.
 
 # %% [markdown] tags=[]
 # ### Sample Weighting: Recency via Exponential Decay
 #
-# Section 11.2 discusses sample weighting as a way to emphasize recent data without
-# discarding older observations. Here we demonstrate the mechanics: exponential decay
-# weights $w_t = e^{-\lambda(T - t)}$ with $\lambda = 0.001$ give the most recent
-# observation full weight while down-weighting older samples gradually.
+# Section 11.2 discusses sample weighting as a way to emphasize recent data
+# without discarding older observations. The weight decays exponentially with
+# age, $w_t = e^{-\lambda(T - t)}$, so the newest observation counts fully and
+# older ones fade smoothly rather than falling off a cliff at a cutoff date.
 #
-# The effective sample size $N_{\text{eff}} = \sum w_t$ summarizes how much data the
-# model "sees" after weighting. We compare a single Ridge fit with and without
-# weighting on the last fold.
+# Age has to be measured in trading sessions, not in rows. This is a panel: every
+# session contributes one row per symbol, so about a hundred rows share each
+# date. Counting age down the rows would decay the weight roughly a hundred times
+# faster than intended, and would hand two symbols quoting on the same day
+# different weights for no reason. Each row is therefore aged by the session it
+# belongs to.
+#
+# The decay rate is set below as a half-life: the number of sessions after which
+# an observation counts half as much as today's. The effective sample size turns
+# that rate into the quantity that decides whether the trade is worth making,
+# which is how many rows the fit is effectively left with. It is Kish's,
+#
+# $$N_{\text{eff}} = \frac{\bigl(\sum w_t\bigr)^2}{\sum w_t^2}$$
+#
+# rather than $\sum w_t$, because only this form is unchanged when every weight
+# is multiplied by a constant. That matters here: the weights are rescaled to
+# mean one before fitting, so $\sum w_t$ would answer for a vector the fit does
+# not use and would report the full sample every time. We compare a single Ridge fit with and without weighting
+# on the last fold.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -406,12 +421,25 @@ if NEED_TRAINING:
     y_tr_sw = target_array[tr_last]
     y_te_sw = target_array[te_last]
 
-    # Exponential recency weights: w_t = exp(-lambda * (T - t))
+    # Exponential recency weights aged in sessions: w_t = exp(-lambda * (T - t)),
+    # so every row quoting on a session shares that session's weight.
+    HALF_LIFE_SESSIONS = 252  # one trading year: a row that old counts half
     n_train_sw = len(y_tr_sw)
-    lam = 0.001
-    recency = np.arange(n_train_sw, dtype=np.float64)
-    weights = np.exp(-lam * (n_train_sw - 1 - recency))
-    n_eff_sw = weights.sum()
+    train_dates_sw = dates_np[tr_last]
+    train_sessions_sw = np.unique(train_dates_sw)
+    age_in_sessions = (len(train_sessions_sw) - 1) - np.searchsorted(
+        train_sessions_sw, train_dates_sw
+    )
+    lam = np.log(2.0) / HALF_LIFE_SESSIONS
+    weights = np.exp(-lam * age_in_sessions)
+    # Kish, not weights.sum(): the rescaling below multiplies every weight by a
+    # constant, which leaves this unchanged and would send a plain sum to n_train.
+    n_eff_sw = float(weights.sum() ** 2 / (weights**2).sum())
+    # Normalize to mean one before fitting. sklearn scales rows by sqrt(w) and does
+    # not renormalize, so the weighted objective is sum(w_i * resid_i^2) + alpha*||b||^2:
+    # with a mean weight near 0.19 the same alpha is roughly five times the penalty
+    # relative to the data term, and the IC gap below would be that, not the recency bet.
+    weights = weights * (n_train_sw / weights.sum())
 
     dates_te_sw = dates_np[te_last]
     symbols_te_sw = symbols_np[te_last]
@@ -429,40 +457,54 @@ if NEED_TRAINING:
     # Store for cache
     sample_weight_results = {
         "n_train": n_train_sw,
+        "n_sessions": len(train_sessions_sw),
+        "half_life": HALF_LIFE_SESSIONS,
         "n_eff": n_eff_sw,
         "ic_uw": ic_uw,
         "ic_w": ic_w,
+        # Stamps which formula n_eff came from. A cache written before the Kish
+        # change carries all the other keys with a plain sum-of-weights n_eff, so
+        # key presence alone cannot tell the two apart and the reader would be
+        # shown 19% of the fold where this notebook computes 37%.
+        "n_eff_kind": "kish",
     }
 
 # %% tags=[]
-# Display sample weighting results (works from cache or fresh training)
 if not NEED_TRAINING:
-    sw = joblib.load(RESULTS_PATH).get("sample_weight_results", {})
-    if sw:
-        n_train_sw, n_eff_sw, ic_uw, ic_w = sw["n_train"], sw["n_eff"], sw["ic_uw"], sw["ic_w"]
-    else:
-        n_train_sw = n_eff_sw = ic_uw = ic_w = None
-else:
-    n_train_sw = sample_weight_results["n_train"]
-    n_eff_sw = sample_weight_results["n_eff"]
+    sample_weight_results = joblib.load(RESULTS_PATH).get("sample_weight_results", {})
+    # A cache written before n_sessions and half_life were recorded would KeyError
+    # below. Treat it as absent so the reader gets the RETRAIN message instead.
+    if (
+        not sample_weight_results.keys()
+        >= {"n_train", "n_sessions", "half_life", "n_eff", "ic_uw", "ic_w"}
+        or sample_weight_results.get("n_eff_kind") != "kish"
+    ):
+        sample_weight_results = {}
 
-if n_train_sw is not None:
-    print(f"Training samples: {n_train_sw:,}")
-    print(f"Effective sample size (N_eff): {n_eff_sw:,.0f}  ({n_eff_sw / n_train_sw:.0%} of total)")
-    print(f"IC unweighted: {ic_uw:.4f}")
-    print(f"IC weighted:   {ic_w:.4f}")
+if sample_weight_results:
+    print(f"Training rows: {sample_weight_results['n_train']:,}")
+    print(f"Training sessions: {sample_weight_results['n_sessions']:,}")
+    print(f"Weight half-life: {sample_weight_results['half_life']} sessions")
+    print(
+        f"Effective sample size: {sample_weight_results['n_eff']:,.0f} rows "
+        f"({sample_weight_results['n_eff'] / sample_weight_results['n_train']:.0%} of the fold)"
+    )
+    print(f"IC unweighted: {sample_weight_results['ic_uw']:.4f}")
+    print(f"IC weighted:   {sample_weight_results['ic_w']:.4f}")
 else:
-    print("Sample weighting results not available — retrain to generate.")
+    print("Sample weighting results not available - set RETRAIN=True to generate them.")
 
 # %% [markdown] tags=[]
-# On this single fold, exponential recency weighting actually *degrades* IC
-# (unweighted -0.0009 -> weighted -0.1323): down-weighting the bulk of the
-# training window concentrates the fit on a short recent slice that, here, was
-# less representative of the test period than the full history. This is an
-# $N{=}1$ observation — the effect varies across folds and market regimes. After
-# structural breaks, recency weighting can improve responsiveness; in stable
-# markets (as on this fold) it adds noise by discarding useful long-term data. The `sample_weight` parameter is
-# available on all sklearn estimators, including the logistic models in NB03
+# Compare the two ICs printed above. Recency weighting is a bet that the recent
+# past resembles the near future more than the distant past does, and the
+# effective sample size says what the bet costs: the decay leaves the fit with
+# the equivalent of a fraction of its training rows. Where the bet does not pay,
+# the model has traded data for nothing. One fold decides none of this - the
+# effect varies across folds and market regimes, and after a structural break
+# recency weighting is what lets a model respond at all. What to take from the
+# cell is the mechanics and the size of the sample-size cost, not the sign of
+# the difference on one window. The `sample_weight` parameter is available on
+# all sklearn estimators, including the logistic models in `03_logistic_classification`
 # and gradient boosting in Ch12.
 #
 # > **Note on uniqueness weighting**: The text also discusses $\bar{H}$-bar
@@ -474,10 +516,12 @@ else:
 # %% [markdown] tags=[]
 # ## LASSO Regression (L1)
 #
-# LASSO drives some coefficients to exactly zero — automatic feature selection.
-# To find a meaningful alpha grid, we first compute `alpha_max` (the smallest alpha
-# that sets all coefficients to zero) from the first fold's training data, then
-# sweep 10 log-spaced values down to `0.01 * alpha_max`.
+# LASSO drives some coefficients to exactly zero - automatic feature selection.
+# To find a meaningful alpha grid, we first compute `alpha_max`, the smallest
+# alpha that sets every coefficient to zero, from the first fold's training data.
+# Above it there is nothing to see, because every model is the same empty model.
+# The grid then runs log-spaced from there down to a small fraction of it, which
+# is where the model is close to unpenalized.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -514,7 +558,7 @@ if NEED_TRAINING:
         ]
     ).sort("mean_ic", descending=True)
 
-    # Skip NaN rows (high alpha can zero out all features → constant predictions)
+    # An alpha that zeroes every coefficient scores NaN: it has no ranking to select on.
     best_lasso_alpha = lasso_summary.filter(pl.col("mean_ic").is_not_nan()).row(0, named=True)[
         "alpha"
     ]
@@ -529,13 +573,13 @@ lasso_summary
 # LASSO achieves comparable IC to Ridge while zeroing out a substantial fraction of
 # features. The `n_nonzero` column shows the sparsity-performance tradeoff: too few
 # features (high $\alpha$) loses signal, while too many (low $\alpha$) approaches
-# OLS overfitting. Which features survive varies across folds — LASSO's instability
+# OLS overfitting. Which features survive varies across folds - LASSO's instability
 # with correlated inputs, as discussed in the text.
 
 # %% [markdown] tags=[]
 # ### LASSO Feature Selection Stability
 #
-# Which features survive varies across folds — a binary heatmap reveals the
+# Which features survive varies across folds - a binary heatmap reveals the
 # instability. Columns that flicker on and off confirm LASSO's sensitivity
 # to the training window when features are correlated.
 
@@ -557,7 +601,7 @@ ax.set_xticks(range(mask_subset.shape[0]))
 ax.set_xticklabels([f"Fold {i + 1}" for i in range(mask_subset.shape[0])])
 ax.set_yticks(range(len(names_subset)))
 ax.set_yticklabels(names_subset, fontsize=9)
-ax.set_title(f"LASSO Feature Selection Across Folds (α={best_lasso_alpha:.4f})")
+ax.set_title("Which features LASSO keeps depends on the training window")
 
 # Add grid lines between cells
 for i in range(mask_subset.shape[1] + 1):
@@ -566,20 +610,25 @@ for j in range(mask_subset.shape[0] + 1):
     ax.axvline(j - 0.5, color="lightgray", lw=0.5)
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grid with one row per feature and one column per fold, filled where LASSO "
+    "gave that feature a non-zero coefficient on that fold.",
+)
 
 # %% [markdown] tags=[]
 # Features present in all folds represent robust LASSO selections. Features that
-# flicker on and off are unstable — their inclusion depends on which training
+# flicker on and off are unstable - their inclusion depends on which training
 # window the model sees. This motivates Elastic Net, which retains correlated
 # feature groups rather than picking one arbitrarily.
 
 # %% [markdown] tags=[]
 # ## Elastic Net (L1 + L2)
 #
-# Elastic Net blends Ridge and LASSO penalties. We fix alpha at the best LASSO
-# alpha and vary the L1 ratio: 0.25 (mostly Ridge), 0.50 (balanced), 0.75
-# (mostly LASSO). This shows how the L1/L2 mix affects sparsity.
+# Elastic Net blends the two penalties, and `l1_ratio` sets the mix: at one it is
+# LASSO, at zero it is Ridge. Holding alpha at the value the LASSO sweep selected
+# and varying only the ratio isolates what the mix decides, which is how much
+# sparsity you get for a given total penalty.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -634,17 +683,19 @@ print("Elastic Net Summary:")
 en_summary
 
 # %% [markdown] tags=[]
-# We fix $\alpha$ at the best LASSO value to isolate the effect of the L1/L2 mixing
-# ratio. Higher `l1_ratio` produces more sparsity (closer to LASSO); lower values
-# retain more features (closer to Ridge). Joint optimization of both $\alpha$ and
+# Higher `l1_ratio` produces more sparsity, closer to LASSO; lower values retain
+# more features, closer to Ridge. Holding alpha fixed is what makes the row-to-row
+# difference readable, and it also means the mix has not been tuned against the
+# alpha. Joint optimization of both $\alpha$ and
 # `l1_ratio` is demonstrated in `04_nested_cv_hpo`.
 
 # %% [markdown] tags=[]
 # ## Loss Function Comparison
 #
 # The section text discusses MSE, MAE, and Huber loss. `SGDRegressor` provides a
-# unified interface: all three accept L2 penalty and `sample_weight`. We compare
-# them at the best Ridge alpha to isolate the effect of the loss function.
+# unified interface: all three accept an L2 penalty and `sample_weight`. Fitting
+# them at one alpha, on one set of folds, isolates the loss function as the only
+# thing that differs.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -676,14 +727,21 @@ print("Loss Function Comparison (L2 penalty, same α):")
 loss_comparison
 
 # %% [markdown] tags=[]
-# Huber loss leads on this fold-set with mean IC around 0.063, edging out squared
-# error (≈0.056) and ε-insensitive MAE (≈0.030). SGDRegressor is a stochastic
-# optimizer sensitive to the learning rate schedule, so absolute ICs differ from the
-# closed-form Ridge solution above — the comparison highlights *relative* behavior.
-# In the heavy-tailed return distribution, Huber's quadratic-then-linear penalty
-# downweights extreme residuals without ignoring them, which the squared-error and
-# ε-insensitive losses do not. The case-study pipelines in Ch12 use LightGBM's
-# Huber objective for the same reason.
+# The three losses differ in how much weight they give a large residual. Squared
+# error grows with the square of it, so one extreme return can move the fit more
+# than a hundred ordinary ones. Huber is quadratic for small residuals and linear
+# beyond a threshold, so an outlier still counts but stops dominating.
+# The epsilon-insensitive loss ignores residuals smaller than epsilon entirely
+# and is linear outside that band. Return distributions are heavy-tailed, which
+# is the condition under which that difference shows up in a ranking metric, and
+# it is why the case-study pipelines in Ch12 reach for LightGBM's Huber
+# objective.
+#
+# Read the table for the ordering, not for the level. `SGDRegressor` optimizes
+# by stochastic gradient descent under a learning-rate schedule, so its ICs are
+# not comparable with the closed-form Ridge solution above even at the same
+# alpha; only the comparison between the three losses, fitted the same way on
+# the same folds, is meaningful here.
 
 # %% [markdown] tags=[]
 # ### LASSO Coefficient Path
@@ -734,34 +792,49 @@ if NEED_TRAINING:
 # %% [markdown] tags=[]
 # ## Model Comparison
 #
-# We compare all four methods using mean IC and its standard deviation across
-# the 8 walk-forward folds.
+# Each method is summarized by its mean IC across the walk-forward folds and by
+# the standard deviation of that IC, which says how much the number depends on
+# which fold you look at.
+#
+# One caveat governs the whole comparison, and it is the reason `04_nested_cv_hpo`
+# exists. The alpha for each penalized model was chosen by taking the highest mean
+# IC over these same validation folds, and the score reported here is that same
+# highest mean IC. A number picked as the maximum of a sweep is biased upward by
+# the picking: some of it is the penalty helping, and some of it is the luck of
+# whichever alpha happened to suit these folds. Nothing here is held back to
+# measure the difference, so read the chart as a comparison of methods under a
+# tuning budget, not as an estimate of what any of them would score on data
+# nobody selected on. Nested cross-validation, in `04_nested_cv_hpo`, is what
+# separates the two.
 
 # %% tags=[]
-rows = [
-    {"Model": "OLS", "Mean IC": ols_df["ic"].mean(), "Std IC": ols_df["ic"].std()},
-    {
-        "Model": f"Ridge (α={best_ridge_alpha:.0f})",
-        "Mean IC": ridge_all[best_ridge_alpha]["results"]["ic"].mean(),
-        "Std IC": ridge_all[best_ridge_alpha]["results"]["ic"].std(),
-    },
-    {
-        "Model": f"LASSO (α={best_lasso_alpha:.4f})",
-        "Mean IC": lasso_all[best_lasso_alpha]["results"]["ic"].mean(),
-        "Std IC": lasso_all[best_lasso_alpha]["results"]["ic"].std(),
-    },
-]
+selected = {
+    "OLS": ols_df,
+    "Ridge": ridge_all[best_ridge_alpha]["results"],
+    "LASSO": lasso_all[best_lasso_alpha]["results"],
+    "Elastic Net": en_all[best_en_key]["results"],
+}
+model_ics = [frame["ic"].mean() for frame in selected.values()]
+model_stds = [frame["ic"].std() for frame in selected.values()]
 
-rows.append(
-    {
-        "Model": f"Elastic Net ({best_en_key})",
-        "Mean IC": en_all[best_en_key]["results"]["ic"].mean(),
-        "Std IC": en_all[best_en_key]["results"]["ic"].std(),
-    }
+fig, ax = plt.subplots(figsize=(8, 4.5))
+ax.bar(
+    np.arange(len(selected)),
+    model_ics,
+    yerr=model_stds,
+    capsize=4,
+    color=[COLORS["slate"], COLORS["blue"], COLORS["amber"], COLORS["copper"]],
 )
-
-comparison = pl.DataFrame(rows).sort("Mean IC", descending=True)
-comparison
+ax.axhline(0, color="gray", lw=0.8)
+ax.set_xticks(np.arange(len(selected)))
+ax.set_xticklabels(list(selected))
+ax.set_ylabel("Mean IC across folds, ±1 standard deviation")
+ax.set_title("Fold-to-fold spread is wider than the gaps between the methods")
+show_with_alt(
+    fig,
+    "Bar chart of mean information coefficient for OLS, Ridge, LASSO and Elastic "
+    "Net, each with an error bar one standard deviation wide.",
+)
 
 # %% [markdown] tags=[]
 # ### Prediction Rank Stability
@@ -796,11 +869,11 @@ rank_corr_df
 
 # %% [markdown] tags=[]
 # High rank correlation confirms that Ridge produces stable cross-sectional
-# rankings across folds — the same features rank near the top across folds
+# rankings across folds - the same features rank near the top across folds
 # regardless of the training window. Lower values would indicate instability
 # and high implied turnover.
 #
-# > **Turnover**: Rank stability is a proxy for signal turnover — the fraction
+# > **Turnover**: Rank stability is a proxy for signal turnover - the fraction
 # > of the portfolio that changes between rebalancing dates. The per-case-study
 # > runner notebooks (`06_linear.py`) compute explicit turnover alongside IC;
 # > Chapter 17 develops the full turnover-adjusted evaluation framework.
@@ -809,50 +882,40 @@ rank_corr_df
 # %% [markdown] tags=[]
 # ## Regularization Paths
 #
-# ### Ridge IC vs Alpha
+# ### What LASSO gives up as the penalty rises
 #
-# Ridge IC is stable across a wide alpha range. Very strong regularization
-# ($\alpha > 1000$) improves IC by biasing coefficients away from OLS's
-# overfitting — the classic bias-variance tradeoff.
+# Two things move together as $\alpha$ increases: the model keeps fewer
+# features, and its ranking accuracy changes. Plotting them on one axis shows
+# where dropping features stops being free. The two vertical scales are
+# different quantities, so each is labelled in the colour of its own series.
 
 # %% tags=[]
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# (a) Ridge IC vs alpha
 alphas_sorted = sorted(ridge_all.keys())
-ics_ridge = [ridge_all[a]["results"]["ic"].mean() for a in alphas_sorted]
-
-axes[0].semilogx(alphas_sorted, ics_ridge, "o-", color=COLORS["blue"], lw=2)
-axes[0].axhline(ols_df["ic"].mean(), ls="--", color="gray", label="OLS baseline")
-axes[0].set_xlabel("α (regularization strength)")
-axes[0].set_ylabel("Mean IC (8 folds)")
-axes[0].set_title("(a) Ridge: IC vs Regularization Strength")
-axes[0].legend()
-
-# (b) LASSO IC vs alpha (with nonzero count on secondary axis)
 alphas_l = sorted(lasso_all.keys(), reverse=True)
 ics_lasso = [lasso_all[a]["results"]["ic"].mean() for a in alphas_l]
 nz_lasso = [int((np.abs(lasso_all[a]["coeffs"]).mean(axis=0) > 1e-8).sum()) for a in alphas_l]
 
-ax2 = axes[1]
-color_ic = COLORS["blue"]
-ax2.semilogx(alphas_l, ics_lasso, "s-", color=color_ic, lw=2, label="Mean IC")
-ax2.set_xlabel("α (regularization strength)")
-ax2.set_ylabel("Mean IC", color=color_ic)
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.semilogx(alphas_l, ics_lasso, "s-", color=COLORS["blue"], lw=2, label="Mean IC")
+ax.set_xlabel("α (regularization strength)")
+ax.set_ylabel("Mean IC across folds", color=COLORS["blue"])
+ax.tick_params(axis="y", labelcolor=COLORS["blue"])
 
-ax2b = ax2.twinx()
-color_nz = COLORS["amber"]
-ax2b.semilogx(alphas_l, nz_lasso, "^--", color=color_nz, lw=1.5, label="Non-zero features")
-ax2b.set_ylabel("Non-zero features", color=color_nz)
-ax2.set_title("(b) LASSO: IC and Sparsity vs α")
+ax_nz = ax.twinx()
+ax_nz.semilogx(alphas_l, nz_lasso, "^--", color=COLORS["amber"], lw=1.5, label="Non-zero features")
+ax_nz.set_ylabel("Features with a non-zero coefficient", color=COLORS["amber"])
+ax_nz.tick_params(axis="y", labelcolor=COLORS["amber"])
 
-# Combine legends
-lines1, labels1 = ax2.get_legend_handles_labels()
-lines2, labels2 = ax2b.get_legend_handles_labels()
-ax2.legend(lines1 + lines2, labels1 + labels2, loc="lower left", frameon=False)
-
+lines, labels = ax.get_legend_handles_labels()
+lines_nz, labels_nz = ax_nz.get_legend_handles_labels()
+ax.legend(lines + lines_nz, labels + labels_nz, loc="lower left", frameon=False)
+ax.set_title("LASSO drops features long before ranking accuracy responds")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two series against regularization strength on a log axis: mean information "
+    "coefficient on the left scale and the count of non-zero coefficients on the right.",
+)
 
 # %% [markdown] tags=[]
 # ### LASSO Coefficient Path (Top 10 Features)
@@ -881,10 +944,15 @@ ax.axvline(
 )
 ax.set_xlabel("α (LASSO regularization)")
 ax.set_ylabel("Coefficient value (standardized)")
-ax.set_title("LASSO Coefficient Path — Top 10 Features")
+ax.set_title("Features enter the LASSO model one at a time as the penalty falls")
 ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Coefficient values against regularization strength on a log axis. The ten "
+    "largest are drawn in colour and the rest in grey; each leaves zero at a "
+    "different alpha.",
+)
 
 # %% [markdown] tags=[]
 # ### Ridge IC and ICIR vs Alpha
@@ -937,9 +1005,13 @@ lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=9)
 
-ax1.set_title("Ridge Prediction Quality vs Regularization Strength")
+ax1.set_title("Ridge tolerates a wide band of penalties before it degrades")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Mean information coefficient with a one-standard-deviation band and the "
+    "IC information ratio, both against Ridge regularization strength on a log axis.",
+)
 
 # %% [markdown] tags=[]
 # ### Ridge IC/ICIR Statistics
@@ -968,92 +1040,65 @@ print(f"  Std reduction: {(1 - best_std / ols_std) * 100:.0f}%")
 print(f"  ICIR improvement: {best_icir / ols_icir:.1f}x over OLS ({ols_icir:.2f})")
 
 # %% [markdown] tags=[]
-# ### Combined Regularization Path
+# ### Ridge Coefficient Path
 #
-# The three panels below summarize the sweep: the Ridge coefficient path, the
-# LASSO sparsity path, and the cross-model IC comparison side by side.
+# The same sweep read through the coefficients rather than the score. Every
+# feature keeps a non-zero weight at every alpha, and the weights shrink towards
+# zero together as the penalty rises. That is the difference from the LASSO path
+# above, where features leave the model one at a time and do not come back.
 
 # %% tags=[]
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-# (a) Ridge coefficient path
+fig, ax = plt.subplots(figsize=(10, 6))
 for j, feat in enumerate(FEATURE_COLS):
     coefs_by_alpha = [ridge_all[a]["coeffs"].mean(axis=0)[j] for a in alphas_sorted]
     if feat in top10_names:
-        axes[0].semilogx(alphas_sorted, coefs_by_alpha, lw=2, label=feat)
+        ax.semilogx(alphas_sorted, coefs_by_alpha, lw=2, label=feat)
     else:
-        axes[0].semilogx(alphas_sorted, coefs_by_alpha, lw=0.4, color="lightgray", alpha=0.5)
-axes[0].axhline(0, color="gray", lw=0.5)
-axes[0].set_xlabel("α")
-axes[0].set_ylabel("Coefficient")
-axes[0].set_title("(a) Ridge Coefficient Path")
-axes[0].legend(fontsize=7, loc="lower left", ncol=2, frameon=False)
-
-# (b) LASSO coefficient path
-for i in top10_idx:
-    axes[1].semilogx(path_alphas, path_coefs[i], lw=2, label=FEATURE_COLS[i])
-for i in range(path_coefs.shape[0]):
-    if i not in top10_idx:
-        axes[1].semilogx(path_alphas, path_coefs[i], lw=0.4, color="lightgray", alpha=0.5)
-axes[1].axhline(0, color="gray", lw=0.5)
-axes[1].set_xlabel("α")
-axes[1].set_title("(b) LASSO Coefficient Path")
-axes[1].legend(fontsize=7, loc="lower left", ncol=2, frameon=False)
-
-# (c) IC comparison across methods
-x_pos = np.arange(4)
-ics = [
-    ols_df["ic"].mean(),
-    ridge_all[best_ridge_alpha]["results"]["ic"].mean(),
-    lasso_all[best_lasso_alpha]["results"]["ic"].mean(),
-    en_all[best_en_key]["results"]["ic"].mean(),
-]
-stds = [
-    ols_df["ic"].std(),
-    ridge_all[best_ridge_alpha]["results"]["ic"].std(),
-    lasso_all[best_lasso_alpha]["results"]["ic"].std(),
-    en_all[best_en_key]["results"]["ic"].std(),
-]
-labels = ["OLS", "Ridge", "LASSO", "EN"]
-axes[2].bar(
-    x_pos,
-    ics,
-    yerr=stds,
-    capsize=4,
-    color=[COLORS["slate"], COLORS["blue"], COLORS["amber"], COLORS["copper"]],
+        ax.semilogx(alphas_sorted, coefs_by_alpha, lw=0.4, color="lightgray", alpha=0.5)
+ax.axhline(0, color="gray", lw=0.5)
+ax.set_xlabel("α (Ridge regularization strength)")
+ax.set_ylabel("Coefficient value (standardized feature)")
+ax.set_title("Ridge shrinks every coefficient rather than removing any")
+ax.legend(fontsize=7, loc="lower left", ncol=2, frameon=False)
+fig.tight_layout()
+show_with_alt(
+    fig,
+    "Coefficient values against regularization strength on a log axis, one line "
+    "per feature, all converging towards zero as the penalty rises.",
 )
-axes[2].set_xticks(x_pos)
-axes[2].set_xticklabels(labels)
-axes[2].set_ylabel("Mean IC ± 1σ")
-axes[2].set_title("(c) Model Comparison")
-
-fig.suptitle("Regularization Paths and Model Comparison", fontsize=14, y=1.02)
-plt.show()
-plt.close()
 
 # %% [markdown] tags=[]
-# Panels (a) and (b) contrast Ridge's smooth shrinkage with LASSO's sequential
-# elimination. Ridge retains all features with attenuated weights; LASSO selects a
-# sparse subset whose composition can shift across folds. Panel (c) shows that
-# regularization consistently improves over OLS, with LASSO and Ridge achieving
-# the highest mean IC.
+# The two coefficient paths are the whole difference between the penalties in
+# one picture. Ridge attenuates every weight and keeps every feature; LASSO
+# removes features one at a time, and which ones it removes depends on the
+# training window. Elastic Net sits between them: it can zero a coefficient, but
+# its L2 component keeps correlated features together rather than picking one of
+# the group arbitrarily.
 
 # %% [markdown] tags=[]
 # ## Key Takeaways
 #
-# 1. **Ridge improves IC** over OLS by shrinking noisy coefficients — the
-#    bias-variance tradeoff favors more bias when features outnumber signal.
+# 1. **Shrinkage buys variance reduction with bias.** Ridge pulls every
+#    coefficient towards zero, which costs accuracy on the training fold and can
+#    repay it on the next one. Where features are many, correlated, and weakly
+#    related to the target, that trade is usually worth making, and the alpha
+#    sweep is how you find out where it stops paying.
 #
-# 2. **LASSO performs feature selection**: at the best alpha, a little over half
-#    of the features survive (33 of 57). The coefficient path reveals which
-#    features enter the model first as regularization weakens.
+# 2. **LASSO performs feature selection**: at the selected alpha some
+#    coefficients are exactly zero and those features leave the model. The
+#    coefficient path shows the order in which the rest enter as the penalty
+#    weakens, and the fold heatmap shows how much of that selection is repeated
+#    when the training window changes.
 #
 # 3. **Elastic Net** blends both penalties. Higher L1 ratio produces more
 #    sparsity; the choice depends on whether you value interpretability or
 #    want to retain correlated features.
 #
-# 4. **Walk-forward CV with purging** is essential — standard K-fold would
-#    overestimate IC by allowing information leakage across the purge gap.
+# 4. **Walk-forward CV with purging** is what makes any of these numbers
+#    meaningful. Standard K-fold trains on data that follows its test window and
+#    scores a model against outcomes it has already seen, and with a 21-day
+#    forward label the fold boundary has to be widened by the label horizon
+#    before the two sides are genuinely separate.
 #
 # **Next**: See `03_logistic_classification` for direction prediction, or
 # `04_nested_cv_hpo` for hyperparameter optimization with Optuna.

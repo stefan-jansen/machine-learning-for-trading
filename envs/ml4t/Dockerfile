@@ -67,7 +67,7 @@ RUN /opt/ml4t/bin/pip freeze | grep -E '^(torch|torchaudio|torchvision)==' > /tm
 # step below, so this only needs the lower bounds.
 RUN /opt/ml4t/bin/pip install --no-cache-dir \
     "ml4t-data>=0.1.2" \
-    "ml4t-diagnostic>=0.1.1" \
+    "ml4t-diagnostic>=0.1.2" \
     "ml4t-engineer>=0.1.3" \
     "ml4t-live>=0.1.0" \
     "ml4t-backtest>=0.1.3" \

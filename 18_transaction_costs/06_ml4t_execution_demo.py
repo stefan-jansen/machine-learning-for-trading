@@ -18,28 +18,33 @@
 #
 # **Docker image**: `ml4t`
 #
-# This notebook demonstrates four **ml4t.backtest.execution** market-impact models and shows how
-# their signed price moves can be composed with an execution result:
+# The previous notebooks derived impact models by hand. A backtest needs them as code it can call
+# on every fill, and `ml4t.backtest.execution` provides four:
 #
-# 1. **NoImpact**: Zero impact (baseline for comparison)
-# 2. **LinearImpact**: Impact scales linearly with participation rate
-# 3. **SquareRootImpact**: A volatility-scaled, concave baseline
-# 4. **PowerLawImpact**: Generalized power law (configurable exponent)
+# 1. **NoImpact** charges nothing, which is what a backtest does by default and why backtests
+#    flatter strategies that trade a lot.
+# 2. **LinearImpact** charges in proportion to the participation rate.
+# 3. **SquareRootImpact** charges in proportion to volatility times the square root of
+#    participation, which is the shape `03_market_impact_calibration` argues for.
+# 4. **PowerLawImpact** takes the exponent as a parameter, so it covers both of the above and
+#    everything between.
 #
-# **Key Benefits**:
-# - Consistent API across all models
-# - Explicit signed price moves for buy and sell orders
-# - Transparent composition with participation limits and execution results
-# - Research-motivated shapes with reader-visible parameter assumptions
+# All four answer the same question - given an order of this size against this much volume, how far
+# does the price move against me - and all four return a **signed per-share price move**: positive
+# for a buy, negative for a sell, so that adding it to the decision price always makes the fill
+# worse. What separates them is the shape of the relationship and the parameters that scale it.
 #
 # **Learning Objectives**
-# - Compare the shapes implied by `NoImpact`, `LinearImpact`, `SquareRootImpact`,
-#   and `PowerLawImpact`
-# - Map the API surface to benchmark backtest execution code
-# - Interpret how participation and volatility drive impact cost
-# - Parameterize square-root impact with realized ETF volatility while holding the coefficient fixed
+# - Call any of the four models through one interface and read the sign convention correctly
+# - Separate what an impact model's exponent decides from what its coefficient decides, and see why
+#   two models' levels cannot be compared until their coefficients are put on the same footing
+# - Compose an impact model with a participation limit to produce the fill a backtest would record
+# - Substitute a measured volatility into a model whose coefficient you have not measured, and say
+#   what that does and does not establish
+# - Recognize that these models are stateless, and supply persistence across child orders yourself
+#   when you need it
 #
-# **Book Reference:** Chapter 18: Section 18.4 (Baseline Backtest Cost Models)
+# **Book Reference:** Chapter 18, Section 18.4
 #
 # **Prerequisites:** Read
 # [`03_market_impact_calibration`](03_market_impact_calibration.ipynb) for the economic meaning of
@@ -71,13 +76,39 @@ from ml4t.backtest.execution.result import ExecutionResult
 
 from data import load_etfs
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 SEED = 42
+UNIVERSE = ["SPY", "QQQ", "IWM", "EEM", "DBC"]
+LOOKBACK_DAYS = 365
+IMPACT_COEFFICIENT = 0.5
+SCENARIO_VOLATILITY = 0.02
+MAX_PARTICIPATION = 0.10
+PARAMETERIZATION_PARTICIPATION = 0.05
+PERSISTENCE_FRACTION = 0.50
 
 # %%
 set_global_seeds(SEED)
+
+# %% [markdown]
+# What each setting decides:
+#
+# - `UNIVERSE` and `LOOKBACK_DAYS` fix the five ETFs and the trailing window their prices, volumes
+#   and volatilities are measured over. The five span a range of volatility wide enough that the
+#   model's volatility term visibly changes the answer.
+# - `IMPACT_COEFFICIENT` is the library's own default for the square-root model. It is a stated
+#   figure and every impact level in this notebook scales directly with it.
+# - `SCENARIO_VOLATILITY` is the daily volatility used wherever a single round number is wanted
+#   instead of a measured one, so the scenario sections stay comparable with each other.
+# - `MAX_PARTICIPATION` caps how much of a bar's volume one order may take. Anything above it is
+#   filled partially and the remainder is carried, which is what a backtest must do rather than
+#   pretending an unlimited order filled at one price.
+# - `PARAMETERIZATION_PARTICIPATION` is the fixed rate at which the five ETFs are compared, so that
+#   the only thing differing between them is their measured volatility.
+# - `PERSISTENCE_FRACTION` is the share of each child order's impact that the notebook carries into
+#   the next child's reference price. The library models are stateless and do not do this; the
+#   value is the notebook's own assumption.
 
 # %% [markdown]
 # ## Part 1: Understanding the Impact Model API
@@ -94,20 +125,29 @@ set_global_seeds(SEED)
 # ) -> float:            # Signed per-share price move
 # ```
 #
-# The impact is a **signed per-share price move** (not bps): positive for buys and negative for
-# sells. Adding either signed move to the decision price worsens that side's execution. The absolute
-# value is the per-share cost magnitude.
+# The return is a **signed per-share price move** in currency units, not basis points: positive for
+# buys and negative for sells, so adding it to the decision price always moves the fill against the
+# trader. Its absolute value is the per-share cost.
 #
-# `volume` must also respect decision timing. A completed bar's final volume is unavailable to a
-# pre-close decision; use known accumulated volume, a lagged or forecast volume, or execute on the
-# next bar. The examples below treat volume or ADV as an explicit scenario input.
+# The `volume` argument deserves care, because it is where look-ahead enters a backtest most
+# easily. A bar's total volume is known only once the bar has closed, so sizing an order against it
+# uses information the order did not have. Use volume accumulated so far, a lagged or forecast
+# figure, or execute on the following bar. Every example below supplies volume as a stated scenario
+# input rather than reading it from a bar the order is supposedly trading inside.
+#
+# These models are also **stateless**: each call sees one order and knows nothing about the ones
+# before it. That matters for a parent order worked in slices, because permanent impact - the part
+# of the move that does not revert - should be paid again by every later slice. Part 4 supplies
+# that persistence explicitly, outside the model.
 
 # %%
 # Instantiate all four models with default parameters
 models = {
     "NoImpact": NoImpact(),
     "LinearImpact": LinearImpact(coefficient=0.1, permanent_fraction=0.5),
-    "SquareRootImpact": SquareRootImpact(coefficient=0.5, volatility=0.02),
+    "SquareRootImpact": SquareRootImpact(
+        coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY
+    ),
     "PowerLawImpact": PowerLawImpact(coefficient=0.1, exponent=0.5),
 }
 
@@ -143,9 +183,10 @@ impact_comparison
 # $$\text{Impact} = \text{coefficient} \times \frac{Q}{V} \times P$$
 #
 # - Simple, intuitive model
-# - Good for liquid markets with moderate order sizes
-# - Parameters: `coefficient` (default 0.1), `permanent_fraction` (0-1)
-# - Current `calculate()` uses `coefficient` but does not use the stored `permanent_fraction`
+# The coefficient is the whole model. It is the per-share concession, as a fraction of price, that
+# an order equal to the market's entire volume would pay, and every smaller order pays that
+# fraction scaled down in proportion. Multiply the coefficient by ten thousand to read it as the
+# cost in basis points at full participation.
 
 # %%
 # LinearImpact sensitivity analysis
@@ -155,28 +196,20 @@ participation_rates = np.linspace(0.001, 0.20, 100)
 quantities = participation_rates * volume
 
 linear_impacts = [linear.calculate(q, price, volume, is_buy) for q in quantities]
-linear_10pct = linear.calculate(volume * 0.10, price, volume, is_buy)
-linear_perm_zero = LinearImpact(coefficient=0.1, permanent_fraction=0.0).calculate(
-    volume * 0.10, price, volume, is_buy
-)
-linear_perm_one = LinearImpact(coefficient=0.1, permanent_fraction=1.0).calculate(
-    volume * 0.10, price, volume, is_buy
-)
-if not np.isclose(linear_perm_zero, linear_perm_one):
-    raise AssertionError("Current LinearImpact.calculate() should ignore permanent_fraction.")
-
-print(
-    f"LinearImpact (coefficient={linear.coefficient}, "
-    f"permanent_fraction={linear.permanent_fraction})"
-)
-print(f"  10% participation impact: ${linear_10pct:.4f} ({linear_10pct / price * 10000:.1f} bps)")
+print(f"LinearImpact with coefficient {linear.coefficient}, buying a ${price:.0f} stock:")
+for participation in (0.01, 0.10, 1.00):
+    impact = linear.calculate(volume * participation, price, volume, is_buy)
+    print(
+        f"  {participation:>5.0%} of volume -> ${impact:.4f} per share, "
+        f"{impact / price * 10_000:>6.0f} bps"
+    )
 
 # %% [markdown]
-# **Finding**: The linear model is useful as a baseline precisely because it is
-# easy to reason about. If its 10% ADV estimate already looks implausibly high or low, the notebook
-# has exposed a parameter problem before any backtest runs. In the current stateless API,
-# `permanent_fraction` is a stored but currently inert parameter; persistence must be supplied
-# outside `calculate()`.
+# **Reading the output**: The three lines are exactly proportional, which is the model. That makes
+# it easy to sanity-check - at full participation the cost in basis points is the coefficient times
+# ten thousand - and it is also its weakness. Proportionality means the last share of a large order
+# costs the same as the first, which contradicts what the square-root shape in
+# `03_market_impact_calibration` was fitted to.
 
 # %% [markdown]
 # ### SquareRootImpact (Almgren-Chriss)
@@ -184,15 +217,17 @@ print(f"  10% participation impact: ${linear_10pct:.4f} ({linear_10pct / price *
 # $$\text{Impact} = \text{coefficient} \times \sigma \times \sqrt{\frac{Q}{ADV}} \times P$$
 #
 # - Common research-motivated baseline across asset classes
-# - Impact scales with square root of participation (concave)
-# - Incorporates volatility as a scaling factor
-# - Parameters: `coefficient` (library default 0.5), `volatility` (daily σ), `adv_factor`
+# Two things scale this model. The `coefficient` plays the same role as the linear model's, and
+# `volatility` is the instrument's daily standard deviation of returns, which sets how much a given
+# amount of participation costs in a market that moves a lot against one that does not.
+# `adv_factor` converts the `volume` argument into an average daily volume when the bars are
+# shorter than a day: it is the number of bars in a session, so it stays at one for daily bars.
 
 # %%
 # SquareRootImpact with different volatility regimes
-sqrt_low_vol = SquareRootImpact(coefficient=0.5, volatility=0.01)
-sqrt_mid_vol = SquareRootImpact(coefficient=0.5, volatility=0.02)
-sqrt_high_vol = SquareRootImpact(coefficient=0.5, volatility=0.04)
+sqrt_low_vol = SquareRootImpact(coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY / 2)
+sqrt_mid_vol = SquareRootImpact(coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY)
+sqrt_high_vol = SquareRootImpact(coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY * 2)
 
 sqrt_impacts_low = [sqrt_low_vol.calculate(q, price, volume, is_buy) for q in quantities]
 sqrt_impacts_mid = [sqrt_mid_vol.calculate(q, price, volume, is_buy) for q in quantities]
@@ -201,34 +236,33 @@ sqrt_10pct_low = sqrt_low_vol.calculate(volume * 0.10, price, volume, is_buy)
 sqrt_10pct_mid = sqrt_mid_vol.calculate(volume * 0.10, price, volume, is_buy)
 sqrt_10pct_high = sqrt_high_vol.calculate(volume * 0.10, price, volume, is_buy)
 
-print("SquareRootImpact (coefficient=0.5, illustrative library default)")
-print(
-    f"  10% participation @ 1% vol: ${sqrt_10pct_low:.4f} "
-    f"({sqrt_10pct_low / price * 10000:.1f} bps)"
-)
-print(
-    f"  10% participation @ 2% vol: ${sqrt_10pct_mid:.4f} "
-    f"({sqrt_10pct_mid / price * 10000:.1f} bps)"
-)
-print(
-    f"  10% participation @ 4% vol: ${sqrt_10pct_high:.4f} "
-    f"({sqrt_10pct_high / price * 10000:.1f} bps)"
-)
+print(f"SquareRootImpact with coefficient {IMPACT_COEFFICIENT}, at the same participation:")
+for model, impact in (
+    (sqrt_low_vol, sqrt_10pct_low),
+    (sqrt_mid_vol, sqrt_10pct_mid),
+    (sqrt_high_vol, sqrt_10pct_high),
+):
+    print(
+        f"  volatility {model.volatility:.1%} a day: ${impact:.4f} per share, "
+        f"{impact / price * 10_000:.1f} bps"
+    )
 
 # %% [markdown]
-# **Finding**: Volatility is not a cosmetic parameter. The same participation
-# rate becomes materially more expensive in a high-volatility regime, which is
-# why a volatility-parameterized scenario rises when the market becomes disorderly.
+# **Reading the output**: Doubling the volatility doubles the cost, at every participation rate,
+# because volatility enters the model as a plain multiplier. That is what makes this model
+# responsive to market conditions in a way the linear one is not: the same order in the same
+# instrument costs more in a week when the price is moving, without anything about the order or
+# the instrument's liquidity having changed.
 
 # %% [markdown]
 # ### PowerLawImpact
 #
 # $$\text{Impact} = \text{coefficient} \times \left(\frac{Q}{V}\right)^{\text{exponent}} \times P$$
 #
-# - Flexible model for different impact regimes
-# - `exponent=1.0` → Linear; `exponent=0.5` → Square root
-# - `0 < exponent < 1` → Concave (impact grows at a decreasing rate)
-# - `exponent>1` → Convex (impact grows at an increasing rate)
+# The exponent is what the other two models fix and this one exposes. Set it to one and the model
+# is the linear one; set it to a half and it is the square-root one. Any exponent between zero and
+# one makes the curve concave, so each additional unit of participation costs less than the last,
+# and an exponent above one makes it convex, so each costs more.
 # - `min_impact` is a minimum absolute per-share price move, not a fixed dollar trade cost
 
 # %%
@@ -248,10 +282,16 @@ power_10pct_linear = power_linear.calculate(volume * 0.10, price, volume, is_buy
 power_10pct_sqrt = power_sqrt.calculate(volume * 0.10, price, volume, is_buy)
 power_10pct_concave = power_concave.calculate(volume * 0.10, price, volume, is_buy)
 
-print("PowerLawImpact (coefficient=0.1)")
-print(f"  10% participation @ exp=1.0: ${power_10pct_linear:.4f} (linear)")
-print(f"  10% participation @ exp=0.5: ${power_10pct_sqrt:.4f} (square root)")
-print(f"  10% participation @ exp=0.3: ${power_10pct_concave:.4f} (strongly concave)")
+print(f"PowerLawImpact with coefficient {power_linear.coefficient}, at the same participation:")
+for model, impact, shape in (
+    (power_linear, power_10pct_linear, "linear"),
+    (power_sqrt, power_10pct_sqrt, "square root"),
+    (power_concave, power_10pct_concave, "strongly concave"),
+):
+    print(
+        f"  exponent {model.exponent}: ${impact:.4f} per share, "
+        f"{impact / price * 10_000:.1f} bps ({shape})"
+    )
 
 # %% [markdown]
 # **Finding**: Every exponent between zero and one is concave; smaller exponents bend the curve
@@ -287,19 +327,25 @@ fig.update_layout(
     legend=dict(orientation="h", y=-0.23, x=0.5, xanchor="center"),
     margin=dict(b=105),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Three impact curves against participation rate. All rise and flatten, but they sit at "
+    "visibly different levels despite two of them sharing the same square-root shape.",
+)
 
 # %% [markdown]
-# **Finding**: Functional form alone does not rank cost severity. Here the exponent-0.5 power law
-# sits above the volatility-scaled square-root model because their coefficients use different
-# conventions, even though both curves have the same square-root shape.
+# **Reading the chart**: Functional form alone does not rank cost severity. The power-law curve
+# sits above the square-root curve here even though the two have the identical shape, because one
+# of them multiplies by a volatility and the other does not, and their coefficients are on
+# different footings as a result. A reader who took the higher curve to be the more pessimistic
+# model would be reading the coefficients, not the models.
 
 # %% [markdown]
 # ### Volatility Sets Scale
 #
-# Hold the square-root coefficient at the illustrative library default of 0.5 and vary only
-# volatility. A dedicated chart avoids implying that its y-scale is comparable to the power-law
-# coefficient convention.
+# The coefficient is held at the library's default and only the volatility varies, so the three
+# curves differ by exactly the factor their volatilities differ by. This gets its own chart because
+# its vertical scale is not comparable with the power-law chart that follows.
 
 # %%
 volatility_fig = go.Figure()
@@ -325,13 +371,18 @@ volatility_fig.update_layout(
     margin=dict(b=100),
 )
 volatility_fig.update_yaxes(rangemode="tozero")
-volatility_fig.show()
+show_plotly_with_alt(
+    volatility_fig,
+    "Three square-root impact curves, one per volatility, identical in shape and stacked in "
+    "proportion to the volatility that scales them.",
+)
 
 # %% [markdown]
 # ### The Exponent Sets Curvature
 #
-# Now hold the power-law coefficient at 0.1. Exponents in the interval
-# $0 < \text{exponent} < 1$ are concave; 0.8 is mildly concave, not convex.
+# Now the coefficient is held and only the exponent varies. Every exponent shown is between zero
+# and one, so every curve is concave; the ones nearer to one are only mildly so, which is easy to
+# misread as convexity when a curve is close to straight.
 
 # %%
 exponent_specs = (
@@ -360,7 +411,11 @@ exponent_fig.update_layout(
     margin=dict(b=105),
 )
 exponent_fig.update_yaxes(rangemode="tozero")
-exponent_fig.show()
+show_plotly_with_alt(
+    exponent_fig,
+    "Four power-law impact curves sharing a coefficient. The exponent-one curve is a straight "
+    "line; smaller exponents bow further above it and rise more steeply near zero participation.",
+)
 
 # %% [markdown]
 # **Finding**: Doubling volatility doubles square-root impact at every participation rate. Changing
@@ -370,9 +425,11 @@ exponent_fig.show()
 # %% [markdown]
 # ## Part 4: Trade Sequence Simulation
 #
-# Compare models on an illustrative trade sequence: executing 100,000 shares of a $100 stock over
-# ten child orders. The impact objects are stateless, so the notebook adds a shared 50% persistence
-# scenario explicitly. This assumption is not state tracked by the library models.
+# A parent order is worked in equal child orders against a fixed daily volume. Because the models
+# have no memory, the notebook carries a stated fraction of each child's impact into the next
+# child's reference price itself - see `PERSISTENCE_FRACTION` above. That fraction is the
+# notebook's assumption and not something the library tracks, and it is applied identically to
+# every model so the comparison between them is unaffected by it.
 
 # %%
 # Trade sequence simulation
@@ -381,13 +438,14 @@ price = 100.0
 adv_shares = 1_000_000
 n_child_orders = 10
 shares_per_order = total_shares / n_child_orders
-persistence_fraction = 0.50
 
 # Models to compare
 simulation_models = {
     "NoImpact": NoImpact(),
     "LinearImpact": LinearImpact(coefficient=0.1),
-    "SquareRootImpact": SquareRootImpact(coefficient=0.5, volatility=0.02),
+    "SquareRootImpact": SquareRootImpact(
+        coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY
+    ),
     "PowerLawImpact": PowerLawImpact(coefficient=0.1, exponent=0.6),
 }
 
@@ -415,7 +473,7 @@ for model_name, model in simulation_models.items():
         total_cost += order_cost
 
         # Carry the stated scenario fraction into the next child order.
-        exec_price = exec_price + impact * persistence_fraction
+        exec_price = exec_price + impact * PERSISTENCE_FRACTION
 
         results.append(
             {
@@ -432,24 +490,28 @@ results_df = pl.DataFrame(results)
 # %% [markdown]
 # ### First-Child Unit Oracle
 #
-# The first child is 10,000 shares against 1,000,000 ADV: exactly 1% participation. With linear
-# coefficient 0.1 and a $100 reference price, the signed buy move must be $0.10 per share, or 10 bps.
+# The linear model is simple enough to check by hand, which makes it the right place to confirm
+# the units before trusting anything downstream. The first child's participation is its share count
+# divided by the daily volume, and the linear model's signed move must equal the coefficient times
+# that participation times the price. The cell below computes both sides and raises if they differ.
 
-# %%
+# %% tags=["results"]
 first_linear = results_df.filter((pl.col("model") == "LinearImpact") & (pl.col("order") == 1)).row(
     0, named=True
 )
 first_child_participation = shares_per_order / adv_shares
 first_child_impact_per_share = first_linear["impact_per_share_usd"]
-if not np.isclose(first_child_participation, 0.01):
-    raise AssertionError("Each child order must represent 1% of full ADV.")
-if not np.isclose(first_child_impact_per_share, 0.10):
-    raise AssertionError("The first linear child impact must be $0.10 per share.")
+expected_impact = LinearImpact().coefficient * first_child_participation * price
+if not np.isclose(first_child_impact_per_share, expected_impact):
+    raise ValueError("Library linear impact disagrees with coefficient x participation x price")
 display(
     Markdown(
-        f"**Unit check:** first-child participation is **{first_child_participation:.0%}** and "
-        f"linear impact is **${first_child_impact_per_share:.2f} per share** "
-        f"(**{first_child_impact_per_share / price * 10_000:.0f} bps**)."
+        f"**Unit check:** the first child is **{shares_per_order:,.0f} shares** against "
+        f"**{adv_shares:,.0f}** of daily volume, a participation rate of "
+        f"**{first_child_participation:.1%}**. The library returns "
+        f"**${first_child_impact_per_share:.4f} per share**, which is "
+        f"**{first_child_impact_per_share / price * 10_000:.1f} bps** of the "
+        f"**${price:.0f}** reference price and matches the hand calculation exactly."
     )
 )
 
@@ -499,10 +561,6 @@ sequence_markers = {
     "SquareRootImpact": (6, "diamond"),
     "PowerLawImpact": (7, "circle"),
 }
-linear_path = results_df.filter(pl.col("model") == "LinearImpact")["fill_price"]
-square_root_path = results_df.filter(pl.col("model") == "SquareRootImpact")["fill_price"]
-if not np.allclose(linear_path.to_numpy(), square_root_path.to_numpy()):
-    raise AssertionError("Displayed parameters should make the two sequence paths tie exactly.")
 for model_name in simulation_models:
     model_data = results_df.filter(pl.col("model") == model_name)
     marker_size, marker_symbol = sequence_markers[model_name]
@@ -524,23 +582,100 @@ fig.add_hline(
 )
 
 fig.update_layout(
-    title="A shared persistence assumption turns one-shot impact into rising fill prices",
+    title="Carrying impact forward turns single fills into a rising path",
     xaxis_title="Child order",
     yaxis_title="Fill price (USD)",
     height=520,
     legend=dict(orientation="h", y=-0.23, x=0.5, xanchor="center"),
     margin=dict(b=105),
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Fill price against child-order number for four models, all starting at the dashed decision "
+    "price. NoImpact stays flat; the other three rise steadily, with the linear and square-root "
+    "paths lying exactly on top of each other.",
+)
 
 # %% [markdown]
-# **Finding**: Under the stated 50% persistence scenario, repeated buy slices ratchet the reference
-# price upward. Linear and square-root paths tie under these parameters; a dashed, smaller square-root
-# overlay leaves the solid linear path visible. This demonstrates a scenario wrapper around stateless
-# impact models, not a permanent component supplied by every model class.
+# **Reading the chart**: Carrying half of each slice's impact into the next slice's reference price
+# is what makes the fills climb. Without it every child would fill at the same price, because the
+# models have no memory of the ones before.
+#
+# The linear and square-root paths lie on top of each other, and that is worth pausing on rather
+# than passing over. Every child order here is the same fraction of volume, and at that particular
+# fraction the two parameterizations happen to charge the same amount: the linear coefficient times
+# the participation rate equals the square-root coefficient times the volatility times the square
+# root of the same rate. They agree at that one participation rate and nowhere else - the matching
+# used
+# deliberately in `05_almgren_chriss_optimal_execution` to compare two shapes without a level
+# difference confusing the comparison. A schedule that varied its participation would pull them
+# apart immediately.
 
 # %% [markdown]
-# ## Part 5: Backtest Integration Pattern
+# ## Part 5: A Real Universe to Price Orders Against
+#
+# Every number so far has been a round scenario. The rest of the notebook prices orders against
+# five real ETFs - their traded prices, their volumes, and the volatility measured from their
+# returns - so that the participation rates and the resulting costs are ones a reader could
+# actually face.
+#
+# The five are fixed by name and the window is the trailing year of the dataset. That is a
+# retrospective teaching sample, not a universe anyone selected in advance, and nothing in this
+# notebook is held out from anything.
+
+# %%
+etf_data = load_etfs()
+
+max_date = etf_data["timestamp"].max()
+if max_date is None:
+    raise ValueError("ETF dataset is empty; cannot parameterize impact models.")
+min_date = max_date - timedelta(days=LOOKBACK_DAYS)
+etf_filtered = etf_data.filter(
+    (pl.col("symbol").is_in(UNIVERSE)) & (pl.col("timestamp") >= min_date)
+)
+missing_symbols = sorted(set(UNIVERSE) - set(etf_filtered["symbol"].unique().to_list()))
+if missing_symbols:
+    raise ValueError(f"Missing required ETF symbols: {missing_symbols}")
+
+# %% [markdown]
+# ### Compute Descriptive Inputs in Polars
+#
+# Three quantities per symbol drive everything that follows: the average traded price, the average
+# daily volume that a participation rate is a fraction of, and the standard deviation of daily
+# returns, which is the volatility the square-root model scales by. The high-low range is reported
+# alongside as a second view of how much each fund moves; it is not a spread and is not passed to
+# any model.
+
+# %%
+etf_stats = (
+    etf_filtered.sort(["symbol", "timestamp"])
+    .with_columns(daily_return=pl.col("close").pct_change().over("symbol"))
+    .group_by("symbol")
+    .agg(
+        observations=pl.len(),
+        avg_price=pl.col("close").mean(),
+        avg_volume=pl.col("volume").mean(),
+        daily_volatility=pl.col("daily_return").std(),
+        avg_high_low_range_bps=((pl.col("high") / pl.col("low") - 1) * 10_000).mean(),
+    )
+    .with_columns(annualized_volatility=pl.col("daily_volatility") * np.sqrt(252))
+    .sort("symbol")
+)
+etf_stats
+
+# %% tags=["results"]
+display(
+    Markdown(
+        f"The sample covers **{etf_filtered['symbol'].n_unique()} ETFs** from "
+        f"**{etf_filtered['timestamp'].min():%Y-%m-%d}** through "
+        f"**{etf_filtered['timestamp'].max():%Y-%m-%d}**, and their daily volatilities span "
+        f"**{etf_stats['daily_volatility'].min():.2%}** to "
+        f"**{etf_stats['daily_volatility'].max():.2%}**."
+    )
+)
+
+# %% [markdown]
+# ## Part 6: Backtest Integration Pattern
 #
 # `FillExecutor` consumes the limit's `ExecutionResult` internally, uses its fillable quantity,
 # applies the signed impact once to the base price, applies slippage, and emits a `Fill` whose
@@ -559,7 +694,7 @@ def compose_limit_and_impact(
     decision_price: float,
     volume: float,
     impact_model: MarketImpactModel,
-    max_participation: float = 0.10,
+    max_participation: float,
 ) -> ExecutionResult:
     """Expose one limit-plus-impact calculation in an inspection record."""
     if side not in {"buy", "sell"}:
@@ -590,19 +725,33 @@ def compose_limit_and_impact(
     )
 
 
-# %%
-# Example: compare impact models on a series of orders
-trades_data = [
-    ("AAPL", 750_000, "buy", 175.0, 5_000_000),
-    ("MSFT", 300_000, "buy", 380.0, 3_000_000),
-    ("GOOGL", 225_000, "sell", 140.0, 1_500_000),
-    ("NVDA", 200_000, "buy", 480.0, 4_000_000),
-    ("META", 900_000, "sell", 350.0, 6_000_000),
-]
-
 # %% [markdown]
-# **Finding**: This order list is intentionally small and heterogeneous so readers
-# can see how the same impact API scales across names, prices, and order sizes.
+# ### An Order Book Built from the Real Panel
+#
+# One order per ETF, alternating side, each sized as a stated multiple of that fund's own average
+# daily volume. Sizing by participation rather than by share count is what makes the five orders
+# comparable across funds whose volumes differ by orders of magnitude, and it puts two of them
+# above the participation cap on purpose so the partial-fill path is exercised.
+
+# %%
+order_participations = [0.05, 0.10, 0.15, 0.08, 0.20]
+trades_data = [
+    (
+        row["symbol"],
+        row["avg_volume"] * participation,
+        "buy" if index % 2 == 0 else "sell",
+        row["avg_price"],
+        row["avg_volume"],
+    )
+    for index, (row, participation) in enumerate(
+        zip(etf_stats.iter_rows(named=True), order_participations, strict=True)
+    )
+]
+pl.DataFrame(
+    trades_data,
+    schema=["symbol", "order_shares", "side", "decision_price", "daily_volume"],
+    orient="row",
+)
 
 # %% [markdown]
 # ### Compare No-Impact vs Square-Root Impact
@@ -611,10 +760,15 @@ trades_data = [
 integration_rows = []
 for model_name, impact_model in [
     ("NoImpact", NoImpact()),
-    ("SquareRootImpact", SquareRootImpact(coefficient=0.5, volatility=0.02)),
+    (
+        "SquareRootImpact",
+        SquareRootImpact(coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY),
+    ),
 ]:
     for symbol, qty, side, decision_price, volume in trades_data:
-        result = compose_limit_and_impact(qty, side, decision_price, volume, impact_model)
+        result = compose_limit_and_impact(
+            qty, side, decision_price, volume, impact_model, MAX_PARTICIPATION
+        )
         integration_rows.append(
             {
                 "model": model_name,
@@ -636,7 +790,7 @@ integration_results
 # %% [markdown]
 # ### Verify Partial Fills and Adverse Direction
 
-# %%
+# %% tags=["results"]
 square_root_results = integration_results.filter(pl.col("model") == "SquareRootImpact")
 partial_count = square_root_results.filter(pl.col("is_partial")).height
 sell_direction_ok = (
@@ -645,94 +799,27 @@ sell_direction_ok = (
     .item()
 )
 if not sell_direction_ok:
-    raise AssertionError("Adverse sell impact must lower the adjusted price.")
+    raise ValueError("A sell order's adjusted price must fall below its decision price")
 display(
     Markdown(
-        f"**Finding:** The 10% cap produces **{partial_count} partial orders** in this five-order "
-        "scenario. Buy impact raises the adjusted price, sell impact lowers it, and absolute "
-        "impact times filled quantity populates this teaching record's `impact_cost`."
+        f"**Reading the table:** The {MAX_PARTICIPATION:.0%} cap leaves **{partial_count} of "
+        f"{square_root_results.height} orders partially filled**, with the unfilled remainder "
+        "carried in `remaining_qty` for a later bar. Under `NoImpact` the adjusted price equals "
+        "the decision price on every row; under the square-root model it rises for buys and falls "
+        "for sells, which is the sign convention working as intended."
     )
 )
-
-# %% [markdown]
-# ## Part 6: Real-Data Volatility Parameterization
-#
-# Without observed execution costs, this notebook cannot estimate an impact coefficient. It uses
-# the library's illustrative default of 0.5 and substitutes trailing realized volatility from five
-# ETFs. The result is descriptive parameterization, not empirical impact calibration.
-
-# %% [markdown]
-# ### Load Canonical ETF Universe
-
-# %%
-etf_data = load_etfs()
-
-symbols = ["SPY", "QQQ", "IWM", "EEM", "DBC"]
-
-max_date = etf_data["timestamp"].max()
-if max_date is None:
-    raise ValueError("ETF dataset is empty; cannot parameterize impact models.")
-min_date = max_date - timedelta(days=365)
-etf_filtered = etf_data.filter(
-    (pl.col("symbol").is_in(symbols)) & (pl.col("timestamp") >= min_date)
-)
-missing_symbols = sorted(set(symbols) - set(etf_filtered["symbol"].unique().to_list()))
-if missing_symbols:
-    raise ValueError(f"Missing required ETF symbols: {missing_symbols}")
-
-# %% [markdown]
-# The five symbols are a fixed, retrospective teaching sample over the trailing 365 calendar days
-# in the dataset. They are not a point-in-time investment universe and support no holdout claim.
-
-# %%
-display(
-    Markdown(
-        f"The sample contains **{etf_filtered['symbol'].n_unique()} ETFs** from "
-        f"**{etf_filtered['timestamp'].min():%Y-%m-%d}** through "
-        f"**{etf_filtered['timestamp'].max():%Y-%m-%d}**."
-    )
-)
-
-# %% [markdown]
-# ### Compute Descriptive Inputs in Polars
-#
-# Daily high-low range is a volatility proxy, not a quoted spread. The only input passed to the
-# square-root model below is the standard deviation of close-to-close returns.
-
-# %%
-etf_stats = (
-    etf_filtered.sort(["symbol", "timestamp"])
-    .with_columns(daily_return=pl.col("close").pct_change().over("symbol"))
-    .group_by("symbol")
-    .agg(
-        observations=pl.len(),
-        avg_price=pl.col("close").mean(),
-        avg_volume=pl.col("volume").mean(),
-        daily_volatility=pl.col("daily_return").std(),
-        avg_high_low_range_bps=((pl.col("high") / pl.col("low") - 1) * 10_000).mean(),
-    )
-    .with_columns(annualized_volatility=pl.col("daily_volatility") * np.sqrt(252))
-    .sort("symbol")
-)
-etf_stats
-
-# %% [markdown]
-# The table separates observed descriptive inputs from assumed model parameters. Average volume
-# determines the share quantity represented by a participation rate; at a fixed rate, it cancels
-# from the model-implied bps calculation.
 
 # %% [markdown]
 # ### Hold the Coefficient Fixed and Substitute Realized Volatility
 
 # %%
-impact_coefficient = SquareRootImpact().coefficient
-participation_for_parameterization = 0.05
 volatility_parameterized_models = {}
 
 for row in etf_stats.iter_rows(named=True):
     symbol = row["symbol"]
     volatility_parameterized_models[symbol] = SquareRootImpact(
-        coefficient=impact_coefficient,
+        coefficient=IMPACT_COEFFICIENT,
         volatility=row["daily_volatility"],
         adv_factor=1.0,
     )
@@ -742,7 +829,7 @@ for symbol, model in volatility_parameterized_models.items():
     stats = etf_stats.filter(pl.col("symbol") == symbol).row(0, named=True)
     asset_price = stats["avg_price"]
     asset_volume = stats["avg_volume"]
-    quantity = asset_volume * participation_for_parameterization
+    quantity = asset_volume * PARAMETERIZATION_PARTICIPATION
     impact = model.calculate(quantity, asset_price, asset_volume, is_buy=True)
     parameterized_impact_rows.append(
         {
@@ -756,16 +843,21 @@ parameterized_impact = pl.DataFrame(parameterized_impact_rows).sort("impact_bps"
 
 # %% [markdown]
 # ### Model-Implied Impact Mirrors the Volatility Input
+#
+# The check below recomputes the same quantity from the closed form rather than from the library
+# call, and raises if the two disagree. Reproducing a result a second way is what turns a library
+# call into something a reader can trust; the notebook is otherwise taking the library's word for
+# its own arithmetic.
 
 # %%
 expected_bps = (
-    impact_coefficient
+    IMPACT_COEFFICIENT
     * parameterized_impact["daily_volatility"]
-    * np.sqrt(participation_for_parameterization)
+    * np.sqrt(PARAMETERIZATION_PARTICIPATION)
     * 10_000
 )
 if not np.allclose(parameterized_impact["impact_bps"].to_numpy(), expected_bps.to_numpy()):
-    raise AssertionError("Square-root impact must reconcile to the closed-form bps calculation.")
+    raise ValueError("Library impact disagrees with the closed-form square-root expression")
 
 impact_fig = go.Figure()
 impact_fig.add_bar(
@@ -787,31 +879,38 @@ impact_fig.update_layout(
     margin=dict(r=55),
 )
 impact_fig.update_xaxes(range=[0, parameterized_impact["impact_bps"].max() * 1.18])
-impact_fig.show()
+show_plotly_with_alt(
+    impact_fig,
+    "A horizontal bar per ETF of model-implied impact in basis points, sorted ascending and "
+    "labelled with its value. The range across the five funds is roughly threefold.",
+)
 
 # %% [markdown]
-# The closed-form expression provides an independent reconciliation and supports a computed reading
-# of the range rather than a hardcoded result.
+#
 
-# %%
+# %% tags=["results"]
 lowest_impact = parameterized_impact.row(0, named=True)
 highest_impact = parameterized_impact.row(-1, named=True)
 display(
     Markdown(
-        f"**Finding:** With coefficient {impact_coefficient:.1f} and 5% ADV fixed, modeled impact "
-        f"ranges from **{lowest_impact['impact_bps']:.1f} bps** for {lowest_impact['symbol']} to "
-        f"**{highest_impact['impact_bps']:.1f} bps** for {highest_impact['symbol']}. The difference "
-        "comes only from trailing realized volatility, not price or average volume."
+        f"**Reading the chart:** With the coefficient held at {IMPACT_COEFFICIENT:.1f} and "
+        f"participation fixed at {PARAMETERIZATION_PARTICIPATION:.0%}, modeled impact runs from "
+        f"**{lowest_impact['impact_bps']:.1f} bps** for {lowest_impact['symbol']} to "
+        f"**{highest_impact['impact_bps']:.1f} bps** for {highest_impact['symbol']}. Price and "
+        "volume cancel at a fixed participation rate, so the ordering is the ordering of the five "
+        "volatilities and nothing else. That is a property of the model, not a finding about "
+        "these funds: it would hold whatever coefficient was chosen."
     )
 )
 
 # %% [markdown]
 # ## Part 7: Cross-Model Impact at Increasing Order Sizes
 #
-# To close, we use a separate synthetic $100 price and 1,000,000-share volume scenario, then tabulate
-# the impact each model implies from 1% to 20% participation. This section does not reuse the ETF
-# inputs. It is an assumption stress test, not a calibration result or evidence that one model is
-# correct.
+# The reference price and volume are round numbers rather than one of the ETFs, because the point
+# of the table is the spread between the four models at a common set of participation rates, and a
+# round price makes the basis-point arithmetic checkable by eye. The four columns are four
+# assumptions, priced identically; the differences between them are what a reader should stress
+# test before choosing one for a backtest.
 
 # %%
 # Summary comparison table
@@ -829,7 +928,9 @@ test_scenarios = [
 test_models = {
     "NoImpact": NoImpact(),
     "Linear (0.1)": LinearImpact(coefficient=0.1),
-    "SqRt (2% vol)": SquareRootImpact(coefficient=0.5, volatility=0.02),
+    "SqRt (2% vol)": SquareRootImpact(
+        coefficient=IMPACT_COEFFICIENT, volatility=SCENARIO_VOLATILITY
+    ),
     "Power (0.6)": PowerLawImpact(coefficient=0.1, exponent=0.6),
 }
 
@@ -855,25 +956,56 @@ summary_df
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **One signed API across models**: `calculate(quantity, price, volume, is_buy)` returns a
-#    positive buy move and a negative sell move. Add either signed move to the decision price exactly
-#    once; the result is worse for the corresponding side.
+# 1. **Add a signed impact to the decision price exactly once.** The models return a positive move
+#    for buys and a negative one for sells, so the arithmetic is the same on both sides and a sign
+#    error shows up as a fill that is better than the decision price. Check that direction on a
+#    sell order before trusting any cost number built on it.
 #
-# 2. **Shape and scale are separate choices**: every exponent between zero and one is concave, but
-#    coefficients and volatility conventions determine the cost level. The sequence simulation
-#    adds its 50% persistence assumption outside the stateless model classes.
+# 2. **An exponent and a coefficient are not independent, so a level comparison between two models
+#    means nothing until they are matched somewhere.** Two of the curves in Part 3 have the same
+#    square-root shape and sit at different levels purely because their coefficients follow
+#    different conventions. Pick a participation rate, match the models there, and compare what is
+#    left.
 #
-# 3. **Volatility substitution is not calibration**: the ETF section holds the coefficient fixed
-#    and changes only realized volatility. Estimating the coefficient requires observed execution
-#    costs or another external target.
+# 3. **Size orders as a share of volume, not as a share count.** Participation is what every impact
+#    model consumes and what a volume cap acts on, and it is the only quantity comparable across
+#    instruments whose volumes differ by orders of magnitude.
 #
-# 4. **Production emits impacted fills**: `FillExecutor` consumes a volume-limit result, adjusts the
-#    base price once for signed impact, then emits a `Fill`. The notebook helper exposes that
-#    intermediate arithmetic; `ExecutionResult.adjusted_price` and `impact_cost` remain placeholders.
+# 4. **A backtest must carry the unfilled remainder.** Capping participation means some orders fill
+#    partially, and a backtest that quietly fills the whole order anyway has assumed away the
+#    constraint it just imposed.
 #
-# 5. **Volume is time-sensitive**: completed-bar volume cannot size a pre-close order. Use known,
-#    lagged, or forecast volume, or move execution to the next bar.
+# 5. **Substituting a measured volatility into a model whose coefficient you assumed is not
+#    calibration.** The ETF section changes one input and holds the other fixed, so what it shows
+#    is the model's own volatility sensitivity. Estimating the coefficient needs execution records,
+#    as `03_market_impact_calibration` sets out.
 #
-# **Next**: `07_ml4t_volume_participation` for per-bar quantity constraints and
-# `10_gross_vs_net_performance` for full backtest integration; Section 18.7 covers TCA and model
-# validation.
+# 6. **These models have no memory, so persistence is the caller's job.** Each call sees one order.
+#    A parent order worked in slices needs the permanent part of each slice's impact carried into
+#    the next slice's reference price, and this notebook does that itself rather than expecting the
+#    model to.
+#
+# 7. **Reproduce a library result a second way before building on it.** Part 5 recomputes the
+#    square-root impact from the closed form and raises if the two disagree, which is what makes
+#    the rest of the section evidence rather than trust.
+#
+# ### Known limitations
+#
+# - The impact coefficients throughout are stated, including the library defaults. Every cost level
+#   in the notebook scales directly with them and none of them was fitted to executions.
+# - Impact is charged against average daily volume, so the intraday variation that
+#   `03_market_impact_calibration` measured is absent: the same order at the same participation
+#   costs the same at noon as at the open.
+# - The persistence assumption in Part 4 is a flat fraction applied uniformly. Real permanent
+#   impact depends on how much information the trading reveals, which varies by order and by name.
+# - The five ETFs are a fixed retrospective sample over the trailing year, chosen for a spread of
+#   volatilities rather than sampled from anything.
+# - `ExecutionResult.adjusted_price` and `impact_cost` are populated by the notebook's own helper.
+#   The production `FillExecutor` applies impact to the base price and emits a `Fill`; the fields
+#   on the limit's own result are placeholders.
+#
+# **Next**: `07_ml4t_volume_participation` takes the participation cap used here and shows what it
+# does to a parent order across many bars; `10_gross_vs_net_performance` puts these models into a
+# full backtest.
+#
+# **Book**: Chapter 18, Section 18.4.
