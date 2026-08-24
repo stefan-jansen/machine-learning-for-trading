@@ -613,3 +613,58 @@ def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> N
                 "n_placebo": 10,
             },
         ).resolve()
+
+
+def test_the_endpoint_cutoff_steps_back_sessions_not_calendar_days(tmp_path, monkeypatch) -> None:
+    """A gapped calendar makes the two constructions disagree, and only one is safe.
+
+    The horizons these buffers describe are counted in the panel's own observations -
+    fx_pairs says its horizons are sessions and never calendar days - so subtracting
+    the buffer as calendar time removes fewer observations than it promises. Over a
+    business-day panel a five-day buffer spans three sessions across a weekend, which
+    leaves the last two retained rows resolving their returns inside the holdout.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    holdout = pd.Timestamp("2024-02-05")
+    setup_path = study.root / "config" / "setup.yaml"
+    setup = yaml.safe_load(setup_path.read_text())
+    setup["evaluation"]["holdout_start"] = holdout.date().isoformat()
+    setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
+
+    sessions = pl.Series("timestamp", pd.bdate_range("2024-01-01", "2024-02-16").to_list())
+    rows = []
+    for session_index, timestamp in enumerate(sessions):
+        for symbol_index in range(6):
+            rows.append(
+                {
+                    "symbol": f"S{symbol_index}",
+                    "timestamp": timestamp,
+                    "feature": float(symbol_index),
+                    "treatment": float(symbol_index) + session_index / 100,
+                    "confounder": float(session_index % 5),
+                    "fwd_ret_8h": (symbol_index - 2.5) / 100 + session_index / 10000,
+                }
+            )
+    panel = pl.DataFrame(rows)
+    mds = SimpleNamespace(
+        dataset=panel,
+        feature_names=["feature", "treatment", "confounder"],
+        label_col="fwd_ret_8h",
+        label_buffer="5D",
+        date_col="timestamp",
+        entity_cols=["symbol"],
+        input_lineage={
+            "artifacts": {"financial": {"sha256": "features-v1", "size": 1}},
+            "fingerprint": "fixture-v1",
+        },
+    )
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *args, **kwargs: mds)
+
+    resolved = study.causal(method="dml", label=label.name).resolve()
+    retained = resolved.spec["computation"]["analysis_population"]["n_rows"] // 6
+
+    pre_holdout = [value for value in sessions.to_list() if value < holdout]
+    assert retained == len(pre_holdout) - 5
+    # The calendar construction would have stopped at 2024-01-31, keeping two sessions
+    # whose five-session return resolves on or after the holdout.
+    assert len(pre_holdout) - 5 < sum(1 for v in pre_holdout if v < holdout - pd.Timedelta("5D"))
