@@ -41,14 +41,20 @@ import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from IPython.display import Markdown, display
 
 warnings.filterwarnings("ignore")
 
 from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES
 from utils.paths import REPO_ROOT, get_chapter_dir
+from utils.style import show_with_alt
 
 # %% tags=["parameters"]
 MAX_CASE_STUDIES = 0  # 0 = all available
+# Benjamini-Hochberg level the ledger's `fdr_p` is compared against. The ledgers
+# store the adjusted p-value rather than a significance flag, so the threshold
+# lives here and is applied once.
+FDR_ALPHA = 0.05
 
 # %%
 OUTPUT_DIR = get_chapter_dir(20) / "output"
@@ -58,10 +64,15 @@ CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_
 # %% [markdown]
 # ## 1. Load Triage Ledgers
 #
-# Each per-CS ledger has the same schema: one row per candidate feature,
-# columns for IC moment estimates, HAC-adjusted t-statistic, BH-FDR
-# p-value, fold sign consistency, monotonicity, coverage, and a final
-# categorical decision in {PROCEED, REVISE, STOP}.
+# Each per-case-study ledger has the same schema: one row per candidate feature,
+# with IC moment estimates, a HAC-adjusted t-statistic, a Benjamini-Hochberg
+# adjusted p-value (`fdr_p`), fold sign consistency, monotonicity, coverage, a
+# categorical decision in {PROCEED, REVISE, STOP}, and a `note` giving the reason
+# for that decision.
+#
+# The ledgers are generated artifacts, not repository content. Without them this
+# notebook has nothing to compare, so a missing ledger stops the run rather than
+# producing an empty table under a heading that promises nine case studies.
 
 
 # %%
@@ -77,33 +88,44 @@ available = [cs for cs, df in ledgers.items() if df is not None]
 missing = [cs for cs in CS_LIST if cs not in available]
 print(f"Loaded {len(available)}/{len(CS_LIST)} ledgers")
 if missing:
-    print(f"Missing: {missing}")
-
-_frames = [
-    df.select(["feature", "fdr_sig", "decision", "case_study"])
-    for df in ledgers.values()
-    if df is not None
-]
-if _frames:
-    panel = pl.concat(_frames, how="vertical_relaxed")
-else:
-    panel = pl.DataFrame(
-        schema={
-            "feature": pl.Utf8,
-            "fdr_sig": pl.Boolean,
-            "decision": pl.Utf8,
-            "case_study": pl.Utf8,
-        }
+    raise FileNotFoundError(
+        f"No triage ledger for {missing}. Each is written by that case study's "
+        "`05_evaluation` notebook to case_studies/{cs}/evaluation/"
+        "triage_ledger.parquet; run those first."
     )
 
+# `fdr_sig` is derived here rather than read: the ledger stores the adjusted
+# p-value, and a stored boolean would freeze one alpha into the artifact.
+panel = pl.concat(
+    [
+        df.select(
+            "feature",
+            "decision",
+            "note",
+            "case_study",
+            fdr_sig=pl.col("fdr_p") < FDR_ALPHA,
+        )
+        for df in ledgers.values()
+        if df is not None
+    ],
+    how="vertical_relaxed",
+)
+
 # %% [markdown]
-# ## 2. The Triage Funnel
+# ## 2. Two Routes to PROCEED
 #
-# For each case study: candidates considered → features that clear BH-FDR
-# at 5 percent → features that earn a final PROCEED decision (FDR-significant
-# *and* monotonic *and* with stable sign across folds). The gap between
-# `fdr_sig` and `PROCEED` shows how many features survived single-test
-# scrutiny but failed the additional shape and stability checks.
+# A feature earns PROCEED by either of two independent routes, recorded in the
+# ledger's `note`: it clears Benjamini-Hochberg at the level above
+# (`fdr_significant`), or its IC is large enough and holds its sign across
+# enough folds (`stable_and_above_threshold`) without clearing BH. The second
+# route exists because BH over a menu of dozens of correlated features is a
+# blunt instrument at these sample sizes, and a feature can be worth carrying
+# forward on effect size and stability alone.
+#
+# PROCEED is therefore a union of the two routes, not a narrowing of the first.
+# A case study can and does show more PROCEED features than FDR-significant
+# ones, so the three counts below are drawn side by side rather than stacked -
+# stacking them would assert a nesting that does not hold.
 
 # %%
 funnel = (
@@ -112,74 +134,115 @@ funnel = (
         n_candidate=pl.len(),
         n_fdr_sig=pl.col("fdr_sig").sum(),
         n_proceed=(pl.col("decision") == "PROCEED").sum(),
+        n_proceed_by_fdr=((pl.col("decision") == "PROCEED") & pl.col("fdr_sig")).sum(),
     )
     .with_columns(
+        n_proceed_by_stability=pl.col("n_proceed") - pl.col("n_proceed_by_fdr"),
         pct_fdr_sig=(pl.col("n_fdr_sig") / pl.col("n_candidate") * 100).round(1),
         pct_proceed=(pl.col("n_proceed") / pl.col("n_candidate") * 100).round(1),
         cs_short=pl.col("case_study").replace(SHORT_NAMES),
     )
     .sort("pct_proceed", descending=True)
 )
-funnel.select(["cs_short", "n_candidate", "n_fdr_sig", "n_proceed", "pct_fdr_sig", "pct_proceed"])
+funnel.select(
+    "cs_short",
+    "n_candidate",
+    "n_fdr_sig",
+    "n_proceed",
+    "n_proceed_by_fdr",
+    "n_proceed_by_stability",
+    "pct_fdr_sig",
+    "pct_proceed",
+)
 
 # %%
-fig, ax = plt.subplots(figsize=(8, 4))
+fig, ax = plt.subplots(figsize=(9, 5))
 y = np.arange(funnel.height)
-ax.barh(
-    y,
-    funnel["n_candidate"].to_numpy(),
-    color="lightgrey",
-    label="candidates",
-    edgecolor="black",
-    linewidth=0.4,
-)
-ax.barh(
-    y,
-    funnel["n_fdr_sig"].to_numpy(),
-    color="#9ecae1",
-    label="FDR-significant",
-    edgecolor="black",
-    linewidth=0.4,
-)
-ax.barh(
-    y,
-    funnel["n_proceed"].to_numpy(),
-    color="#3182bd",
-    label="PROCEED",
-    edgecolor="black",
-    linewidth=0.4,
-)
+height = 0.26
+series = [
+    ("n_candidate", "candidates", "lightgrey"),
+    ("n_fdr_sig", f"clears BH-FDR at {FDR_ALPHA:.2f}", "#9ecae1"),
+    ("n_proceed", "PROCEED", "#3182bd"),
+]
+for offset, (col, label, color) in zip((-height, 0.0, height), series):
+    ax.barh(
+        y + offset,
+        funnel[col].to_numpy(),
+        height=height,
+        color=color,
+        label=label,
+        edgecolor="black",
+        linewidth=0.4,
+    )
 ax.set_yticks(y)
 ax.set_yticklabels(funnel["cs_short"].to_numpy())
 ax.invert_yaxis()
 ax.set_xlabel("Number of features")
-ax.set_title("Triage funnel by case study: candidates, FDR-significant, PROCEED")
+ax.set_title("Candidate features, FDR-significant, and PROCEED, by case study")
 ax.legend(loc="lower right", frameon=False)
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped horizontal bars per case study giving the candidate feature count, "
+    "the number clearing Benjamini-Hochberg, and the number reaching PROCEED. "
+    "The PROCEED bar exceeds the FDR-significant bar in most case studies, "
+    "because the stability route to PROCEED does not require BH significance.",
+)
 
 # %% [markdown]
-# Two case studies (Crypto and US Firms) clear FDR for roughly
-# two-thirds of their candidate features. The other seven clear FDR for
-# under 10 percent of candidates, and two (SP500 Eq+Opt and US
-# Equities) clear it for none. The spread runs from 0 to 71 percent
-# under the same triage protocol; what varies is the asset class, not
-# the procedure. US Equities is the most extreme low-end case — its
-# candidate menu draws on the same generic financial-features library
-# as the other equity panels, but at the 1-day horizon and broad-cap
-# universe none of the 73 single-feature IC tests clears BH-FDR. The
-# downstream ML model still trains on those features and the carrier
-# configuration publishes a positive validation Sharpe (NB00), which
-# illustrates that single-feature univariate IC tests and multi-feature
-# joint prediction can disagree by design.
+# The same triage protocol, applied to nine different markets, produces very
+# different survival rates. The summary below is computed from the table above
+# rather than typed, so it cannot drift from the ledgers as they are regenerated.
+
+# %% tags=["results"]
+_f = funnel.sort("pct_fdr_sig", descending=True)
+_none = _f.filter(pl.col("n_fdr_sig") == 0)["cs_short"].to_list()
+_top = _f.row(0, named=True)
+_pr = funnel.sort("pct_proceed", descending=True)
+_hi, _lo = _pr.row(0, named=True), _pr.row(-1, named=True)
+_stab = funnel["n_proceed_by_stability"].sum()
+display(
+    Markdown(
+        f"Across {funnel.height} case studies, the share of candidate features "
+        f"clearing BH-FDR at {FDR_ALPHA:.2f} runs from "
+        f"{_f['pct_fdr_sig'].min():.1f} to {_top['pct_fdr_sig']:.1f} percent "
+        f"({_top['cs_short']} highest). "
+        + (
+            f"{len(_none)} clear it for none of their candidates: {', '.join(_none)}. "
+            if _none
+            else ""
+        )
+        + f"PROCEED rates run from {_lo['pct_proceed']:.1f} percent "
+        f"({_lo['cs_short']}, {_lo['n_proceed']} of {_lo['n_candidate']}) to "
+        f"{_hi['pct_proceed']:.1f} percent ({_hi['cs_short']}, "
+        f"{_hi['n_proceed']} of {_hi['n_candidate']}). "
+        f"Of {funnel['n_proceed'].sum()} PROCEED decisions in total, {_stab} "
+        "were reached on effect size and fold stability without clearing BH, "
+        "which is why the PROCEED bars are not contained inside the FDR bars."
+    )
+)
+
+# %% [markdown]
+# A case study can reach zero surviving features and still support a trained
+# model. Univariate IC asks whether one feature predicts on its own; the model
+# is fitted on all of them jointly and can use combinations that no single
+# column carries. The two measurements disagree by construction, so a zero here
+# does not by itself establish that the market is unpredictable.
 
 # %% [markdown]
 # ## 3. Forward Link: Feature Survival vs Strategy Survival
 #
-# Pair each case study's PROCEED rate against the carrier configuration's
-# validation Sharpe and holdout Sharpe from §01. The triage ledger is upstream of
-# every model and backtest, so this is the cleanest test of whether richer
-# feature menus produce stronger downstream strategies.
+# Pair each case study's PROCEED rate against the selected configuration's
+# validation Sharpe and holdout Sharpe from §01. The triage ledger sits upstream
+# of every model and backtest, so this is the most direct available test of
+# whether a richer surviving feature menu produces a stronger strategy.
+#
+# It is a weak test. Sharpe figures exist only for case studies with registered
+# backtests, and §01 reports that several registries are empty while their
+# rebuild is in progress. The pairing below therefore rests on a handful of
+# points, which is too few to support a claim about the relationship in either
+# direction. It is shown because the absence of a relationship at this sample
+# size is itself worth seeing, not because it settles the question.
 
 # %%
 mq = pl.read_parquet(OUTPUT_DIR / "measurement_quality.parquet")
@@ -220,35 +283,75 @@ for ax, ycol, ylabel in zip(
     ax.axhline(0, color="grey", linestyle="--", linewidth=0.7)
     ax.set_xlabel("% candidate features in PROCEED")
     ax.set_ylabel(ylabel)
-fig.suptitle(
-    "Feature-level survival vs strategy-level Sharpe (carrier configuration per case study)"
-)
+fig.suptitle("Feature survival against strategy Sharpe, by case study")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two scatter panels plotting each case study's percentage of PROCEED "
+    "features against its validation Sharpe on the left and its holdout Sharpe "
+    "on the right, points labelled by case study. Only case studies with "
+    "registered backtests appear, and they are too few to show a trend.",
+)
+
+# %% tags=["results"]
+_paired = forward.filter(pl.col("holdout_sharpe").is_not_null())
+_absent = forward.filter(pl.col("holdout_sharpe").is_null())["cs_short"].to_list()
+_best = (
+    _paired.sort("holdout_sharpe", descending=True).row(0, named=True) if _paired.height else None
+)
+display(
+    Markdown(
+        f"{_paired.height} of {forward.height} case studies carry a holdout "
+        "Sharpe; the rest have no registered backtests"
+        + (f" ({', '.join(_absent)})" if _absent else "")
+        + ". "
+        + (
+            f"Among those that do, the highest holdout Sharpe is "
+            f"{_best['holdout_sharpe']:+.2f} ({_best['cs_short']}, "
+            f"{_best['pct_proceed']:.1f} percent PROCEED). "
+            if _best
+            else ""
+        )
+        + "With this many points, no ordering of PROCEED rate against holdout "
+        "Sharpe is distinguishable from chance, and none is claimed here."
+    )
+)
 
 # %% [markdown]
-# The two high-PROCEED case studies bracket much of the holdout-Sharpe
-# range: US Firms posts the strongest holdout Sharpe in the panel,
-# while Crypto's holdout Sharpe sits well below its own validation
-# Sharpe. The lower-PROCEED band is similarly mixed: CME and ETFs
-# produce respectable holdout Sharpes despite under 10 percent of
-# features clearing FDR; NASDAQ-100, FX, US Equities, and SP500
-# variants do not. What appears to matter more than the count of
-# surviving features is the economic size of those features relative
-# to per-period frictions and the way they are turned into positions,
-# taken up in §03 and §04.
+# What the count of surviving features cannot tell you is how large those
+# features are relative to the frictions of the market they trade in, or how
+# they are turned into positions. Those two questions are what §03 and §04
+# measure, and they are where the differences between these case studies
+# actually appear.
 
 # %% [markdown]
 # ## Takeaways
 #
-# - PROCEED rates span 0–71 percent under the same triage protocol;
-#   the spread is asset-class-driven.
-# - The high-PROCEED case studies do not bracket the strongest holdout
-#   Sharpes — feature triage is a screen, not a predictor of strategy
-#   survival.
-# - Single-feature univariate IC tests and multi-feature joint
-#   prediction can disagree (US Equities is the clearest case: 0/73
-#   features clear FDR but the carrier ML model still publishes a
-#   positive validation Sharpe).
-# - §03 and §04 take the surviving signal forward into model evidence
-#   and IC-to-Sharpe translation.
+# - The same triage protocol yields very different survival rates across the
+#   nine markets. The numbers are in the computed summary above; what they show
+#   is that the protocol does not transfer a fixed pass rate from one asset class
+#   to the next, so a rate is only interpretable next to the market it came from.
+# - PROCEED is a union of two routes, BH significance and effect-size-plus-fold-
+#   stability. Reading it as a stricter version of BH significance inverts the
+#   relationship and inflates how selective the screen appears.
+# - Univariate IC and joint prediction answer different questions. A case study
+#   where no single feature clears BH can still train a usable model, and that
+#   is a property of the two tests rather than evidence about the market.
+# - Whether feature survival predicts strategy survival is not settled here. Too
+#   few case studies currently carry holdout backtests for the comparison to
+#   discriminate, and this notebook says so rather than reading a trend into
+#   five points.
+#
+# ## Known Limitations
+#
+# - The ledgers are regenerated by each case study's `05_evaluation` notebook and
+#   are not versioned with this repository. Numbers here move when those are
+#   re-run; nothing in this notebook is pinned to a particular generation.
+# - BH-FDR treats the candidate menu as one family of tests, but the candidates
+#   are heavily correlated - overlapping return windows, related volatility
+#   measures - so the effective number of independent tests is smaller than the
+#   row count and the adjustment is conservative. This is part of why the
+#   stability route to PROCEED exists.
+# - The forward link compares one selected configuration per case study, not a
+#   distribution over configurations, so it carries the selection uncertainty
+#   §01 documents in `measurement_quality.parquet`.

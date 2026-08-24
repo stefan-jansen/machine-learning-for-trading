@@ -677,9 +677,10 @@ spread.group_by("label", maintain_order=True).head(5)
 # ## 5. What to notice
 #
 # **At the traded horizon every configuration ranks the cross-section the right way, which the
-# linear grid did not.** All fifteen five-day configurations are positive at the end of training,
-# from 0.006 to 0.026, and the weakest of them is more than twice the best full-coverage linear
-# result at that horizon. Something in this data is available to a model that can split on one
+# linear grid did not.** Every five-day configuration is positive at the end of training - read
+# `above_zero` against `configurations` in the horizons frame - and the weakest of them is a
+# multiple of the leading full-coverage linear result at that horizon. Something in this data
+# is available to a model that can split on one
 # feature inside a region defined by another, and is not available to a weighted sum of the
 # columns. The two hand-built interaction terms in the feature set, `carry_mom_composite` and
 # `carry_mom_interaction`, exist because someone had to name that structure for the linear model;
@@ -688,8 +689,9 @@ spread.group_by("label", maintain_order=True).head(5)
 # **The horizons reverse between the two families, which is what fitting both labels here was
 # for.** The linear grid did better at 21 days than at five - by how much depends on how the
 # coverage filter is handled, and `06_linear` works that through - while this grid does the
-# opposite outright: 0.026 at five days with all fifteen configurations above zero, and *nothing*
-# above zero at 21, where the best is -0.006 and the worst -0.042. The direction of the reversal
+# opposite outright: every five-day configuration above zero, and *nothing* above zero at 21,
+# where `best_ic` and `worst_ic` in the horizons frame are both negative. The direction of the
+# reversal
 # does not depend on any of the qualifications the linear comparison needs, which is what makes
 # it the durable finding here. What each family can represent decides which horizon it reads. So
 # neither notebook's horizon ranking carries into the other, and the strong-L1 advantage at 21
@@ -701,29 +703,30 @@ spread.group_by("label", maintain_order=True).head(5)
 # comparison across them is between two label-specific protocols. What is being compared cleanly
 # is the two *families* on each label, and there the answer is unambiguous at both.
 #
-# **Squared error is last at both horizons; the rest of the ordering is not stable.** At five days
-# the ordering is the textbook one - Huber 0.019 mean, absolute error 0.015, squared error 0.014 -
-# and at 21 days absolute error and Huber swap while squared error stays clearly last at -0.034
-# against -0.014 and -0.017. The mechanism usually offered is the label's tails: squared error
+# **Squared error is last at both horizons; the rest of the ordering is not stable.** At five
+# days the objective frame gives the textbook ordering - Huber, then absolute error, then
+# squared error - and at 21 days absolute error and Huber swap while squared error stays
+# clearly last. The mechanism usually offered is the label's tails: squared error
 # weights an observation by the square of its error, so the largest commodity moves dominate what
 # each successive tree is fitted to, while a rank correlation cares about order rather than
 # magnitude, and effort spent getting the extremes right buys nothing on this metric. The tails
-# frame is consistent with that as far as it goes - excess kurtosis 22.7 at five days against 18.7
-# at 21, and the clean ordering is on the heavier one - but 22.7 and 18.7 are close enough that
-# this is one observation and not a demonstration. What the two labels do establish is the part
+# frame is consistent with that as far as it goes - the five-day label carries the heavier excess
+# kurtosis of the two, and the clean ordering is on the heavier one - but the two kurtoses are
+# close enough that this is one observation and not a demonstration. What the two labels do
+# establish is the part
 # that did not move: **an objective is a claim about which errors matter, and squared error is the
 # wrong claim when the result is judged on ranks.**
 #
-# **The checkpoint moves the answer about half as much as the model does.** The `comparison` frame
-# puts the spread across the fifteen configurations at 1.9 times the median configuration's own
-# checkpoint range at five days, and 2.6 times at 21. So the stopping point is not a detail: it is
-# a second dial within a factor of two or three of the first. Adding trees does not settle it
-# either - the median configuration ends a little above where it started at both horizons, seven
-# of fifteen end lower at each, and the best checkpoint is an interior one for ten of fifteen at
-# 21 days and seven at five. There is no common turning point to read off, which is why the honest
-# comparison is the fixed-iteration chart rather than each configuration's best moment. Reporting
-# the leading row of the table would be reporting the maximum of 150 numbers as though it were
-# one.
+# **The checkpoint moves the answer within a small factor of what the model does.** The
+# `comparison` frame puts the spread across the configurations against the median
+# configuration's own checkpoint range at each horizon, and the ratio is a small multiple at
+# both. So the stopping point is not a detail: it is a second dial of the same order as the
+# first. Adding trees does not settle it either - the median configuration ends near where it
+# started at both horizons, a substantial share end lower, and the best checkpoint is an
+# interior one for most configurations at 21 days. There is no common turning point to read
+# off, which is why the comparison that holds is the fixed-iteration chart rather than each
+# configuration's best moment. Reporting the leading row of the table would be reporting the
+# maximum of every candidate as though it were one.
 #
 # **The capacity axis does not produce the textbook shape.** The usual reason to sweep leaf count
 # is to find where out-of-sample performance turns over, and here it does not turn over cleanly:
@@ -733,9 +736,9 @@ spread.group_by("label", maintain_order=True).head(5)
 # explains.
 #
 # **None of this selects anything.** IC measures whether predictions rank products correctly, not
-# whether a strategy trading them makes money after costs and turnover. A five-day IC of 0.026 is
-# not by itself a tradeable edge, and turnover on a five-day horizon is exactly where a small
-# ranking advantage is lost. Selection is on validation backtest Sharpe over the population just
+# whether a strategy trading them makes money after costs and turnover. A few hundredths of rank
+# correlation is not by itself a tradeable edge, and turnover on a five-day horizon is exactly
+# where a small ranking advantage is lost. Selection is on validation backtest Sharpe over the population just
 # published, and it happens in [`13_backtest`](13_backtest.ipynb), where the checkpoint is part of
 # what is selected.
 #

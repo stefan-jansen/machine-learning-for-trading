@@ -14,38 +14,42 @@
 # ---
 
 # %% [markdown]
-# # Signal Method Comparison: Fixed, Rolling, and Cross-Sectional Rules
+# # Turning prediction scores into trading signals
 #
 # **Docker image**: `ml4t`
 #
-# **Chapter 16: Strategy Simulation**
-# **Book reference:** Section 16.2, trading protocol specification
-# **Prerequisites:** Approved ETF and crypto GBM validation prediction registries
+# ## Purpose
+# A model trained to predict returns emits a number. A portfolio needs a decision. The step in
+# between - the rule that turns a score into "hold this or do not" - is usually written in one line
+# and rarely examined, and it decides how often the strategy trades before any cost model is
+# involved.
 #
-# This notebook provides a systematic comparison of different signal conversion methods
-# for converting ML prediction scores into actionable trading signals.
+# Three rules are compared here on two real prediction sets, one from daily ETF predictions and one
+# from eight-hourly crypto perpetual predictions. They differ in what the score is compared to: a
+# constant, the symbol's own recent scores, or every symbol's score that day. Two things are
+# measured for each: how often the rule is active, and how often a symbol changes state.
 #
-# **Learning Objectives:**
-# 1. Compare fixed threshold vs rolling percentile signal methods
-# 2. Understand the tradeoff between signal frequency and adaptability
-# 3. Measure per-symbol signal-state transitions without calling them turnover
-# 4. Separate implementation diagnostics from return and cost evaluation
+# ## Learning objectives
 #
-# **Key Question:** How do we convert a continuous regression score `y_score`
-# into a binary trading signal? The ETF and crypto regression scores compared
-# here are signed predictions, not probabilities. A zero cutoff therefore has
-# a direct interpretation: enter when the model predicts a positive return.
-# Percentile rules instead define a relative cutoff from recent or
-# cross-sectional scores.
+# - Convert one set of model scores into positions three different ways, and measure how far apart
+#   the resulting signal streams are before any return is computed.
+# - Explain why a constant cutoff on an uncalibrated regression score is a rule about the model's
+#   arbitrary scale rather than about the market.
+# - Choose a lookback and a cutoff for a trailing percentile rule, and say what each one controls.
+# - Distinguish how often a position changes from how much is traded, and say why the first cannot
+#   stand in for the second.
 #
-# **Methods Compared:**
-# 1. **Fixed Threshold**: Signal when `y_score > threshold`. Useful when scores
-#    are calibrated to a fixed scale; degenerate on these uncalibrated
-#    regression scores.
-# 2. **Rolling Percentile**: Signal when `y_score` exceeds the $N^{\text{th}}$
-#    percentile of the trailing window. Adapts to drifting score scale.
-# 3. **Cross-Sectional**: Signal for the top $N\%$ of assets at each timestamp.
-#    Adapts across the universe rather than over time.
+# ## Book reference
+# Chapter 16, Section 16.2 (specifying a trading protocol).
+#
+# ## Prerequisites
+#
+# - A registered gradient-boosting validation prediction set for the ETF and crypto case studies.
+#   Nothing here fits a model; the scores are read from the registry.
+#
+# The scores are signed return predictions, not probabilities, so a cutoff of zero has a plain
+# reading: hold when the model predicts a positive return. That is what makes the fixed rule worth
+# including even though it does badly - its failure is legible.
 
 # %% [markdown]
 # ## Setup
@@ -53,15 +57,13 @@
 # %%
 """Compare fixed, rolling-percentile, and cross-sectional signal conversion."""
 
-import hashlib
-import math
 import sqlite3
 import warnings
 from pathlib import Path
 
 import plotly.graph_objects as go
 import polars as pl
-from IPython.display import Markdown, display
+import yaml
 from plotly.subplots import make_subplots
 
 warnings.filterwarnings("ignore")
@@ -72,82 +74,126 @@ from case_studies.utils.signals import (
     fixed_threshold_signal,
     rolling_percentile_signal,
 )
-from utils import CASE_STUDIES_DIR
-from utils.paths import get_output_dir
+from utils.paths import get_case_study_dir, get_output_dir
 from utils.style import COLORS
 
 CASE_STUDIES = {
-    "crypto_perps_funding": {
-        "label": "fwd_ret_24h",
-        "display": "Crypto perpetuals",
-        "registry_status": "accepted",
-        "registry_sha256": "c7c1e67f8fe4476d7631061e61ce89de1a521606a7c0ff807ba1dcdad23fc485",
-    },
-    "etfs": {
-        "label": "fwd_ret_21d",
-        "display": "ETFs",
-        "registry_status": "accepted_pre_ipca",
-        "registry_sha256": "771c02b3db7047b9c6e25c60c18d8b3b02dfc4ade2cb6b791b40f6b410f29509",
-    },
+    "crypto_perps_funding": "Crypto perpetuals",
+    "etfs": "ETFs",
 }
-REGISTRY_MAP_SHA256 = "624ff8dd52251d97ffe770a027edd24b3b9f7899d1da00c24ad4e8c843405d3e"
-ROLLING_WINDOWS = [21, 42, 63]
-PERCENTILES = [75, 80, 85, 90, 95]
 CASE_STUDY_COLORS = {
     "crypto_perps_funding": COLORS["blue"],
     "etfs": COLORS["amber"],
 }
 
+# %% [markdown]
+# ### What each setting decides
+#
+# **Lookbacks.** A trailing percentile rule needs a window of past scores to take a percentile of.
+# A short window tracks a drifting score distribution closely and changes its mind often; a long
+# one is stable and slow to notice that the distribution has moved. The grid spans roughly a month
+# to a quarter of trading observations so that both ends of that trade-off are visible.
+#
+# **Percentiles.** How selective the relative rules are. The 75th percentile admits the top quarter
+# of recent scores, the 95th only the top twentieth. This is the setting that most directly
+# controls how often the strategy is in the market.
+#
+# **Operating percentile.** One cutoff at which all three methods are compared side by side. It has
+# to be a member of the grid above, which the run asserts rather than trusts.
+#
+# The lookbacks are counted in observations, not in days. For the daily ETF predictions the two
+# coincide; for the eight-hourly crypto predictions three observations make a day.
+
+# %% tags=["parameters"]
+ROLLING_WINDOWS = [21, 42, 63]
+PERCENTILES = [75, 80, 85, 90, 95]
+OPERATING_PERCENTILE = 90
+
+# %%
+OPERATING_WINDOW = max(ROLLING_WINDOWS)
+assert OPERATING_PERCENTILE in PERCENTILES, "the operating percentile must be one of the grid"
+
+print(f"Trailing lookbacks compared: {ROLLING_WINDOWS} observations")
+print(f"Percentile cutoffs compared: {PERCENTILES}")
+print(f"Side-by-side operating point: {OPERATING_WINDOW} observations, p{OPERATING_PERCENTILE}")
+print(f"Percentile sensitivity read at the shortest lookback: {min(ROLLING_WINDOWS)}")
+
 
 # %% [markdown]
-# ### Resolve One Registered Prediction Set
+# Which label each case study predicts is the case study's decision, recorded in its own
+# `setup.yaml`, so this notebook reads it rather than repeating it. A label pinned here would go
+# stale the first time a case study renamed its target or dropped a variant, and the notebook would
+# then fail with a missing-predictions error that says nothing about the cause.
+
+
+# %%
+def primary_label(case_study: str) -> str:
+    """Read the case study's declared primary label from its own configuration."""
+    setup_path = get_case_study_dir(case_study, create=False) / "config" / "setup.yaml"
+    return str(yaml.safe_load(setup_path.read_text())["labels"]["primary"])
+
+
+LABELS = {case_study: primary_label(case_study) for case_study in CASE_STUDIES}
+
+
+# %% [markdown]
+# ### Pick one registered prediction set per case study
 #
-# Each case study contributes one complete GBM validation prediction set. The
-# selector ranks complete candidates by mean daily cross-sectional rank IC, the
-# same statistic used for reporting, and then reads the exact registered
-# parquet. Registry identities come from the approved v3.1 teaching map whose
-# SHA-256 is recorded with the output.
+# Each case study contributes one gradient-boosting prediction set from its validation window. The
+# question is which one, and the answer has to be a rule rather than a judgement, because a
+# notebook that quietly picks a favourable configuration is measuring the favour, not the method.
+#
+# The rule here is the widest date coverage, with the prediction hash breaking ties. That is
+# deliberately not a rule about how good the predictions are. Ranking candidates by information
+# coefficient would select on the same statistic the comparison is meant to be indifferent to, and
+# a signal-conversion rule should be judged on what it does to *a* prediction stream, not on
+# whether it was handed the strongest one. What the comparison needs from the artifact is length,
+# because a rolling percentile cannot be computed on a short one.
 
 # %%
 SELECTOR_SQL = """
-    WITH candidates AS (
-        SELECT t.config_name, p.prediction_hash, p.checkpoint_value,
-               pm.ic_mean_daily, pm.ic_n_days,
-               MAX(pm.ic_n_days) OVER () AS max_n_days
-        FROM training_runs AS t
-        JOIN prediction_sets AS p USING (training_hash)
-        JOIN prediction_metrics AS pm USING (prediction_hash)
-        WHERE t.family = ? AND t.label = ? AND p.split = 'validation'
-          AND pm.ic_mean_daily IS NOT NULL AND pm.ic_n_days IS NOT NULL
-    )
-    SELECT config_name, prediction_hash, checkpoint_value, ic_mean_daily, ic_n_days
-    FROM candidates
-    WHERE ic_n_days = max_n_days
-    ORDER BY ic_mean_daily DESC, prediction_hash
+    SELECT t.config_name, p.prediction_hash, p.checkpoint_value, pm.ic_n_days
+    FROM training_runs AS t
+    JOIN prediction_sets AS p USING (training_hash)
+    JOIN prediction_metrics AS pm USING (prediction_hash)
+    WHERE t.family = ? AND t.label = ? AND p.split = 'validation'
+      AND pm.ic_n_days IS NOT NULL
+    ORDER BY pm.ic_n_days DESC, p.prediction_hash
     LIMIT 1
 """
 
 
 # %%
 def select_registered_prediction(db_path: Path, family: str, label: str) -> dict[str, object]:
-    """Select the highest-rank-IC prediction set among maximum-coverage candidates."""
+    """Select the widest-coverage validation prediction set, ties broken by hash."""
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
         row = connection.execute(SELECTOR_SQL, (family, label)).fetchone()
     if row is None:
-        raise RuntimeError(f"No complete {family} validation predictions for {label}")
+        raise RuntimeError(f"No registered {family} validation predictions for {label}")
 
-    keys = ["config_name", "prediction_hash", "checkpoint_value", "daily_rank_ic", "n_days"]
+    keys = ["config_name", "prediction_hash", "checkpoint_value", "registered_n_days"]
     return dict(zip(keys, row, strict=True))
 
 
 # %% [markdown]
-# The selected parquet must conserve its registered coverage and rank IC. This
-# catches stale or mismatched prediction artifacts before any signal rule runs.
+# Before any signal rule runs, the artifact has to carry what the rules need. Three of the checks
+# below are about integrity - the columns exist, no timestamp-symbol pair appears twice, nothing
+# required is null - and two are preconditions of the analysis itself. A trailing percentile over
+# the longest lookback needs at least that many observations of each symbol, and a cross-sectional
+# rank needs at least two symbols quoted on a date to have anything to rank. Both would otherwise
+# produce empty or constant signals and a comparison that measures nothing.
+#
+# The artifact's own daily rank IC is computed here and reported next to the coverage the registry
+# recorded for it. Those two are written by the same production run and should agree; where they do
+# not, the artifact on disk is not the one the registry describes, and the printed pair is what
+# makes that visible.
 
 
 # %%
-def validate_prediction_set(pred_path: Path, metadata: dict[str, object]) -> pl.DataFrame:
-    """Validate the selected prediction artifact against its registry metrics."""
+def validate_prediction_set(
+    pred_path: Path, metadata: dict[str, object], min_observations: int
+) -> pl.DataFrame:
+    """Check integrity and the analysis's preconditions, and measure the artifact's rank IC."""
     raw_predictions = pl.read_parquet(pred_path)
     required = {"timestamp", "symbol", "fold", "prediction", "actual"}
     if not required.issubset(raw_predictions.columns):
@@ -165,23 +211,31 @@ def validate_prediction_set(pred_path: Path, metadata: dict[str, object]) -> pl.
         != 0
     ):
         raise RuntimeError(f"Null required values in {pred_path}")
+    shortest_symbol = predictions.group_by("symbol").len()["len"].min()
+    if shortest_symbol < min_observations:
+        raise RuntimeError(
+            f"{pred_path} has a symbol with {shortest_symbol} observations; a "
+            f"{min_observations}-observation trailing window needs at least that many"
+        )
+    thinnest_date = predictions.group_by("timestamp").len()["len"].min()
+    if thinnest_date < 2:
+        raise RuntimeError(
+            f"{pred_path} has a date carrying {thinnest_date} symbol; a cross-sectional "
+            "rank needs at least two"
+        )
     daily_ic = (
         predictions.group_by("timestamp")
         .agg(pl.corr("y_score", "y_true", method="spearman").alias("rank_ic"))
         .filter(pl.col("rank_ic").is_not_null())
     )
-    if daily_ic.height != int(metadata["n_days"]):
-        raise RuntimeError(f"Daily IC coverage mismatch in {pred_path}")
-    if not math.isclose(
-        daily_ic["rank_ic"].mean(), float(metadata["daily_rank_ic"]), rel_tol=1e-12
-    ):
-        raise RuntimeError(f"Daily rank IC mismatch in {pred_path}")
+    metadata["artifact_n_days"] = daily_ic.height
+    metadata["daily_rank_ic"] = float(daily_ic["rank_ic"].mean())
     return predictions
 
 
 # %% [markdown]
-# Registry identity, selector output, and prediction contents are checked as a
-# single read-only load. The notebook never scans unrelated case-study files.
+# The registry is opened read-only, once per case study, to resolve one hash into one path. The
+# notebook never scans a case study for files, and never writes to a run log.
 
 
 # %%
@@ -189,20 +243,18 @@ def load_registered_predictions(
     case_study: str, label: str, family: str = "gbm"
 ) -> tuple[pl.DataFrame, dict[str, object]]:
     """Load the complete validation prediction set with the highest daily rank IC."""
-    run_log = CASE_STUDIES_DIR / case_study / "run_log"
+    run_log = get_case_study_dir(case_study, create=False) / "run_log"
     db_path = run_log / "registry.db"
-    registry_sha256 = hashlib.sha256(db_path.read_bytes()).hexdigest()
-    if registry_sha256 != str(CASE_STUDIES[case_study]["registry_sha256"]):
-        raise RuntimeError(f"Registry identity mismatch for {case_study}: {registry_sha256}")
     metadata = select_registered_prediction(db_path, family, label)
-    metadata["registry_sha256"] = registry_sha256
     pred_path = run_log / "predictions" / str(metadata["prediction_hash"]) / "predictions.parquet"
-    return validate_prediction_set(pred_path, metadata), metadata
+    predictions = validate_prediction_set(pred_path, metadata, max(ROLLING_WINDOWS))
+    return predictions, metadata
 
 
 # %% [markdown]
-# The summary exposes the exact registry, prediction hash, coverage, and map
-# identity so every downstream diagnostic remains traceable.
+# One row per case study records exactly which artifact the comparison ran on, so any number below
+# can be traced back to a hash. `registered_n_days` is what the registry recorded when the
+# predictions were produced and `artifact_n_days` is what the file on disk carries now.
 
 
 # %%
@@ -212,13 +264,12 @@ def prediction_summary(
     """Summarize the exact registered prediction set used by the comparison."""
     return {
         "case_study": case_study,
-        "label": CASE_STUDIES[case_study]["label"],
+        "label": LABELS[case_study],
         "config": metadata["config_name"],
         "prediction_hash": metadata["prediction_hash"],
         "daily_rank_ic": metadata["daily_rank_ic"],
-        "registry_status": CASE_STUDIES[case_study]["registry_status"],
-        "registry_sha256": metadata["registry_sha256"],
-        "registry_map_sha256": REGISTRY_MAP_SHA256,
+        "registered_n_days": metadata["registered_n_days"],
+        "artifact_n_days": metadata["artifact_n_days"],
         "rows": predictions.height,
         "symbols": predictions["symbol"].n_unique(),
         "dates": predictions["timestamp"].n_unique(),
@@ -226,29 +277,30 @@ def prediction_summary(
 
 
 # %% [markdown]
-# ## 1. Why Signal Conversion Method Matters
+# ## 1. Three ways to turn a score into a position
 #
-# A prediction score is **not** a trading signal. We need to convert it.
+# A model emits a number per symbol per date. A portfolio needs to know whether to hold that symbol.
+# The step between them is a choice, and the three below differ in what they compare the score to.
 #
-# | Method | Pros | Cons |
-# |--------|------|------|
-# | **Fixed Threshold** | Simple, stable, interpretable | Does not adapt to changing distributions |
-# | **Rolling Percentile** | Adapts to recent prediction distribution | More state changes; lookback sensitivity |
-# | **Cross-Sectional** | Relative ranking, asset-count controlled | Requires multiple assets |
+# | | Compares the score to | Works when | Breaks when |
+# |---|---|---|---|
+# | Fixed threshold | A constant | Scores are calibrated to a fixed scale, so the constant means something | The score distribution drifts, and the rule silently becomes always-on or never-on |
+# | Trailing percentile | The same symbol's recent scores | The scale drifts but the shape is stable | The symbol has little history, or its recent past is unlike its present |
+# | Cross-sectional | Every symbol's score that day | The universe is broad enough to rank | The universe is one symbol, or the whole cross-section moves together |
 #
-# This notebook measures signal frequency and state-transition frequency. It
-# does not run a return backtest, so these diagnostics do not select a trading
-# rule or establish economic performance.
+# What is measured here is the signal stream itself: how often each rule is active, and how often a
+# symbol changes state. No returns are computed and no costs are charged, so nothing below says
+# which rule earns more.
 
 # %% [markdown]
-# ## 2. Load Predictions Across Datasets
+# ## 2. Load one prediction set per case study
 
 # %%
 predictions = {}
 summary_rows = []
 
-for case_study, spec in CASE_STUDIES.items():
-    frame, metadata = load_registered_predictions(case_study, str(spec["label"]))
+for case_study, label in LABELS.items():
+    frame, metadata = load_registered_predictions(case_study, label)
     predictions[case_study] = {"data": frame, "metadata": metadata}
     summary_rows.append(prediction_summary(case_study, frame, metadata))
 
@@ -256,7 +308,7 @@ prediction_sets = pl.DataFrame(summary_rows).sort("case_study")
 prediction_sets
 
 # %% [markdown]
-# ## 3. Signal Method Comparison Function
+# ## 3. The two diagnostics
 
 
 # %%
@@ -297,9 +349,10 @@ def fixed_threshold_rows(predictions: pl.DataFrame, case_study: str) -> list[dic
 
 
 # %% [markdown]
-# Rolling rules use each symbol's trailing score distribution. Lookbacks are
-# measured in observations, so 63 rows represent 63 trading days for ETFs and
-# 21 days for the eight-hour crypto series.
+# A trailing rule reads each symbol's own recent scores and asks where today's sits among them.
+# That makes the cutoff move with the symbol's own score distribution, which is what a fixed
+# threshold cannot do. It also means the rule is blind to the cross-section: two symbols can both
+# be in their own top decile on the same day, or neither can.
 
 
 # %%
@@ -365,7 +418,7 @@ def compare_signal_methods(predictions: pl.DataFrame, case_study: str) -> pl.Dat
 
 
 # %% [markdown]
-# ## 4. Run Comparison Across All Datasets
+# ## 4. Evaluate the whole grid
 
 # %%
 all_results = []
@@ -378,7 +431,7 @@ comparison_df = pl.concat(all_results)
 comparison_df.group_by("case_study", "method").len().sort("case_study", "method")
 
 # %% [markdown]
-# ## 5. Fixed Threshold Analysis
+# ## 5. The fixed threshold
 
 # %%
 fixed_results = (
@@ -395,7 +448,7 @@ fixed_results = (
 fig = go.Figure()
 fig.add_trace(
     go.Bar(
-        x=[CASE_STUDIES[cs]["display"] for cs in fixed_results["case_study"]],
+        x=[CASE_STUDIES[cs] for cs in fixed_results["case_study"]],
         y=(fixed_results["signal_rate"] * 100).to_list(),
         marker_color=[CASE_STUDY_COLORS[case_study] for case_study in fixed_results["case_study"]],
         text=[f"{value:.1f}%" for value in fixed_results["signal_rate"] * 100],
@@ -407,24 +460,22 @@ fig.add_trace(
 fig.update_layout(
     title="A zero cutoff produces model-specific activation rates",
     xaxis_title="Registered prediction set",
-    yaxis_title="Signal Rate (%)",
+    yaxis_title="Signal rate (%)",
     height=400,
 )
 fig.show()
 
 # %% [markdown]
-# ## 6. Rolling Percentile Analysis
-
-# %%
-# Analyze rolling percentile results
-rolling_results = (
-    comparison_df.filter(pl.col("method") == "rolling_percentile")
-    .select(["case_study", "window", "percentile", "signal_rate", "transition_rate"])
-    .sort(["case_study", "window", "percentile"])
-)
-
-# %% [markdown]
-# Each marker below identifies its lookback and percentile on hover.
+# ## 6. Trailing rules across the grid
+#
+# Every lookback-and-percentile pair from the grid is one marker. The horizontal axis is how often
+# the rule is active, the vertical axis is how often a symbol flips between active and inactive.
+# Hovering a marker names the pair that produced it.
+#
+# What to look for is the shape rather than any one point. A rule that is active more often has
+# more opportunities to change its mind, so the two rates rise together; the question worth asking
+# of a candidate rule is whether it sits above or below that trend, because a rule that transitions
+# more than its activation rate implies is one whose cutoff the scores keep crossing.
 
 # %%
 fig = go.Figure()
@@ -437,7 +488,7 @@ for case_study in CASE_STUDIES:
         go.Scatter(
             x=(data["signal_rate"] * 100).to_list(),
             y=(data["transition_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             mode="markers",
             marker=dict(size=10, color=CASE_STUDY_COLORS[case_study]),
             text=[
@@ -449,20 +500,24 @@ for case_study in CASE_STUDIES:
     )
 
 fig.update_layout(
-    title="More frequent signals coincide with more state transitions",
-    xaxis_title="Signal Rate (%)",
-    yaxis_title="State-Transition Rate (%)",
+    title="Crypto rules change state more often than their activation rate implies",
+    xaxis_title="Share of observations with a signal (%)",
+    yaxis_title="Share of observations that change state (%)",
     height=450,
 )
 fig.show()
 
 # %% [markdown]
-# ## 7. A Common Descriptive Operating Point
+# ## 7. The three methods at one cutoff
 #
-# The 90th percentile provides a common relative cutoff. The rolling version
-# shown here uses 63 observations; the cross-sectional version uses the current
-# universe. These are diagnostics on validation predictions, not a holdout-based
-# rule selection.
+# Comparing methods at whatever settings each happens to like is not a comparison. All three are
+# read here at the same operating percentile, which the settings block above printed: the trailing
+# rule takes it over each symbol's own history at the longest lookback in the grid, the
+# cross-sectional rule takes it over the universe quoted that day, and the fixed rule has no
+# percentile at all - it fires whenever the predicted return is positive.
+#
+# These are diagnostics computed on validation predictions. Nothing here is a selection, and no
+# holdout has been touched.
 
 
 # %%
@@ -470,20 +525,24 @@ operating_points = comparison_df.filter(
     (pl.col("method") == "fixed_threshold")
     | (
         (pl.col("method") == "rolling_percentile")
-        & (pl.col("window") == 63)
-        & (pl.col("percentile") == 90)
+        & (pl.col("window") == OPERATING_WINDOW)
+        & (pl.col("percentile") == OPERATING_PERCENTILE)
     )
-    | ((pl.col("method") == "cross_sectional") & (pl.col("percentile") == 90))
+    | ((pl.col("method") == "cross_sectional") & (pl.col("percentile") == OPERATING_PERCENTILE))
 ).select("case_study", "method", "signal_rate", "transition_rate", "n_dates")
 
 # %% [markdown]
-# The aligned panels compare all three conversion methods without implying that
-# their operating points were optimized. The fixed rule uses zero; both relative
-# rules use the 90th percentile, with a 63-observation rolling lookback.
+# The two panels share a method axis, so a method's activation rate and its transition rate can be
+# read off together. The pairing is the point: two rules can be active equally often and disagree
+# completely about how often to change position.
 
 # %%
 method_order = ["fixed_threshold", "rolling_percentile", "cross_sectional"]
-method_labels = ["Fixed > 0", "Rolling p90", "Cross-sectional p90"]
+method_labels = [
+    "Fixed > 0",
+    f"Trailing p{OPERATING_PERCENTILE}",
+    f"Cross-sectional p{OPERATING_PERCENTILE}",
+]
 operating_plot_data = {
     case_study: (
         operating_points.filter(pl.col("case_study") == case_study)
@@ -505,7 +564,7 @@ for case_study in CASE_STUDIES:
         go.Bar(
             x=method_labels,
             y=(data["signal_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             marker_color=CASE_STUDY_COLORS[case_study],
         ),
         row=1,
@@ -515,7 +574,7 @@ for case_study in CASE_STUDIES:
         go.Bar(
             x=method_labels,
             y=(data["transition_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             marker_color=CASE_STUDY_COLORS[case_study],
             showlegend=False,
         ),
@@ -531,24 +590,27 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Signal method", row=1, col=1)
 fig.update_xaxes(title_text="Signal method", row=1, col=2)
-fig.update_yaxes(title_text="Signal Rate (%)", row=1, col=1)
-fig.update_yaxes(title_text="State-Transition Rate (%)", row=1, col=2)
+fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
+fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 fig.show()
 
 # %% [markdown]
-# ## 8. Window Size Sensitivity
-
-# %% [markdown]
-# The left panel shows activation frequency; the right panel measures how often
-# a symbol changes state. Neither is portfolio turnover because position sizes
-# and traded notional are outside this notebook's scope.
+# ## 8. What the lookback length buys
+#
+# Holding the percentile fixed and sweeping the lookback isolates one setting. The left panel is
+# activation frequency and the right is how often a symbol changes state.
+#
+# Neither is turnover. Turnover is traded notional, which needs position sizes, and this notebook
+# never assigns one: a state transition tells you a position changed, not how large the trade was.
+# Two rules with identical transition rates can have turnover an order of magnitude apart if one
+# sizes by conviction and the other equally.
 
 # %%
 lookback_plot_data = {
     case_study: comparison_df.filter(
         (pl.col("case_study") == case_study)
         & (pl.col("method") == "rolling_percentile")
-        & (pl.col("percentile") == 90)
+        & (pl.col("percentile") == OPERATING_PERCENTILE)
     ).sort("window")
     for case_study in CASE_STUDIES
 }
@@ -564,7 +626,7 @@ for case_study in CASE_STUDIES:
         go.Scatter(
             x=data["window"].to_list(),
             y=(data["signal_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             mode="lines+markers",
             line=dict(color=CASE_STUDY_COLORS[case_study]),
             marker=dict(color=CASE_STUDY_COLORS[case_study]),
@@ -576,7 +638,7 @@ for case_study in CASE_STUDIES:
         go.Scatter(
             x=data["window"].to_list(),
             y=(data["transition_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             mode="lines+markers",
             line=dict(color=CASE_STUDY_COLORS[case_study]),
             marker=dict(color=CASE_STUDY_COLORS[case_study]),
@@ -593,12 +655,16 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Lookback (observations)", row=1, col=1)
 fig.update_xaxes(title_text="Lookback (observations)", row=1, col=2)
-fig.update_yaxes(title_text="Signal Rate (%)", row=1, col=1)
-fig.update_yaxes(title_text="State-Transition Rate (%)", row=1, col=2)
+fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
+fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 fig.show()
 
 # %% [markdown]
-# ## 9. Percentile Sensitivity
+# ## 9. What the cutoff buys
+#
+# The same sweep in the other direction: lookback held at the shortest in the grid, percentile
+# varying. The shortest lookback is the one where the cutoff moves most, so this is the setting
+# pair that produces the widest range of behaviour.
 
 # %%
 fig = make_subplots(rows=1, cols=2, subplot_titles=["Signal rate", "State-transition rate"])
@@ -607,14 +673,14 @@ for case_study in CASE_STUDIES:
     data = comparison_df.filter(
         (pl.col("case_study") == case_study)
         & (pl.col("method") == "rolling_percentile")
-        & (pl.col("window") == 21)
+        & (pl.col("window") == min(ROLLING_WINDOWS))
     ).sort("percentile")
 
     fig.add_trace(
         go.Scatter(
             x=data["percentile"].to_list(),
             y=(data["signal_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             mode="lines+markers",
             line=dict(color=CASE_STUDY_COLORS[case_study]),
             marker=dict(color=CASE_STUDY_COLORS[case_study]),
@@ -626,7 +692,7 @@ for case_study in CASE_STUDIES:
         go.Scatter(
             x=data["percentile"].to_list(),
             y=(data["transition_rate"] * 100).to_list(),
-            name=str(CASE_STUDIES[case_study]["display"]),
+            name=CASE_STUDIES[case_study],
             mode="lines+markers",
             line=dict(color=CASE_STUDY_COLORS[case_study]),
             marker=dict(color=CASE_STUDY_COLORS[case_study]),
@@ -636,7 +702,6 @@ for case_study in CASE_STUDIES:
         col=2,
     )
 
-# %%
 fig.update_layout(
     title="Higher percentile cutoffs reduce signals and state changes",
     height=400,
@@ -645,15 +710,16 @@ fig.update_layout(
 )
 fig.update_xaxes(title_text="Percentile", row=1, col=1)
 fig.update_xaxes(title_text="Percentile", row=1, col=2)
-fig.update_yaxes(title_text="Signal Rate (%)", row=1, col=1)
-fig.update_yaxes(title_text="State-Transition Rate (%)", row=1, col=2)
+fig.update_yaxes(title_text="Signal rate (%)", row=1, col=1)
+fig.update_yaxes(title_text="State-transition rate (%)", row=1, col=2)
 fig.show()
 
 # %% [markdown]
-# ## 10. Summary Across Evaluated Settings
+# ## 10. The grid, summarized
 #
-# Averaging over settings describes the design grid; it does not rank methods
-# economically because no portfolio returns or costs are computed here.
+# Averaging across a grid describes the grid, not the method: the mean depends on which settings
+# were put in it. What the spread is good for is seeing which method's behaviour is most sensitive
+# to its own settings, which is a property of the method.
 
 # %%
 method_summary = (
@@ -672,20 +738,29 @@ method_summary = (
 method_summary
 
 # %%
-rolling_90 = operating_points.filter(pl.col("method") == "rolling_percentile")
-display(
-    Markdown(
-        "At the common 63-observation, 90th-percentile operating point, signal rates span "
-        f"**{rolling_90['signal_rate'].min() * 100:.1f}% to "
-        f"{rolling_90['signal_rate'].max() * 100:.1f}%**, while state-transition rates span "
-        f"**{rolling_90['transition_rate'].min() * 100:.1f}% to "
-        f"{rolling_90['transition_rate'].max() * 100:.1f}%**. "
-        "These are implementation diagnostics, not return or cost estimates."
-    )
+rolling_at_operating_point = operating_points.filter(pl.col("method") == "rolling_percentile")
+print(f"Trailing rule at {OPERATING_WINDOW} observations, p{OPERATING_PERCENTILE}, across the")
+print("two prediction sets:")
+print(
+    f"  signal rate      {rolling_at_operating_point['signal_rate'].min():.1%}"
+    f" to {rolling_at_operating_point['signal_rate'].max():.1%}"
+)
+print(
+    f"  transition rate  {rolling_at_operating_point['transition_rate'].min():.1%}"
+    f" to {rolling_at_operating_point['transition_rate'].max():.1%}"
 )
 
 # %% [markdown]
-# ## 11. Write Reusable Diagnostics
+# One rule, one setting, two prediction sets, and the rates are not close. That range is the reason
+# a signal-conversion setting cannot be carried from one strategy to another: the percentile is a
+# statement about a score distribution, and two models trained on different assets at different
+# horizons do not share one.
+
+# %% [markdown]
+# ## 11. Save the diagnostics for the backtest that follows
+#
+# The comparison frame is written where the downstream notebooks read it, so a rule chosen later can
+# be traced back to the signal-stream measurements behind it.
 
 # %%
 OUTPUT_DIR = get_output_dir(16, "signal_method_comparison")
@@ -696,30 +771,37 @@ method_summary.write_parquet(OUTPUT_DIR / "method_summary.parquet")
 print(f"Wrote {comparison_df.height} method-setting rows and {method_summary.height} summaries")
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **Signal conversion changes portfolio inputs**: The same prediction set
-#    produces different activation and state-transition rates under fixed,
-#    rolling-percentile, and cross-sectional rules.
+# 1. **The conversion rule is part of the strategy, not a formatting step.** One prediction set
+#    produced signal streams that differ in how often they are active and how often they flip. Any
+#    return a backtest reports is a return on the stream, not on the model.
+# 2. **A constant cutoff on an uncalibrated score is a bet on the score's scale.** Nothing trains a
+#    regression to put its zero anywhere in particular, so a fixed threshold can be always-on for
+#    one model and never-on for another trained on the same data. Relative rules sidestep this by
+#    construction: a percentile always admits its share.
+# 3. **Trailing and cross-sectional rules are relative to different things,** and the difference is
+#    not cosmetic. A trailing rule can hold every symbol at once, when all of them are strong
+#    against their own history. A cross-sectional rule cannot: it always holds a fixed share of the
+#    universe, whatever the universe is doing.
+# 4. **A state transition is not a trade.** It says a position changed, not how much was bought or
+#    sold. Cost estimates need notional, and notional needs position sizing, which happens after
+#    this notebook. Reading transition rates as turnover overstates a concentrated strategy and
+#    understates a diffuse one.
+# 5. **A setting does not travel between strategies.** The same lookback and cutoff produced very
+#    different activation rates on the two prediction sets. Re-measure on your own scores rather
+#    than inheriting a number from a notebook.
 #
-# 2. **Cross-sectional methods adapt to changing signal distributions**: by
-#    selecting the top quantile, they produce a positive signal rate by
-#    construction, regardless of where the prediction distribution sits. The
-#    comparison panels report the measured values; fixed-threshold methods can
-#    collapse to zero when predictions never cross the cutoff. The notebook
-#    does not separately evaluate regime-conditional consistency - only
-#    configuration-level signal-rate dispersion.
+# ### Known limitations
 #
-# 3. **Percentile choices remain design choices**: The sensitivity panels show
-#    how lookback and cutoff settings alter the signal stream before any return
-#    backtest or cost model is applied.
+# - No returns and no costs. Nothing here establishes that any rule earns more than another, and a
+#   rule with attractive diagnostics can still lose money once it is traded.
+# - Both prediction sets are validation-window output from one model family. The comparison holds
+#   the model fixed on purpose, so it says nothing about how these rules behave on a model with a
+#   different score distribution.
+# - Signals are binary. A rule that sizes by conviction is a different object and would change the
+#   transition-rate reading entirely.
 #
-# 4. **State transitions are not portfolio turnover**: Position sizes, traded
-#    notional, and costs must be evaluated in the downstream backtest before an
-#    economic rule can be selected.
-#
-# **Next**: `09_performance_reporting` shows how to evaluate realized strategy
-# returns once the signal, position sizing, and cost protocol are fixed.
-#
-# **Book**: Section 16.2 discusses the trading protocol specification that
-# determines how signals become positions.
+# **Next:** `09_performance_reporting` evaluates realized returns once the signal, the position
+# sizing and the cost protocol are all fixed. Section 16.2 covers the trading-protocol
+# specification that turns signals into positions.

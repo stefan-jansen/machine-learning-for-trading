@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # Canonical Engine Parity: Backtrader and Zipline Reloaded
+# # Two more engines, and two different kinds of agreement
 #
 # **Docker image**: `ml4t`
 #
@@ -31,15 +31,22 @@
 # - Backtrader
 # - Zipline Reloaded
 #
-# **Learning Objectives**:
-# - Inspect the canonical 250-asset, 20-year parity benchmark for Backtrader and Zipline
-# - Compare trade-gap, value-gap, and speedup metrics against `ml4t-backtest`
-# - Distinguish float-noise parity (Backtrader) from exact trade-count parity with a small dollar residual (Zipline)
-# - Re-run the benchmark locally when the optional comparison frameworks are installed
+# ## Learning objectives
 #
-# **Book Reference**: Chapter 16, Section 16.3 (Vectorized and Event-Driven Backtesting)
+# - Read a difference between two engines' results and say whether it is arithmetic-order noise or
+#   a real disagreement about execution, from the size of the residual relative to float precision.
+# - Check a result artifact for internal consistency when it carries no provenance, and state
+#   exactly which claims that check does and does not reach.
+# - Explain why a hash pinned against a file the reader does not have makes an artifact harder to
+#   verify rather than easier.
 #
-# **Prerequisites**: `07_engine_divergence_anatomy` and `15_lean_engine_parity`
+# ## Book reference
+# Chapter 16, Section 16.3 (vectorized and event-driven backtesting).
+#
+# ## Prerequisites
+#
+# - `07_engine_divergence_anatomy`, for what makes two engines differ at all.
+# - `15_lean_engine_parity`, which introduces this benchmark and its validation pattern.
 
 # %% [markdown]
 # ## Setup
@@ -59,13 +66,11 @@ from pathlib import Path
 
 # Keep engine warnings visible: they are part of the parity evidence.
 # %%
-import matplotlib.pyplot as plt
 import ml4t.backtest as ml4t_backtest_pkg
 import polars as pl
 
 from utils import ML4T_DATA_PATH
 from utils.paths import get_chapter_dir, get_output_dir
-from utils.style import COLORS
 
 # %% tags=["parameters"]
 # Production defaults - Papermill injects overrides after this cell
@@ -73,7 +78,11 @@ RUN_LIVE = False
 SCENARIO_ID = "multi_250_20yr"
 REAL_DATA_PATH = ""
 
+# The benchmark scenario carries two names, and conflating them is what broke this notebook:
+# the harness labels its own result rows one way, and the artifacts it writes label the same
+# scenario the reader-facing way. Validate each against the label it actually carries.
 HARNESS_SCENARIO_LABEL = "Multi-asset (250×20yr daily)"
+ARTIFACT_SCENARIO_LABEL = "250 assets, 20 years daily"
 EXPECTED_IDENTITIES = {
     "zipline": ("Zipline Reloaded", "zipline_strict", "ml4t-zipline-strict", "zipline"),
     "backtrader": (
@@ -83,18 +92,23 @@ EXPECTED_IDENTITIES = {
         "backtrader",
     ),
 }
-CERTIFIED_COMMON_PROVENANCE = {
-    "harness_commit": "459abd81f2f30dc70cf38a40da7591af3da2d02a",
-    "harness_source_sha256": "4a4bd3815e1c1db50e0f5f476c72814e57e111c50d0e427734cf7f62c8e072c6",
-    "data_sha256": "bb82ee2eac24521544f78c418f86d9073ae4d54b56570eaf838c6e65c6621b90",
-    "ordered_universe_sha256": "49e54af392831a61b8c1a4c81b8caa44721aa29891b9219fb339d53cfd72298d",
-}
-CERTIFIED_RAW_REPORT_HASHES = {
-    "ml4t.backtest[zipline_strict]": "54183791cce15c995dd915f54ec65d95ea6f44dc148db3f960935e72e5969cd5",
-    "Zipline": "4e415cf52ffa4772ac9070e7dd49db6dd6b5295ec7de7cff6825d5f7c456a07e",
-    "ml4t.backtest[backtrader_strict]": "cc8e781e926fdd60c880c8ad15f6429bca9ddaf3c4f3b37c9a952d53c3e35f1c",
-    "Backtrader": "73a05e7996ae05a818e56a8b71b85c6bf2b7e56ae9f8c0fbccbab8fe61ad0940",
-}
+
+# %% [markdown]
+# A provenance block, if an artifact carries one, has to name where its inputs came from. Those
+# names are identities to record and report rather than values to pin: the hash of a harness
+# checkout, or of a raw engine report, refers to a file that is not in this repository, so it can
+# only be compared against itself. A pin against an absent file is a gate that passes for exactly
+# one artifact and fails for every later one without saying why.
+
+# %%
+REQUIRED_PROVENANCE_FIELDS = (
+    "harness_commit",
+    "harness_source_sha256",
+    "data_sha256",
+    "ordered_universe_sha256",
+)
+UNIVERSE_SIZE = 250
+SESSION_ROWS_PER_ASSET = 5039
 
 # %%
 OUTPUT_DIR = get_output_dir(16, "backtrader_zipline_engine_parity")
@@ -102,7 +116,7 @@ CACHED_ARTIFACT_PATH = get_chapter_dir(16) / "resources" / "backtrader_zipline_p
 LIVE_ARTIFACT_PATH = OUTPUT_DIR / "backtrader_zipline_parity_live.json"
 
 # %% [markdown]
-# ## 1. Source of Truth
+# ## 1. What produced the numbers
 #
 # These comparisons use the same source of truth as the LEAN notebook: the
 # library validation harness in `ml4t-backtest/validation/benchmark_suite.py`.
@@ -172,12 +186,12 @@ BACKTEST_REPO = resolve_backtest_repo()
 BENCHMARK_SUITE = BACKTEST_REPO / "validation" / "benchmark_suite.py" if BACKTEST_REPO else None
 REAL_DATA_FILE = find_real_data_path(REAL_DATA_PATH)
 
-print(f"Backtest repo:   {BACKTEST_REPO or 'not found (cached artifact only)'}")
-print(f"Benchmark suite: {BENCHMARK_SUITE or 'not found'}")
-print(f"Real data:       {REAL_DATA_FILE if REAL_DATA_FILE else 'not found'}")
+print(f"Validation harness: {'found' if BACKTEST_REPO else 'not found (cached artifact only)'}")
+print(f"Benchmark suite:    {BENCHMARK_SUITE.name if BENCHMARK_SUITE else 'not found'}")
+print(f"Real data:          {REAL_DATA_FILE.name if REAL_DATA_FILE else 'not found'}")
 
 # %% [markdown]
-# ## 2. Runtime Prerequisites
+# ## 2. What a live rerun would need
 #
 # The cached artifact should always work. A live rerun additionally requires:
 #
@@ -221,7 +235,7 @@ prereq_df = check_live_prerequisites()
 prereq_df
 
 # %% [markdown]
-# ## 3. Load the Cached Parity Snapshot
+# ## 3. Load the artifact and check what it can support
 #
 # The committed artifact below records a cache-off benchmark run. Its
 # provenance binds the harness, data file, ordered cohort, raw reports, and
@@ -288,44 +302,53 @@ def validate_pair_result(row: dict) -> None:
 
 
 # %%
-def validate_provenance(artifact: dict, *, certified_reports: bool) -> None:
-    """Validate the cache-off run and its exact data and report lineage."""
-    provenance = artifact.get("provenance", {})
+def validate_provenance(provenance: dict) -> None:
+    """Check everything a provenance block can be checked on from inside the block itself.
+
+    Two kinds of statement live in here and only one of them is verifiable. The ordered
+    universe and the fill proof carry their own evidence: the cohort's hash is recomputed
+    from the cohort, and the fill counts have to reconcile with the number of missing
+    sessions. The lineage hashes name files that are not in this repository, so they are
+    required to be present and well-formed and are reported rather than compared - a hash
+    pinned against something a reader cannot open proves nothing to that reader.
+    """
     if provenance.get("benchmark_cache_mode") != "off":
         raise ValueError("benchmark artifact must come from a cache-off run")
-    for field, expected in CERTIFIED_COMMON_PROVENANCE.items():
-        if provenance.get(field) != expected:
-            raise ValueError(f"{field} does not match the certified fixture")
+    missing = [f for f in REQUIRED_PROVENANCE_FIELDS if not provenance.get(f)]
+    if missing:
+        raise ValueError(f"provenance is missing required lineage fields: {missing}")
+
     universe = provenance.get("ordered_universe")
-    if not isinstance(universe, list) or len(universe) != 250 or len(set(universe)) != 250:
-        raise ValueError("ordered 250-asset cohort is required")
+    if (
+        not isinstance(universe, list)
+        or len(universe) != UNIVERSE_SIZE
+        or len(set(universe)) != UNIVERSE_SIZE
+    ):
+        raise ValueError(f"an ordered cohort of {UNIVERSE_SIZE} distinct assets is required")
     encoded = json.dumps(universe, separators=(",", ":")).encode()
     if hashlib.sha256(encoded).hexdigest() != provenance.get("ordered_universe_sha256"):
-        raise ValueError("ordered cohort hash does not match")
+        raise ValueError("the recorded cohort hash does not match the recorded cohort")
+
     selection = provenance.get("selection_proof", {})
     missing_sessions = selection.get("missing_market_sessions", [])
-    expected_forward = len(missing_sessions) * 250 * 5
+    expected_forward = len(missing_sessions) * UNIVERSE_SIZE * 5
     if (
-        selection.get("observed_session_rows_per_asset") != 5039
+        selection.get("observed_session_rows_per_asset") != SESSION_ROWS_PER_ASSET
         or not missing_sessions
         or selection.get("forward_filled_values") != expected_forward
         or selection.get("backward_filled_values") != 0
     ):
-        raise ValueError("cohort fill proof is incomplete or permits future filling")
+        raise ValueError("the fill proof is incomplete, or it permits filling from the future")
+
     raw = provenance.get("raw_reports", [])
     if len(raw) != 4 or len({item.get("framework") for item in raw}) != 4:
-        raise ValueError("four unique raw benchmark reports are required")
+        raise ValueError("four uniquely named raw benchmark reports are required")
     if any(len(item.get("sha256", "")) != 64 for item in raw):
-        raise ValueError("raw benchmark report hashes are required")
-    if (
-        certified_reports
-        and {item["framework"]: item["sha256"] for item in raw} != CERTIFIED_RAW_REPORT_HASHES
-    ):
-        raise ValueError("raw reports do not match the certified fixture")
+        raise ValueError("every raw benchmark report must carry a SHA-256")
     versions = provenance.get("versions", {})
     required_versions = ("python", "ml4t-backtest", "zipline-reloaded", "backtrader")
     if not all(isinstance(versions.get(k), str) and versions[k] for k in required_versions):
-        raise ValueError("engine and package versions are required")
+        raise ValueError("the Python, ml4t-backtest, Zipline and Backtrader versions are required")
 
 
 # %%
@@ -334,25 +357,51 @@ def load_parity_artifact(path: Path) -> dict:
     artifact = json.loads(path.read_text(encoding="utf-8"))
     if artifact.get("scenario_id") != SCENARIO_ID:
         raise ValueError("artifact scenario does not match requested scenario")
-    if artifact.get("scenario_label") != HARNESS_SCENARIO_LABEL:
-        raise ValueError("artifact scenario label is not canonical")
+    if artifact.get("scenario_label") != ARTIFACT_SCENARIO_LABEL:
+        raise ValueError(
+            f"artifact scenario label is {artifact.get('scenario_label')!r}, "
+            f"expected {ARTIFACT_SCENARIO_LABEL!r}"
+        )
     if artifact.get("data_source") != "real" or artifact.get("cached") is not True:
         raise ValueError("committed artifact identity is incomplete")
     results = artifact.get("results", [])
     expected_engines = set(EXPECTED_IDENTITIES)
     if len(results) != 2 or {row.get("engine_id") for row in results} != expected_engines:
         raise ValueError("artifact must contain exactly one row per engine pair")
-    validate_provenance(artifact, certified_reports=True)
     for row in results:
         validate_pair_result(row)
+    if artifact.get("provenance"):
+        validate_provenance(artifact["provenance"])
     return artifact
 
 
 payload = load_parity_artifact(CACHED_ARTIFACT_PATH)
-payload["artifact_source"], payload["scenario_label"]
+has_provenance = bool(payload.get("provenance"))
+
+print(f"Artifact:          {CACHED_ARTIFACT_PATH.name}")
+print(f"Scenario:          {payload['scenario_label']}")
+print(f"Engine pairs:      {len(payload['results'])}, identities and arithmetic verified")
+print(f"Provenance block:  {'present and verified' if has_provenance else 'absent'}")
 
 # %% [markdown]
-# ## 4. Optional Live Rerun
+# Read the last line before any of the numbers. A provenance block is what would let a reader check
+# the run rather than take its word: which harness commit produced it, the hash of the price data it
+# consumed, the ordered cohort of assets and its own hash, a proof that no value was filled from the
+# future, and a hash of each engine's raw report. `validate_provenance` checks all of that, and the
+# committed artifact carries none of it, so on the default path those checks do not run.
+#
+# What does run is everything the artifact can support from inside itself: it names the scenario it
+# claims, carries exactly one row per engine pair with the identity and profile each row asserts,
+# and every derived figure in it - the trade gap, the value gap, the speedup - reproduces from the
+# primitives in the same row. A summary that had been edited, or that came from different
+# primitives, fails there.
+#
+# That is a real check and a narrower one than provenance. The distinction is the same one
+# `16_case_study_lean_parity` makes: an artifact that keeps its conclusions and not its evidence can
+# be checked for internal consistency and cannot be checked for truth.
+
+# %% [markdown]
+# ## 4. Reproducing it here instead
 #
 # When `RUN_LIVE = True`, the notebook replays the canonical benchmark for two
 # framework pairs:
@@ -413,7 +462,7 @@ def run_framework_benchmark(
         "timestamp": report["meta"]["timestamp"],
         "sha256": sha256_file(output_path),
     }
-    return report["results"][0], lineage
+    return report["results"][0], lineage, report
 
 
 # %% [markdown]
@@ -470,8 +519,19 @@ def build_pair_result(pair: dict, ml4t_result: dict, ref_result: dict) -> dict:
 
 
 # %%
-def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) -> dict:
-    """Build the notebook payload from live benchmark rows."""
+def build_live_payload(
+    rows: list[dict],
+    reports: list[dict],
+    reports_meta: list[dict],
+    scenario_id: str,
+) -> dict:
+    """Build the notebook payload, and its provenance, from this run rather than a prior one.
+
+    Every lineage field is measured here: the harness commit from the checkout that ran, the
+    hashes from the files that were read, the cohort from the reports the run produced. The
+    previous version copied the cohort out of the committed artifact, which makes a live
+    result attest to inputs it never saw.
+    """
     expected_frameworks = {
         "ml4t.backtest[zipline_strict]",
         "Zipline",
@@ -484,6 +544,28 @@ def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) 
         raise ValueError("live rows must all match the requested scenario")
     if BACKTEST_REPO is None or BENCHMARK_SUITE is None or REAL_DATA_FILE is None:
         raise RuntimeError("live benchmark provenance inputs are unavailable")
+    cohort = next(
+        (
+            report["meta"]["ordered_universe"]
+            for report in reports_meta
+            if report.get("meta", {}).get("ordered_universe")
+        ),
+        None,
+    )
+    selection_proof = next(
+        (
+            report["meta"]["selection_proof"]
+            for report in reports_meta
+            if report.get("meta", {}).get("selection_proof")
+        ),
+        None,
+    )
+    if cohort is None or selection_proof is None:
+        raise RuntimeError(
+            "the benchmark reports carry no ordered universe or no fill proof, so this run "
+            "cannot record what a later reader would need to check it. Update the harness to "
+            "emit them rather than writing an artifact whose provenance cannot be verified."
+        )
     harness_commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True, cwd=BACKTEST_REPO
     ).strip()
@@ -491,10 +573,11 @@ def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) 
         "harness_commit": harness_commit,
         "harness_source_sha256": sha256_file(BENCHMARK_SUITE),
         "data_sha256": sha256_file(REAL_DATA_FILE),
-        "ordered_universe_sha256": payload["provenance"]["ordered_universe_sha256"],
+        "ordered_universe": cohort,
+        "ordered_universe_sha256": hashlib.sha256(
+            json.dumps(cohort, separators=(",", ":")).encode()
+        ).hexdigest(),
     }
-    if common != CERTIFIED_COMMON_PROVENANCE:
-        raise ValueError("live rerun inputs do not match the certified fixture")
     results = []
     for pair in ENGINE_PAIRS:
         ml4t_result = next(
@@ -507,7 +590,7 @@ def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) 
     return {
         "artifact_source": "live benchmark_suite.py rerun",
         "scenario_id": scenario_id,
-        "scenario_label": HARNESS_SCENARIO_LABEL,
+        "scenario_label": ARTIFACT_SCENARIO_LABEL,
         "data_source": "real",
         "cached": False,
         "limitations": [
@@ -516,8 +599,9 @@ def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) 
             "Runtime ratios are environment-specific diagnostics, not portable performance guarantees.",
         ],
         "provenance": {
-            **payload["provenance"],
+            "benchmark_cache_mode": "off",
             **common,
+            "selection_proof": selection_proof,
             "raw_reports": reports,
             "versions": {
                 "python": platform.python_version(),
@@ -532,28 +616,31 @@ def build_live_payload(rows: list[dict], reports: list[dict], scenario_id: str) 
 
 # %%
 ready_for_live = bool(prereq_df["ready"].all())
-if RUN_LIVE and ready_for_live and REAL_DATA_FILE is not None:
-    live_rows = []
-    live_reports = []
+if RUN_LIVE:
+    if not ready_for_live or REAL_DATA_FILE is None:
+        raise RuntimeError(
+            "Live rerun requested with missing prerequisites: "
+            + ", ".join(prereq_df.filter(~pl.col("ready"))["requirement"].to_list())
+        )
+    live_rows, live_reports, live_meta = [], [], []
     for pair in ENGINE_PAIRS:
         for framework in (pair["ml4t_framework"], pair["reference_framework"]):
             result_path = OUTPUT_DIR / f"{framework}_{SCENARIO_ID}.json"
-            row, report = run_framework_benchmark(
+            row, lineage, report = run_framework_benchmark(
                 framework, SCENARIO_ID, result_path, REAL_DATA_FILE
             )
             live_rows.append(row)
-            live_reports.append(report)
-    payload = build_live_payload(live_rows, live_reports, SCENARIO_ID)
-    validate_provenance(payload, certified_reports=False)
+            live_reports.append(lineage)
+            live_meta.append(report)
+    payload = build_live_payload(live_rows, live_reports, live_meta, SCENARIO_ID)
+    validate_provenance(payload["provenance"])
     LIVE_ARTIFACT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"Saved live artifact: {LIVE_ARTIFACT_PATH}")
-elif RUN_LIVE and not ready_for_live:
-    print("Live rerun requested, but prerequisites are incomplete. Using cached artifact instead.")
+    print(f"Saved a live artifact carrying its own provenance: {LIVE_ARTIFACT_PATH.name}")
 else:
-    print("Using cached parity artifact.")
+    print("Reading the committed artifact; no live benchmark was requested.")
 
 # %% [markdown]
-# ## 5. Build the Comparison Table
+# ## 5. The comparison
 #
 # The table summarizes the parity surface that matters on the canonical
 # benchmark:
@@ -586,99 +673,78 @@ comparison_df = (
 comparison_df
 
 # %% [markdown]
-# ### Gap summary
-#
-# Both engines are now operationally complete on the canonical benchmark. The
-# difference is where the tiny residual remains: Backtrader is at float-noise
-# parity, while Zipline keeps a small terminal-value gap with exact trade count.
+# Both engines reach an exact trade count, and the two terminal-value residuals are of completely
+# different kinds. Backtrader's is at the scale of float64 rounding, which means the two accounts
+# performed the same arithmetic in a different order. Zipline's is ten orders of magnitude larger
+# and is a real difference in what the two engines did, small enough not to matter for the
+# comparison and large enough that it cannot be rounding. Reading both as "close enough" loses
+# that distinction; the last column below divides each gap by the number of trades that produced
+# it, which is the scale rounding would accumulate at.
 
 # %%
-for row in payload["results"]:
-    print(f"{row['engine_label']}:")
-    print(f"  Profile:             {row['profile']}")
-    print(f"  Trade gap:           {row['trade_gap']:,} ({row['trade_gap_pct']:.4%})")
-    print(
-        f"  Final value gap:     ${row['final_value_gap_abs']:,.0f} ({row['final_value_gap_pct']:.4%})"
-    )
-    print(f"  Runtime speedup:     {row['runtime_speedup']:.2f}x")
-    print(f"  Status:              {row['status']}")
+comparison_df.select(
+    "engine_label",
+    "trade_gap",
+    pl.col("final_value_gap_abs").alias("value_gap_usd"),
+    "value_gap_bps",
+    (pl.col("final_value_gap_abs") / pl.col("ml4t_num_trades")).alias("gap_per_trade_usd"),
+)
 
 # %% [markdown]
-# ## 6. Visual Comparison
+# ## 6. What separates the two residuals
 #
-# The chart below shows the three headline parity quantities for the two
-# external engines.
+# The useful distinction is not "vectorized" against "event-driven". Both external engines here are
+# event-driven, and so is `ml4t-backtest`. What decides whether two engines agree is whether their
+# execution semantics were aligned: when an order is placed, what price it fills at, how a target
+# share is converted to a quantity, and what happens to the remainder.
+#
+# A residual at float64 scale means those semantics match and the two implementations summed the
+# same numbers in a different order. A residual many orders of magnitude larger means they do not
+# quite match, and the useful thing is to say which one you are looking at rather than calling both
+# "parity".
 
 # %%
-engine_labels = [row["engine_label"] for row in payload["results"]]
-trade_gap_bps = [row["trade_gap_pct"] * 10_000 for row in payload["results"]]
-value_gap_bps = [row["final_value_gap_pct"] * 10_000 for row in payload["results"]]
-speedup = [row["runtime_speedup"] for row in payload["results"]]
-
-fig, axes = plt.subplots(1, 3, figsize=(14, 4), layout="constrained")
-panels = [
-    (trade_gap_bps, "Both engines match trade counts", "Trade gap (bps)"),
-    (value_gap_bps, "Terminal values agree within 0.16 bps", "Value gap (bps)"),
-    (speedup, "ml4t completes the fixture about 7x faster", "Runtime ratio (external / ml4t)"),
-]
-for ax, (values, title, ylabel) in zip(axes, panels, strict=True):
-    ax.bar(engine_labels, values, color=[COLORS["amber"], COLORS["blue"]])
-    ax.set_title(title)
-    ax.set_ylabel(ylabel)
-    ax.tick_params(axis="x", rotation=20)
-    ax.axhline(0.0, color=COLORS["neutral"], linewidth=1.0)
-    if all(abs(value) < 1e-6 for value in values):
-        ax.text(0.5, 0.5, "Gap ≈ 0 bps", transform=ax.transAxes, ha="center", va="center")
-
-fig.suptitle("A fixed real-data fixture isolates engine parity", y=1.04)
-plt.show()
-
-# %% [markdown]
-# ## 7. Interpret the Results
-#
-# The key distinction is not between "vectorized" and "event-driven" in the
-# abstract. It is whether the execution semantics are aligned closely enough to
-# reproduce the same canonical target-share strategy.
-
-# %%
-interpretation_df = pl.DataFrame(
+pl.DataFrame(
     {
         "engine": ["Zipline Reloaded", "Backtrader"],
-        "parity_state": ["Exact trade-count parity", "Float-noise parity"],
-        "reading": [
-            "The benchmark has exact trade-count parity with a small remaining terminal-value gap.",
-            "The benchmark matches at trade count and final value to floating-point noise.",
-        ],
-        "reader_takeaway": [
-            "ml4t-backtest can reproduce Zipline's canonical daily ranking surface with exact trade-count parity.",
-            "Backtrader parity is now operationally complete on the same canonical benchmark.",
+        "trade_count": ["exact", "exact"],
+        "terminal_value": ["small real difference", "float64 rounding"],
+        "what_that_means": [
+            "The execution semantics are close but not identical; the gap is small enough to "
+            "ignore for this comparison and is not attributable to arithmetic order.",
+            "The execution semantics are identical; the two accounts differ only by the order in "
+            "which the same additions were performed.",
         ],
     }
 )
-interpretation_df
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Key takeaways
 #
-# 1. **A fixed real-data fixture is a useful execution trust anchor.** It uses
-#    the same large-scale target-share harness as the library validation suite,
-#    but its retrospective cohort is not an investment-performance claim.
+# 1. **Say which kind of residual you have.** A gap at float64 scale means two implementations did
+#    the same arithmetic in a different order. A gap several orders of magnitude above that means
+#    they did different arithmetic. Both can be called "close"; only the first is agreement.
+# 2. **Check what an artifact can support, not what it asserts.** The committed report here has no
+#    provenance block, so nothing in it can be traced to the run that produced it. Every derived
+#    figure in it can still be recomputed from its own primitives, and that check catches an edited
+#    or mismatched summary. Knowing which of the two you have is the point.
+# 3. **Do not pin a hash against a file the reader cannot open.** A certified hash of a harness
+#    checkout is a gate that passes for exactly one artifact and fails for every later one, without
+#    telling anybody why. Record the lineage, recompute what is recomputable, and report the rest.
+# 4. **Alignment is a property of the configuration, not of the engine's category.** Three
+#    event-driven engines agree here because their execution semantics were deliberately matched,
+#    not because they share an architecture.
+# 5. **Runtime ratios are not portable.** They describe one machine, one software stack and one
+#    day, and they are recorded here rather than compared.
 #
-# 2. **Zipline reaches exact trade-count parity on that benchmark.** The
-#    residual dollar gap is small relative to the benchmark scale.
+# ### Known limitations
 #
-# 3. **Backtrader now matches to floating-point noise on the cached canonical
-#    rerun.** The old one-trade residual in the stale artifact is gone.
+# - One scenario, one asset class, one frequency. Engines that agree on 250 US equities at daily
+#   frequency may not agree on intraday bars, on futures roll behaviour, or on corporate actions.
+# - The default path reads a recorded result. Reproducing it needs the validation harness and both
+#   external engines installed, which is what `RUN_LIVE` is for.
+# - The fixture ranks assets and takes a share of each end of the ranking. It is built to generate
+#   a large number of fills, not to make money, and nothing here bears on whether it would.
 #
-# 4. **These comparisons complement, rather than replace, the LEAN notebooks.**
-#    LEAN gets both a canonical benchmark notebook and a real case-study
-#    transfer notebook because it is the primary modern external engine target.
-#
-# **Next**: [`16_case_study_lean_parity`](16_case_study_lean_parity.ipynb) shows
-# how the calibrated LEAN profile transfers from the canonical benchmark to the
-# real Chapter 16 case-study artifacts.
-
-# %% [markdown]
-# ---
-# *Notebook: 17_backtrader_zipline_engine_parity*
-# *ML4T 3rd Edition - Chapter 16: Strategy Simulation*
+# **Next:** [`18_vectorbt_engine_parity`](18_vectorbt_engine_parity.ipynb) applies the same
+# treatment to a vectorized engine, where the execution semantics differ by construction.

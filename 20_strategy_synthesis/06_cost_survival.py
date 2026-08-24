@@ -39,18 +39,21 @@
 # %%
 """Ch20 Friction Survival — cross-case-study cost-sweep analysis from registry."""
 
+import json
 import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
+from IPython.display import Markdown, display
 from matplotlib.patches import Patch
 
 from case_studies.utils.analytics import (
-    CADENCE_MAP,
     CASE_STUDY_IDS,
     SHORT_NAMES,
     load_carrier_cost_curves,
 )
+from utils.paths import get_chapter_dir
+from utils.style import show_with_alt
 
 warnings.filterwarnings("ignore")
 pl.Config.set_tbl_rows(20)
@@ -89,11 +92,25 @@ print(f"Loaded {len(costs_df)} carrier cost-sweep entries across {n_cs} case stu
 costs_df.head(5)
 
 # %% [markdown]
+# Assumed per-leg cost and rebalance cadence both come from each case study's
+# `setup.yaml`, read back through the Ch20 artifacts that `01_aggregate_synthesis`
+# writes, rather than being typed into this notebook.
+#
+# `setup.yaml` records a specific cadence such as `monthly_month_end` or
+# `daily_ny_close`. The charts group by period, taken from the leading word, and
+# anything unrecognised is grouped as unspecified rather than given a default.
+# The turnover multipliers attached to each period say how often a book of that
+# cadence is assumed to turn over relative to a daily one. They are an
+# assumption, not turnover measured from the backtests.
+#
 # ## Gross-to-Net Sharpe Degradation
 #
-# For each case study we compare the zero-cost (gross) Sharpe with the
-# Sharpe at the assumed cost level. This reveals how much performance
-# each dataset's cost structure consumes.
+# For each case study we compare the zero-cost (gross) Sharpe with the Sharpe at
+# the cost that case study actually assumes, which comes from its `setup.yaml`
+# by way of `overview.parquet`. The assumed cost rarely falls on a grid point, so
+# the net Sharpe is interpolated linearly between the two grid points that
+# bracket it, and the bracketing points are reported alongside.
+#
 
 # %%
 gross_df = costs_df.filter(pl.col("cost_bps") == 0)
@@ -107,34 +124,91 @@ best_alloc = (
 )
 
 # %%
+_overview = pl.read_parquet(get_chapter_dir(20) / "output" / "overview.parquet")
+ASSUMED_COST_BPS = dict(_overview.select("cs_id", "cost_bps").iter_rows())
+_synthesis = json.loads((get_chapter_dir(20) / "output" / "all_synthesis.json").read_text())
+CADENCE_BY_CS = {
+    cs: (data["meta"].get("cadence") or "unspecified") for cs, data in _synthesis.items()
+}
+
+CADENCE_PERIODS = ("15min", "hourly", "8_hour", "daily", "weekly", "monthly")
+TURNOVER_MULTIPLIER = {
+    "15min": 26.0,
+    "hourly": 6.5,
+    "8_hour": 3.0,
+    "daily": 1.0,
+    "weekly": 1.0 / 5,
+    "monthly": 1.0 / 21,
+}
+
+
+def _cadence_period(cadence: str) -> str:
+    for period in CADENCE_PERIODS:
+        if cadence.startswith(period):
+            return period
+    return "unspecified"
+
+
+def _sharpe_at(curve: pl.DataFrame, cost_bps: float) -> tuple[float, float, float]:
+    """Sharpe at `cost_bps`, linearly interpolated on the sweep grid.
+
+    Returns the interpolated Sharpe and the two grid costs it sits between. A
+    cost beyond either end of the grid is clamped to that end, which is reported
+    by the bracket coming back equal.
+    """
+    grid = curve["cost_bps"].to_list()
+    vals = curve["sharpe"].to_list()
+    if cost_bps <= grid[0]:
+        return vals[0], grid[0], grid[0]
+    if cost_bps >= grid[-1]:
+        return vals[-1], grid[-1], grid[-1]
+    for lo, hi, v_lo, v_hi in zip(grid, grid[1:], vals, vals[1:], strict=False):
+        if lo <= cost_bps <= hi:
+            w = 0.0 if hi == lo else (cost_bps - lo) / (hi - lo)
+            return v_lo + w * (v_hi - v_lo), lo, hi
+    return vals[-1], grid[-1], grid[-1]
+
+
+def _breakeven(curve: pl.DataFrame) -> tuple[float, bool]:
+    """Cost at which Sharpe crosses zero, and whether that crossing was observed.
+
+    Interpolates between the last positive grid point and the first negative one.
+    A curve still positive at the top of the grid is censored: the breakeven is
+    somewhere above the ceiling and the ceiling is not it.
+    """
+    grid = curve["cost_bps"].to_list()
+    vals = curve["sharpe"].to_list()
+    for lo, hi, v_lo, v_hi in zip(grid, grid[1:], vals, vals[1:], strict=False):
+        if v_lo > 0 >= v_hi:
+            w = v_lo / (v_lo - v_hi)
+            return lo + w * (hi - lo), True
+    return (grid[-1], False) if vals[-1] > 0 else (0.0, True)
+
+
 summary_rows = []
 for row in best_alloc.iter_rows(named=True):
     cs = row["case_study"]
     alloc = row["allocator"]
-    gross_row = gross_df.filter((pl.col("case_study") == cs) & (pl.col("allocator") == alloc))
-    if gross_row.is_empty():
-        continue
-    gross_sharpe = gross_row["sharpe"][0]
-
-    net_rows = net_df.filter((pl.col("case_study") == cs) & (pl.col("allocator") == alloc)).sort(
+    curve = costs_df.filter((pl.col("case_study") == cs) & (pl.col("allocator") == alloc)).sort(
         "cost_bps"
     )
-
-    if net_rows.is_empty():
+    if curve.height < 2 or curve["cost_bps"].min() > 0:
         continue
 
-    assumed = net_rows.row(0, named=True)
-    net_sharpe = assumed["sharpe"]
-    assumed_cost = assumed["cost_bps"]
-
-    positive = net_rows.filter(pl.col("sharpe") > 0)
-    breakeven_bps = int(positive["cost_bps"].max()) if not positive.is_empty() else 0
+    gross_sharpe = curve["sharpe"][0]
+    assumed_cost = ASSUMED_COST_BPS.get(cs)
+    if assumed_cost is None:
+        msg = f"No cost_bps for {cs} in overview.parquet; re-run 01_aggregate_synthesis"
+        raise RuntimeError(msg)
+    net_sharpe, bracket_lo, bracket_hi = _sharpe_at(curve, assumed_cost)
+    breakeven_bps, breakeven_observed = _breakeven(curve)
 
     summary_rows.append(
         {
             "case_study": cs,
             "display_name": SHORT_NAMES.get(cs, cs),
-            "cadence": CADENCE_MAP.get(cs, "unknown"),
+            "cadence": CADENCE_BY_CS.get(cs, "unspecified"),
+            "cadence_period": _cadence_period(CADENCE_BY_CS.get(cs, "unspecified")),
             "allocator": alloc,
             "gross_sharpe": round(gross_sharpe, 3),
             "net_sharpe": round(net_sharpe, 3),
@@ -143,7 +217,10 @@ for row in best_alloc.iter_rows(named=True):
             if gross_sharpe != 0
             else 0.0,
             "assumed_cost_bps": assumed_cost,
-            "breakeven_bps": breakeven_bps,
+            "grid_bracket": f"{bracket_lo:g}-{bracket_hi:g}",
+            "breakeven_bps": round(breakeven_bps, 1),
+            "breakeven_observed": breakeven_observed,
+            "survives": net_sharpe > 0,
         }
     )
 
@@ -154,11 +231,41 @@ summary.select(
     "display_name",
     "cadence",
     "gross_sharpe",
+    "assumed_cost_bps",
+    "grid_bracket",
     "net_sharpe",
     "sharpe_drag",
     "drag_pct",
-    "assumed_cost_bps",
     "breakeven_bps",
+    "breakeven_observed",
+    "survives",
+)
+
+# %% tags=["results"]
+_dead = summary.filter(~pl.col("survives"))
+_censored = summary.filter(~pl.col("breakeven_observed"))
+display(
+    Markdown(
+        f"{summary.height} case studies have a carrier cost sweep. "
+        + (
+            f"**{', '.join(_dead['display_name'].to_list())}** "
+            f"{'has' if _dead.height == 1 else 'have'} a negative Sharpe at the "
+            "cost the case study assumes, so the strategy does not survive its "
+            "own cost model. "
+            if _dead.height
+            else "All of them keep a positive Sharpe at the cost they assume. "
+        )
+        + f"Cost consumes between {summary['drag_pct'].min():.1f} and "
+        f"{summary['drag_pct'].max():.1f} percent of gross Sharpe.\n\n"
+        + (
+            f"For {', '.join(_censored['display_name'].to_list())} the Sharpe is "
+            f"still positive at the top of the swept grid, so the breakeven "
+            "column is a lower bound rather than a measurement: it is at least "
+            "that, and the grid does not say how much more."
+            if _censored.height
+            else "Every breakeven was observed inside the swept grid."
+        )
+    )
 )
 
 # %% [markdown]
@@ -189,9 +296,9 @@ ax.set_xlabel("Sharpe Drag (%)")
 ax.set_title("Cost Impact: Gross-to-Net Sharpe Degradation")
 ax.invert_yaxis()
 
-for bar, bps in zip(bars, summary["breakeven_bps"].to_list(), strict=False):
+for bar, row in zip(bars, summary.iter_rows(named=True), strict=False):
     ax.annotate(
-        f"BE: {bps} bps",
+        f"BE: {'' if row['breakeven_observed'] else '>'}{row['breakeven_bps']:g} bps",
         xy=(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2),
         va="center",
         fontsize=9,
@@ -201,7 +308,12 @@ for bar, bps in zip(bars, summary["breakeven_bps"].to_list(), strict=False):
 ax.set_xlim(right=max(summary["drag_pct"]) * 1.28)
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars giving the percentage of gross Sharpe consumed by each case "
+    "study's assumed cost, ordered by severity, each annotated with the cost at "
+    "which that strategy breaks even.",
+)
 
 # %% [markdown]
 # ## Breakeven Cost Thresholds by Frequency
@@ -211,14 +323,20 @@ fig.show()
 # budget that the signal supports before becoming unprofitable.
 
 # %%
-freq_order = ["15-min", "8-hourly", "daily", "monthly"]
-freq_colors = {"15-min": "#d62728", "8-hourly": "#ff7f0e", "daily": "#1f77b4", "monthly": "#2ca02c"}
+freq_order = list(CADENCE_PERIODS)
+freq_colors = {
+    "15min": "#d62728",
+    "hourly": "#e8833a",
+    "8_hour": "#ff7f0e",
+    "daily": "#1f77b4",
+    "weekly": "#5aa469",
+    "monthly": "#2ca02c",
+}
 
 fig, ax = plt.subplots(figsize=(10, 5))
 
 for i, row in enumerate(summary.sort("breakeven_bps").iter_rows(named=True)):
-    cadence = row["cadence"]
-    color = freq_colors.get(cadence, "gray")
+    color = freq_colors.get(row["cadence_period"], "gray")
     ax.barh(i, row["breakeven_bps"], color=color, height=0.6, edgecolor="none")
 
 ax.set_yticks(range(len(summary)))
@@ -231,7 +349,11 @@ legend_handles = [Patch(facecolor=freq_colors[f], label=f) for f in freq_order i
 ax.legend(handles=legend_handles, loc="lower right", title="Cadence")
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of the breakeven per-leg cost for each case study, ordered "
+    "from lowest to highest and coloured by rebalance cadence.",
+)
 
 # %% [markdown]
 # ## Cost Drag Curves
@@ -270,76 +392,87 @@ for cs_id in CS_LIST:
 ax.axhline(y=0, color="black", linestyle="--", alpha=0.3, linewidth=0.8)
 ax.set_xlabel("Per-Leg Cost (bps)")
 ax.set_ylabel("Sharpe Ratio")
-ax.set_title("Cost Sensitivity: Sharpe vs Per-Leg Cost")
+ax.set_title("Cost sensitivity: Sharpe against per-leg cost")
 ax.legend(loc="upper right", fontsize=9, ncol=2)
 
+# Mark each case study's assumed cost so the curve can be read at the point that
+# matters rather than across the whole grid.
+for cs_id in best_alloc_map:
+    _c = ASSUMED_COST_BPS.get(cs_id)
+    if _c is not None:
+        ax.axvline(_c, color="gray", alpha=0.25, linewidth=0.8, linestyle=":")
+
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Line chart of Sharpe against per-leg cost in basis points, one line per "
+    "case study over the swept grid, with a reference line at zero Sharpe and "
+    "faint vertical lines marking each case study's assumed cost.",
+)
 
 # %% [markdown]
 # ## Cost Survival Classification
 #
-# Each case study is classified by cost resilience: the ratio of its breakeven
-# to the per-leg cost it is actually assumed to pay (Table 20.7), not to the
-# grid's smallest step. A higher ratio means more headroom once realistic
-# frictions are imposed. Per-share regimes (ETFs, NASDAQ) use a bps-equivalent
-# anchor — ETFs a ~2 bps half-spread, NASDAQ the 10 bps measured-spread
-# protocol point.
+# Each case study is classified by cost resilience: the ratio of its breakeven to
+# the per-leg cost it is assumed to pay. A higher ratio means more headroom once
+# realistic frictions are imposed. A ratio below one means the breakeven sits
+# under the assumed cost, so the strategy is already losing money at its own
+# assumption, and it is classified apart from a thin but positive margin.
+#
+# The assumed cost is the one already in `summary`, read from each case study's
+# own setup rather than declared again here, so this table and the degradation
+# table above cannot disagree about what a case study is assumed to pay.
 
 # %%
-# Assumed per-leg cost (bps) in each carrier's signal/allocation stage,
-# from Table 20.7 / the Ch18 cost-model decisions.
-ASSUMED_COST_BPS = {
-    "etfs": 2.0,
-    "crypto_perps_funding": 4.0,
-    "nasdaq100_microstructure": 10.0,
-    "sp500_equity_option_analytics": 6.5,
-    "us_firm_characteristics": 12.5,
-    "fx_pairs": 4.0,
-    "cme_futures": 10.0,
-    "us_equities_panel": 12.5,
-}
-
-survival = (
-    summary.with_columns(
-        assumed_cost_bps=pl.col("case_study").replace_strict(
-            ASSUMED_COST_BPS, default=1.0, return_dtype=pl.Float64
-        ),
-    )
-    .with_columns(
-        cost_margin_bps=(pl.col("breakeven_bps") - pl.col("assumed_cost_bps")),
-        cost_margin_ratio=(
-            pl.col("breakeven_bps") / pl.col("assumed_cost_bps").clip(lower_bound=1)
-        ),
-    )
-    .with_columns(
-        resilience=pl.when(pl.col("cost_margin_ratio") >= 10)
-        .then(pl.lit("very robust"))
-        .when(pl.col("cost_margin_ratio") >= 3)
-        .then(pl.lit("robust"))
-        .when(pl.col("cost_margin_ratio") >= 1.5)
-        .then(pl.lit("marginal"))
-        .otherwise(pl.lit("fragile")),
-    )
+survival = summary.with_columns(
+    cost_margin_bps=(pl.col("breakeven_bps") - pl.col("assumed_cost_bps")),
+    cost_margin_ratio=(pl.col("breakeven_bps") / pl.col("assumed_cost_bps").clip(lower_bound=1)),
+).with_columns(
+    resilience=pl.when(pl.col("cost_margin_ratio") < 1)
+    .then(pl.lit("does not survive"))
+    .when(pl.col("cost_margin_ratio") >= 10)
+    .then(pl.lit("very robust"))
+    .when(pl.col("cost_margin_ratio") >= 3)
+    .then(pl.lit("robust"))
+    .when(pl.col("cost_margin_ratio") >= 1.5)
+    .then(pl.lit("marginal"))
+    .otherwise(pl.lit("fragile")),
 )
 
 print("=== Cost Survival Classification ===")
 survival.select(
     "display_name",
     "cadence",
-    "net_sharpe",
     "assumed_cost_bps",
+    "net_sharpe",
     "breakeven_bps",
+    "breakeven_observed",
     "cost_margin_ratio",
     "resilience",
+)
+
+# %% tags=["results"]
+_res = survival.group_by("resilience").agg(cs=pl.col("display_name")).sort("resilience")
+display(
+    Markdown(
+        "; ".join(
+            f"**{r['resilience']}**: {', '.join(sorted(r['cs']))}"
+            for r in _res.iter_rows(named=True)
+        )
+        + ". A ratio is only as good as the breakeven behind it, and where the "
+        "sweep never crossed zero the breakeven is the grid ceiling rather than "
+        "a crossing, so the ratio for those is a lower bound too."
+    )
 )
 
 # %% [markdown]
 # ## S&P 500 Options: Spread Realism Caveat
 #
 # The S&P 500 Options case study was validated using executable-label
-# backtesting — pricing straddle entries and exits at actual bid/ask quotes
-# rather than assumed bps costs. The numbers are decisive:
+# backtesting, pricing straddle entries and exits at actual bid/ask quotes rather
+# than at an assumed bps cost. That case study has no carrier cost sweep, so it
+# does not appear in any table above; the figures below are quoted from its own
+# evaluation and are not computed here.
 #
 # - **Median round-trip spread**: 1091 bps of premium (10.9%)
 # - **Best executable Sharpe**: −1.05 (across 5 predictions × 8 schemes)
@@ -366,16 +499,9 @@ survival.select(
 
 # %%
 if not summary.is_empty():
-    freq_to_turnover_multiplier = {
-        "15-min": 26.0,
-        "8-hourly": 3.0,
-        "daily": 1.0,
-        "monthly": 1.0 / 21,
-    }
-
     regime = summary.with_columns(
-        turnover_mult=pl.col("cadence").replace_strict(
-            freq_to_turnover_multiplier,
+        turnover_mult=pl.col("cadence_period").replace_strict(
+            TURNOVER_MULTIPLIER,
             default=1.0,
             return_dtype=pl.Float64,
         ),
@@ -406,7 +532,7 @@ if not summary.is_empty():
     }
 
     for row in regime.iter_rows(named=True):
-        color = freq_colors.get(row["cadence"], "gray")
+        color = freq_colors.get(row["cadence_period"], "gray")
         size = max(60, min(360, row["turnover_mult"] ** 0.5 * 120))
         ax.scatter(
             row["turnover_mult"],
@@ -455,52 +581,78 @@ if not summary.is_empty():
     )
 
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Log-log scatter of breakeven cost against assumed relative turnover, one "
+        "marker per case study coloured by cadence, with a horizontal line at the "
+        "lowest assumed cost in the panel.",
+    )
 
 # %% [markdown]
-# **Interpretation**: Marker x-position is per-day turnover relative to a daily
-# strategy (15-min ≈ 26×, 8-hourly ≈ 3×, monthly ≈ 0.05×); marker y is the
-# breakeven cost at which the strategy's net Sharpe crosses zero. Strategies
-# above the dashed survival floor (assumed cost ≈ 1 bps per leg) survive their
-# cost model; those below do not. Three regimes emerge:
-#
-# - **High-frequency** (NQ-100, Crypto): the steepest cost gradients, set by
-#   turnover. NQ-100's marginal gross (+1.16) breaks even at ~10 bps — right at
-#   its measured-spread cost, the thinnest headroom in the test bed (fragile).
-#   Crypto's stronger gross (+3.5) reaches 15 bps, a comfortable multiple of its
-#   3-to-4 bps schedule despite the 8-hourly cadence.
-# - **Daily, signal-dependent** (FX, US Equities): FX breaks even at ~7 bps,
-#   only a couple of basis points above its assumed spread (marginal), while
-#   US Equities' stronger signal carries it through the whole grid — survival
-#   here is set by signal strength, not cadence alone.
-# - **Monthly, robust** (CME and SP500 Eq+Opt ≈ 30 bps; ETFs and US Firms to
-#   the 50-bps ceiling): low turnover leaves wide margins, though US Firms'
-#   binding constraint is universe liquidity (bottom-quartile spreads of
-#   100–500 bps), not the swept per-leg cost.
-#
-# SP500 Options is excluded from the "monthly robust" category because
-# executable-label backtesting at actual bid/ask prices shows best
-# Sharpe = −1.05.
+# %% tags=["results"]
+_reg = regime.sort("turnover_mult", descending=True)
+display(
+    Markdown(
+        "Marker x-position is assumed per-day turnover relative to a daily "
+        "strategy, y is the cost at which net Sharpe crosses zero. The turnover "
+        "multipliers are an assumption written into this notebook, not a "
+        "measurement from the backtests: they say how often a book of a given "
+        "cadence is expected to turn over, and the chart uses them to place the "
+        "case studies rather than to test them.\n\n"
+        + "; ".join(
+            f"**{r['display_name']}** ({r['cadence']}), breakeven "
+            f"{'' if r['breakeven_observed'] else 'at least '}"
+            f"{r['breakeven_bps']:g} bps against an assumed "
+            f"{r['assumed_cost_bps']:g}"
+            for r in _reg.iter_rows(named=True)
+        )
+        + ".\n\nThe cadences present here span a narrow part of the range the "
+        "chart is drawn for. The high-frequency corner is empty: NASDAQ-100 is "
+        "excluded pending a corrected carrier cost grid, and the other "
+        "sub-daily case studies have no cost sweep. Nothing here tests whether "
+        "turnover or signal strength sets the breakeven, because the case "
+        "studies that would separate them are the ones missing."
+    )
+)
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **Frequency is the dominant cost driver**. Higher-frequency strategies
-#    (15-min, 8-hourly) face structurally higher turnover and need wider
-#    cost budgets to survive.
-# 2. **Monthly strategies are most robust**. Monthly rebalance cadences
-#    (ETFs, CME, US Firms) have the widest breakeven margins because
-#    turnover per period is inherently lower.
-# 3. **Cost cliffs are steep**. Most strategies show a sharp drop from
-#    profitable to unprofitable within a narrow cost range — the difference
-#    between a 5-bps and 15-bps execution cost can determine viability.
-# 4. **Cost structure matters as much as signal**. A strong signal in a
-#    high-cost asset class may underperform a weaker signal in a low-cost
-#    asset class after realistic costs.
-# 5. **Generic bps sweeps can mislead**. SP500 Options demonstrates that
-#    when the dominant cost is the bid-ask spread (median RT 1091 bps),
-#    a basis-point sensitivity grid understates the cost. Executable
-#    backtesting against actual quotes is the right test for those cases.
+# - **A cost sweep is only informative at the cost the strategy assumes.** The
+#   gross Sharpe and the Sharpe at the top of the grid are both easy to read off
+#   and neither is the number that decides whether the strategy is tradable. The
+#   assumed cost comes from the case study's own setup, and the tables above
+#   report the net Sharpe there.
+# - **Breakeven and assumed cost have to be compared, not reported side by
+#   side.** The ratio between them is the headroom, and a ratio below one means
+#   the strategy is already under water at its own assumption. The computed
+#   classification above says which case studies are where.
+# - **A breakeven above the top of the swept grid is not a breakeven.** Where the
+#   curve is still positive at the ceiling, the honest statement is that the
+#   crossing is somewhere above it, and the tables mark those rows rather than
+#   printing the ceiling as though it had been measured.
+# - **A basis-point grid does not model every cost structure.** Where the
+#   dominant cost is a wide bid-ask spread rather than a proportional fee, a bps
+#   sweep understates it, and the answer is an executable backtest against
+#   quotes. The S&P 500 Options section above is the worked case.
+#
+# ## Known Limitations
+#
+# - Only case studies with a carrier cost sweep appear. NASDAQ-100 is excluded by
+#   `DEFERRED_V31_CASE_STUDIES` pending a corrected cost grid, and the rest have
+#   no sweep because their registries are being rebuilt. The loaded count is
+#   printed at the top.
+# - The sweep applies one proportional per-leg cost to every trade. Real costs
+#   vary with size, with the instrument, and with the state of the book, and the
+#   spread realism section is where that assumption is checked rather than
+#   assumed.
+# - Net Sharpe at the assumed cost is interpolated between grid points; the
+#   bracketing points are in the table so the interpolation can be checked.
+# - The turnover multipliers used to place case studies on the cadence chart are
+#   stated assumptions about how often each cadence trades, not turnover measured
+#   from the backtests.
+# - Every Sharpe here is a validation-fold number for a configuration chosen on
+#   validation data, so the cost headroom inherits that selection.
 #
 # **Next**: [`07_regime_risk`](07_regime_risk.ipynb) examines regime
 # robustness and risk overlays.

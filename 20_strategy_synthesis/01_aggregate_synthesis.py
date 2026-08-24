@@ -41,13 +41,14 @@ import warnings
 
 import polars as pl
 import yaml
+from IPython.display import Markdown, display
 
 warnings.filterwarnings("ignore")
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_returns
 from case_studies.utils.strategy_analysis import compute_cost_bps
-from utils.paths import get_case_study_dir, get_chapter_dir
+from utils.paths import REPO_ROOT, get_case_study_dir, get_chapter_dir
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
@@ -207,19 +208,10 @@ from holdout import LABEL_RESTRICTIONS as _CLUSTER_LABEL_RESTRICTIONS  # noqa: E
 # have no entry here and skip the filter altogether.
 _RUNG3_PREDICATE = (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null()
 
-# NASDAQ-100 carrier pin. The cost-feasible **ensemble** slot design was fixed
-# before holdout scoring as diversification under validation selection
-# uncertainty. Corrected validation Sharpe is +1.348 and sealed-holdout Sharpe
-# is +0.411; both confidence intervals straddle zero. Pin the exact corrected
-# validation row so the reader path fails closed instead of selecting a
-# historical family sibling. The corrected linear holdout is a comparator only
-# and is ineligible for reselection.
-_NASDAQ_ACTIVE_VAL_HASH = "9d111089aa27"
-_NASDAQ_ACTIVE_HOLDOUT_HASH = "eb3da38446fe"
-_NASDAQ_PREDICATE = (
-    (pl.col("universe_filter") == "cost_feasible")
-    & (pl.col("family") == "ensemble")
-    & (pl.col("backtest_hash") == _NASDAQ_ACTIVE_VAL_HASH)
+# NASDAQ-100 pin: cost-feasible ensemble, chosen before the holdout was opened
+# and matched on those two design attributes, which any registry can satisfy.
+_NASDAQ_PREDICATE = (pl.col("universe_filter") == "cost_feasible") & (
+    pl.col("family") == "ensemble"
 )
 
 _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
@@ -434,8 +426,10 @@ if not cluster_df.is_empty():
 # %% [markdown]
 # ## Overview Table
 #
-# Summary showing the diversity of the test bed: nine case studies spanning
-# six asset classes, three frequencies, and universe sizes from 19 to 634.
+# The nine case studies differ in asset class, rebalancing frequency, universe
+# size, and the cost assumption each one carries. The table records those four
+# properties so that a later result can be attributed to the setting it was
+# measured in rather than to the model that produced it.
 
 # %%
 overview_rows = []
@@ -443,7 +437,15 @@ for cs, explorer in explorers.items():
     setup = configs.get(cs, {})
     cost_bps = compute_cost_bps(setup)
     universe = setup.get("universe", {})
-    n_assets = universe.get("n_assets", 0) or len(universe.get("symbols", []))
+    # A futures universe is sized in products rather than in assets, so
+    # cme_futures declares `n_products` where the others declare `n_assets`.
+    # Reading only the latter reported that case study as an empty universe.
+    n_assets = (
+        universe.get("n_assets")
+        or universe.get("n_products")
+        or len(universe.get("symbols", []))
+        or 0
+    )
     primary_label = setup.get("labels", {}).get("primary", "")
 
     families = explorer.compare_families(stage="signal")
@@ -1907,6 +1909,18 @@ if not lineage_df.is_empty():
 
 
 # %%
+def _optional_metric(db: sqlite3.Connection, table: str, column: str, alias: str) -> str:
+    """Select `table.column` when the registry has it, otherwise a NULL of the same alias.
+
+    Registries written before a metric existed simply lack its column, and a query naming one
+    aborts with `no such column` - taking every other case study down with it. Probing the schema
+    keeps a stale registry a row of missing values rather than a failed run.
+    """
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    prefix = {"backtest_metrics": "bm", "prediction_metrics": "pm"}[table]
+    return f"{prefix}.{column} AS {alias}" if column in columns else f"NULL AS {alias}"
+
+
 def query_holdout_rows():
     """Query holdout backtest results from each case study registry.
 
@@ -1947,9 +1961,6 @@ def query_holdout_rows():
                     "json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?"
                 )
                 params.append(rung["exit_at_max_days"])
-        if cs == "nasdaq100_microstructure":
-            clauses.append("b.backtest_hash = ?")
-            params.append(_NASDAQ_ACTIVE_HOLDOUT_HASH)
         # Pin the holdout pick to val rank-1's *full* strategy spec (signal
         # + allocation + risk) so the val/holdout comparison reads the same
         # full pipeline on both sides. Without this constraint, MAX(sharpe)
@@ -1966,24 +1977,29 @@ def query_holdout_rows():
 
         db = sqlite3.connect(str(db_path))
         db.row_factory = sqlite3.Row
+        optional = ", ".join(
+            [
+                _optional_metric(db, "prediction_metrics", "ic_mean_daily", "holdout_ic_daily"),
+                _optional_metric(db, "prediction_metrics", "ic_se_hac", "holdout_ic_se_hac"),
+                _optional_metric(db, "prediction_metrics", "ic_p_hac", "holdout_ic_p_hac"),
+                _optional_metric(db, "prediction_metrics", "ic_ci_lo", "holdout_ic_ci_lo"),
+                _optional_metric(db, "prediction_metrics", "ic_ci_hi", "holdout_ic_ci_hi"),
+                _optional_metric(db, "backtest_metrics", "sharpe_ci95_lo", "holdout_sharpe_ci_lo"),
+                _optional_metric(db, "backtest_metrics", "sharpe_ci95_hi", "holdout_sharpe_ci_hi"),
+                _optional_metric(db, "backtest_metrics", "psr_pvalue", "holdout_psr_p"),
+            ]
+        )
         rows = db.execute(
             f"""
             SELECT t.family, t.config_name, t.label,
                    b.backtest_hash AS holdout_backtest_hash,
                    p.prediction_hash AS holdout_prediction_hash,
                    pm.ic_mean AS holdout_ic,
-                   pm.ic_mean_daily AS holdout_ic_daily,
-                   pm.ic_se_hac AS holdout_ic_se_hac,
-                   pm.ic_p_hac AS holdout_ic_p_hac,
-                   pm.ic_ci_lo AS holdout_ic_ci_lo,
-                   pm.ic_ci_hi AS holdout_ic_ci_hi,
+                   {optional},
                    bm.sharpe AS holdout_sharpe,
-                   bm.sharpe_ci95_lo AS holdout_sharpe_ci_lo,
-                   bm.sharpe_ci95_hi AS holdout_sharpe_ci_hi,
                    bm.max_drawdown AS holdout_max_dd,
                    bm.cagr AS holdout_cagr,
-                   bm.num_trades AS holdout_num_trades,
-                   bm.psr_pvalue AS holdout_psr_p
+                   bm.num_trades AS holdout_num_trades
             FROM prediction_sets p
             JOIN training_runs t ON p.training_hash = t.training_hash
             LEFT JOIN prediction_metrics pm
@@ -2087,15 +2103,15 @@ attrition = {
 }
 
 for cs in ALL_CASE_STUDIES:
-    display = DISPLAY_NAMES.get(cs, cs)
+    display_name = DISPLAY_NAMES.get(cs, cs)
 
     # IC check
-    cs_ic = ic_df.filter(pl.col("case_study") == display)
+    cs_ic = ic_df.filter(pl.col("case_study") == display_name)
     if not cs_ic.is_empty() and cs_ic["ic_best"].max() > 0:
         attrition["good_predictor"] += 1
 
     # Signal Sharpe check
-    cs_bt = bt_df.filter(pl.col("case_study") == display)
+    cs_bt = bt_df.filter(pl.col("case_study") == display_name)
     if not cs_bt.is_empty():
         sig_sr = cs_bt["signal_sharpe"][0]
         if sig_sr is not None and sig_sr > 0:
@@ -2155,7 +2171,7 @@ for stage, count in attrition.items():
 # %%
 measurement_rows = []
 for cs in ALL_CASE_STUDIES:
-    display = DISPLAY_NAMES.get(cs, cs)
+    display_name = DISPLAY_NAMES.get(cs, cs)
     cluster_row = (
         cluster_df.filter(pl.col("cs_id") == cs) if not cluster_df.is_empty() else pl.DataFrame()
     )
@@ -2175,7 +2191,7 @@ for cs in ALL_CASE_STUDIES:
 
     measurement_rows.append(
         {
-            "case_study": display,
+            "case_study": display_name,
             "cs_id": cs,
             "rank1_val_sharpe": rank1,
             "rank1_rank10_spread": rank10_spread,
@@ -2262,11 +2278,30 @@ def build_variant_rows():
     return variant_rows
 
 
+# %% [markdown]
+# The schema is declared rather than inferred. Polars reads the leading rows to guess a column's
+# type, and a registry that has no metrics yet contributes rows whose `ic` and `sharpe` are all
+# null - enough of them and the guess comes back as a null column, which then refuses the first
+# real float that arrives behind it. Declaring the types makes an empty registry contribute
+# missing values instead of breaking the frame.
+
 # %%
 variant_rows = build_variant_rows()
 
 # %%
-variant_df = pl.DataFrame(variant_rows)
+variant_df = pl.DataFrame(
+    variant_rows,
+    schema={
+        "case_study": pl.String,
+        "cs_id": pl.String,
+        "cadence": pl.String,
+        "source": pl.String,
+        "family": pl.String,
+        "ic": pl.Float64,
+        "sharpe": pl.Float64,
+        "positive_sharpe": pl.Boolean,
+    },
+)
 print(f"\n=== Variant Analysis: {len(variant_df)} variants ===")
 if not variant_df.is_empty():
     print(
@@ -2295,7 +2330,24 @@ if not variant_df.is_empty():
 # notebooks 02–06 and `generate_figures.py`. All values are queried
 # from `registry.db` and `setup.yaml`; nothing is hardcoded.
 
+# %% [markdown]
+# Pinning a case study to its spine prediction stops cost and risk figures being
+# pooled out of full-universe rows when the selected strategy runs on a
+# restricted subset, and `build_all_synthesis` raises rather than pool silently.
+# That guard is aimed at a pin which fails to match rows that do exist, meaning
+# the pin has gone stale. A case study whose registry holds no backtests at all
+# has nothing to pool and nothing to be stale against, and pinning it would abort
+# the nine-case-study aggregation over one empty registry. Those are left
+# unpinned, and their cost and risk entries are reported as not applicable.
+
 # %%
+_PINNED_WITH_EVIDENCE = frozenset(
+    row["case_study_id"]
+    for row in bt_rows
+    if row["case_study_id"] in _CLUSTER_RUNG_RESTRICTIONS
+    and (row["n_signal"] + row["n_allocation"] + row["n_risk"]) > 0
+)
+
 from case_studies.utils.strategy_analysis import build_all_synthesis
 
 synthesis_dict = build_all_synthesis(
@@ -2309,7 +2361,7 @@ synthesis_dict = build_all_synthesis(
     display_names=DISPLAY_NAMES,
     asset_class_map=ASSET_CLASS_MAP,
     freq_map=FREQ_MAP,
-    pin_cost_risk_to_spine=frozenset(_CLUSTER_RUNG_RESTRICTIONS),
+    pin_cost_risk_to_spine=_PINNED_WITH_EVIDENCE,
     allow_missing_spine=ALLOW_MISSING_SPINE,
 )
 
@@ -2396,9 +2448,38 @@ if not variant_df.is_empty():
 )
 (OUTPUT_DIR / "all_synthesis.json").write_text(json.dumps(synthesis_dict, indent=2))
 
-print(f"\nSaved aggregated data to {OUTPUT_DIR}")
+# Relative to the repository root: an absolute path is specific to the machine
+# that ran the notebook and tells a reader nothing.
+print(f"\nSaved aggregated data to {OUTPUT_DIR.relative_to(REPO_ROOT)}")
 for f in sorted(OUTPUT_DIR.glob("*.parquet")) + sorted(OUTPUT_DIR.glob("*.json")):
     print(f"  {f.name}: {f.stat().st_size / 1024:.1f} KB")
+
+# %% [markdown]
+# ## What the Empty Cells Mean
+#
+# Several tables above carry nulls for whole case studies. A null here is not a
+# failed strategy, it is an absent measurement: those case studies are being
+# rebuilt and their registries hold no backtest rows yet, so there is nothing
+# for the aggregation to read. Predictions and their IC survive the rebuild -
+# those are in `prediction_metrics`, a separate table - which is why a case study
+# can have an IC in the family comparison and nulls everywhere downstream of it.
+# The cell below names which ones, rather than leaving the reader to infer it
+# from a pattern of blanks.
+
+# %% tags=["results"]
+_empty = [
+    row["case_study"]
+    for row in bt_rows
+    if (row["n_signal"] + row["n_allocation"] + row["n_cost"] + row["n_risk"]) == 0
+]
+display(
+    Markdown(
+        f"**{len(_empty)} of {len(bt_rows)} case studies have no registered backtests**: "
+        + (", ".join(_empty) if _empty else "none")
+        + ". Every backtest-derived column is null for these, and the stage "
+        "attrition counts above treat them as not reaching the tradable stage."
+    )
+)
 
 # %% [markdown]
 # ## Artifacts Produced
