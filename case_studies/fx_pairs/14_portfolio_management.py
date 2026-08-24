@@ -193,10 +193,22 @@ top_n = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
 selected_configs: dict[str, set[tuple[str, str]]] = {}
 candidate_sets: dict[str, CandidateSet] = {}
 
-for label in sorted(catalog.get_column("label").unique()):
+# The labels come from the baselines this run resolved, not from this notebook's own
+# catalog. A narrowed upstream covers fewer labels than the catalog holds, and rebuilding
+# the label list locally means reproducing 13_backtest's narrowing by convention - the
+# same guess that reading the registered population exists to avoid. When the run is not
+# scoped it is publishing canonical names, and then the two must agree exactly.
+baseline_labels = sorted({_result_config(result)[0] for result in baseline_results})
+if not baseline_labels:
+    raise RuntimeError("the equal-weight baselines carry no labels")
+if not POPULATION_NAME and baseline_labels != sorted(catalog.get_column("label").unique()):
+    raise RuntimeError(
+        "the canonical baseline population does not cover every label in the catalog: "
+        f"baselines {baseline_labels}, catalog {sorted(catalog.get_column('label').unique())}"
+    )
+
+for label in baseline_labels:
     label_results = [result for result in baseline_results if _result_config(result)[0] == label]
-    if not label_results:
-        raise RuntimeError(f"no equal-weight baselines resolved for {label}")
     if include_preview:
         ordered_configs = sorted({_result_config(result)[1:] for result in label_results})
     else:

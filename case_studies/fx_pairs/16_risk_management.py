@@ -190,8 +190,22 @@ else:
             name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
         )
     )
-    for label in sorted(catalog.get_column("label").unique()):
-        members = [result for result in [*baselines, *allocations] if _label(result) == label]
+    # The labels come from the upstream populations this run resolved, not from this
+    # notebook's own catalog. A narrowed upstream covers fewer labels than the catalog
+    # holds, and rebuilding the list locally reproduces the upstream narrowing by
+    # convention. Unscoped, the run publishes canonical names and the two must agree.
+    upstream = [*baselines, *allocations]
+    upstream_labels = sorted({_label(result) for result in upstream})
+    if not upstream_labels:
+        raise RuntimeError("the upstream populations carry no labels")
+    if not POPULATION_NAME and upstream_labels != sorted(catalog.get_column("label").unique()):
+        raise RuntimeError(
+            "the canonical upstream populations do not cover every label in the catalog: "
+            f"upstream {upstream_labels}, "
+            f"catalog {sorted(catalog.get_column('label').unique())}"
+        )
+    for label in upstream_labels:
+        members = [result for result in upstream if _label(result) == label]
         candidates = CandidateSet.create(
             study,
             name=research_name(
