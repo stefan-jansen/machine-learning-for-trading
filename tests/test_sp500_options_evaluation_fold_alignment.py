@@ -146,9 +146,13 @@ def test_real_artifact_alignment_is_safe_after_regeneration() -> None:
     financial = pl.read_parquet(financial_path)
     temporal = pl.read_parquet(temporal_path)
     setup = yaml.safe_load(setup_path.read_text())
+    # setup_path rather than case_study_id: the buffer above is read from this file, and
+    # case_study_id would take the evaluation section from somewhere else - the repo, or
+    # ML4T_OUTPUT_DIR's seeded copy when one is set. The folds and the buffer that shifts
+    # them have to come from the same config or the artifact is checked against neither.
     folds = generate_cv_splits(
         financial.select("timestamp"),
-        case_study_id="sp500_options",
+        setup_path=setup_path,
         label_buffer=str(setup["labels"]["buffer"]),
     )
 

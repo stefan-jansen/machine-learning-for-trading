@@ -238,10 +238,10 @@ def intermediates_dir(test_data_dir):
     When running downstream chapters (Ch11+), they need labels/features
     from pipeline stages. These are pre-computed and stored in test-data repo.
 
-    ``test_data_dir`` is requested for its skip: with no test data at all there is
-    nothing for a consumer of this fixture to do, and that fixture already says so.
-    The path itself comes from ``_resolve_intermediates_root``, which the seeding
-    fixture uses too.
+    ``test_data_dir`` is requested for its side effect - it puts the resolved data
+    path in ``ML4T_DATA_PATH`` for the rest of the session - not for a skip, which it
+    does not do (``populated_data_dir`` is the fixture that skips). The path itself
+    comes from ``_resolve_intermediates_root``, which the seeding fixture uses too.
     """
     return _resolve_intermediates_root()
 
