@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -233,18 +233,31 @@ plan.select(
 # `SUPERSEDES_POPULATION` names the earlier snapshot this one replaces. A population is hashed
 # over its members *and* over what it supersedes, so the default carries the hash the published
 # snapshot actually superseded: leaving it empty would compute a different population and the
-# registry would refuse it against the one on record. It applies to a canonical run only. A
-# preview population lives and dies with its workspace, so it has no lineage to extend and the
-# runner refuses the argument rather than let a caller believe a snapshot was superseded when
-# nothing was written down.
+# registry would refuse it against the one on record.
+#
+# The default hash records what the published snapshot replaced, so it is only correct under that
+# population's name. Two runs therefore start a lineage of their own: a preview, whose population
+# lives and dies with its workspace and has nothing to extend, and a run under a name of its own,
+# whose first version has no predecessor and would be refused for claiming one. Passing a hash
+# explicitly under a custom name still supersedes, which is what a second version of that
+# population needs.
 
 # %%
-population_name = POPULATION_NAME or "sp500-options-gbm-validation-v1"
+DEFAULT_POPULATION_NAME = "sp500-options-gbm-validation-v1"
+PUBLISHED_SUPERSEDES = "6f061b802c3f"
+
+population_name = POPULATION_NAME or DEFAULT_POPULATION_NAME
+supersedes = SUPERSEDES_POPULATION or None
+starts_own_lineage = EXECUTION_TIER != "canonical" or (
+    population_name != DEFAULT_POPULATION_NAME and supersedes == PUBLISHED_SUPERSEDES
+)
+if starts_own_lineage:
+    supersedes = None
 execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=(SUPERSEDES_POPULATION or None) if EXECUTION_TIER == "canonical" else None,
+    supersedes=supersedes,
 )
 
 print(f"{len(execution.runs)} configurations fitted")
