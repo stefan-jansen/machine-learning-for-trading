@@ -493,10 +493,13 @@ def test_a_legacy_and_a_current_registry_load_together(seeded_registries) -> Non
             "INSERT INTO prediction_sets VALUES (?, ?, ?, ?, ?, ?)",
             ("ph_c_val", "th_c", 0, "final", "validation", "2024-01-02T00:00:00"),
         )
+        # `ic_mean` null here and populated on the etfs side: a classification run stores no
+        # cross-sectional IC when no fold has a defined one, which is the same Null-against-
+        # Float64 concat under a third column name.
         conn.execute(
             "INSERT INTO prediction_metrics (prediction_hash, computed_at, ic_mean, task_type, "
             "auc_roc, accuracy) VALUES (?, ?, ?, ?, ?, ?)",
-            ("ph_c_val", "2024-01-03", 0.04, "classification", 0.55, 0.51),
+            ("ph_c_val", "2024-01-03", None, "classification", 0.55, 0.51),
         )
         conn.commit()
     # crypto never gained the column, so its rows carry no cross-sectional AUC at all.
@@ -521,12 +524,16 @@ def test_a_legacy_and_a_current_registry_load_together(seeded_registries) -> Non
         assert set(df["case_study"].to_list()) == {"etfs", "crypto_perps_funding"}
         assert df.schema["auc"] == pl.Float64
         assert df.schema["log_loss"] == pl.Float64
+        assert df.schema["ic_mean"] == pl.Float64
         by_case = dict(zip(df["case_study"], df["auc"], strict=True))
         assert by_case["etfs"] == 0.58
         assert by_case["crypto_perps_funding"] is None
         by_case_log_loss = dict(zip(df["case_study"], df["log_loss"], strict=True))
         assert by_case_log_loss["etfs"] == 0.61
         assert by_case_log_loss["crypto_perps_funding"] is None
+        by_case_ic = dict(zip(df["case_study"], df["ic_mean"], strict=True))
+        assert by_case_ic["etfs"] == 0.04
+        assert by_case_ic["crypto_perps_funding"] is None
 
 
 # -----------------------------------------------------------------------------

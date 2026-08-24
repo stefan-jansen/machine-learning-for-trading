@@ -386,7 +386,8 @@ def load_classification_metrics(
         df = _query(db_path, sql, tuple(params))
         if len(df) > 0:
             # Any of these is all-null for a registry that does not compute it, which polars
-            # reads back as the Null dtype: `auc` where no cross-section yields one, and
+            # reads back as the Null dtype: `ic_mean` where no fold has a defined
+            # cross-sectional IC, `auc` where no cross-section yields one, and
             # `auc_pr` / `log_loss` / `brier_score` for the multiclass rows that never emit
             # them. The concat below is over registries, and one returning Null where another
             # returns Float64 raises rather than widening. Casting rather than relaxing the
@@ -396,6 +397,7 @@ def load_classification_metrics(
                     *(
                         pl.col(column).cast(pl.Float64, strict=False)
                         for column in (
+                            "ic_mean",
                             "auc",
                             "auc_roc",
                             "accuracy",
