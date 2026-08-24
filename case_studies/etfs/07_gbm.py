@@ -95,6 +95,7 @@
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+import yaml
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
@@ -107,6 +108,7 @@ from case_studies.research import (
     resolved_model_plan,
     run_model_population,
 )
+from utils.artifact_specs import resolve_label_horizon
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -669,11 +671,25 @@ objective_summary
 # The mechanism above is a claim about the label, not the model, so it is checkable without
 # fitting anything. Excess kurtosis measures how much of a distribution's variance comes from
 # rare large moves; where the loss functions separate, the heavier-tailed label should separate
-# them further. The rows are cut at the development boundary the fits were resolved against, so
-# nothing held back for the holdout is described here.
+# them further. That is the prediction; section 5 reports what the two frames actually show.
+#
+# Each label is cut on the date it **resolves**, not the date it is observed, and against its
+# own development boundary rather than a boundary shared with the other label. Both parts
+# matter here. A 21-session label observed inside the development window can have its forward
+# window closing after the boundary, which makes it a holdout row that a filter on the
+# observation date would have kept - the rule `02_labels` states and applies. And the two
+# labels resolve their last validation fold on different dates, so one shared cut would
+# describe `fwd_ret_21d` rows the 21-day fits never saw.
 
 # %% tags=["results"]
-development_end = plan.get_column("validation_end").max()
+development_end = {
+    label: plan.filter(pl.col("label") == label).get_column("validation_end").max()
+    for label in panel_labels
+}
+setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text())
+label_horizon = {
+    label: int(resolve_label_horizon("etfs", label, setup).rstrip("Dd")) for label in panel_labels
+}
 tails = pl.DataFrame(
     [
         {
@@ -692,7 +708,13 @@ tails = pl.DataFrame(
                 label,
                 study.labels.get(label, execution_tier=EXECUTION_TIER)
                 .load()
-                .filter(pl.col("timestamp") <= development_end)
+                .with_columns(
+                    pl.col("timestamp")
+                    .shift(-label_horizon[label])
+                    .over("symbol")
+                    .alias("_label_end")
+                )
+                .filter(pl.col("_label_end") <= development_end[label])
                 .get_column(label)
                 .drop_nulls()
                 .to_numpy(),
@@ -750,12 +772,22 @@ spread
 # labels Huber has the highest `mean_ic`, absolute error is next and squared error is last, and
 # squared error is also the only objective whose `above_zero` is not 5 of 5. The families order
 # on their averages but they overlap on individual configurations, so this is a statement about
-# objectives and not a ranking of the fifteen. That much is what the label's tails predict.
-# Squared error weights an observation by the square of its error, so the largest moves dominate
-# what each successive tree is fitted to, while the information coefficient is a rank correlation
-# that cares about order rather than magnitude: effort spent getting the extremes right buys
-# nothing on this metric. **An objective is a claim about which errors matter, and it is worth
-# choosing to match the metric the result will be judged on.**
+# objectives and not a ranking of the fifteen. Squared error weights an observation by the square
+# of its error, so the largest moves dominate what each successive tree is fitted to, while the
+# information coefficient is a rank correlation that cares about order rather than magnitude:
+# effort spent getting the extremes right buys nothing on this metric. **An objective is a claim
+# about which errors matter, and it is worth choosing to match the metric the result will be
+# judged on.**
+#
+# **The ordering is what the tails predict; the size of the gap is not.** The prediction in
+# section 4 was that the heavier-tailed label should separate the objectives further. `tails`
+# puts `fwd_ret_5d` at excess kurtosis 10.26 against `fwd_ret_21d`'s 7.00, so five-day is the
+# heavier-tailed label. But the Huber-minus-squared-error gap in `objective_summary` is 0.0143
+# on `fwd_ret_21d` and 0.0075 on `fwd_ret_5d` - the heavier-tailed label separates them by
+# about half as much. The direction survives on both labels and the magnitude runs the other
+# way, so tail heaviness is not what sets how far apart the objectives land. Whatever does is
+# not measured here: the two labels differ in horizon, in autocorrelation and in how much of
+# each one a fold contains, and this notebook holds none of those fixed.
 #
 # **The boosted population does not beat the linear one.** The strongest full-coverage
 # configuration here ranks below the strongest full-coverage configuration in
