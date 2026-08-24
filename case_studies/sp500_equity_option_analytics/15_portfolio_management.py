@@ -33,7 +33,7 @@
 #
 # **Prerequisites:** `14_backtest` and its registry-backed equal-weight
 # baselines. Signals form after Friday's close and execute at the next available
-# open, normally Monday. The 2021 holdout remains sealed throughout. The
+# open, normally Monday. Every result here is validation data. The
 # current-constituent universe retains survivorship bias, so results describe
 # this retrospective roster rather than historical S&P 500 membership or a
 # prospective index population.
@@ -78,22 +78,31 @@ MAX_SYMBOLS = 0
 SKIP_EXPENSIVE_ALLOC = False
 TOP_N_PREDICTIONS = None
 
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request; the values this notebook runs on are resolved here under
+# different names, so a resolved value can never overwrite the request that produced it. An
+# injected parameter wins; otherwise the case study's own declaration does.
+
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_PREDICTIONS is None:
-    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "allocation")
+TOP_N = (
+    TOP_N_PREDICTIONS
+    if TOP_N_PREDICTIONS is not None
+    else get_top_n_predictions(CASE_STUDY_ID, "allocation")
+)
 CHECKPOINTS_PER_CONFIG = get_checkpoints_per_config(CASE_STUDY_ID)
-if not LABEL:
-    LABEL = bt_config.primary_label
+ALLOCATION_LABEL = LABEL or bt_config.primary_label
 
 print(
-    f"Case study: {CASE_STUDY_ID}; label: {LABEL}; "
-    f"top configs: {TOP_N_PREDICTIONS}; checkpoints/config: {CHECKPOINTS_PER_CONFIG}"
+    f"Case study: {CASE_STUDY_ID}; label: {ALLOCATION_LABEL}; "
+    f"top configs: {TOP_N}; checkpoints/config: {CHECKPOINTS_PER_CONFIG}"
 )
 
 # %% [markdown]
-# ## 1. Advance the baseline winners
+# ## 1. Advance the leading baselines
 #
 # Selection uses validation Sharpe and counts distinct `(family, config_name)`
 # pairs. Each configuration enters through its best full-coverage checkpoint,
@@ -103,16 +112,14 @@ print(
 # %%
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
-    LABEL,
+    ALLOCATION_LABEL,
     split="validation",
     stage="signal",
-    top_n=TOP_N_PREDICTIONS,
+    top_n=TOP_N,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
 )
-if len(top_preds) != TOP_N_PREDICTIONS:
-    raise RuntimeError(
-        f"Expected {TOP_N_PREDICTIONS} advancing configurations, found {len(top_preds)}"
-    )
+if len(top_preds) != TOP_N:
+    raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
 
 selected_hashes = top_preds["prediction_hash"].to_list()
 top_preds.select("source", "prediction_hash", "sharpe")
@@ -125,7 +132,7 @@ top_preds.select("source", "prediction_hash", "sharpe")
 # %%
 prices = load_backtest_prices_for(
     CASE_STUDY_ID,
-    LABEL,
+    ALLOCATION_LABEL,
     split="validation",
     warmup_periods=warmup_periods_for(CASE_STUDY_ID),
     max_symbols=MAX_SYMBOLS,
@@ -137,11 +144,12 @@ print(f"Price support: {len(prices):,} rows across {n_assets} historical symbols
 # ## 2. Sweep alternative allocators
 #
 # Equal weight is the baseline established in `14_backtest`, so it is not an
-# allocation-stage method. The sweep combines three concentration levels with
-# five alternatives. Existing hashes are reused; only missing combinations run.
+# allocation-stage method. The sweep combines every declared concentration level with every
+# declared alternative allocator, both read from `setup.yaml` rather than counted here, so the
+# grid follows the declaration. Existing hashes are reused; only missing combinations run.
 
 # %%
-TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
+TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, ALLOCATION_LABEL, n_assets)
 ALLOC_CONFIGS = get_allocators(CASE_STUDY_ID)
 if SKIP_EXPENSIVE_ALLOC:
     ALLOC_CONFIGS = [
@@ -211,7 +219,7 @@ for index, row in enumerate(planned, start=1):
             row["spec"],
             prices=prices,
             predictions=read_predictions(CASE_STUDY_ID, row["prediction_hash"]),
-            label=LABEL,
+            label=ALLOCATION_LABEL,
             register=True,
             initial_cash=bt_config.initial_cash,
             calendar=bt_config.calendar,
@@ -241,7 +249,7 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 alloc_comparison = explorer.compare_allocators(
-    label=LABEL,
+    label=ALLOCATION_LABEL,
     prediction_hashes=selected_hashes,
 ).filter(pl.col("allocator").is_in(allocation_methods))
 alloc_comparison
@@ -276,17 +284,19 @@ add_message_title(
 fig.show()
 
 # %% [markdown]
-# ## 4. Inspect the allocation winner
+# ## 4. Inspect the leading allocation
 #
-# The best allocation combines NLinear predictions, ten selected stocks, and
-# score weighting. The table keeps the top ten visible while the next figure
-# shows whether that result depends on one concentration choice.
+# The table keeps the highest-Sharpe rows visible, and the figure after it shows whether that
+# result depends on one concentration choice. **Read the two together.** A row that leads at one
+# `top_k` and disappears at the next is a concentration artefact rather than an allocator that
+# suits this signal, and the sweep runs every level precisely so that is visible rather than
+# assumed.
 
 # %%
 top_rows = explorer.best(
     stage="allocation",
     top_n=10,
-    label=LABEL,
+    label=ALLOCATION_LABEL,
     prediction_hashes=selected_hashes,
 )
 winner = explorer.inspect(top_rows["backtest_hash"][0])
@@ -354,17 +364,26 @@ fig.show()
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. The allocation funnel advances ten distinct full-coverage configurations;
-#    the 2021 holdout is not consulted.
-# 2. Risk parity leads the method averages at validation Sharpe 0.639. Score
-#    weighting produces the peak result: NLinear, top 10, Sharpe 1.186 with a
-#    block-bootstrap interval of [0.032, 2.426].
-# 3. Allocation raises the winning NLinear lineage from an equal-weight baseline
-#    Sharpe of 0.826 to 1.186, a validation improvement of 0.360.
-# 4. Twenty-name portfolios dilute the NLinear result across all five eligible
-#    alternatives.
-# 5. These are selection-stage results on a current-constituent universe, so
-#    they retain survivorship bias and do not establish an out-of-sample edge.
+# 1. **Equal weight is the baseline, not a competitor.** It is the signal stage's own weighting,
+#    so it is excluded from the allocator menu and the notebook raises if it reappears there.
+#    Every Sharpe here is read against it rather than ranked alongside it.
 #
-# **Next:** `16_costs` applies realistic friction assumptions to the best
-# validation lineage. See Chapter 18 for the transaction-cost framework.
+# 2. **An allocator is judged across concentration levels, not at one.** The method averages and
+#    the per-`top_k` figure answer different questions: which allocator suits this signal on
+#    average, and whether its leading row persists when the number of names held changes.
+#
+# 3. **The gain from allocation is measured against that lineage's own baseline.** The
+#    difference between a lineage's equal-weight Sharpe and its highest allocated Sharpe is
+#    what allocation contributed. That comparison holds the predictions fixed, which is what
+#    isolates the allocator's effect from the signal's.
+#
+# 4. **`conformal_weighted` is the one allocator that reads the model's uncertainty.** The
+#    others weight by a moment of returns. Where the conformal intervals under-cover out of
+#    time - which `13_model_analysis` measures - this allocator inherits that miscalibration,
+#    so its result should be read beside that coverage rather than on its own.
+#
+# 5. **These are selection-stage results on a current-constituent universe**, so they carry
+#    survivorship bias and establish no out-of-sample edge. The holdout is untouched here.
+#
+# **Next:** [`16_costs`](16_costs.ipynb) applies friction to the leading validation lineage. See
+# Chapter 18 for the transaction-cost framework.
