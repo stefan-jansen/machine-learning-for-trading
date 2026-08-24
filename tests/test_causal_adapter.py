@@ -611,29 +611,17 @@ def test_holdout_seal_counts_sessions_not_calendar_days(tmp_path, monkeypatch) -
         (pl.col("timestamp") >= session_cutoff) & (pl.col("timestamp") < calendar_cutoff)
     )
     assert leaked.height > 0
-    # The population the calendar construction would have produced, less exactly the rows
-    # whose outcomes reach past the holdout. Stated independently of the assertion above.
-    assert (
-        computation["analysis_population"]["n_rows"]
-        == frame.filter(pl.col("timestamp") < calendar_cutoff).height - leaked.height
-    )
+    # Counted from the session list rather than derived from the frame filters above, so it
+    # can disagree with them: every session strictly before the cutoff, times every symbol.
+    symbols = frame.get_column("symbol").n_unique()
+    admissible = len([timestamp for timestamp in sessions if timestamp < session_cutoff])
+    assert computation["analysis_population"]["n_rows"] == admissible * symbols
 
 
-def test_holdout_seal_counts_each_entity_own_observations(tmp_path, monkeypatch) -> None:
-    """A product missing late sessions needs an earlier cutoff than the panel's.
-
-    The buffer advances by the entity's own observations. Counting distinct timestamps
-    across the panel reaches back five panel sessions, which is fewer than five of a
-    sparse product's own, so that product keeps rows resolving inside the holdout.
-    """
-    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
-    holdout = pd.Timestamp("2024-02-19", tz="UTC")
-    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
-    # S0 stops trading four sessions before the holdout; every other product runs through.
-    absent = set(pre_holdout[-4:])
-    sparse = frame.filter(~((pl.col("symbol") == "S0") & pl.col("timestamp").is_in(absent)))
-    sparse_mds = SimpleNamespace(
-        dataset=sparse,
+def _patch_modeling_dataset(monkeypatch, frame) -> None:
+    """Re-point the resolver at a modified panel, keeping the fixture's label metadata."""
+    mds = SimpleNamespace(
+        dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_5d",
         label_buffer="5D",
@@ -644,17 +632,73 @@ def test_holdout_seal_counts_each_entity_own_observations(tmp_path, monkeypatch)
             "fingerprint": "fixture-v1",
         },
     )
-    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: sparse_mds)
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", lambda *a, **k: mds)
+
+
+def _retained_rows(frame, cutoffs: dict) -> int:
+    """Rows each symbol keeps when sealed against its own cutoff."""
+    return sum(
+        frame.filter((pl.col("symbol") == symbol) & (pl.col("timestamp") < cutoff)).height
+        for symbol, cutoff in cutoffs.items()
+    )
+
+
+def test_holdout_seal_counts_each_entity_own_observations(tmp_path, monkeypatch) -> None:
+    """A product missing late sessions is sealed earlier, and only that product is.
+
+    The buffer advances by the entity's own observations. Counting distinct timestamps
+    across the panel reaches back five panel sessions, which is fewer than five of a
+    sparse product's own, so that product would keep rows resolving inside the holdout.
+    """
+    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    holdout = pd.Timestamp("2024-02-19", tz="UTC")
+    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
+    # S0 stops trading four sessions before the holdout; every other product runs through.
+    absent = set(pre_holdout[-4:])
+    sparse = frame.filter(~((pl.col("symbol") == "S0") & pl.col("timestamp").is_in(absent)))
+    _patch_modeling_dataset(monkeypatch, sparse)
     _set_holdout_start(study.root / "config" / "setup.yaml", "2024-02-19")
 
     computation = study.causal(method="dml", label=label.name).resolve().spec["computation"]
 
-    # S0's own five-observations-back lands four sessions earlier than the panel's.
-    sparse_sessions = [timestamp for timestamp in pre_holdout if timestamp not in absent]
-    expected = sparse_sessions[-5]
-    panel_cutoff = pre_holdout[-5]
-    assert expected < panel_cutoff
-    assert computation["estimand"]["holdout_endpoint_cutoff"] == expected.isoformat()
+    sparse_cutoff = [t for t in pre_holdout if t not in absent][-5]
+    dense_cutoff = pre_holdout[-5]
+    assert sparse_cutoff < dense_cutoff
+
+    cutoffs = {"S0": sparse_cutoff} | {f"S{i}": dense_cutoff for i in range(1, 6)}
+    assert computation["analysis_population"]["n_rows"] == _retained_rows(sparse, cutoffs)
+    # Sealing every symbol at the earliest cutoff would keep strictly fewer rows, so the
+    # count above distinguishes a per-entity seal from a panel-wide collapse of them.
+    collapsed = {symbol: sparse_cutoff for symbol in cutoffs}
+    assert _retained_rows(sparse, collapsed) < _retained_rows(sparse, cutoffs)
+    assert computation["estimand"]["holdout_endpoint_cutoff"] == dense_cutoff.isoformat()
+
+
+def test_one_entity_exiting_early_does_not_truncate_the_others(tmp_path, monkeypatch) -> None:
+    """A product that stops trading long before the holdout seals only itself.
+
+    Collapsing the per-entity cutoffs to their minimum and applying it panel-wide would
+    drag every other product back to this one's exit date, which is a much larger loss
+    than the leak the seal exists to prevent.
+    """
+    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    holdout = pd.Timestamp("2024-02-19", tz="UTC")
+    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
+    # S0 exits early but still holds well more than the five observations the buffer needs.
+    exit_after = pre_holdout[15]
+    early = frame.filter(~((pl.col("symbol") == "S0") & (pl.col("timestamp") > exit_after)))
+    _patch_modeling_dataset(monkeypatch, early)
+    _set_holdout_start(study.root / "config" / "setup.yaml", "2024-02-19")
+
+    computation = study.causal(method="dml", label=label.name).resolve().spec["computation"]
+
+    dense_cutoff = pre_holdout[-5]
+    cutoffs = {"S0": pre_holdout[11]} | {f"S{i}": dense_cutoff for i in range(1, 6)}
+    assert computation["analysis_population"]["n_rows"] == _retained_rows(early, cutoffs)
+    # Sealing every symbol at S0's exit instead keeps strictly fewer rows, which is the
+    # truncation this test exists to rule out.
+    collapsed = {symbol: pre_holdout[11] for symbol in cutoffs}
+    assert _retained_rows(early, collapsed) < _retained_rows(early, cutoffs)
 
 
 def test_holdout_seal_fails_closed_on_a_panel_shorter_than_its_buffer(

@@ -958,11 +958,15 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     # resolving inside the holdout. The panel-wide count is only correct when every entity
     # trades every session, which is a property of the data rather than of this function.
     #
+    # Each entity is then sealed against its own cutoff rather than against a panel-wide
+    # collapse of them. Taking the earliest and applying it everywhere would let one
+    # entity whose history ends early - a delisted firm, a contract that stopped trading -
+    # drag the boundary back to its own exit date and silently truncate every other
+    # entity to an early slice of the panel.
+    #
     # An entity that does not hold more than `horizon_steps` observations before the
     # holdout has no row whose outcome resolves before it, so it contributes no cutoff and
-    # drops out entirely. Taking the earliest surviving cutoff and applying it panel-wide
-    # keeps one scalar boundary, which is what the estimand records, and is at least as
-    # tight as every entity's own.
+    # drops out entirely.
     per_entity = (
         pre_holdout.unique()
         .sort(entity_col, mds.date_col)
@@ -983,13 +987,17 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             f"no entity holds more than {horizon_steps} observations before "
             f"{holdout.date()}, so none can absorb the buffer and leave anything to analyse"
         )
-    endpoint_cutoff = pd.Timestamp(per_entity.get_column("entity_cutoff").min())
-    retained_entities = per_entity.get_column(entity_col).implode()
-    analysis = populated.filter(
-        pl.col(mds.date_col)
-        < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False),
-        pl.col(entity_col).is_in(retained_entities),
+    analysis = (
+        populated.join(per_entity.select(entity_col, "entity_cutoff"), on=entity_col, how="inner")
+        .filter(pl.col(mds.date_col) < pl.col("entity_cutoff"))
+        .select(columns)
     )
+    if analysis.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    # The estimand records one boundary, and with a per-entity seal the honest scalar is
+    # the loosest of them: no entity retains a row at or after its own cutoff, and none
+    # of those cutoffs is later than this one.
+    endpoint_cutoff = pd.Timestamp(per_entity.get_column("entity_cutoff").max())
     analysis = _whole_timestamp_tail(
         analysis,
         timestamp=mds.date_col,
