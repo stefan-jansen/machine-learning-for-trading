@@ -49,7 +49,25 @@ CASE_STUDIES = [
 
 # Pattern for numbered pipeline stages — allows optional single-letter suffix
 # (e.g., 10a_pca, 11b_ipca) for per-estimator notebook splits.
-_STAGE_RE = re.compile(r"^\d{2}[a-z]?_")
+_STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def _stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order a stage's lettered siblings before the bare notebook that aggregates them.
+
+    Plain filename order puts `11_latent_factors.py` ahead of `11a_pca.py`, because
+    `_` sorts below `a`. That is backwards for the six case studies where the bare
+    notebook is a read-only view over what its lettered siblings register: it runs
+    first, finds nothing, and fails. Sorting the letter ahead of its absence within a
+    stage number puts each aggregator after the notebooks it reads, and moves nothing
+    else - every other stage number carries either a bare notebook or lettered ones,
+    never both.
+    """
+    match = _STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
 
 
 def _collect_case_study_tests():
@@ -64,7 +82,7 @@ def _collect_case_study_tests():
         if not cs_dir.exists():
             continue
 
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*.py"), key=_stage_sort_key):
             if notebook.name.startswith("_"):
                 continue
             if not _STAGE_RE.match(notebook.name):

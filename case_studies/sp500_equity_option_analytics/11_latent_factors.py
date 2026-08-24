@@ -74,10 +74,11 @@ from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
+EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
 # %%
-study = open_study(CASE_STUDY_ID, workspace=WORKSPACE or None)
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 
 # %% [markdown]
 # ## 1. Does the family's split cover its menu?
@@ -134,7 +135,7 @@ pl.DataFrame(
 # %% tags=["results"]
 catalog = (
     PredictionCatalog(study)
-    .table()
+    .table(include_preview=EXECUTION_TIER == "preview")
     .filter((pl.col("family") == "latent_factors") & (pl.col("split") == "validation"))
 )
 if catalog.is_empty():

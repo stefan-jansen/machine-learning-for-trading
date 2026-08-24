@@ -38,7 +38,14 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    "ipca": {"n_epochs": 2, "checkpoint_interval": 1, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
+    # No checkpoint_interval. PCA and IPCA are solved rather than trained: one fold
+    # produces one answer, so they publish a single checkpoint and the adapter rejects
+    # any non-zero interval outright (`latent_factors/adapter.py:236-239`). Patching it
+    # to 1 alongside the trained families set an illegal value, which failed every ipca
+    # notebook in CI - etfs, sp500_equity_option_analytics, us_equities_panel and
+    # us_firm_characteristics - at the cell that builds the request rather than anywhere
+    # the value could be read as a budget.
+    "ipca": {"n_epochs": 2, "factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
 
