@@ -49,6 +49,7 @@
 # %%
 """Ch16 backtest and equal-weight baseline for US Firm Characteristics."""
 
+import sqlite3
 import time
 import warnings
 from collections import Counter
@@ -379,8 +380,8 @@ print(repr(explorer))
 # ### The upper tail of the surface
 #
 # The ten highest validation Sharpes the sweep registered, with the model that
-# produced each and the concentration it was traded at. Read this as the shape of
-# the tail rather than as a selection: these are the ten largest draws from a
+# produced each and how many names a side it was traded at. Read this as the shape
+# of the tail rather than as a selection: these are the ten largest draws from a
 # sweep of hundreds, so the largest is biased upward by however many were tried.
 # The deflated Sharpe below is the first correction for that, and the strategy
 # analysis notebook is where the selection is confronted properly. Nothing here
@@ -389,7 +390,30 @@ print(repr(explorer))
 
 # %% tags=["results"]
 top = explorer.best(stage="signal", top_n=10)
-print(top.select("source", "signal_method", "sharpe", "cagr", "max_drawdown"))
+
+# `best` reports `signal.method`, which is the same string for every entry scheme in
+# this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
+# name one - the dimension the sweep exists to vary. The concentration is in the same
+# spec, one key across, and is joined back here.
+with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+    concentration = (
+        pl.DataFrame(
+            conn.execute(
+                "SELECT backtest_hash, spec_json FROM backtest_runs WHERE stage = 'signal'"
+            ).fetchall(),
+            schema=["backtest_hash", "spec_json"],
+            orient="row",
+        )
+        .with_columns(
+            names_per_side=pl.col("spec_json")
+            .str.json_path_match("$.strategy.signal.top_k")
+            .cast(pl.Int64)
+        )
+        .drop("spec_json")
+    )
+
+top = top.join(concentration, on="backtest_hash", how="left")
+print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 
 # %% [markdown]
 # ### By model family
