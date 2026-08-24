@@ -200,6 +200,13 @@ else:
 _effect = causal.metrics["dml_effect"]
 _se = causal.metrics["dml_se_hac"]
 _t = _effect / _se if _se else float("nan")
+# The block and the bandwidth are sized by different rules and the reader is being asked to
+# weigh a ratio built from the second. `block_size` spans the treatment's construction window;
+# the second-stage bandwidth is statsmodels' cube-root-of-decision-times default, raised only
+# to cover the label horizon (utils/causal.py:467-472), which is one bar here. The realized
+# bandwidth is not registered - `causal_runs` stores neither `hac_maxlags` nor `n_periods` -
+# so the notebook states the rule rather than a number it cannot read back.
+_block = causal.spec["computation"]["refutation"]["block_size"]
 Markdown(
     f"The registered DML estimate is **{_effect:+.4g}** with "
     f"a HAC standard error of **{_se:.4g}**, a ratio of **{_t:.2f}**. {_refutation_text} "
@@ -207,6 +214,13 @@ Markdown(
     "manufactures this effect out of permuted treatment, and the standard error asks "
     "whether the effect is separable from zero at all. Surviving the first while failing "
     "the second is not evidence of a causal effect. "
+    f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
+    "persistence, but the standard error behind this ratio does not. Its HAC bandwidth is "
+    "the cube-root-of-decision-times default raised to cover the label horizon, and nothing "
+    "ties it to the treatment's window, so it covers materially fewer lags than the block. "
+    "A bandwidth that under-covers serial dependence understates the standard error, so the "
+    "ratio shown here is if anything generous - correcting it would widen the interval, not "
+    "narrow it. "
     "This result describes the declared causal estimand and does not rank predictive models "
     "or trading strategies."
 )
