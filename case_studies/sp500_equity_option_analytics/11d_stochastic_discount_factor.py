@@ -337,8 +337,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 #
 # `checkpoint_selection` is added here rather than read from the registry. It separates the rows
 # whose checkpoint number is an epoch from the four per label whose number encodes a state the
-# library chose by reading the validation split. Nothing downstream distinguishes them, which is
-# exactly why this notebook does.
+# library chose by reading the validation split.
+#
+# **It is derived from the sign of `checkpoint_value`, which is a weaker thing to depend on than it
+# looks.** The four validation-selected states are packed onto the non-positive integers by
+# `library_bridge.py:691-701`, and that packing is a consequence of flattening two training phases
+# onto one axis - not something the registry records or promises. A provenance column naming them
+# is the durable form of this distinction and is being added upstream; this expression is what it
+# replaces.
 #
 # The published catalog is checked against the population planned before fitting rather than against
 # its own row count, because a run that lost a member would otherwise report a shorter table and
@@ -364,6 +370,7 @@ catalog = (
         "prediction_hash",
     )
     .with_columns(
+        # Reads the packing, not a field. See the note above.
         checkpoint_selection=pl.when(pl.col("checkpoint_value") > 0)
         .then(pl.lit("scheduled epoch"))
         .otherwise(pl.lit("validation-selected"))
@@ -483,15 +490,17 @@ show_plotly_with_alt(
 # nothing else. This differs in what is being estimated, and the head that turns a discount factor
 # into a per-stock signal is an extra modelling choice sitting between the estimator and the IC.
 #
-# **Four of the published checkpoints per label were chosen by reading the validation split.** The
-# library captures its best-validation-loss and best-validation-Sharpe states in each phase, and the
-# bridge publishes them as ordinary population members. They are not marked as different in the
-# registry, and [`14_backtest`](14_backtest.ipynb) then selects among all published members on
-# validation backtest Sharpe - so for this model, and for no other in this case study, the
-# downstream selection can land on a checkpoint that was already selected on the same split. That
-# is a look at the validation data compounded rather than a fresh one. It does not invalidate the
-# population, and it is the reason the `checkpoint_selection` column exists above rather than being
-# left implicit.
+# **Four of the published checkpoints per label were chosen by reading the validation split**, and
+# they are barred from selection for that reason. The library captures its best-validation-loss and
+# best-validation-Sharpe states in each phase, and the bridge publishes them as ordinary population
+# members. An entry whose definition is "the epoch where validation Sharpe was highest", entered
+# into a contest judged on validation Sharpe, wins by construction - and the number it wins with is
+# a maximum over many attempts reported as a single result. If it won, that configuration is what
+# would be replayed on the holdout, which is read once.
+#
+# They stay published, because they are what the estimator produced and an edited population is a
+# worse record than an honest one with a rule attached. What changes is that they cannot be
+# selected: [`14_backtest`](14_backtest.ipynb) draws only from the scheduled checkpoints.
 #
 # **An adversarial objective has no single stopping point to find.** Two networks improve against
 # each other, so a plateau in one is not a plateau in the system, and the epoch chart is where that
