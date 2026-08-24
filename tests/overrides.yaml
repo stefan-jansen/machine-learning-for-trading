@@ -2070,7 +2070,27 @@ case_studies/us_equities_panel/19_risk_management:
     MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/20_strategy_analysis:
-  timeout: 600
+  skip: true
+  # Two obstacles of different kinds. Do not treat them as one.
+  #
+  # STRUCTURAL, and it holds until someone changes what CI runs against. This notebook reads a
+  # research lock, and lifecycle.lock() refuses a selected backtest whose execution_tier is not
+  # canonical - "preview ancestry cannot enter a lock", research/lifecycle.py:231-232, with
+  # _locked_training_spec at :106 refusing a non-canonical holdout independently. CI exercises
+  # reduced fixtures and has no canonical registry to draw a lock from, so there is no parameter
+  # that reaches this and no hash that could be passed in. The notebook is exercised by the
+  # production run instead.
+  #
+  # A PRESENT GAP, and it closes on its own. VALIDATION_BACKTEST_SET_NAME names a per-label
+  # validation set that nothing freezes yet: 16_backtest freezes per-label baseline sets and 19
+  # freezes per-label risk-overlay sets, but the union the funnel selects over has no producer.
+  # That is ordinary unfinished rebuild work, not a boundary.
+  skip_reason: >-
+    Reads a research lock, which cannot be built from preview ancestry
+    (research/lifecycle.py:231-232), so a reduced CI fixture cannot exercise it by construction -
+    the production run does. Separately, its per-label validation set
+    us-equities-fwd-ret-1d-validation-strategies-v1 has no producer yet; that gap closes when the
+    rebuild freezes it, the tier boundary does not.
 case_studies/us_firm_characteristics/01_feasibility_analysis:
   timeout: 120
 case_studies/us_firm_characteristics/02_labels:

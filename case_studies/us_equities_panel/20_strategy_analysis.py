@@ -55,7 +55,7 @@ from utils.style import COLORS
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-VALIDATION_BACKTEST_SET_NAME = "us-equities-validation-strategies-v1"
+VALIDATION_BACKTEST_SET_NAME = "us-equities-fwd-ret-1d-validation-strategies-v1"
 RESEARCH_LOCK_HASH = ""
 
 # %% [markdown]
