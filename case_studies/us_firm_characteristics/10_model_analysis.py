@@ -89,6 +89,7 @@ from case_studies.utils.model_viz import (
 from case_studies.utils.notebook_render import (
     conformal_coverage_diagnostic,
 )
+from utils.modeling import load_configs
 from utils.paths import get_case_study_dir
 from utils.style import COLORS
 
@@ -1048,25 +1049,54 @@ else:
 # learning to partial out a declared set of confounders from both. The output is an
 # effect size with a standard error, plus a permutation-based refutation test, and it
 # is stored in its own registry table for that reason.
+#
+# A causal identity covers the row cap and the development window as well as the fold
+# and placebo geometry, so re-running under a different cap writes a second row rather
+# than replacing the first. Both rows are real runs, and the table below is read as this
+# case study's causal evidence, so it shows the run under the configuration currently
+# declared and counts the superseded identities rather than mixing them in.
+#
+# The declared run is identified by the knobs the configuration sets rather than by the
+# preset name, because the recorded spec names every causal run in the fleet after the
+# original single preset whatever configuration produced it.
 
 # %% tags=["results"]
+declared_causal = load_configs(CASE_STUDY, PRIMARY_LABEL, "causal_dml")[0]
 with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
     conn.row_factory = sqlite3.Row
     causal_rows = [
         dict(r)
         for r in conn.execute(
             "SELECT label, treatment, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-            "       confounding_bias_pct, refutation_p, n_folds, n_obs "
+            "       confounding_bias_pct, refutation_p, n_folds, n_obs, spec_json "
             "FROM causal_runs ORDER BY label"
         ).fetchall()
     ]
 
 if causal_rows:
-    causal_df = pl.DataFrame(causal_rows).with_columns(
-        significant_hac=pl.col("p_value_hac") < 0.05,
-        refutation_passes=pl.col("refutation_p") < 0.05,
+    all_causal = pl.DataFrame(causal_rows).with_columns(
+        max_samples=pl.col("spec_json").str.json_path_match("$.params.max_samples").cast(pl.Int64),
+        spec_n_placebo=pl.col("spec_json").str.json_path_match("$.params.n_placebo").cast(pl.Int64),
+        spec_n_folds=pl.col("spec_json").str.json_path_match("$.n_folds").cast(pl.Int64),
+        spec_seed=pl.col("spec_json").str.json_path_match("$.seed").cast(pl.Int64),
     )
-    print(f"causal runs recorded: {causal_df.height}")
+    is_declared = (
+        (pl.col("max_samples") == int(declared_causal["max_samples"]))
+        & (pl.col("spec_n_placebo") == int(declared_causal["n_placebo"]))
+        & (pl.col("spec_n_folds") == int(declared_causal["n_folds"]))
+        & (pl.col("spec_seed") == int(declared_causal["seed"]))
+    )
+    causal_df = (
+        all_causal.filter(is_declared)
+        .drop("spec_json", "spec_n_placebo", "spec_n_folds", "spec_seed")
+        .with_columns(
+            significant_hac=pl.col("p_value_hac") < 0.05,
+            refutation_passes=pl.col("refutation_p") < 0.05,
+        )
+    )
+    print(f"declared causal configuration: {declared_causal['config_name']}")
+    print(f"runs recorded under it: {causal_df.height}")
+    print(f"superseded identities also in the table: {all_causal.height - causal_df.height}")
     print(f"clearing the HAC inference gate: {causal_df['significant_hac'].sum()}")
     print(f"clearing the placebo refutation gate: {causal_df['refutation_passes'].sum()}")
     causal_df
@@ -1081,7 +1111,10 @@ else:
 # correlation across firms within a month. The gap between the naive and orthogonalised
 # estimates, reported above as a confounding-bias percentage, is what the DML procedure
 # bought: it is how much of the raw association was attributable to the declared
-# confounders rather than to the treatment.
+# confounders rather than to the treatment. That percentage divides the gap by the
+# adjusted estimate, so it grows without bound as the adjusted estimate approaches zero
+# and says nothing on its own about how large either effect is. Read it beside the two
+# effect sizes in the table above, which are in the same units as each other.
 #
 # The second is the placebo test, which re-estimates the effect on permuted treatment
 # histories and asks where the real estimate falls among them. A placebo p-value near

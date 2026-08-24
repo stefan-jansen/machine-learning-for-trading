@@ -118,6 +118,13 @@ print(f"Holdout starts: {holdout_start}")
 # The label buffer closes development one month before the holdout so no forward return reaches
 # into 2016. The declared row cap then selects the most recent complete monthly cross-sections that
 # fit below the limit. Conversion to pandas occurs only at the causal utility boundary.
+#
+# The cap is denominated in rows and spent on whole decision months, so the history it buys is the
+# cap divided by the width of the cross-section. That matters because the inference below runs
+# along the time axis rather than the row axis: the panel-robust standard error clusters by
+# decision month, and the placebo permutes each firm's months in blocks. Adding firms widens the
+# cross-section without adding a single month to either. A panel this wide would get a short window
+# out of the cap the narrower case studies share, so this one declares a preset of its own.
 
 # %%
 mds = load_modeling_dataset(CASE_STUDY_ID, PRIMARY_LABEL, max_symbols=MAX_SYMBOLS)
