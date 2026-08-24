@@ -838,20 +838,32 @@ def test_conformal_weighted_allocation_is_dispatched_not_refused(tmp_path: Path)
 def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) -> None:
     """A quote gap after the decision date must not decide what could be ranked on it.
 
-    The screen reads the paired chain from entry through expiration, so every date it looks
-    at is later than the decision it would filter. Selecting first and reporting the gap
-    afterwards keeps the decision-time universe made of decision-time information.
+    The screen reads the paired chain from entry through expiration, so every date it looks at
+    is later than the decision it would filter. Two candidates make the difference visible: A
+    scores higher and has the gap, B scores lower and is complete. A screen that ran before the
+    ranking would drop A and hand the cohort to B; running it on the selection keeps A ranked
+    first and reports that its lifecycle cannot be accounted for.
     """
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
     chain = pl.read_parquet(raw_dir / "year=2024.parquet")
-    # Drop one leg of one session: the session still exists in the chain, so the gap is the
-    # contract's own rather than a hole in the calendar every contract shares.
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    # Drop one leg of one session for A: the session still exists in the chain, so the gap is
+    # that contract's own rather than a hole in the calendar every contract shares.
     gap = (pl.col("date") == date(2024, 1, 9)) & (pl.col("call_put") == "C")
-    chain.filter(~gap).write_parquet(raw_dir / "year=2024.parquet")
+    pl.concat([chain.filter(~gap), runner_up]).write_parquet(raw_dir / "year=2024.parquet")
 
-    ranked = _select_cohorts(_predictions(), _contract_returns(), top_k=1)
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [_contract_returns(), _contract_returns().with_columns(symbol=pl.lit("B"))]
+    )
+
+    ranked = _select_cohorts(predictions, contract_returns, top_k=1)
     assert ranked.get_column("symbol").to_list() == ["A"]
 
-    with pytest.raises(ValueError, match="complete paired lifecycle"):
-        _select_cohorts(_predictions(), _contract_returns(), top_k=1, raw_options_dir=raw_dir)
+    with pytest.raises(ValueError, match="complete paired lifecycle") as refusal:
+        _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    # The cohort the screen refused is A's, so the ranking was not handed to the runner-up.
+    assert "'symbol': 'A'" in str(refusal.value)

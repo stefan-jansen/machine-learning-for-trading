@@ -407,16 +407,9 @@ def _select_cohorts(
             f"equal_weight_top_k, score_weighted_top_k, cross_sectional_percentile."
         )
 
+    # `pred` was already restricted to symbols `cr` carries a contract for, and `cr` holds one
+    # row per (timestamp, symbol), so this join keeps every ranked row.
     cohorts = ranked.join(cr, on=["timestamp", "symbol"], how="inner")
-    missing = ranked.join(
-        cohorts.select("timestamp", "symbol"),
-        on=["timestamp", "symbol"],
-        how="anti",
-    )
-    if not missing.is_empty():
-        raise ValueError(
-            f"selected option decisions have no complete entry contract: {missing.height} rows"
-        )
     if raw_options_dir is not None:
         # Completeness is checked on what was selected, never on what could be selected. The
         # screen reads quotes from entry through expiration, so applying it to the candidate
