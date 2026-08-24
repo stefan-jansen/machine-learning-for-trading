@@ -55,9 +55,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -617,6 +617,18 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
     def live(line: int) -> bool:
         return line > injected_at and not any(lo <= line <= hi for lo, hi in stale)
 
+    # A notebook declaring PREVIEW_REDUCTIONS receives these by translation rather than by name -
+    # `research_preview_parameters` folds them in - so the source never mentions them and the
+    # "never reads it" test below would report every one of them unreachable.
+    cell_declares = (
+        {name for name, line in _top_level_bindings(tree) if tagged[-1][1] <= line <= injected_at}
+        if tagged
+        else set()
+    )
+    translated = (
+        set(PREVIEW_TRANSLATED_PARAMETERS) if "PREVIEW_REDUCTIONS" in cell_declares else set()
+    )
+
     events: list[tuple[str, str, int]] = []
     _module_level_events(tree, events)
     branch = _branch_paths(tree)
@@ -638,6 +650,8 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
 
     problems = {}
     for name in names:
+        if name in translated:
+            continue
         reads = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
@@ -884,6 +898,19 @@ def research_preview_parameters(
     return resolved
 
 
+# The override names `_collect_preview_reductions` folds into PREVIEW_REDUCTIONS, mapped to the
+# reduction key each becomes. `unusable_parameters` reads the same table, so a name that reaches a
+# notebook by translation is not reported unreachable for not appearing in its source. Two places
+# stating this list separately is what let one of them go stale: measured on
+# agent/us-equities-panel-notebooks, `06_linear` and `07_gbm` declare PREVIEW_REDUCTIONS and were
+# reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
+PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any]]] = {
+    "MAX_FOLDS": ("folds", lambda value: list(range(int(value)))),
+    "MAX_SYMBOLS": ("max_symbols", int),
+    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float),
+}
+
+
 def _collect_preview_reductions(parameters: dict) -> dict:
     """Fold the per-notebook reduction overrides into the single parameter that carries them.
 
@@ -895,15 +922,10 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     """
     resolved = dict(parameters)
     reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
-    max_folds = resolved.pop("MAX_FOLDS", None)
-    max_symbols = resolved.pop("MAX_SYMBOLS", None)
-    train_sample_frac = resolved.pop("TRAIN_SAMPLE_FRAC", None)
-    if max_folds is not None:
-        reductions.setdefault("folds", list(range(int(max_folds))))
-    if max_symbols is not None:
-        reductions.setdefault("max_symbols", int(max_symbols))
-    if train_sample_frac is not None:
-        reductions.setdefault("train_sample_frac", float(train_sample_frac))
+    for name, (key, cast) in PREVIEW_TRANSLATED_PARAMETERS.items():
+        value = resolved.pop(name, None)
+        if value is not None:
+            reductions.setdefault(key, cast(value))
     # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
     # request builder rejects it. Reducing the universe is the reduction that always applies.
     if not reductions:
