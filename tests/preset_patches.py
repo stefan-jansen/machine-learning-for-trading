@@ -38,18 +38,15 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    # No checkpoint_interval. PCA and IPCA are solved rather than trained: one fold
-    # produces one answer, so they publish a single checkpoint and the adapter rejects
-    # any non-zero interval outright (`latent_factors/adapter.py:236-239`). Patching it
-    # to 1 alongside the trained families set an illegal value, which failed every ipca
-    # notebook in CI - etfs, sp500_equity_option_analytics, us_equities_panel and
-    # us_firm_characteristics - at the cell that builds the request rather than anywhere
-    # the value could be read as a budget.
-    # No n_epochs either: it reduces nothing here. `_expected_latent_checkpoints` returns
-    # (0,) unconditionally for pca and ipca (`cv.py:115-116`), `runner_kwargs` forwards
-    # n_epochs only for cae and sae (`cv.py:704`), and `run_ipca_fold` has no such
-    # parameter. Left in, it reached the training-spec identity alone and read as a budget
-    # reduction that does not exist. factor_ridge and gamma_ridge do reach the runner.
+    #
+    # It carries no n_epochs or checkpoint_interval, and that asymmetry with the eight entries
+    # above is deliberate. IPCA is fitted by ALS once per fold and publishes a final checkpoint
+    # only, so it has no epochs to shorten and no interval to checkpoint on; `pca`, the other
+    # model of that shape, has no entry here at all. The two keys were present verbatim from the
+    # epoch-based neighbours and set checkpoint_interval to 1, which the latent-factor adapter
+    # rejects outright (latent_factors/adapter.py:236-239) because the value means nothing for
+    # these models - so every ipca run through that adapter failed at resolution. Do not restore
+    # them for symmetry with the block above.
     "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 
