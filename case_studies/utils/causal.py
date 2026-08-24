@@ -736,14 +736,13 @@ def run_dml_analysis(
                 f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
             )
         if 0 < n_placebo < _MIN_PLACEBO_DRAWS:
-            import warnings
-
-            warnings.warn(
-                f"run_dml_analysis: n_placebo={n_placebo} is below the {_MIN_PLACEBO_DRAWS} "
-                "draws a refutation can be built from, so this run publishes none. A caller "
-                "that defaults a missing refutation to p = 1 reports 'cannot reject' for a "
-                "test that never ran. Ask for none, or ask for enough.",
-                stacklevel=2,
+            raise ValueError(
+                f"n_placebo={n_placebo} cannot reject at {REFUTATION_ALPHA}: the plus-one "
+                f"correction bounds the smallest reportable p-value at 1/(n+1), so the block "
+                f"permutation needs at least {_MIN_PLACEBO_DRAWS} draws. Below it this "
+                "function publishes no refutation at all, and a caller that defaults a missing "
+                "one to p = 1 reports 'cannot reject' for a test that never ran. Ask for none, "
+                "or ask for enough."
             )
         if df[treatment_col].std() < 1e-10:
             raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
