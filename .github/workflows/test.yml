@@ -497,6 +497,21 @@ jobs:
             tests/test_download_coverage.py \
             tests/test_plotly_renderer.py \
             -v --tb=short
+      # model_viz.py rendered the model-analysis figures for seven case studies
+      # through fig.show(), which emits an <img> with no alternative text, so all
+      # seven published figures a screen reader cannot describe. Alt text lives in
+      # output metadata, so it only reaches a notebook by executing it, and these
+      # notebooks execute rarely - which is exactly why the plumbing has to be
+      # gated rather than checked by eye. The tests require the alt text to change
+      # when the plotted data changes, so a canned sentence fails them.
+      - name: Run model-analysis figure alt-text tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MPLBACKEND: Agg
+        run: |
+          .venv/bin/python -m pytest \
+            tests/test_model_viz_alt_text.py \
+            -v --tb=short
       # The Chapter 21 environments reached readers as broken imports partly
       # because no job ran the tests that name them: test_import_coverage.py
       # listed both notebooks while nothing invoked it. These two files pin the
