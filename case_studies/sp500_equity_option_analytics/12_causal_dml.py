@@ -210,11 +210,14 @@ merged_clean = (
 # draw - the permutation that is too easy to pass and therefore proves nothing.
 #
 # **Two scales qualify, and the block size below covers only one of them.** The label horizon is
-# how long an outcome stays open. The treatment has its own persistence: `ivrv_spread` carries a
-# rolling realized-volatility window, so consecutive values are dependent over that window
-# regardless of the label. A block sized to the label horizon alone is shorter than the
-# treatment's own dependence, and a refutation run at that size is easier to pass than the
-# estimate deserves. Read the refutation below with that in mind.
+# how long an outcome stays open. The treatment has its own persistence: `ivrv_spread` subtracts a
+# rolling realized volatility from implied, so consecutive values share most of their input and
+# stay dependent over that rolling window whatever the label does. The window is declared as
+# `features.windows.realized_vol` in `config/setup.yaml` and is the longer of the two scales here,
+# but nothing carries it to the block size, which is set from the label buffer alone. A permutation
+# at that size leaves the treatment's own autocorrelation largely intact inside each block while
+# claiming to have destroyed the dependence, so the refutation below is not yet a test the estimate
+# can fail. Read it as a placeholder rather than as evidence.
 #
 # The embargo and the block size are equal in this case study because the same buffer sets both.
 # They are assigned separately below so that stays a fact about this case study rather than an
@@ -482,10 +485,13 @@ register_causal_run(
 #    out-of-fold sample, which is what stops an apparent large correction that is really
 #    two estimators reading different numbers of rows.
 #
-# 4. **The permutation result is supporting, not decisive**: its p-value has a floor of
-#    one over the number of placebo draws plus one, so a run of this size cannot report
-#    zero however extreme the estimate is. It does not override the coefficient's own
-#    uncertainty, and a block permutation disturbs timing rather than confounding.
+# 4. **The permutation result is not yet a test the estimate can fail**: its block size
+#    comes from the label buffer and not from the treatment's own rolling window, which is
+#    the longer of the two, so each block still carries much of the dependence the placebo
+#    is meant to destroy. Its p-value also has a floor of one over the number of placebo
+#    draws plus one, so a run of this size cannot report zero however extreme the estimate
+#    is. It does not override the coefficient's own uncertainty, and a block permutation
+#    disturbs timing rather than confounding.
 #
 # 5. **Diagnostics do not establish identification**: Complete-date cross-fitting
 #    and both uncertainty checks strengthen the sensitivity analysis, but a

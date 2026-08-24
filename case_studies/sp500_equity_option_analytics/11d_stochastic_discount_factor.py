@@ -32,8 +32,8 @@
 # network proposes the discount factor; a second network constructs the portfolio that the first one
 # prices worst. Training alternates: the discount factor improves against the current adversary, the
 # adversary improves against the current discount factor. The configuration therefore declares three
-# separate budgets rather than one `n_epochs`, and the published checkpoint numbers are not simply
-# epoch counts - section 1 sets out what they are.
+# separate budgets rather than one `n_epochs`, and the published checkpoint numbers are epochs of
+# two different phases packed onto one axis - section 1 sets out how.
 #
 # **It is also the only member of this family that reads anything outside the cross-section.** The
 # adapter resolves a macro panel for `sdf` and for no other model, so the state variables the
@@ -44,9 +44,10 @@
 #
 # - State what a stochastic discount factor is estimating, and why that is not a factor model.
 # - Explain what makes the training adversarial and what the three declared budgets do.
-# - Read a checkpoint column in which some values are epochs and some are not.
-# - Say which published checkpoints were chosen by looking at the validation split, and what that
-#   means for how the population may be used downstream.
+# - Read a checkpoint column that packs two training phases onto one axis, where an unconditional
+#   epoch is published as itself and a conditional epoch as the unconditional budget plus itself.
+# - Say why the states the library picked by reading the validation split are computed and then
+#   discarded rather than published, and what would go wrong if one of them reached the population.
 #
 # **Book reference**: Chapter 14, Section 14.6 (the stochastic discount factor and the adversarial
 # estimator of Chen, Pelger and Zhu, 2021). Chapter 6, Section 6.7 (Search accounting and run
@@ -340,6 +341,12 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # integers, so a non-positive value here would mean one of them reached the registry - and it would
 # then compete, on validation IC and later on validation Sharpe, against epochs that were not chosen
 # by reading that split.
+#
+# **That guard is an invariant check on this population, not a test of what a checkpoint is.** It is
+# safe here only because this catalog holds one family, whose schedule is positive epochs by
+# construction. Section 5 forbids the same expression anywhere a population spans families, and the
+# reason is the same fact that makes it safe here: zero means different things to different
+# estimators.
 #
 # The published catalog is checked against the population planned before fitting rather than against
 # its own row count, because a run that lost a member would otherwise report a shorter table and

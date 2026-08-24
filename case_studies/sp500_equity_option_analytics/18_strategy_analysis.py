@@ -572,6 +572,15 @@ ax_cost.set_xlabel("One-way cost per traded notional (bps)")
 ax_cost.set_ylabel("Annualized validation Sharpe")
 if first_crossing is not None:
     ax_cost.axvline(first_crossing, color=COLORS["neutral"], linestyle=":", linewidth=1)
+    ax_cost.annotate(
+        "lower bound reaches zero",
+        (first_crossing, ax_cost.get_ylim()[1]),
+        xytext=(4, -8),
+        textcoords="offset points",
+        fontsize=8,
+        color=COLORS["slate"],
+        va="top",
+    )
 add_message_title(
     ax_cost,
     "Where the point path and its lower bound stand across the cost grid",
