@@ -47,6 +47,7 @@ POOLED_FALLBACK: str = "pooled_prior_oos"
 
 HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "etfs/fwd_ret_21d": 21,
+    "etfs/fwd_ret_5d": 5,
     "cme_futures/fwd_ret_5d": 5,
     "cme_futures/fwd_ret_21d": 21,
     "fx_pairs/fwd_ret_1d": 1,
@@ -54,6 +55,8 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "fx_pairs/fwd_ret_21d": 21,
     "crypto_perps_funding/fwd_ret_24h": 3,
     "crypto_perps_funding/fwd_ret_8h": 1,
+    "crypto_perps_funding/fwd_dir_8h": 1,
+    "crypto_perps_funding/fwd_dir_8h_3c": 1,
     "nasdaq100_microstructure/fwd_ret_15m": 1,
     "nasdaq100_microstructure/fwd_ret_60m": 4,
     "nasdaq100_microstructure/fwd_ret_5m": 1,
