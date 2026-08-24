@@ -882,9 +882,9 @@ def research_preview_parameters(
         if "SUPERSEDES_POPULATION" in declared:
             # A preview population is discarded with its workspace, so it extends no lineage
             # and `run_model_population` refuses a non-None `supersedes` outright. The
-            # notebook's default is the hash its canonical population actually superseded -
-            # which is what lets a reader re-run the canonical population and resolve to the
-            # one on record - so the value has to be cleared here rather than removed there.
+            # notebooks now default this to empty, so this clears an explicitly passed value
+            # rather than a default - a caller who names a canonical predecessor and asks for
+            # a preview is asking for two incompatible things, and the tier wins.
             # Forced for the same reason the tier and the workspace are: the preview routing
             # is this function's job, and nine notebooks each deciding it is nine chances to
             # decide it differently.
