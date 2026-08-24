@@ -348,9 +348,10 @@ catalog = execution.catalog_rows.select(
     "config_name",
     "label",
     "task",
-    # The sibling a regression prediction was scored as a direction signal against. `by_label`
-    # reports it beside the AUC so a null AUC is readable as "no sibling declared at this horizon"
-    # rather than as a missing measurement.
+    # The sibling a regression prediction was scored as a direction signal against, null on this
+    # case study because its direction label has three states and the scorer takes only binary
+    # siblings. Carried beside the AUC so that the two nulls are read together as one fact rather
+    # than as two missing measurements.
     "direction_label",
     "complete",
     "checkpoint_value",
@@ -396,14 +397,23 @@ catalog.select(
 # with the continuous return the label was cut from. Same measurement either way, so the classifier
 # and the three regressions are read side by side.
 #
-# `auc_mean_daily` is a second reading, and which rows carry it is the opposite of what the column
-# name suggests. An AUC needs a two-state outcome, and `fwd_dir_15m` has three - down, flat, up -
-# so the classification rows carry no AUC at all. The rows that do are regressions: a predicted
-# return is scored as a ranking signal against a declared direction sibling, binarized to whether
-# the constituent rose or did not, and `auc_scored_against` names the sibling it was scored
-# against. `config/setup.yaml` declares exactly one such cut, `fwd_dir_15m` from `fwd_ret_15m`, so
-# `fwd_ret_15m` is the only label here with an AUC and the other three have none. Null in that
-# column means not computed, not zero.
+# **`auc_mean_daily` is null on every row of this case study**, and the reason is worth following
+# because it is a modelling decision rather than a gap. An AUC needs a two-state outcome. This
+# case study's direction label has three states - down, flat, up - so it is not one, and the
+# classification rows carry no AUC.
+#
+# A regression label can still be scored that way, against the direction label cut from its own
+# return: rank by predicted return, ask whether the constituent rose. `config/setup.yaml` declares
+# exactly one such cut, `fwd_dir_15m` from `fwd_ret_15m`. But the registry declines that too, and
+# deliberately. Collapsing a three-state label to "rose or did not" puts the flat class in with
+# the falls, so "up" would mean *up beyond the neutral band* while the ranking is scored as though
+# it meant plain up - two different events under one column. Rather than record that quietly, the
+# scorer skips any sibling that is not strictly binary.
+#
+# So the column stays null here, and `auc_scored_against` names nothing. Both are carried because
+# the same notebook runs on case studies whose direction label is binary, where they fill in. On
+# this one, **IC is the only cross-label measure**, which is the substance of the point above: the
+# classifier and the three regressions are comparable on `ic_mean` and on nothing else.
 
 # %% tags=["results"]
 by_label = (
