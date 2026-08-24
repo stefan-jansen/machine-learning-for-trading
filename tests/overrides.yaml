@@ -1240,27 +1240,24 @@ case_studies/cme_futures/11_causal_dml:
   timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
+# Timeout only, for 13 through 16 as already for 12 and 17. The stage 06+ rewrite made all
+# six read what the registry holds instead of recomputing it, so they declare no parameters
+# cell and MAX_SYMBOLS, TOP_K, TOP_N_PREDICTIONS, TOP_N_COMBOS and MAX_RISK_VARIANTS named
+# nothing any of them reads. Their scale is now set by the seeded fixture registry these
+# tests run against, not by an injected width.
+#
+# Restoring a reduction on the label axis instead would be wrong rather than merely
+# redundant: every one of these notebooks accumulates across `for label in ALL_LABELS` into
+# a single structure - 14 builds one request_rows list, 17 one selection pool across both
+# horizons - and REVIEW.md section D permits collapsing an axis only where the notebook
+# never combines across it.
 case_studies/cme_futures/13_backtest:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
-    TOP_N_PREDICTIONS: 2
   timeout: 120
 case_studies/cme_futures/14_portfolio_management:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/cme_futures/15_costs:
-  parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/cme_futures/16_risk_management:
-  parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/cme_futures/17_strategy_analysis:
 case_studies/crypto_perps_funding/01_feasibility_analysis:
