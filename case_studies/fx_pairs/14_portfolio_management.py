@@ -51,6 +51,7 @@ from case_studies.research import (
     plan_backtests,
     research_name,
     run_backtests,
+    strategy_warmup_periods,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -378,14 +379,34 @@ if any(
     raise RuntimeError("the allocation population is incomplete or misclassified")
 
 
+def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a nested spec to dotted paths so a mismatch can name what moved."""
+    if isinstance(value, dict):
+        flat: dict[str, Any] = {}
+        for key, item in value.items():
+            flat.update(_leaves(item, f"{prefix}.{key}" if prefix else str(key)))
+        return flat
+    return {prefix: value}
+
+
 def _non_allocation_projection(spec: dict[str, Any]) -> dict[str, Any]:
     projected = deepcopy(spec)
     projected.pop("chapter", None)
     projected.pop("_runtime_backtest_config", None)
-    projected.get("strategy", {}).pop("allocation", None)
+    allocation = projected.get("strategy", {}).pop("allocation", None)
     metadata = projected.get("backtest_config", {}).get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("chapter", None)
+    # input_identity.prices is a function of the allocation, not something held constant
+    # across it. A moment allocator declares a warmup, load_backtest_prices_for leaves the
+    # start of the window unconstrained by that many periods, and the frame it returns
+    # therefore digests differently from the equal-weight baseline's - by design, and the
+    # extra prefix is consumed by the rolling window without entering return aggregation.
+    # Comparing it for those allocators reports the warmup as a changed input. Where the
+    # allocator declares no warmup both sides load the same window, and there the digest is
+    # a real check that the allocation did not move the price input, so it is still made.
+    if allocation and strategy_warmup_periods({"allocation": allocation}):
+        projected.get("input_identity", {}).pop("prices", None)
     return projected
 
 
@@ -402,8 +423,26 @@ for result in allocation_results:
         raise RuntimeError(
             f"allocation {result.hash} resolved to {len(siblings)} equal-weight siblings"
         )
-    if _non_allocation_projection(result.spec()) != _non_allocation_projection(siblings[0].spec()):
-        raise RuntimeError("an allocation result changed a non-allocation strategy field")
+    allocation_projection = _non_allocation_projection(result.spec())
+    baseline_projection = _non_allocation_projection(siblings[0].spec())
+    if allocation_projection != baseline_projection:
+        # Naming the fields is the difference between a check and a diagnosis. The
+        # projections are nested, so compare the flattened leaves and report only the
+        # paths that actually disagree.
+        divergent = sorted(
+            path
+            for path in set(_leaves(allocation_projection)) | set(_leaves(baseline_projection))
+            if _leaves(allocation_projection).get(path) != _leaves(baseline_projection).get(path)
+        )
+        raise RuntimeError(
+            f"allocation {result.hash} changed a non-allocation strategy field against "
+            f"baseline {siblings[0].hash}: "
+            + "; ".join(
+                f"{path}: baseline={_leaves(baseline_projection).get(path)!r} "
+                f"allocation={_leaves(allocation_projection).get(path)!r}"
+                for path in divergent
+            )
+        )
 
 # %% [markdown]
 # ## Validate the frozen allocation population

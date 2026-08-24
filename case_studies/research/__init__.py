@@ -44,7 +44,7 @@ from .model_planning import (
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import OfficialPopulation, research_name
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
-from .strategy import Strategy
+from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
 __all__ = [
@@ -80,6 +80,7 @@ __all__ = [
     "ResolvedCVSpec",
     "Result",
     "Strategy",
+    "strategy_warmup_periods",
     "Study",
     "StateTransitionPolicy",
     "TrainingResult",
