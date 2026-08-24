@@ -39,9 +39,9 @@ import torch
 
 from case_studies.research import (
     ExecutionTier,
-    Study,
     declared_labels,
     narrows_declared_catalog,
+    open_study,
     plan_models,
     sweep_labels,
 )
@@ -60,17 +60,39 @@ BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
 POPULATION_NAME = ""
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a run could be reduced and still open the case study's own artifacts in
+# place, which is the production path; a reader under test then wrote where the published run
+# writes. WORKSPACE is the other half: a preview has nowhere else to put its results.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Select the task and execution tier
 #
-# Canonical execution uses every configured fold, symbol, epoch, and batch setting. Supplying a
-# reduction creates a preview identity in an isolated registry. A preview proves the path but cannot
-# join the official model population.
+# Canonical execution uses every configured fold, symbol, epoch, and batch setting. A preview
+# declares its reductions, takes an isolated workspace, and creates a preview identity there. A
+# preview proves the path but cannot join the official model population.
+#
+# The reductions are read before the study is opened, because which study to open is decided by
+# the tier and the two have to agree: a preview that reduces nothing is a canonical run wearing
+# the wrong tier, and a canonical run carrying reductions would publish a narrowed population
+# under the canonical name.
 
 # %%
 set_global_seeds(SEED)
-study = Study.regenerate(CASE_STUDY_ID)
+REDUCTION_PARAMETERS = {
+    "folds": list(range(MAX_FOLDS)) if MAX_FOLDS else None,
+    "max_symbols": MAX_SYMBOLS or None,
+    "n_epochs": N_EPOCHS or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
 
 # Which labels this notebook fits is a question for the training menus, not for the sweep list:
 # `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
@@ -92,12 +114,6 @@ if PREDICTION_SPLIT != "validation":
 if FORCE_RETRAIN:
     raise ValueError("valid checkpoints are reloaded by identity; change the request to refit")
 
-reductions = {
-    **({"folds": list(range(MAX_FOLDS))} if MAX_FOLDS else {}),
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-    **({"n_epochs": N_EPOCHS} if N_EPOCHS else {}),
-}
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
 
 print(f"Labels: {', '.join(labels)}")
 print(f"Execution tier: {tier.value}")

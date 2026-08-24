@@ -41,8 +41,8 @@ import torch
 
 from case_studies.research import (
     ExecutionTier,
-    Study,
     declared_labels,
+    open_study,
     plan_models,
     sweep_labels,
 )
@@ -62,6 +62,12 @@ BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
 POPULATION_NAME = ""
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a run could be reduced and still open the case study's own artifacts in
+# place, which is the production path; a reader under test then wrote where the published run
+# writes. WORKSPACE is the other half: a preview has nowhere else to put its results.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Resolve one forecasting request
@@ -72,7 +78,21 @@ POPULATION_NAME = ""
 
 # %%
 set_global_seeds(SEED)
-study = Study.regenerate(CASE_STUDY_ID)
+# The reductions are read before the study is opened, because which study to open is decided by
+# the tier and the two have to agree: a preview that reduces nothing is a canonical run wearing
+# the wrong tier, and a canonical run carrying reductions would publish a narrowed population
+# under the canonical name.
+REDUCTION_PARAMETERS = {
+    "folds": list(range(MAX_FOLDS)) if MAX_FOLDS else None,
+    "max_symbols": MAX_SYMBOLS or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
 
 # Which labels this notebook fits is a question for the training menus, not for the sweep list:
 # `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
@@ -103,11 +123,6 @@ if PREDICTION_SPLIT != "validation":
 if FORCE_RETRAIN:
     raise ValueError("valid checkpoints are reloaded by identity; change the request to refit")
 
-reductions = {
-    **({"folds": list(range(MAX_FOLDS))} if MAX_FOLDS else {}),
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-}
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
 # An empty DEVICE resolves to what the machine has. The runners refuse "cuda" on a host without
 # it rather than falling back silently - which is the right contract for a run whose results get
 # registered - so a hardcoded "cuda" default made the notebook unrunnable for any reader without
