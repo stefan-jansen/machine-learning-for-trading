@@ -493,13 +493,25 @@ signal_grid
 
 # %% [markdown]
 # **`entry_rule` is what was requested, not what every decision traded.** The label is read from
-# `strategy.signal.top_k` in the registered specification, so a `top-5 a side` row is named for
-# the book it asked for. At the 186 decisions the figure above shows below ten contracts, the
-# allocator took `min(k, n/2)` and the book was narrower than its name. The turnover, trade count
-# and Sharpe spread in this table are therefore aggregated over rows whose realised breadth
-# varies, under a label that does not vary. That is a caveat on reading the table, not a defect in
-# the results: every configuration within a label met the same cross-section on the same dates, so
-# the comparison between rows holds even where the name overstates the book.
+# `strategy.signal.top_k` in the registered specification, so a `top-5 a side` row is named for the
+# book it asked for. The allocator takes `min(k, n/2)` at each decision, so how often the name
+# overstates the book depends on `k` and not only on the panel:
+#
+# - **`top-5 a side` narrows at 186 of the decisions** - both sub-ten episodes, because five a
+#   side needs ten names and the panel holds five in the first and eight in the second.
+# - **`top-3 a side` narrows at 93** - only the five-contract episode. Where the panel holds
+#   eight, `min(3, 4)` is 3 and a three-a-side book fills exactly as named.
+# - The quantile rule takes a fraction of whatever is quoted, so it has no fixed width to fall
+#   short of and is not affected.
+#
+# The counts are the same for all four labels: every one predicts on the same eight-hour decision
+# grid, and `fwd_ret_24h` differs only in how long a position is then held, not in when it is
+# opened. `fwd_ret_24h` has 2,187 decisions to the others' 2,189, which is its longer horizon
+# retiring the last two of each fold.
+#
+# This is a caveat on reading the table, not a defect in the results. Within a label every
+# configuration met the same cross-section on the same dates, so the comparison between rows holds
+# even where the name overstates the book.
 
 # %% [markdown]
 # ### The spread the baseline produces

@@ -980,7 +980,11 @@ def run_backtest(
     # crypto_perps_funding overlay rows are still on disk behind. Ahead of ensure_backtest_spec
     # too, so a spec that cannot produce the overlay it names is refused before the canonical
     # form is derived from it.
-    _reject_inert_risk_spec((strategy_spec.get("strategy") or {}).get("risk") or {})
+    # Both shapes run_backtest accepts. A caller may nest the block under "strategy", or pass it
+    # at the top level, which backtest_presets.py:368-369 projects into strategy.risk during
+    # canonicalization. The flat shape is the one setup.yaml declares controls in and the one this
+    # guard exists for, so reading only the nested key would leave it blind to its own case.
+    _reject_inert_risk_spec((strategy_spec.get("strategy") or strategy_spec).get("risk") or {})
 
     # 0. Normalize prediction columns to canonical schema, then for
     # classification labels replace the binary y_true with the underlying
