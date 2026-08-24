@@ -70,6 +70,7 @@ MAX_RISK_VARIANTS = 0
 SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
+POPULATION_NAME = ""
 
 # %% [markdown]
 # ## Select the parent strategy
@@ -97,6 +98,21 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # predictions - and a reduced run over a canonical upstream, which is what the
 # test suite exercises, then resolved no rows at all.
 include_preview = EXECUTION_TIER == "preview"
+
+# The tier decides the namespace, so a canonical run may legitimately be narrowed -
+# but a narrowed run declares a different set of members than the canonical
+# population does, and a population is immutable once written. Such a run must
+# publish under its own name rather than register a partial snapshot of the risk overlay sweep
+# under the canonical one.
+if (
+    (TOP_K or TOP_N_PREDICTIONS is not None or MAX_RISK_VARIANTS)
+    and not include_preview
+    and not POPULATION_NAME
+):
+    raise ValueError(
+        "this run narrows the risk overlay sweep, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
+    )
 catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current")
     & (pl.col("split") == SPLIT)
@@ -279,7 +295,7 @@ risk_population = None
 if not include_preview:
     risk_population = OfficialPopulation.create(
         study,
-        name=f"{CASE_STUDY_ID}:risk-overlay-backtests",
+        name=POPULATION_NAME or f"{CASE_STUDY_ID}:risk-overlay-backtests",
         member_kind="backtest",
         members=planned_hashes,
     )
