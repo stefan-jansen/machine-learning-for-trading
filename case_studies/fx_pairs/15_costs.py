@@ -91,7 +91,12 @@ if not RUN_SWEEP:
     raise ValueError("set RUN_SWEEP=True to execute the visible cost request")
 
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-include_preview = bool(TOP_K or TOP_N_PREDICTIONS or MAX_COST_POINTS)
+# The execution tier decides which registry namespace this run reads and writes;
+# the reduction knobs decide only how much of it is covered. Inferring the tier
+# from the knobs conflated the two, so any reduced run went looking for preview
+# predictions - and a reduced run over a canonical upstream, which is what the
+# test suite exercises, then resolved no rows at all.
+include_preview = EXECUTION_TIER == "preview"
 catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current")
     & (pl.col("split") == SPLIT)
@@ -121,20 +126,28 @@ def _label(result: BacktestResult) -> str:
 
 
 def _preview_leader(rows: pl.DataFrame) -> BacktestResult:
-    row = rows.sort("family", "config_name", "checkpoint_value").row(0, named=True)
-    prediction = Result.open(study, row["prediction_hash"], include_preview=True)
-    if not isinstance(prediction, PredictionResult):
-        raise TypeError("preview catalog identity is not a prediction")
-    label = str(row["label"])
-    top_k = TOP_K or get_top_k_values_for(CASE_STUDY_ID, label, n_assets)[0]
-    allocation = get_allocators(CASE_STUDY_ID)[0]
-    strategy = study.strategy(
-        prediction=prediction,
-        signal={"method": "equal_weight_top_k", "top_k": top_k},
-        allocation=allocation,
-        chapter="17",
+    """One allocation backtest for this label, read from what 14 registered.
+
+    Rebuilding the identity restated two of the upstream run's choices - its `top_k` and
+    which allocator came first - from this notebook's own defaults. A preview reduces
+    each notebook independently, so those are guesses about another run's parameters,
+    and a guess that is wrong looks for a hash nothing wrote instead of reporting the
+    disagreement.
+    """
+    registered = study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "allocation")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
     )
-    result = Result.open(study, strategy.identity(), include_preview=True)
+    if registered.is_empty():
+        raise RuntimeError(
+            "no preview allocation backtests are registered for this prediction "
+            "catalog; run 14_portfolio_management at the same reduction first"
+        )
+    row = registered.sort("family", "config_name", "checkpoint_value", "backtest_hash").row(
+        0, named=True
+    )
+    result = Result.open(study, row["backtest_hash"], include_preview=True)
     if not isinstance(result, BacktestResult) or not result.complete:
         raise RuntimeError("the deterministic preview allocation result is not complete")
     return result

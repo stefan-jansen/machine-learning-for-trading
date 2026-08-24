@@ -1518,6 +1518,7 @@ case_studies/fx_pairs/12_model_analysis:
   timeout: 300
 case_studies/fx_pairs/13_backtest:
   parameters:
+    POPULATION_NAME: fx_pairs:preflight-baselines
     TOP_K: 2
   timeout: 600
 case_studies/fx_pairs/14_portfolio_management:

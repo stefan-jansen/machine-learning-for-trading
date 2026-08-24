@@ -58,6 +58,7 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 TOP_N_PREDICTIONS = None
+POPULATION_NAME = ""
 
 # %% [markdown]
 # ## Select the exact prediction population
@@ -75,7 +76,12 @@ if not RUN_SWEEP:
     raise ValueError("set RUN_SWEEP=True to execute the visible baseline request")
 
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-include_preview = bool(TOP_K or TOP_N_PREDICTIONS)
+# The execution tier decides which registry namespace this run reads and writes;
+# the reduction knobs decide only how much of it is covered. Inferring the tier
+# from the knobs conflated the two, so any reduced run went looking for preview
+# predictions - and a reduced run over a canonical upstream, which is what the
+# test suite exercises, then resolved no rows at all.
+include_preview = EXECUTION_TIER == "preview"
 catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current") & (pl.col("split") == SPLIT) & pl.col("complete")
 )
@@ -92,13 +98,24 @@ if TOP_N_PREDICTIONS is not None:
 
 if catalog.is_empty():
     raise RuntimeError("the baseline request resolved no complete prediction rows")
+
+# TOP_K and TOP_N_PREDICTIONS both narrow what is backtested, and a narrowed run declares
+# a different set of members than the canonical population does. A population is immutable
+# once written, so such a run must publish under its own name rather than register a
+# partial snapshot under the canonical one. The tier is a separate question: a canonical
+# run may legitimately be narrowed, it just may not claim to be the whole population.
+if (TOP_K or TOP_N_PREDICTIONS is not None) and not include_preview and not POPULATION_NAME:
+    raise ValueError(
+        "this run narrows the baseline sweep, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
+    )
 if catalog.get_column("prediction_hash").n_unique() != catalog.height:
     raise RuntimeError("the baseline population contains duplicate prediction identities")
 
 if not include_preview:
     prediction_population = OfficialPopulation.create(
         study,
-        name=f"{CASE_STUDY_ID}:validation-predictions",
+        name=POPULATION_NAME or f"{CASE_STUDY_ID}:validation-predictions",
         member_kind="prediction",
         members=catalog.get_column("prediction_hash").to_list(),
     )
@@ -192,7 +209,9 @@ baseline_population = None
 if not include_preview:
     baseline_population = OfficialPopulation.create(
         study,
-        name=f"{CASE_STUDY_ID}:equal-weight-baselines",
+        name=f"{POPULATION_NAME}-baselines"
+        if POPULATION_NAME
+        else f"{CASE_STUDY_ID}:equal-weight-baselines",
         member_kind="backtest",
         members=planned_hashes,
     )

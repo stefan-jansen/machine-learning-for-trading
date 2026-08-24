@@ -94,7 +94,12 @@ if not RUN_SWEEP:
     raise ValueError("set RUN_SWEEP=True to execute the visible allocation request")
 
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-include_preview = bool(TOP_K or TOP_N_PREDICTIONS)
+# The execution tier decides which registry namespace this run reads and writes;
+# the reduction knobs decide only how much of it is covered. Inferring the tier
+# from the knobs conflated the two, so any reduced run went looking for preview
+# predictions - and a reduced run over a canonical upstream, which is what the
+# test suite exercises, then resolved no rows at all.
+include_preview = EXECUTION_TIER == "preview"
 catalog = study.predictions.table(include_preview=include_preview).filter(
     (pl.col("identity_status") == "current")
     & (pl.col("split") == SPLIT)
@@ -120,22 +125,27 @@ def _open_backtests(hashes: Iterable[str]) -> list[BacktestResult]:
 
 
 def _preview_baselines(rows: pl.DataFrame) -> list[BacktestResult]:
-    expected = []
-    for label in sorted(rows.get_column("label").unique()):
-        label_rows = rows.filter(pl.col("label") == label)
-        top_k_values = [TOP_K] if TOP_K else get_top_k_values_for(CASE_STUDY_ID, label, n_assets)
-        for top_k in top_k_values:
-            for row in label_rows.iter_rows(named=True):
-                prediction = Result.open(study, row["prediction_hash"], include_preview=True)
-                if not isinstance(prediction, PredictionResult):
-                    raise TypeError("preview catalog identity is not a prediction")
-                strategy = study.strategy(
-                    prediction=prediction,
-                    signal={"method": "equal_weight_top_k", "top_k": top_k},
-                    chapter="16",
-                )
-                expected.append(strategy.identity())
-    return _open_backtests(expected)
+    """The baselines 13_backtest registered, read rather than reconstructed.
+
+    Rebuilding the identity here meant restating the upstream run's `top_k`, and the two
+    notebooks reduce independently: a preview gives 13_backtest its own `TOP_K` and says
+    nothing to this one, so the reconstruction was a guess about someone else's
+    parameters. A wrong guess does not report a disagreement - it computes a hash that
+    was never written and fails looking for it, or worse, finds an unrelated run. The
+    canonical branch below already reads its members from the published population; this
+    is the same read against the preview registry.
+    """
+    registered = study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "signal")
+        & (pl.col("execution_tier") == "preview")
+        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+    )
+    if registered.is_empty():
+        raise RuntimeError(
+            "no preview equal-weight baselines are registered for this prediction "
+            "catalog; run 13_backtest at the same reduction before this notebook"
+        )
+    return _open_backtests(registered.get_column("backtest_hash").unique().sort())
 
 
 if include_preview:
