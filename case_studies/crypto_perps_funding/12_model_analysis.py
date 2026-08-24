@@ -203,12 +203,11 @@ _t = _effect / _se if _se else float("nan")
 # The block and the bandwidth are sized by different rules and the reader is being asked to
 # weigh a ratio built from the second. The bandwidth is not statsmodels': it requires an
 # explicit `maxlags` for both `HAC` and `hac-groupsum` and supplies no default. The
-# cube-root-of-decision-times rule is this repository's own fallback, in
-# `manual_dml_timeseries` (`case_studies/utils/causal.py:467-472`, inside the function that
-# starts at :340 - `run_dml_analysis` at :624 only warns and forwards), applied because no
-# `hac_maxlags` is passed and then raised to `horizon - 1`. The realized bandwidth is not
-# registered - `causal_runs` stores neither `hac_maxlags` nor `n_periods` - so the notebook
-# states the rule rather than a number it cannot read back.
+# cube-root-of-decision-times rule is this repository's own fallback, applied in
+# `manual_dml_timeseries` in `case_studies/utils/causal.py` because no `hac_maxlags` is
+# passed, and then raised to `horizon - 1` (`run_dml_analysis` only warns and forwards).
+# The realized bandwidth is not registered - `causal_runs` stores neither `hac_maxlags` nor
+# `n_periods` - so the notebook states the rule rather than a number it cannot read back.
 #
 # The two window quantities decide the wording, not `block_size_basis`. The basis string
 # cannot carry it: `block_size = max(horizon_steps, treatment_window_steps or 1)` and the

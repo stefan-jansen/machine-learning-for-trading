@@ -1,19 +1,11 @@
-"""The three properties the block-permutation refutation rests on.
+"""The two properties the block-permutation refutation rests on.
 
-All three were broken together, which is what made the test easy to pass and its
-result impossible to read:
-
-- The block was sized by the label horizon alone. On this panel the horizon, the
-  embargo and the cadence all coincide at one bar, so the "block" permutation was
-  a full within-symbol shuffle - destroying exactly the serial dependence the
-  placebo exists to keep - even though the treatment is a 14-day z-score
-  autocorrelated over 42 bars. The block now spans the longer of the two scales;
-  `tests/test_causal_adapter.py` pins that resolution.
-- The p-value omitted the plus-one correction, so a run in which no placebo
-  reached the observed effect published `p = 0.000`.
-- The pass/fail label was emitted at placebo counts too small to produce it. With
-  the correction in place, fewer than 20 successful placebos cannot score below
-  5 %, so the label read "Fails" regardless of the data.
+Both were broken together, and the pair is what made the test easy to pass and
+its result impossible: `block_size` was taken from `embargo_periods`, so at the
+common `embargo_periods = 1` the "block" permutation was an iid shuffle that
+destroys exactly the serial dependence the placebo is supposed to keep; and the
+p-value omitted the plus-one correction, so a run in which no placebo reached
+the observed effect published `p = 0.000`.
 """
 
 from __future__ import annotations
@@ -24,7 +16,7 @@ import pytest
 import yaml
 
 from case_studies.utils.causal import (
-    REFUTATION_UNRESOLVED,
+    REFUTATION_ALPHA,
     _treatment_persistence_steps,
     block_permute,
     classify_refutation,
@@ -115,31 +107,30 @@ class TestBlockSizePreservesDependence:
         assert adjacent >= len(arr) - len(arr) // block - 1
 
 
-class TestClassificationResolution:
-    """A pass/fail label is only meaningful when the placebo count can produce it.
+class TestUnderpoweredRefutation:
+    """The plus-one correction floors the p-value, so few draws cannot reject."""
 
-    With the plus-one correction the smallest attainable p-value is
-    `1 / (n + 1)`, so below 20 successful placebos every run scores at or above
-    5 % and the label reads "Fails" whatever the data show.
-    """
+    def test_nineteen_draws_cannot_reach_the_alpha_the_classifier_tests(self) -> None:
+        # The most extreme result 19 draws can produce: no placebo reaches the observed
+        # effect. Even then the reported p-value is at the threshold, not below it.
+        strongest = empirical_permutation_p(np.zeros(19), observed_effect=1.0)
 
-    @pytest.mark.parametrize("n_placebo", [1, 10, 19])
-    def test_too_few_placebos_report_no_resolution_rather_than_a_verdict(
-        self, n_placebo: int
-    ) -> None:
-        smallest_attainable = 1.0 / (n_placebo + 1)
+        assert strongest == 1 / 20
+        assert not strongest < REFUTATION_ALPHA
 
-        assert classify_refutation(smallest_attainable, n_placebo) == REFUTATION_UNRESOLVED
+    def test_a_draw_count_that_cannot_reject_is_reported_as_underpowered(self) -> None:
+        # "Fails" here would be untrue by construction - the same defect as p = 0.000
+        # at the other end of the range - because no data could have produced "Passes".
+        assert classify_refutation(1 / 20, n_successful=19) == "Underpowered"
+        assert classify_refutation(1.0, n_successful=10) == "Underpowered"
 
-    def test_twenty_placebos_are_enough_to_decide(self) -> None:
-        """1/21 is below 5 %, so the smallest attainable p-value can now pass."""
-        assert classify_refutation(1.0 / 21, 20) == "Passes"
-        assert classify_refutation(0.5, 20) == "Fails"
+    def test_twenty_draws_are_enough_to_answer(self) -> None:
+        assert classify_refutation(1 / 21, n_successful=20) == "Passes"
+        assert classify_refutation(0.9, n_successful=20) == "Fails"
 
-    def test_the_count_is_optional_so_the_notebook_callers_keep_working(self) -> None:
-        """Seven case-study notebooks call this with the p-value alone."""
+    def test_a_caller_without_the_draw_count_keeps_the_two_way_answer(self) -> None:
         assert classify_refutation(0.01) == "Passes"
-        assert classify_refutation(0.5) == "Fails"
+        assert classify_refutation(0.9) == "Fails"
 
 
 class TestTreatmentWindowLookup:

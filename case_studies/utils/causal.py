@@ -210,10 +210,33 @@ def block_permute(
         Block-permuted array.
     """
     arr = np.asarray(arr)
-    n = len(arr)
     if rng is None:
         rng = np.random.default_rng()
 
+    segments = _permutation_segments(len(arr), groups, units, expected_step, gap_tolerance)
+    result = np.array(arr, copy=True)
+    for idx in segments:
+        result[idx] = _permute_one_segment(arr[idx], block_size, rng)
+    return result
+
+
+def _permutation_segments(
+    n: int,
+    groups: np.ndarray | None,
+    units: np.ndarray | None,
+    expected_step: str | pd.Timedelta | None,
+    gap_tolerance: str | pd.Timedelta | None,
+) -> list[np.ndarray]:
+    """The maximal stretches of rows a block permutation may reorder within.
+
+    One entity's uninterrupted run of decision times is one segment. Blocks never cross
+    a segment boundary, because the rows on either side are not adjacent in time - they
+    belong to different entities, or to the same entity either side of a gap.
+
+    This is the single definition of where the series is cut. ``block_permute`` permutes
+    within these segments and ``_immobile_masks`` counts what they leave standing, so
+    the two can never disagree about the segmentation.
+    """
     if units is not None:
         if groups is None:
             raise ValueError("groups are required when units are supplied")
@@ -221,21 +244,17 @@ def block_permute(
         unit_arr = np.asarray(units)
         if len(group_arr) != n or len(unit_arr) != n:
             raise ValueError("groups and units must have the same length as arr")
-        result = np.empty_like(arr)
+        segments: list[np.ndarray] = []
         for unit in pd.unique(unit_arr):
             idx = np.flatnonzero(unit_arr == unit)
             unit_groups = group_arr[idx]
             if len(unit_groups) > 1 and np.any(unit_groups[1:] <= unit_groups[:-1]):
                 raise ValueError("groups must be strictly increasing within each unit")
-            result[idx] = block_permute(
-                arr[idx],
-                block_size,
-                rng=rng,
-                groups=unit_groups,
-                expected_step=expected_step,
-                gap_tolerance=gap_tolerance,
+            segments.extend(
+                idx[bounds]
+                for bounds in _contiguous_runs(unit_groups, expected_step, gap_tolerance)
             )
-        return result
+        return segments
 
     if groups is not None:
         group_arr = np.asarray(groups)
@@ -245,28 +264,45 @@ def block_permute(
             raise ValueError("units are required when decision times contain multiple rows")
         if n > 1 and np.any(group_arr[1:] <= group_arr[:-1]):
             raise ValueError("groups must be strictly increasing")
-        if expected_step is not None and n > 1:
-            cadence = pd.Timedelta(expected_step)
-            tolerance = (
-                pd.Timedelta(gap_tolerance)
-                if gap_tolerance is not None
-                else GAP_TOLERANCE_CADENCES * cadence
-            )
-            timestamps = pd.to_datetime(group_arr, utc=True)
-            steps = np.asarray(timestamps[1:] - timestamps[:-1])
-            boundaries = np.flatnonzero(steps > tolerance) + 1
-            if boundaries.size:
-                result = np.empty_like(arr)
-                starts = np.r_[0, boundaries]
-                stops = np.r_[boundaries, n]
-                for start, stop in zip(starts, stops, strict=True):
-                    result[start:stop] = block_permute(
-                        arr[start:stop],
-                        block_size,
-                        rng=rng,
-                    )
-                return result
+        positions = np.arange(n)
+        return [
+            positions[bounds]
+            for bounds in _contiguous_runs(group_arr, expected_step, gap_tolerance)
+        ]
 
+    return [np.arange(n)]
+
+
+def _contiguous_runs(
+    group_arr: np.ndarray,
+    expected_step: str | pd.Timedelta | None,
+    gap_tolerance: str | pd.Timedelta | None,
+) -> list[slice]:
+    """Split one entity's ordered decision times wherever the gap exceeds the tolerance."""
+    n = len(group_arr)
+    if expected_step is None or n <= 1:
+        return [slice(0, n)]
+    cadence = pd.Timedelta(expected_step)
+    tolerance = (
+        pd.Timedelta(gap_tolerance)
+        if gap_tolerance is not None
+        else GAP_TOLERANCE_CADENCES * cadence
+    )
+    timestamps = pd.to_datetime(group_arr, utc=True)
+    steps = np.asarray(timestamps[1:] - timestamps[:-1])
+    boundaries = np.flatnonzero(steps > tolerance) + 1
+    if not boundaries.size:
+        return [slice(0, n)]
+    starts = np.r_[0, boundaries]
+    stops = np.r_[boundaries, n]
+    return [slice(int(a), int(b)) for a, b in zip(starts, stops, strict=True)]
+
+
+def _permute_one_segment(
+    values: np.ndarray, block_size: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Reorder whole blocks within one uninterrupted stretch."""
+    n = len(values)
     n_blocks = n // block_size
     if n_blocks < 2:
         # Not enough room for two blocks, so there is no permutation to make at this
@@ -274,23 +310,48 @@ def block_permute(
         # caller asked to keep; shuffling it would destroy exactly that, which is
         # what the old `rng.permutation(arr)` did to every weekend-bounded segment
         # of a daily series. A caller that permutes nothing at all is caught by
-        # `_assert_placebo_moved`, not here: inside a panel, one short unit staying
+        # `_assert_placebo_permutation_possible`, not here: inside a panel, one short unit staying
         # put while the others move is correct.
-        return np.array(arr, copy=True)
+        return np.array(values, copy=True)
 
-    block_indices = rng.permutation(n_blocks)
+    pieces = [
+        values[idx * block_size : (idx + 1) * block_size] for idx in rng.permutation(n_blocks)
+    ]
 
-    result = []
-    for idx in block_indices:
-        start = idx * block_size
-        result.append(arr[start : start + block_size])
-
-    # Handle remainder
+    # The trailing rows that do not fill a whole block stay where they are. This is a
+    # property of block permutation itself, not of the data: it happens to any segment
+    # whose length is not a multiple of the block size, however long the segment is.
     remainder_start = n_blocks * block_size
     if remainder_start < n:
-        result.append(arr[remainder_start:])
+        pieces.append(values[remainder_start:])
 
-    return np.concatenate(result)
+    return np.concatenate(pieces)
+
+
+def _immobile_masks(
+    n: int, block_size: int, segments: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Which rows no draw can move, split by the two unrelated reasons.
+
+    The first mask is rows in a segment too short to hold two blocks. Those are frozen
+    because of how the data is shaped against the block size, they carry their observed
+    values into every placebo, and a large share of them makes the refutation
+    uninformative - which is worth telling the caller about.
+
+    The second is the trailing remainder of a segment whose length is not a multiple of
+    the block size. Those rows also never move, but for a reason intrinsic to block
+    permutation that no choice of gap tolerance can remove, and shrinking the block size
+    to chase them is the wrong response. They are reported, not warned about.
+    """
+    short = np.zeros(n, dtype=bool)
+    remainder = np.zeros(n, dtype=bool)
+    for idx in segments:
+        n_blocks = len(idx) // block_size
+        if n_blocks < 2:
+            short[idx] = True
+        elif n_blocks * block_size < len(idx):
+            remainder[idx[n_blocks * block_size :]] = True
+    return short, remainder
 
 
 def _walk_forward_indices(
@@ -533,27 +594,101 @@ def manual_dml_timeseries(
 
 
 REFUTATION_ALPHA = 0.05
-# The label a refutation gets when the placebo count cannot resolve REFUTATION_ALPHA.
-REFUTATION_UNRESOLVED = "Below resolution"
 
 
-def _assert_placebo_moved(original: np.ndarray, permuted: np.ndarray, block_size: int) -> None:
-    """A placebo that equals the observed treatment measures nothing.
+def _placebo_is_unchanged(original: np.ndarray, permuted: np.ndarray) -> bool:
+    """Whether a placebo draw returned the observed treatment.
 
-    `block_permute` leaves a segment intact when it cannot hold two blocks of the
-    requested size, which is the right thing to do to one short unit in a panel. If
-    it happens to *every* segment - the block is larger than the longest
-    uninterrupted stretch of observations - then the "permuted" treatment is the
-    observed treatment, every placebo effect equals the observed effect, and the
-    refutation reports p = 1 while looking like it ran. Fail instead of publishing
-    that.
+    ``np.array_equal`` calls two arrays different wherever either holds a NaN, so a
+    frame the resolver's ``drop_nulls()`` never touched - which is every frame the
+    case-study notebooks pass to ``run_dml_analysis`` directly - would report every
+    identity draw as a real permutation. Compare the non-null positions and require
+    the null positions to agree.
     """
-    if np.array_equal(original, permuted):
+    return not _placebo_moved_mask(original, permuted).any()
+
+
+def _placebo_moved_fraction(original: np.ndarray, permuted: np.ndarray) -> float:
+    """The share of comparable rows this draw actually moved.
+
+    Separate from `_placebo_moved_mask` on purpose. That one answers "are these the same
+    series at all", so a disagreement in null positions means every row counts as moved;
+    here that convention would report a frozen panel as fully permuted the moment one
+    draw shifted a missing value. Rows that are null on either side are simply not
+    comparable, so they are left out of both the count and the denominator.
+    """
+    original = np.asarray(original)
+    permuted = np.asarray(permuted)
+    if original.shape != permuted.shape:
+        return 0.0
+    if not np.issubdtype(original.dtype, np.floating):
+        comparable = np.ones(original.shape, dtype=bool)
+    else:
+        comparable = ~np.isnan(original) & ~np.isnan(permuted)
+    if not comparable.any():
+        return 0.0
+    return float(np.mean(original[comparable] != permuted[comparable]))
+
+
+def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarray:
+    """Which comparable rows the permutation actually moved.
+
+    ``True`` where the row differs, ``False`` where it sits still. Rows whose original
+    value is missing are never comparable, so they are reported as unmoved rather than
+    counted as evidence either way. A shape or null-position mismatch means the two are
+    not the same series at all, so every row counts as moved.
+    """
+    original = np.asarray(original)
+    permuted = np.asarray(permuted)
+    if original.shape != permuted.shape:
+        return np.ones(original.shape, dtype=bool)
+    if not np.issubdtype(original.dtype, np.floating):
+        return original != permuted
+    missing = np.isnan(original)
+    if not np.array_equal(missing, np.isnan(permuted)):
+        return np.ones(original.shape, dtype=bool)
+    moved = np.zeros(original.shape, dtype=bool)
+    moved[~missing] = original[~missing] != permuted[~missing]
+    return moved
+
+
+def _assert_placebo_permutation_possible(
+    unchanged_draws: int, n_draws: int, block_size: int, short_segment_fraction: float = 0.0
+) -> None:
+    """A refutation whose every placebo equals the observed treatment measures nothing.
+
+    ``block_permute`` leaves a segment intact when it cannot hold two blocks of the
+    requested size, which is the right thing to do to one short unit in a panel. If it
+    happens to *every* segment - the block is larger than the longest uninterrupted
+    stretch of observations - then the "permuted" treatment is the observed treatment,
+    every placebo effect equals the observed effect, and the refutation reports p = 1
+    while looking like it ran. Fail instead of publishing that.
+
+    The test is over the whole set of draws, not each one. ``rng.permutation(n_blocks)``
+    can return the identity by chance - one time in two at two blocks, one in six at
+    three - so failing on a single unchanged draw aborts runs that are structurally
+    fine, with a message asserting something false about the data. Every draw coming
+    back unchanged is the structural condition; the chance of that happening to a
+    series that can be permuted falls off as the draws multiply.
+    """
+    if n_draws and unchanged_draws == n_draws:
         raise ValueError(
             f"block permutation with block_size={block_size} left the treatment "
-            "unchanged: no uninterrupted segment of the series holds two blocks of "
-            "that size. Either the block size exceeds the data's contiguous runs or "
-            "the gap tolerance is splitting the series too finely."
+            f"unchanged on all {n_draws} placebo draws: no uninterrupted segment of "
+            "the series holds two blocks of that size. Either the block size exceeds "
+            "the data's contiguous runs or the gap tolerance is splitting the series "
+            "too finely."
+        )
+    if n_draws and short_segment_fraction > 0:
+        warnings.warn(
+            f"block permutation with block_size={block_size} cannot move "
+            f"{short_segment_fraction:.1%} of the treatment rows: they sit in segments "
+            "too short to hold two blocks, so the placebo distribution holds them at "
+            "their observed values and the refutation p-value is biased toward 1. Read "
+            "placebo_frozen_fraction alongside the p-value, and lower block_size or "
+            "widen gap_tolerance if the frozen share is large.",
+            UserWarning,
+            stacklevel=3,
         )
 
 
@@ -585,22 +720,25 @@ def empirical_permutation_p(placebo_effects: np.ndarray, observed_effect: float)
     return (1.0 + at_least_as_extreme) / (1.0 + placebo.size)
 
 
-def classify_refutation(empirical_p: float, n_placebo: int | None = None) -> str:
-    """Binary pass/fail of the block-permutation refutation test at 5 %.
+def classify_refutation(empirical_p: float, n_successful: int | None = None) -> str:
+    """Pass, fail, or too few draws to tell, at the 5 % level.
 
-    Returns "Passes" if the empirical placebo p-value is below 5 %
-    (the observed effect cannot be reproduced by permutation in
-    most placebo runs); "Fails" otherwise. Always read the raw
-    `empirical_p` alongside the label.
+    Returns "Passes" if the empirical placebo p-value is below 5 % (the observed effect
+    cannot be reproduced by permutation in most placebo runs), and "Fails" otherwise.
 
-    Pass ``n_placebo`` and the test reports when it has no resolution to decide
-    with. The plus-one correction puts the smallest attainable p-value at
-    ``1 / (n_placebo + 1)``, so below 20 successful placebos even a placebo
-    distribution that never reaches the observed effect scores above 5 % and the
-    label would read "Fails" whatever the data show.
+    "Underpowered" is the third answer, and it is the honest one whenever the number of
+    successful draws puts "Passes" out of reach. The plus-one correction floors the
+    reported p-value at ``1 / (n + 1)``, so at 19 successful draws or fewer the smallest
+    value the test can produce is already at or above 5 % and "Fails" would be published
+    whatever the data said - untrue by construction in the same way ``p = 0.000`` was at
+    the other end. The preview tier runs ten draws, so this is the ordinary case there,
+    not an exotic one.
+
+    ``n_successful`` is optional so that a caller holding only a p-value keeps the
+    two-way answer; pass it wherever the draw count is known.
     """
-    if n_placebo is not None and 1.0 / (n_placebo + 1) >= REFUTATION_ALPHA:
-        return REFUTATION_UNRESOLVED
+    if n_successful is not None and 1.0 / (n_successful + 1) >= REFUTATION_ALPHA:
+        return "Underpowered"
     return "Passes" if empirical_p < REFUTATION_ALPHA else "Fails"
 
 
@@ -764,6 +902,17 @@ def run_dml_analysis(
         # Block permutation refutation
         placebo_effects = []
         placebo_n_obs = []
+        unchanged_draws = 0
+        moved_fractions: list[float] = []
+        # What no draw can move is a property of the segmentation and the block size, so
+        # it is computed from them rather than inferred from what the draws happened to
+        # do. The two reasons a row never moves are unrelated and only one of them is
+        # worth a warning: see `_immobile_masks`.
+        short_frozen, remainder_frozen = _immobile_masks(
+            len(T),
+            block_size,
+            _permutation_segments(len(T), groups, units, expected_step, None),
+        )
         for _ in range(n_placebo):
             T_perm = block_permute(
                 T,
@@ -773,7 +922,8 @@ def run_dml_analysis(
                 units=units,
                 expected_step=expected_step,
             )
-            _assert_placebo_moved(T, T_perm, block_size)
+            moved_fractions.append(_placebo_moved_fraction(T, T_perm))
+            unchanged_draws += _placebo_is_unchanged(T, T_perm)
             perm_result = manual_dml_timeseries(
                 Y,
                 T_perm,
@@ -795,6 +945,12 @@ def run_dml_analysis(
                 placebo_effects.append(perm_result["theta"])
                 placebo_n_obs.append(int(perm_result["n_obs"]))
 
+        frozen_fraction = float(short_frozen.mean()) if short_frozen.size else 0.0
+        remainder_fraction = float(remainder_frozen.mean()) if remainder_frozen.size else 0.0
+        _assert_placebo_permutation_possible(
+            unchanged_draws, n_placebo, block_size, frozen_fraction
+        )
+
         refutation = {}
         if len(placebo_effects) >= 10:
             placebo_arr = np.array(placebo_effects)
@@ -809,6 +965,11 @@ def run_dml_analysis(
                 "placebo_mean": p_mean,
                 "placebo_std": p_std,
                 "n_successful": len(placebo_effects),
+                "placebo_frozen_fraction": frozen_fraction,
+                "placebo_remainder_fraction": remainder_fraction,
+                "placebo_moved_fraction": float(np.mean(moved_fractions))
+                if moved_fractions
+                else 0.0,
                 "n_folds": n_folds,
                 "placebo_n_obs": placebo_n_obs,
                 "placebo_effects": placebo_effects,
@@ -858,10 +1019,7 @@ def format_dml_summary(results: dict) -> str:
 
     ref = results.get("refutation", {})
     if ref:
-        ref_class = ref.get(
-            "refutation_class",
-            classify_refutation(ref["empirical_p"], ref.get("n_successful")),
-        )
+        ref_class = ref.get("refutation_class", classify_refutation(ref["empirical_p"]))
         lines += [
             "",
             "Refutation (block permutation):",
@@ -1047,15 +1205,74 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     holdout = pd.Timestamp(setup["evaluation"]["holdout_start"], tz="UTC")
     horizon_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
     date_dtype = mds.dataset.schema[mds.date_col]
-    endpoint_cutoff = holdout - horizon_delta
-    analysis = (
-        mds.dataset.select(columns)
-        .drop_nulls()
-        .filter(
-            pl.col(mds.date_col)
-            < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
+    # The cutoff steps back a count of observations, not a calendar duration. The horizons
+    # these buffers describe are counted in the panel's own observations, so subtracting the
+    # buffer as calendar time answers a different question on any gapped calendar. A 21D
+    # buffer is roughly fifteen sessions on a five-session week, which left the last few
+    # retained rows resolving their returns inside the holdout, silently. The two
+    # constructions agree only on a continuous panel, which is why this held wherever anyone
+    # had checked it.
+    #
+    # The cadence therefore has to be measured before the cutoff rather than after it, and on
+    # the pre-holdout observations alone: `_observed_cadence` takes the mode of the gaps, so a
+    # panel whose spacing changes across the holdout boundary would otherwise size the buffer
+    # and the embargo from rows the analysis never touches.
+    entity_col = mds.entity_cols[0]
+    populated = mds.dataset.select(columns).drop_nulls()
+    pre_holdout = populated.filter(
+        pl.col(mds.date_col) < pl.lit(holdout.to_pydatetime()).cast(date_dtype, strict=False)
+    ).select(entity_col, mds.date_col)
+    if pre_holdout.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    cadence = _observed_cadence(pre_holdout, mds.date_col)
+    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
+    # The step-back is counted within each entity, not across the panel's distinct
+    # timestamps. A label advances by that entity's own observations, so on a panel where
+    # one product is missing some of the final sessions, a global count reaches back fewer
+    # of that product's observations than the buffer names and leaves its last rows
+    # resolving inside the holdout. The panel-wide count is only correct when every entity
+    # trades every session, which is a property of the data rather than of this function.
+    #
+    # Each entity is then sealed against its own cutoff rather than against a panel-wide
+    # collapse of them. Taking the earliest and applying it everywhere would let one
+    # entity whose history ends early - a delisted firm, a contract that stopped trading -
+    # drag the boundary back to its own exit date and silently truncate every other
+    # entity to an early slice of the panel.
+    #
+    # An entity that does not hold more than `horizon_steps` observations before the
+    # holdout has no row whose outcome resolves before it, so it contributes no cutoff and
+    # drops out entirely.
+    per_entity = (
+        pre_holdout.unique()
+        .sort(entity_col, mds.date_col)
+        .group_by(entity_col)
+        .agg(
+            pl.col(mds.date_col).len().alias("observations"),
+            pl.col(mds.date_col).alias("timestamps"),
+        )
+        .filter(pl.col("observations") > horizon_steps)
+        .with_columns(
+            pl.col("timestamps")
+            .list.get(pl.col("observations") - horizon_steps)
+            .alias("entity_cutoff")
         )
     )
+    if per_entity.is_empty():
+        raise ValueError(
+            f"no entity holds more than {horizon_steps} observations before "
+            f"{holdout.date()}, so none can absorb the buffer and leave anything to analyse"
+        )
+    analysis = (
+        populated.join(per_entity.select(entity_col, "entity_cutoff"), on=entity_col, how="inner")
+        .filter(pl.col(mds.date_col) < pl.col("entity_cutoff"))
+        .select(columns)
+    )
+    if analysis.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    # The estimand records one boundary, and with a per-entity seal the honest scalar is
+    # the loosest of them: no entity retains a row at or after its own cutoff, and none
+    # of those cutoffs is later than this one.
+    endpoint_cutoff = pd.Timestamp(per_entity.get_column("entity_cutoff").max())
     analysis = _whole_timestamp_tail(
         analysis,
         timestamp=mds.date_col,
@@ -1064,14 +1281,21 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     )
     if analysis.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
-    cadence = _observed_cadence(analysis, mds.date_col)
-    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
-    # Two separate scales create the serial dependence the placebo has to
-    # preserve, and the block has to span the longer of them: the overlapping
-    # labels span the horizon, and the treatment's own construction window spans
-    # itself. On this panel the label horizon is one bar and the treatment is a
-    # 14-day z-score over 42, so sizing the block by the horizon alone would
-    # permute in blocks of one - the iid shuffle `block_permute` exists to avoid.
+    # The cadence is measured on the pre-holdout observations above, so the embargo
+    # is counted against it rather than against an assumed bar size. Leaving the
+    # fallback here would make the embargo short by the ratio between the two on
+    # any panel whose real cadence differs from its declared one, while the
+    # horizon computed from that same cadence stayed right. A month buffer has no
+    # fixed length and keeps the calendar branch.
+    try:
+        embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
+    except ValueError:
+        embargo = embargo_from_buffer(mds.label_buffer)
+    # Two separate scales create the serial dependence the placebo has to preserve, and
+    # the block spans the longer of them: the overlapping labels span the label horizon,
+    # and the treatment's own construction window spans itself. Sizing by the horizon
+    # alone permutes a 42-bar rolling z-score in blocks of one on an 8-hour panel, which
+    # is the iid shuffle `block_permute` exists to avoid.
     treatment_window_steps = _treatment_persistence_steps(setup, treatment)
     if treatment_window_steps is None:
         warnings.warn(
@@ -1086,16 +1310,6 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     block_size_basis = (
         "treatment_window" if block_size == treatment_window_steps else "label_horizon"
     )
-    # The cadence is already measured on the frame being analysed, so the embargo
-    # is counted against it rather than against an assumed bar size. Leaving the
-    # fallback here would make the embargo short by the ratio between the two on
-    # any panel whose real cadence differs from its declared one, while the
-    # horizon computed on the line above stayed right. A month buffer has no
-    # fixed length and keeps the calendar branch.
-    try:
-        embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
-    except ValueError:
-        embargo = embargo_from_buffer(mds.label_buffer)
     nuisance_params = _resolve_nuisance_params(config, request["overrides"], seed)
     key_frame = analysis.select(mds.entity_cols[0], mds.date_col)
     if key_frame.n_unique([mds.entity_cols[0], mds.date_col]) != key_frame.height:
@@ -1172,11 +1386,18 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         n_folds=n_folds,
         embargo=embargo,
         n_placebo=n_placebo,
-        # Resolved above as the longer of the label horizon and the treatment's
-        # own construction window, with the basis recorded in the spec. Sizing it
-        # by the horizon alone gave `block_size = 1` on this panel, because
-        # `embargo`, `horizon_steps` and the cadence all coincide at one bar there
-        # - a full within-symbol shuffle wearing the name of a block permutation.
+        # The block spans the longer of the two scales that create the serial
+        # dependence the permutation exists to preserve: the overlapping labels
+        # span the label horizon, and the treatment's construction window spans
+        # itself. `block_size_basis` records which one set it.
+        #
+        # Neither is the embargo. `embargo` is `embargo_from_buffer(mds.label_buffer,
+        # observed_step=cadence)`, equal to `horizon_steps` by construction here, so
+        # sizing the block off it was right only while the treatment was assumed to
+        # persist no longer than one label. The case-study notebooks that call
+        # `run_dml_analysis` directly still take `BLOCK_SIZE = EMBARGO_PERIODS` from
+        # the *fallback* conversion, with no `observed_step`, where the two can
+        # diverge as well.
         block_size=block_size,
         seed=seed,
         horizon=horizon_steps,
@@ -1238,7 +1459,9 @@ def run_resolved_causal_request(
     dml = results["dml_result"]
     if not all(math.isfinite(float(dml[name])) for name in ("theta", "se_hac")):
         raise ValueError("DML fit did not produce a finite effect and HAC standard error")
-    refutation_p = results.get("refutation", {}).get("empirical_p")
+    refutation = results.get("refutation", {})
+    refutation_p = refutation.get("empirical_p")
+    refutation_n = refutation.get("n_successful")
     case_dir = study.storage_root(spec["execution_tier"])
     register_record(
         study.case_study,
@@ -1255,6 +1478,7 @@ def run_resolved_causal_request(
         naive_effect=float(results["naive_effect"]),
         confounding_bias_pct=float(results["confounding_bias_pct"]),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
+        refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         spec_json=canonical_json(spec),
         notebook="case_studies.utils.causal",
         started_at=results.get("started_at"),
@@ -1354,6 +1578,7 @@ def register_causal_run(
     # significant result, and ``or 1.0`` would flip its meaning.
     p_value_hac = results.get("p_value_hac")
     refutation_p = ref.get("empirical_p")
+    refutation_n = ref.get("n_successful")
 
     _register_causal_run(
         case_study_id,
@@ -1370,6 +1595,7 @@ def register_causal_run(
         naive_effect=float(results.get("naive_effect", 0.0)),
         confounding_bias_pct=float(results.get("confounding_bias_pct", 0.0)),
         refutation_p=float(refutation_p) if refutation_p is not None else None,
+        refutation_n_successful=int(refutation_n) if refutation_n is not None else None,
         spec_json=canonical_json(spec),
         notebook=notebook,
         started_at=started_at or results.get("started_at"),
