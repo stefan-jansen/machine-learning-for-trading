@@ -373,11 +373,12 @@ show_plotly_with_alt(
     "Line chart of the number of perpetual contracts scored at each eight-hour decision over the "
     "validation period, with two horizontal reference lines at ten and twenty contracts marking "
     "what a five-a-side and a ten-a-side long-short book need. The series starts at fourteen "
-    "contracts in January 2022 and ends at nineteen, but the path between is not a rise: it "
-    "collapses to five from 2 October 2022 before recovering. It stays below the twenty line "
-    "throughout, so the ten-a-side rule is never fillable, and it is below the ten line at 186 "
-    "of the 2,189 decisions - all inside that collapse - where the five-a-side rule truncates to "
-    "whatever the cross-section holds rather than failing.",
+    "contracts in January 2022 and ends at nineteen, and it never touches the twenty line, so "
+    "the ten-a-side rule is never fillable. It drops below the ten line in two separate "
+    "episodes rather than trending: to five between 2 October and 2 November 2022, and to eight "
+    "between 9 April and 10 May 2023, ninety-three decisions each and 186 of 2,189 in total. "
+    "Across those the five-a-side rule truncates to whatever the cross-section holds rather "
+    "than failing.",
 )
 
 # %% [markdown]
