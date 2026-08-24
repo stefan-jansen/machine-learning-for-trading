@@ -930,15 +930,74 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     holdout = pd.Timestamp(setup["evaluation"]["holdout_start"], tz="UTC")
     horizon_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
     date_dtype = mds.dataset.schema[mds.date_col]
-    endpoint_cutoff = holdout - horizon_delta
-    analysis = (
-        mds.dataset.select(columns)
-        .drop_nulls()
-        .filter(
-            pl.col(mds.date_col)
-            < pl.lit(endpoint_cutoff.to_pydatetime()).cast(date_dtype, strict=False)
+    # The cutoff steps back a count of observations, not a calendar duration. The horizons
+    # these buffers describe are counted in the panel's own observations, so subtracting the
+    # buffer as calendar time answers a different question on any gapped calendar. A 21D
+    # buffer is roughly fifteen sessions on a five-session week, which left the last few
+    # retained rows resolving their returns inside the holdout, silently. The two
+    # constructions agree only on a continuous panel, which is why this held wherever anyone
+    # had checked it.
+    #
+    # The cadence therefore has to be measured before the cutoff rather than after it, and on
+    # the pre-holdout observations alone: `_observed_cadence` takes the mode of the gaps, so a
+    # panel whose spacing changes across the holdout boundary would otherwise size the buffer
+    # and the embargo from rows the analysis never touches.
+    entity_col = mds.entity_cols[0]
+    populated = mds.dataset.select(columns).drop_nulls()
+    pre_holdout = populated.filter(
+        pl.col(mds.date_col) < pl.lit(holdout.to_pydatetime()).cast(date_dtype, strict=False)
+    ).select(entity_col, mds.date_col)
+    if pre_holdout.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    cadence = _observed_cadence(pre_holdout, mds.date_col)
+    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
+    # The step-back is counted within each entity, not across the panel's distinct
+    # timestamps. A label advances by that entity's own observations, so on a panel where
+    # one product is missing some of the final sessions, a global count reaches back fewer
+    # of that product's observations than the buffer names and leaves its last rows
+    # resolving inside the holdout. The panel-wide count is only correct when every entity
+    # trades every session, which is a property of the data rather than of this function.
+    #
+    # Each entity is then sealed against its own cutoff rather than against a panel-wide
+    # collapse of them. Taking the earliest and applying it everywhere would let one
+    # entity whose history ends early - a delisted firm, a contract that stopped trading -
+    # drag the boundary back to its own exit date and silently truncate every other
+    # entity to an early slice of the panel.
+    #
+    # An entity that does not hold more than `horizon_steps` observations before the
+    # holdout has no row whose outcome resolves before it, so it contributes no cutoff and
+    # drops out entirely.
+    per_entity = (
+        pre_holdout.unique()
+        .sort(entity_col, mds.date_col)
+        .group_by(entity_col)
+        .agg(
+            pl.col(mds.date_col).len().alias("observations"),
+            pl.col(mds.date_col).alias("timestamps"),
+        )
+        .filter(pl.col("observations") > horizon_steps)
+        .with_columns(
+            pl.col("timestamps")
+            .list.get(pl.col("observations") - horizon_steps)
+            .alias("entity_cutoff")
         )
     )
+    if per_entity.is_empty():
+        raise ValueError(
+            f"no entity holds more than {horizon_steps} observations before "
+            f"{holdout.date()}, so none can absorb the buffer and leave anything to analyse"
+        )
+    analysis = (
+        populated.join(per_entity.select(entity_col, "entity_cutoff"), on=entity_col, how="inner")
+        .filter(pl.col(mds.date_col) < pl.col("entity_cutoff"))
+        .select(columns)
+    )
+    if analysis.is_empty():
+        raise ValueError("DML request resolved an empty pre-holdout analysis frame")
+    # The estimand records one boundary, and with a per-entity seal the honest scalar is
+    # the loosest of them: no entity retains a row at or after its own cutoff, and none
+    # of those cutoffs is later than this one.
+    endpoint_cutoff = pd.Timestamp(per_entity.get_column("entity_cutoff").max())
     analysis = _whole_timestamp_tail(
         analysis,
         timestamp=mds.date_col,
@@ -947,13 +1006,11 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     )
     if analysis.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
-    cadence = _observed_cadence(analysis, mds.date_col)
-    horizon_steps = max(1, int(np.ceil(horizon_delta / cadence)))
-    # The cadence is already measured on the frame being analysed, so the embargo
+    # The cadence is measured on the pre-holdout observations above, so the embargo
     # is counted against it rather than against an assumed bar size. Leaving the
     # fallback here would make the embargo short by the ratio between the two on
     # any panel whose real cadence differs from its declared one, while the
-    # horizon computed on the line above stayed right. A month buffer has no
+    # horizon computed from that same cadence stayed right. A month buffer has no
     # fixed length and keeps the calendar branch.
     try:
         embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
