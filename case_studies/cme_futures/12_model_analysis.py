@@ -27,9 +27,13 @@
 #
 # What `ic_mean` and `ic_t` are, precisely, because the two readings are easy to confuse. Both are
 # computed **across folds**: `ic_mean` averages each fold's cross-sectional IC, and `ic_t` divides
-# that by the dispersion of the same five numbers. The registry also computes the daily-series
-# reading with its HAC standard error, which is the inferential statistic, but the predictions
-# reader does not surface it, so it is not in the table below. `ic_n_days` is carried instead: it
+# that by the *standard error* of the same five numbers, which is their dispersion divided by the
+# square root of how many are defined - not the dispersion itself. `ic_std` in the table below is
+# the dispersion, so reproducing `ic_t` from the two columns needs the `sqrt(n_folds_ic)` factor.
+#
+# The registry also computes the daily-series reading with its HAC standard error, which is the
+# inferential statistic, but the predictions reader does not surface it, so it is not in the table
+# below. `ic_n_days` is carried instead: it
 # counts the validation dates that produced a defined IC, and a configuration whose predictions
 # collapse to near-constant on some dates has its `ic_mean` measured over fewer of them. Reading
 # `ic_mean` without `ic_n_days` is how a partial-coverage artifact reads as a leader.
