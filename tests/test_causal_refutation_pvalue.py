@@ -14,7 +14,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from case_studies.utils.causal import block_permute, empirical_permutation_p
+from case_studies.utils.causal import (
+    REFUTATION_ALPHA,
+    block_permute,
+    classify_refutation,
+    empirical_permutation_p,
+)
 
 
 class TestEmpiricalPermutationP:
@@ -97,3 +102,29 @@ class TestBlockSizePreservesDependence:
         assert sorted(permuted) == sorted(arr)
         # Four blocks of six: five of every six steps stay contiguous.
         assert adjacent >= len(arr) - len(arr) // block - 1
+
+
+class TestUnderpoweredRefutation:
+    """The plus-one correction floors the p-value, so few draws cannot reject."""
+
+    def test_nineteen_draws_cannot_reach_the_alpha_the_classifier_tests(self) -> None:
+        # The most extreme result 19 draws can produce: no placebo reaches the observed
+        # effect. Even then the reported p-value is at the threshold, not below it.
+        strongest = empirical_permutation_p(np.zeros(19), observed_effect=1.0)
+
+        assert strongest == 1 / 20
+        assert not strongest < REFUTATION_ALPHA
+
+    def test_a_draw_count_that_cannot_reject_is_reported_as_underpowered(self) -> None:
+        # "Fails" here would be untrue by construction - the same defect as p = 0.000
+        # at the other end of the range - because no data could have produced "Passes".
+        assert classify_refutation(1 / 20, n_successful=19) == "Underpowered"
+        assert classify_refutation(1.0, n_successful=10) == "Underpowered"
+
+    def test_twenty_draws_are_enough_to_answer(self) -> None:
+        assert classify_refutation(1 / 21, n_successful=20) == "Passes"
+        assert classify_refutation(0.9, n_successful=20) == "Fails"
+
+    def test_a_caller_without_the_draw_count_keeps_the_two_way_answer(self) -> None:
+        assert classify_refutation(0.01) == "Passes"
+        assert classify_refutation(0.9) == "Fails"

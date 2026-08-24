@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     naive_effect     REAL,
     confounding_bias_pct REAL,
     refutation_p     REAL,
+    refutation_n_successful INTEGER,
     spec_json        TEXT,
     notebook         TEXT,
     started_at       TEXT,
@@ -649,6 +650,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     for table in ("holdout_staging", "holdout_evaluations"):
         if table in tables and not _table_has_column(db, table, "fitted_state_digest"):
             db.execute(f"ALTER TABLE {table} ADD COLUMN fitted_state_digest TEXT")
+
+    # The number of successful placebo draws decides whether the refutation could have
+    # rejected at all: the plus-one correction floors the p-value at 1 / (n + 1), so at
+    # 19 or fewer no data could produce a pass. Without it a reader holding only
+    # refutation_p cannot tell an underpowered run from a failed one.
+    if "causal_runs" in tables and not _table_has_column(
+        db, "causal_runs", "refutation_n_successful"
+    ):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

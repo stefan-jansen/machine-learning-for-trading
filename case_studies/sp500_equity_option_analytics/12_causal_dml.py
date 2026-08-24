@@ -385,7 +385,7 @@ if "empirical_p" not in ref:
     # which is the one reading a missing test must not produce.
     raise RuntimeError("the DML run published no block-permutation refutation")
 p_value_perm = ref["empirical_p"]
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
+ref_class = ref.get("refutation_class", classify_refutation(p_value_perm, ref.get("n_successful")))
 
 print("Statistical significance:")
 print(f"  p-value (HAC): {p_value:.4f}")

@@ -124,7 +124,7 @@ def prove(workspace: Path) -> dict[str, object]:
             "max_samples": 1200,
             "max_symbols": 6,
             "n_folds": 2,
-            "n_placebo": 24,
+            "n_placebo": 10,
         },
         overrides={"nuisance_params": {"max_iter": 10}},
     )
