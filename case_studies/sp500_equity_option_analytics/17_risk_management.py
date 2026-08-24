@@ -16,14 +16,17 @@
 # %% [markdown]
 # # S&P 500 Equity+Options: Risk Controls
 #
-# This notebook applies predeclared position-level risk rules to the best
-# eligible allocation lineage. It asks whether stop losses, trailing stops, or
-# time exits improve validation Sharpe and drawdown relative to the same
-# no-overlay baseline. The 2021 holdout remains sealed.
+# This notebook applies predeclared position-level risk rules to the allocation
+# lineage that ranks first on validation Sharpe among the full-coverage
+# candidates. It asks whether stop losses, trailing stops, or time exits improve
+# validation Sharpe and drawdown relative to the same no-overlay baseline. Every
+# measurement here comes from validation; the 2021 holdout is read in
+# `18_strategy_analysis`.
 #
 # **Learning objectives**
 #
-# 1. Carry one full-coverage allocation winner into a controlled risk sweep.
+# 1. Carry the highest-ranked full-coverage allocation lineage into a
+#    controlled risk sweep.
 # 2. Compare fixed stop-loss, trailing-stop, and time-exit rules.
 # 3. Evaluate each overlay with a paired block-bootstrap Sharpe-difference
 #    interval against its exact no-overlay baseline.
@@ -94,23 +97,30 @@ MAX_SYMBOLS = 0
 MAX_RISK_VARIANTS = 0
 TOP_N_COMBOS = None
 
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request; the values this notebook runs on are resolved here under
+# different names, so a resolved value cannot overwrite the request that produced it. An injected
+# parameter wins; otherwise the case study's own declaration does.
+
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
 bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
-if not LABEL:
-    LABEL = bt_config.primary_label
+TOP_N = (
+    TOP_N_COMBOS
+    if TOP_N_COMBOS is not None
+    else get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+)
+RISK_LABEL = LABEL or bt_config.primary_label
 if CASE_STUDY_ID in VECTORIZED_CASE_STUDIES:
     raise RuntimeError("This notebook requires engine-level position rules")
 
-print(
-    f"Case study: {CASE_STUDY_ID}; label: {LABEL}; selected lineages: {TOP_N_COMBOS}; mode: engine"
-)
+print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TOP_N}; mode: engine")
 
 # %% [markdown]
-# ## 1. Advance the best eligible strategy carrier
+# ## 1. Advance the highest-ranked eligible strategy carrier
 #
 # Selection compares the equal-weight baseline with active alternative
 # allocators using validation Sharpe and maximum prediction coverage.
@@ -119,10 +129,10 @@ print(
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="signal", top_n=9999
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="allocation", top_n=9999
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -165,26 +175,24 @@ for row in candidate_pool.iter_rows(named=True):
             }
         )
 
-if len(eligible_rows) < TOP_N_COMBOS:
-    raise RuntimeError(
-        f"Expected {TOP_N_COMBOS} eligible strategy lineages, found {len(eligible_rows)}"
-    )
-top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N_COMBOS)
-winner = top_combos.row(0, named=True)
+if len(eligible_rows) < TOP_N:
+    raise RuntimeError(f"Expected {TOP_N} eligible strategy lineages, found {len(eligible_rows)}")
+top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N)
+carrier = top_combos.row(0, named=True)
 print(
-    f"Selected {winner['source']} with {winner['allocator']} allocation, "
-    f"top-{winner['top_k']}, validation Sharpe {winner['sharpe']:.3f}"
+    f"Selected {carrier['source']} with {carrier['allocator']} allocation, "
+    f"top-{carrier['top_k']}, validation Sharpe {carrier['sharpe']:.3f}"
 )
 
 # %% [markdown]
-# The corrected carrier is NLinear with score weighting and ten stocks. The
-# baseline remains fixed while the risk rule changes, so every comparison is a
-# paired strategy perturbation rather than a new model-selection contest.
+# The cell above names the lineage this run resolved to. The baseline stays
+# fixed while the risk rule changes, so every comparison is a paired strategy
+# perturbation rather than a new model-selection contest.
 
 # %%
 prices = load_backtest_prices_for(
     CASE_STUDY_ID,
-    LABEL,
+    RISK_LABEL,
     split="validation",
     warmup_periods=warmup_periods_for(CASE_STUDY_ID),
     max_symbols=MAX_SYMBOLS,
@@ -196,7 +204,7 @@ print(
 # %% [markdown]
 # ## 2. Build the risk-control surface
 #
-# The sweep uses only the 14 rules declared in `setup.yaml`. A prior version
+# The sweep uses only the rules declared in `setup.yaml`. A prior version
 # derived additional MAE thresholds from the full validation price panel and
 # evaluated them on that same panel. Those tuned-on-validation rules are not
 # eligible for corrected v3.1 selection.
@@ -275,7 +283,7 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
         predictions,
         combo_plans[0]["spec"],
         prices,
-        label=LABEL,
+        label=RISK_LABEL,
         case_study=CASE_STUDY_ID,
         prediction_hash=combo["prediction_hash"],
     )
@@ -287,7 +295,7 @@ def execute_risk_plans(combo: dict, combo_plans: list[dict]) -> list[str]:
                 plan["spec"],
                 prices=prices,
                 predictions=predictions,
-                label=LABEL,
+                label=RISK_LABEL,
                 register=True,
                 initial_cash=bt_config.initial_cash,
                 calendar=bt_config.calendar,
@@ -390,7 +398,7 @@ def paired_overlay_metrics(row: dict) -> dict:
         aligned["baseline_ret"],
         periods_per_year=periods_per_year_from_setup(CASE_STUDY_ID),
         case_study=CASE_STUDY_ID,
-        label=LABEL,
+        label=RISK_LABEL,
         n_boot=2000,
         seed=42,
     )
@@ -413,11 +421,12 @@ risk_results = risk_results.join(pl.DataFrame(paired_rows), on="backtest_hash").
 )
 
 # %% [markdown]
-# Fixed trailing stops dominate this validation comparison. The five-percent
-# trailing stop raises Sharpe from 1.186 to 2.088 and reduces maximum drawdown
-# magnitude from 32.9% to 12.2%. Its paired Sharpe improvement is 0.907 with a
-# 95% interval of [0.067, 1.685]. It is the only fixed overlay whose paired
-# interval excludes zero.
+# The chart below ranks every overlay by its paired Sharpe difference against
+# its own no-overlay carrier. What separates an overlay worth carrying forward
+# from one that is not is whether its bootstrap interval clears zero, not the
+# size of the point difference. With every declared rule scored on a single
+# validation path, a large point difference whose interval spans zero is what
+# selection noise looks like.
 
 # %%
 plot_risk = risk_results.sort("sharpe_diff")
@@ -446,7 +455,7 @@ ax_delta.set_yticks(y, plot_risk["risk_name"].to_list(), fontsize=8)
 ax_delta.set_xlabel("Paired annualized Sharpe difference vs no overlay")
 add_message_title(
     ax_delta,
-    "Trailing stops lead the paired validation comparison",
+    "Which overlays move Sharpe, and which intervals clear zero",
     "Bars: point difference; whiskers: 95% stationary-block bootstrap",
 )
 fig_delta.show()
@@ -467,10 +476,10 @@ for risk_type, color in type_colors.items():
         color=color,
         label=risk_type.replace("_", " ").title(),
     )
-winner = risk_results.row(0, named=True)
+top_overlay = risk_results.row(0, named=True)
 ax_tradeoff.annotate(
-    winner["risk_name"],
-    (-winner["max_drawdown"], winner["sharpe"]),
+    top_overlay["risk_name"],
+    (-top_overlay["max_drawdown"], top_overlay["sharpe"]),
     xytext=(7, -12),
     textcoords="offset points",
     fontsize=8,
@@ -481,7 +490,7 @@ ax_tradeoff.set_ylabel("Annualized validation Sharpe")
 ax_tradeoff.legend(frameon=False)
 add_message_title(
     ax_tradeoff,
-    "The five-percent trailing stop offers the strongest trade-off",
+    "Where each rule lands on return against drawdown depth",
     "Higher is better; farther left means a shallower drawdown",
 )
 
@@ -490,18 +499,18 @@ fig_tradeoff.show()
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. Risk selection is validation-only and carries the eligible NLinear,
-#    score-weighted, top-ten lineage forward without consulting the holdout.
-# 2. The five-percent trailing stop raises validation Sharpe from 1.186 to
-#    2.088 and reduces maximum drawdown magnitude from 32.9% to 12.2%.
-# 3. Its paired Sharpe improvement is 0.907 with a 95% interval of [0.067,
-#    1.685]. The other 13 fixed overlays have intervals that include zero.
+# 1. Risk selection is validation-only. It carries the eligible lineage that
+#    ranks first on validation Sharpe forward without consulting the holdout.
+# 2. Every overlay is scored against its own carrier's no-overlay path, so the
+#    position rule is the only difference inside a pair.
+# 3. An overlay earns a claim only where its paired bootstrap interval excludes
+#    zero. The ordering of point differences on its own establishes nothing.
 # 4. Full-validation MAE-calibrated thresholds are excluded from corrected
 #    v3.1 because their thresholds were learned from the same validation paths
 #    used to score them.
-# 5. Fourteen predeclared overlays still constitute a selection cohort. The
-#    holdout can be used once on the final carrier, not to choose among them.
+# 5. The predeclared overlays still constitute a selection cohort. The holdout
+#    can be used once on the final carrier, not to choose among them.
 #
 # **Next:** `18_strategy_analysis` locks the corrected validation carrier and
-# compares it with the preserved historical holdout without reusing the sealed
-# window on the new lineage. See Chapter 20 for the strategy synthesis framework.
+# compares it with the preserved historical holdout without reading that window
+# a second time on the new lineage. See Chapter 20 for the strategy synthesis framework.
