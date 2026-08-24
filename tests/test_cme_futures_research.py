@@ -589,6 +589,78 @@ def test_candidate_set_stage_outside_the_funnel_is_refused() -> None:
         research_workflow.candidate_set_name("cme-signal", "fwd_ret_21d")
 
 
+_TABULAR_SHAPE = {
+    "financial": {"sha256": "aa" * 32, "size": 75849052},
+    "label": {"sha256": "bb" * 32, "size": 862351},
+    "model_based": {"sha256": "cc" * 32, "size": 26132109},
+}
+_LATENT_SHAPE = [
+    {"role": "financial", "sha256": "sha256:" + "aa" * 32},
+    {"role": "label", "sha256": "sha256:" + "bb" * 32},
+    {"role": "model_based", "sha256": "sha256:" + "cc" * 32},
+    {"role": "setup", "sha256": "sha256:" + "dd" * 32},
+]
+
+
+def _member(name: str, feature_artifacts):
+    """A stand-in carrying only what the feature-artifact comparison reads."""
+    return SimpleNamespace(
+        hash=name,
+        protocol=lambda: {"feature_artifacts": feature_artifacts},
+    )
+
+
+def test_the_two_feature_artifact_recording_shapes_normalize_to_one_reading() -> None:
+    """The latent adapter writes the same digests differently; the comparison sees through it."""
+    tabular = research_workflow._feature_artifact_digests(_member("t", _TABULAR_SHAPE))
+    latent = research_workflow._feature_artifact_digests(_member("l", _LATENT_SHAPE))
+    assert tabular == latent
+    assert tabular == {
+        "financial": "aa" * 32,
+        "label": "bb" * 32,
+        "model_based": "cc" * 32,
+    }
+    # `setup` is a config digest the latent adapter records and the others do not. It is not a
+    # feature input, so it must not enter the comparison and make the two shapes disagree.
+    assert "setup" not in latent
+
+
+def test_a_member_reading_a_different_feature_build_is_refused() -> None:
+    """The guard the normalization preserves still fails on a real difference in inputs."""
+    stale = {**_TABULAR_SHAPE, "financial": {"sha256": "ee" * 32, "size": 75849052}}
+    with pytest.raises(ValueError, match=r"different feature artifacts: \['financial'\]"):
+        research_workflow._require_agreeing_feature_artifacts(
+            [_member("current", _TABULAR_SHAPE), _member("stale", stale)]
+        )
+    # Agreement across the two shapes is not an error.
+    research_workflow._require_agreeing_feature_artifacts(
+        [_member("t", _TABULAR_SHAPE), _member("l", _LATENT_SHAPE)]
+    )
+
+
+def test_a_member_recording_no_digest_for_a_role_is_refused() -> None:
+    """A role recorded without a digest cannot pass as agreeing with one that has it."""
+    blank = {**_TABULAR_SHAPE, "model_based": {"size": 26132109}}
+    with pytest.raises(ValueError, match="records no digest for 'model_based'"):
+        research_workflow._require_agreeing_feature_artifacts([_member("blank", blank)])
+
+
+def test_a_member_reading_an_extra_feature_artifact_is_refused() -> None:
+    """An extra feature input is a real difference, unlike the config digest that is dropped."""
+    extra = {**_TABULAR_SHAPE, "sentiment": {"sha256": "ff" * 32, "size": 10}}
+    with pytest.raises(ValueError, match=r"different feature artifacts: \['sentiment'\]"):
+        research_workflow._require_agreeing_feature_artifacts(
+            [_member("plain", _TABULAR_SHAPE), _member("extra", extra)]
+        )
+
+
+def test_a_role_recorded_as_a_bare_digest_string_normalizes_too() -> None:
+    """Some results record a role as the digest itself rather than a mapping."""
+    assert research_workflow._feature_artifact_digests(
+        _member("bare", {"financial": "features-a"})
+    ) == {"financial": "features-a"}
+
+
 def _labelled_prediction(study: Study, *, label: str, alpha: float):
     """Publish one validation prediction whose training identity carries the given horizon."""
     spec = _resolved_spec(alpha=alpha)

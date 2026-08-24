@@ -812,6 +812,66 @@ def candidate_set_name(stage: str, label: str) -> str:
     return f"cme_futures-{stage}-{label}-v1"
 
 
+# `setup` is the case-study configuration digest, not a feature input. The latent-factor adapter
+# records it alongside the feature artifacts and the other families do not, so it is dropped before
+# the comparison rather than being read as a difference in what the members trained on.
+NON_FEATURE_ARTIFACT_ROLES = frozenset({"setup"})
+_NORMALIZED_FEATURE_ARTIFACT_CONTRACT = {"comparable_fields": ["feature_artifacts"]}
+
+
+def _feature_artifact_digests(result: Result) -> dict[str, str]:
+    """Return ``{role: digest}`` for the feature inputs, from any recorded shape.
+
+    Three shapes reach the registry for the same information. The tabular families record
+    ``{role: {"sha256": <hex>, "size": int}}``, the latent-factor adapter records
+    ``[{"role": ..., "sha256": "sha256:<hex>"}]``, and a role may carry a bare digest string.
+    Comparing the recorded field by equality therefore refuses a mixed-family set over how the
+    same digests were written down. Normalizing first keeps the guarantee the protocol check
+    exists to give - every member of a comparable set read the same features - instead of
+    declaring the field uncomparable and giving it up.
+    """
+    recorded = result.protocol()["feature_artifacts"]
+    if isinstance(recorded, dict):
+        entries = recorded.items()
+    else:
+        entries = [(entry["role"], entry) for entry in recorded or ()]
+    digests = {}
+    for role, value in entries:
+        if role in NON_FEATURE_ARTIFACT_ROLES:
+            continue
+        digest = value.get("sha256") if isinstance(value, dict) else value
+        if not digest:
+            raise ValueError(f"result {result.hash} records no digest for {role!r}")
+        digests[role] = str(digest).removeprefix("sha256:")
+    return digests
+
+
+def _require_agreeing_feature_artifacts(members: Iterable[Result]) -> None:
+    """Refuse a candidate set whose members did not read the same feature artifacts."""
+    baseline = None
+    for member in members:
+        digests = _feature_artifact_digests(member)
+        if baseline is None:
+            baseline = digests
+            continue
+        if digests != baseline:
+            differing = sorted(set(baseline) ^ set(digests)) or sorted(
+                role for role in baseline if baseline[role] != digests[role]
+            )
+            raise ValueError(f"candidate set members read different feature artifacts: {differing}")
+
+
+def _create_comparable_set(study: Study, name: str, members: list[Result]) -> CandidateSet:
+    """Create one set whose members are checked to share their feature artifacts."""
+    _require_agreeing_feature_artifacts(members)
+    return CandidateSet.create(
+        study,
+        name,
+        members,
+        comparison_contract=dict(_NORMALIZED_FEATURE_ARTIFACT_CONTRACT),
+    )
+
+
 def create_label_candidate_sets(
     study: Study,
     execution: FuturesBacktestExecution,
@@ -825,7 +885,7 @@ def create_label_candidate_sets(
         hashes = execution.catalog_rows.filter(pl.col("label") == label).get_column("backtest_hash")
         members_by_hash = {result.hash: result for result in execution.results}
         members = [members_by_hash[value] for value in hashes]
-        output[label] = CandidateSet.create(
+        output[label] = _create_comparable_set(
             study,
             candidate_set_name(stage, label),
             members,
@@ -865,7 +925,7 @@ def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
     allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
     members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
-    return CandidateSet.create(study, candidate_set_name("pre-overlay", label), members)
+    return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
 
 
 def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
@@ -873,7 +933,7 @@ def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     pre_overlay = pre_overlay_candidate_set(study, label=label)
     risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
     members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
-    return CandidateSet.create(study, candidate_set_name("final-validation", label), members)
+    return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
 
 
 def final_selection_candidate_set(study: Study) -> CandidateSet:
