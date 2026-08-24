@@ -1460,6 +1460,7 @@ def register_causal_run(
     seed: int | None = None,
     horizon: int | None = None,
     max_samples: int | None = None,
+    max_symbols: int | None = None,
     development_end: str | None = None,
     notebook: str = "causal_dml",
     case_dir=None,
@@ -1508,6 +1509,8 @@ def register_causal_run(
         causal_params["horizon"] = horizon
     if max_samples is not None:
         causal_params["max_samples"] = max_samples
+    if max_symbols is not None:
+        causal_params["max_symbols"] = max_symbols
     if development_end is not None:
         causal_params["development_end"] = development_end
 
@@ -1547,6 +1550,7 @@ def register_causal_run(
         notebook=notebook,
         started_at=started_at or results.get("started_at"),
         elapsed_s=elapsed_s if elapsed_s is not None else results.get("elapsed_s"),
+        case_dir=case_dir,
     )
 
     p_hac_display = f"{float(p_value_hac):.4f}" if p_value_hac is not None else "n/a"

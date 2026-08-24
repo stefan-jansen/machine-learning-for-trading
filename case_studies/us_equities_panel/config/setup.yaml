@@ -199,7 +199,7 @@ modeling:
 
 causal:
   treatment: past_ret_12m_skip
-  confounders: [vol_21d, amihud_illiq, volume_ratio]
+  confounders: [vol_21d, illiq_rank, volume_ratio]
   method: walk_forward_dml
 
 # Read by 20_strategy_analysis.py to gate the headline strategy summary.
