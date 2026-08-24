@@ -165,7 +165,7 @@ causal_summary = pl.DataFrame(
 causal_summary
 
 # %% tags=["results"]
-# refutation_p is nullable by contract (utils/causal.py:1111), so it is reported as absent
+# refutation_p is nullable by contract (`case_studies/utils/causal.py`), so it is reported as absent
 # rather than formatted. A run whose refutation did not produce an empirical p-value is a
 # weaker result, and saying so is more useful than omitting the sentence or failing to render.
 _refutation = causal.metrics["refutation_p"]
@@ -201,12 +201,42 @@ _effect = causal.metrics["dml_effect"]
 _se = causal.metrics["dml_se_hac"]
 _t = _effect / _se if _se else float("nan")
 # The block and the bandwidth are sized by different rules and the reader is being asked to
-# weigh a ratio built from the second. `block_size` spans the treatment's construction window;
-# the second-stage bandwidth is statsmodels' cube-root-of-decision-times default, raised only
-# to cover the label horizon (utils/causal.py:467-472), which is one bar here. The realized
-# bandwidth is not registered - `causal_runs` stores neither `hac_maxlags` nor `n_periods` -
-# so the notebook states the rule rather than a number it cannot read back.
-_block = causal.spec["computation"]["refutation"]["block_size"]
+# weigh a ratio built from the second. The bandwidth is not statsmodels': it requires an
+# explicit `maxlags` for both `HAC` and `hac-groupsum` and supplies no default. The
+# cube-root-of-decision-times rule is this repository's own fallback in `run_dml_analysis`,
+# applied because no `hac_maxlags` is passed (`case_studies/utils/causal.py:467-472`), and
+# raised only to `horizon - 1`. The realized bandwidth is not registered - `causal_runs`
+# stores neither `hac_maxlags` nor `n_periods` - so the notebook states the rule rather than
+# a number it cannot read back.
+#
+# The caveat is worded off `block_size_basis`, not off `block_size` alone. The block is
+# `max(horizon_steps, treatment_window_steps or 1)`, so on a run whose treatment declares no
+# window it collapses to the label horizon - and then the block is not treatment persistence
+# and the bandwidth no longer covers fewer lags than it, since `hac_maxlags >= horizon - 1`.
+# Saying so unconditionally would invert the moment someone re-runs this against a treatment
+# the resolver cannot size.
+_refutation_spec = causal.spec["computation"]["refutation"]
+_block = _refutation_spec["block_size"]
+_basis = _refutation_spec["block_size_basis"]
+if _basis == "treatment_window":
+    _bandwidth_text = (
+        f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
+        "persistence, but the standard error behind this ratio does not. Its HAC bandwidth "
+        "is this repository's cube-root-of-decision-times fallback raised to cover the label "
+        "horizon, and nothing ties it to the treatment's window, so it covers materially "
+        "fewer lags than the block. Which way that moves the standard error is not something "
+        "the mismatch settles: a HAC estimate is not monotonic in its bandwidth, because the "
+        "autocovariances a longer bandwidth admits can carry either sign, and the treatment's "
+        "construction window is an argument for the block rather than a derivation of the "
+        "right bandwidth. Read the ratio as provisional until the estimate is recomputed "
+        "across a range of defensible bandwidths. "
+    )
+else:
+    _bandwidth_text = (
+        f"The placebo block spans **{_block}** bars on the label horizon, the resolver having "
+        "found no declared construction window for the treatment, so the block is not sized "
+        "by treatment persistence and the standard error's bandwidth already covers it. "
+    )
 Markdown(
     f"The registered DML estimate is **{_effect:+.4g}** with "
     f"a HAC standard error of **{_se:.4g}**, a ratio of **{_t:.2f}**. {_refutation_text} "
@@ -214,16 +244,7 @@ Markdown(
     "manufactures this effect out of permuted treatment, and the standard error asks "
     "whether the effect is separable from zero at all. Surviving the first while failing "
     "the second is not evidence of a causal effect. "
-    f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
-    "persistence, but the standard error behind this ratio does not. Its HAC bandwidth is "
-    "the cube-root-of-decision-times default raised to cover the label horizon, and nothing "
-    "ties it to the treatment's window, so it covers materially fewer lags than the block. "
-    "Which way that moves the standard error is not something the mismatch settles: a HAC "
-    "estimate is not monotonic in its bandwidth, because the autocovariances a longer "
-    "bandwidth admits can carry either sign, and the treatment's construction window is an "
-    "argument for the block rather than a derivation of the right bandwidth. Read the ratio "
-    "as provisional until the estimate is recomputed across a range of defensible "
-    "bandwidths. "
+    f"{_bandwidth_text}"
     "This result describes the declared causal estimand and does not rank predictive models "
     "or trading strategies."
 )
