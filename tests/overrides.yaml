@@ -1904,7 +1904,15 @@ case_studies/us_equities_panel/06_linear:
   parameters:
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-  timeout: 120
+  # 300s, not 120s. 06 runs the widest workload of the model notebooks under these reductions -
+  # LABELS and CONFIG_NAMES both empty means all three labels against all sixteen published linear
+  # configurations, 48 config-label fits at two folds each - and it carried the tightest budget of
+  # the seventeen. 07_gbm has 300s for 2 fits and 08_tabular_dl 180s for 1. The budget was inverted
+  # against the work. It timed out at 120s in a full-chain run on a box at load 39 with ten
+  # concurrent pytest processes, then passed alone under the same load, so nothing here is broken -
+  # but a shared CI runner is normally loaded, and a margin that survives only an idle machine is
+  # not a margin.
+  timeout: 300
 case_studies/us_equities_panel/07_gbm:
   # See 06_linear on why EXECUTION_TIER is not written here.
   #
