@@ -59,12 +59,13 @@ SUPERSEDES_POPULATION: str | None = None
 # checkpoint schedule, seed, gap policy, and device enter the resolved computation identity.
 #
 # **The device is declared here rather than inherited.** With no override the shared sequence
-# adapter falls back to a literal `"cuda"` written in `case_studies/utils/deep_learning.py`, and the
-# runner raises `CUDA was requested for deep learning, but CUDA is unavailable` rather than quietly
-# moving the fit to the CPU. A CUDA device is therefore a hard requirement of this population, and
-# stating it in the request puts that requirement where a reader meets it instead of two layers
-# below. The resolved specification hash is the same with the override as without, so this names
-# what the published run already did.
+# adapter falls back to a literal `"cuda"` written in `case_studies/utils/deep_learning.py`, and
+# resolving the request raises `CUDA was requested for sequence training, but CUDA is unavailable`
+# rather than quietly moving the fit to the CPU. That refusal comes from resolving the request, so
+# it arrives before any fitting starts. A CUDA device is therefore a hard requirement of this
+# population, and stating it in the request puts that requirement where a reader meets it instead
+# of two layers below. The resolved specification hash is the same with the override as without,
+# so this names what the published run already did.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
