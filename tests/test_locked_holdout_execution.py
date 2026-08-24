@@ -65,16 +65,6 @@ def replay_ranked_positions(
     )
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _locked_study(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

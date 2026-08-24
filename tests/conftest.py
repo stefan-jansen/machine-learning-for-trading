@@ -475,6 +475,34 @@ def pytest_runtest_logreport(report):
         f.flush()
 
 
+@pytest.fixture(autouse=True)
+def _restore_output_root():
+    """Put back the process-global output root a test may have redirected.
+
+    ``Study.open``/``Study.activate`` set ``ML4T_OUTPUT_DIR`` and
+    ``workspace._ACTIVE_OUTPUT_ROOT``, and a test that leaves either pointing into its own
+    tmp_path makes ``get_case_study_dir`` resolve there for every later test in the worker.
+
+    Restored rather than deleted: ``seeded_output_dir`` is session-scoped and writes the
+    per-worker path exactly once, so a teardown that removes the variable removes it for the
+    rest of the worker, and every later module resolving through ``get_case_study_dir`` then
+    reads the committed ``case_studies/`` tree instead of the seeded output dir. This lives here
+    rather than in each module because thirteen copies of it drifted apart once already.
+    """
+    previous = os.environ.get("ML4T_OUTPUT_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+    else:
+        os.environ["ML4T_OUTPUT_DIR"] = previous
+    try:
+        from case_studies.research import workspace
+    except ImportError:
+        return
+    workspace._ACTIVE_OUTPUT_ROOT = None
+    workspace._clear_root_sensitive_caches()
+
+
 @pytest.fixture
 def clean_env():
     """Fixture that provides a clean environment and restores it after."""

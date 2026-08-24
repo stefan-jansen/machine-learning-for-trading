@@ -19,6 +19,21 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def _has_causal_runs(db: sqlite3.Connection) -> bool:
+    """Whether this registry has the table at all.
+
+    A release seeded before any causal run holds a registry with no ``causal_runs`` in it, and
+    naming an absent table in a SELECT is an error rather than an empty result. Reaching those
+    registries is the point of the fallback below, so the check belongs with it.
+    """
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'causal_runs'"
+        ).fetchone()
+        is not None
+    )
+
+
 def _registry_paths(study: Study, tier: ExecutionTier) -> list[Path]:
     """Registries a causal lookup at this tier reads, nearest first.
 
@@ -52,6 +67,8 @@ class CausalResult:
 
         def _current(db_path: Path) -> list[str]:
             with sqlite3.connect(db_path) as db:
+                if not _has_causal_runs(db):
+                    return []
                 rows = db.execute(
                     "SELECT causal_hash, spec_json FROM causal_runs "
                     "WHERE label = ? ORDER BY causal_hash",
@@ -113,6 +130,8 @@ class CausalResult:
             if not db_path.is_file():
                 continue
             with sqlite3.connect(db_path) as db:
+                if not _has_causal_runs(db):
+                    continue
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
                     "confounding_bias_pct, refutation_p, spec_json "

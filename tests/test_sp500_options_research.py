@@ -39,30 +39,6 @@ from tests.test_research_contract_catalog import _resolved_spec
 from utils.paths import REPO_ROOT
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    """`open_study` and `Study.activate` mutate process-global state; put it back.
-
-    Without this, a test that activates a preview tier leaves `ML4T_OUTPUT_DIR` and
-    `workspace._ACTIVE_OUTPUT_ROOT` pointing into its own tmp_path for every later test in the
-    same worker, and `get_case_study_dir` resolves there. Restored rather than deleted:
-    `conftest.py::seeded_output_dir` is session-scoped, so a variable this teardown removes is
-    gone for the rest of the worker and nothing sets it again.
-    """
-    import os
-
-    previous = os.environ.get("ML4T_OUTPUT_DIR")
-    yield
-    if previous is None:
-        os.environ.pop("ML4T_OUTPUT_DIR", None)
-    else:
-        os.environ["ML4T_OUTPUT_DIR"] = previous
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _study(tmp_path: Path) -> Study:
     output_root = tmp_path / "workspace"
     root = output_root / "sp500_options"

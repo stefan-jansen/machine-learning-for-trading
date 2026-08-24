@@ -17,16 +17,6 @@ from utils.artifact_specs import load_setup_config
 from utils.paths import get_case_study_dir
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in root.rglob("*") if p.is_file()):

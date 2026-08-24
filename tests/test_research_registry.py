@@ -22,16 +22,6 @@ from case_studies.utils.registry.store import _open_registry
 from tests.test_research_workspace import _seed_release
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _study(tmp_path: Path) -> Study:
     return Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)

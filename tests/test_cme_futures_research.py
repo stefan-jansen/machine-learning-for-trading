@@ -37,16 +37,6 @@ from tests.test_research_registry import _training_spec
 from utils.paths import REPO_ROOT
 
 
-@pytest.fixture(autouse=True)
-def _restore_output_root():
-    yield
-    os.environ.pop("ML4T_OUTPUT_DIR", None)
-    from case_studies.research import workspace
-
-    workspace._ACTIVE_OUTPUT_ROOT = None
-    workspace._clear_root_sensitive_caches()
-
-
 def _study(tmp_path: Path) -> Study:
     output_root = tmp_path / "workspace"
     root = output_root / "cme_futures"
