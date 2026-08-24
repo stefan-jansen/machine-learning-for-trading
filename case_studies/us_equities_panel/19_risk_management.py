@@ -14,329 +14,445 @@
 # ---
 
 # %% [markdown]
-# # US Equities Panel: Risk: Engine-Level Risk Rules
+# # US Equities Panel: Risk Overlays
 #
-# **Chapter 19 — Risk Management**
+# For each label, this notebook selects the highest validation-Sharpe configuration from the complete
+# equal-weight and alternative-sizing populations, then applies every declared risk overlay to that
+# fixed configuration. It finally freezes the union of equal-weight, allocation, and risk-overlay
+# rows as the immutable population used for official validation selection.
 #
-# For the US equities panel, the risk-overlay question is different from
-# most other case studies. The 3,200-stock universe already provides
-# inherent diversification, so portfolio-level concentration limits are
-# not the relevant lever. The motivating concern is regime sensitivity:
-# the cross-stage validation rank-1 — gbm `leaves_31_huber` on the
-# fwd_ret_5d horizon, score-weighted top_k=20 — pairs a validation
-# Sharpe of 2.028 [1.464, 2.549] with a holdout Sharpe that resolves on
-# the negative side of zero. Position-level rules (stop-loss, trailing
-# stop, time exit) modify trade duration and risk-shed behavior on
-# losing positions; whether any of them materially blunts the
-# validation-to-holdout decay is an empirical question this notebook
-# answers in the negative.
+# **Learning objectives**
 #
-# This notebook tests **position-level risk controls** on the top
-# allocation-stage combos. Stop-losses, trailing stops, and time exits
-# execute inside the backtest engine — the results reflect the real
-# execution path. Portfolio-level controls (max-drawdown breakers,
-# daily-loss limits) were removed from the sweep across all case
-# studies on 2026-05-17 because their permanent-halt semantics produced
-# a degenerate Sharpe artifact (mean of one active day divided by the
-# standard deviation of zeros); `get_portfolio_risk_controls` returns
-# an empty list and the portfolio-rule loop below executes zero
-# variants.
+# - Fix one selection-eligible strategy configuration per label before applying risk controls.
+# - Hold model, checkpoint, signal, and allocation decisions fixed across overlays.
+# - Freeze the complete validation population used by the research lifecycle.
 #
-# Sections 1–2 generate risk-overlay backtests (write to registry).
-# Section 3 queries the registry via `BacktestExplorer` for analysis.
+# **Book reference**: Chapter 19, Sections 19.3-19.6
 #
-# **Learning Objectives:**
-# 1. Measure how position-level rules (stop-loss, trailing stop, time exit) change
-#    trade count, drawdown, and Sharpe for a high-turnover daily strategy
-# 2. Locate the best-performing position-level overlay for this lineage and
-#    quantify how much (if any) of the validation→holdout decay it absorbs
-# 3. Recognize that risk overlays applied in-sample cannot retroactively close
-#    an out-of-sample Sharpe gap whose source is a signal-regime interaction
-#
-# **Book Reference:** Chapter 19, Sections 19.3–19.6
-#
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Prerequisites**: `16_backtest.py` and `17_portfolio_management.py` publish the strategy sets
+# consumed here.
 
 # %%
-"""US Equities Panel: Risk: Engine-Level Risk Rules."""
+"""Generate risk overlays and freeze the official US-equities validation set."""
 
 import json
-import warnings
+import os
+from pathlib import Path
 
 import polars as pl
 
-warnings.filterwarnings("ignore")
-
-from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
-from case_studies.utils.backtest_presets import (
-    clone_backtest_spec,
-    ensure_backtest_spec,
-    strategy_view,
+from case_studies.research import (
+    CandidateSet,
+    OfficialPopulation,
+    Study,
+    plan_backtests,
+    run_backtests,
 )
-from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.registry import read_predictions, resolve_best_backtest_runs
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.sweep_config import (
-    calibrate_trailing_stops,
     get_portfolio_risk_controls,
     get_position_risk_controls,
     get_top_n_predictions,
 )
-from utils.paths import get_case_study_dir
+from utils.paths import REPO_ROOT
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-LABEL = ""
+BASELINE_SET_NAMES = [
+    "us-equities-fwd-ret-1d-baseline-v1",
+    "us-equities-fwd-ret-5d-baseline-v1",
+    "us-equities-fwd-ret-21d-baseline-v1",
+]
+ALLOCATION_SET_NAMES = [
+    "us-equities-fwd-ret-1d-allocation-v1",
+    "us-equities-fwd-ret-5d-allocation-v1",
+    "us-equities-fwd-ret-21d-allocation-v1",
+]
+VALIDATION_SET_NAME = "us-equities-validation-strategies-v1"
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
+PREVIEW_LABELS = []
+PREVIEW_MAX_SOURCE_ROWS = 0
+PREVIEW_MAX_RISK_CONTROLS = 0
 MAX_SYMBOLS = 0
-MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
-TOP_N_COMBOS = None
-
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
-if not LABEL:
-    LABEL = bt_config.primary_label
-
-from case_studies.utils.backtest_loaders import VECTORIZED_CASE_STUDIES
-
-IS_VECTORIZED = CASE_STUDY_ID in VECTORIZED_CASE_STUDIES
-MODE_LABEL = "vectorized" if IS_VECTORIZED else "engine"
-print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}, mode: {MODE_LABEL}")
 
 # %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
+# ## Open the selection-eligible strategy rows
 #
-# The allocation-stage top combos are all GBM-based configurations. We apply
-# risk overlays to measure how each rule type modifies the risk-return profile.
-# For daily-cadence strategies, the baseline drawdown profile will show frequent
-# small drawdowns rather than occasional large ones — position-level stops are
-# calibrated to this environment.
+# Canonical execution reopens the named equal-weight and allocation sets. A reduced proof selects
+# preview rows by visible labels and explicit source-row, risk-control, and symbol limits.
 
 # %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
+declared_set_names = [*BASELINE_SET_NAMES, *ALLOCATION_SET_NAMES]
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_SOURCE_ROWS or PREVIEW_MAX_RISK_CONTROLS or MAX_SYMBOLS:
+        raise ValueError("Canonical execution cannot declare preview reductions")
+    if not declared_set_names or len(declared_set_names) != len(set(declared_set_names)):
+        raise ValueError("Canonical execution requires unique named strategy sets")
+    study = Study.regenerate(CASE_STUDY_ID, release_root=REPO_ROOT)
+elif EXECUTION_TIER == "preview":
+    if (
+        not PREVIEW_LABELS
+        or PREVIEW_MAX_SOURCE_ROWS < 1
+        or PREVIEW_MAX_RISK_CONTROLS < 1
+        or MAX_SYMBOLS < 1
+    ):
+        raise ValueError(
+            "Preview execution requires labels and explicit row, risk, and symbol limits"
+        )
+    study = Study.open(
+        CASE_STUDY_ID,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        release_root=REPO_ROOT,
+    )
+else:
+    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
+
+# %% [markdown]
+# ## Select eligible source rows
+#
+# Canonical rows come from the named baseline and allocation sets. Preview rows use the visible
+# label and row limits declared above.
+
+# %%
+backtest_catalog = study.backtests.table(include_preview=True)
+if EXECUTION_TIER == "canonical":
+    declared_sets = tuple(CandidateSet.one(study, name=name) for name in declared_set_names)
+    if any(result_set.member_kind != "backtest" for result_set in declared_sets):
+        raise ValueError("Every declared input set must contain backtests")
+    source_members = tuple(member for result_set in declared_sets for member in result_set.members)
+    if len(source_members) != len(set(source_members)):
+        raise ValueError("Declared baseline and allocation sets overlap")
+    eligible = backtest_catalog.filter(pl.col("backtest_hash").is_in(source_members))
+    if eligible.height != len(source_members):
+        raise ValueError("The backtest catalog does not contain every declared strategy member")
+else:
+    eligible = (
+        backtest_catalog.filter(
+            (pl.col("execution_tier") == "preview")
+            & pl.col("stage").is_in(["signal", "allocation"])
+            & pl.col("label").is_in(PREVIEW_LABELS)
+        )
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+        .head(PREVIEW_MAX_SOURCE_ROWS)
+    )
+
+ineligible = eligible.filter(
+    (pl.col("split") != "validation")
+    | (pl.col("execution_tier") != EXECUTION_TIER)
+    | ~pl.col("stage").is_in(["signal", "allocation"])
+    | ~pl.col("complete")
+    | pl.col("sharpe").is_null()
+    | ~pl.col("sharpe").is_finite()
+)
+if eligible.is_empty() or not ineligible.is_empty():
+    raise ValueError("Risk overlays require complete finite selection-eligible validation rows")
+
+# %% [markdown]
+# ## Fix one source configuration per label
+#
+# The exact model checkpoint, signal, and allocation decisions from the highest validation-Sharpe
+# source row remain fixed while the risk decision changes.
+
+# %% tags=["results"]
+top_n = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
+selected_parts = []
+for label in eligible.get_column("label").unique().sort().to_list():
+    selected_parts.append(
+        eligible.filter(pl.col("label") == label)
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+        .head(top_n)
+    )
+selected_sources = pl.concat(selected_parts).sort("label", "backtest_hash")
+if selected_sources.is_empty():
+    raise RuntimeError("No risk-overlay source configuration was selected")
+
+selected_sources.select(
+    "label",
+    "family",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "stage",
+    "prediction_hash",
+    "backtest_hash",
+    "sharpe",
 )
 
-if top_combos.is_empty():
-    msg = "No allocation-stage results found. Run the portfolio management notebook first."
-    raise RuntimeError(msg)
-
-for row in top_combos.iter_rows(named=True):
-    spec = json.loads(row["spec_json"])
-    alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-    print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
-
-# %%
-prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
-
 # %% [markdown]
-# ### MAE/MFE-Calibrated Trailing Stops
+# ## Declare and plan every risk overlay
+#
+# Position and portfolio controls come from the case-study configuration. Every planned identity is
+# snapshotted before the first overlay runs, so unsuccessful controls remain visible in the official
+# population and completed siblings can be reused on restart.
 
 # %%
-_position_grid = get_position_risk_controls(CASE_STUDY_ID)
-if not IS_VECTORIZED and "close" in prices.columns:
-    calibrated = calibrate_trailing_stops(prices)
-    if calibrated:
-        existing_thresholds = {rc.get("threshold", 0) for rc in _position_grid}
-        new_calibrated = [c for c in calibrated if c["threshold"] not in existing_thresholds]
-        position_controls = _position_grid + new_calibrated
-        print(f"MAE/MFE calibration added {len(new_calibrated)} thresholds")
+risk_requests = []
+for control in get_position_risk_controls(CASE_STUDY_ID):
+    if control["type"] == "time_exit":
+        rule = {"type": control["type"], "bars": control["bars"]}
     else:
-        position_controls = _position_grid
-        print("MAE/MFE calibration returned no results; using standard grid")
-else:
-    position_controls = _position_grid
-    print("Skipping MAE/MFE calibration (vectorized or no close column)")
-
-portfolio_controls = get_portfolio_risk_controls(CASE_STUDY_ID)
-if MAX_RISK_VARIANTS > 0:
-    position_controls = position_controls[:MAX_RISK_VARIANTS]
-    portfolio_controls = portfolio_controls[:MAX_RISK_VARIANTS]
-    print(f"Risk variants limited to {MAX_RISK_VARIANTS} each")
-
-# %% [markdown]
-# ## 2. Risk Overlay Sweep
-#
-# For each top combo, run one position-level overlay per rule in the
-# grid. Position-level rules (stop_loss, trailing_stop, time_exit)
-# execute inside the engine. The portfolio-level loop below runs zero
-# variants because `get_portfolio_risk_controls` returns an empty list
-# after the 2026-05-17 setup.yaml purge.
-#
-# For the US equities panel, watch one pattern that is specific to
-# daily-cadence broad-universe strategies:
-#
-# - **Stop-losses that increase turnover**: tight position-level stops fire
-#   frequently under daily rebalancing, adding trades and worsening the already
-#   tight cost tolerance. A stop that "protects" Sharpe at 0 bps may make the
-#   strategy inoperable at 15 bps. The MAE/MFE-calibrated trailing stops
-#   below probe whether thresholds tuned to the empirical loss distribution
-#   improve on the round-number grid.
-
-# %%
-n_done = 0
-
-for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
-    pred_hash = combo_row["prediction_hash"]
-    base_spec = ensure_backtest_spec(
-        CASE_STUDY_ID,
-        bt_config,
-        json.loads(combo_row["spec_json"]),
-        prices=prices,
-        prediction_hash=pred_hash,
-        initial_cash=bt_config.initial_cash,
-    )
-    alloc_method = strategy_view(base_spec).get("allocation", {}).get("method", "equal_weight")
-
-    predictions = read_predictions(CASE_STUDY_ID, pred_hash)
-
-    # Precompute allocation weights ONCE per combo — avoids re-running
-    # expensive MVO/HRP for every risk variant (167s → 0s per variant)
-    import time
-
-    t0 = time.time()
-    combo_weights = precompute_weights(
-        predictions, base_spec, prices, label=LABEL, case_study=CASE_STUDY_ID
-    )
-    print(
-        f"  Combo {combo_idx + 1}/{len(top_combos)}: {alloc_method} — "
-        f"weights precomputed in {time.time() - t0:.0f}s"
-    )
-
-    # Position-level risk rules (engine only)
-    if not IS_VECTORIZED:
-        for rc in position_controls:
-            spec_risk = clone_backtest_spec(base_spec)
-            spec_risk["chapter"] = "ch19"
-            if rc["type"] == "time_exit":
-                spec_risk["strategy"]["risk"] = {
-                    "name": rc["name"],
-                    "position_rules": [{"type": rc["type"], "bars": rc["bars"]}],
-                }
-            else:
-                spec_risk["strategy"]["risk"] = {
-                    "name": rc["name"],
-                    "position_rules": [{"type": rc["type"], "threshold": rc["threshold"]}],
-                }
-
-            try:
-                result = run_backtest(
-                    CASE_STUDY_ID,
-                    pred_hash,
-                    spec_risk,
-                    prices=prices,
-                    predictions=predictions,
-                    label=LABEL,
-                    register=True,
-                    initial_cash=bt_config.initial_cash,
-                    calendar=bt_config.calendar,
-                    precomputed_weights=combo_weights,
-                )
-                n_done += 1
-                print(
-                    f"    {rc['name']}: Sharpe={result.metrics.get('sharpe', 0):.3f}, "
-                    f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
-                )
-            except Exception as e:
-                print(f"    {rc['name']}: FAILED — {e}")
-
-    # Portfolio-level risk limits
-    for rc in portfolio_controls:
-        spec_risk = clone_backtest_spec(base_spec)
-        spec_risk["chapter"] = "ch19"
-        spec_risk["strategy"]["risk"] = {
-            "name": rc["name"],
-            "portfolio_limits": [{"type": rc["type"], "threshold": rc["threshold"]}],
+        rule = {"type": control["type"], "threshold": control["threshold"]}
+    risk_requests.append(
+        {
+            "name": control["name"],
+            "spec": {"name": control["name"], "position_rules": [rule]},
         }
-
-        try:
-            result = run_backtest(
-                CASE_STUDY_ID,
-                pred_hash,
-                spec_risk,
-                prices=prices,
-                predictions=predictions,
-                label=LABEL,
-                register=True,
-                initial_cash=bt_config.initial_cash,
-                calendar=bt_config.calendar,
-                precomputed_weights=combo_weights,
-            )
-            n_done += 1
-            print(
-                f"    {rc['name']}: Sharpe={result.metrics.get('sharpe', 0):.3f}, "
-                f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
-            )
-        except Exception as e:
-            print(f"    {rc['name']}: FAILED — {e}")
-
-print(f"\nRisk sweep complete: {n_done} backtests")
-
-# %% [markdown]
-# ## 3. Risk Impact Analysis
-#
-# This section is **read-only** — queries the registry for risk overlay
-# results and computes impact relative to the allocation-stage baseline.
-#
-# For the US equities panel, the key comparison is not simply "which rule
-# has the best Sharpe" but "which rule improves the cost-adjusted profile."
-# A risk overlay that adds turnover is net-negative here even if its gross
-# Sharpe is higher. Time-based exits, which cap holding duration rather
-# than firing on price moves, change trade count modestly and are the
-# candidates with the smallest cost penalty.
-
-# %%
-from case_studies.utils.backtest_explorer import BacktestExplorer
-
-explorer = BacktestExplorer(CASE_STUDY_ID)
-
-# %%
-risk_df = explorer.risk_impact()
-
-if not risk_df.is_empty():
-    # Best by risk type
-    for risk_type in risk_df["risk_type"].unique().sort().to_list():
-        subset = risk_df.filter(pl.col("risk_type") == risk_type).sort("sharpe", descending=True)
-        best = subset.head(1)
-        print(f"  Best {risk_type}: {best['risk_name'][0]} → Sharpe={best['sharpe'][0]:.3f}")
-
-    print(f"\nAll risk overlays ({len(risk_df)}):")
-    print(
-        risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta")
-        .sort("sharpe", descending=True)
-        .head(15)
     )
-else:
-    print("No risk overlay data in registry")
+for control in get_portfolio_risk_controls(CASE_STUDY_ID):
+    risk_requests.append(
+        {
+            "name": control["name"],
+            "spec": {
+                "name": control["name"],
+                "portfolio_limits": [{"type": control["type"], "threshold": control["threshold"]}],
+            },
+        }
+    )
+if EXECUTION_TIER == "preview":
+    risk_requests = risk_requests[:PREVIEW_MAX_RISK_CONTROLS]
+if not risk_requests or len({request["name"] for request in risk_requests}) != len(risk_requests):
+    raise ValueError("Risk controls must be non-empty and uniquely named")
+
+prediction_catalog = study.predictions.table(include_preview=True)
+planned_requests = []
+plan_rows = []
+
+
+# %%
+def risk_member_records(
+    label, source_row, selection, signal, allocation, risk_request, expected_hash
+):
+    request = {
+        "label": label,
+        "selection": selection,
+        "signal": signal,
+        "allocation": allocation,
+        "risk": risk_request["spec"],
+        "risk_name": risk_request["name"],
+        "prediction_hash": source_row["prediction_hash"],
+        "source_backtest_hash": source_row["backtest_hash"],
+        "expected_hash": expected_hash,
+    }
+    row = {
+        "label": label,
+        "source_stage": source_row["stage"],
+        "source_backtest_hash": source_row["backtest_hash"],
+        "risk": risk_request["name"],
+        "prediction_hash": source_row["prediction_hash"],
+        "backtest_hash": expected_hash,
+    }
+    return request, row
+
+
+# %%
+def plan_risk_member(label, prices, risk_request, source_row):
+    selected_prediction = prediction_catalog.filter(
+        pl.col("prediction_hash") == source_row["prediction_hash"]
+    )
+    if selected_prediction.height != 1:
+        raise ValueError("A risk source must resolve one prediction catalog row")
+    source_spec = json.loads(source_row["spec_json"])
+    signal = dict(source_spec["strategy"]["signal"])
+    allocation = source_spec["strategy"].get("allocation")
+    plan = plan_backtests(
+        study,
+        predictions=selected_prediction,
+        signal=signal,
+        allocation=allocation,
+        risk=risk_request["spec"],
+        prices=prices,
+        chapter="ch19",
+    )
+    if len(plan.members) != 1:
+        raise RuntimeError("One risk request must plan one backtest")
+    return risk_member_records(
+        label,
+        source_row,
+        selected_prediction,
+        signal,
+        allocation,
+        risk_request,
+        plan.expected_hashes[0],
+    )
+
+
+# %%
+for label in selected_sources.get_column("label").unique().sort().to_list():
+    prices = load_backtest_prices_for(
+        CASE_STUDY_ID,
+        label,
+        split="validation",
+        max_symbols=MAX_SYMBOLS,
+    )
+    for source_row in selected_sources.filter(pl.col("label") == label).iter_rows(named=True):
+        for risk_request in risk_requests:
+            request, row = plan_risk_member(label, prices, risk_request, source_row)
+            planned_requests.append(request)
+            plan_rows.append(row)
+    del prices
+
+# %%
+planned_population = pl.DataFrame(plan_rows).sort(
+    "label", "risk", "source_backtest_hash", "backtest_hash"
+)
+if planned_population.get_column("backtest_hash").n_unique() != planned_population.height:
+    raise ValueError("The risk plan contains duplicate backtest identities")
+
+official_population = None
+if EXECUTION_TIER == "canonical":
+    official_population = OfficialPopulation.create(
+        study,
+        name="us-equities-risk-overlay-v1",
+        member_kind="backtest",
+        members=tuple(planned_population.get_column("backtest_hash")),
+    )
+
+planned_population
 
 # %% [markdown]
-# ## Key Takeaways
+# ## Execute the planned overlay members
 #
-# 1. Position-level rules (stop-loss, trailing stop) increase trade count
-#    for a daily-cadence strategy, exacerbating the cost fragility identified
-#    in Ch18. Any gross Sharpe improvement from stops must be evaluated net
-#    of the additional turnover costs they generate.
-# 2. Among the position-level overlays swept here, the time-exit family
-#    (cap holding duration at 10 / 20 / 40 bars) carries the smallest
-#    turnover penalty and is the only family that lifts the lineage's
-#    validation Sharpe relative to the no-overlay allocation row; the
-#    cross-stage validation rank-1 carrier is `time_exit_40` on top of
-#    the score-weighted top_k=20 allocation. Trailing-stop and
-#    hard-stop variants all sit below the unadorned allocation Sharpe.
-# 3. The validation-to-holdout deterioration is a signal-regime
-#    interaction, not a risk-management failure. Risk overlays applied
-#    in-sample cannot retroactively close an out-of-sample Sharpe gap
-#    whose source is the signal-regime interaction itself; the §6 spine
-#    reading quantifies the gap.
-# 4. The US equities panel pairs a 16-fold validation record that resolves
-#    above zero with a holdout closure that resolves on the negative side
-#    under index-paired resampling — illustrating that fold count and fold
-#    stability are necessary but not sufficient for generalization. Regime
-#    coverage of the training set is a separate axis of evidence.
+# Each source prediction row is passed directly to the shared runner. The pass attempts every
+# independent member before reporting an incomplete official population.
+
+# %%
+execution_rows = []
+failure_rows = []
+
+
+def execute_risk_member(prices, request):
+    execution = run_backtests(
+        study,
+        predictions=request["selection"],
+        signal=request["signal"],
+        allocation=request["allocation"],
+        risk=request["risk"],
+        prices=prices,
+        chapter="ch19",
+    )
+    if len(execution.results) != 1 or execution.results[0].hash != request["expected_hash"]:
+        raise RuntimeError("Risk execution changed its planned identity")
+    return {
+        "label": request["label"],
+        "source_backtest_hash": request["source_backtest_hash"],
+        "risk": request["risk_name"],
+        "backtest_hash": execution.results[0].hash,
+        "status": execution.diagnostics[0]["status"],
+    }
+
+
+# %% tags=["results"]
+for label in selected_sources.get_column("label").unique().sort().to_list():
+    prices = load_backtest_prices_for(
+        CASE_STUDY_ID,
+        label,
+        split="validation",
+        max_symbols=MAX_SYMBOLS,
+    )
+    for request in (item for item in planned_requests if item["label"] == label):
+        try:
+            execution_rows.append(execute_risk_member(prices, request))
+        except Exception as error:
+            failure_rows.append(
+                {
+                    "label": label,
+                    "source_backtest_hash": request["source_backtest_hash"],
+                    "risk": request["risk_name"],
+                    "backtest_hash": request["expected_hash"],
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+            )
+    del prices
+
+# %% tags=["results"]
+execution_diagnostics = pl.DataFrame(
+    execution_rows,
+    schema={
+        "label": pl.String,
+        "source_backtest_hash": pl.String,
+        "risk": pl.String,
+        "backtest_hash": pl.String,
+        "status": pl.String,
+    },
+)
+failures = pl.DataFrame(
+    failure_rows,
+    schema={
+        "label": pl.String,
+        "source_backtest_hash": pl.String,
+        "risk": pl.String,
+        "backtest_hash": pl.String,
+        "error_type": pl.String,
+        "error": pl.String,
+    },
+)
+if not failures.is_empty():
+    raise RuntimeError(f"Risk population has {failures.height} unsuccessful members")
+
+if official_population is not None:
+    official_population.require_complete()
+
+execution_diagnostics
+
+# %% [markdown]
+# ## Freeze the risk and official validation sets
 #
-# **Next**: Ch20 synthesis aggregates results from Ch16–19 across all case
-# studies. The US equities panel contributes a strong validation reading
-# paired with a holdout closure that resolves on the negative side under
-# index-paired resampling — a pairing that anchors the cross-CS holdout-
-# decay table in the synthesis chapter.
+# Per-label risk sets preserve compatible comparisons. The final cross-label set contains exactly
+# the complete equal-weight, alternative-sizing, and risk-overlay populations. Its comparison
+# contract declares the input protocols that vary across label configurations.
+
+# %% tags=["results"]
+set_rows = []
+validation_set = None
+completed_risk = study.backtests.table(include_preview=True).filter(
+    pl.col("backtest_hash").is_in(planned_population.get_column("backtest_hash"))
+)
+if (
+    completed_risk.height != planned_population.height
+    or completed_risk.filter(~pl.col("complete")).height
+    or completed_risk.filter(pl.col("stage") != "risk_overlay").height
+    or completed_risk.filter(pl.col("execution_tier") != EXECUTION_TIER).height
+    or completed_risk.filter(pl.col("sharpe").is_null() | ~pl.col("sharpe").is_finite()).height
+):
+    raise RuntimeError("The risk catalog is incomplete or mis-staged")
+if EXECUTION_TIER == "canonical":
+    for label in completed_risk.get_column("label").unique().sort().to_list():
+        label_name = label.replace("_", "-")
+        result_set = study.backtests.freeze(
+            completed_risk.filter(pl.col("label") == label),
+            name=f"us-equities-{label_name}-risk-overlay-v1",
+        )
+        set_rows.append(
+            {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
+        )
+
+    validation_candidates = pl.concat([eligible, completed_risk]).sort("backtest_hash")
+    if validation_candidates.get_column("backtest_hash").n_unique() != validation_candidates.height:
+        raise ValueError("Selection-eligible strategy sets overlap")
+    validation_set = study.backtests.freeze(
+        validation_candidates,
+        name=VALIDATION_SET_NAME,
+        comparison_contract={"comparable_fields": ["cv", "feature_artifacts", "label_artifact"]},
+    )
+
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"label": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
+
+# %% [markdown]
+# `20_strategy_analysis.py` reopens `us-equities-validation-strategies-v1` and applies the one
+# official rule: highest validation backtest Sharpe with the backtest hash as deterministic tie-break.
+# Research-lock creation and the single holdout execution wait for the frozen holdout producer.
+
+# %% [markdown]
+# ## Key takeaways and limitations
+#
+# - Risk-overlay requests retain the source strategy decisions and change only the declared control.
+# - The official population contains every complete equal-weight, allocation, and risk-overlay
+#   validation result.
+# - Validation Sharpe and the backtest hash define deterministic selection from that population.
+# - The locked holdout is used once after selection and may disconfirm the validation evidence.
