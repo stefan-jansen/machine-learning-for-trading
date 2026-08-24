@@ -226,7 +226,7 @@ execution = plan.run()
 resolved_rows = []
 for run in execution.runs:
     spec = run.training.spec()
-    computation = spec.get("computation", spec)
+    computation = spec["computation"]
     model = computation["model"]
     resolved_rows.append(
         {
