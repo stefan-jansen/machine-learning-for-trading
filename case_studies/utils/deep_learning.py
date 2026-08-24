@@ -314,7 +314,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported sequence preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     mds = load_modeling_dataset(
         study.case_study,
         label_ref.name,
