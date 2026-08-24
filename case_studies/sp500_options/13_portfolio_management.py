@@ -171,17 +171,21 @@ shortlist.select(
 #   resulting tree, which avoids inverting a covariance matrix estimated from short samples.
 # - **mvo_ledoit_wolf** is mean-variance optimisation with the covariance matrix shrunk toward a
 #   structured target, the shrinkage being what keeps an estimate from a short window usable.
+# - **conformal_weighted** sizes each position by the width of its conformal prediction interval,
+#   so capital follows how precise the model's forecast is rather than any moment of past returns.
+#   It is the only rule here that reads the model's own uncertainty.
 #
 # The volatility and covariance windows are all the same length, set once at the case-study level,
-# so no allocator is advantaged by seeing more history than another. Equal weight is absent
-# because it is the baseline these are being compared against.
+# so no allocator is advantaged by seeing more history than another. Equal weight is absent from
+# the menu because it is the baseline these are being compared against.
 
 # %%
-allocators = [
-    allocation
-    for allocation in get_allocators(CASE_STUDY)
-    if allocation["method"] != "equal_weight"
-]
+allocators = get_allocators(CASE_STUDY)
+if any(allocation["method"] == "equal_weight" for allocation in allocators):
+    raise ValueError(
+        "the allocator menu lists equal_weight, which is the signal stage's own weighting; "
+        "the comparison would enter the baseline against itself"
+    )
 if EXECUTION_TIER == "preview":
     allocators = [row for row in allocators if row["method"] in PREVIEW_ALLOCATORS]
 if not allocators:
