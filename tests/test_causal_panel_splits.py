@@ -433,3 +433,21 @@ def test_an_explicit_gap_tolerance_moves_the_boundary() -> None:
 
     assert not np.array_equal(tolerant, treatment)
     assert np.array_equal(strict, treatment)
+
+
+def test_a_zero_length_buffer_is_zero_periods_in_every_unit() -> None:
+    """A label that resolves on its own row's timestamp declares a zero buffer.
+
+    Both branches got it wrong, in different ways. The per-unit fallback divides by
+    the value and is built eagerly, so every unit raised `ZeroDivisionError` -
+    including `D`, which would have returned the zero unchanged had it been reached.
+    The `observed_step` branch floors at one period, which is right for a buffer
+    shorter than a bar and wrong for one of no length: it invented a gap. The two
+    branches answer the same declaration and must not disagree.
+
+    `labels.horizons` in `us_firm_characteristics` declares `0D`, because that
+    release dates each row by the month its return was earned.
+    """
+    for buffer in ("0D", "0min", "0H"):
+        assert embargo_from_buffer(buffer, periods_per_year=12) == 0
+        assert embargo_from_buffer(buffer, observed_step=pd.Timedelta("1D")) == 0

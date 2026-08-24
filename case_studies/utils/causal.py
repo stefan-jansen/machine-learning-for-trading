@@ -148,17 +148,25 @@ def embargo_from_buffer(
                 f"omitting observed_step."
             )
         span = pd.Timedelta(normalized)
+        # The floor of one period is there so a buffer shorter than a bar still
+        # embargoes the bar it resolves inside. A zero-length buffer is not that
+        # case: it declares that the label resolves on its own row's timestamp, so
+        # there is nothing to embargo, and the floor would invent a gap the case
+        # study did not ask for. The `periods_per_year` branch below answers zero
+        # for the same declaration, and the two must not disagree.
+        if span == pd.Timedelta(0):
+            return 0
         return max(1, math.ceil(span / step))
 
     match = re.match(r"(\d+)(D|H|h|M|T|min)", label_buffer.strip())
     if not match:
         raise ValueError(f"Cannot parse label_buffer: {label_buffer}")
     value, unit = int(match.group(1)), match.group(2)
-    # A zero-length buffer is zero periods whatever the unit. The per-unit conversions
-    # below divide by the value and are evaluated eagerly, so every unit raises on a
-    # zero, including the D branch that would otherwise return it unchanged. A case
-    # study whose outcome resolves on the row's own timestamp declares exactly that,
-    # for example `labels.horizons` in us_firm_characteristics.
+    # The per-unit conversions below divide by the value and are built eagerly, so
+    # every unit raised on a zero, including the D branch that would have returned it
+    # unchanged had it been reached. A case study whose outcome resolves on the row's
+    # own timestamp declares exactly that, for example `labels.horizons` in
+    # us_firm_characteristics.
     if value == 0:
         return 0
     return {
