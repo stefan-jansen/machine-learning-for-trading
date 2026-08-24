@@ -30,6 +30,11 @@ def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     knob isolates every name in the chain. With no scope the result is byte-identical to
     the canonical name, which is what lets a narrowed run be configured without moving
     any published population.
+
+    A scope names one run of the chain, not one notebook in it. Giving each stage its own
+    scope isolates each stage from every other stage as well as from the canonical names,
+    so the second stage looks for an upstream population under a name the first stage
+    never wrote. Every notebook in one narrowed run takes the same scope.
     """
     return f"{scope}:{suffix}" if scope else f"{case_study_id}:{suffix}"
 
