@@ -89,6 +89,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
+DEVICE: str = ""
 
 MODEL_NAME = "sae"
 
@@ -164,10 +165,16 @@ if set(configs.get_column("label")) != set(declared.get_column("label")) and not
 # [`11b_ipca`](11b_ipca.ipynb) override it to `cpu` because their runners are numpy and scipy and
 # take no device at all. This one is a torch model trained on the declared device, so it takes the
 # family's value unchanged and passes no override.
+#
+# A machine without a card cannot run the declared device at all, and the library refuses to
+# substitute one (`case_studies/utils/latent_factors/library_bridge.py:53-54`). `DEVICE` names the
+# device such a run fits on. It travels with `POPULATION_NAME`, because the device it names is
+# inside the training identity: the run computes a different member set and has to publish under
+# its own name rather than into the population the declaration describes.
 
 # %%
-overrides: dict = {}
-print("training device: the family declaration in config/setup.yaml (cuda)")
+overrides: dict = {"device": DEVICE} if DEVICE else {}
+print(f"training device: {DEVICE or 'the family declaration in config/setup.yaml (cuda)'}")
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data

@@ -1788,11 +1788,18 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   timeout: 600
 
 case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl and the sequence pair above.
+  # config/setup.yaml declares this family on cuda, and the library refuses to substitute a CPU
+  # for a requested card (case_studies/utils/latent_factors/library_bridge.py:53-54), so without
+  # DEVICE this notebook cannot run on a CI machine at all. The device is inside the training
+  # identity, so the CPU fit declares a different member set and publishes under its own name.
   # Five symbols, and nothing else. n_epochs is deliberately absent: preset_patches.py already
   # patches cae to n_epochs 2 / checkpoint_interval 1, and declaring n_epochs here would override
   # that patch rather than reinforce it - the notebook would train the full schedule for the same
   # two checkpoints.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-cae-preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
   timeout: 600
@@ -1804,17 +1811,27 @@ case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
   # instead, which the adapter supports directly and which also rebuilds `checkpoint_epochs`
   # against the smaller budget (case_studies/utils/latent_factors/adapter.py:248-260).
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sdf-preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
       n_epochs_unc: 2
       n_epochs_moment: 2
       n_epochs_cond: 4
-  timeout: 900
+  # Measured at 537s on CPU on this workstation with the reductions above, against a 900s cap
+  # sized when the family still fell back to whichever device the host had. That is under two
+  # times headroom on a machine faster than the runner, so the cap is raised rather than left
+  # to fail on the next slow one. 11c and 11e are 67s and 73s under the same conditions and
+  # keep theirs.
+  timeout: 1800
 
 case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
   # Five symbols. As with 11c, n_epochs stays out: preset_patches.py patches sae to 2 epochs and
-  # declaring it here would replace that patch with the full schedule.
+  # declaring it here would replace that patch with the full schedule. DEVICE and POPULATION_NAME
+  # carry the same reason they do for 11c and 11d.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sae-preview
     PREVIEW_REDUCTIONS:
       max_symbols: 5
   timeout: 900
@@ -1822,12 +1839,15 @@ case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
 case_studies/sp500_equity_option_analytics/12_causal_dml:
   # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
   # value, so the parameter and the number the analysis runs on no longer share a name.
+  # N_PLACEBO was 5, which cannot produce a refutation at all: run_dml_analysis assembles one
+  # only from at least ten surviving draws, so the notebook's guard against a missing refutation
+  # fired on every CI run. Ten is the floor and a draw can still fail, so twelve is asked for.
   parameters:
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
     N_FOLDS: 2
-    N_PLACEBO: 5
-  timeout: 120
+    N_PLACEBO: 12
+  timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:

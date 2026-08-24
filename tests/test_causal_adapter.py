@@ -730,3 +730,46 @@ def test_the_cutoff_anchors_on_the_first_session_at_or_after_the_holdout(
     # before the holdout, not past it.
     assert sessions[retained - 1 + 5] == pre_holdout[-1]
     assert sessions[retained + 5] >= holdout
+
+
+def test_a_placebo_count_that_cannot_refute_is_refused(tmp_path, monkeypatch) -> None:
+    """Fewer draws than the refutation is built from used to return no refutation at all.
+
+    `run_dml_analysis` assembles the block-permutation result only once enough draws
+    survive, so a request below that floor produced an empty dict rather than an error.
+    Downstream that is indistinguishable from a test that ran and rejected nothing,
+    which is the one reading a refutation that never happened must not produce.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="cannot produce a refutation"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 5,
+            },
+        ).resolve()
+
+
+def test_asking_for_no_placebos_is_still_allowed(tmp_path, monkeypatch) -> None:
+    """Zero is a request for no refutation, which is different from one that cannot run."""
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={
+            "max_samples": 240,
+            "max_symbols": 6,
+            "n_folds": 2,
+            "n_placebo": 0,
+        },
+    ).resolve()
+
+    assert resolved.spec["computation"]["refutation"]["n_placebo"] == 0

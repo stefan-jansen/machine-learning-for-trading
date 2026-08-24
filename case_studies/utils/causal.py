@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 
 
 _DML_PREVIEW_FIELDS = {"max_samples", "max_symbols", "n_folds", "n_placebo"}
+# The fewest surviving placebo draws a block-permutation refutation is built from. Below this
+# the Monte Carlo p-value cannot resolve the level classify_refutation tests at: with k draws
+# the smallest two-sided p it can report is bounded away from zero, so a request for fewer is
+# a request for a test that cannot reject. Such a request is refused rather than returning an
+# empty refutation, which downstream reads as a test that ran and found nothing.
+_MIN_PLACEBO_DRAWS = 10
 
 
 @dataclass(frozen=True)
@@ -727,6 +733,12 @@ def run_dml_analysis(
             raise ValueError(
                 f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
             )
+        if 0 < n_placebo < _MIN_PLACEBO_DRAWS:
+            raise ValueError(
+                f"n_placebo={n_placebo} cannot produce a refutation: the block permutation "
+                f"needs at least {_MIN_PLACEBO_DRAWS} surviving draws, and a draw can still "
+                "fail. Ask for none, or ask for enough."
+            )
         if df[treatment_col].std() < 1e-10:
             raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
         if df[outcome_col].std() < 1e-10:
@@ -826,7 +838,7 @@ def run_dml_analysis(
         _assert_placebo_permutation_possible(unchanged_draws, n_placebo, block_size)
 
         refutation = {}
-        if len(placebo_effects) >= 10:
+        if len(placebo_effects) >= _MIN_PLACEBO_DRAWS:
             placebo_arr = np.array(placebo_effects)
             p_mean = np.mean(placebo_arr)
             p_std = np.std(placebo_arr)
@@ -1037,6 +1049,11 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     max_samples = int(reductions.get("max_samples", 0))
     if n_folds < 2 or n_placebo < 0 or max_samples < 0:
         raise ValueError("DML folds, placebos, and sample cap are invalid")
+    if 0 < n_placebo < _MIN_PLACEBO_DRAWS:
+        raise ValueError(
+            f"a DML request for {n_placebo} placebo draws cannot produce a refutation; the "
+            f"block permutation needs at least {_MIN_PLACEBO_DRAWS}"
+        )
 
     columns = [mds.date_col, mds.entity_cols[0], treatment, mds.label_col, *confounders]
     missing = sorted(set(columns) - set(mds.dataset.columns))
