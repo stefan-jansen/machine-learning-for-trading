@@ -1230,10 +1230,12 @@ case_studies/cme_futures/09_dl_lstm:
     # matters here and cutting symbols further is not.
     #
     # What still blocks CPU coverage is neither of those: the notebook hard-codes
-    # `overrides={"device": "cuda"}` at its resolve call and raises when preview is requested
-    # without an explicit WORKSPACE, and this file is static YAML that cannot supply a
-    # per-run temporary path. Enabling it needs a DEVICE parameter and a decision about that
-    # guard, which is queued behind the pending 09 refit rather than done here.
+    # `overrides={"device": "cuda"}` at its resolve call, and this file is static YAML that
+    # cannot override an argument the source pins. The preview workspace is not a blocker -
+    # `research_preview_parameters` injects a per-run WORKSPACE for any notebook whose
+    # parameters cell declares both EXECUTION_TIER and WORKSPACE, which this one does.
+    # Enabling CPU coverage needs a DEVICE parameter and nothing else, and that is queued
+    # behind the pending 09 refit rather than done here.
   timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
