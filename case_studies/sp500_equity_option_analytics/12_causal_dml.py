@@ -226,9 +226,11 @@ merged_clean = (
 # knows how to read and refuses any other, rather than applying a window that may not describe it.
 #
 # The **Newey-West bandwidth** in the second stage has to cover the overlap between successive
-# outcomes, and the notebook hands it the longer of the outcome horizon and the buffer. A bandwidth
-# shorter than the overlap understates the standard error; a longer one costs power and nothing
-# else, so where the two disagree the notebook takes the longer.
+# outcomes, which is the outcome horizon and not the buffer. The buffer is a cross-validation
+# device that holds a fold's training rows clear of its validation labels; it says nothing about
+# how far apart two outcomes stop sharing a return window. A bandwidth shorter than the overlap
+# understates the standard error, and a longer one moves it in whichever direction the extra
+# sample autocovariances happen to point, so the notebook passes the horizon itself.
 
 # %%
 BUFFER_PERIODS = embargo_from_buffer(mds.label_buffer)
@@ -241,7 +243,6 @@ if TREATMENT_COL != "ivrv_spread":
     )
 TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
 BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
-HAC_HORIZON = max(OUTCOME_HORIZON, BUFFER_PERIODS)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
 
@@ -289,7 +290,7 @@ print(f"Development cutoff after label buffer: {DEVELOPMENT_CUTOFF.date()}")
 print(
     f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE} "
     f"(outcome horizon {OUTCOME_HORIZON}, treatment window {TREATMENT_PERSISTENCE}) | "
-    f"HAC horizon: {HAC_HORIZON}"
+    f"HAC horizon: {OUTCOME_HORIZON}"
 )
 if entity_cols:
     print(f"Entities: {merged_clean[entity_cols[0]].nunique()}")
@@ -313,7 +314,7 @@ results = run_dml_analysis(
     n_placebo=PLACEBO_REPS,
     block_size=BLOCK_SIZE,
     seed=RANDOM_SEED,
-    horizon=HAC_HORIZON,
+    horizon=OUTCOME_HORIZON,
     time_col=date_col,
     entity_col=entity_cols[0] if entity_cols else None,
 )
@@ -491,7 +492,7 @@ register_causal_run(
     block_size=BLOCK_SIZE,
     n_placebo=PLACEBO_REPS,
     seed=RANDOM_SEED,
-    horizon=HAC_HORIZON,
+    horizon=OUTCOME_HORIZON,
     max_samples=ROW_CAP,
     max_symbols=MAX_SYMBOLS,
     development_end=str(DEVELOPMENT_CUTOFF.date()),
