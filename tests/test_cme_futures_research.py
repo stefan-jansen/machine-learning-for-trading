@@ -854,3 +854,43 @@ def test_every_declared_model_population_is_published_by_a_notebook() -> None:
         f"MODEL_POPULATION_NAMES declares populations no notebook publishes: "
         f"{sorted(declared - published)}"
     )
+
+
+def test_a_partial_resolved_set_cannot_snapshot_the_catalog_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`resolved_requests` avoids resolving twice; it does not narrow the population.
+
+    The sp500_options copy of this guard has its own test. This one covers the CME copy, so a
+    regression in either is caught where it lives.
+    """
+    monkeypatch.setattr(
+        research_workflow,
+        "OfficialPopulation",
+        SimpleNamespace(create=lambda *a, **k: pytest.fail("a partial set reached the snapshot")),
+    )
+    catalog = pl.DataFrame(
+        {
+            "family": ["pca", "pca"],
+            "label": ["fwd_ret_5d", "fwd_ret_5d"],
+            "config_name": ["pca", "pca_wide"],
+        }
+    )
+    partial = (
+        SimpleNamespace(
+            family="pca",
+            spec={
+                "execution_tier": "canonical",
+                "label": "fwd_ret_5d",
+                "config_name": "pca",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="do not match the declared catalog"):
+        research_workflow.run_official_model_catalog(
+            cast("object", SimpleNamespace()),
+            catalog,
+            population_name="cme-pca-validation-v1",
+            resolved_requests=partial,
+        )

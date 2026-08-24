@@ -135,25 +135,6 @@ def registry_path(case_study: str) -> Path:
     return _cs_dir(case_study) / case_study / "run_log" / "registry.db"
 
 
-def _has_values(db_path: Path, table: str, column: str) -> bool:
-    """Whether ``table`` in this registry holds a non-null value in ``column`` anywhere.
-
-    Distinct from :func:`_has_column`, which the metric-column declaration made unusable as a
-    signal: the column now exists in every registry, including one written before the metric
-    behind it did, where it is null on every row.
-    """
-    if not _has_column(db_path, table, column):
-        return False
-    try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
-            row = db.execute(
-                f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL LIMIT 1"  # noqa: S608
-            ).fetchone()
-    except sqlite3.Error:
-        return False
-    return row is not None
-
-
 def _has_column(db_path: Path, table: str, column: str) -> bool:
     """Whether ``table`` in this registry carries ``column``.
 
@@ -337,6 +318,12 @@ def load_classification_metrics(
     company in ``sp500_equity_option_analytics`` at 0.5308 pooled against 0.5063
     cross-sectional. Ranking on the pooled figure was ranking partly on the calendar.
 
+    ``auc`` is null where no cross-sectional AUC was computed - a registry written before the
+    metric existed, or a row whose cross-section is too thin to average one. It is never filled
+    in from ``auc_roc``, because a reader cannot then tell which figure a row is carrying, and
+    ordering would rank the two against each other. Rows with a null ``auc`` sort last, by
+    ``auc_roc`` among themselves.
+
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
         ic_mean, auc, auc_roc, accuracy, balanced_accuracy, log_loss, brier_score, auc_pr
@@ -360,17 +347,18 @@ def load_classification_metrics(
 
         params.append(split)
 
-        # Which value `auc` carries turns on whether this registry computes the cross-sectional
-        # one at all, not on whether a row has it. A registry written before the cross-sectional
-        # block holds it nowhere, and `_declare_uncertainty_columns` ALTERs the column into every
-        # registry on open, so a schema check reads that registry as having it and returns an
-        # all-NULL column ordered arbitrarily. A registry that does compute it leaves it null on
-        # a row with too few dated AUCs to average, and coalescing there would present the pooled
-        # value under a name that says cross-sectional.
-        computes_daily = _has_values(db_path, "prediction_metrics", "auc_mean_daily")
-        auc_expression = "pm.auc_mean_daily" if computes_daily else "pm.auc_roc"
-        auc_select = f"{auc_expression} AS auc"
-        auc_order = auc_expression
+        # `auc` is the cross-sectional value or nothing. Substituting the pooled one where a row
+        # has no cross-sectional AUC cannot be made correct, because the two cases that produce
+        # a NULL are indistinguishable from the column: a registry written before the metric
+        # existed (`_declare_uncertainty_columns` ALTERs the column into every registry on open,
+        # so it is present and empty), and a current row whose cross-section is too thin to
+        # average. The pooled value is returned unchanged as `auc_roc`, so a caller that wants it
+        # has it under the name that says what it is.
+        has_daily = _has_column(db_path, "prediction_metrics", "auc_mean_daily")
+        auc_select = ("pm.auc_mean_daily" if has_daily else "NULL") + " AS auc"
+        # Two keys rather than one, so a registry that has no cross-sectional AUC anywhere still
+        # comes back in a defined order instead of an arbitrary one over an all-NULL key.
+        auc_order = "pm.auc_mean_daily DESC NULLS LAST, pm.auc_roc" if has_daily else "pm.auc_roc"
 
         sql = f"""
             SELECT

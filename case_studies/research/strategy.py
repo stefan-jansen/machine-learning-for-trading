@@ -664,18 +664,6 @@ class Strategy:
         )
         case_config = get_backtest_config(self.study.case_study)
         spec = self._build_spec(resolved_prices, case_config, contract_specs)
-        allocation = spec.get("strategy", {}).get("allocation", {})
-        if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
-            lock_record = self._active_lock_record()
-            compute_holdout_conformal_widths(
-                self.study.case_study,
-                lock_record["prediction_hash"],
-                self.prediction.hash,
-                alpha=float(allocation.get("alpha", 0.2)),
-                min_calibration_n=int(allocation["min_calibration_n"]),
-                embargo_steps=holdout_conformal_embargo_steps(self.study.case_study, self.label),
-                write=True,
-            )
         if option_lifecycle is not None:
             declared = spec.get("input_identity", {}).get("option_lifecycle")
             supplied = (
@@ -688,6 +676,18 @@ class Strategy:
                     "a supplied option lifecycle must declare the raw files it was built from, "
                     "and they must be the ones this backtest's identity records"
                 )
+        allocation = spec.get("strategy", {}).get("allocation", {})
+        if self.split == "holdout" and allocation.get("method") == "conformal_weighted":
+            lock_record = self._active_lock_record()
+            compute_holdout_conformal_widths(
+                self.study.case_study,
+                lock_record["prediction_hash"],
+                self.prediction.hash,
+                alpha=float(allocation.get("alpha", 0.2)),
+                min_calibration_n=int(allocation["min_calibration_n"]),
+                embargo_steps=holdout_conformal_embargo_steps(self.study.case_study, self.label),
+                write=True,
+            )
         tier = ExecutionTier(self.prediction.execution_tier)
         self.study.activate(tier)
         decision_weights = self._decision_weights(resolved_prices)

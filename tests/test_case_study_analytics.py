@@ -444,52 +444,34 @@ def test_load_classification_metrics_excludes_regression_rows(seeded_registries)
     assert df.filter(pl.col("auc_roc").is_null()).is_empty()
 
 
-def test_classification_auc_falls_back_when_the_daily_column_is_present_but_empty(
-    seeded_registries,
-) -> None:
-    """A declared-but-unwritten column must not stand in for the pooled AUC.
+def test_auc_is_the_cross_sectional_value_or_nothing(seeded_registries) -> None:
+    """`auc` never carries the pooled figure, whichever reason a row has no daily one.
 
-    `_declare_uncertainty_columns` ALTERs `auc_mean_daily` into every registry when it is
-    opened, so a registry written before the cross-sectional block has the column with NULL on
-    every row it already held. Deciding on whether the column exists reads that as "present"
-    and returns an all-NULL `auc` ordered on an all-NULL key.
+    The two reasons are indistinguishable from the column. `_declare_uncertainty_columns` ALTERs
+    `auc_mean_daily` into every registry on open, so a registry written before the metric existed
+    has it present and empty; a current registry leaves it null on a row whose cross-section is
+    too thin to average. Filling either from `auc_roc` puts the pooled number under a name that
+    says cross-sectional and ranks the two against each other.
     """
     db_path = seeded_registries / "etfs" / "run_log" / "registry.db"
     with sqlite3.connect(str(db_path)) as conn:
         conn.execute("ALTER TABLE prediction_metrics ADD COLUMN auc_mean_daily REAL")
         conn.commit()
 
-    df = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
+    legacy = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
 
-    assert df.height == 1
-    assert df["auc"].to_list() == [0.62]
+    assert legacy.height == 1
+    assert legacy["auc"].to_list() == [None]
+    assert legacy["auc_roc"].to_list() == [0.62]
 
-
-def test_a_current_row_without_a_daily_auc_is_not_given_the_pooled_one(
-    seeded_registries,
-) -> None:
-    """`auc` says cross-sectional; a registry that computes it must not fill in the pooled value.
-
-    The metric pass leaves `auc_mean_daily` null on a row with too few dated AUCs to average
-    while `auc_roc` still exists. Coalescing would present that pooled number, and rank on it,
-    under the name of the method the cross-sectional column was added to replace.
-    """
-    db_path = seeded_registries / "etfs" / "run_log" / "registry.db"
     with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("ALTER TABLE prediction_metrics ADD COLUMN auc_mean_daily REAL")
-        # Another row in the same registry does carry one, which is what says this registry
-        # computes the metric at all.
-        conn.execute(
-            "UPDATE prediction_metrics SET auc_mean_daily = 0.58 "
-            "WHERE prediction_hash != 'ph_lin_c_val'"
-        )
+        conn.execute("UPDATE prediction_metrics SET auc_mean_daily = 0.58")
         conn.commit()
 
-    df = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
+    current = analytics.load_classification_metrics(case_studies=["etfs"], split="validation")
 
-    assert df.height == 1
-    assert df["auc_roc"].to_list() == [0.62]
-    assert df["auc"].to_list() == [None]
+    assert current["auc"].to_list() == [0.58]
+    assert current["auc_roc"].to_list() == [0.62]
 
 
 # -----------------------------------------------------------------------------

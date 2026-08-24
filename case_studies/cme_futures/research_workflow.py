@@ -47,15 +47,17 @@ EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"
 # The result-protocol fields that differ between the two return horizons, and the axis the
 # final cross-horizon comparison therefore spans.
 HORIZON_DEPENDENT_PROTOCOL_FIELDS = ("cv", "feature_artifacts", "label_artifact")
-# Every name here has to be one a notebook actually registers: `official_prediction_catalog`
-# resolves each with `OfficialPopulation.one`, which raises on a name that does not exist, so a
-# name declared and never written stops `12_model_analysis` rather than being ignored. The first
-# two carry the case-study id, which is what the other eight case studies do; the remaining three
-# keep the abbreviation their producers still use, and move when 08, 09 and 10a are next run.
+# Every name here has to be one a notebook actually registers. Nothing a reader runs enforces
+# that yet: `official_prediction_catalog` would resolve each with `OfficialPopulation.one`, which
+# raises on a name that does not exist, but no CME notebook calls it - `12_model_analysis` reads
+# the registry directly. What holds the tuple to its producers today is
+# `tests/test_cme_futures_research.py`, which greps the notebooks for the names they publish.
 #
-# `10b_stochastic_discount_factor` publishes nothing yet: it still runs through the latent-factor
-# library path rather than the research boundary, so there is no `cme-sdf-validation-v1` to
-# resolve. Its name joins this tuple when that notebook registers a population.
+# The first two carry the case-study id, which is what the other eight case studies do; the
+# remaining three keep the abbreviation their producers still use, and move when 08, 09 and 10a
+# are next run. `10b_stochastic_discount_factor` publishes nothing at all: it still runs through
+# the latent-factor library path rather than the research boundary, so there is no
+# `cme-sdf-validation-v1`, and its name joins this tuple when that notebook registers one.
 MODEL_POPULATION_NAMES = (
     "cme_futures-linear-validation-v1",
     "cme_futures-gbm-validation-v1",

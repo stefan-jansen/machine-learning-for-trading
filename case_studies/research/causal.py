@@ -49,25 +49,31 @@ class CausalResult:
     ) -> CausalResult:
         """Resolve one causal result by declared label and execution tier."""
         tier = ExecutionTier(execution_tier)
-        # Nearest registry that holds anything for this label wins outright. Merging them would
-        # make a workspace that has re-derived the result under a corrected input read as two
-        # current identities against the release's prior one, and refuse.
-        rows: list[tuple[str, str]] = []
-        for db_path in _registry_paths(study, tier):
+
+        def _current(db_path: Path) -> list[str]:
             with sqlite3.connect(db_path) as db:
                 rows = db.execute(
                     "SELECT causal_hash, spec_json FROM causal_runs "
                     "WHERE label = ? ORDER BY causal_hash",
                     (label,),
                 ).fetchall()
-            if rows:
+            return [
+                causal_hash
+                for causal_hash, spec_json in rows
+                if json.loads(spec_json or "{}").get("identity_version") == IDENTITY_VERSION
+                and json.loads(spec_json or "{}").get("execution_tier", tier.value) == tier.value
+            ]
+
+        # Nearest registry holding a result at the requested identity and tier wins outright.
+        # Merging them would make a workspace that has re-derived the result under a corrected
+        # input read as two current identities against the release's prior one, and refuse; and
+        # stopping on any row for the label would let a stale workspace row at an older identity
+        # hide a current released one.
+        current: list[str] = []
+        for db_path in _registry_paths(study, tier):
+            current = _current(db_path)
+            if current:
                 break
-        current = [
-            causal_hash
-            for causal_hash, spec_json in rows
-            if json.loads(spec_json or "{}").get("identity_version") == IDENTITY_VERSION
-            and json.loads(spec_json or "{}").get("execution_tier", tier.value) == tier.value
-        ]
         if len(current) != 1:
             raise ValueError(
                 f"causal selection for {label!r} resolved to {len(current)} identities"

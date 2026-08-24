@@ -1276,3 +1276,15 @@ def test_a_workspace_causal_result_wins_over_the_release_it_supersedes(tmp_path:
 
     assert result.hash == "causalworkspace1"
     assert result.metrics["dml_effect"] == pytest.approx(-0.07)
+
+    # A workspace row at an older identity is not a result at this one, so the release answers.
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        db.execute(
+            "UPDATE causal_runs SET spec_json = ? WHERE causal_hash = ?",
+            (json.dumps({"family": "causal_dml", "identity_version": 1}), "causalworkspace1"),
+        )
+        db.commit()
+
+    fallback = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert fallback.hash == "causalreleasedaa"
