@@ -712,10 +712,10 @@ def test_holdout_seal_fails_closed_on_a_panel_shorter_than_its_buffer(
         study.causal(method="dml", label=label.name).resolve()
 
 
-def test_holdout_seal_holds_a_one_session_horizon_over_a_holiday_boundary(
+def test_holdout_seal_holds_a_one_session_horizon_over_a_weekend_boundary(
     tmp_path, monkeypatch
 ) -> None:
-    """A one-session horizon leaks too, whenever the holdout opens on a non-session.
+    """A one-session horizon leaks too, whenever a non-session gap precedes the boundary.
 
     This is a boundary problem rather than a long-horizon one. The holdout opens on a
     Monday, so the two weekend days sit between the last session and the boundary: the
