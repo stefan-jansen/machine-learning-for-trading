@@ -216,6 +216,7 @@ def _build_expected_latent_training_spec(
         fold_extras = [expected_extra]
     expected = _apply_latent_factor_runtime_spec(
         spec=spec,
+        model_name=model_name,
         n_factors=n_factors,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
@@ -1033,7 +1034,12 @@ def run_latent_factor_cv(
                 extras_dir.mkdir(parents=True, exist_ok=True)
                 _save_fold_extras(extras_dir / "fold_extras.json", state[model_name]["fold_extras"])
 
-        log(f"    -> best epoch={best_epoch}, IC={mean_ic:+.4f} ({elapsed:.1f}s)")
+        # Named for the policy that produced it. Under `fixed` this is the configured reporting
+        # epoch and not an arg-max over checkpoints, so calling it "best" asserted a selection
+        # that did not happen - and it read as one, printing epoch 50 for a curve peaking at 20.
+        selection = metric_policy["checkpoint_selection_policy"]
+        epoch_label = "best epoch" if selection == "validation_ic" else "reporting epoch"
+        log(f"    -> {epoch_label}={best_epoch} ({selection}), IC={mean_ic:+.4f} ({elapsed:.1f}s)")
         gc.collect()
 
     if model_results:
@@ -1669,6 +1675,7 @@ def _register_model_predictions(
 
     spec = _apply_latent_factor_runtime_spec(
         spec=spec,
+        model_name=model_name,
         n_factors=n_factors,
         n_epochs=n_epochs,
         model_kwargs=model_kwargs,
@@ -1720,6 +1727,7 @@ def _register_model_predictions(
 def _apply_latent_factor_runtime_spec(
     *,
     spec: dict[str, Any],
+    model_name: str,
     n_factors: int,
     n_epochs: int,
     model_kwargs: dict[str, Any],
@@ -1759,6 +1767,12 @@ def _apply_latent_factor_runtime_spec(
     params["input_digest"] = input_digest
     params["macro_digest"] = macro_digest
     params["runtime"] = dict(runtime_spec)
+    # The declared behaviour version of the model that produced this fit. `adapter._source_identity`
+    # carries it on the migrated path; without it here, the two registration paths disagree about
+    # what a training hash means, and a runner version bump would move identities on one path while
+    # the other silently served the pre-bump predictions from cache. That is not hypothetical: it is
+    # what `SAE_RUNNER_VERSION = 2` would have done to a notebook still on this path.
+    params["runner_version"] = latent_model_version(model_name)
 
     # IPCA solver controls are part of the configured training identity. If
     # omitted, changing the ALS budget or tolerances reuses the historical
@@ -1775,6 +1789,7 @@ def _apply_latent_factor_runtime_spec(
     if n_epochs:
         runtime_fields["n_epochs"] = n_epochs
     for field in (
+        "batch_size",
         "checkpoint_interval",
         "checkpoint_epochs",
         "n_epochs_unc",

@@ -72,6 +72,7 @@ from case_studies.research import (
     planned_model_plan,
     primary_label,
     run_model_population,
+    supersedes_for_run,
 )
 from case_studies.us_firm_characteristics.research_workflow import MODEL_RUNTIME_OVERRIDES
 from utils.style import COLORS, show_plotly_with_alt
@@ -246,8 +247,18 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 
 # %%
 population_name = POPULATION_NAME or f"us_firm_characteristics-{MODEL_NAME}-validation-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A preview
+# run, a reader's first canonical run against an empty `run_log/`, and a run under a caller-chosen
+# `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is passed anyway. The
+# resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
-    study, plan, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study, plan, population_name=population_name, supersedes=supersedes
 )
 
 print(f"{len(execution.runs)} configurations fitted")

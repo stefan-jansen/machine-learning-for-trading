@@ -42,7 +42,7 @@ from .model_planning import (
     require_declared_menu_coverage,
 )
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
-from .population import OfficialPopulation
+from .population import OfficialPopulation, supersedes_for_run
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy
 from .workspace import Study, open_study
@@ -73,6 +73,7 @@ __all__ = [
     "PlannedBacktest",
     "PlannedModel",
     "OfficialPopulation",
+    "supersedes_for_run",
     "ResearchLock",
     "ResolvedModelRequest",
     "ResolvedCausalRequest",

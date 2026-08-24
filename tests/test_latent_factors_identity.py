@@ -22,6 +22,7 @@ from case_studies.utils.latent_factors.cae import CAE_RUNNER_VERSION, run_cae_fo
 from case_studies.utils.latent_factors.cv import (
     _MODEL_RUNNERS,
     _MODEL_VERSIONS,
+    _apply_latent_factor_runtime_spec,
     latent_model_version,
 )
 from case_studies.utils.latent_factors.ipca import IPCA_RUNNER_VERSION, run_ipca_fold
@@ -221,3 +222,65 @@ class TestTheDeclaredVersions:
             "minibatched and full-batch SAE fits agree, so `batch_size` is not reaching the "
             "library and the OOM this guards against is back"
         )
+
+
+class TestBothRegistrationPathsAgree:
+    """A latent fit reaches the registry by two routes, and a declared version is only worth
+    anything if both carry it. The migrated path goes through `adapter._source_identity`; the
+    legacy `run_case_study_model` path builds its spec in `_apply_latent_factor_runtime_spec`,
+    which carried neither the runner version nor `batch_size`. A notebook on that path would have
+    matched its pre-bump training hash and served the old full-batch SAE predictions from cache
+    rather than refitting - the bump would have been invisible exactly where it mattered."""
+
+    @staticmethod
+    def _legacy_spec(model_name: str, **model_kwargs):
+        return _apply_latent_factor_runtime_spec(
+            spec={
+                "family": "latent_factors",
+                "config_name": model_name,
+                "label": "fwd_ret_1m",
+                "params": {"n_factors": N_FACTORS},
+                "seed": 42,
+            },
+            model_name=model_name,
+            n_factors=N_FACTORS,
+            n_epochs=2,
+            model_kwargs=model_kwargs,
+            fold_extras=[],
+            feature_names=["a", "b"],
+            splits=[{"fold": 0}],
+            task_type="regression",
+            class_values=None,
+            eval_label_col=None,
+            input_digest="deadbeef",
+            macro_digest=None,
+            runtime_spec={"device": "cpu"},
+        )
+
+    def test_the_legacy_path_records_the_declared_runner_version(self) -> None:
+        spec = self._legacy_spec("sae")
+
+        assert spec["params"]["runner_version"] == latent_model_version("sae")
+
+    def test_a_version_bump_moves_the_legacy_spec(self, monkeypatch) -> None:
+        before = self._legacy_spec("sae")
+        monkeypatch.setitem(_MODEL_VERSIONS, "sae", SAE_RUNNER_VERSION + 1)
+        after = self._legacy_spec("sae")
+
+        assert before != after, (
+            "a runner version bump does not reach the legacy registration path, so a notebook on "
+            "it would reuse pre-bump predictions from cache instead of refitting"
+        )
+
+    def test_a_version_bump_moves_both_paths_together(self, monkeypatch) -> None:
+        """The property that makes the declaration meaningful: neither route can miss a bump."""
+        migrated_before, legacy_before = _source_identity("sae"), self._legacy_spec("sae")
+        monkeypatch.setitem(_MODEL_VERSIONS, "sae", SAE_RUNNER_VERSION + 1)
+
+        assert _source_identity("sae") != migrated_before
+        assert self._legacy_spec("sae") != legacy_before
+
+    def test_the_legacy_path_separates_batch_sizes(self) -> None:
+        """`batch_size` changes the gradients, so it is identity and not runtime trivia - the same
+        argument the IPCA solver controls above it are included for."""
+        assert self._legacy_spec("sae", batch_size=64) != self._legacy_spec("sae", batch_size=512)

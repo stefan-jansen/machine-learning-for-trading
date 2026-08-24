@@ -101,6 +101,7 @@ from case_studies.research import (
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -250,8 +251,18 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "us_firm_characteristics-gbm-validation-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A preview
+# run, a reader's first canonical run against an empty `run_log/`, and a run under a caller-chosen
+# `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is passed anyway. The
+# resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study, resolved, population_name=population_name, supersedes=supersedes
 )
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
