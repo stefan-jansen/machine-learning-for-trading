@@ -295,15 +295,31 @@ execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )
 
-fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
-reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
-print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+# The runner's paths do not all record the same diagnostics, so the split below is printed only
+# when every run recorded it. A run fitted or resolved fold by fold carries `fitted_folds` and
+# `reused_folds`; one served whole from the registry, and one taken through the single-request
+# path, carry neither - they prepared no folds, so they have none to count. Indexing the keys
+# raises `KeyError` on those, and defaulting them to zero is worse: it reports every fold as
+# served from the registry, which is the opposite of what nothing-recorded means, and it does so
+# in a number a reader cannot tell from a measurement.
+with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
+print(f"{len(execution.runs)} configurations, fitted or served from the registry")
+if with_folds and len(with_folds) == len(execution.diagnostics):
+    fitted = sum(len(item["fitted_folds"]) for item in with_folds)
+    served = sum(len(item["reused_folds"]) for item in with_folds)
+    print(f"folds fitted: {fitted}, folds served from the registry: {served}")
+else:
+    print(
+        f"{len(with_folds)} of {len(execution.diagnostics)} runs recorded fold counts, "
+        "so the fitted-against-served split is not reported"
+    )
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the
-# registry already holds the matching rows, and the runner returns the stored result rather than
-# fitting again - so re-running this notebook unchanged costs the time it takes to read the data.
+# On a second run every configuration is served from the registry. Each identity is re-derived
+# from the inputs, the registry already holds the matching rows, and the runner returns the
+# stored result rather than fitting again - so re-running this notebook unchanged costs the time
+# it takes to read the data rather than the time it took to fit.
 #
 # ### Running configurations of your own
 #

@@ -278,17 +278,24 @@ execution, population = run_model_population(
     study, plan, population_name=population_name, supersedes=supersedes
 )
 
-# The two branches of the runner report different keys, so read what both provide. A
-# configuration served whole from the registry carries `reused: True` and no fold counts - it
-# prepared no folds, so it has none to count - while one that fitted carries `fitted_folds` and
-# `reused_folds` per fold. Asking only for the fold counts raises `KeyError` on the second run
-# of a notebook whose first run registered everything, which is exactly the run that is supposed
-# to be cheap.
-reused_configs = sum(1 for item in execution.diagnostics if item.get("reused"))
-fitted = sum(len(item.get("fitted_folds") or ()) for item in execution.diagnostics)
-reused_folds = sum(len(item.get("reused_folds") or ()) for item in execution.diagnostics)
-print(f"{len(execution.runs)} configurations: {reused_configs} served from the registry")
-print(f"folds fitted: {fitted}, folds reused: {reused_folds}")
+# The runner's paths do not all record the same diagnostics, so the split below is printed only
+# when every run recorded it. A run fitted or resolved fold by fold carries `fitted_folds` and
+# `reused_folds`; one served whole from the registry, and one taken through the single-request
+# path, carry neither - they prepared no folds, so they have none to count. Indexing the keys
+# raises `KeyError` on those, and defaulting them to zero is worse: it reports every fold as
+# served from the registry, which is the opposite of what nothing-recorded means, and it does so
+# in a number a reader cannot tell from a measurement.
+with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
+print(f"{len(execution.runs)} configurations, fitted or served from the registry")
+if with_folds and len(with_folds) == len(execution.diagnostics):
+    fitted = sum(len(item["fitted_folds"]) for item in with_folds)
+    served = sum(len(item["reused_folds"]) for item in with_folds)
+    print(f"folds fitted: {fitted}, folds served from the registry: {served}")
+else:
+    print(
+        f"{len(with_folds)} of {len(execution.diagnostics)} runs recorded fold counts, "
+        "so the fitted-against-served split is not reported"
+    )
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
