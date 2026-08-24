@@ -618,13 +618,13 @@ def test_holdout_seal_counts_sessions_not_calendar_days(tmp_path, monkeypatch) -
     assert computation["analysis_population"]["n_rows"] == admissible * symbols
 
 
-def _patch_modeling_dataset(monkeypatch, frame) -> None:
+def _patch_modeling_dataset(monkeypatch, frame, buffer: str = "5D") -> None:
     """Re-point the resolver at a modified panel, keeping the fixture's label metadata."""
     mds = SimpleNamespace(
         dataset=frame,
         feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_5d",
-        label_buffer="5D",
+        label_buffer=buffer,
         date_col="timestamp",
         entity_cols=["symbol"],
         input_lineage={
@@ -710,3 +710,32 @@ def test_holdout_seal_fails_closed_on_a_panel_shorter_than_its_buffer(
     _set_holdout_start(study.root / "config" / "setup.yaml", "2024-01-04")
     with pytest.raises(ValueError, match="none can absorb the buffer"):
         study.causal(method="dml", label=label.name).resolve()
+
+
+def test_holdout_seal_holds_a_one_session_horizon_over_a_holiday_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    """A one-session horizon leaks too, whenever the holdout opens on a non-session.
+
+    This is a boundary problem rather than a long-horizon one. The holdout opens on a
+    Monday, so the two weekend days sit between the last session and the boundary: the
+    calendar cutoff lands on the Sunday, a strict `<` still admits the Friday, and that
+    Friday's one-session-forward outcome resolves on the first session of the holdout.
+    A test that only pins a multi-session buffer passes on a panel that still leaks here.
+    """
+    study, label, frame, sessions = _session_causal_fixture(tmp_path, monkeypatch)
+    _patch_modeling_dataset(monkeypatch, frame, buffer="1D")
+    _set_holdout_start(study.root / "config" / "setup.yaml", "2024-02-19")
+
+    computation = study.causal(method="dml", label=label.name).resolve().spec["computation"]
+
+    holdout = pd.Timestamp("2024-02-19", tz="UTC")
+    pre_holdout = [timestamp for timestamp in sessions if timestamp < holdout]
+    last_session = pre_holdout[-1]
+    # The Friday sits strictly before the calendar cutoff, so the old construction kept it.
+    assert last_session < holdout - pd.Timedelta("1D")
+    # Counting one observation instead seals at that Friday, so the last row retained is
+    # the Thursday, whose next session is the Friday and therefore still outside.
+    assert computation["estimand"]["holdout_endpoint_cutoff"] == last_session.isoformat()
+    symbols = frame.get_column("symbol").n_unique()
+    assert computation["analysis_population"]["n_rows"] == (len(pre_holdout) - 1) * symbols
