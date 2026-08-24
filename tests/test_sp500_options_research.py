@@ -1007,7 +1007,18 @@ def test_the_displayed_calendar_follows_the_schedule_the_predictions_resolve(
         research_workflow, "option_data_paths", lambda: (labels_dir, tmp_path / "raw")
     )
 
-    decision_dates = option_decision_dates(study, [prediction.hash])
+    decision_dates = option_decision_dates(
+        study,
+        [prediction.hash],
+        prices=pl.DataFrame(
+            {
+                "symbol": ["A", "A"],
+                "timestamp": [datetime(2024, 1, 10), datetime(2024, 1, 11)],
+                "close": [100.0, 101.0],
+            }
+        ),
+        signal={"universe_filter": "full"},
+    )
     calendar = option_trade_calendar(decision_dates)
 
     assert decision_dates.to_list() == [thursday]
@@ -1117,5 +1128,55 @@ def test_a_pair_is_compared_on_the_dates_both_backtests_traded(tmp_path: Path) -
     row = paired.row(0, named=True)
     assert row["n_periods"] == 5
     assert row["baseline_periods"] == 10
-    # The baseline's own series straddles zero; on the common support it is the winning half.
+    # Neither side may be the registered metric: on its own ten sessions the baseline is the
+    # 0.1 it registered, and on the five it shares with the variant it is the winning half.
+    assert row["baseline_sharpe"] != pytest.approx(0.1)
     assert row["baseline_sharpe"] > 0
+    assert row["allocation_sharpe"] != pytest.approx(5.0)
+
+
+def test_a_preview_pair_is_found_in_the_preview_namespace(tmp_path: Path) -> None:
+    """A preview run of the allocation notebook compares preview backtests.
+
+    Preview results live under `output_root/.preview/<case>`, which `Result.open` reaches only
+    when asked. Opening the pair without asking raised `KeyError` on the documented preview path
+    of `13_portfolio_management`, at the cell that used to read the catalog with the same flag.
+    """
+    from case_studies.utils.registry.registration import register_backtest_run
+
+    study = _study(tmp_path)
+    prediction = _prediction(study, execution_tier="preview")
+    preview_root = study.storage_root("preview")
+    sessions = [datetime(2024, 1, day) for day in range(2, 8)]
+    strategy = {
+        "execution_tier": "preview",
+        "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+    }
+    baseline_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        strategy,
+        stage="signal",
+        returns=pl.DataFrame(
+            {"timestamp": sessions, "return": [0.01, -0.02, 0.03, -0.01, 0.02, 0.01]}
+        ),
+        metrics={"sharpe": 0.1},
+        case_dir=preview_root,
+    )
+    variant_hash = register_backtest_run(
+        "sp500_options",
+        prediction.hash,
+        {**strategy, "strategy": {**strategy["strategy"], "allocation": {"method": "hrp"}}},
+        stage="allocation",
+        returns=pl.DataFrame({"timestamp": sessions[2:], "return": [0.04, -0.01, 0.03, 0.02]}),
+        metrics={"sharpe": 1.0},
+        case_dir=preview_root,
+    )
+
+    paired = paired_sharpe_on_common_support(
+        study,
+        pl.DataFrame({"baseline_hash": [baseline_hash], "backtest_hash": [variant_hash]}),
+        include_preview=True,
+    )
+
+    assert paired.row(0, named=True)["n_periods"] == 4

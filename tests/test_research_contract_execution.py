@@ -1171,3 +1171,52 @@ def test_backtest_catalog_carries_the_registered_sharpe_interval(tmp_path: Path)
     assert row["sharpe"] == pytest.approx(1.25)
     assert row["sharpe_ci95_lo"] == pytest.approx(0.4)
     assert row["sharpe_ci95_hi"] == pytest.approx(2.1)
+
+
+def test_a_workspace_resolves_the_released_canonical_causal_result(tmp_path: Path) -> None:
+    """A workspace opened over a release starts with an empty run_log; the release still counts.
+
+    `11_model_analysis` reads canonical prediction populations at every tier, so it asks for the
+    canonical causal artifact at every tier too. The prediction and backtest catalogs overlay the
+    release; the causal lookup read only `study.root`, so in a workspace it found nothing.
+    """
+    import json
+
+    from case_studies.research import CausalResult
+    from case_studies.utils.registry.registration import register_causal_run
+    from case_studies.utils.registry.specs import IDENTITY_VERSION
+
+    release = _seed_release(tmp_path)
+    register_causal_run(
+        "etfs",
+        "causalreleased01",
+        label="fwd_ret_21d",
+        treatment="ivrv_spread",
+        confounders_json='["rv_20"]',
+        embargo=10,
+        n_folds=5,
+        n_obs=100,
+        dml_effect=-0.03,
+        dml_se_hac=0.02,
+        p_value_hac=0.25,
+        naive_effect=-0.02,
+        confounding_bias_pct=-0.5,
+        refutation_p=0.01,
+        spec_json=json.dumps(
+            {
+                "family": "causal_dml",
+                "identity_version": IDENTITY_VERSION,
+                "execution_tier": "canonical",
+            }
+        ),
+        notebook="10_causal_dml",
+        started_at="2024-01-05T00:00:00Z",
+        elapsed_s=1.0,
+        case_dir=release / "case_studies" / "etfs",
+    )
+    study = Study.open("etfs", workspace=tmp_path / "workspace", release_root=release)
+
+    result = CausalResult.one(study, label="fwd_ret_21d", execution_tier="canonical")
+
+    assert result.hash == "causalreleased01"
+    assert result.metrics["dml_effect"] == pytest.approx(-0.03)

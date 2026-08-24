@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from case_studies.utils.registry.specs import (
@@ -16,6 +17,18 @@ from .contracts import ExecutionTier
 
 if TYPE_CHECKING:
     from .workspace import Study
+
+
+def _registry_paths(study: Study, tier: ExecutionTier) -> list[Path]:
+    """Registries a causal lookup at this tier reads, nearest first.
+
+    Canonical includes the release: a workspace opened over one holds an empty ``run_log`` until
+    something is written into it, so a released canonical result is only ever found there.
+    """
+    roots = [study.storage_root(tier)]
+    if tier is ExecutionTier.CANONICAL and study.release_case_root != study.root:
+        roots.append(study.release_case_root)
+    return [path for path in (root / "run_log" / "registry.db" for root in roots) if path.is_file()]
 
 
 @dataclass(frozen=True)
@@ -36,15 +49,18 @@ class CausalResult:
     ) -> CausalResult:
         """Resolve one causal result by declared label and execution tier."""
         tier = ExecutionTier(execution_tier)
-        root = study.storage_root(tier)
-        db_path = root / "run_log" / "registry.db"
-        if not db_path.is_file():
-            raise ValueError(f"causal selection for {label!r} resolved to 0 identities")
-        with sqlite3.connect(db_path) as db:
-            rows = db.execute(
-                "SELECT causal_hash, spec_json FROM causal_runs WHERE label = ? ORDER BY causal_hash",
-                (label,),
-            ).fetchall()
+        rows: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for db_path in _registry_paths(study, tier):
+            with sqlite3.connect(db_path) as db:
+                for causal_hash, spec_json in db.execute(
+                    "SELECT causal_hash, spec_json FROM causal_runs "
+                    "WHERE label = ? ORDER BY causal_hash",
+                    (label,),
+                ).fetchall():
+                    if causal_hash not in seen:
+                        seen.add(causal_hash)
+                        rows.append((causal_hash, spec_json))
         current = [
             causal_hash
             for causal_hash, spec_json in rows
@@ -70,6 +86,13 @@ class CausalResult:
         include_preview: bool = False,
     ) -> CausalResult:
         roots = [(study.root, ExecutionTier.CANONICAL.value)]
+        # A workspace opened over a release starts with an empty `run_log`, so a canonical
+        # artifact registered by the release lives only there. The prediction and backtest
+        # catalogs already overlay it; without the same fallback here, a preview run asking for
+        # the canonical causal result finds nothing.
+        release_root = study.release_case_root
+        if release_root != study.root:
+            roots.append((release_root, ExecutionTier.CANONICAL.value))
         if include_preview and study.output_root is not None:
             roots.insert(
                 0,

@@ -317,7 +317,13 @@ def official_prediction_catalog(
     )
 
 
-def option_decision_dates(study: Study, prediction_hashes: Iterable[str]) -> pl.Series:
+def option_decision_dates(
+    study: Study,
+    prediction_hashes: Iterable[str],
+    *,
+    prices: pl.DataFrame,
+    signal: dict[str, Any],
+) -> pl.Series:
     """Return the weekly decision dates the engine will enter on, over these predictions.
 
     The engine resolves its schedule from the prediction frame it is handed, not from the
@@ -325,6 +331,11 @@ def option_decision_dates(study: Study, prediction_hashes: Iterable[str]) -> pl.
     *those* timestamps. A prediction set missing a Friday therefore rebalances on that
     week's Thursday, and a schedule read off the complete artifact would name a session the
     engine cannot trade.
+
+    ``prices`` and ``signal`` are the ones the requests carry, because the frame the engine
+    ranks is the filtered one: ``resolve_short_straddle_decisions`` applies the declared
+    universe filter before ranking, and that filter is a semi-join against price rows, so it
+    can empty a decision date and move that week's last session earlier.
 
     Prediction sets do not share one schedule. A sequence model needs its lookback window
     before it scores anything, so its first weeks are absent and its schedule starts later.
@@ -337,7 +348,14 @@ def option_decision_dates(study: Study, prediction_hashes: Iterable[str]) -> pl.
         result = Result.open(study, str(prediction_hash), include_preview=True)
         if not isinstance(result, PredictionResult):
             raise TypeError(f"{prediction_hash} is not a prediction result")
-        timestamps = result.load().get_column("timestamp").cast(pl.Date).unique().sort()
+        predictions = apply_universe_filter(
+            normalize_prediction_columns(result.load()),
+            prices,
+            CASE_STUDY,
+            signal,
+            prediction_hash=result.hash,
+        )
+        timestamps = predictions.get_column("timestamp").cast(pl.Date).unique().sort()
         schedules.append(resolve_rebalance_timestamps(timestamps, "weekly_friday"))
     if not schedules:
         raise ValueError("no prediction set was given to resolve a decision schedule from")
@@ -382,6 +400,8 @@ def option_trade_calendar(decision_dates: pl.Series) -> pl.DataFrame:
 def paired_sharpe_on_common_support(
     study: Study,
     pairs: pl.DataFrame,
+    *,
+    include_preview: bool = False,
 ) -> pl.DataFrame:
     """Recompute each pair's two Sharpe ratios over the dates both backtests actually traded.
 
@@ -391,11 +411,13 @@ def paired_sharpe_on_common_support(
     of each is computed over its own series, so comparing the two registered numbers mixes
     the allocator with the period. Both sides are recomputed here over the intersection of
     their dates, and ``n_periods`` says how much of the baseline the comparison kept.
+
+    ``include_preview`` reaches the preview namespace, where a preview run's backtests live.
     """
     from case_studies.utils.backtest_runner import compute_portfolio_metrics
 
     def _returns(backtest_hash: str) -> pl.DataFrame:
-        result = Result.open(study, backtest_hash)
+        result = Result.open(study, backtest_hash, include_preview=include_preview)
         if not isinstance(result, BacktestResult):
             raise TypeError(f"{backtest_hash} is not a backtest result")
         frame = pl.read_parquet(

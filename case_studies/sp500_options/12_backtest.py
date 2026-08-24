@@ -146,11 +146,23 @@ population_summary
 # from: `weekly_friday` is the last session present in each week of a prediction set, so a set that
 # does not reach a Friday enters on that week's Thursday. The contract artifact carries every
 # session, and the sessions no prediction set reaches are ones nothing enters on.
+#
+# The universe filter below is applied first, for the same reason. It is a semi-join against the
+# price rows, so a decision date it empties is a date the engine does not rank on, and that too
+# can move a week's last session earlier.
 
 # %%
-decision_dates = option_decision_dates(study, predictions.get_column("prediction_hash"))
-trade_calendar = option_trade_calendar(decision_dates)
 prices = load_backtest_prices_for(CASE_STUDY, PRIMARY_LABEL, split="validation")
+universe_filters = get_universe_filters_for(CASE_STUDY)
+if universe_filters != ["liquid"]:
+    raise ValueError(f"the canonical option universe must be liquid alone, got {universe_filters}")
+decision_dates = option_decision_dates(
+    study,
+    predictions.get_column("prediction_hash"),
+    prices=prices,
+    signal={"universe_filter": universe_filters[0]},
+)
+trade_calendar = option_trade_calendar(decision_dates)
 sessions = prices.get_column("timestamp").cast(pl.Date).unique().sort().to_frame("session")
 # A straddle entered near the end of the window expires after the last priced session, so the
 # holding period is measured over the candidates that open and expire inside it.
@@ -216,9 +228,6 @@ show_plotly_with_alt(
 # against the liquid one.
 
 # %%
-universe_filters = get_universe_filters_for(CASE_STUDY)
-if universe_filters != ["liquid"]:
-    raise ValueError(f"the canonical option universe must be liquid alone, got {universe_filters}")
 n_symbols = prices.get_column("symbol").n_unique()
 top_k_values = get_top_k_values_for(CASE_STUDY, PRIMARY_LABEL, n_symbols)
 if not top_k_values:

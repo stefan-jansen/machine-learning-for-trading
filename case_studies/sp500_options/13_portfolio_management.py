@@ -270,8 +270,8 @@ strategy_candidates = (
 # read from the registry where each covers its own series. `conformal_weighted` trades a shorter
 # history, so its registered number is measured over a different stretch of market than the
 # baseline's and the difference between them would carry the period as well as the allocator. The
-# summary reports the shortest common support against the baseline's own length, which is how much
-# of the record a comparison in that row is made on.
+# summary reports the shortest common support in each row against the length of that same pair's
+# baseline, which is how much of the record the thinnest comparison in that row is made on.
 
 # %%
 pairs = (
@@ -293,7 +293,7 @@ if pairs.height != catalog.height:
 # entry date with no prior-only calibration window, so it starts trading later than the baseline
 # it is built from, and its registered Sharpe covers a different stretch of market.
 allocation_sharpe = pairs.join(
-    paired_sharpe_on_common_support(study, pairs),
+    paired_sharpe_on_common_support(study, pairs, include_preview=EXECUTION_TIER == "preview"),
     on=["backtest_hash", "baseline_hash"],
     how="inner",
 )
@@ -307,8 +307,11 @@ allocation_summary = (
         backtests=pl.len(),
         sharpe_median=pl.col("allocation_sharpe").median(),
         improved_on_baseline=(pl.col("allocation_sharpe") > pl.col("baseline_sharpe")).sum(),
+        # Both from the same pair: baselines within a group differ in length, so a minimum
+        # overlap taken from one pair and a maximum baseline from another describe no
+        # comparison in the table.
         shortest_common_support=pl.col("n_periods").min(),
-        baseline_sessions=pl.col("baseline_periods").max(),
+        its_baseline_sessions=pl.col("baseline_periods").sort_by("n_periods").first(),
     )
     .sort("allocation_method")
 )
