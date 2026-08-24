@@ -794,11 +794,29 @@ def run_official_backtest_requests(
     return FuturesBacktestExecution(tuple(results), pl.DataFrame(rows), population)
 
 
+CANDIDATE_SET_STAGES = ("signal", "allocation", "risk", "pre-overlay", "final-validation")
+
+
+def candidate_set_name(stage: str, label: str) -> str:
+    """Name one per-label candidate set.
+
+    Every writer and every reader of a per-label set goes through this function. A stage the
+    funnel does not define is refused here rather than minting a second namespace a reader
+    would then find empty: a candidate set opened under a name nothing wrote does not fail
+    loudly, it carries an absent or stale pool into the notebooks downstream.
+    """
+    if stage not in CANDIDATE_SET_STAGES:
+        raise ValueError(
+            f"unknown candidate set stage {stage!r}, expected one of {CANDIDATE_SET_STAGES}"
+        )
+    return f"cme_futures-{stage}-{label}-v1"
+
+
 def create_label_candidate_sets(
     study: Study,
     execution: FuturesBacktestExecution,
     *,
-    name_prefix: str,
+    stage: str,
 ) -> dict[str, CandidateSet]:
     """Create one immutable comparable backtest set per label."""
     labels = execution.catalog_rows.get_column("label").unique().sort().to_list()
@@ -809,7 +827,7 @@ def create_label_candidate_sets(
         members = [members_by_hash[value] for value in hashes]
         output[label] = CandidateSet.create(
             study,
-            f"{name_prefix}-{label}-v1",
+            candidate_set_name(stage, label),
             members,
         )
     return output
@@ -822,7 +840,7 @@ def shortlist_signal_configurations(
     limit: int,
 ) -> tuple[BacktestResult, ...]:
     """Select the strongest signal result for each distinct model configuration."""
-    candidates = CandidateSet.one(study, name=f"cme_futures-signal-{label}-v1")
+    candidates = CandidateSet.one(study, name=candidate_set_name("signal", label))
     selected = []
     configurations = set()
     for result in candidates.ranked_validation_sharpe():
@@ -844,18 +862,18 @@ def shortlist_signal_configurations(
 
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
-    signal = CandidateSet.one(study, name=f"cme_futures-signal-{label}-v1")
-    allocation = CandidateSet.one(study, name=f"cme_futures-allocation-{label}-v1")
+    signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
+    allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
     members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
-    return CandidateSet.create(study, f"cme-pre-overlay-{label}-v1", members)
+    return CandidateSet.create(study, candidate_set_name("pre-overlay", label), members)
 
 
 def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
-    risk = CandidateSet.one(study, name=f"cme_futures-risk-{label}-v1")
+    risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
     members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
-    return CandidateSet.create(study, f"cme_futures-final-validation-{label}-v1", members)
+    return CandidateSet.create(study, candidate_set_name("final-validation", label), members)
 
 
 def final_selection_candidate_set(study: Study) -> CandidateSet:

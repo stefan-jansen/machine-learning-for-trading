@@ -91,7 +91,7 @@ execution = run_official_backtest_requests(
 candidate_sets = create_label_candidate_sets(
     study,
     execution,
-    name_prefix="cme-risk",
+    stage="risk",
 )
 
 # %% tags=["results"]

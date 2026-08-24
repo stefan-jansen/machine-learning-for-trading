@@ -569,12 +569,24 @@ def test_visible_requests_snapshot_complete_canonical_backtests(
     candidate_sets = create_label_candidate_sets(
         study,
         execution,
-        name_prefix="test-cme-signal",
+        stage="signal",
     )
     assert set(candidate_sets) == {"fwd_ret_21d"}
     assert set(candidate_sets["fwd_ret_21d"].members) == set(
         execution.catalog_rows.get_column("backtest_hash")
     )
+    shortlist = research_workflow.shortlist_signal_configurations(
+        study, label="fwd_ret_21d", limit=1
+    )
+    assert shortlist[0].hash in set(candidate_sets["fwd_ret_21d"].members)
+
+
+def test_candidate_set_stage_outside_the_funnel_is_refused() -> None:
+    """A stage the funnel does not define never reaches the registry as a new namespace."""
+    for stage in research_workflow.CANDIDATE_SET_STAGES:
+        assert research_workflow.candidate_set_name(stage, "fwd_ret_21d").startswith("cme_futures-")
+    with pytest.raises(ValueError, match="unknown candidate set stage 'cme-signal'"):
+        research_workflow.candidate_set_name("cme-signal", "fwd_ret_21d")
 
 
 def _labelled_prediction(study: Study, *, label: str, alpha: float):
