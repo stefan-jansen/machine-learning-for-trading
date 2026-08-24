@@ -411,17 +411,18 @@ if (
 if EXECUTION_TIER == "canonical":
     for label in completed.get_column("label").unique().sort().to_list():
         label_name = label.replace("_", "-")
-        # The set spans model families within one label, which is what the funnel ranks over, and
-        # families do not share a feature lineage: latent_factors builds feature_artifacts from
-        # input_lineage["files"] (latent_factors/adapter.py:463) while linear, gbm, tabular_dl and
-        # deep_learning use input_lineage["artifacts"]. Without a contract CandidateSet.create
-        # treats every differing protocol field as undeclared and refuses the set, so the freeze
-        # would raise on any label carrying both. `label_artifact` is deliberately NOT comparable:
-        # the set is per label, and that is what keeps 20_strategy_analysis ranking within one.
+        # No comparison_contract, matching cme_futures/research_workflow.py:811, which builds the
+        # same per-label pool across the full funnel and declares nothing. An empty contract makes
+        # every protocol field required-constant, which is the guard: if two members disagree on
+        # `cv` they measured their Sharpe on different folds and ranking them is not a comparison,
+        # and this field is the only thing checking that. Latent-factor members will refuse on
+        # `feature_artifacts` when they enter this pool - latent builds it from a different object
+        # than the other five families (latent_factors/case_study.py:337-383, carrying the label
+        # digest and setup.yaml bytes). That refusal is a known adapter defect surfacing, not a
+        # property to declare around; report it rather than adding the field here.
         result_set = study.backtests.freeze(
             completed.filter(pl.col("label") == label),
             name=f"us-equities-{label_name}-allocation-v1",
-            comparison_contract={"comparable_fields": ["cv", "feature_artifacts"]},
         )
         set_rows.append(
             {"label": label, "set_name": result_set.name, "members": len(result_set.members)}
