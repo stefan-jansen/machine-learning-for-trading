@@ -17,9 +17,9 @@
 # # Model Analysis for the US Equities Panel
 #
 # This notebook reads immutable validation results produced by the modelling notebooks. An
-# immutable compatible set records the exact prediction hashes and the protocol fields they share.
-# The full set supplies the descriptive table and passes unchanged to strategy evaluation. A second
-# immutable set identifies a bounded subset for diagnostics that require loading raw predictions.
+# immutable compatible set records exact prediction membership and the protocol fields its members
+# share. The full sets supply the descriptive table and pass unchanged to strategy evaluation.
+# Separate immutable sets identify bounded subsets for diagnostics that load raw predictions.
 #
 # **Learning objectives**
 #
@@ -41,73 +41,270 @@
 """Read-only interpretation of explicit phase-one result sets."""
 
 import json
-import sqlite3
+import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from ml4t.diagnostic.metrics import cross_sectional_ic_series
 
-from case_studies.research import CandidateSet, PredictionResult, Study
+from case_studies.research import (
+    CandidateSet,
+    CausalResult,
+    OfficialPopulation,
+    PredictionResult,
+    Study,
+)
 from case_studies.utils.backtest_runner import normalize_prediction_columns
 from case_studies.utils.insight_chapter import conformal_coverage_for_selected_prediction
-from case_studies.utils.registry import load_prediction_metrics
+from case_studies.utils.registry import canonical_json, load_prediction_metrics
 from utils.style import COLORS
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
-PREDICTION_SET_HASH = ""
-DIAGNOSTIC_SET_HASH = ""
-CAUSAL_RESULT_HASHES = []
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
+PREVIEW_LABELS = []
+PREVIEW_FAMILIES = []
+PREVIEW_CONFIG_NAMES = []
+PREVIEW_MAX_PREDICTIONS = 0
+PREVIEW_MAX_DIAGNOSTICS = 0
+PREDICTION_SET_NAMES = [
+    "us-equities-fwd-ret-1d-linear-v1",
+    "us-equities-fwd-ret-1d-gbm-v1",
+    "us-equities-fwd-ret-1d-tabular-dl-v1",
+    "us-equities-fwd-ret-1d-nlinear-v1",
+    "us-equities-fwd-ret-1d-lstm-v1",
+    "us-equities-fwd-ret-1d-tsmixer-v1",
+    "us-equities-fwd-ret-5d-weekly-v1",
+    "us-equities-fwd-ret-1d-pca-v1",
+    "us-equities-fwd-ret-1d-ipca-v1",
+    "us-equities-fwd-ret-5d-pca-v1",
+    "us-equities-fwd-ret-5d-ipca-v1",
+    "us-equities-fwd-ret-21d-pca-v1",
+    "us-equities-fwd-ret-21d-ipca-v1",
+]
+
+# %% tags=["parameters"]
+OFFICIAL_POPULATION_NAMES = [
+    "us-equities-linear-checkpoints-v1",
+    "us-equities-gbm-checkpoints-v1",
+    "us-equities-tabular-dl-checkpoints-v1",
+    "us-equities-nlinear-checkpoints-v1",
+    "us-equities-lstm-checkpoints-v1",
+    "us-equities-tsmixer-checkpoints-v1",
+    "us-equities-weekly-checkpoints-v1",
+    "us-equities-pca-checkpoints-v1",
+    "us-equities-ipca-checkpoints-v1",
+]
+
+# %% tags=["parameters"]
+DIAGNOSTIC_SET_NAMES = [
+    "us-equities-fwd-ret-1d-linear-diagnostics-v1",
+    "us-equities-fwd-ret-1d-gbm-diagnostics-v1",
+    "us-equities-fwd-ret-1d-tabular-dl-diagnostics-v1",
+    "us-equities-fwd-ret-1d-nlinear-v1",
+    "us-equities-fwd-ret-1d-lstm-v1",
+    "us-equities-fwd-ret-1d-tsmixer-v1",
+    "us-equities-fwd-ret-5d-weekly-diagnostics-v1",
+    "us-equities-fwd-ret-1d-pca-v1",
+    "us-equities-fwd-ret-1d-ipca-v1",
+    "us-equities-fwd-ret-5d-pca-v1",
+    "us-equities-fwd-ret-5d-ipca-v1",
+    "us-equities-fwd-ret-21d-pca-v1",
+    "us-equities-fwd-ret-21d-ipca-v1",
+]
+CAUSAL_LABELS = ["fwd_ret_1d"]
 
 # %% [markdown]
 # ## Open the declared result sets
 #
 # A prediction result is eligible here when its persisted coverage matches the expected
-# `(symbol, timestamp, fold)` grid, its execution tier is canonical, and its split is validation.
-# The compatible-set contract also records the shared label, features, and cross-validation
-# protocol. The diagnostic set is a subset of the full set, so its displays cannot change the
-# collection sent to backtesting.
+# `(symbol, timestamp, fold)` grid and its split and execution tier match the declared analysis.
+# Canonical analysis verifies named compatible sets and their official checkpoint populations.
+# A reduced preview selects a bounded catalog population by visible fields without publishing it.
+# Diagnostic members remain a subset of the strategy handoff in either tier.
 
 # %% tags=["results"]
-if not PREDICTION_SET_HASH or not DIAGNOSTIC_SET_HASH:
-    raise ValueError("PREDICTION_SET_HASH and DIAGNOSTIC_SET_HASH are required")
-
-study = Study.open(CASE_STUDY_ID)
-prediction_set = CandidateSet.open(study, PREDICTION_SET_HASH)
-diagnostic_set = CandidateSet.open(study, DIAGNOSTIC_SET_HASH)
-
-IDENTITY_PROTOCOL_FIELDS = {"label_artifact", "feature_artifacts", "cv"}
-for declared_set in (prediction_set, diagnostic_set):
-    if declared_set.member_kind != "prediction":
-        raise ValueError(f"{declared_set.hash} contains {declared_set.member_kind} results")
-    comparable_fields = set(declared_set.comparison_contract.get("comparable_fields", ()))
-    variable_identity_fields = IDENTITY_PROTOCOL_FIELDS & comparable_fields
-    if variable_identity_fields:
+preview_filters = bool(PREVIEW_LABELS or PREVIEW_FAMILIES or PREVIEW_CONFIG_NAMES)
+if EXECUTION_TIER == "canonical":
+    if preview_filters or PREVIEW_MAX_PREDICTIONS or PREVIEW_MAX_DIAGNOSTICS:
+        raise ValueError("Canonical analysis cannot declare preview reductions")
+    for names, field in (
+        (PREDICTION_SET_NAMES, "PREDICTION_SET_NAMES"),
+        (DIAGNOSTIC_SET_NAMES, "DIAGNOSTIC_SET_NAMES"),
+        (OFFICIAL_POPULATION_NAMES, "OFFICIAL_POPULATION_NAMES"),
+    ):
+        if not names or len(names) != len(set(names)):
+            raise ValueError(f"{field} must contain unique names")
+    study = Study.open(CASE_STUDY_ID)
+elif EXECUTION_TIER == "preview":
+    if not preview_filters or PREVIEW_MAX_PREDICTIONS < 1 or PREVIEW_MAX_DIAGNOSTICS < 1:
         raise ValueError(
-            f"{declared_set.hash} varies identity fields {sorted(variable_identity_fields)}"
+            "Preview analysis requires a catalog filter and explicit prediction limits"
         )
-    declared_protocol = declared_set.comparison_contract.get("protocol", {})
-    missing_identity_fields = {
-        field for field in IDENTITY_PROTOCOL_FIELDS if not declared_protocol.get(field)
+    if PREVIEW_MAX_DIAGNOSTICS > PREVIEW_MAX_PREDICTIONS:
+        raise ValueError("Preview diagnostics cannot exceed the preview prediction population")
+    study = Study.open(
+        CASE_STUDY_ID,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+    )
+else:
+    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
+
+include_preview = EXECUTION_TIER == "preview"
+prediction_sets = ()
+diagnostic_sets = ()
+official_populations = ()
+
+# %% tags=["results"]
+if EXECUTION_TIER == "canonical":
+    prediction_sets = tuple(CandidateSet.one(study, name=name) for name in PREDICTION_SET_NAMES)
+    diagnostic_sets = tuple(CandidateSet.one(study, name=name) for name in DIAGNOSTIC_SET_NAMES)
+    official_populations = tuple(
+        OfficialPopulation.one(study, name=name) for name in OFFICIAL_POPULATION_NAMES
+    )
+    for population in official_populations:
+        if population.member_kind != "prediction":
+            raise ValueError(f"{population.hash} is not a prediction population")
+        population.require_complete()
+
+# %% tags=["results"]
+if EXECUTION_TIER == "canonical":
+    identity_protocol_fields = {"label_artifact", "feature_artifacts", "cv"}
+    for declared_set in (*prediction_sets, *diagnostic_sets):
+        if declared_set.member_kind != "prediction":
+            raise ValueError(f"{declared_set.hash} contains {declared_set.member_kind} results")
+        comparable_fields = set(declared_set.comparison_contract.get("comparable_fields", ()))
+        variable_identity_fields = identity_protocol_fields & comparable_fields
+        if variable_identity_fields:
+            raise ValueError(
+                f"{declared_set.hash} varies identity fields {sorted(variable_identity_fields)}"
+            )
+        declared_protocol = declared_set.comparison_contract.get("protocol", {})
+        missing_identity_fields = {
+            field for field in identity_protocol_fields if not declared_protocol.get(field)
+        }
+        if missing_identity_fields:
+            raise ValueError(
+                f"{declared_set.hash} lacks identity fields {sorted(missing_identity_fields)}"
+            )
+        if (
+            declared_protocol.get("split") != "validation"
+            or declared_protocol.get("execution_tier") != "canonical"
+        ):
+            raise ValueError(f"{declared_set.hash} is not a canonical validation set")
+
+# %% tags=["results"]
+if EXECUTION_TIER == "canonical":
+    prediction_members = tuple(
+        member for declared_set in prediction_sets for member in declared_set.members
+    )
+    diagnostic_members = tuple(
+        member for declared_set in diagnostic_sets for member in declared_set.members
+    )
+    prediction_set_by_member = {
+        member: declared_set.name
+        for declared_set in prediction_sets
+        for member in declared_set.members
     }
-    if missing_identity_fields:
-        raise ValueError(
-            f"{declared_set.hash} lacks identity fields {sorted(missing_identity_fields)}"
+    diagnostic_set_by_member = {
+        member: declared_set.name
+        for declared_set in diagnostic_sets
+        for member in declared_set.members
+    }
+    if len(prediction_members) != len(set(prediction_members)):
+        raise ValueError("full prediction sets overlap")
+    if len(diagnostic_members) != len(set(diagnostic_members)):
+        raise ValueError("diagnostic prediction sets overlap")
+    if not set(diagnostic_members) <= set(prediction_members):
+        raise ValueError("diagnostic results must be members of the full prediction sets")
+    official_members = tuple(
+        member for population in official_populations for member in population.members
+    )
+    if len(official_members) != len(set(official_members)):
+        raise ValueError("official checkpoint populations overlap")
+    if set(official_members) != set(prediction_members):
+        raise ValueError("official checkpoint population differs from the full prediction sets")
+
+# %% tags=["results"]
+if EXECUTION_TIER == "canonical":
+    for diagnostic_set in diagnostic_sets:
+        diagnostic_protocol = canonical_json(diagnostic_set.comparison_contract["protocol"])
+        matching_full_sets = [
+            full_set
+            for full_set in prediction_sets
+            if canonical_json(full_set.comparison_contract["protocol"]) == diagnostic_protocol
+            and set(diagnostic_set.members) <= set(full_set.members)
+        ]
+        if len(matching_full_sets) != 1:
+            raise ValueError(
+                f"{diagnostic_set.hash} resolved {len(matching_full_sets)} matching full sets"
+            )
+
+# %% tags=["results"]
+if EXECUTION_TIER == "canonical":
+    set_rows = [
+        {
+            "role": role,
+            "name": declared_set.name,
+            "set_hash": declared_set.hash,
+            "members": len(declared_set.members),
+        }
+        for role, declared_sets in (
+            ("strategy handoff", prediction_sets),
+            ("bounded diagnostics", diagnostic_sets),
         )
+        for declared_set in declared_sets
+    ]
+else:
+    preview_selection = study.predictions.table(include_preview=True).filter(
+        (pl.col("execution_tier") == "preview")
+        & (pl.col("split") == "validation")
+        & pl.col("complete")
+    )
+    if PREVIEW_LABELS:
+        preview_selection = preview_selection.filter(pl.col("label").is_in(PREVIEW_LABELS))
+    if PREVIEW_FAMILIES:
+        preview_selection = preview_selection.filter(pl.col("family").is_in(PREVIEW_FAMILIES))
+    if PREVIEW_CONFIG_NAMES:
+        preview_selection = preview_selection.filter(
+            pl.col("config_name").is_in(PREVIEW_CONFIG_NAMES)
+        )
+    preview_selection = preview_selection.sort(
+        "label", "family", "config_name", "checkpoint_value", "prediction_hash"
+    ).head(PREVIEW_MAX_PREDICTIONS)
+    if preview_selection.is_empty():
+        raise ValueError("Preview analysis selection is empty")
 
-if not set(diagnostic_set.members) <= set(prediction_set.members):
-    raise ValueError("diagnostic results must be members of the full prediction set")
+# %% tags=["results"]
+if EXECUTION_TIER == "preview":
+    prediction_members = tuple(preview_selection.get_column("prediction_hash"))
+    diagnostic_members = prediction_members[:PREVIEW_MAX_DIAGNOSTICS]
+    preview_group_by_member = {
+        row["prediction_hash"]: f"preview:{row['label']}:{row['cv_identity']}"
+        for row in preview_selection.iter_rows(named=True)
+    }
+    prediction_set_by_member = dict(preview_group_by_member)
+    diagnostic_set_by_member = {
+        member: preview_group_by_member[member] for member in diagnostic_members
+    }
+    set_rows = [
+        {
+            "role": role,
+            "name": name,
+            "set_hash": None,
+            "members": len(members),
+        }
+        for role, name, members in (
+            ("strategy handoff", "preview-selection", prediction_members),
+            ("bounded diagnostics", "preview-diagnostics", diagnostic_members),
+        )
+    ]
 
-protocol = prediction_set.comparison_contract["protocol"]
-diagnostic_protocol = diagnostic_set.comparison_contract["protocol"]
-if protocol != diagnostic_protocol:
-    raise ValueError("full and diagnostic sets must share one comparison protocol")
-if protocol.get("split") != "validation" or protocol.get("execution_tier") != "canonical":
-    raise ValueError("model analysis requires canonical validation results")
-
-print(f"Prediction set: {prediction_set.hash} ({len(prediction_set.members)} results)")
-print(f"Diagnostic set: {diagnostic_set.hash} ({len(diagnostic_set.members)} results)")
+set_table = pl.DataFrame(set_rows)
+set_table
 
 # %% [markdown]
 # ## Validate identities and coverage
@@ -122,12 +319,13 @@ catalog_rows = []
 prediction_results = {}
 prediction_identities = set()
 
-for prediction_hash in prediction_set.members:
-    result = study.results.open(prediction_hash)
+# %% tags=["results"]
+for prediction_hash in prediction_members:
+    result = study.results.open(prediction_hash, include_preview=include_preview)
     if not isinstance(result, PredictionResult):
         raise TypeError(f"{prediction_hash} is not a prediction result")
-    if result.execution_tier != "canonical" or not result.complete:
-        raise ValueError(f"{prediction_hash} is not a complete canonical result")
+    if result.execution_tier != EXECUTION_TIER or not result.complete:
+        raise ValueError(f"{prediction_hash} is not a complete {EXECUTION_TIER} result")
 
     record = result.registry_record()
     if record["split"] != "validation":
@@ -138,7 +336,7 @@ for prediction_hash in prediction_set.members:
     if coverage is None or coverage["status"] != "complete":
         raise ValueError(f"{prediction_hash} has incomplete coverage")
 
-    training = study.results.open(record["training_hash"])
+    training = study.results.open(record["training_hash"], include_preview=include_preview)
     specification = training.spec()
     identity = (
         record["training_hash"],
@@ -152,6 +350,7 @@ for prediction_hash in prediction_set.members:
         {
             "prediction_hash": prediction_hash,
             "training_hash": record["training_hash"],
+            "compatible_set": prediction_set_by_member[prediction_hash],
             "family": specification["family"],
             "config_name": specification["config_name"],
             "label": specification["label"],
@@ -163,12 +362,9 @@ for prediction_hash in prediction_set.members:
     )
     prediction_results[prediction_hash] = result
 
-catalog = pl.DataFrame(catalog_rows)
-if catalog["label"].n_unique() != 1:
-    raise ValueError("prediction results must share one label")
-
-catalog = catalog.sort(
-    ["family", "config_name", "checkpoint_kind", "checkpoint_value", "prediction_hash"]
+# %% tags=["results"]
+catalog = pl.DataFrame(catalog_rows).sort(
+    ["label", "family", "config_name", "checkpoint_kind", "checkpoint_value", "prediction_hash"]
 )
 catalog
 
@@ -206,9 +402,10 @@ for row in catalog.iter_rows(named=True):
     metric_rows.append({**row, **{name: values[name] for name in required_metrics}})
 
 performance = pl.DataFrame(metric_rows).sort(
-    ["family", "config_name", "checkpoint_kind", "checkpoint_value", "prediction_hash"]
+    ["label", "family", "config_name", "checkpoint_kind", "checkpoint_value", "prediction_hash"]
 )
 performance.select(
+    "label",
     "family",
     "config_name",
     "checkpoint_kind",
@@ -228,7 +425,9 @@ performance.select(
 # %% tags=["results"]
 plot_performance = performance.with_columns(
     (
-        pl.col("family")
+        pl.col("label")
+        + " | "
+        + pl.col("family")
         + "/"
         + pl.col("config_name")
         + " @ "
@@ -274,7 +473,7 @@ KEYS = ["symbol", "timestamp", "fold_id"]
 diagnostic_frames = {}
 daily_rows = []
 
-for prediction_hash in diagnostic_set.members:
+for prediction_hash in diagnostic_members:
     result = prediction_results[prediction_hash]
     frame = normalize_prediction_columns(result.load())
     required_columns = {*KEYS, "y_true", "y_score"}
@@ -288,7 +487,7 @@ for prediction_hash in diagnostic_set.members:
         raise ValueError(f"{prediction_hash} contains non-finite predictions")
 
     meta = catalog.filter(pl.col("prediction_hash") == prediction_hash).row(0, named=True)
-    model_id = f"{meta['family']}/{meta['config_name']} [{prediction_hash[:8]}]"
+    model_id = f"{meta['label']} | {meta['family']}/{meta['config_name']} [{prediction_hash[:8]}]"
     diagnostic_frames[prediction_hash] = frame
     for fold_id in sorted(frame["fold_id"].unique().to_list()):
         fold_frame = frame.filter(pl.col("fold_id") == fold_id)
@@ -310,6 +509,7 @@ for prediction_hash in diagnostic_set.members:
             )
         )
 
+# %% tags=["results"]
 daily_ic = pl.concat(daily_rows, how="vertical_relaxed")
 if daily_ic.select(["prediction_hash", "fold_id", "timestamp"]).is_duplicated().any():
     raise ValueError("daily IC keys are not unique")
@@ -335,49 +535,57 @@ fold_ic
 
 # %% tags=["results"]
 correlation_rows = []
-diagnostic_hashes = list(diagnostic_set.members)
+diagnostic_hashes = list(diagnostic_members)
 
+
+def prediction_display_id(prediction_hash):
+    meta = catalog.filter(pl.col("prediction_hash") == prediction_hash).row(0, named=True)
+    return f"{meta['label']} | {meta['family']}/{meta['config_name']} [{prediction_hash[:8]}]"
+
+
+# %% tags=["results"]
+def summarize_prediction_pair(left_hash, right_hash):
+    left = diagnostic_frames[left_hash].select(
+        *KEYS,
+        pl.col("y_true").alias("y_true_left"),
+        pl.col("y_score").alias("score_left"),
+    )
+    right = diagnostic_frames[right_hash].select(
+        *KEYS,
+        pl.col("y_true").alias("y_true_right"),
+        pl.col("y_score").alias("score_right"),
+    )
+    paired = left.join(right, on=KEYS, how="inner", validate="1:1")
+    if paired.is_empty() or paired.height > min(left.height, right.height):
+        raise ValueError(f"invalid paired coverage for {left_hash} and {right_hash}")
+    if not np.allclose(
+        paired["y_true_left"].cast(pl.Float64).to_numpy(),
+        paired["y_true_right"].cast(pl.Float64).to_numpy(),
+        rtol=1e-6,
+        atol=1e-8,
+    ):
+        raise ValueError(f"realized returns disagree for {left_hash} and {right_hash}")
+    daily_correlation = paired.group_by("timestamp", "fold_id").agg(
+        pl.corr(
+            pl.col("score_left").rank(method="average"),
+            pl.col("score_right").rank(method="average"),
+        ).alias("correlation")
+    )
+    return {
+        "left": prediction_display_id(left_hash),
+        "right": prediction_display_id(right_hash),
+        "mean_daily_correlation": daily_correlation["correlation"].drop_nulls().mean(),
+        "n_shared_rows": paired.height,
+        "n_decision_dates": daily_correlation["correlation"].drop_nulls().len(),
+    }
+
+
+# %% tags=["results"]
 for left_index, left_hash in enumerate(diagnostic_hashes):
-    left_meta = catalog.filter(pl.col("prediction_hash") == left_hash).row(0, named=True)
-    left_id = f"{left_meta['family']}/{left_meta['config_name']} [{left_hash[:8]}]"
     for right_hash in diagnostic_hashes[left_index:]:
-        right_meta = catalog.filter(pl.col("prediction_hash") == right_hash).row(0, named=True)
-        right_id = f"{right_meta['family']}/{right_meta['config_name']} [{right_hash[:8]}]"
-        left = diagnostic_frames[left_hash].select(
-            *KEYS,
-            pl.col("y_true").alias("y_true_left"),
-            pl.col("y_score").alias("score_left"),
-        )
-        right = diagnostic_frames[right_hash].select(
-            *KEYS,
-            pl.col("y_true").alias("y_true_right"),
-            pl.col("y_score").alias("score_right"),
-        )
-        paired = left.join(right, on=KEYS, how="inner", validate="1:1")
-        if paired.is_empty() or paired.height > min(left.height, right.height):
-            raise ValueError(f"invalid paired coverage for {left_hash} and {right_hash}")
-        if not np.allclose(
-            paired["y_true_left"].cast(pl.Float64).to_numpy(),
-            paired["y_true_right"].cast(pl.Float64).to_numpy(),
-            rtol=1e-6,
-            atol=1e-8,
-        ):
-            raise ValueError(f"realized returns disagree for {left_hash} and {right_hash}")
-        daily_correlation = paired.group_by("timestamp", "fold_id").agg(
-            pl.corr(
-                pl.col("score_left").rank(method="average"),
-                pl.col("score_right").rank(method="average"),
-            ).alias("correlation")
-        )
-        correlation_rows.append(
-            {
-                "left": left_id,
-                "right": right_id,
-                "mean_daily_correlation": daily_correlation["correlation"].drop_nulls().mean(),
-                "n_shared_rows": paired.height,
-                "n_decision_dates": daily_correlation["correlation"].drop_nulls().len(),
-            }
-        )
+        if diagnostic_set_by_member[left_hash] != diagnostic_set_by_member[right_hash]:
+            continue
+        correlation_rows.append(summarize_prediction_pair(left_hash, right_hash))
 
 correlations = pl.DataFrame(correlation_rows).sort("left", "right")
 correlations
@@ -392,9 +600,11 @@ correlations
 # %% tags=["results"]
 coverage_frames = []
 
-for prediction_hash in diagnostic_set.members:
+for prediction_hash in diagnostic_members:
     meta = catalog.filter(pl.col("prediction_hash") == prediction_hash).row(0, named=True)
-    training_spec = study.results.open(meta["training_hash"]).spec()
+    training_spec = study.results.open(
+        meta["training_hash"], include_preview=include_preview
+    ).spec()
     coverage_frames.append(
         conformal_coverage_for_selected_prediction(
             {
@@ -404,13 +614,14 @@ for prediction_hash in diagnostic_set.members:
                 "prediction_hash": prediction_hash,
                 "spec_json": json.dumps(training_spec),
             }
-        )
+        ).with_columns(pl.lit(meta["label"]).alias("label"))
     )
 
 conformal_coverage = pl.concat(coverage_frames, how="vertical_relaxed").sort(
-    "family", "config_name", "nominal_level"
+    "label", "family", "config_name", "nominal_level"
 )
 conformal_coverage.select(
+    "label",
     "family",
     "config_name",
     "prediction_hash",
@@ -424,15 +635,15 @@ conformal_coverage.select(
 #
 # Double machine learning estimates a treatment effect after using nuisance models to remove the
 # variation explained by declared confounders. Its estimand and uncertainty differ from a predictive
-# score, so causal hashes are read separately and never enter either prediction set. Each requested
-# hash must resolve to exactly one registered causal result.
+# score, so causal results are read separately and never enter a prediction set. Each visible label
+# request must resolve to exactly one complete canonical causal result.
 
 # %% tags=["results"]
 causal_columns = [
     "causal_hash",
     "label",
     "treatment",
-    "confounders_json",
+    "confounders",
     "dml_effect",
     "dml_se_hac",
     "p_value_hac",
@@ -441,26 +652,33 @@ causal_columns = [
     "n_obs",
 ]
 
-if len(CAUSAL_RESULT_HASHES) != len(set(CAUSAL_RESULT_HASHES)):
-    raise ValueError("causal result hashes must be unique")
+if len(CAUSAL_LABELS) != len(set(CAUSAL_LABELS)):
+    raise ValueError("causal labels must be unique")
 
-if CAUSAL_RESULT_HASHES:
-    placeholders = ",".join("?" for _ in CAUSAL_RESULT_HASHES)
-    with sqlite3.connect(study.root / "run_log" / "registry.db") as connection:
-        rows = connection.execute(
-            f"SELECT {','.join(causal_columns)} FROM causal_runs "
-            f"WHERE causal_hash IN ({placeholders}) ORDER BY causal_hash",
-            tuple(CAUSAL_RESULT_HASHES),
-        ).fetchall()
-    if len(rows) != len(set(CAUSAL_RESULT_HASHES)):
-        raise ValueError("every requested causal hash must resolve exactly once")
-    causal_results = pl.DataFrame(rows, schema=causal_columns, orient="row").with_columns(
-        pl.col("confounders_json").str.json_decode().alias("confounders")
-    )
+if CAUSAL_LABELS:
+    causal_rows = []
+    for label in CAUSAL_LABELS:
+        result = CausalResult.one(study, label=label, execution_tier=EXECUTION_TIER)
+        if not result.complete or result.execution_tier != EXECUTION_TIER:
+            raise ValueError(
+                f"{label} does not resolve to a complete {EXECUTION_TIER} causal result"
+            )
+        computation = result.spec["computation"]
+        estimand = computation["estimand"]
+        causal_rows.append(
+            {
+                "causal_hash": result.hash,
+                "label": result.spec["label"],
+                "treatment": estimand["treatment"],
+                "confounders": estimand["confounders"],
+                **{name: result.metrics[name] for name in causal_columns[4:]},
+            }
+        )
+    causal_results = pl.DataFrame(causal_rows).sort("label", "causal_hash")
 else:
     causal_results = pl.DataFrame(schema={name: pl.String for name in causal_columns})
 
-causal_results.drop("confounders_json")
+causal_results
 
 # %% [markdown]
 # ## Handoff to strategy evaluation
@@ -470,10 +688,12 @@ causal_results.drop("confounders_json")
 # the single selection decision using validation backtest Sharpe.
 
 # %% tags=["results"]
-print(f"Prediction candidate set for backtesting: {prediction_set.hash}")
-print(f"Members handed off: {len(prediction_set.members)}")
-for prediction_hash in prediction_set.members:
-    print(f"  {prediction_hash}")
+print(
+    "Prediction candidate sets for backtesting: "
+    f"{set_table.filter(pl.col('role') == 'strategy handoff').height}"
+)
+print(f"Members handed off: {len(prediction_members)}")
+set_table.filter(pl.col("role") == "strategy handoff")
 
 # %% [markdown]
 # ## Key takeaways and limitations
@@ -488,7 +708,8 @@ for prediction_hash in prediction_set.members:
 # - Causal estimates answer a treatment-effect question and remain separate from prediction and
 #   strategy contracts.
 #
-# The full table covers every declared prediction result. Shape-based diagnostics use the separately
-# declared subset because loading every large prediction artifact together is unnecessary. All
+# Canonical execution covers every declared prediction result. Preview execution is explicitly
+# bounded and cannot publish a candidate set or official population. Shape-based diagnostics use a
+# separate subset because loading every large prediction artifact together is unnecessary. All
 # evidence in this notebook comes from validation data; the holdout remains reserved for the locked
 # strategy evaluation.
