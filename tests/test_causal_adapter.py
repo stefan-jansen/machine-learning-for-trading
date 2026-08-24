@@ -119,7 +119,7 @@ def test_causal_request_resolves_timing_gap_and_preview_identity(tmp_path, monke
             "max_samples": 240,
             "max_symbols": 6,
             "n_folds": 2,
-            "n_placebo": 10,
+            "n_placebo": 20,
         },
     ).resolve()
     computation = resolved.spec["computation"]
@@ -147,7 +147,7 @@ def test_canonical_causal_uses_the_full_declared_population(tmp_path, monkeypatc
             "max_samples": 60,
             "max_symbols": 6,
             "n_folds": 2,
-            "n_placebo": 10,
+            "n_placebo": 20,
         },
     ).resolve()
 
@@ -361,7 +361,7 @@ def test_preview_causal_requires_every_reduction(tmp_path, monkeypatch) -> None:
             method="dml",
             label=label.name,
             execution_tier="preview",
-            preview_reductions={"max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+            preview_reductions={"max_symbols": 6, "n_folds": 2, "n_placebo": 20},
         ).resolve()
 
 
@@ -427,7 +427,7 @@ def test_causal_run_registers_once_and_reopens_after_restart(tmp_path, monkeypat
             "max_samples": 240,
             "max_symbols": 6,
             "n_folds": 2,
-            "n_placebo": 10,
+            "n_placebo": 20,
         },
     )
 
@@ -466,7 +466,7 @@ def test_causal_cache_accepts_provenance_only_drift(tmp_path, monkeypatch) -> No
             "max_samples": 240,
             "max_symbols": 6,
             "n_folds": 2,
-            "n_placebo": 10,
+            "n_placebo": 20,
         },
     ).resolve()
     first = resolved.run()
@@ -516,7 +516,7 @@ def test_causal_resolver_accepts_either_canonical_entity_key(tmp_path, monkeypat
         method="dml",
         label=label.name,
         execution_tier="preview",
-        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 20},
     ).resolve()
 
     assert resolved.spec["computation"]["analysis_population"]["n_rows"] > 0
@@ -542,7 +542,7 @@ def test_the_placebo_block_spans_the_label_horizon(
         method="dml",
         label=label.name,
         execution_tier="preview",
-        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 20},
     ).resolve()
 
     assert resolved.spec["computation"]["refutation"]["block_size"] == expected_block
@@ -560,7 +560,7 @@ def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch
                 "max_samples": 240,
                 "max_symbols": 6,
                 "n_folds": 2,
-                "n_placebo": 10,
+                "n_placebo": 20,
             },
         ).resolve()
 
@@ -585,7 +585,7 @@ def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
         method="dml",
         label=label.name,
         execution_tier="preview",
-        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 20},
     ).resolve()
 
     computation = resolved.spec["computation"]
@@ -615,7 +615,7 @@ def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> N
                 "max_samples": 240,
                 "max_symbols": 6,
                 "n_folds": 2,
-                "n_placebo": 10,
+                "n_placebo": 20,
             },
         ).resolve()
 
@@ -742,7 +742,7 @@ def test_a_placebo_count_that_cannot_refute_is_refused(tmp_path, monkeypatch) ->
     """
     study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
 
-    with pytest.raises(ValueError, match="cannot produce a refutation"):
+    with pytest.raises(ValueError, match="cannot reject at"):
         study.causal(
             method="dml",
             label=label.name,

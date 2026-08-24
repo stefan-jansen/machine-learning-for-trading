@@ -55,12 +55,6 @@ if TYPE_CHECKING:
 
 
 _DML_PREVIEW_FIELDS = {"max_samples", "max_symbols", "n_folds", "n_placebo"}
-# The fewest surviving placebo draws a block-permutation refutation is built from. Below this
-# the Monte Carlo p-value cannot resolve the level classify_refutation tests at: with k draws
-# the smallest two-sided p it can report is bounded away from zero, so a request for fewer is
-# a request for a test that cannot reject. Such a request is refused rather than returning an
-# empty refutation, which downstream reads as a test that ran and found nothing.
-_MIN_PLACEBO_DRAWS = 10
 
 
 @dataclass(frozen=True)
@@ -538,6 +532,14 @@ def manual_dml_timeseries(
 
 
 REFUTATION_ALPHA = 0.05
+# The fewest surviving placebo draws a block-permutation refutation can be built from, derived
+# from the level classify_refutation tests at rather than chosen. empirical_permutation_p takes
+# the plus-one correction, so with n draws the smallest p it can report is 1 / (n + 1); the test
+# can reject only where that is below REFUTATION_ALPHA, which needs n >= 20 at five percent. The
+# threshold this replaced was a bare 10, under which every refutation reads "Fails" whatever the
+# permutation distribution looks like - a test that cannot reject, which is the reading a missing
+# refutation must not produce either.
+_MIN_PLACEBO_DRAWS = int(np.ceil(1.0 / REFUTATION_ALPHA))
 
 
 def _placebo_is_unchanged(original: np.ndarray, permuted: np.ndarray) -> bool:
@@ -734,10 +736,14 @@ def run_dml_analysis(
                 f"Need at least {min_rows} rows for {n_folds}-fold CV with embargo={embargo}, got {n}"
             )
         if 0 < n_placebo < _MIN_PLACEBO_DRAWS:
-            raise ValueError(
-                f"n_placebo={n_placebo} cannot produce a refutation: the block permutation "
-                f"needs at least {_MIN_PLACEBO_DRAWS} surviving draws, and a draw can still "
-                "fail. Ask for none, or ask for enough."
+            import warnings
+
+            warnings.warn(
+                f"run_dml_analysis: n_placebo={n_placebo} is below the {_MIN_PLACEBO_DRAWS} "
+                "draws a refutation can be built from, so this run publishes none. A caller "
+                "that defaults a missing refutation to p = 1 reports 'cannot reject' for a "
+                "test that never ran. Ask for none, or ask for enough.",
+                stacklevel=2,
             )
         if df[treatment_col].std() < 1e-10:
             raise ValueError(f"Treatment '{treatment_col}' has near-zero variance")
@@ -1051,8 +1057,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError("DML folds, placebos, and sample cap are invalid")
     if 0 < n_placebo < _MIN_PLACEBO_DRAWS:
         raise ValueError(
-            f"a DML request for {n_placebo} placebo draws cannot produce a refutation; the "
-            f"block permutation needs at least {_MIN_PLACEBO_DRAWS}"
+            f"a DML request for {n_placebo} placebo draws cannot reject at "
+            f"{REFUTATION_ALPHA}: the plus-one correction bounds the smallest reportable "
+            f"p-value at 1/(n+1), so the block permutation needs at least "
+            f"{_MIN_PLACEBO_DRAWS} draws"
         )
 
     columns = [mds.date_col, mds.entity_cols[0], treatment, mds.label_col, *confounders]

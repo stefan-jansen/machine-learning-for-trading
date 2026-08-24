@@ -1840,13 +1840,16 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
   # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
   # value, so the parameter and the number the analysis runs on no longer share a name.
   # N_PLACEBO was 5, which cannot produce a refutation at all: run_dml_analysis assembles one
-  # only from at least ten surviving draws, so the notebook's guard against a missing refutation
-  # fired on every CI run. Ten is the floor and a draw can still fail, so twelve is asked for.
+  # only above a floor, so the notebook's guard against a missing refutation fired on every CI
+  # run. The floor is twenty, derived from the level the classification tests at - the plus-one
+  # correction bounds the smallest reportable p-value at 1/(n+1), so nineteen draws report 0.05
+  # at best and never clear a strict comparison against it. A draw can still fail, so the request
+  # carries headroom above the floor rather than sitting on it.
   parameters:
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
     N_FOLDS: 2
-    N_PLACEBO: 12
+    N_PLACEBO: 24
   timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300

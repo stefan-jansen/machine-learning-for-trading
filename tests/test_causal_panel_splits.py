@@ -292,7 +292,7 @@ def test_dml_comparisons_use_the_observed_second_stage_sample_and_folds() -> Non
         confounder_cols=["confounder"],
         n_folds=2,
         embargo=1,
-        n_placebo=10,
+        n_placebo=20,
         block_size=3,
         seed=7,
         horizon=1,
@@ -345,7 +345,7 @@ def test_a_block_longer_than_every_contiguous_run_fails_the_refutation() -> None
             confounder_cols=["confounder"],
             n_folds=2,
             embargo=1,
-            n_placebo=10,
+            n_placebo=20,
             block_size=101,
             seed=7,
             horizon=1,
@@ -354,7 +354,7 @@ def test_a_block_longer_than_every_contiguous_run_fails_the_refutation() -> None
         )
     except ValueError as error:
         assert "block_size=101" in str(error)
-        assert "all 10 placebo draws" in str(error)
+        assert "all 20 placebo draws" in str(error)
     else:
         raise AssertionError("a block longer than every contiguous run must fail")
 
