@@ -1518,24 +1518,19 @@ case_studies/fx_pairs/12_model_analysis:
   timeout: 300
 case_studies/fx_pairs/13_backtest:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_K: 2
   timeout: 600
 case_studies/fx_pairs/14_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
   timeout: 300
 case_studies/fx_pairs/15_costs:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    MAX_COST_POINTS: 1
   timeout: 600
 case_studies/fx_pairs/16_risk_management:
   parameters:
     MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
   timeout: 600
 case_studies/fx_pairs/17_strategy_analysis:
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
