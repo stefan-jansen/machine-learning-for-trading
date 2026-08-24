@@ -325,7 +325,9 @@ print(f"Registered causal identity: {causal_hash}")
 #
 # One cell, so every number this notebook publishes is in one place and moves together on a re-run.
 # `placebo_p_floor` is one over the number of successful placebo draws plus one, the smallest
-# p-value a permutation test of this size can report.
+# p-value a permutation test of this size can report. `placebo_z` is how many placebo standard
+# deviations separate the observed estimate from the placebo mean, and it is printed beside the
+# p-value because the p-value alone cannot show how far apart the two distributions are.
 
 # %% tags=["results"]
 refutation_class = refutation.get(
@@ -342,6 +344,7 @@ pl.DataFrame(
         "p_hac": [results["p_value_hac"]],
         "placebo_p": [refutation["empirical_p"]],
         "placebo_p_floor": [1.0 / (refutation["n_successful"] + 1)],
+        "placebo_z": [refutation["z_score"]],
         "refutation_class": [refutation_class],
     }
 )
@@ -360,5 +363,18 @@ pl.DataFrame(
 # - The permutation p-value cannot fall below its floor however extreme the estimate is, so a value
 #   at the floor is a bound and not a measurement. A block permutation disturbs the timing of the
 #   treatment; it does not disturb confounding.
+# - A permutation p at the top of its range is compatible with two different situations, and this
+#   design cannot separate them. The estimate may be unremarkable against the null the placebo
+#   draws, or the null the placebo draws may not be the one the question is about - which is what a
+#   block too short for the treatment's own dependence would produce. `placebo_z` says how far
+#   apart the observed estimate and the placebo mean are; it does not say which of the two
+#   situations put them there. Separating them needs a block sized to the dependence being
+#   preserved, and at a one-month block this notebook does not have one, so read the refutation
+#   here as uninformative rather than as evidence in either direction.
+# - Read the refutation against the coefficient's own uncertainty rather than on its own. Where
+#   the estimate is not separable from zero by its Driscoll-Kraay standard error, a placebo test
+#   of that estimate could not have said much whichever way it came out. The sentence the evidence
+#   supports is that this design cannot tell, which is not the same as a statement about whether
+#   an effect is there.
 # - Conditioning on Beta, IdioVol, LME and Variance does not establish that conditional
 #   ignorability, overlap or no-interference hold. Every step above ends before the 2016 holdout.
