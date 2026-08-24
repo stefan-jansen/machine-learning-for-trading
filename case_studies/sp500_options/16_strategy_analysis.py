@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -361,8 +361,8 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 #    spread (settle at intrinsic), so this gate is materially weakened
 #    relative to the bps-cost variants - but the entry-leg spread alone
 #    remains the dominant friction. The specification block reports the
-#    current entry and hedge cost totals; Section 5's HTM cost-sensitivity
-#    grid quantifies the slope.
+#    current entry and hedge cost totals; the `14_costs` sweep quantifies
+#    the slope against the share of the quoted spread paid on entry.
 #
 # In addition, the strategy-analysis notebook evaluates two universal gates in §9:
 # (i) the validation Sharpe CI lower bound ≥ 0, and
@@ -376,9 +376,9 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # The equal-weight baseline sweep on `ret_to_expiry` covers four model families
 # under HTM accounting. The rank-1 lineage anchors a multi-stage path
 # (signal → allocation → optional risk overlay) at the training-hash
-# level; § 5 reads the HTM-specific cost sensitivity from the `14_costs`
-# artefact rather than the standard bps cost-grid (which is the wrong
-# unit for option premium returns).
+# level. § 5 says why the standard bps cost-grid is the wrong unit for
+# option premium returns and points at the `14_costs` population, which
+# runs the sweep in fractions of the quoted half-spread instead.
 
 # %%
 ctx = explorer.search_context("signal")
@@ -511,8 +511,9 @@ print(
     "cross-section (eq_w_topk); the allocation stage overlays a within-"
     "cross-section weighting on the HTM cohort accounting; the risk_overlay "
     "stage layers position-level controls on top of the allocator weights. "
-    "§ 5 reads the HTM-specific cost grid from `14_costs` (the standard "
-    "bps cost-grid is the wrong unit for option premium returns)."
+    "The cost sweep lives in `14_costs`, in fractions of the quoted "
+    "half-spread (the standard bps cost-grid is the wrong unit for option "
+    "premium returns)."
 )
 
 # %% [markdown]
@@ -837,8 +838,8 @@ if fold_df.height > 1:
 # ruinous for the actual P&L. `14_costs` runs the cost sweep in fractions of the quoted half-spread
 # instead, executes it through the same engine as every other backtest, and publishes it as the
 # named population `sp500-options-cost-sensitivity-validation-v1`. It reports the resulting Sharpe
-# surface across families, universes and spread fractions there, so this notebook does not repeat
-# it.
+# surface across families, universes and spread fractions there, each point with its
+# block-bootstrap Sharpe interval, so this notebook does not repeat it.
 
 # %% [markdown]
 # ## §6 Holdout closure with paired bootstrap

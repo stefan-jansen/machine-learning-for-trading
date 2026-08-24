@@ -577,13 +577,25 @@ def test_preview_prediction_is_excluded_from_official_population(
     assert preview_selection.height == 1
     with pytest.raises(ValueError, match="preview.*candidate set"):
         study.predictions.freeze(preview_selection, name="preview-must-not-freeze")
-    with pytest.raises(ValueError, match="preview.*cannot enter"):
+    # Two independent refusals cover this. The process-level guard fires first while the run is
+    # still pointed at the preview output root, and the member check is what refuses a preview
+    # hash reached from a canonical run.
+    with pytest.raises(ValueError, match="preview run cannot create an official population"):
         OfficialPopulation.create(
             study,
             name="preview-must-not-enter-official",
             member_kind="prediction",
             members=[preview.hash],
         )
+    with monkeypatch.context() as canonical_env:
+        canonical_env.delenv("ML4T_OUTPUT_DIR", raising=False)
+        with pytest.raises(ValueError, match="preview.*cannot enter"):
+            OfficialPopulation.create(
+                study,
+                name="preview-must-not-enter-official",
+                member_kind="prediction",
+                members=[preview.hash],
+            )
     preview_returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
         pl.col("timestamp").str.to_date()
     )
@@ -1126,3 +1138,36 @@ def test_prediction_retry_finishes_metrics_without_new_identity(
 
     assert finalized.hash == prediction_hash
     assert finalized.complete
+
+
+def test_backtest_catalog_carries_the_registered_sharpe_interval(tmp_path: Path) -> None:
+    """A catalog reader can say whether a Sharpe clears zero without raw SQL.
+
+    The uncertainty layer registers ``sharpe_ci95_lo``/``_hi`` on every backtest, but the
+    catalog used to project only point estimates, so a notebook reading it could report a
+    Sharpe surface and had no interval to compare against zero.
+    """
+    study = _study(tmp_path)
+    prediction_hash = _publish_prediction(study, alpha=1.0, checkpoint=1)
+    returns = pl.DataFrame({"timestamp": ["2024-01-05"], "return": [0.01]}).with_columns(
+        pl.col("timestamp").str.to_date()
+    )
+    backtest_hash = register_backtest_run(
+        "etfs",
+        prediction_hash,
+        {
+            "execution_tier": "canonical",
+            "strategy": {"signal": {"method": "equal_weight_top_k", "top_k": 1}},
+        },
+        stage="signal",
+        returns=returns,
+        trades=pl.DataFrame({"symbol": ["SPY"], "pnl": [1.0]}),
+        metrics={"sharpe": 1.25, "sharpe_ci95_lo": 0.4, "sharpe_ci95_hi": 2.1},
+        case_dir=study.root,
+    )
+
+    row = study.backtests.one(backtest_hash=backtest_hash)
+
+    assert row["sharpe"] == pytest.approx(1.25)
+    assert row["sharpe_ci95_lo"] == pytest.approx(0.4)
+    assert row["sharpe_ci95_hi"] == pytest.approx(2.1)

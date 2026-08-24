@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -225,15 +225,16 @@ if catalog.height != requests.height or catalog.filter(~pl.col("complete")).heig
 #
 # Read each line for its slope rather than its level. The slope is how much of the result is a
 # claim about execution quality; the gap between the two universes at the same fraction is what
-# the liquidity restriction buys. Whether any line clears zero by enough to matter needs the
-# interval around each point, which no stage computes for this sweep: every point here is a
-# single Sharpe estimate, and the comparison it supports is between assumptions, not against
-# zero.
+# the liquidity restriction buys. Each point carries the block-bootstrap Sharpe interval the
+# engine registers with every backtest, reported below as `ci95_lo` and `ci95_hi`, so whether a
+# point clears zero can be read off the bar rather than assumed from the marker. The intervals share a return series across neighbouring
+# spread fractions, so they are not independent along a line: they say how firm a single point
+# is, not whether two points on the same line differ.
 
 # %%
 cost_curve = (
     study.backtests.table(include_preview=EXECUTION_TIER == "preview")
-    .select("backtest_hash", "sharpe")
+    .select("backtest_hash", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi")
     .join(catalog.select("request_name", "backtest_hash"), on="backtest_hash", how="inner")
     .join(
         requests.select("request_name", "family", "universe", "spread_fraction"),
@@ -242,25 +243,38 @@ cost_curve = (
     )
     .sort("family", "universe", "spread_fraction")
 )
-if cost_curve.height != catalog.height or cost_curve.get_column("sharpe").null_count():
+interval_columns = ["sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"]
+if (
+    cost_curve.height != catalog.height
+    or cost_curve.select(interval_columns).null_count().sum_horizontal().sum()
+):
     raise RuntimeError("the published cost population is missing rows or Sharpe metrics")
 
 # %% tags=["results"]
-cost_curve.pivot(
-    on="spread_fraction",
-    index=["family", "universe"],
-    values="sharpe",
-).sort("family", "universe")
+cost_curve.select(
+    "family",
+    "universe",
+    "spread_fraction",
+    "sharpe",
+    pl.col("sharpe_ci95_lo").alias("ci95_lo"),
+    pl.col("sharpe_ci95_hi").alias("ci95_hi"),
+    (pl.col("sharpe_ci95_lo") > 0).alias("clears_zero"),
+).sort("family", "universe", "spread_fraction")
 
 # %%
 cost_figure = px.line(
-    cost_curve,
+    cost_curve.with_columns(
+        ci95_upper=pl.col("sharpe_ci95_hi") - pl.col("sharpe"),
+        ci95_lower=pl.col("sharpe") - pl.col("sharpe_ci95_lo"),
+    ),
     x="spread_fraction",
     y="sharpe",
     color="family",
     line_dash="universe",
     markers=True,
-    hover_data=["backtest_hash"],
+    error_y="ci95_upper",
+    error_y_minus="ci95_lower",
+    hover_data=["backtest_hash", "sharpe_ci95_lo", "sharpe_ci95_hi"],
 )
 cost_figure.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 cost_figure.update_layout(
@@ -275,7 +289,8 @@ cost_figure.update_yaxes(title_text="Validation Sharpe")
 show_plotly_with_alt(
     cost_figure,
     "Line chart of validation Sharpe against the fraction of the quoted option half-spread paid "
-    "on entry, one line per model family and option universe.",
+    "on entry, one line per model family and option universe, each point carrying its "
+    "block-bootstrap Sharpe interval as an error bar.",
 )
 
 # %% [markdown]
