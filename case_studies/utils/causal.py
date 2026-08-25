@@ -652,6 +652,36 @@ def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarra
     return moved
 
 
+# Below this many successful placebo draws the permutation test is not computed at all:
+# the plus-one correction floors the empirical p at 1/(n+1), so under ten draws no data
+# could produce a pass and a number would be reported that no test earned. When it is not
+# computed, `refutation` stays empty and `refutation_p` is registered NULL - a missing
+# measurement, which is what it is.
+MIN_PLACEBO_DRAWS = 10
+
+
+def placebo_request_is_on_the_boundary(n_placebo: int) -> bool:
+    """Would one failed draw take the whole refutation with it?
+
+    This is not enforced at run time, and the attempt to do so is worth recording. Nine
+    tests in tests/test_causal_adapter.py request two to six draws on purpose, to
+    exercise the block-span and permutation-feasibility logic without paying for a
+    refutation they never read; refusing every small request turned all nine red for a
+    property they are not about. The boundary is a property of a *declared reduction* -
+    a config that says how a real run should be made cheap - not of every call.
+
+    Zero means "do not refute", which is a different statement from "refute with too
+    few draws to say anything".
+    """
+    return 0 < n_placebo < MIN_PLACEBO_DRAWS + PLACEBO_REQUEST_MARGIN
+
+
+# Enough that one draw failing does not take the whole test with it. Small on purpose:
+# a placebo draw is a full nuisance refit, so this is the least that makes the boundary
+# unreachable by a single failure rather than a comfortable cushion.
+PLACEBO_REQUEST_MARGIN = 5
+
+
 def _assert_placebo_permutation_possible(
     unchanged_draws: int, n_draws: int, block_size: int, short_segment_fraction: float = 0.0
 ) -> None:
@@ -952,7 +982,7 @@ def run_dml_analysis(
         )
 
         refutation = {}
-        if len(placebo_effects) >= 10:
+        if len(placebo_effects) >= MIN_PLACEBO_DRAWS:
             placebo_arr = np.array(placebo_effects)
             p_mean = np.mean(placebo_arr)
             p_std = np.std(placebo_arr)
@@ -1359,10 +1389,15 @@ def run_resolved_causal_request(
     study: Study,
     spec: dict[str, Any],
     context: DMLResearchContext,
+    *,
+    supersedes: str | None = None,
 ):
     import math
 
     from case_studies.research.causal import CausalResult
+    from case_studies.utils.registry.registration import (
+        declare_causal_supersedes,
+    )
     from case_studies.utils.registry.registration import register_causal_run as register_record
     from case_studies.utils.registry.specs import canonical_json, training_hash_from_spec
 
@@ -1378,6 +1413,23 @@ def run_resolved_causal_request(
     if cached is not None:
         if training_hash_from_spec(cached.spec) != causal_hash or not cached.complete:
             raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
+        if supersedes is not None:
+            # The declaration has to land even when the fit does not re-run, because
+            # that is the shape of the repair. A registry already holding two
+            # undeclared identities tells the author to re-register the newer one
+            # naming the older; doing so reproduces the same causal_hash, so the cache
+            # answers and the fit is skipped. Returning here without writing would drop
+            # the declaration silently and leave the label unresolvable, with the
+            # notebook reporting success. register_causal_run fills the column
+            # once and validates what it is given.
+            declare_causal_supersedes(
+                study.case_study,
+                causal_hash,
+                supersedes_hash=supersedes,
+                label=context.outcome_col,
+                tier=str(spec["execution_tier"]),
+                case_dir=study.storage_root(spec["execution_tier"]),
+            )
         return cached
 
     nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)
@@ -1413,6 +1465,11 @@ def run_resolved_causal_request(
     register_record(
         study.case_study,
         causal_hash,
+        # The identity this run retires, from the notebook's SUPERSEDES_CAUSAL. A refit
+        # under a changed version of this file produces a second canonical identity for
+        # the same label, and a reader resolves a label to exactly one; register_record
+        # refuses the second without a declaration.
+        supersedes_hash=supersedes,
         label=context.outcome_col,
         treatment=context.treatment_col,
         confounders_json=json.dumps(list(context.confounder_cols)),
@@ -1466,6 +1523,7 @@ def register_causal_run(
     case_dir=None,
     started_at: str | None = None,
     elapsed_s: float | None = None,
+    supersedes_hash: str | None = None,
 ) -> str:
     """Register a causal DML run in the dedicated `causal_runs` table.
 
@@ -1550,6 +1608,11 @@ def register_causal_run(
         notebook=notebook,
         started_at=started_at or results.get("started_at"),
         elapsed_s=elapsed_s if elapsed_s is not None else results.get("elapsed_s"),
+        # The causal identity this run retires. A refit produces a second canonical
+        # identity for the same label and `CausalResult.one` resolves a label to exactly
+        # one, so the chain is declared here rather than guessed from `created_at`.
+        # Notebooks pass their SUPERSEDES_CAUSAL parameter through.
+        supersedes_hash=supersedes_hash,
         case_dir=case_dir,
     )
 

@@ -208,17 +208,42 @@ def populated_data_dir(test_data_dir):
     pytest.skip("No test data available. Set ML4T_DATA_PATH or run in CI.")
 
 
+def _resolve_intermediates_root() -> Path | None:
+    """Where the pre-computed pipeline intermediates are, or ``None``.
+
+    Two candidates, in order, because the two places this runs disagree on both:
+    beside the resolved data path (the test-data repo layout, which is what CI has -
+    the checkout lands under the workspace), then the well-known workstation path.
+    Taking only the first misses a workstation whose ``ML4T_DATA_PATH`` points at the
+    canonical Dropbox data root, whose parent holds no intermediates; taking only the
+    second misses every CI runner. The seeding fixture below has always tried both;
+    ``intermediates_dir`` tried only the first, which is why the tests that consume it
+    skipped everywhere.
+    """
+    data_path = _resolve_data_path()
+    candidates = []
+    if data_path:
+        candidates.append(Path(data_path).parent / "intermediates")
+    candidates.append(Path.home() / "ml4t" / "test-data" / "intermediates")
+    for candidate in candidates:
+        if candidate.exists() and any(candidate.iterdir()):
+            return candidate
+    return None
+
+
 @pytest.fixture(scope="session")
 def intermediates_dir(test_data_dir):
     """Return directory with pre-computed pipeline intermediates.
 
     When running downstream chapters (Ch11+), they need labels/features
     from pipeline stages. These are pre-computed and stored in test-data repo.
+
+    ``test_data_dir`` is requested for its side effect - it puts the resolved data
+    path in ``ML4T_DATA_PATH`` for the rest of the session - not for a skip, which it
+    does not do (``populated_data_dir`` is the fixture that skips). The path itself
+    comes from ``_resolve_intermediates_root``, which the seeding fixture uses too.
     """
-    idir = test_data_dir.parent / "intermediates"
-    if idir.exists() and any(idir.iterdir()):
-        return idir
-    return None
+    return _resolve_intermediates_root()
 
 
 SEEDED_SUBDIRS = ("features", "labels", "evaluation", "run_log", "results", "benchmark")
@@ -313,16 +338,7 @@ def seeded_output_dir(tmp_path_factory):
     # executing the full pipeline first.
     # Look for intermediates next to data (test-data repo layout) or at well-known path.
     data_path = _resolve_data_path()
-    intermediates_root = None
-    if data_path:
-        candidate = Path(data_path).parent / "intermediates"
-        if candidate.exists():
-            intermediates_root = candidate
-    if intermediates_root is None:
-        # Well-known test-data repo location
-        candidate = Path.home() / "ml4t" / "test-data" / "intermediates"
-        if candidate.exists():
-            intermediates_root = candidate
+    intermediates_root = _resolve_intermediates_root()
     if intermediates_root and intermediates_root.exists():
         for cs_id in CASE_STUDY_IDS:
             src = intermediates_root / cs_id
