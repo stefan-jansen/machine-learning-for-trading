@@ -48,6 +48,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -220,6 +221,36 @@ if not pred_index.is_empty():
 if pred_index.is_empty():
     msg = f"No predictions found for {CASE_STUDY_ID}/{LABEL}/{SPLIT}"
     raise RuntimeError(msg)
+
+# `load_prediction_index` answers "what predictions exist in this registry" and leaves
+# admissibility to the caller. A backtest is asking a different question - "what should
+# I trade" - and the difference is exactly the conditions the catalog computes. Without
+# this filter the sweep consumes rows the official population cannot contain: a run that
+# reports every backtest completed and zero failed, off a population that resolves empty.
+# That is not a late failure, it is a loud success on the wrong rows, and it costs the
+# full sweep to discover.
+# `complete` is the whole test: `catalog.py:309` already requires `identity_status ==
+# "current"` before a row can be complete, and the tier is decided by which registry the
+# study opened, not by a column comparison. Re-asserting either here would reject a
+# preview run's own rows - the mistake `8fc28044` fixed on the registry path.
+_catalog = open_study(CASE_STUDY_ID, entry_point="14_backtest").predictions.table()
+_admissible = _catalog.filter(pl.col("complete")).select("prediction_hash")
+_offered = len(pred_index)
+pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
+if pred_index.is_empty():
+    msg = (
+        f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
+        "complete: every row is missing an artifact or a fold metric, or carries an identity "
+        "this schema version no longer recognises. Backtesting them would produce a full sweep "
+        "over a population that cannot be official. Re-run the model notebooks on the research "
+        "interface first."
+    )
+    raise RuntimeError(msg)
+if len(pred_index) < _offered:
+    print(
+        f"  Excluded {_offered - len(pred_index)} of {_offered} prediction sets: not complete",
+        flush=True,
+    )
 
 if TOP_N_PREDICTIONS > 0:
     pred_index = pred_index.head(TOP_N_PREDICTIONS)

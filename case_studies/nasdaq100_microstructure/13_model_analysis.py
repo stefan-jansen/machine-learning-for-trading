@@ -198,11 +198,7 @@ if excluded_families(CASE_STUDY):
 # admissibility off one and detail off the other keeps both, where swapping wholesale to the
 # catalog would have narrowed the columns and silently emptied the interval on every forest tile.
 _catalog = study.predictions.table()
-_admissible = (
-    pl.col("complete")
-    & (pl.col("execution_tier") == "canonical")
-    & (pl.col("identity_status") != "legacy")
-)
+_admissible = pl.col("complete")
 _ok = _catalog.filter(_admissible).select("prediction_hash")
 _rejected = _catalog.filter(~_admissible)
 
