@@ -669,13 +669,21 @@ def test_a_role_recorded_as_a_bare_digest_string_normalizes_too() -> None:
     ) == {"financial": "features-a"}
 
 
-def _labelled_prediction(study: Study, *, label: str, alpha: float):
+def _labelled_prediction(
+    study: Study, *, label: str, alpha: float, execution_tier: str = "canonical"
+):
     """Publish one validation prediction whose training identity carries the given horizon."""
     spec = _resolved_spec(alpha=alpha)
     spec["label"] = label
+    spec["execution_tier"] = execution_tier
+    if execution_tier == "preview":
+        # A preview spec has to identity-cover its reductions, or `register_training` refuses
+        # it: a preview that does not say what it narrowed is indistinguishable from a
+        # canonical run.
+        spec["computation"]["preview_reductions"] = {"max_symbols": 2}
     computation = spec.get("computation", spec)
     computation["label_artifact"] = f"{label}-artifact"
-    training = study.results.register_training(spec)
+    training = study.results.register_training(spec, execution_tier=execution_tier)
     dates = pl.date_range(pl.date(2024, 1, 2), pl.date(2024, 1, 5), eager=True)
     frame = pl.DataFrame(
         {
@@ -766,7 +774,7 @@ def test_final_selection_pool_spans_both_return_horizons(
         research_workflow.HORIZON_DEPENDENT_PROTOCOL_FIELDS
     )
 
-    catalog = research_workflow.selection_catalog(study, selection)
+    catalog = research_workflow.selection_catalog(study, selection.members)
     assert catalog.height == 2
     assert set(catalog.get_column("label")) == set(research_workflow.ALL_LABELS)
     assert catalog.get_column("sharpe").to_list() == sorted(
@@ -782,12 +790,10 @@ def test_selection_catalog_rejects_a_candidate_the_catalog_does_not_describe(
 
     study = _study(tmp_path)
     by_label = _labelled_execution(study, monkeypatch)
-    selection = SimpleNamespace(
-        members=(*(value for hashes in by_label.values() for value in hashes), "not-a-backtest")
-    )
+    members = (*(value for hashes in by_label.values() for value in hashes), "not-a-backtest")
 
     with pytest.raises(ValueError, match="does not describe every candidate"):
-        research_workflow.selection_catalog(study, cast(CandidateSet, selection))
+        research_workflow.selection_catalog(study, members)
 
 
 def test_holdout_evidence_is_empty_until_the_lifecycle_is_locked(tmp_path: Path) -> None:
@@ -1309,3 +1315,108 @@ def test_sdf_checkpoints_chosen_on_validation_never_reach_the_selection_pool() -
     assert published
     assert not published & chosen_on_validation
     assert fitted - published == chosen_on_validation
+
+
+def test_a_preview_request_backtests_its_own_preview_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision artifact must follow its prediction's tier rather than assert canonical.
+
+    `publish_product_weights` was called with a hardcoded `canonical=True`, and
+    `DecisionArtifact.publish` resolves its lineage with `include_preview=not canonical`
+    (research/decisions.py:192). A preview prediction was therefore looked up in the canonical
+    registry only, and the publish failed on its own input with `Unknown result hash` before any
+    backtest ran. That took cme_futures' notebooks 13 through 17 red in every CI run, because CI
+    is the one environment where every prediction is a preview one.
+    """
+    prices = _product_prices()
+    path = FuturesPricePath(
+        prices=prices,
+        audit=pl.DataFrame(
+            {
+                "product": ["ES", "NQ"],
+                "position": [0, 0],
+                "timestamp": [prices.item(0, "timestamp"), prices.item(1, "timestamp")],
+                "cum_ratio": [1.0, 1.0],
+            }
+        ),
+        roll_transitions=pl.DataFrame(),
+        expiry_rules=_expiry_rules(["ES", "NQ"]),
+    )
+    monkeypatch.setattr(research_workflow, "load_futures_price_path", lambda *a, **k: path)
+
+    study = _study(tmp_path)
+    study.activate("preview")
+    prediction = _labelled_prediction(
+        study, label="fwd_ret_21d", alpha=1.0, execution_tier="preview"
+    )
+    assert prediction.execution_tier == "preview", "the fixture must publish a preview prediction"
+
+    execution = run_official_backtest_requests(
+        study,
+        strategy_request_frame(
+            [
+                {
+                    "request_name": "preview-equal-weight-k1",
+                    "prediction_hash": prediction.hash,
+                    "label": "fwd_ret_21d",
+                    "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                    "allocation": None,
+                    "risk": None,
+                    "costs": None,
+                    "chapter": "ch16",
+                }
+            ]
+        ),
+        population_name=None,
+    )
+
+    assert execution.population is None, "a preview run publishes no official population"
+    (result,) = execution.results
+    assert result.execution_tier == "preview"
+    assert result.complete
+    assert execution.catalog_rows.item(0, "source") == "computed"
+
+
+def test_a_preview_run_is_refused_an_official_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naming a population under preview must fail rather than publish a preview snapshot."""
+    prices = _product_prices()
+    path = FuturesPricePath(
+        prices=prices,
+        audit=pl.DataFrame(
+            {
+                "product": ["ES", "NQ"],
+                "position": [0, 0],
+                "timestamp": [prices.item(0, "timestamp"), prices.item(1, "timestamp")],
+                "cum_ratio": [1.0, 1.0],
+            }
+        ),
+        roll_transitions=pl.DataFrame(),
+        expiry_rules=_expiry_rules(["ES", "NQ"]),
+    )
+    monkeypatch.setattr(research_workflow, "load_futures_price_path", lambda *a, **k: path)
+
+    study = _study(tmp_path)
+    study.activate("preview")
+    prediction = _labelled_prediction(
+        study, label="fwd_ret_21d", alpha=1.0, execution_tier="preview"
+    )
+    requests = strategy_request_frame(
+        [
+            {
+                "request_name": "preview-equal-weight-k1",
+                "prediction_hash": prediction.hash,
+                "label": "fwd_ret_21d",
+                "signal": {"method": "equal_weight_top_k", "top_k": 1},
+                "allocation": None,
+                "risk": None,
+                "costs": None,
+                "chapter": "ch16",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot create an official population"):
+        run_official_backtest_requests(study, requests, population_name="cme_futures-preview-v1")

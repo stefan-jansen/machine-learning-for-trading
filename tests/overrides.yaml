@@ -1255,28 +1255,50 @@ case_studies/cme_futures/11_causal_dml:
       n_folds: 2
       n_placebo: 25
   timeout: 300
+# 12 through 17 run in the preview tier here, and the tier is what reduces them.
+#
+# `tests/pm_helpers.py::research_preview_parameters` injects EXECUTION_TIER="preview" and
+# WORKSPACE=<the isolated output dir> into a notebook's parameters cell - but only if that cell
+# declares BOTH names. A cell declaring one of them silently gets neither, which is the trap: the
+# notebook then runs canonical against a checkout with no canonical registry. That is what these
+# six did, and it is why they were red on every run while 01-11 passed.
+#
+# PREVIEW_LABELS is the one reduction they take. It is a real narrowing rather than a redundant
+# one: each of these notebooks accumulates across `for label in labels` into a single structure -
+# 14 builds one request_rows list, 17 one selection pool spanning both horizons - so the label
+# axis is the only axis they combine over, and collapsing it to the primary horizon is what keeps
+# the reduced run cheap without changing the shape of what the notebook does. The remaining scale
+# comes from the fixture registry itself.
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
-# Timeout only, for 13 through 16 as already for 12 and 17. The stage 06+ rewrite made all
-# six read what the registry holds instead of recomputing it, so they declare no parameters
-# cell and MAX_SYMBOLS, TOP_K, TOP_N_PREDICTIONS, TOP_N_COMBOS and MAX_RISK_VARIANTS named
-# nothing any of them reads. Their scale is now set by the seeded fixture registry these
-# tests run against, not by an injected width.
-#
-# Restoring a reduction on the label axis instead would be wrong rather than merely
-# redundant: every one of these notebooks accumulates across `for label in ALL_LABELS` into
-# a single structure - 14 builds one request_rows list, 17 one selection pool across both
-# horizons - and REVIEW.md section D permits collapsing an axis only where the notebook
-# never combines across it.
 case_studies/cme_futures/13_backtest:
-  timeout: 120
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_PREDICTIONS: 4
+  timeout: 600
 case_studies/cme_futures/14_portfolio_management:
-  timeout: 300
+  # PREVIEW_MAX_BASELINE_ROWS is the preview's own shortlist width. The canonical width comes
+  # from setup.yaml's top_n_predictions.allocation and is 10, which the preview signal stage
+  # cannot supply: 13_backtest caps itself at PREVIEW_MAX_PREDICTIONS and those resolve to two
+  # distinct (family, config_name) pairs. Declaring 2 keeps the notebook's refusal strict -
+  # it still fails if the pool cannot supply exactly this many - rather than letting it take
+  # whatever it finds.
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_BASELINE_ROWS: 2
+  timeout: 600
 case_studies/cme_futures/15_costs:
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/16_risk_management:
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/17_strategy_analysis:
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
+  timeout: 600
 case_studies/crypto_perps_funding/01_feasibility_analysis:
   parameters:
     # No START_DATE: the notebook already declares 2020-01-01, which is the data start, so an

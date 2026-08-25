@@ -42,6 +42,12 @@ from case_studies.cme_futures.research_workflow import (
 )
 from case_studies.utils.sweep_config import get_allocators, get_top_n_predictions
 
+# %% tags=["parameters"]
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_LABELS: list[str] = []
+PREVIEW_MAX_BASELINE_ROWS = 0
+
 # %% [markdown]
 # ## Select signal configurations by validation Sharpe
 #
@@ -50,12 +56,41 @@ from case_studies.utils.sweep_config import get_allocators, get_top_n_prediction
 # distinct `(family, config_name)` pair.
 
 # %%
-study = open_study(execution_tier="canonical")
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_BASELINE_ROWS:
+        raise ValueError("canonical execution cannot declare preview reductions")
+    labels = ALL_LABELS
+elif EXECUTION_TIER == "preview":
+    if WORKSPACE is None or not PREVIEW_LABELS or PREVIEW_MAX_BASELINE_ROWS < 1:
+        raise ValueError(
+            "preview execution requires WORKSPACE, PREVIEW_LABELS and PREVIEW_MAX_BASELINE_ROWS"
+        )
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    labels = tuple(PREVIEW_LABELS)
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 universe = product_universe_table()
 universe
 
+# %% [markdown]
+# ## How many signal configurations the allocators run on
+#
+# Canonical takes the shortlist size from `setup.yaml`, which is the declared width of the
+# allocation stage. A preview cannot: it backtests a bounded slice of the signal stage, so the
+# canonical width names more distinct configurations than its pool contains and
+# `shortlist_signal_configurations` refuses - correctly, since silently returning fewer is the
+# quiet shrinking that strictness exists to prevent. The preview therefore declares its own
+# width, and is held to it just as strictly.
+
 # %%
-shortlist_size = get_top_n_predictions("cme_futures", "allocation")
+shortlist_size = (
+    get_top_n_predictions("cme_futures", "allocation")
+    if EXECUTION_TIER == "canonical"
+    else PREVIEW_MAX_BASELINE_ROWS
+)
 allocators = get_allocators("cme_futures")
 if not allocators:
     raise ValueError("the configured allocator population is empty")
@@ -67,11 +102,12 @@ if any(allocation.get("method") == "equal_weight" for allocation in allocators):
     )
 
 request_rows = []
-for label in ALL_LABELS:
+for label in labels:
     for baseline in shortlist_signal_configurations(
         study,
         label=label,
         limit=shortlist_size,
+        execution_tier=EXECUTION_TIER,
     ):
         prediction_hash = baseline.registry_record()["prediction_hash"]
         signal = baseline.spec()["strategy"]["signal"]
@@ -102,13 +138,21 @@ requests.select("request_name", "prediction_hash", "label", "signal", "allocatio
 execution = run_official_backtest_requests(
     study,
     requests,
-    population_name="cme_futures-allocation-validation-v1",
+    population_name="cme_futures-allocation-validation-v1"
+    if EXECUTION_TIER == "canonical"
+    else None,
 )
-candidate_sets = create_label_candidate_sets(
-    study,
-    execution,
-    stage="allocation",
+candidate_sets = (
+    create_label_candidate_sets(study, execution, stage="allocation")
+    if EXECUTION_TIER == "canonical"
+    else {}
 )
+
+# %% [markdown]
+# `source` says whether each member was computed by this run or served from the registry because
+# an identical identity was already recorded. A re-run of a registered sweep is entirely `reused`
+# and completes in seconds; without the column that is indistinguishable from having computed
+# every row.
 
 # %% tags=["results"]
 execution.catalog_rows.sort("label", "request_name")

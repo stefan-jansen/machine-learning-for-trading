@@ -107,13 +107,28 @@ class FuturesPricePath:
 class FuturesBacktestExecution:
     results: tuple[BacktestResult, ...]
     catalog_rows: pl.DataFrame
-    population: OfficialPopulation
+    # None under a preview run. A population is canonical by definition and
+    # `OfficialPopulation.create` refuses a preview member outright
+    # (research/population.py:101-103), so a reduced re-execution publishes no snapshot.
+    population: OfficialPopulation | None
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
-    """Open canonical regeneration or an isolated reader preview."""
+    """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
+
+    Canonical with no workspace regenerates the case study's artifacts in place, which is the
+    production path and needs the generated-artifact directory symlinks a maintainer worktree
+    carries. Canonical *with* a workspace is the same computation writing to that root instead,
+    which is the only form a checkout without those symlinks can run: CI seeds its fixture into
+    ``ML4T_OUTPUT_DIR`` and has no `features`, `labels` or `run_log` symlink to regenerate over,
+    so `Study.regenerate` refused there and took notebooks 13 through 17 red on every run.
+    """
     if execution_tier == "canonical":
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        if workspace is None:
+            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        return Study.open(
+            CASE_STUDY, workspace=Path(workspace).expanduser().resolve(), release_root=REPO_ROOT
+        )
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
     if workspace is None:
@@ -693,16 +708,23 @@ def run_official_backtest_requests(
     study: Study,
     requests: pl.DataFrame,
     *,
-    population_name: str,
+    population_name: str | None,
 ) -> FuturesBacktestExecution:
-    """Resolve, snapshot, and execute visible canonical futures strategy requests."""
+    """Resolve, snapshot, and execute visible futures strategy requests.
+
+    ``population_name`` is None for a preview run, which publishes no snapshot: a backtest
+    inherits its tier from the predictions it reads (research/execution.py:364), preview
+    results are refused entry to an official population, and the workspace holding them is
+    discarded afterwards. Everything else - the expected-identity snapshot before the engine
+    runs, the order check, the per-request completeness - applies to both tiers.
+    """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
     if missing:
         raise ValueError(f"strategy requests are missing columns: {sorted(missing)}")
     if requests.is_empty() or requests.get_column("request_name").n_unique() != requests.height:
         raise ValueError("strategy request names must be non-empty and unique")
-    catalog = study.predictions.table()
+    catalog = study.predictions.table(include_preview=True)
     price_cache: dict[tuple[str, int], FuturesPricePath] = {}
     prepared = []
     expected = []
@@ -735,7 +757,12 @@ def run_official_backtest_requests(
             allocation=allocation,
             risk=risk,
             costs=costs,
-            canonical=True,
+            # A decision artifact is canonical when the prediction it decides on is, and not
+            # by declaration: `DecisionArtifact.publish` resolves its lineage with
+            # `include_preview=not canonical` (research/decisions.py:192), so asserting
+            # canonical over a preview prediction sends that lookup to the wrong registry and
+            # the publish fails on its own input with `Unknown result hash`.
+            canonical=prediction.execution_tier == "canonical",
         )
         plan = plan_backtests(
             study,
@@ -755,16 +782,26 @@ def run_official_backtest_requests(
         prepared.append((row, selected, price_path, signal, allocation, decision, expected_hash))
     if len(expected) != len(set(expected)):
         raise ValueError("strategy requests resolve to duplicate backtest identities")
-    population = OfficialPopulation.create(
-        study,
-        name=population_name,
-        member_kind="backtest",
-        members=expected,
+    population = (
+        OfficialPopulation.create(
+            study,
+            name=population_name,
+            member_kind="backtest",
+            members=expected,
+        )
+        if population_name is not None
+        else None
     )
     results = []
     rows = []
     for row, selected, price_path, signal, allocation, decision, expected_hash in prepared:
-        result = run_backtests(
+        # `run_backtests` says per member whether it computed the backtest or served an
+        # identical one from the registry, and that distinction is kept rather than dropped.
+        # Without it a re-run of an already-registered sweep displays the same table of N
+        # complete rows as the run that computed them, and a reader cannot tell a cold sweep
+        # from a no-op - a wrong reading that looks exactly like a right one, and one that
+        # gets more misleading every time the sweep is re-run.
+        executed = run_backtests(
             study,
             predictions=selected,
             signal=signal,
@@ -774,7 +811,9 @@ def run_official_backtest_requests(
             costs=row.get("costs"),
             chapter=row.get("chapter"),
             decision=decision,
-        ).results[0]
+        )
+        result = executed.results[0]
+        source = "computed" if executed.diagnostics[0]["status"] == "completed" else "reused"
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)
@@ -786,11 +825,15 @@ def run_official_backtest_requests(
                 "decision_hash": decision.hash,
                 "backtest_hash": result.hash,
                 "complete": result.complete,
+                "source": source,
             }
         )
     if tuple(result.hash for result in results) != tuple(expected):
         raise RuntimeError("backtest execution did not preserve declared request order")
-    population.require_complete()
+    if population is not None:
+        population.require_complete()
+    elif not all(result.complete for result in results):
+        raise RuntimeError("a preview backtest did not complete")
     return FuturesBacktestExecution(tuple(results), pl.DataFrame(rows), population)
 
 
@@ -893,17 +936,123 @@ def create_label_candidate_sets(
     return output
 
 
+# The candidate-set stage names and the registry's ``backtest_runs.stage`` values are two
+# vocabularies. A set is named for the funnel step it freezes; a row is named for the
+# computation that produced it. Only the three executed steps appear in both - `pre-overlay`
+# and `final-validation` name unions, and no backtest row carries either.
+REGISTRY_STAGE_BY_SET_STAGE = {
+    "signal": "signal",
+    "allocation": "allocation",
+    "risk": "risk_overlay",
+}
+
+
+def stage_backtest_results(
+    study: Study,
+    *,
+    stage: str,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The eligible results of one funnel step for one label, at the tier that produced them.
+
+    Canonical reads the immutable per-label candidate set, which is what makes a selection
+    reproducible from the registry alone: the pool is fixed before anything ranks it. A preview
+    has no set to read, because `CandidateSet.create` refuses a preview member outright
+    (research/comparison.py:50-51), so it reads its own workspace rows for the same step. The
+    guarantee therefore differs by tier and the notebooks say so: canonical selects from a
+    frozen pool, preview selects from whatever its reduced run produced.
+    """
+    if execution_tier == "canonical":
+        members = CandidateSet.one(study, name=candidate_set_name(stage, label)).members
+        return tuple(Result.open(study, value) for value in members)
+    if execution_tier != "preview":
+        raise ValueError("execution_tier must be canonical or preview")
+    registry_stage = REGISTRY_STAGE_BY_SET_STAGE.get(stage)
+    if registry_stage is None:
+        raise ValueError(f"{stage!r} names a union of steps, which no backtest row carries")
+    rows = study.backtests.table(include_preview=True).filter(
+        (pl.col("execution_tier") == "preview")
+        & (pl.col("split") == "validation")
+        & (pl.col("stage") == registry_stage)
+        & (pl.col("label") == label)
+        & pl.col("complete")
+    )
+    return tuple(
+        Result.open(study, value, include_preview=True)
+        for value in rows.get_column("backtest_hash")
+    )
+
+
+def rank_by_validation_sharpe(
+    study: Study,
+    results: Iterable[Result],
+) -> tuple[BacktestResult, ...]:
+    """Order backtest results by validation Sharpe, ties broken by identity.
+
+    The same rule `CandidateSet._ranked_validation_hashes` applies, so a preview ranking and a
+    canonical one differ in which rows they see and in nothing else. A member with no Sharpe is
+    refused rather than sorted to an end, which is what a null would otherwise do silently.
+    """
+    members = {result.hash: result for result in results}
+    if not members:
+        raise ValueError("ranking by validation Sharpe requires at least one result")
+    rows = (
+        study.backtests.table(include_preview=True)
+        .filter(pl.col("backtest_hash").is_in(list(members)) & pl.col("sharpe").is_not_null())
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+    )
+    if rows.height != len(members):
+        raise ValueError("a result being ranked has no validation Sharpe recorded")
+    return tuple(members[value] for value in rows.get_column("backtest_hash"))
+
+
+def pre_overlay_results(
+    study: Study,
+    *,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The signal and allocation pool for one label, at the tier that produced it."""
+    if execution_tier == "canonical":
+        pool = pre_overlay_candidate_set(study, label=label)
+        return tuple(Result.open(study, value) for value in pool.members)
+    return (
+        *stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier),
+        *stage_backtest_results(
+            study, stage="allocation", label=label, execution_tier=execution_tier
+        ),
+    )
+
+
+def final_validation_results(
+    study: Study,
+    *,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The full selection pool for one label: signal, allocation and the risk overlay."""
+    if execution_tier == "canonical":
+        pool = final_validation_candidate_set(study, label=label)
+        return tuple(Result.open(study, value) for value in pool.members)
+    return (
+        *pre_overlay_results(study, label=label, execution_tier=execution_tier),
+        *stage_backtest_results(study, stage="risk", label=label, execution_tier=execution_tier),
+    )
+
+
 def shortlist_signal_configurations(
     study: Study,
     *,
     label: str,
     limit: int,
+    execution_tier: str = "canonical",
 ) -> tuple[BacktestResult, ...]:
     """Select the strongest signal result for each distinct model configuration."""
-    candidates = CandidateSet.one(study, name=candidate_set_name("signal", label))
+    pool = stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier)
     selected = []
     configurations = set()
-    for result in candidates.ranked_validation_sharpe():
+    for result in rank_by_validation_sharpe(study, pool):
         assert isinstance(result, BacktestResult)
         training = result.lineage()["training_spec"]
         key = (training["family"], training.get("config_name"))
@@ -960,10 +1109,18 @@ def final_selection_candidate_set(study: Study) -> CandidateSet:
     )
 
 
-def selection_catalog(study: Study, candidates: CandidateSet) -> pl.DataFrame:
-    """Return the registered catalog rows for one immutable selection pool."""
-    table = study.backtests.table().filter(pl.col("backtest_hash").is_in(candidates.members))
-    if table.height != len(candidates.members):
+def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
+    """Return the registered catalog rows for one selection pool, given its member hashes.
+
+    Takes the hashes rather than a `CandidateSet` because only a canonical pool is a set: a
+    preview pool is the rows its own reduced run produced, and there is no immutable object to
+    pass. The check that every member is described by the catalog applies to both.
+    """
+    members = list(members)
+    table = study.backtests.table(include_preview=True).filter(
+        pl.col("backtest_hash").is_in(members)
+    )
+    if table.height != len(members):
         raise ValueError("the backtest catalog does not describe every candidate")
     return table.select(
         "label",

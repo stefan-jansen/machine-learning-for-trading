@@ -30,12 +30,18 @@
 from case_studies.cme_futures.research_workflow import (
     ALL_LABELS,
     open_study,
-    pre_overlay_candidate_set,
+    pre_overlay_results,
     product_universe_table,
+    rank_by_validation_sharpe,
     run_official_backtest_requests,
     strategy_request_frame,
 )
 from case_studies.utils.sweep_config import get_cost_grid_bps
+
+# %% tags=["parameters"]
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_LABELS: list[str] = []
 
 # %% [markdown]
 # ## Fixed per-label inputs
@@ -44,7 +50,20 @@ from case_studies.utils.sweep_config import get_cost_grid_bps
 # The selected backtest supplies its exact prediction checkpoint, signal, and allocation settings.
 
 # %%
-study = open_study(execution_tier="canonical")
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS:
+        raise ValueError("canonical execution cannot declare preview reductions")
+    labels = ALL_LABELS
+elif EXECUTION_TIER == "preview":
+    if WORKSPACE is None or not PREVIEW_LABELS:
+        raise ValueError("preview execution requires WORKSPACE and PREVIEW_LABELS")
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    labels = tuple(PREVIEW_LABELS)
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 universe = product_universe_table()
 universe
 
@@ -54,8 +73,10 @@ if not cost_grid:
     raise ValueError("the configured cost grid is empty")
 
 request_rows = []
-for label in ALL_LABELS:
-    selected = pre_overlay_candidate_set(study, label=label).best_validation_sharpe()
+for label in labels:
+    selected = rank_by_validation_sharpe(
+        study, pre_overlay_results(study, label=label, execution_tier=EXECUTION_TIER)
+    )[0]
     strategy = selected.spec()["strategy"]
     prediction_hash = selected.registry_record()["prediction_hash"]
     for total_cost_bps in cost_grid:
@@ -87,8 +108,14 @@ requests.select("request_name", "prediction_hash", "label", "costs")
 execution = run_official_backtest_requests(
     study,
     requests,
-    population_name="cme_futures-cost-validation-v1",
+    population_name="cme_futures-cost-validation-v1" if EXECUTION_TIER == "canonical" else None,
 )
+
+# %% [markdown]
+# `source` says whether each member was computed by this run or served from the registry because
+# an identical identity was already recorded. A re-run of a registered sweep is entirely `reused`
+# and completes in seconds; without the column that is indistinguishable from having computed
+# every row.
 
 # %% tags=["results"]
 execution.catalog_rows.sort("label", "request_name")

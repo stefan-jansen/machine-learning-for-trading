@@ -48,13 +48,20 @@ from case_studies.cme_futures.research_workflow import (
     ALL_LABELS,
     final_selection_candidate_set,
     final_validation_candidate_set,
+    final_validation_results,
     holdout_evidence,
     open_study,
     product_universe_table,
+    rank_by_validation_sharpe,
     selection_catalog,
 )
-from case_studies.research import OfficialPopulation
+from case_studies.research import OfficialPopulation, Result
 from utils.style import COLORS
+
+# %% tags=["parameters"]
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_LABELS: list[str] = []
 
 # %% [markdown]
 # ## The pool the configuration is selected from
@@ -65,19 +72,59 @@ from utils.style import COLORS
 # the same members rather than against whatever the registry holds at the time.
 
 # %%
-study = open_study(execution_tier="canonical")
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS:
+        raise ValueError("canonical execution cannot declare preview reductions")
+    labels = ALL_LABELS
+elif EXECUTION_TIER == "preview":
+    if WORKSPACE is None or not PREVIEW_LABELS:
+        raise ValueError("preview execution requires WORKSPACE and PREVIEW_LABELS")
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    labels = tuple(PREVIEW_LABELS)
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
 universe = product_universe_table()
 universe
 
+# %% [markdown]
+# Only a canonical pool is an immutable set. A preview run publishes no candidate set - one cannot
+# hold a preview member - so its pool is the rows its own reduced execution produced and the
+# `candidate_set_hash` column below is null. Everything downstream, the ranking rule included, is
+# the same either way; what differs is whether the pool can be reopened later by name.
+
 # %%
-per_label = {label: final_validation_candidate_set(study, label=label) for label in ALL_LABELS}
-candidates = final_selection_candidate_set(study)
-pool = selection_catalog(study, candidates)
+if EXECUTION_TIER == "canonical":
+    per_label = {label: final_validation_candidate_set(study, label=label) for label in labels}
+    per_label_results = {
+        label: tuple(Result.open(study, value) for value in pool_set.members)
+        for label, pool_set in per_label.items()
+    }
+    candidates = final_selection_candidate_set(study)
+    pool_results = tuple(Result.open(study, value) for value in candidates.members)
+    pool_identity = candidates.hash
+    per_label_identity = {label: pool_set.hash for label, pool_set in per_label.items()}
+else:
+    per_label_results = {
+        label: final_validation_results(study, label=label, execution_tier=EXECUTION_TIER)
+        for label in labels
+    }
+    pool_results = tuple(result for results in per_label_results.values() for result in results)
+    pool_identity = None
+    per_label_identity = dict.fromkeys(labels)
+pool = selection_catalog(study, (result.hash for result in pool_results))
 pool_size = pl.DataFrame(
     [
-        {"label": label, "candidates": len(pool_set.members), "candidate_set_hash": pool_set.hash}
-        for label, pool_set in per_label.items()
-    ]
+        {
+            "label": label,
+            "candidates": len(results),
+            "candidate_set_hash": per_label_identity[label],
+        }
+        for label, results in per_label_results.items()
+    ],
+    schema={"label": pl.String, "candidates": pl.Int64, "candidate_set_hash": pl.String},
 ).sort("label")
 
 # %% tags=["results"]
@@ -145,7 +192,7 @@ fig.show()
 # model, which is why the checkpoint travels with the selection into the lock below.
 
 # %%
-selected = candidates.best_validation_sharpe()
+selected = rank_by_validation_sharpe(study, pool_results)[0]
 selected_row = pool.filter(pl.col("backtest_hash") == selected.hash)
 selected_label = selected_row.item(0, "label")
 selected_strategy = selected.spec()["strategy"]
@@ -157,8 +204,8 @@ selected_row
 pl.DataFrame(
     [
         {
-            "candidate_set_hash": candidates.hash,
-            "candidates_compared": len(candidates.members),
+            "candidate_set_hash": pool_identity,
+            "candidates_compared": len(pool_results),
             "label": selected_label,
             "signal": str(selected_strategy["signal"]),
             "allocation": str(selected_strategy.get("allocation")),
@@ -176,10 +223,22 @@ pl.DataFrame(
 # shows how the validation result changes as the assumed fill gets worse.
 
 # %%
-cost_population = OfficialPopulation.one(study, name="cme_futures-cost-validation-v1")
-cost_members = cost_population.require_complete()
+if EXECUTION_TIER == "canonical":
+    cost_population = OfficialPopulation.one(study, name="cme_futures-cost-validation-v1")
+    cost_members = list(cost_population.require_complete())
+else:
+    cost_members = (
+        study.backtests.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("stage") == "cost_sensitivity")
+            & pl.col("complete")
+        )
+        .get_column("backtest_hash")
+        .to_list()
+    )
 cost_curve = (
-    study.backtests.table()
+    study.backtests.table(include_preview=True)
     .filter(pl.col("backtest_hash").is_in(cost_members) & (pl.col("label") == selected_label))
     .with_columns(
         (
@@ -260,7 +319,7 @@ holdout
 if holdout.is_empty() or holdout.item(0, "holdout_backtest_hash") is None:
     comparison = pl.DataFrame()
 else:
-    evaluated = study.backtests.table().filter(
+    evaluated = study.backtests.table(include_preview=True).filter(
         pl.col("backtest_hash") == holdout.item(0, "holdout_backtest_hash")
     )
     comparison = pl.concat(

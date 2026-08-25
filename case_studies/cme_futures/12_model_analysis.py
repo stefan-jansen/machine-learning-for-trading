@@ -50,10 +50,14 @@ from case_studies.cme_futures.research_workflow import (
     CASE_STUDY,
     MODEL_POPULATION_NAMES,
     official_prediction_catalog,
+    open_study,
     product_universe_table,
 )
-from case_studies.research import CausalResult, Study, require_declared_menu_coverage
-from utils.paths import REPO_ROOT
+from case_studies.research import CausalResult, require_declared_menu_coverage
+
+# %% tags=["parameters"]
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Complete prediction catalog
@@ -63,12 +67,35 @@ from utils.paths import REPO_ROOT
 # analysis because another row happened to finish.
 
 # %%
-study = Study.open(CASE_STUDY, release_root=REPO_ROOT)
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+if EXECUTION_TIER == "preview" and WORKSPACE is None:
+    raise ValueError("preview execution requires WORKSPACE")
 universe = product_universe_table()
 universe
 
+# %% [markdown]
+# Canonical analysis reads the six published population snapshots, which is the whole point of
+# freezing them before their runs. A preview has no published population to read: it is a reduced
+# re-execution whose rows exist only in its own workspace and which is deliberately excluded from
+# every official population. It reads its own complete validation predictions instead, and the
+# comparison against the declared menus below is skipped with them, because a preview fits a named
+# subset by design and would fail that comparison on every configuration it left out.
+
 # %%
-catalog = official_prediction_catalog(study, MODEL_POPULATION_NAMES)
+if EXECUTION_TIER == "canonical":
+    catalog = official_prediction_catalog(study, MODEL_POPULATION_NAMES)
+else:
+    catalog = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+    )
+    if catalog.is_empty():
+        raise RuntimeError("preview execution registered no complete validation predictions")
 
 
 def _feature_count(spec_json: str) -> int:
@@ -109,7 +136,10 @@ analysis = catalog.with_columns(
 # adapter registry, not a list here, is what decides that.
 
 # %%
-excluded = require_declared_menu_coverage(analysis, case_study=CASE_STUDY)
+if EXECUTION_TIER == "canonical":
+    excluded = require_declared_menu_coverage(analysis, case_study=CASE_STUDY)
+else:
+    excluded = analysis.clear()
 excluded
 
 # %% tags=["results"]
@@ -149,7 +179,7 @@ analysis.sort("label", "family", "config_name", "checkpoint_value")
 # %%
 causal_rows = []
 for label in ALL_LABELS:
-    result = CausalResult.one(study, label=label)
+    result = CausalResult.one(study, label=label, execution_tier=EXECUTION_TIER)
     if not result.complete:
         raise RuntimeError(f"causal result for {label} is incomplete")
     causal_rows.append({"label": label, "causal_hash": result.hash, **result.metrics})

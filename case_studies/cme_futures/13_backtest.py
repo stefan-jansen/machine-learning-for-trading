@@ -43,6 +43,12 @@ from case_studies.cme_futures.research_workflow import (
 )
 from case_studies.utils.sweep_config import get_top_k_values_for
 
+# %% tags=["parameters"]
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
+PREVIEW_LABELS: list[str] = []
+PREVIEW_MAX_PREDICTIONS = 0
+
 # %% [markdown]
 # ## Futures data used by the strategy
 #
@@ -52,8 +58,23 @@ from case_studies.utils.sweep_config import get_top_k_values_for
 # audit table and the product expiry rules in its identity.
 
 # %%
-study = open_study(execution_tier="canonical")
-price_paths = {label: load_futures_price_path(label) for label in ALL_LABELS}
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
+if EXECUTION_TIER == "canonical":
+    if PREVIEW_LABELS or PREVIEW_MAX_PREDICTIONS:
+        raise ValueError("canonical execution cannot declare preview reductions")
+    labels = ALL_LABELS
+elif EXECUTION_TIER == "preview":
+    if WORKSPACE is None or not PREVIEW_LABELS or PREVIEW_MAX_PREDICTIONS < 1:
+        raise ValueError(
+            "preview execution requires WORKSPACE, PREVIEW_LABELS and PREVIEW_MAX_PREDICTIONS"
+        )
+    unknown = sorted(set(PREVIEW_LABELS) - set(ALL_LABELS))
+    if unknown:
+        raise ValueError(f"preview labels this case study does not declare: {unknown}")
+    labels = tuple(PREVIEW_LABELS)
+else:
+    raise ValueError(f"unsupported execution tier: {EXECUTION_TIER!r}")
+price_paths = {label: load_futures_price_path(label) for label in labels}
 market_rows = []
 for label, path in price_paths.items():
     roll_counts = path.roll_transitions.group_by("product").len().rename({"len": "rolls"})
@@ -80,9 +101,24 @@ market_contract
 # failure can remove a candidate.
 
 # %%
-predictions = official_prediction_catalog(study, MODEL_POPULATION_NAMES)
+if EXECUTION_TIER == "canonical":
+    predictions = official_prediction_catalog(study, MODEL_POPULATION_NAMES)
+else:
+    predictions = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(list(labels))
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .head(PREVIEW_MAX_PREDICTIONS)
+    )
+    if predictions.is_empty():
+        raise RuntimeError("preview execution found no complete validation predictions to backtest")
 request_rows = []
-for label in ALL_LABELS:
+for label in labels:
     label_catalog = predictions.filter(pl.col("label") == label)
     n_products = price_paths[label].prices.get_column("product").n_unique()
     for row in label_catalog.iter_rows(named=True):
@@ -135,13 +171,22 @@ requests.select("request_name", "prediction_hash", "label", "signal")
 execution = run_official_backtest_requests(
     study,
     requests,
-    population_name="cme_futures-signal-validation-v1",
+    population_name=("cme_futures-signal-validation-v1" if EXECUTION_TIER == "canonical" else None),
 )
-candidate_sets = create_label_candidate_sets(
-    study,
-    execution,
-    stage="signal",
+# A candidate set is canonical too - `CandidateSet.create` refuses a preview member
+# (research/comparison.py:50-51) - so a preview run leaves the funnel's named pools alone and
+# the notebooks downstream read its backtest catalog directly instead.
+candidate_sets = (
+    create_label_candidate_sets(study, execution, stage="signal")
+    if EXECUTION_TIER == "canonical"
+    else {}
 )
+
+# %% [markdown]
+# `source` says whether each member was computed by this run or served from the registry because
+# an identical identity was already recorded. A re-run of a registered sweep is entirely `reused`
+# and completes in seconds; without the column that is indistinguishable from having computed
+# every row.
 
 # %% tags=["results"]
 execution.catalog_rows.sort("label", "request_name")
