@@ -519,6 +519,7 @@ def _populate_pair(
     label,
     *,
     disjoint_windows: bool = False,
+    challenger_overlays_baseline: bool = False,
     benchmark_label: str | None = None,
     write_case_dir: Path | None = None,
 ):
@@ -529,6 +530,15 @@ def _populate_pair(
     distribution is built from independent draws. Otherwise, the streams are
     inner-joined on timestamp and a paired stationary bootstrap runs on the
     aligned diff series.
+
+    ``challenger_overlays_baseline`` says what a leading flat run on the challenger
+    means, and the two pair shapes here answer differently. Against the equal-weight
+    benchmark the challenger is an independent strategy whose returns begin at the
+    first bar rather than at its first signal, so those rows are warmup and the
+    default drops them. Across a stage transition the challenger is built on top of
+    the baseline and both are live from the same session, so a flat challenger there
+    is a position it chose to hold and the comparison keeps it. See
+    :func:`case_studies.utils.uncertainty.joint_returns`.
     """
     min_n = _min_paired_n(ppy)
     if disjoint_windows:
@@ -569,7 +579,9 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        c_arr, b_arr = joint_returns(c_arr, b_arr)
+        c_arr, b_arr = joint_returns(
+            c_arr, b_arr, challenger_overlays_baseline=challenger_overlays_baseline
+        )
         n_overlap = c_arr.size
         if n_overlap < min_n:
             return {
@@ -587,6 +599,7 @@ def _populate_pair(
             label=label,
             n_boot=2000,
             seed=42,
+            challenger_overlays_baseline=challenger_overlays_baseline,
         )
 
     if not paired:
@@ -865,7 +878,13 @@ def populate_paired_metrics(
                 )
             )
 
-    # Pairs #4-6: stage transitions on the validation rank-1 lineage
+    # Pairs #4-6: stage transitions on the validation rank-1 lineage.
+    #
+    # Each of these runs the challenger on top of its own baseline - an allocation over the
+    # signal it allocates, a cost model over that allocation, a risk overlay over that. Both
+    # sides are live from the same session, so a session the challenger sits out is a decision
+    # it made rather than a warmup before it had a signal, and it belongs in the comparison.
+    # Pair #6 is the same quantity `17_risk_management` computes, and the two have to agree.
     lineage = explorer.champion_lineage(leader_phash)
     for prev_stage, this_stage, kind in [
         ("signal", "allocation", "signal_leader"),
@@ -892,6 +911,7 @@ def populate_paired_metrics(
                 prev_returns,
                 ppy,
                 leader_label,
+                challenger_overlays_baseline=True,
                 write_case_dir=write_case_dir,
             )
         )

@@ -413,7 +413,7 @@ def paired_overlay_metrics(row: dict) -> dict:
         raise RuntimeError(
             f"Paired uncertainty failed for {row['risk_name']}: the overlay and its carrier "
             f"share {aligned.height} sessions, and too few of them fall after the first one "
-            "the pair both traded. A bootstrap needs at least four."
+            "either side traded. A bootstrap needs at least four."
         )
     return {
         "backtest_hash": row["backtest_hash"],
