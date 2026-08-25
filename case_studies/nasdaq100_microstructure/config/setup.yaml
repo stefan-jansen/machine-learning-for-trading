@@ -245,6 +245,13 @@ universe:
       - UAL
 
 decision:
+  # How often the strategy is allowed to act, NOT the size of a bar in the panel.
+  # The observations are one minute apart; 03_financial_features keeps every
+  # fifteenth of them to build the decision schedule. Nothing here declares the
+  # observation grid, so anything that needs it - an embargo, a permutation block,
+  # any count of periods spanning a duration - measures it from the data instead
+  # of dividing by this number. Reading this field as the bar size yields an
+  # answer fifteen times too small and nothing in the result shows it.
   bar_frequency: 15_minute
   decision_snapshot: bar_close
   execution_delay: 1_bar

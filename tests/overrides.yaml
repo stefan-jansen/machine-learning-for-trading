@@ -1417,19 +1417,40 @@ case_studies/etfs/10_dl_tsmixer:
     N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
-  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no override they ran on the
+  # max_symbols must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no reduction they ran on the
   # full fixture universe while the artifact covered 5 symbols, so the CV splits
   # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
   # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-pca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
+  # max_symbols must match 04_model_based_features for the same reason as 11a,
+  # which leaves IPCA five funds to fit a 71-characteristic Gamma on. At the
+  # production n_factors=5 that is 355 parameters against five assets a date and
+  # the ALS does not identify. Measured on this fixture at the declared
+  # max_iter=100, per fold: K=5 fails on both folds (110.0s, 113.6s), K=3 fails
+  # on both (55.7s, 57.0s), K=2 converges on fold 0 in 21.8s and fails on fold 1
+  # at 42.0s, K=1 converges on both in 0.6s and 0.8s. The times are the tell -
+  # a fold that fails takes the full cap, so the failures are the cap and not a
+  # local minimum. K=2 sitting half in and half out is the identification
+  # boundary, and it is the same boundary sp500_equity_option_analytics measured
+  # at K=2 on 19-21 assets and found unstable across machines. n_factors=1 is
+  # below it rather than on it, which is why it is chosen over raising max_iter.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-ipca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      n_factors: 1
   timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
@@ -1448,6 +1469,13 @@ case_studies/etfs/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
+    # Five draws are below the ten run_dml_analysis assembles a refutation from at all, so it
+    # published none and this notebook's `ref.get("empirical_p", 1.0)` wrote p = 1.00 and a
+    # class of "Fails" into causal_runs - measurements from a test that never ran. Every
+    # on-screen trace is suppressed: the printed line is guarded by `if ref:` and the histogram
+    # and its subtitle by `len(placebo_arr) > 0`, so whoever ran it saw no line, no figure and
+    # no error. A value nobody is shown cannot be sanity-checked, which is why the count moved
+    # rather than the default. Measured at 18s against a 120s cap.
     N_PLACEBO: 25
   timeout: 120
 case_studies/etfs/13_model_analysis:
@@ -1592,12 +1620,33 @@ case_studies/nasdaq100_microstructure/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
-  timeout: 120
+  parameters:
+    # Declared here rather than left to the harness default of max_symbols alone.
+    # This is a minute panel: planning resolves one prediction identity per
+    # (symbol, minute, fold), so the cost of the plan tracks the timestamp grid and
+    # cutting the cross-section does not touch it. `folds` is the reduction that does.
+    PREVIEW_REDUCTIONS:
+      folds: [0]
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured after the preview branch stopped re-resolving: slowest cell 211s (the fit),
+  # planning 121s, 342s end to end. Timeout is per cell, so this is ~2.8x the slowest.
+  tier: weekly
+  timeout: 600
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-  timeout: 600
+    # As 06_linear, plus the two axes a boosted fit adds: 20 trees instead of 500,
+    # checkpointed every 10, so the run still exercises the checkpoint dimension the
+    # notebook is about rather than reducing it away.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0]
+      max_iterations: 20
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured the same way: slowest cell 362s, planning 147s, 515s end to end.
+  tier: weekly
+  timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   parameters:
     BATCH_SIZE: 32
@@ -1643,8 +1692,12 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
+  skip: true
+  skip_reason: "The fixture registry predates the research interface: training_runs carries neither execution_tier nor identity_version, so catalog.py resolves every row to a legacy identity and no prediction set is complete. The declared-population cross-check then reports all 12 declared linear members absent against 0 admissible rows. Lifts when the test-data registry is regenerated on the current schema."
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
+  skip: true
+  skip_reason: "Same fixture registry limitation as 13_model_analysis: with no identity_version column, no prediction set is complete, and the admissibility guard refuses rather than sweep a population that cannot be official. Lifts when the test-data registry is regenerated on the current schema."
   parameters:
     # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
     # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.
@@ -1689,31 +1742,79 @@ case_studies/sp500_equity_option_analytics/06_linear:
 case_studies/sp500_equity_option_analytics/07_gbm:
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
+  # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
+  # for a requested GPU, and the device is inside the training identity, so a CPU run
+  # declares a different member set and the notebook makes it name its own population.
+  # BATCH_SIZE and N_EPOCHS named nothing after the migration; the epoch budget comes
+  # from the patched fixture presets in tests/preset_patches.py, not from a parameter.
+  # MAX_FOLDS and MAX_SYMBOLS are gone for a subtler reason: the folding in
+  # _collect_preview_reductions happens on the papermill path, after
+  # test_every_declared_parameter_reaches_its_notebook has read this file, so the migrated
+  # notebook binds neither name and both are rejected. A reduction reaches it only under
+  # the name it declares. The tier comes from the harness: research_preview_parameters sees
+  # EXECUTION_TIER and WORKSPACE in the parameters cell and injects preview plus an isolated
+  # output root.
+  #
+  # The reduction is stated rather than left to the max_symbols: 5 the harness would
+  # substitute. It stops at the universe: tests/preset_patches.py already patches every tabm
+  # preset to n_epochs 2 at checkpoint_interval 1, so CI runs two epoch checkpoints and
+  # exercises the per-epoch prediction sets this notebook is about. Declaring n_epochs here
+  # would override that patch rather than add to it - 50 epochs at interval 25 is the same
+  # two checkpoints for twenty-five times the training.
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-tabular_dl-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl above: the device is
+  # part of the training identity, so a CPU run declares a different member set and the
+  # notebook makes it name its own population rather than write into the published one.
+  #
+  # This entry said gpu: true until the notebook was measured on CPU. The reason recorded
+  # was the sixty-observation lookback, which no sequence preview reduction narrows
+  # (_SEQUENCE_PREVIEW_FIELDS is folds, max_symbols and max_train_sequences). That was not
+  # the binding constraint. The fixture carries about five years of daily rows per stock, so
+  # a sixty-step window costs eligibility nothing, and the notebook finishes on CPU in under
+  # a minute with the lookback left alone. What gpu: true did was skip the test outright
+  # wherever no card is present, which is every CI runner, so the sequence family had no
+  # coverage at all. On CPU the run fits six configurations across the three declared labels
+  # and publishes twelve prediction sets, all inside the preview root.
+  #
+  # The epoch budget comes from tests/preset_patches.py, which patches lstm and nlinear to
+  # two epochs at checkpoint_interval one. Declaring N_EPOCHS here would override that patch
+  # rather than add to it. BATCH_SIZE, LOOKBACK, MAX_FOLDS and MAX_SYMBOLS name nothing the
+  # migrated notebook binds, so test_every_declared_parameter_reaches_its_notebook rejects
+  # them; a reduction reaches this notebook only under PREVIEW_REDUCTIONS. That reduction is
+  # stated rather than left to the max_symbols the harness would substitute, so the preview
+  # identity records what it narrowed.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sequence-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/10_dl_patchtst:
+  # Same reasoning as 09_dl_lstm, and the same measured outcome on CPU. Its own population
+  # name keeps the patchtst slice separate from the population 09 declares.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 24
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-patchtst-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   timeout: 600
-case_studies/sp500_equity_option_analytics/11a_pca: {}
+case_studies/sp500_equity_option_analytics/11a_pca:
+  # The harness forces EXECUTION_TIER=preview and WORKSPACE for any notebook declaring both, and
+  # _collect_preview_reductions would otherwise substitute a bare max_symbols: 5. Declared here so
+  # the preview identity says what it reduced. PCA needs no factor reduction: it decomposes the
+  # return panel, so the fixture's cross-section bounds nothing the way it does for IPCA below.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_equity_option_analytics/11b_ipca:
   # IPCA estimates a 45-characteristic Gamma from the cross-section. Production
   # has 634 symbols; the CI fixture has 23, giving 19-21 assets per date, so at
@@ -1748,30 +1849,88 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # reruns: 2 stays as a second line of defense, now that
   # pytest-rerunfailures is actually installed in the case-study CI job
   # (.github/workflows/test.yml) - it was a silent no-op before.
+  #
+  # After the migration none of those knobs is a papermill parameter any more. N_FACTORS was a
+  # positional argument of the retired run_case_study_model; it is now a declared preview
+  # reduction, which is where it belongs - it changes the preview identity rather than silently
+  # refitting a different model under the canonical name. MAX_VARIANT_LABELS is gone with the
+  # variant path: the notebook fits every declared label through one population, and the
+  # non-identified second variant the old comment describes is covered by the same n_factors
+  # reduction. The factor_ridge/gamma_ridge patch in tests/preset_patches.py is unchanged and
+  # still does the numerical work described above.
   parameters:
-    MAX_VARIANT_LABELS: 1
-    N_FACTORS: 2
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_factors: 2
   reruns: 2
   timeout: 600
 
+case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl and the sequence pair above.
+  # config/setup.yaml declares this family on cuda, and the library refuses to substitute a CPU
+  # for a requested card (case_studies/utils/latent_factors/library_bridge.py:53-54), so without
+  # DEVICE this notebook cannot run on a CI machine at all. The device is inside the training
+  # identity, so the CPU fit declares a different member set and publishes under its own name.
+  # Five symbols, and nothing else. n_epochs is deliberately absent: preset_patches.py already
+  # patches cae to n_epochs 2 / checkpoint_interval 1, and declaring n_epochs here would override
+  # that patch rather than reinforce it - the notebook would train the full schedule for the same
+  # two checkpoints.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-cae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
+
 case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
-  # The SDF training cell exceeded the 300s default in CI while the whole
-  # notebook runs in 98s locally on the same image, so the cap is what fails,
-  # not the notebook. Sized for the slower runner with headroom.
-  timeout: 900
+  # SDF is the one latent model preset_patches.py cannot reduce: its entry patches `n_epochs`,
+  # which this model does not read - the budgets are n_epochs_unc, n_epochs_moment and
+  # n_epochs_cond, so an unreduced CI run trains 256 + 64 + 1024 epochs. They are reduced here
+  # instead, which the adapter supports directly and which also rebuilds `checkpoint_epochs`
+  # against the smaller budget (case_studies/utils/latent_factors/adapter.py:248-260).
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sdf-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_epochs_unc: 2
+      n_epochs_moment: 2
+      n_epochs_cond: 4
+  # Measured at 537s on CPU on this workstation with the reductions above, against a 900s cap
+  # sized when the family still fell back to whichever device the host had. That is under two
+  # times headroom on a machine faster than the runner, so the cap is raised rather than left
+  # to fail on the next slow one. 11c and 11e are 67s and 73s under the same conditions and
+  # keep theirs.
+  timeout: 1800
 
 case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
-  # 95s locally, ~190s on the CI runner - passing, but close enough to the 300s
-  # default that the next slow runner turns it red. Same headroom as 11d.
+  # Five symbols. As with 11c, n_epochs stays out: preset_patches.py patches sae to 2 epochs and
+  # declaring it here would replace that patch with the full schedule. DEVICE and POPULATION_NAME
+  # carry the same reason they do for 11c and 11d.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
+  # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
+  # value, so the parameter and the number the analysis runs on no longer share a name.
+  # N_PLACEBO was 5, below the ten successful draws run_dml_analysis assembles a refutation
+  # from at all, so it published none and this notebook's guard against a missing refutation
+  # fired on every CI run. The bar is not that a refutation is computed but that a verdict below
+  # alpha is reachable: the plus-one correction floors the reported p-value at 1/(n+1), so
+  # ceil(1/REFUTATION_ALPHA) = 20 successful draws is where "Passes" becomes attainable and
+  # anything less returns "Underpowered" whatever the data said. The 20 is derived; the five
+  # draws above it are a chosen margin, because a draw can fail and drop the survivors below the
+  # bar. Measured at 14s against a 300s cap.
   parameters:
-    CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
+    N_FOLDS: 2
     N_PLACEBO: 25
-  timeout: 120
+  timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:

@@ -956,6 +956,32 @@ def research_preview_parameters(
     return resolved
 
 
+def resolved_registry_path(
+    py_path: Path,
+    output_dir: Path,
+    case_study: str,
+    *,
+    research_preview: bool,
+) -> Path:
+    """The registry the run this harness is about to launch will actually write to.
+
+    The tier decides the directory, and the tier is decided here rather than by the
+    caller: :func:`research_preview_parameters` binds ``EXECUTION_TIER="preview"`` for a
+    migrated Study notebook, and ``Study.activate`` then relocates the output root to
+    ``<workspace>/.preview``. A caller that names the canonical path itself snapshots and
+    queries a database the run never opens, so every registry assertion reads an absent
+    file as "the notebook registered nothing" - a failure that reads as a broken notebook
+    and is a wrong path. Resolving it through the same call that binds the tier is what
+    keeps the two from drifting apart again.
+    """
+    root = output_dir
+    if research_preview:
+        resolved = research_preview_parameters(py_path, None, output_dir)
+        if resolved.get("EXECUTION_TIER") == "preview":
+            root = output_dir / ".preview"
+    return root / case_study / "run_log" / "registry.db"
+
+
 # The override names `_collect_preview_reductions` folds into PREVIEW_REDUCTIONS, mapped to the
 # reduction key each becomes. `unusable_parameters` reads the same table, so a name that reaches a
 # notebook by translation is not reported unreachable for not appearing in its source. Two places

@@ -62,6 +62,14 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "nasdaq100_microstructure/fwd_ret_5m": 1,
     "sp500_equity_option_analytics/fwd_ret_5d": 5,
     "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
+    # The three below joined the table when this case study declared the conformal_weighted
+    # allocator, which sizes every declared label rather than the primary alone. Each value is
+    # the label's own horizon from labels.horizons in sessions, the panel's step: a ten-session
+    # return needs ten sessions of embargo for the calibration residuals to stop overlapping the
+    # holdout, and the direction labels reach exactly as far as the returns they are signs of.
+    "sp500_equity_option_analytics/fwd_ret_10d": 10,
+    "sp500_equity_option_analytics/fwd_dir_5d": 5,
+    "sp500_equity_option_analytics/fwd_dir_10d": 10,
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,

@@ -315,7 +315,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported sequence preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     mds = load_modeling_dataset(
         study.case_study,
         label_ref.name,
@@ -791,7 +791,11 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     complete_predictions = tuple(
         result for result in predictions if isinstance(result, PredictionResult)
     )
-    return ModelRun(training=training, predictions=complete_predictions)
+    return ModelRun(
+        training=training,
+        predictions=complete_predictions,
+        diagnostics={"reused": True},
+    )
 
 
 def _predict_reconstructed_sequence(
@@ -1188,7 +1192,11 @@ def run_resolved_request(
                 cpu_s=fit_cpu_s,
             ),
         )
-    return ModelRun(training=training, predictions=prediction_results)
+    return ModelRun(
+        training=training,
+        predictions=prediction_results,
+        diagnostics={"reused": reused_fitted_state},
+    )
 
 
 def validate_locked_run(
