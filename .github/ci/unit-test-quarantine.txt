@@ -126,7 +126,3 @@ tests/test_backtest_presets.py
 tests/test_etf_baseline_parity.py
 tests/test_sp500_options_research.py::test_official_population_is_snapshotted_before_option_execution
 tests/test_us_firm_research_workflow.py::test_open_study_writes_canonical_results_to_output_dir
-
-# MODEL_POPULATION_NAMES declares `cme-sdf-validation-v1` and no cme_futures
-# notebook publishes it.
-tests/test_cme_futures_research.py::test_every_declared_model_population_is_published_by_a_notebook
