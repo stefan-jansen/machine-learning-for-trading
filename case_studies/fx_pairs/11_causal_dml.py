@@ -41,7 +41,7 @@
 import polars as pl
 import yaml
 
-from case_studies.research import ExecutionTier, Study, supersedes_for
+from case_studies.research import ExecutionTier, open_study, supersedes_for
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
@@ -54,6 +54,11 @@ CV_FOLDS = 0
 MAX_SAMPLES = 0
 N_PLACEBO = 0
 FORCE_RETRAIN = False
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a reduced run still opened the case study's own artifacts in place, which
+# is the production path. WORKSPACE is the other half: a preview has nowhere else to write.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
@@ -75,14 +80,19 @@ labels = (
 if FORCE_RETRAIN:
     raise ValueError("an identical complete causal request is reused; change the request to refit")
 
-reductions = {
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-    **({"n_folds": CV_FOLDS} if CV_FOLDS else {}),
-    **({"max_samples": MAX_SAMPLES} if MAX_SAMPLES else {}),
-    **({"n_placebo": N_PLACEBO} if N_PLACEBO else {}),
+REDUCTION_PARAMETERS = {
+    "max_symbols": MAX_SYMBOLS or None,
+    "n_folds": CV_FOLDS or None,
+    "max_samples": MAX_SAMPLES or None,
+    "n_placebo": N_PLACEBO or None,
 }
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
-study = Study.regenerate(CASE_STUDY_ID)
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
 requests = {
     label: study.causal(
         method="dml",
