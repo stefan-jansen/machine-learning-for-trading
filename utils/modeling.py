@@ -1175,6 +1175,8 @@ def load_configs(
     case_study_id: str,
     label: str,
     family: str,
+    *,
+    case_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Load model configurations for a label and family.
 
@@ -1191,6 +1193,14 @@ def load_configs(
         ``config/training/``.
     family : str
         Model family (e.g., "linear", "gbm", "deep_learning").
+    case_dir : Path, optional
+        The case study directory to read the menu and presets from. Callers
+        holding a ``Study`` pass ``study.root``, which the study resolved when it
+        was opened. Without it the directory comes from ``ML4T_OUTPUT_DIR``, which
+        is process-global and can be changed after the study was opened - a
+        read-only release study clears the variable on activation, so anything
+        that re-installs it afterwards silently redirects these reads to a
+        different, possibly reduced, set of menus.
 
     Returns
     -------
@@ -1202,7 +1212,7 @@ def load_configs(
     ConfigError
         If the training menu file or a referenced preset is missing.
     """
-    case_dir = get_case_study_dir(case_study_id)
+    case_dir = Path(case_dir) if case_dir is not None else get_case_study_dir(case_study_id)
     label_config_path = case_dir / "config" / "training" / f"{label}.yaml"
 
     if not label_config_path.exists():
