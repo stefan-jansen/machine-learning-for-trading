@@ -351,7 +351,18 @@ def conformal_coverage_for_selected_prediction(
         raise RegistrySelectionError(f"selected row missing conformal fields: {sorted(missing)}")
 
     spec = json.loads(selected["spec_json"])
-    n_folds = int(spec.get("n_folds", 0))
+    computation = spec.get("computation") or {}
+    # Two spec shapes are live. Identity v3 nests the fold count under
+    # `computation.expected_prediction_keys`; the v2 shape that `build_training_spec`
+    # still emits - `run_dl_cv` uses it, and LEGACY_IDENTITY_VERSION is still supported -
+    # carries `n_folds` at the top level and has no `computation` key at all. Reading only
+    # the v3 location answered 0 for every v2 row and raised "requires at least two
+    # declared folds" against a row declaring five.
+    n_folds = int(
+        (computation.get("expected_prediction_keys") or {}).get("n_folds")
+        or spec.get("n_folds")
+        or 0
+    )
     if n_folds < 2:
         raise RegistrySelectionError(
             f"{selected['case_study']}/{selected['prediction_hash']}: "

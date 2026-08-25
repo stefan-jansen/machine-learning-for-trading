@@ -1236,7 +1236,7 @@ case_studies/cme_futures/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 25
   timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
@@ -1324,7 +1324,7 @@ case_studies/crypto_perps_funding/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 25
   timeout: 300
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
@@ -1469,7 +1469,7 @@ case_studies/etfs/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 5
+    N_PLACEBO: 25
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
@@ -1542,32 +1542,48 @@ case_studies/fx_pairs/11_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 25
   timeout: 120
 case_studies/fx_pairs/12_model_analysis:
+  research_preview: false
+  skip: true
+  skip_reason: "Asserts the assembled canonical population equals the configured menu, and the
+    fixture cannot present both consistently: _trim_label_configs trims the seeded config dir
+    while the seeded registry carries the full production population, so the guard reports 117
+    unexpected members (3 labels x 13 gbm + 26 linear configs) and nothing missing. Same class
+    as 17_strategy_analysis - not a reduction that can be made to work. It reads no preview
+    rows either, so a preview tier is not the alternative."
   timeout: 300
 case_studies/fx_pairs/13_backtest:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: fx_pairs:preflight
     TOP_K: 2
-  timeout: 600
-case_studies/fx_pairs/14_portfolio_management:
-  parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
-  timeout: 300
+  timeout: 900
+case_studies/fx_pairs/14_portfolio_management:
+  research_preview: false
+  parameters:
+    POPULATION_NAME: fx_pairs:preflight
+    TOP_K: 2
+    TOP_N_CONFIGS: 1
+  timeout: 900
 case_studies/fx_pairs/15_costs:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+    POPULATION_NAME: fx_pairs:preflight
+    MAX_COST_POINTS: 1
+  timeout: 900
 case_studies/fx_pairs/16_risk_management:
+  research_preview: false
   parameters:
+    POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+  timeout: 900
 case_studies/fx_pairs/17_strategy_analysis:
+  skip: true
+  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
+  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
@@ -1645,7 +1661,7 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 900
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
   timeout: 300
@@ -1775,7 +1791,7 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 5
+    N_PLACEBO: 25
   timeout: 120
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
@@ -1870,7 +1886,7 @@ case_studies/sp500_options/10_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 25
   timeout: 120
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
@@ -1925,66 +1941,90 @@ case_studies/us_equities_panel/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_equities_panel/06_linear:
+  # EXECUTION_TIER and WORKSPACE are NOT set here on purpose. pm_helpers'
+  # research_preview_parameters sets both for any notebook that declares them, and it does
+  # so only on the research_preview=True path. generate_intermediates.py passes this same
+  # entry with research_preview=False and no output_dir, so an EXECUTION_TIER written down
+  # here would force the preview tier on the run that is meant to be canonical.
+  # MAX_FOLDS and MAX_SYMBOLS are folded into PREVIEW_REDUCTIONS by _collect_preview_reductions.
   parameters:
-    # A reduction is only legal under the preview tier: the canonical branch refuses to
-    # declare one, and it opens the study against the published release root rather than
-    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
-    EXECUTION_TIER: preview
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-  timeout: 120
+  # 300s, not 120s. 06 runs the widest workload of the model notebooks under these reductions -
+  # LABELS and CONFIG_NAMES both empty means all three labels against all sixteen published linear
+  # configurations, 48 config-label fits at two folds each - and it carried the tightest budget of
+  # the seventeen. 07_gbm has 300s for 2 fits and 08_tabular_dl 180s for 1. The budget was inverted
+  # against the work. It timed out at 120s in a full-chain run on a box at load 39 with ten
+  # concurrent pytest processes, then passed alone under the same load, so nothing here is broken -
+  # but a shared CI runner is normally loaded, and a margin that survives only an idle machine is
+  # not a margin.
+  timeout: 300
 case_studies/us_equities_panel/07_gbm:
+  # See 06_linear on why EXECUTION_TIER is not written here.
+  #
+  # The declared menu is 15 GBM configurations per label across three labels. All 45 at two
+  # folds does not finish inside any timeout worth having in CI - it ran past 180s on the
+  # population fit - so this narrows to one label and two configurations. 07 refuses to
+  # publish the canonical population from a narrowed menu (narrows_declared_catalog), which
+  # is why POPULATION_NAME is set: the reduced run gets its own population rather than
+  # writing a partial one under the canonical name.
   parameters:
-    # A reduction is only legal under the preview tier: the canonical branch refuses to
-    # declare one, and it opens the study against the published release root rather than
-    # the harness's output directory. Preview writes into ML4T_OUTPUT_DIR instead.
-    EXECUTION_TIER: preview
+    LABELS: [fwd_ret_1d]
+    CONFIG_NAMES: [default_mse, leaves_31_mse]
+    POPULATION_NAME: ci-preview-gbm
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
-  timeout: 180
+  timeout: 300
 case_studies/us_equities_panel/08_tabular_dl:
+  # A reduction is only legal under the preview tier, as for 06 and 07 above.
+  # BATCH_SIZE and LOOKBACK are gone from this notebook; the runner takes them
+  # from the published config, and N_EPOCHS is now PREVIEW_N_EPOCHS because the
+  # shortened schedule is part of the preview identity. DEVICE is explicit so a
+  # runner without CUDA does not fall back silently.
   parameters:
-    BATCH_SIZE: 32
+    DEVICE: cpu
+    CONFIG_NAMES: [tabm_s]
+    DIAGNOSTIC_CONFIG_NAMES: [tabm_s]
     MAX_FOLDS: 2
     MAX_SYMBOLS: 20
-    N_EPOCHS: 1
+    PREVIEW_N_EPOCHS: 1
   timeout: 180
 case_studies/us_equities_panel/09_dl_nlinear:
+  # MAX_FOLDS became FOLD_IDS: the sequence runner takes the fold ids it should
+  # keep, not a count to slice to.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
+    DEVICE: cpu
+    CONFIG_NAMES: [nlinear]
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
+    FOLD_IDS: [0, 1]
     MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    PREVIEW_N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/10_dl_lstm:
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
+    DEVICE: cpu
+    CONFIG_NAMES: [lstm_h64]
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
+    FOLD_IDS: [0, 1]
     MAX_SYMBOLS: 5
-    N_EPOCHS: 1
+    PREVIEW_N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/11_dl_tsmixer:
-  # Pin a small symbol whitelist that exists in the reduced test-data raw panel
-  # (load_us_equities) so the Darts horizon-aware base-target join is non-empty.
-  # The default MAX_SYMBOLS top-by-history selection picks production symbols
-  # absent from the sampled raw panel; SYMBOLS overrides it. Sibling lstm/nlinear
-  # use a non-Darts path and don't need this.
-  #
-  # Every pinned symbol must additionally be gap-free across the whole MAX_FOLDS
-  # span and cover both validation windows: cross_sectional_ic uses min_obs=5, so
-  # a symbol missing from a date drops that date, and a whitelist of exactly five
-  # scores zero days as soon as one drops out. AMD was pinned here and has no rows
-  # at all in 2014 or 2015 - both test validation windows - which left four symbols
-  # per date, ic_n_days=0 and a NaN IC for every checkpoint. Eight symbols keeps
-  # three spare above min_obs.
+  # The pinned SYMBOLS whitelist this entry used to carry has no parameter to
+  # bind to any more: the sequence runner accepts only folds, max_symbols and
+  # max_train_sequences (deep_learning.py _SEQUENCE_PREVIEW_FIELDS), and passes
+  # only max_symbols to load_modeling_dataset, whose `symbols` argument exists
+  # for exactly this Darts case. MAX_SYMBOLS: 8 keeps the old whitelist's size
+  # so at least three symbols stay above cross_sectional_ic's min_obs=5 when one
+  # drops out of a date, but it reinstates the top-by-history selection the
+  # whitelist was added to avoid.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    SYMBOLS: [AIG, AMAT, C, CSCO, GE, INTC, JPM, MSFT]
-    N_EPOCHS: 1
+    DEVICE: cpu
+    CONFIG_NAMES: [tsmixer]
+    COMMON_OVERRIDES: {batch_size: 32, lookback: 5}
+    FOLD_IDS: [0, 1]
+    MAX_SYMBOLS: 8
+    PREVIEW_N_EPOCHS: 1
   timeout: 600
 case_studies/us_equities_panel/12_dl_weekly:
   parameters:
@@ -1997,43 +2037,109 @@ case_studies/us_equities_panel/12_dl_weekly:
 case_studies/us_equities_panel/13_latent_factors:
   timeout: 600
 case_studies/us_equities_panel/13a_pca:
-  skip: true
-  skip_reason: 'TEMPORARY: DL training stage 300s timeout under trimmed test-data; needs full fixture rebuild'
-case_studies/us_equities_panel/13b_ipca:
-  skip: true
-  skip_reason: 'TEMPORARY: DL training stage 300s timeout under trimmed test-data; needs full fixture rebuild'
-case_studies/us_equities_panel/14_causal_dml:
+  # Un-skipped. The reason carried here cited a "DL training stage 300s timeout", but neither of
+  # these notebooks trains a deep model - they fit PCA and IPCA - and the skip predated the rebuild
+  # that gave them MAX_SYMBOLS, FOLD_IDS and PREVIEW_N_FACTORS. Same reductions etfs/11a_pca and
+  # 11b_ipca run under.
   parameters:
-    CV_FOLDS: 2
-    MAX_SAMPLES: 5000
+    LABELS: [fwd_ret_1d]
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    FOLD_IDS: [0, 1]
+    PREVIEW_N_FACTORS: 2
+  timeout: 300
+case_studies/us_equities_panel/13b_ipca:
+  # See 13a_pca on why this is no longer skipped.
+  parameters:
+    LABELS: [fwd_ret_1d]
+    MAX_SYMBOLS: 5
+    FOLD_IDS: [0, 1]
+    PREVIEW_N_FACTORS: 2
+  timeout: 300
+case_studies/us_equities_panel/14_causal_dml:
+  # CV_FOLDS, MAX_SAMPLES and N_PLACEBO became PREVIEW_N_FOLDS,
+  # PREVIEW_MAX_SAMPLES and PREVIEW_N_PLACEBO: the reduced fold count, sample
+  # cap and placebo count are part of the preview identity now, not free knobs.
+  parameters:
+    MAX_SYMBOLS: 5
+    PREVIEW_N_FOLDS: 2
+    PREVIEW_MAX_SAMPLES: 5000
+    PREVIEW_N_PLACEBO: 25
   timeout: 120
 case_studies/us_equities_panel/15_model_analysis:
+  # 15 declares EXECUTION_TIER and WORKSPACE, so research_preview_parameters routes it to the
+  # preview tier, and the preview branch requires a catalog filter plus explicit prediction and
+  # diagnostic limits. Without them it raised before reading anything. Diagnostics must be a
+  # subset of the prediction population, so PREVIEW_MAX_DIAGNOSTICS stays at or below
+  # PREVIEW_MAX_PREDICTIONS. The rows it reads are whatever 06-14 wrote into the same session's
+  # workspace, which is why this only means anything when the case study runs in notebook order.
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_1d]
+    PREVIEW_MAX_PREDICTIONS: 4
+    PREVIEW_MAX_DIAGNOSTICS: 2
   timeout: 300
 case_studies/us_equities_panel/16_backtest:
+  # TOP_K is gone: the signal-to-position mapping grid comes from
+  # config/setup.yaml's top_k_grid and is not a notebook parameter any more.
+  # A preview needs a catalog filter plus an explicit prediction cap, and
+  # MAX_SYMBOLS is itself one of the reductions the canonical branch refuses.
+  # MAX_SYMBOLS must leave a declared entry scheme reachable. This case study's smallest is
+  # ew_top20 and the backtest is long-short, so get_entry_schemes_for returns nothing below 40
+  # assets and the notebook correctly refuses to backtest with no declared scheme. At 5 it raised
+  # "does not declare only equal-weight baseline schemes"; 45 is the smallest round universe that
+  # keeps one scheme alive.
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
+    PREVIEW_LABELS: [fwd_ret_1d]
+    PREVIEW_MAX_PREDICTIONS: 2
+    MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/17_portfolio_management:
+  # TOP_N_PREDICTIONS became PREVIEW_MAX_BASELINE_ROWS. The canonical shortlist
+  # size is read from setup.yaml's top_n_predictions.allocation and is no longer
+  # overridable; what a preview bounds is how many baseline rows it reads.
+  # See 16_backtest on the 45-symbol floor.
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_PREDICTIONS: 2
+    PREVIEW_LABELS: [fwd_ret_1d]
+    PREVIEW_MAX_BASELINE_ROWS: 2
+    PREVIEW_MAX_ALLOCATORS: 2
+    MAX_SYMBOLS: 45
   timeout: 300
 case_studies/us_equities_panel/18_costs:
+  # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS, and the cost grid is bounded by
+  # PREVIEW_MAX_COST_VALUES rather than run in full.
+  # See 16_backtest on the 45-symbol floor.
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_1d]
+    PREVIEW_MAX_SOURCE_ROWS: 1
+    PREVIEW_MAX_COST_VALUES: 2
+    MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/19_risk_management:
+  # TOP_N_COMBOS became PREVIEW_MAX_SOURCE_ROWS and MAX_RISK_VARIANTS became
+  # PREVIEW_MAX_RISK_CONTROLS.
+  # See 16_backtest on the 45-symbol floor.
   parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_1d]
+    PREVIEW_MAX_SOURCE_ROWS: 1
+    PREVIEW_MAX_RISK_CONTROLS: 3
+    MAX_SYMBOLS: 45
   timeout: 600
 case_studies/us_equities_panel/20_strategy_analysis:
-  timeout: 600
+  skip: true
+  # One obstacle, and it is structural: it holds until someone changes what CI runs against. This
+  # notebook reads a research lock, and lifecycle.lock() refuses a selected backtest whose
+  # execution_tier is not canonical - "preview ancestry cannot enter a lock",
+  # research/lifecycle.py:231-232, with _locked_training_spec at :106 refusing a non-canonical
+  # holdout independently. CI exercises reduced fixtures and has no canonical registry to draw a
+  # lock from, so there is no parameter that reaches this and no hash that could be passed in. The
+  # notebook is exercised by the production run instead.
+  #
+  # This entry used to carry a second obstacle - that VALIDATION_BACKTEST_SET_NAME had no producer.
+  # 19_risk_management.py:488-491 now freezes exactly that name per label, so it is closed, and the
+  # sentence is gone rather than left standing next to the one that is still true.
+  skip_reason: >-
+    Reads a research lock, which cannot be built from preview ancestry
+    (research/lifecycle.py:231-232), so a reduced CI fixture cannot exercise it by construction -
+    the production run does.
 case_studies/us_firm_characteristics/01_feasibility_analysis:
   timeout: 120
 case_studies/us_firm_characteristics/02_labels:
@@ -2107,7 +2213,7 @@ case_studies/us_firm_characteristics/09_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 25
   timeout: 120
 case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300

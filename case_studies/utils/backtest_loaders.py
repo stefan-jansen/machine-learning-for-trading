@@ -1026,7 +1026,7 @@ def load_backtest_prices(
             .sort("n", descending=True)
             .head(max_symbols)["symbol"]
         )
-        df = df.filter(pl.col("symbol").is_in(top_symbols))
+        df = df.filter(pl.col("symbol").is_in(top_symbols.implode()))
 
     return df.sort("timestamp", "symbol")
 

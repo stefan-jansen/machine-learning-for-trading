@@ -9,6 +9,7 @@ import yaml
 
 from tests import pm_helpers
 from tests.pm_helpers import (
+    PREVIEW_TRANSLATED_PARAMETERS,
     RECORD_REPLAY,
     RECORD_REWRITE,
     TIER_ON_DEMAND,
@@ -599,6 +600,42 @@ def test_unusable_parameters_does_not_take_a_comprehension_target_for_a_rebind(
     assert unusable_parameters(py, ["SYMBOLS"]) == {}
 
 
+def test_unusable_parameters_accepts_a_name_that_reaches_by_preview_translation(
+    tmp_path: Path,
+) -> None:
+    """A PREVIEW_REDUCTIONS notebook never names MAX_FOLDS; the harness folds it in.
+
+    `research_preview_parameters` pops the names in `PREVIEW_TRANSLATED_PARAMETERS` into the
+    PREVIEW_REDUCTIONS mapping, so the notebook reads the reduction and not the override name.
+    Measured on agent/us-equities-panel-notebooks: `06_linear` and `07_gbm` were reported
+    unreachable on MAX_FOLDS and MAX_SYMBOLS, both of which do reach them.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint(PREVIEW_REDUCTIONS)\n',
+    )
+    assert unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS)) == {}
+
+
+def test_unusable_parameters_still_rejects_an_untranslated_name_on_such_a_notebook(
+    tmp_path: Path,
+) -> None:
+    """The exemption covers the translated names only, not every name on the notebook."""
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint(PREVIEW_REDUCTIONS)\n',
+    )
+    assert "never reads it" in unusable_parameters(py, ["TOP_N_COMBOS"])["TOP_N_COMBOS"]
+
+
+def test_unusable_parameters_does_not_exempt_a_translated_name_without_the_mapping(
+    tmp_path: Path,
+) -> None:
+    """No PREVIEW_REDUCTIONS declared means no translation, so MAX_SYMBOLS must be read."""
+    py = _notebook(tmp_path, '# %% tags=["parameters"]\nLABELS = []\n\n# %%\nprint(LABELS)\n')
+    assert "never reads it" in unusable_parameters(py, ["MAX_SYMBOLS"])["MAX_SYMBOLS"]
+
+
 def test_unusable_parameters_rejects_a_notebook_with_no_parameters_cell(tmp_path: Path) -> None:
     """Without a tagged cell papermill injects above the imports, so every binding
     the notebook makes wins. Three case study notebooks were in this state."""
@@ -1096,3 +1133,68 @@ def test_injected_parameters_keeps_preview_reductions_under_the_preview_tier(
     )
     assert resolved["PREVIEW_REDUCTIONS"]["max_samples"] == 5000
     assert resolved["EXECUTION_TIER"] == "preview"
+
+
+def test_unusable_parameters_catches_a_preview_mapping_the_notebook_never_reads(
+    tmp_path: Path,
+) -> None:
+    """Declaring PREVIEW_REDUCTIONS is not on its own proof the reduction reaches anything.
+
+    The translated names are analysed through the mapping they are folded into. A notebook that
+    declares the mapping and then never reads it discards every reduction, so the preview run is a
+    canonical run wearing the preview label - which is what this helper exists to catch. Exempting
+    the translated names outright would have passed it.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n# %%\nprint("nothing reads it")\n',
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "never reads it" in reason
+        assert "PREVIEW_REDUCTIONS" in reason, name
+
+
+def test_unusable_parameters_catches_a_preview_mapping_rebound_before_any_read(
+    tmp_path: Path,
+) -> None:
+    """A mapping rebound below the parameters cell throws the injected reductions away.
+
+    Same condition as the overwrite check on an ordinary name, reached through the translation:
+    every read below the parameters cell is on a path that rebinds PREVIEW_REDUCTIONS first, so
+    nothing the harness folded in survives to be read.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n'
+        "# %%\nPREVIEW_REDUCTIONS = {}\nprint(PREVIEW_REDUCTIONS)\n",
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "overwrites the injected value" in reason, name
+        assert "PREVIEW_REDUCTIONS" in reason, name
+
+
+def test_unusable_parameters_catches_a_preview_mapping_rebound_above_every_reader(
+    tmp_path: Path,
+) -> None:
+    """A helper that reads the mapping does not save it when the rebind runs before every call.
+
+    The deferred-reader exemption asks whether anything can observe the injected value. Here the
+    unconditional rebind sits above the only call site, so every read the helper performs sees the
+    notebook's own mapping and none see the reductions the harness folded in. Reached through the
+    translation, so it also pins that the redirect keeps the reader analysis rather than bypassing
+    it.
+    """
+    py = _notebook(
+        tmp_path,
+        '# %% tags=["parameters"]\nPREVIEW_REDUCTIONS = {}\n\n'
+        "# %%\ndef fit():\n    return dict(PREVIEW_REDUCTIONS)\n\n"
+        "# %%\nPREVIEW_REDUCTIONS = {}\nprint(fit())\n",
+    )
+    problems = unusable_parameters(py, sorted(PREVIEW_TRANSLATED_PARAMETERS))
+    assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
+    for name, reason in problems.items():
+        assert "PREVIEW_REDUCTIONS" in reason, name

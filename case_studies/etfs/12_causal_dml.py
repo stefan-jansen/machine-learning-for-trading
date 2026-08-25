@@ -258,8 +258,9 @@ print(format_dml_summary(results))
 # estimate supports a directional conclusion.
 #
 # Entity-aware within-symbol temporal block permutation does separate the observed
-# estimate from placebo assignments (empirical p=0.040, z=1.48 against 100
-# placebos), which the 5 % rule labels "Passes". The two diagnostics disagree. A
+# estimate from placebo assignments (empirical p=0.0495, z=1.48 against 100
+# placebos), which the 5 % rule labels "Passes" - by 0.0005, on a p-value floored at
+# 1/101 by the plus-one correction. The two diagnostics disagree. A
 # placebo distribution this much narrower than the Driscoll-Kraay standard error
 # means the permutation is not reproducing all of the cross-sectional and serial
 # dependence that covariance corrects for, so its p-value is the less
@@ -288,7 +289,13 @@ p_value = results["p_value_hac"]
 
 ref = results.get("refutation", {})
 p_value_perm = ref.get("empirical_p", 1.0)
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
+# The draw count goes with the p-value. `classify_refutation` accepts a bare p-value and
+# answers Passes or Fails, and that two-way answer is wrong whenever the plus-one
+# correction floors the smallest reachable p-value at or above 5 %: at nineteen successful
+# placebos or fewer, "Fails" is what the rule prints whatever the data did. With the
+# hundred declared here the third answer cannot arise, which is exactly why passing the
+# count costs nothing and why a run reduced to fewer draws must not silently start lying.
+ref_class = ref.get("refutation_class", classify_refutation(p_value_perm, ref.get("n_successful")))
 
 print("Statistical significance:")
 print(f"  p-value (HAC): {p_value:.4f}")
@@ -425,7 +432,7 @@ register_causal_run(
 #
 # 3. **HAC and refutation disagree**: Entity-aware within-symbol temporal block
 #    permutation puts the observed estimate at z=1.48 against 100 placebos
-#    (empirical p=0.040), while the Driscoll-Kraay p-value on the same estimate
+#    (empirical p=0.0495), while the Driscoll-Kraay p-value on the same estimate
 #    is 0.378. The permutation holds less dependence than the covariance
 #    estimator corrects for, so its narrower placebo distribution overstates the
 #    evidence; the conservative reading stands, and the untouched holdout is not

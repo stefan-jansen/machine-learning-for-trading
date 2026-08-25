@@ -21,6 +21,7 @@ from utils.style import (
     add_message_title,
     ml4t_diverging,
     ml4t_palette,
+    show_with_alt,
 )
 
 ML4T_DIVERGING_CMAP = LinearSegmentedColormap.from_list("ml4t_diverging", ml4t_diverging())
@@ -43,6 +44,21 @@ FAMILY_COLORS = {
     "causal_dml": COLORS["neutral"],
     "benchmark": COLORS["slate"],
 }
+
+
+def _span(values, fmt: str = "{:+.3f}") -> str:
+    """Describe the range of the finite values a figure actually plots.
+
+    Alt text here is computed from the plotted data rather than written as prose,
+    so it cannot drift from the figure and cannot describe a chart nobody saw.
+    """
+    arr = np.asarray(list(values), dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return "no finite values"
+    if arr.size == 1:
+        return fmt.format(float(arr[0]))
+    return f"{fmt.format(float(arr.min()))} to {fmt.format(float(arr.max()))}"
 
 
 def _family_color(label: str, i: int = 0) -> str:
@@ -112,7 +128,15 @@ def plot_cv_timeline(
         loc="lower right",
     )
     fig.tight_layout()
-    fig.show()
+    starts = fold_ranges["val_start"].to_list()
+    ends = fold_ranges["val_end"].to_list()
+    alt = (
+        f"Horizontal bar chart of {n_splits} walk-forward validation windows, one bar per fold, "
+        f"covering {min(starts)} to {max(ends)}."
+    )
+    if holdout_start:
+        alt += f" A dashed vertical line marks the holdout start at {holdout_start}."
+    show_with_alt(fig, alt)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +195,13 @@ def plot_fold_heatmap(
     ax.text(n_folds + 0.3, -0.7, "Mean", ha="left", va="center", fontsize=9, fontweight="bold")
 
     fig.colorbar(im, ax=ax, label="IC", shrink=0.8)
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Heatmap of information coefficient for {n_models} models down the rows and "
+        f"{n_folds} validation folds across the columns, each cell annotated with its value. "
+        f"Cell values span {_span(matrix)}; the per-model means printed at the right span "
+        f"{_span(row_means)}.",
+    )
 
     return model_labels, fold_cols, matrix
 
@@ -231,7 +261,14 @@ def plot_fold_boxplot(
     ax.set_ylabel("Mean IC per Fold")
     add_message_title(ax, title)
     fig.tight_layout()
-    fig.show()
+    n_folds = fold_ic["fold_id"].n_unique()
+    show_with_alt(
+        fig,
+        f"Box plot of mean IC per fold for {n_families} model families, with each fold's value "
+        f"overlaid as a jittered point and the mean marked by a diamond. Across "
+        f"{n_folds} folds the plotted values span {_span(np.concatenate(bp_data))}, "
+        f"against a dashed line at zero.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +311,15 @@ def plot_bucket_monotonicity(
     add_message_title(ax, title)
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
-    fig.show()
+    plotted = np.concatenate([b["mean_return"].to_numpy() for b in bucket_results.values()])
+    alt = (
+        f"Line chart of mean realized {label_name.lower()} against prediction bucket, one line per "
+        f"model family, for {len(bucket_results)} families over {n_buckets} buckets ordered lowest "
+        f"to highest score. Plotted means span {_span(plotted, '{:+.4f}')}."
+    )
+    if unconditional_mean is not None:
+        alt += f" A dashed line marks the unconditional mean at {unconditional_mean:+.4f}."
+    show_with_alt(fig, alt)
 
     # Cost context
     if cost_range:
@@ -325,9 +370,15 @@ def plot_correlation_matrix(
     ax.set_yticklabels(short_labels)
     add_message_title(ax, title)
     fig.colorbar(im, ax=ax, shrink=0.8)
-    fig.show()
-
     off_diag = corr_matrix[np.triu_indices(n, k=1)]
+    show_with_alt(
+        fig,
+        f"Heatmap of pairwise prediction correlation between {n} models, symmetric about the "
+        f"diagonal and annotated with each value. The {off_diag.size} distinct off-diagonal "
+        f"correlations span {_span(off_diag, '{:.2f}')} and average "
+        f"{float(np.nanmean(off_diag)):.2f}.",
+    )
+
     print(f"\nAverage pairwise correlation: {off_diag.mean():.2f}")
     print(f"Range: {off_diag.min():.2f} to {off_diag.max():.2f}")
 
@@ -347,6 +398,8 @@ def plot_learning_curves(
         return
 
     n_panels = len(cp_families)
+    plotted_ic: list[np.ndarray] = []
+    n_configs = 0
     fig, axes = plt.subplots(n_panels, 1, figsize=(12, 4 * n_panels), squeeze=False)
 
     for idx, family in enumerate(sorted(cp_families)):
@@ -359,6 +412,8 @@ def plot_learning_curves(
             y = cfg_data["ic_mean_daily"].to_numpy()
 
             ax.plot(x, y, marker=".", label=config, linewidth=1.5)
+            plotted_ic.append(y)
+            n_configs += 1
 
             if "ic_std" in cfg_data.columns:
                 y_std = cfg_data["ic_std"].to_numpy()
@@ -374,7 +429,14 @@ def plot_learning_curves(
         ax.legend(fontsize=7, loc="lower right")
 
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        f"{n_panels} stacked line charts, one per model family "
+        f"({', '.join(sorted(cp_families))}), plotting mean IC across folds against the training "
+        f"checkpoint for {n_configs} configurations in total, each against a dashed line at zero. "
+        f"Plotted IC spans "
+        f"{_span(np.concatenate(plotted_ic) if plotted_ic else np.array([]))}.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +484,13 @@ def plot_feature_importance_heatmap(
     ax.set_yticklabels(features_sorted)
     add_message_title(ax, title)
     fig.colorbar(im, ax=ax, shrink=0.8)
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Heatmap of normalized feature importance for the {n_show} features with the highest mean "
+        f"importance, down the rows, across {len(fold_cols)} folds along the columns, each cell "
+        f"annotated with its value. Plotted importances span {_span(matrix_sorted, '{:.2f}')}, on a "
+        f"scale from 0 to 1.",
+    )
 
     # Recurrence summary
     n_total_folds = importance_df["fold_id"].n_unique()
@@ -461,6 +529,7 @@ def plot_regime_bars(
     fig, ax = plt.subplots(figsize=(max(8, n_fam * 2), 5))
 
     x = np.arange(n_fam)
+    plotted_ic: list[float] = []
     width = 0.35
     colors_regime = {
         "low_vol": COLORS.get("blue", "#3B82F6"),
@@ -494,6 +563,7 @@ def plot_regime_bars(
                 ics.append(0)
                 ses.append(0)
 
+        plotted_ic.extend(ics)
         offset = (i - 0.5) * width
         bars = ax.bar(
             x + offset,
@@ -523,7 +593,12 @@ def plot_regime_bars(
     add_message_title(ax, title)
     ax.legend()
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Grouped bar chart of mean IC for {n_fam} model families along the x-axis, one bar per "
+        f"volatility regime ({', '.join(r.replace('_', ' ') for r in regimes)}), with error bars "
+        f"and a dashed line at zero. Plotted IC spans {_span(plotted_ic)}.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +712,29 @@ def plot_hac_ci_leaderboard(
     ax.set_title(title)
     ax.grid(axis="x", alpha=0.3, zorder=0)
     fig.tight_layout()
-    fig.show()
+    ics = df[ic_col].to_numpy().astype(float)
+    if {lo_col, hi_col}.issubset(df.columns):
+        los = df[lo_col].to_numpy().astype(float)
+        his = df[hi_col].to_numpy().astype(float)
+        # The drawing loop above skips any row whose point estimate is missing or
+        # non-finite, so a row with a valid interval and no `ic` is never drawn.
+        # Counting it here would describe a bar that is not on the chart.
+        finite = np.isfinite(los) & np.isfinite(his) & np.isfinite(ics)
+        excludes_zero = int(np.sum(finite & ((los > 0) | (his < 0))))
+        ci_clause = (
+            f" {excludes_zero} of the {int(finite.sum())} intervals drawn exclude zero, "
+            f"which a dashed vertical line marks."
+        )
+    else:
+        ci_clause = " A dashed vertical line marks zero."
+    show_with_alt(
+        fig,
+        f"Dot plot of {n} model configurations, one row each, ordered by daily-pooled IC with the "
+        f"highest at the top. The dot is the point estimate and the bar is its HAC 95% confidence "
+        f"interval"
+        f"{', with a fainter bootstrap interval behind it' if has_boot else ''}. "
+        f"Point estimates span {_span(ics, '{:+.4f}')}.{ci_clause}",
+    )
 
 
 def plot_label_horizon_forest(
@@ -700,6 +797,9 @@ def plot_label_horizon_forest(
         axes = [axes]
 
     y_pos = np.arange(n_fam)
+    plotted_ic: list[float] = []
+    n_drawn = 0
+    n_excludes_zero = 0
     for ax, lbl in zip(axes, lbls):
         sub = metrics.filter(pl.col(label_col) == lbl)
         sub_map = {r[family_col]: r for r in sub.iter_rows(named=True)}
@@ -722,6 +822,9 @@ def plot_label_horizon_forest(
             hi = row.get(hi_col)
             ci_valid = lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi)
             crosses_zero = bool(ci_valid and lo <= 0 <= hi)
+            plotted_ic.append(ic)
+            n_drawn += 1
+            n_excludes_zero += int(ci_valid and not crosses_zero)
             color = (
                 "#999999" if (not ci_valid or crosses_zero) else family_palette.get(fam, "#444444")
             )
@@ -742,7 +845,16 @@ def plot_label_horizon_forest(
     fig.supxlabel("Information Coefficient (daily-pooled, 95% HAC CI)", fontsize=9)
     if title:
         fig.suptitle(title, fontsize=11)
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Forest plot in {n_lab} side-by-side panels, one per label "
+        f"({', '.join(label_display.get(l, l) for l in lbls)}), each showing daily-pooled IC with "
+        f"its 95% HAC confidence interval for {n_fam} model families on a shared y-axis. "
+        f"{n_drawn} of the {n_lab * n_fam} family-label pairs have a run, the rest marked "
+        f"'no run'; {n_excludes_zero} of the drawn intervals exclude zero and are shown in the "
+        f"family colour, the remainder in grey. Point estimates span "
+        f"{_span(plotted_ic, '{:+.4f}')}.",
+    )
 
 
 def plot_rolling_daily_ic(
@@ -761,6 +873,11 @@ def plot_rolling_daily_ic(
         return
 
     df = defined_ic(daily_metrics).sort("date")
+    if df.height == 0:
+        # The guard above tests the input; `defined_ic` is what drops undefined days,
+        # and it can drop all of them. Reducing over the empty date array raises, so
+        # this returns where the pre-alt-text version rendered an empty figure.
+        return
     if df.height < window:
         window = max(5, df.height // 4)
 
@@ -789,4 +906,10 @@ def plot_rolling_daily_ic(
     ax.set_title(f"Daily IC time series{(' - ' + label) if label else ''}")
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.show()
+    alt = (
+        f"Line chart of daily cross-sectional IC over {df.height} days from {dates.min()} to "
+        f"{dates.max()}, against a dashed line at zero. Daily values span {_span(ic)}"
+    )
+    if window > 1 and df.height >= window:
+        alt += f", and a {window}-day rolling mean drawn over them spans {_span(roll_mean)}"
+    show_with_alt(fig, alt + ".")
