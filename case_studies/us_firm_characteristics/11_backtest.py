@@ -418,7 +418,8 @@ print(f"runs whose equity went negative: {ruined.height} of {all_runs.height}")
 if ruined.height:
     print(
         "their reported Sharpe ranges "
-        f"{ruined['sharpe'].min():.2f} to {ruined['sharpe'].max():.2f}, and none of it means anything"
+        f"{ruined['sharpe'].min():.2f} to {ruined['sharpe'].max():.2f}, computed on periods "
+        "that are arithmetic on a negative balance"
     )
 
 top = explorer.best(stage="signal", top_n=10)
