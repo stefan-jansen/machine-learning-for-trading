@@ -1417,19 +1417,40 @@ case_studies/etfs/10_dl_tsmixer:
     N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
-  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no override they ran on the
+  # max_symbols must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no reduction they ran on the
   # full fixture universe while the artifact covered 5 symbols, so the CV splits
   # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
   # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-pca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
+  # max_symbols must match 04_model_based_features for the same reason as 11a,
+  # which leaves IPCA five funds to fit a 71-characteristic Gamma on. At the
+  # production n_factors=5 that is 355 parameters against five assets a date and
+  # the ALS does not identify. Measured on this fixture at the declared
+  # max_iter=100, per fold: K=5 fails on both folds (110.0s, 113.6s), K=3 fails
+  # on both (55.7s, 57.0s), K=2 converges on fold 0 in 21.8s and fails on fold 1
+  # at 42.0s, K=1 converges on both in 0.6s and 0.8s. The times are the tell -
+  # a fold that fails takes the full cap, so the failures are the cap and not a
+  # local minimum. K=2 sitting half in and half out is the identification
+  # boundary, and it is the same boundary sp500_equity_option_analytics measured
+  # at K=2 on 19-21 assets and found unstable across machines. n_factors=1 is
+  # below it rather than on it, which is why it is chosen over raising max_iter.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-ipca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      n_factors: 1
   timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
