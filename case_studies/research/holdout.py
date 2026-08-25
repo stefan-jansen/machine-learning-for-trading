@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import importlib
 import inspect
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pandas as pd
 import polars as pl
 
 from .decisions import DecisionArtifact, StateTransitionPolicy
 from .lifecycle import ResearchLock
 from .results import BacktestResult, PredictionResult
+
+_FOLD_FIELDS = ("fold", "train_start", "train_end", "val_start", "val_end")
 
 
 def _source_digest(function: Any) -> str:
@@ -342,3 +346,126 @@ def prepare_locked_strategy_replay(lock: ResearchLock) -> LockedStrategyReplay:
         "min_trade_value": rebalance.get("min_trade_value"),
     }
     return LockedStrategyReplay(lock, request, _prepare_decision_replay(lock))
+
+
+def _validation_folds(validation_spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    computation = validation_spec.get("computation")
+    if not isinstance(computation, dict):
+        raise ValueError("holdout CV derivation requires a current resolved training specification")
+    cv = computation.get("cv")
+    if not isinstance(cv, dict):
+        raise ValueError("selected training specification has no resolved CV interval")
+    folds = cv.get("folds")
+    if not isinstance(folds, list) or not folds:
+        raise ValueError("selected training specification has no resolved validation folds")
+    missing = {name for fold in folds for name in _FOLD_FIELDS if name not in fold}
+    if missing:
+        raise ValueError(f"validation folds are missing boundaries: {sorted(missing)}")
+    return [dict(fold) for fold in folds]
+
+
+def build_holdout_cv(
+    validation_spec: Mapping[str, Any],
+    *,
+    case_study: str,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Derive the one holdout CV interval that retrains the selected validation configuration.
+
+    The holdout window is not a choice. It is ``evaluation.holdout_start`` and
+    ``evaluation.holdout_end`` from the case study's own ``setup.yaml``, read here through
+    :func:`case_studies.utils.cv_window.canonical_window` so this derivation and the window a
+    backtest is sliced to cannot disagree. ``lifecycle.lock`` re-checks the same window before
+    it will accept the spec, and :func:`case_studies.research.models.locked_holdout_split`
+    checks it a third time at execution.
+
+    The training interval is the whole history available before that window, which is
+    ``min(train_start)`` across the validation folds and never one fold's own start: the fold
+    list runs newest first, so ``folds[0]["train_start"]`` is the *latest* start in the set and
+    would hand the retrain the shortest window it could have had rather than the longest.
+    :func:`utils.cv_splits.earliest_train_start` is that read, and this calls it rather than
+    repeating it.
+
+    Training ends one label buffer before the holdout opens, using the same buffer the
+    validation folds were built with. That gap is what stops the last training label's outcome
+    window from reaching into the holdout, which would train the holdout model on the period it
+    is meant to be judged against. The buffer is required rather than defaulted: a case study
+    that declares none has no basis for a gap, and a zero gap here is a leak rather than a
+    conservative choice.
+    """
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.cv_window import canonical_window
+    from utils.artifact_specs import (
+        load_setup_config,
+        resolve_label_buffer,
+        resolve_label_horizon,
+    )
+    from utils.cv_splits import earliest_train_start, normalize_label_buffer
+
+    resolved_label = str(label if label is not None else validation_spec.get("label") or "")
+    if not resolved_label:
+        raise ValueError("holdout CV derivation requires the label the selection was made on")
+
+    window = canonical_window(case_study, resolved_label, split="holdout")
+    if window is None:
+        raise ValueError(
+            f"{case_study} declares no holdout window for {resolved_label!r}; "
+            "evaluation.holdout_start and evaluation.holdout_end must both be set in "
+            "config/setup.yaml before a holdout can be locked"
+        )
+    holdout_start, holdout_end = window
+
+    folds = _validation_folds(validation_spec)
+    validation_cv = dict(validation_spec["computation"]["cv"])
+    train_start = earliest_train_start(folds)
+
+    # Both resolvers fall back to setup.yaml's own labels block, and return None without it
+    # for every case study whose label carries no separate spec artifact - which is all nine
+    # for their primary label. Passing the setup is what makes the buffer resolvable at all.
+    setup = load_setup_config(case_study)
+    buffer = resolve_label_buffer(case_study, resolved_label, setup)
+    if not buffer:
+        raise ValueError(
+            f"{case_study} declares no label buffer for {resolved_label!r}, so the gap sealing "
+            "holdout training from the holdout window cannot be derived"
+        )
+    buffer_offset = pd.Timedelta(normalize_label_buffer(buffer))
+    if buffer_offset <= pd.Timedelta(0):
+        raise ValueError(f"label buffer {buffer!r} leaves no gap before the holdout window")
+
+    horizon = resolve_label_horizon(case_study, resolved_label, setup)
+    if horizon:
+        horizon_offset = pd.Timedelta(normalize_label_buffer(horizon))
+        if buffer_offset < horizon_offset:
+            raise ValueError(
+                f"label buffer {buffer!r} is shorter than the outcome horizon {horizon!r}, so "
+                "the last training label resolves inside the holdout window"
+            )
+
+    train_end = pd.Timestamp(holdout_start) - buffer_offset
+    if train_end <= train_start:
+        raise ValueError(
+            f"{case_study} holdout training interval is empty: history starts "
+            f"{train_start.date()} and the buffered boundary is {train_end.date()}"
+        )
+
+    fold = {
+        "fold": max(int(entry["fold"]) for entry in folds) + 1,
+        "train_start": train_start.isoformat(),
+        "train_end": train_end.isoformat(),
+        "val_start": pd.Timestamp(holdout_start).isoformat(),
+        "val_end": pd.Timestamp(holdout_end).isoformat(),
+    }
+    identity = value_digest(pl.DataFrame([fold]))
+    if identity == validation_cv.get("identity"):
+        raise ValueError("derived holdout CV is identical to the selected validation CV")
+    return {
+        "folds": [fold],
+        "identity": identity,
+        "split": "holdout",
+        "request": {
+            "source": "case_study_holdout",
+            "label_buffer": str(buffer),
+            "holdout_window": [str(holdout_start), str(holdout_end)],
+        },
+    }
