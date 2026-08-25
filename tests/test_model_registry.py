@@ -161,8 +161,16 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
-# Notebooks whose recorded entry point is the MODEL name rather than their own stem, which is
-# what the pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote.
+# Notebooks whose expected entry point is the MODEL name rather than their own stem.
+#
+# For `etfs/10_dl_tsmixer`, `sp500_options/09a_lstm` and `sp500_options/09b_patchtst` that is
+# what the notebook still writes: all three call `run_case_study_model(..., notebook=f"dl_{MODEL}")`.
+#
+# `cme_futures/09_dl_lstm` is a fourth case and this map is wrong about it. That notebook has
+# already been migrated - it reaches `open_study` through
+# `case_studies/cme_futures/research_workflow.py:82`, which forwards no `entry_point`, so its rows
+# record NULL and this entry expects a value nothing writes. It is the same defect as the two
+# removed below, in a case study this branch does not own; ml4t/agent-workspace#929 carries it.
 #
 # `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
 # their stem, which is the value that answers the question the column exists for - which
