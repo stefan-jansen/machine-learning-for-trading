@@ -1236,7 +1236,7 @@ case_studies/cme_futures/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 24
+      n_placebo: 25
   timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
@@ -1324,7 +1324,7 @@ case_studies/crypto_perps_funding/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 24
+      n_placebo: 25
   timeout: 300
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
@@ -1448,12 +1448,7 @@ case_studies/etfs/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    # Five draws are below the ten run_dml_analysis assembles a refutation from at all, so it
-    # published none and this notebook's `ref.get("empirical_p", 1.0)` wrote p = 1.00 into the
-    # registered record and the figure caption - a p-value from a test that never ran. Above the
-    # floor the refutation is real; twenty-four rather than ten so the verdict is reachable
-    # rather than "Underpowered" by construction. Measured at 18s against a 120s cap.
-    N_PLACEBO: 24
+    N_PLACEBO: 25
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
@@ -1526,7 +1521,7 @@ case_studies/fx_pairs/11_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 24
+    N_PLACEBO: 25
   timeout: 120
 case_studies/fx_pairs/12_model_analysis:
   timeout: 300
@@ -1629,7 +1624,7 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 900
     MAX_SYMBOLS: 5
-    N_PLACEBO: 24
+    N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
   timeout: 300
@@ -1863,9 +1858,8 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
   parameters:
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_FOLDS: 2
-    N_PLACEBO: 24
-  timeout: 300
+    N_PLACEBO: 25
+  timeout: 120
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:
@@ -1959,7 +1953,7 @@ case_studies/sp500_options/10_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 24
+    N_PLACEBO: 25
   timeout: 120
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
@@ -2136,7 +2130,7 @@ case_studies/us_equities_panel/14_causal_dml:
     MAX_SYMBOLS: 5
     PREVIEW_N_FOLDS: 2
     PREVIEW_MAX_SAMPLES: 5000
-    PREVIEW_N_PLACEBO: 24
+    PREVIEW_N_PLACEBO: 25
   timeout: 120
 case_studies/us_equities_panel/15_model_analysis:
   # 15 declares EXECUTION_TIER and WORKSPACE, so research_preview_parameters routes it to the
@@ -2286,7 +2280,7 @@ case_studies/us_firm_characteristics/09_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 24
+    N_PLACEBO: 25
   timeout: 120
 case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300
