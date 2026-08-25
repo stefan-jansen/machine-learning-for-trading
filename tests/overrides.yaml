@@ -1449,10 +1449,12 @@ case_studies/etfs/12_causal_dml:
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
     # Five draws are below the ten run_dml_analysis assembles a refutation from at all, so it
-    # published none and this notebook's `ref.get("empirical_p", 1.0)` wrote p = 1.00 into the
-    # registered record and the figure caption - a p-value from a test that never ran. Above the
-    # floor the refutation is real; twenty-four rather than ten so the verdict is reachable
-    # rather than "Underpowered" by construction. Measured at 18s against a 120s cap.
+    # published none and this notebook's `ref.get("empirical_p", 1.0)` wrote p = 1.00 and a
+    # class of "Fails" into causal_runs - measurements from a test that never ran. Every
+    # on-screen trace is suppressed: the printed line is guarded by `if ref:` and the histogram
+    # and its subtitle by `len(placebo_arr) > 0`, so whoever ran it saw no line, no figure and
+    # no error. A value nobody is shown cannot be sanity-checked, which is why the count moved
+    # rather than the default. Measured at 18s against a 120s cap.
     N_PLACEBO: 25
   timeout: 120
 case_studies/etfs/13_model_analysis:

@@ -166,3 +166,65 @@ def test_selected_prediction_conformal_coverage_rejects_non_finite_rows(
             },
             levels=(0.80,),
         )
+
+
+def test_selected_prediction_conformal_coverage_reads_the_legacy_spec_shape(
+    tmp_path, monkeypatch
+) -> None:
+    """Two spec shapes are live, and the older one is still written.
+
+    `build_training_spec` puts `n_folds` at the top level and emits no `computation`
+    key at all; `run_dl_cv` still uses it and LEGACY_IDENTITY_VERSION is still
+    supported. Reading only the identity-v3 location answered 0 for every such row, so
+    a row declaring five folds raised "requires at least two declared folds" and
+    12_case_study_insights, which tolerates only "fewer than 30 rows", aborted the
+    chapter rather than degrading.
+    """
+    case_dir = tmp_path / "case_studies" / "probe"
+    prediction_dir = case_dir / "run_log" / "predictions" / "prediction-legacy"
+    prediction_dir.mkdir(parents=True)
+    calibration = [0.1] * 33 + [5.0] * 7
+    evaluation = [1.0] * 40
+    pl.DataFrame(
+        {
+            "timestamp": ["2019-01-02"] * 40 + ["2020-01-02"] * 40,
+            "y_true": calibration + evaluation,
+            "y_score": [0.0] * 80,
+            "fold_id": [1] * 40 + [0] * 40,
+        }
+    ).write_parquet(prediction_dir / "predictions.parquet")
+    monkeypatch.setattr(insight_chapter, "get_case_study_dir", lambda _case_study: case_dir)
+
+    legacy = insight_chapter.conformal_coverage_for_selected_prediction(
+        {
+            "case_study": "probe",
+            "family": "deep_learning",
+            "config_name": "probe-config",
+            "prediction_hash": "prediction-legacy",
+            "spec_json": json.dumps({"family": "deep_learning", "n_folds": 2}),
+        },
+        levels=(0.80,),
+    )
+
+    assert legacy["empirical_coverage"].to_list() == [0.0]
+
+
+def test_selected_prediction_conformal_coverage_still_rejects_a_single_fold(
+    tmp_path, monkeypatch
+) -> None:
+    """The fallback must not turn the real one-fold refusal into a pass."""
+    case_dir = tmp_path / "case_studies" / "probe"
+    (case_dir / "run_log" / "predictions" / "prediction-one").mkdir(parents=True)
+    monkeypatch.setattr(insight_chapter, "get_case_study_dir", lambda _case_study: case_dir)
+
+    with pytest.raises(insight_chapter.RegistrySelectionError, match="at least two declared folds"):
+        insight_chapter.conformal_coverage_for_selected_prediction(
+            {
+                "case_study": "probe",
+                "family": "deep_learning",
+                "config_name": "probe-config",
+                "prediction_hash": "prediction-one",
+                "spec_json": json.dumps({"family": "deep_learning", "n_folds": 1}),
+            },
+            levels=(0.80,),
+        )
