@@ -1417,19 +1417,40 @@ case_studies/etfs/10_dl_tsmixer:
     N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
-  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no override they ran on the
+  # max_symbols must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no reduction they ran on the
   # full fixture universe while the artifact covered 5 symbols, so the CV splits
   # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
   # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-pca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
+  # max_symbols must match 04_model_based_features for the same reason as 11a,
+  # which leaves IPCA five funds to fit a 71-characteristic Gamma on. At the
+  # production n_factors=5 that is 355 parameters against five assets a date and
+  # the ALS does not identify. Measured on this fixture at the declared
+  # max_iter=100, per fold: K=5 fails on both folds (110.0s, 113.6s), K=3 fails
+  # on both (55.7s, 57.0s), K=2 converges on fold 0 in 21.8s and fails on fold 1
+  # at 42.0s, K=1 converges on both in 0.6s and 0.8s. The times are the tell -
+  # a fold that fails takes the full cap, so the failures are the cap and not a
+  # local minimum. K=2 sitting half in and half out is the identification
+  # boundary, and it is the same boundary sp500_equity_option_analytics measured
+  # at K=2 on 19-21 assets and found unstable across machines. n_factors=1 is
+  # below it rather than on it, which is why it is chosen over raising max_iter.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-ipca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      n_factors: 1
   timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
@@ -1599,12 +1620,33 @@ case_studies/nasdaq100_microstructure/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/nasdaq100_microstructure/06_linear:
-  timeout: 120
+  parameters:
+    # Declared here rather than left to the harness default of max_symbols alone.
+    # This is a minute panel: planning resolves one prediction identity per
+    # (symbol, minute, fold), so the cost of the plan tracks the timestamp grid and
+    # cutting the cross-section does not touch it. `folds` is the reduction that does.
+    PREVIEW_REDUCTIONS:
+      folds: [0]
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured after the preview branch stopped re-resolving: slowest cell 211s (the fit),
+  # planning 121s, 342s end to end. Timeout is per cell, so this is ~2.8x the slowest.
+  tier: weekly
+  timeout: 600
 case_studies/nasdaq100_microstructure/07_gbm:
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-  timeout: 600
+    # As 06_linear, plus the two axes a boosted fit adds: 20 trees instead of 500,
+    # checkpointed every 10, so the run still exercises the checkpoint dimension the
+    # notebook is about rather than reducing it away.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0]
+      max_iterations: 20
+      max_symbols: 5
+      train_sample_frac: 0.02
+  # Measured the same way: slowest cell 362s, planning 147s, 515s end to end.
+  tier: weekly
+  timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
   parameters:
     BATCH_SIZE: 32
@@ -1650,8 +1692,12 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
+  skip: true
+  skip_reason: "The fixture registry predates the research interface: training_runs carries neither execution_tier nor identity_version, so catalog.py resolves every row to a legacy identity and no prediction set is complete. The declared-population cross-check then reports all 12 declared linear members absent against 0 admissible rows. Lifts when the test-data registry is regenerated on the current schema."
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
+  skip: true
+  skip_reason: "Same fixture registry limitation as 13_model_analysis: with no identity_version column, no prediction set is complete, and the admissibility guard refuses rather than sweep a population that cannot be official. Lifts when the test-data registry is regenerated on the current schema."
   parameters:
     # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
     # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.

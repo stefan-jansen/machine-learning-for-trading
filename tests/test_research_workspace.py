@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CVSpec, LabelDefinition, Study
+from case_studies.research import CVSpec, LabelDefinition, Study, open_study
 from case_studies.research.contracts import ExecutionTier
 from case_studies.utils import linear
 from case_studies.utils.registry.store import _open_registry
@@ -490,3 +490,45 @@ def test_custom_cv_cannot_relabel_fold_scoped_temporal_features() -> None:
     changed = [{**artifact[1], "train_end": "2021-05-31"}]
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
         require_fold_scoped_temporal_compatibility(changed, artifact)
+
+
+def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
+    tmp_path: Path,
+) -> None:
+    """A clean clone has regular generated directories, and its runs must still say who wrote them.
+
+    The symlink branch of `open_study` is a maintainer-worktree convenience; the branch taken
+    everywhere else must carry `entry_point` just the same, or the registry row loses the only
+    column that names the notebook.
+    """
+    release = _seed_release(tmp_path)
+    generated = release / "case_studies" / "etfs"
+    assert not any((generated / name).is_symlink() for name in ("features", "labels", "run_log")), (
+        "fixture must exercise the regular-directory branch"
+    )
+
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+        entry_point="06_linear",
+    )
+    training = study.results.register_training(
+        {
+            "identity_version": 2,
+            "execution_tier": "preview",
+            "family": "linear",
+            "label": "fwd_ret_21d",
+            "config_name": "ridge",
+            "seed": 42,
+            "preview_reductions": {"folds": [0]},
+        },
+        execution_tier="preview",
+    )
+
+    with sqlite3.connect(training.root / "run_log" / "registry.db") as db:
+        recorded = db.execute(
+            "SELECT entry_point FROM training_runs WHERE training_hash = ?", (training.hash,)
+        ).fetchone()
+    assert recorded == ("06_linear",)

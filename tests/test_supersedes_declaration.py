@@ -23,12 +23,19 @@ REPO = Path(__file__).resolve().parent.parent
 CAUSAL_NOTEBOOKS = [
     "case_studies/cme_futures/11_causal_dml.py",
     "case_studies/crypto_perps_funding/11_causal_dml.py",
+    "case_studies/etfs/12_causal_dml.py",
     "case_studies/fx_pairs/11_causal_dml.py",
     "case_studies/us_equities_panel/14_causal_dml.py",
     # Numbered one lower than the other eight: this case study has no stage-04
     # notebook, so its causal notebook is 09 rather than 11.
     "case_studies/us_firm_characteristics/09_causal_dml.py",
 ]
+
+# Four more notebooks open a causal request through register_causal_run and do not yet
+# declare the parameter, so they cannot answer the write-time refusal:
+# nasdaq100_microstructure/12, sp500_options/10, sp500_equity_option_analytics/12 and
+# us_firm_characteristics/09. Each is owned by an active branch and takes the same patch
+# from its own side; add the path here in the same commit that adds the parameter.
 
 
 class TestTheDeclarationParser:
@@ -101,8 +108,8 @@ def test_the_parameter_reaches_the_request(path: str) -> None:
         if keyword.arg == _SUPERSEDES_CALLS[_call_name(node)]
     ]
     assert passed, (
-        f"{path} declares SUPERSEDES_CAUSAL but no study.causal(supersedes=...) or "
-        f"register_causal_run(supersedes_hash=...) call takes it"
+        f"{path} declares SUPERSEDES_CAUSAL but nothing takes it: no study.causal() call "
+        "with supersedes= and no register_causal_run() call with supersedes_hash="
     )
 
 
