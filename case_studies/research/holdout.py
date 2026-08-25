@@ -469,3 +469,95 @@ def build_holdout_cv(
             "holdout_window": [str(holdout_start), str(holdout_end)],
         },
     }
+
+
+@dataclass(frozen=True)
+class HoldoutOutcome:
+    """One case study's holdout evaluation, and whether this call is what produced it."""
+
+    lock: ResearchLock
+    evaluated_now: bool
+
+    @property
+    def lineage(self) -> dict[str, str]:
+        return self.lock.study.lifecycle.holdout_lineage(self.lock.hash)
+
+
+def evaluate_holdout(
+    study: Any,
+    *,
+    candidate_set_name: str,
+    case_study: str | None = None,
+    selection_evidence: Mapping[str, Any] | None = None,
+) -> HoldoutOutcome:
+    """Lock one selected configuration and evaluate it on the holdout, at most once ever.
+
+    This is the whole sequence, in one place, because every case study needs the identical one
+    and nine notebooks assembling it from five primitives is how nine versions of it appear.
+    Each primitive it calls already exists and is already tested; what did not exist was anything
+    that called them.
+
+    The holdout is used once. That is not a convention this enforces by asking callers to check
+    first - re-running a notebook is normal and must not be able to spend the holdout a second
+    time. So an already-evaluated lifecycle returns its recorded lineage and executes nothing,
+    and ``evaluated_now`` is how a caller tells the two apart. A notebook re-run therefore reads
+    back exactly the numbers it published before, which is also what makes the page reproducible.
+
+    Selection is not a parameter either. ``lifecycle.lock`` refuses any selection that is not the
+    candidate set's highest validation backtest Sharpe, so passing the rank-1 member is the only
+    thing that can be passed - this reads it from the set rather than accepting it, which removes
+    the one place a caller could have disagreed with the documented rule.
+    """
+    from .comparison import CandidateSet
+    from .execution import run_locked_holdout
+    from .lifecycle import LifecycleState
+
+    lifecycle = study.lifecycle
+    state = lifecycle.state
+    if state == LifecycleState.HOLDOUT_EVALUATED.value:
+        existing = _sole_lock(study)
+        return HoldoutOutcome(existing, evaluated_now=False)
+
+    candidates = CandidateSet.one(study, name=candidate_set_name)
+    selected = candidates.best_validation_sharpe()
+    selected_record = selected.registry_record()
+    prediction = study.results.open(selected_record["prediction_hash"])
+    training = study.results.open(prediction.registry_record()["training_hash"])
+
+    validation_spec = training.spec()
+    holdout_spec = deepcopy(validation_spec)
+    holdout_spec["computation"]["cv"] = build_holdout_cv(
+        validation_spec,
+        case_study=str(case_study if case_study is not None else study.case_study),
+    )
+
+    # selection_evidence is hashed into the lock identity, so anything put here that is already
+    # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
+    # caller that words it differently. The candidate set is already in the record under
+    # candidate_set_hash; the metric is the only thing this adds, and it is the documented rule.
+    evidence = {"metric": "validation_backtest_sharpe", **dict(selection_evidence or {})}
+    lock = lifecycle.lock(
+        candidate_set_hash=candidates.hash,
+        selected_backtest_hash=selected.hash,
+        selection_evidence=evidence,
+        holdout_training_spec=holdout_spec,
+    )
+    if lock.reopen().state == LifecycleState.HOLDOUT_EVALUATED.value:
+        # The lock already existed and had been spent. lifecycle.lock returns the existing lock
+        # rather than raising when the request is identical, so this is reached by a re-run whose
+        # selection has not changed - and it must not re-execute.
+        return HoldoutOutcome(lock.reopen(), evaluated_now=False)
+
+    execution = run_locked_holdout(lock)
+    return HoldoutOutcome(execution.lock, evaluated_now=True)
+
+
+def _sole_lock(study: Any) -> ResearchLock:
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        rows = db.execute("SELECT lock_hash FROM research_locks").fetchall()
+    if len(rows) != 1:
+        raise ValueError(f"lifecycle holds {len(rows)} research locks, not one")
+    return study.lifecycle.open(rows[0][0])
