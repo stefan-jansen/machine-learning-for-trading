@@ -838,8 +838,8 @@ jobs:
           # here and the first run of this job went red on exactly them (4 failed,
           # 13 passed). They are verified locally against the real data and in no
           # CI job, which is a real gap and is stated in that file's docstring.
-          # The four relational tests in the same file hold on any extract and are
-          # what this job gates.
+          # The other three tests in the same file assert relations that hold on any
+          # extract - they collect as six cases - and are what this job gates.
           .venv/bin/python -m pytest \
             tests/test_eoa_universe_roster.py \
             tests/test_fixture_registry_identity.py \
@@ -885,6 +885,10 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
+    # Measured runtime is 3m21s. --timeout=900 bounds a hung test but not a hung
+    # import, collection or image pull, which would otherwise fall through to
+    # GitHub's six-hour default.
+    timeout-minutes: 30
     container:
       image: ml4t/ml4t:latest
     steps:
@@ -906,11 +910,6 @@ jobs:
           # redirects every get_case_study_dir() call at a directory this job
           # does not seed.
           unset ML4T_OUTPUT_DIR
-          # OfficialPopulation.create refuses a preview *run*, and there is no
-          # check that a preview *prediction* cannot be a member of an official
-          # population - which is what this test asserts. It is a gap in
-          # case_studies/research/population.py, owned by the research boundary,
-          # not by this job. Tracked on the workspace board.
           python -m pytest \
             tests/test_crypto_modeling_lineage.py \
             tests/test_cv_cached_results.py \
@@ -938,7 +937,6 @@ jobs:
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_runtime.py \
-            --deselect tests/test_research_contract_execution.py::test_preview_prediction_is_excluded_from_official_population \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------

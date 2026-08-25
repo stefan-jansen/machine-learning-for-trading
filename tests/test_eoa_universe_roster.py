@@ -23,9 +23,9 @@ tests assert an **absolute** property of the production extract - 633 names, and
 wider than the roster - and `ml4t/third-edition-test-data` is the same reduced 23-name extract, so
 they fail there for the same reason the notebooks did. They carry `@pytest.mark.production_extract`
 and CI deselects them; they are verified locally against the real data and nowhere else. The other
-four assert *relations* that hold on any extract - every roster name has bars, a narrowed window
+three assert *relations* that hold on any extract - every roster name has bars, a narrowed window
 holds fewer names than the declaration, the roster is not read off the requested window - and those
-are the ones a CI job can actually gate.
+three, six cases once parametrized, are the ones a CI job can actually gate.
 """
 
 import ast
