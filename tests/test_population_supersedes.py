@@ -248,3 +248,21 @@ class TestWhatALaterGenerationRetires:
         )
         _publish(study, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members(study) == frozenset(MEMBERS_ONE)
+
+    def test_a_registry_error_that_is_not_a_missing_table_propagates(self, tmp_path: Path) -> None:
+        """The blanket catch this replaced turned every failure into "nothing is retired".
+
+        A lock timeout, an I/O error and a half-migrated schema are not evidence that no
+        generation has been superseded, and answering them with an empty set is the silent
+        wrong answer the whole module exists to prevent - the sweep runs over both generations
+        and reports every member complete. Only a missing file or a missing table means
+        nothing was ever written.
+        """
+        study = Study.open(
+            "etfs", workspace=tmp_path / "broken", release_root=_seed_release(tmp_path)
+        )
+        _publish(study, MEMBERS_ONE)
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            db.execute("ALTER TABLE official_populations RENAME COLUMN supersedes_hash TO gone")
+        with pytest.raises(sqlite3.OperationalError, match="supersedes_hash"):
+            superseded_members(study)
