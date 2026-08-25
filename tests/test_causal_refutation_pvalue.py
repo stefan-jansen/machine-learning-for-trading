@@ -156,6 +156,8 @@ def test_every_declared_test_reduction_can_produce_a_refutation() -> None:
     Pinning the constant alone would leave `tests/overrides.yaml` free to drift back
     onto the boundary, which is exactly how it got there.
     """
+    import math
+
     import yaml
 
     from case_studies.utils.causal import (
@@ -195,4 +197,20 @@ def test_every_declared_test_reduction_can_produce_a_refutation() -> None:
         "then produces no refutation at all, silently - and a notebook reading the "
         f"p-value with a default publishes a number no test computed. Ask for at least "
         f"{MIN_PLACEBO_DRAWS + PLACEBO_REQUEST_MARGIN}, or 0 to declare no refutation."
+    )
+
+    # Above the boundary the refutation is computed; that is a lower bar than being able
+    # to answer. The plus-one correction floors the empirical p at 1/(n+1), so a verdict
+    # below alpha needs ceil(1/alpha) successful draws - twenty at alpha = 0.05, and
+    # classify_refutation returns "Underpowered" for anything less whatever the data
+    # showed. Nine declarations sat at 5, 10 and 15 and none of them could ever have
+    # passed. The margin is the same one: one draw may fail without taking the verdict.
+    answerable = math.ceil(1.0 / REFUTATION_ALPHA)
+    unanswerable = [value for value in declared if 0 < value < answerable + PLACEBO_REQUEST_MARGIN]
+    assert not unanswerable, (
+        f"these declared reductions request {unanswerable} placebo draws. The smallest "
+        f"p-value attainable at n draws is 1/(n+1), so below {answerable} the refutation "
+        f"cannot reach alpha = {REFUTATION_ALPHA} and the verdict is 'Underpowered' by "
+        f"construction - the draws are paid for and answer nothing. Ask for at least "
+        f"{answerable + PLACEBO_REQUEST_MARGIN}, or 0 to declare no refutation."
     )

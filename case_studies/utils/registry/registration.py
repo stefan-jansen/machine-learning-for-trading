@@ -1728,12 +1728,20 @@ def declare_causal_supersedes(
         case_dir = _case_dir(case_study)
     db = _open_registry(case_dir)
     try:
-        stored = (
-            db.execute(
-                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
-            ).fetchone()
-            or (None,)
-        )[0]
+        row = db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+        ).fetchone()
+        # This is the one function an author calls by hand, typing a hash copied out of
+        # the `CausalResult.one` error text. Without this check a truncated or mistyped
+        # hash makes the UPDATE below match zero rows, commit, and return None - so the
+        # repair reports success and the label still resolves to two identities.
+        if row is None:
+            raise ValueError(
+                f"no causal run {causal_hash!r} in {case_study}'s registry, so there is "
+                f"nothing to declare a predecessor for. Check the hash against "
+                f"`SELECT causal_hash FROM causal_runs WHERE label = '{label}'`."
+            )
+        stored = row[0]
         if stored is not None:
             if stored != supersedes_hash:
                 raise ValueError(
@@ -1800,6 +1808,16 @@ def _enforce_causal_supersedes(
         # by this row's own edge, so it is no longer in the current set and reads as
         # "not a current identity ... Current: none".
         return
+    if stored is not None and supersedes_hash is not None:
+        # One column holds one edge, so a row cannot retire two identities. The INSERT
+        # this guards uses COALESCE, which keeps the stored value and drops the new one
+        # in silence; declare_causal_supersedes refuses the same case. Both paths answer
+        # the same question and must answer it the same way, or which one an author
+        # happened to call decides whether a contradiction is reported.
+        raise ValueError(
+            f"causal run {causal_hash} already declares it supersedes {stored}; "
+            f"it cannot also supersede {supersedes_hash}"
+        )
     if causal_hash in causal_identities_retired(db, label=label):
         # Reproducing a retired identity is a no-op, but the declaration it carries is
         # not exempt from being checked. An author reproducing A from an older checkout

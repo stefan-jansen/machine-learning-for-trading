@@ -41,7 +41,7 @@
 import polars as pl
 import yaml
 
-from case_studies.research import ExecutionTier, open_study
+from case_studies.research import ExecutionTier, open_study, supersedes_for
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
@@ -59,6 +59,7 @@ FORCE_RETRAIN = False
 # is the production path. WORKSPACE is the other half: a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Resolve the estimand and analysis population
@@ -100,6 +101,7 @@ requests = {
         execution_tier=tier,
         preview_reductions=reductions,
         overrides={},
+        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(labels)),
     )
     for label in labels
 }
