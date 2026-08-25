@@ -249,18 +249,39 @@ class TestWhatALaterGenerationRetires:
         _publish(study, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members(study) == frozenset(MEMBERS_ONE)
 
-    def test_a_generation_still_a_tip_in_the_other_registry_is_kept(self, tmp_path: Path) -> None:
-        """Whether a generation is a tip is decided within the registry that holds it.
+    def test_a_registry_error_that_is_not_a_missing_table_propagates(self, tmp_path: Path) -> None:
+        """The blanket catch this replaced turned every failure into "nothing is retired".
 
-        The release registry lags: it holds generation one as an unsuperseded tip, because it
-        never saw the refit the author made in a workspace. Flattening both chains before
-        asking makes generation one a superseded hash on the strength of the workspace's chain
-        alone, and its members are retired out of a sweep the release registry still publishes
-        them for.
+        A lock timeout, an I/O error and a half-migrated schema are not evidence that no
+        generation has been superseded, and answering them with an empty set is the silent
+        wrong answer the whole module exists to prevent - the sweep runs over both generations
+        and reports every member complete. Only a missing file or a missing table means
+        nothing was ever written.
+        """
+        study = Study.open(
+            "etfs", workspace=tmp_path / "broken", release_root=_seed_release(tmp_path)
+        )
+        _publish(study, MEMBERS_ONE)
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            db.execute("ALTER TABLE official_populations RENAME COLUMN supersedes_hash TO gone")
+        with pytest.raises(sqlite3.OperationalError, match="supersedes_hash"):
+            superseded_members(study)
 
-        Under-retiring is the safe direction. A member wrongly kept is backtested and its
-        result verified; a member wrongly dropped silently narrows the sweep, which is the
-        failure this whole function exists to prevent.
+    def test_a_hash_superseded_in_either_registry_is_superseded(self, tmp_path: Path) -> None:
+        """Supersession is monotone, so the union of edges across both roots is the merge.
+
+        The two roots disagree in the ordinary case, not the exotic one. An author copies a
+        workspace registry into the release root - what `test_a_workspace_reads_the_released_
+        registry_s_lineage` calls what a reader sees - and then refits, which leaves the release
+        root holding generation A as an unsuperseded tip while the workspace holds A -> B. That
+        is the state right after every release.
+
+        A stale root is not independent evidence that A is still published; it is an older copy
+        of the same content-addressed chain. Reading tip-ness per root and keeping any root's
+        tip alive lets the lagging root veto every retirement for the names it holds, while
+        `PredictionCatalog.table()` goes on overlaying generation A's rows into that workspace -
+        so the sweep runs over both generations, which is the failure this function exists to
+        stop.
         """
         release_root = _seed_release(tmp_path)
         author = Study.open("etfs", release_root=release_root, workspace=tmp_path / "author")
@@ -269,9 +290,7 @@ class TestWhatALaterGenerationRetires:
         released_db.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(author.root / "run_log" / "registry.db", released_db)
 
-        # The refit happens in a workspace that carries generation one forward, so the
-        # workspace chain reads A -> B while the release registry still holds A as its tip.
         refitter = Study.open("etfs", release_root=release_root, workspace=tmp_path / "refit")
         shutil.copy(released_db, refitter.root / "run_log" / "registry.db")
         _publish(refitter, MEMBERS_TWO, supersedes=first.hash)
-        assert superseded_members(refitter) == frozenset()
+        assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
