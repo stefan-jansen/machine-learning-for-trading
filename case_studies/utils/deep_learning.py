@@ -1691,6 +1691,55 @@ def _decision_time_checkpoint_metrics(
 # ---------------------------------------------------------------------------
 
 
+def sequence_identity_params(
+    config: dict[str, Any],
+    *,
+    identity_params: dict[str, Any] | None,
+    input_data_spec: dict[str, Any] | None,
+    label_col: str,
+    case_study: str | None,
+    max_train_sequences: int,
+    device: str,
+) -> dict[str, Any] | None:
+    """The identity-bearing fields of one sequence training run.
+
+    ``device`` is one of them. Two fits of the same configuration on CPU and on GPU are
+    not the same fit - different kernels, different reduction orders, a different
+    nondeterminism profile (``reference/gpu-reproducibility.md``) - so they must not
+    share a ``training_hash``. Without it a completed CPU run satisfies the
+    already-complete check that skips a GPU fit, and a run registers under a device it
+    did not have. The device index is dropped: ``cuda:0`` and ``cuda:1`` are the same
+    claim about what the numbers came from.
+    """
+    from case_studies.utils.darts_forecasting import darts_training_identity, uses_darts_backend
+
+    params = dict(identity_params or {})
+    params["device"] = torch.device(str(device).lower().replace("gpu", "cuda")).type
+    if input_data_spec is not None:
+        if uses_darts_backend([config]):
+            if case_study is None:
+                raise ValueError("Darts identity requires case_study")
+            params.update(
+                darts_training_identity(
+                    config,
+                    label_col,
+                    case_study=case_study,
+                    input_data_spec=input_data_spec,
+                    max_train_sequences=max_train_sequences,
+                )
+            )
+        else:
+            params.update(
+                {
+                    "batch_size": config.get("batch_size", 2048),
+                    "input_data_spec": input_data_spec,
+                    "lookback": config.get("params", {}).get("lookback", 60),
+                    "max_train_sequences": max_train_sequences,
+                }
+            )
+    return params or None
+
+
 def run_dl_cv(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -1794,30 +1843,15 @@ def run_dl_cv(
     cached_result = None
 
     def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
-        params = dict(identity_params or {})
-        if input_data_spec is not None:
-            if uses_darts_backend([cfg]):
-                if case_study is None:
-                    raise ValueError("Darts identity requires case_study")
-                params.update(
-                    darts_training_identity(
-                        cfg,
-                        label_col,
-                        case_study=case_study,
-                        input_data_spec=input_data_spec,
-                        max_train_sequences=max_train_sequences,
-                    )
-                )
-            else:
-                params.update(
-                    {
-                        "batch_size": cfg.get("batch_size", 2048),
-                        "input_data_spec": input_data_spec,
-                        "lookback": cfg.get("params", {}).get("lookback", 60),
-                        "max_train_sequences": max_train_sequences,
-                    }
-                )
-        return params or None
+        return sequence_identity_params(
+            cfg,
+            identity_params=identity_params,
+            input_data_spec=input_data_spec,
+            label_col=label_col,
+            case_study=case_study,
+            max_train_sequences=max_train_sequences,
+            device=device,
+        )
 
     from case_studies.utils.registry import build_training_spec
 
