@@ -779,13 +779,31 @@ jobs:
   test-unit-data:
     runs-on: ubuntu-latest
     # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
-    # so the checkout below cannot succeed there. Skip rather than fail red on a
-    # contribution that has done nothing wrong. This job is not a required
-    # context, so a skip blocks nothing.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # so the checkout below cannot succeed there, and every step after the first
+    # is gated on the key being present rather than the job being skipped.
+    #
+    # The gate is a step and not the job's `if:` because this IS a required
+    # context. A job-level `if:` that evaluates false creates no check run at
+    # all, and a required context with no check run blocks the pull request
+    # forever - there is no state a fork contributor can reach that satisfies
+    # it. Measured 2026-08-25 on #595, a one-line packaging fix from a fork
+    # that had guards, lint and test-unit green and could not merge. Gated at
+    # the step level the job still runs, reports success, and asserts nothing
+    # it was unable to check.
     steps:
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. The data-dependent tests do not run here; they run on the branch once it is merged."
+          fi
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -793,9 +811,11 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
       - uses: astral-sh/setup-uv@v6
+        if: steps.reach.outputs.have_key
         with:
           version: "latest"
       - name: Install minimal test deps
+        if: steps.reach.outputs.have_key
         run: |
           uv venv --python 3.14
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
@@ -806,11 +826,13 @@ jobs:
       # when the data is absent, so a checkout that silently produced an empty
       # tree would turn the job green while running nothing.
       - name: The data this job exists for is actually here
+        if: steps.reach.outputs.have_key
         run: |
           test -d test-data/data || { echo "test-data/data missing"; exit 1; }
           test -d test-data/intermediates || { echo "test-data/intermediates missing"; exit 1; }
           echo "data: $(du -sh test-data/data | cut -f1), intermediates: $(du -sh test-data/intermediates | cut -f1)"
       - name: Run data-dependent unit tests
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           ML4T_PATH: ${{ github.workspace }}
@@ -850,7 +872,7 @@ jobs:
       # exits 0 on a full sheet of skips, which is exactly the state that let
       # 13 tests sit unrun without anything going red.
       - name: No test in this job skipped
-        if: always()
+        if: always() && steps.reach.outputs.have_key
         run: |
           .venv/bin/python - <<'PY'
           import sys, xml.etree.ElementTree as ET
