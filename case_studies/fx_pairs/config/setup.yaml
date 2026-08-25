@@ -296,7 +296,12 @@ causal:
   # one. Derived from the construction, not chosen:
   #
   # `close.shift(skip_recent) / close.shift(momentum[-1]) - 1` in 03_financial_features,
-  # which is 21 and 252. The oldest price it reads is 252 sessions back.
+  # which is 21 and 252. Three different numbers live in that one expression and conflating them
+  # is easy, so all three are stated: the LOOKBACK is 252 sessions, the oldest price it reads;
+  # the RETURN INTERVAL is 231 sessions, from t-252 to t-21, which is what the value measures;
+  # and consecutive values OVERLAP in 230 of those 231. The declaration takes the lookback
+  # because it is the larger, so a block of this length spans the 231-session dependence
+  # whichever way the arithmetic is read.
   treatment_window: 252
   confounders: [vol_gk_21d, vol_gk_63d, zscore_21d]
   method: walk_forward_dml
