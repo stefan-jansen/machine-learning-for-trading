@@ -252,10 +252,9 @@ plan.select(
 # which is the same condition on the narrowed-run path: a caller-chosen `POPULATION_NAME` has no
 # prior generation either.
 #
-# A reduced-scale run passes it empty. A population produced under a reduction is thrown away
-# with the workspace it was written to, so it has no lineage to extend, and the call refuses a
-# supersede rather than accept one it will not record. Pass `SUPERSEDES_POPULATION=` alongside
-# the reductions.
+# A reduced-scale run needs no override. A population produced under a reduction is thrown away
+# with the workspace it was written to, so it has no lineage to extend - and its isolated registry
+# holds no generation under this name, so the rule below withholds the hash there on its own.
 #
 # **One population covers every label**, because one run fits every label. A population is
 # immutable once written, so a notebook fitting one label per run under a single name publishes
@@ -264,8 +263,9 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "fx_pairs-gbm-validation-v1"
+declared_supersedes = SUPERSEDES_POPULATION or None
 try:
-    OfficialPopulation.one(study, name=population_name)
+    current = OfficialPopulation.one(study, name=population_name)
 except (ValueError, sqlite3.OperationalError):
     # No generation in force under this name: none was ever written, the chain forked, or - on a
     # reader's clean clone, where run_log/ is gitignored - the registry has no table to read at
@@ -273,7 +273,13 @@ except (ValueError, sqlite3.OperationalError):
     # caught: a clean clone is the ordinary case here, not the exotic one.
     supersedes = None
 else:
-    supersedes = SUPERSEDES_POPULATION or None
+    # The declaration describes ONE generation: the one produced by superseding
+    # `declared_supersedes`. Offer it only when that is the generation in force, which is what
+    # makes the hash reproduce the tip rather than extend the chain past it. Asking merely
+    # whether any generation exists is not the same question, and gets the second run on a clean
+    # clone wrong: run 1 writes the first generation, whose own supersedes is None, and offering
+    # the hash again there would write a second generation the reader never asked for.
+    supersedes = declared_supersedes if current.supersedes == declared_supersedes else None
 execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )
