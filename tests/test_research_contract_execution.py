@@ -577,6 +577,14 @@ def test_preview_prediction_is_excluded_from_official_population(
     assert preview_selection.height == 1
     with pytest.raises(ValueError, match="preview.*candidate set"):
         study.predictions.freeze(preview_selection, name="preview-must-not-freeze")
+    # Back to canonical first, because the tier is ambient and sticky: `run_models`
+    # calls `study.activate` per request and nothing restores it, so the process is
+    # still in preview here. `OfficialPopulation.create` checks the running tier
+    # before it checks its members (population.py, `_refuse_preview_activation`), so
+    # without this the run-level guard fires and the member-tier check below - which
+    # is what this asserts - is never reached. A notebook re-activates the same way
+    # when it moves from a preview to a canonical step.
+    study.activate("canonical")
     with pytest.raises(ValueError, match="preview.*cannot enter"):
         OfficialPopulation.create(
             study,

@@ -5,11 +5,13 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from case_studies.utils.causal import classify_refutation
 from case_studies.utils.registry.specs import (
     IDENTITY_VERSION,
     SUPPORTED_IDENTITY_VERSIONS,
     training_hash_from_spec,
 )
+from case_studies.utils.registry.store import current_causal_identities
 
 from .adapters import get_adapter, registered_adapters
 from .contracts import ExecutionTier
@@ -41,19 +43,22 @@ class CausalResult:
         if not db_path.is_file():
             raise ValueError(f"causal selection for {label!r} resolved to 0 identities")
         with sqlite3.connect(db_path) as db:
-            rows = db.execute(
-                "SELECT causal_hash, spec_json FROM causal_runs WHERE label = ? ORDER BY causal_hash",
-                (label,),
-            ).fetchall()
-        current = [
-            causal_hash
-            for causal_hash, spec_json in rows
-            if json.loads(spec_json or "{}").get("identity_version") == IDENTITY_VERSION
-            and json.loads(spec_json or "{}").get("execution_tier", tier.value) == tier.value
-        ]
+            # One derivation, shared with register_causal_run's write-time check. Two
+            # copies of this disagreed within an hour of being written, and the shape
+            # of that disagreement is a refusal to register for an ambiguity the
+            # reader never sees. It also probes for supersedes_hash rather than naming
+            # it, because this read does not go through the migrating opener.
+            current = current_causal_identities(db, label=label, tier=tier.value)
         if len(current) != 1:
+            hint = ""
+            if len(current) > 1:
+                hint = (
+                    f" ({', '.join(current)}). A refit left more than one live, and none of "
+                    "them says which it retires - re-register the newer with SUPERSEDES_CAUSAL "
+                    "naming the older."
+                )
             raise ValueError(
-                f"causal selection for {label!r} resolved to {len(current)} identities"
+                f"causal selection for {label!r} resolved to {len(current)} identities{hint}"
             )
         return cls.open(
             study,
@@ -83,15 +88,31 @@ class CausalResult:
             if not db_path.is_file():
                 continue
             with sqlite3.connect(db_path) as db:
+                # `refutation_n_successful` arrived with a migration, and this read does
+                # not go through the migrating opener - deliberately, because a read that
+                # rewrites the schema of a registry it was only asked to look at is a
+                # write. Naming the column unconditionally instead raises
+                # OperationalError on any registry written before it existed, and the
+                # cache probe in `run_resolved_causal_request` catches only KeyError, so
+                # the error escapes, the registering write that would have migrated the
+                # database never happens, and re-running the notebook fails identically.
+                columns = {
+                    row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()
+                }
+                draws_column = (
+                    "refutation_n_successful"
+                    if "refutation_n_successful" in columns
+                    else "NULL AS refutation_n_successful"
+                )
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-                    "confounding_bias_pct, refutation_p, spec_json "
+                    f"confounding_bias_pct, refutation_p, {draws_column}, spec_json "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
             if row is None:
                 continue
-            spec = json.loads(row[7])
+            spec = json.loads(row[8])
             tier = str(spec.get("execution_tier", namespace))
             return cls(
                 study=study,
@@ -105,6 +126,20 @@ class CausalResult:
                     "naive_effect": row[4],
                     "confounding_bias_pct": row[5],
                     "refutation_p": row[6],
+                    "refutation_n_successful": row[7],
+                    # Derived here so every reader gets the same verdict from the same
+                    # rule. A p-value alone cannot say whether the draws could have
+                    # rejected at all, so a caller that re-applies a bare threshold
+                    # publishes "Fails" for runs that were merely underpowered. An
+                    # unknown draw count is the same problem one step back: a row written
+                    # before the column existed carries NULL there, and classifying it on
+                    # the p-value alone reports exactly the verdict this derivation is
+                    # here to prevent. No count, no verdict.
+                    "refutation_class": (
+                        classify_refutation(row[6], row[7])
+                        if row[6] is not None and row[7] is not None
+                        else None
+                    ),
                 },
                 execution_tier=tier,
             )
@@ -126,6 +161,11 @@ class ResolvedCausalRequest:
     method: str
     spec: dict[str, Any]
     _context: Any
+    # Alongside the spec and deliberately not in it: the identity is what was fitted,
+    # and which earlier identity this run retires is a statement about the registry.
+    # Putting it in the spec would change the hash of every run that declares one, so
+    # a refit would supersede a row and then not be the row it claimed to be.
+    supersedes: str | None = None
 
     @property
     def identity(self) -> str:
@@ -136,7 +176,7 @@ class ResolvedCausalRequest:
         runner = getattr(module, "run_resolved_causal_request", None)
         if runner is None:
             raise NotImplementedError(f"{self.method!r} has no shared causal runner")
-        result = runner(self.study, self.spec, self._context)
+        result = runner(self.study, self.spec, self._context, supersedes=self.supersedes)
         if not isinstance(result, CausalResult):
             raise TypeError(
                 f"{self.method!r} runner returned {type(result).__name__}, not CausalResult"
@@ -153,6 +193,7 @@ class CausalRequest:
     overrides: dict[str, Any]
     execution_tier: ExecutionTier
     preview_reductions: dict[str, Any]
+    supersedes: str | None = None
 
     @classmethod
     def from_request(cls, study: Study, request: dict[str, Any]) -> CausalRequest:
@@ -163,6 +204,7 @@ class CausalRequest:
             "overrides",
             "execution_tier",
             "preview_reductions",
+            "supersedes",
         }
         unknown = set(request) - supported
         if unknown:
@@ -188,6 +230,7 @@ class CausalRequest:
             overrides=dict(request.get("overrides") or {}),
             execution_tier=tier,
             preview_reductions=reductions,
+            supersedes=(str(request["supersedes"]) if request.get("supersedes") else None),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -199,6 +242,8 @@ class CausalRequest:
             "execution_tier": self.execution_tier.value,
             "preview_reductions": dict(self.preview_reductions),
         }
+        # `supersedes` is absent on purpose: this dict is what the resolver turns into
+        # the spec, and the spec is hashed.
 
     def resolve(self) -> ResolvedCausalRequest:
         module = get_adapter("causal", self.method)
@@ -212,7 +257,7 @@ class CausalRequest:
             raise ValueError("causal resolver did not produce the resolved-spec schema")
         if spec.get("execution_tier") != self.execution_tier.value:
             raise ValueError("causal resolver changed the execution tier")
-        return ResolvedCausalRequest(self.study, self.method, spec, context)
+        return ResolvedCausalRequest(self.study, self.method, spec, context, self.supersedes)
 
     def run(self) -> CausalResult:
         return self.resolve().run()
