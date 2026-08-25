@@ -106,7 +106,10 @@ configs = load_model_configs(
     labels=labels,
     config_names=CONFIG_NAMES or None,
 )
-configs
+# `model_class` is empty for every row: the TabM presets under `case_studies/config/tabm/`
+# declare their architecture in `params` and carry no `model_class` key, the way the LightGBM
+# presets do not either. Showing the column would put a blank field in front of the reader.
+configs.drop("model_class")
 
 # %% [markdown]
 # The three configurations differ on one axis, capacity, in two places at once: the width of each
