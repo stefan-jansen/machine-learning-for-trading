@@ -17,6 +17,15 @@ production extract; the reduced one CI runs the pipeline against carries 23 name
 assertion on the count inside a notebook fails there for being small rather than for being wrong -
 which is exactly what it did, taking three notebooks red. A declaration about the dataset belongs
 in a test over the dataset, and this file skips when that dataset is absent.
+
+Moving the count out of the notebooks did not put it anywhere that runs, though. Three of these
+tests assert an **absolute** property of the production extract - 633 names, and a share extract
+wider than the roster - and `ml4t/third-edition-test-data` is the same reduced 23-name extract, so
+they fail there for the same reason the notebooks did. They carry `@pytest.mark.production_extract`
+and CI deselects them; they are verified locally against the real data and nowhere else. The other
+four assert *relations* that hold on any extract - every roster name has bars, a narrowed window
+holds fewer names than the declaration, the roster is not read off the requested window - and those
+are the ones a CI job can actually gate.
 """
 
 import ast
@@ -71,6 +80,7 @@ def bars(populated_data_dir):
     return _or_skip(load_sp500_daily_bars, "sp500 daily bars")
 
 
+@pytest.mark.production_extract
 def test_the_unbounded_roster_is_the_declared_universe(surface, declared_n_assets):
     """What `n_assets` claims is what the surface extract holds."""
     roster = set(surface["symbol"].unique().to_list())
@@ -83,6 +93,7 @@ def test_every_roster_name_has_share_bars(surface, bars):
     assert not roster - set(bars["symbol"].unique().to_list())
 
 
+@pytest.mark.production_extract
 def test_the_bars_carry_names_the_universe_does_not(surface, bars):
     """The direction the original guard did not check.
 
@@ -112,6 +123,7 @@ def test_a_narrowed_window_holds_fewer_names_than_the_declaration(
     assert 0 < windowed < declared_n_assets
 
 
+@pytest.mark.production_extract
 @pytest.mark.parametrize(
     ("start", "end"), [("2020-01-01", "2020-12-31"), ("2017-01-01", "2021-12-31")]
 )

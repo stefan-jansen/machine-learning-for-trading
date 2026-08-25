@@ -117,3 +117,67 @@ def test_no_entry_is_both_ignored_and_deselected() -> None:
         f"{overlapping}. The ignore wins. Drop one of the two so the list says what "
         "is actually excluded."
     )
+
+
+def _modelling_environment_block() -> list[str]:
+    """The entries under the "needs the modelling environment" heading.
+
+    Sections in the quarantine file are separated by full-width `# ---` rules, so a
+    heading owns every entry until the next one.
+    """
+    # Only a comment run opened by a full-width `# ---` rule is a section heading;
+    # the shorter runs are per-entry annotations, which sit inside a section and must
+    # not close it. Everything after a heading belongs to it until the next heading.
+    block: list[str] = []
+    heading: list[str] | None = None
+    mine = False
+    for line in RAW_LINES:
+        if line.startswith("# ---"):
+            # The rule is drawn both above and below a heading. The second one must
+            # not wipe the text collected between them.
+            if heading is None:
+                heading = []
+            continue
+        if line.startswith("#"):
+            if heading is not None:
+                heading.append(line)
+            continue
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        if heading is not None:
+            mine = any("modelling environment" in h for h in heading)
+            heading = None
+        if mine:
+            block.append(entry)
+    return block
+
+
+def test_the_image_job_runs_exactly_what_is_quarantined_for_it() -> None:
+    """The two lists are one decision written in two files, so they have to agree.
+
+    Excluding a file here moves it to `test-unit-image`. Nothing makes that true
+    except the job naming the same file, and a file dropped from one side is
+    invisible from the other: removed from the job it silently runs nowhere, and
+    removed from here it goes red in test-unit for want of torch. That is the same
+    exclude-more-than-you-meant failure this whole file exists to catch.
+    """
+    quarantined = set(_modelling_environment_block())
+    assert quarantined, "the modelling-environment section of the quarantine file is empty"
+
+    workflow = (REPO_ROOT / ".github/workflows/test.yml").read_text()
+    _, _, after = workflow.partition("  test-unit-image:")
+    job, _, _ = after.partition("\n  test-chapters:")
+    assert job, "no test-unit-image job in .github/workflows/test.yml"
+    in_job = {
+        token
+        for line in job.splitlines()
+        for token in [line.strip().rstrip("\\").strip()]
+        if token.startswith("tests/") and token.endswith(".py")
+    }
+
+    assert quarantined == in_job, (
+        "the quarantine's modelling-environment section and the test-unit-image job "
+        f"disagree.\n  quarantined but not run by the job: {sorted(quarantined - in_job)}"
+        f"\n  run by the job but not quarantined: {sorted(in_job - quarantined)}"
+    )

@@ -16,11 +16,20 @@
 # this job does not have, or name the defect and who owns it.
 
 # ---------------------------------------------------------------------------
-# Needs torch. `case_studies/utils/gbm.py` imports torch at module scope, so
-# the LightGBM files are behind this boundary too even though LightGBM itself
-# is a small wheel. Installing torch would turn a per-commit gate into a
-# multi-GB one; these belong in a job that runs the reader's Docker image,
-# which is where the environment already exists. 25 files.
+# Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
+# 26 files, 392 tests, 3m21s.
+#
+# `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
+# files are behind this boundary too even though LightGBM itself is a small
+# wheel. The multi-GB estimate this block used to carry is right, and it is not
+# torch that makes it so: importing all 26 pulls 110 distributions, because
+# ml4t-models brings shap, numba and xarray, and three files bring darts with
+# pytorch-lightning, transformers and triton behind it. A CPU torch wheel is
+# 184 MB and would not reach any of them.
+#
+# These stay excluded from THIS job's sweep, which has the fast dependency set.
+# The exclusion no longer means unrun: until 2026-08-24 the image job named here
+# did not exist, so it did.
 # ---------------------------------------------------------------------------
 tests/test_crypto_modeling_lineage.py
 tests/test_cv_cached_results.py
