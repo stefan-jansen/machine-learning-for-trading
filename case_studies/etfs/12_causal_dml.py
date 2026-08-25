@@ -250,17 +250,23 @@ print(format_dml_summary(results))
 
 # %% [markdown]
 # **ETF Momentum - Interpretation**: The full-development DML estimate is
-# +0.0045 with a Driscoll-Kraay standard error of 0.0127 (p=0.722). Its
+# +0.0104 with a Driscoll-Kraay standard error of 0.0118 (t=0.88, p=0.378). Its
 # confidence interval spans economically meaningful positive and negative
 # values, so the data do not identify a momentum effect after controlling for
-# volatility, regime, and yield-curve slope. Naive OLS is slightly negative
-# (-0.0031), while orthogonalization changes the point estimate's sign; neither
-# point estimate supports a directional conclusion.
+# volatility, regime, and yield-curve slope. Naive OLS is negative (-0.0093),
+# while orthogonalization changes the point estimate's sign; neither point
+# estimate supports a directional conclusion.
 #
-# Entity-aware within-symbol temporal block permutation also fails to distinguish the observed
-# estimate from placebo assignments (empirical p=0.72). The two diagnostics
-# agree on a null result. This is a development-stage stability analysis; the
-# ETF holdout remains sealed.
+# Entity-aware within-symbol temporal block permutation does separate the observed
+# estimate from placebo assignments (empirical p=0.0495, z=1.48 against 100
+# placebos), which the 5 % rule labels "Passes" - by 0.0005, on a p-value floored at
+# 1/101 by the plus-one correction. The two diagnostics disagree. A
+# placebo distribution this much narrower than the Driscoll-Kraay standard error
+# means the permutation is not reproducing all of the cross-sectional and serial
+# dependence that covariance corrects for, so its p-value is the less
+# conservative of the two. Read against the Driscoll-Kraay p-value, there is no
+# effect to report. This is a development-stage stability analysis; the ETF
+# holdout remains sealed.
 
 # %% [markdown]
 # ## 4. Statistical Assessment
@@ -283,7 +289,13 @@ p_value = results["p_value_hac"]
 
 ref = results.get("refutation", {})
 p_value_perm = ref.get("empirical_p", 1.0)
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
+# The draw count goes with the p-value. `classify_refutation` accepts a bare p-value and
+# answers Passes or Fails, and that two-way answer is wrong whenever the plus-one
+# correction floors the smallest reachable p-value at or above 5 %: at nineteen successful
+# placebos or fewer, "Fails" is what the rule prints whatever the data did. With the
+# hundred declared here the third answer cannot arise, which is exactly why passing the
+# count costs nothing and why a run reduced to fewer draws must not silently start lying.
+ref_class = ref.get("refutation_class", classify_refutation(p_value_perm, ref.get("n_successful")))
 
 print("Statistical significance:")
 print(f"  p-value (HAC): {p_value:.4f}")
@@ -399,6 +411,7 @@ register_causal_run(
     seed=RANDOM_SEED,
     horizon=EMBARGO_PERIODS,
     max_samples=MAX_SAMPLES,
+    max_symbols=MAX_SYMBOLS,
     development_end=DEVELOPMENT_END.date().isoformat(),
     notebook="12_causal_dml",
 )
@@ -406,20 +419,24 @@ register_causal_run(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **No stable directional effect**: After orthogonalizing for volatility
+# 1. **No effect distinguishable from zero**: After orthogonalizing for volatility
 #    (21d, 126d), regime, and yield-curve slope, the skip-recent momentum effect
-#    on 21-day ETF returns is +0.0045 per unit (Driscoll-Kraay SE 0.0127,
-#    t≈0.36, p=0.722). The confidence interval includes zero.
+#    on 21-day ETF returns is +0.0104 per unit across 312,073 rows on 3,527
+#    decision dates (Driscoll-Kraay SE 0.0118, t≈0.88, p=0.378). The confidence
+#    interval includes zero.
 #
-# 2. **The sign is not robust to adjustment**: Naive OLS gives -0.0031, while
-#    the orthogonalized estimate is slightly positive. With both effects close
-#    to zero, the sign change is evidence against a directional interpretation,
-#    not evidence for a positive effect.
+# 2. **The sign is not robust to adjustment**: Naive OLS gives -0.0093, while
+#    the orthogonalized estimate is positive. With both effects close to zero,
+#    the sign change is evidence against a directional interpretation, not
+#    evidence for a positive effect.
 #
-# 3. **HAC and refutation agree**: Entity-aware within-symbol temporal block permutation gives
-#    empirical p=0.72, so the observed estimate is typical of placebo
-#    assignments. Both tests support the corrected null conclusion, and the
-#    untouched holdout is not consulted.
+# 3. **HAC and refutation disagree**: Entity-aware within-symbol temporal block
+#    permutation puts the observed estimate at z=1.48 against 100 placebos
+#    (empirical p=0.0495), while the Driscoll-Kraay p-value on the same estimate
+#    is 0.378. The permutation holds less dependence than the covariance
+#    estimator corrects for, so its narrower placebo distribution overstates the
+#    evidence; the conservative reading stands, and the untouched holdout is not
+#    consulted.
 #
 # **Next**: [`14_backtest`](14_backtest.ipynb) translates the registered validation candidates into
 # strategy backtests and tests whether predictive rank correlation survives portfolio construction.

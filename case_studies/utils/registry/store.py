@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .specs import _validate_spec, canonical_json, training_hash_from_spec
+from .specs import (
+    IDENTITY_VERSION,
+    _validate_spec,
+    canonical_json,
+    training_hash_from_spec,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -154,6 +159,13 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     started_at       TEXT,
     elapsed_s        REAL,
     git_commit       TEXT,
+    -- The causal identity this run retires, mirroring official_populations. A causal
+    -- refit produces a second canonical identity for the same label, and without a
+    -- declared chain CausalResult.one sees two and refuses forever - there is no
+    -- recency rule to fall back on, and there should not be one in a registry that is
+    -- otherwise entirely spec-addressed. Declared by a person through the notebook's
+    -- SUPERSEDES_CAUSAL parameter, never inferred from created_at.
+    supersedes_hash  TEXT REFERENCES causal_runs(causal_hash),
     created_at       TEXT NOT NULL
 );
 
@@ -579,6 +591,61 @@ def _table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     return column in {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def current_causal_identities(
+    db, *, label: str, tier: str = "canonical", exclude: str | None = None
+) -> list[str]:
+    """The causal identities a reader would currently resolve for *label*.
+
+    A row is current when its spec carries the current ``identity_version``, its
+    ``execution_tier`` is the one asked for, and no other row declares that it
+    supersedes it.
+
+    This lives here, and not beside either caller, because it has to be one derivation.
+    ``CausalResult.one`` decides what a reader resolves and ``register_causal_run``
+    decides what may be written; if those two sets differ, a registration is refused
+    for an ambiguity the reader never sees, or permitted into one it cannot resolve.
+    The first draft duplicated the logic and the copies disagreed within the hour -
+    one counted every SUPPORTED_IDENTITY_VERSION, the other only the current one, so a
+    legacy row made the first v3 registration for its label impossible to satisfy.
+    The reader's rule is the authority, because it is the one a person hits.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    supersedes_column = (
+        "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
+    )
+    rows = db.execute(
+        f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
+        "WHERE label = ? ORDER BY causal_hash",
+        (label,),
+    ).fetchall()
+    retired = {row[2] for row in rows if row[2]}
+    current = []
+    for causal_hash, spec_json, _ in rows:
+        spec = json.loads(spec_json or "{}")
+        if spec.get("identity_version") != IDENTITY_VERSION:
+            continue
+        if str(spec.get("execution_tier", tier)) != tier:
+            continue
+        if causal_hash in retired or causal_hash == exclude:
+            continue
+        current.append(causal_hash)
+    return current
+
+
+def causal_identities_retired(db, *, label: str) -> set[str]:
+    """Every causal hash some other row declares it supersedes."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    if "supersedes_hash" not in columns:
+        return set()
+    return {
+        row[0]
+        for row in db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE label = ? AND supersedes_hash IS NOT NULL",
+            (label,),
+        ).fetchall()
+    }
+
+
 def _migrate_registry(db: sqlite3.Connection) -> None:
     """Apply incremental schema migrations to an existing registry."""
     # Check if backtest_runs table exists at all
@@ -659,6 +726,12 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "causal_runs", "refutation_n_successful"
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
+
+    # Additive, and it costs no recompute: _causal_source_identity hashes
+    # case_studies/utils/causal.py and nothing else, so a column outside the spec
+    # moves no causal_hash and invalidates no registered row.
+    if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

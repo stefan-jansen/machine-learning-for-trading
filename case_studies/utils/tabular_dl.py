@@ -46,6 +46,7 @@ from sklearn.preprocessing import StandardScaler
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.registry import clear_prediction_sets, compute_fold_metrics_from_predictions
+from case_studies.utils.runtime import cpu_seconds
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
@@ -722,6 +723,41 @@ def _record_tabm_runtime(train_dir: Path, result: dict[str, Any], config_name: s
     runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 
 
+def _record_tabm_training_runtime(
+    study: Study,
+    training,
+    *,
+    elapsed_s: float,
+    cpu_s: float,
+    preparation_s: float | None = None,
+) -> None:
+    """Record what this TabM run cost, against its registry row.
+
+    ``_record_tabm_runtime`` above writes the same seconds into the run's ``runtime.json``, which
+    is the artifact compared byte for byte when the same identity is registered again. Nothing
+    queries that file. ``training_runs.elapsed_s`` is the column
+    ``reference/case-study-runtimes.md`` is built from, and it was NULL on every TabM row the
+    fleet had ever registered, so a run could be timed and still leave the next agent nothing to
+    cost the family from.
+
+    Only the fitting path calls this. A run served from the registry has no fit cost to record,
+    and writing one would overwrite the measurement its original fit left behind.
+    """
+    from case_studies.utils.registry.registration import record_training_runtime
+    from case_studies.utils.runtime import resource_measurement
+
+    record_training_runtime(
+        study.case_study,
+        training.hash,
+        case_dir=training.root,
+        measured=resource_measurement(
+            elapsed_s=elapsed_s,
+            cpu_s=cpu_s,
+            fold_preparation_s=preparation_s,
+        ),
+    )
+
+
 def _persist_tabm_diagnostics(train_dir: Path, result: dict[str, Any], candidate_key: str) -> None:
     diagnostics_dir = train_dir / "diagnostics"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -1283,6 +1319,8 @@ def _run_tabm_compatible_group(study: Study, items):
         execution_diagnostics = result["execution_diagnostics"]
         preparation_elapsed_s = float(execution_diagnostics["base_fold_preparation_s"])
         fit_elapsed_by_candidate = execution_diagnostics["candidate_fit_s"]
+        fit_cpu_by_candidate = execution_diagnostics.get("candidate_fit_cpu_s", {})
+        fit_folds_by_candidate = execution_diagnostics.get("candidate_fitted_folds", {})
         measured_s = preparation_elapsed_s + sum(
             float(value) for value in fit_elapsed_by_candidate.values()
         )
@@ -1308,6 +1346,21 @@ def _run_tabm_compatible_group(study: Study, items):
                 candidate.attempt = None
                 continue
             _record_tabm_runtime(train_dir, result, candidate_key)
+            # A candidate whose every fold was replayed from persisted state fitted nothing,
+            # so its fit seconds are 0.0 - not a measurement of a very fast run. The gate
+            # skips reused rows, so a zero written here reaches
+            # `reference/case-study-runtimes.md` unchallenged and prices the next run at
+            # nothing. Leaving `elapsed_s` NULL keeps the original fit's measurement as the
+            # only thing that column ever holds, the same rule the latent and cached paths
+            # follow.
+            if int(fit_folds_by_candidate.get(candidate_key, 0)) > 0:
+                _record_tabm_training_runtime(
+                    study,
+                    training,
+                    elapsed_s=float(fit_elapsed_by_candidate[candidate_key]),
+                    cpu_s=float(fit_cpu_by_candidate.get(candidate_key, 0.0)),
+                    preparation_s=preparation_elapsed_s,
+                )
             _persist_tabm_diagnostics(train_dir, result, candidate_key)
             predictions = _publish_tabm_predictions(
                 study,
@@ -2578,6 +2631,8 @@ def run_tabm_cv(
             "available": True,
             "config": cfg,
             "elapsed_s": 0.0,
+            "cpu_s": 0.0,
+            "fitted_folds": 0,
             "error": None,
             "fold_checkpoint_ics": {},
             "prediction_frames": [],
@@ -2630,6 +2685,7 @@ def run_tabm_cv(
             cfg_checkpoint = cfg.get("checkpoint_interval", 25)
             is_tabpfn = artifact_name.startswith("tabpfn")
             fold_t0 = time.perf_counter()
+            fold_cpu0 = cpu_seconds()
             seed_everything(seed + fd["fold"])
             fold_prediction_frame = None
             fold_training_record = None
@@ -2862,6 +2918,8 @@ def run_tabm_cv(
                     print(f"    Fold {fd['fold']}: {artifact_name} persistence failed: {error}")
                     continue
             state["elapsed_s"] += time.perf_counter() - fold_t0
+            state["cpu_s"] += cpu_seconds() - fold_cpu0
+            state["fitted_folds"] += 1
         del fd
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -3061,6 +3119,12 @@ def run_tabm_cv(
         "base_fold_preparations": preparation_count,
         "candidate_fit_s": {
             candidate_key: float(state["elapsed_s"]) for candidate_key, state in states.items()
+        },
+        "candidate_fit_cpu_s": {
+            candidate_key: float(state["cpu_s"]) for candidate_key, state in states.items()
+        },
+        "candidate_fitted_folds": {
+            candidate_key: int(state["fitted_folds"]) for candidate_key, state in states.items()
         },
     }
     if not config_results:

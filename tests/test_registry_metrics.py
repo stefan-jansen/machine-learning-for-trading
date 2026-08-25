@@ -514,13 +514,14 @@ def test_load_daily_metrics_series_normalises_a_legacy_nan(tmp_path, monkeypatch
     assert loaded.drop_nulls("ic")["ic"].mean() == pytest.approx(-0.1)
 
 
-def test_plot_rolling_daily_ic_ignores_an_undefined_date() -> None:
+def test_plot_rolling_daily_ic_ignores_an_undefined_date(monkeypatch) -> None:
     """One NaN day must not blank out a whole window of the rolling-mean line."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    from case_studies.utils import model_viz as model_viz_module
     from case_studies.utils.model_viz import plot_rolling_daily_ic
 
     window = 20
@@ -529,12 +530,21 @@ def test_plot_rolling_daily_ic_ignores_an_undefined_date() -> None:
     ic[10] = float("nan")
     frame = pl.DataFrame({"date": dates, "ic": ic, "n_obs": [12] * len(dates)})
 
+    # `plot_rolling_daily_ic` hands its figure to `show_with_alt`, which closes it.
+    # Reading `plt.gcf()` afterwards therefore gets a fresh, empty figure and the
+    # search below finds no lines at all - the test asserted nothing about the
+    # rolling mean and failed on an IndexError instead. Capture the figure at the
+    # hand-off, which is the only point where it still has its artists.
+    captured: list = []
+    monkeypatch.setattr(model_viz_module, "show_with_alt", lambda fig, alt: captured.append(fig))
+
     plt.close("all")
     plot_rolling_daily_ic(frame, window=window, label="test")
 
+    (fig,) = captured
     (line,) = [
         artist
-        for artist in plt.gcf().axes[0].get_lines()
+        for artist in fig.axes[0].get_lines()
         if artist.get_label().startswith("Rolling mean")
     ]
     ydata = np.asarray(line.get_ydata(), dtype=float)
