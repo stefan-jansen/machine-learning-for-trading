@@ -32,8 +32,8 @@
 #   strategy specification rather than selecting on holdout performance.
 # - Quantify implementation friction with a micro-cap-realistic extended
 #   cost grid driven by the illiquidity profile of selected stocks.
-# - Distinguish a `straddles_zero` decay (CI includes 0 but is wide because
-#   of a 12-period holdout) from `excludes_zero_strong` evidence.
+# - Distinguish a decay whose CI includes zero because the effect is absent
+#   from one whose CI includes zero because a one-year holdout is short.
 #
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
@@ -128,12 +128,14 @@ from utils.paths import display_path, get_case_study_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, add_message_title, ml4t_diverging
 
-# %%
-MAX_SYMBOLS = 0
+# %% tags=["parameters"]
+# Papermill overrides names in this cell and nowhere else. Without it the notebook
+# cannot be run at reduced scale through the same runner production uses, which is
+# what the pre-production preview requires.
+CASE_STUDY = "us_firm_characteristics"
 SEED = 42
 
 # %%
-CASE_STUDY = "us_firm_characteristics"
 PRIMARY_LABEL = "fwd_ret_1m"  # setup.yaml primary; benchmark series keyed here
 PERIODS_PER_YEAR = 12  # monthly cadence
 CASE_DIR = get_case_study_dir(CASE_STUDY)
@@ -172,11 +174,13 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %% [markdown]
 # ## §1 Handoff from model analysis
 #
-# The strategy phase inherits a single rank-1 model from
-# `10_model_analysis.py` §8. The selected backtest trains on the
+# The strategy phase inherits one selected model from `10_model_analysis.py`
+# §8. That selection is what §3's deflated Sharpe and §6's holdout closure
+# are correcting for, so it is stated here rather than treated as settled.
+# The selected backtest trains on the
 # **winsorized continuous return label** `fwd_ret_1m_win` rather than the
-# setup-primary `fwd_ret_1m` - the registry's rank-1 by validation Sharpe
-# emerges from the variant. The winsorization clips the upper and lower
+# setup-primary `fwd_ret_1m` - the highest validation Sharpe in the registry
+# comes from the variant. The winsorization clips the upper and lower
 # 1% of cross-sectional monthly returns, dampening the influence of
 # extreme firm-month observations on the regression target. IC on the
 # prediction set is computed on continuous model scores against continuous
@@ -283,9 +287,10 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 
 
 # %% [markdown]
-# The holdout resolver requires an exact strategy-specification match. This
-# preserves the one-holdout rule and prevents an allocator from winning by
-# holdout performance.
+# The holdout resolver requires an exact strategy-specification match, so the
+# holdout run is determined by the validation carrier rather than chosen. Any
+# looser rule would let an allocator be picked on its holdout performance,
+# which spends the one holdout this case study has.
 
 
 # %%
@@ -339,10 +344,10 @@ print(
 # The IC table above reads as a continuous-score-vs-continuous-return
 # signal: HAC-adjusted CI status indicates whether the prediction edge
 # is `excludes_zero_strong` on the positive side. The strategy-side
-# translation of the prediction-stage IC depends critically on
-# cross-sectional concentration (top-K decile from ~2,500 stocks); §3
-# reports the selection-adjusted Sharpe under the sweep's k-variants
-# search.
+# translation of the prediction-stage IC depends on how concentrated the
+# book is: the same IC spread over a handful of names and over the whole
+# cross section produce different Sharpes. §3 reports the selection-adjusted
+# Sharpe under the sweep's k-variants search.
 #
 # **Kill conditions** are not encoded in `setup.yaml` for this CS. The
 # notebook evaluates two universal gates in §9: (i) the validation Sharpe
@@ -353,12 +358,12 @@ print(
 # %% [markdown]
 # ## §2 Search context, family comparison, and lineage waterfall
 #
-# The equal-weight baseline covers the full family x config x label grid.
-# The search-context table below summarizes the
-# distribution; the family-level breakdown then locates where the
-# rank-1's edge comes from within the sweep.
+# The equal-weight baseline covers the full family x config x label grid. The
+# search-context table below summarizes that distribution; the family-level
+# breakdown then locates the carrier within it, which is what makes the size
+# of the search visible rather than only its maximum.
 
-# %%
+# %% tags=["results"]
 ctx = explorer.search_context("signal")
 search_table = pl.DataFrame(
     [
@@ -438,20 +443,19 @@ ax.axvline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
 ax.set_yticks(y)
 ax.set_yticklabels(fams)
 ax.set_xlabel("Validation Sharpe")
-add_message_title(ax, "GBM leads the equal-weight baseline across model families")
+add_message_title(ax, "One family carries the upper tail of the baseline sweep")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
 fig.show()
 
 # %% [markdown]
-# Family medians span a range with the max-by-family markers locating each
-# family's best config. The equal-weight baseline's
-# positive-Sharpe rate (from the search-context table above) indicates
-# how broadly tradeable the cross-section is in this sweep; the rank-1
-# typically gets its edge as much from placement at a family's tail as
-# from a qualitative class advantage. The family-IQR overlap quantifies
-# how much of the rank-1's edge is family-driven vs config-tuning
-# driven.
+# Two statistics answer different questions here. The median says whether a
+# family's configurations were generally worth trading; the maximum says only
+# how far its luckiest draw reached, and it rises with the number of
+# configurations tried whether or not the family has an edge. Where the
+# families' interquartile ranges overlap, the carrier's margin is a matter of
+# where it sat within its own family's spread rather than of which family it
+# belongs to.
 
 # %%
 # The carrier lineage records all stages registered against the selected
@@ -466,7 +470,7 @@ for stage_name, info in lineage.items():
         ci_lo[stage_name] = row.get("sharpe_ci95_lo")
         ci_hi[stage_name] = row.get("sharpe_ci95_hi")
 
-print("Lineage stages present for rank-1 prediction:")
+print("Lineage stages present for the carrier prediction:")
 for s, info in lineage.items():
     lo, hi = ci_lo.get(s), ci_hi.get(s)
     print(f"  {s}: hash={info['backtest_hash']}, Sharpe={_fmt_ci(info['sharpe'], lo, hi)}")
@@ -483,11 +487,12 @@ if missing_stages:
 
 # %% [markdown]
 # The corrected conformal candidates start one fold later than the equal-weight
-# carrier. The comparison below therefore recomputes both alternatives on the
-# exact 99-month timestamp intersection rather than comparing their natural
-# registry windows.
+# carrier, so their registry windows are not the same length. Comparing the two
+# Sharpes as registered would credit the difference to the allocator when part
+# of it is the window. The comparison below recomputes both on the exact
+# timestamp intersection and raises if the two supports still differ.
 
-# %%
+# %% tags=["results"]
 with sqlite3.connect(str(_db)) as _con:
     strict_conformal_hashes = [
         row[0]
@@ -540,29 +545,29 @@ bars = ax.bar(
 ax.bar_label(bars, labels=[f"{value:.3f}" for value in stage_values], padding=4)
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.8)
 ax.set_xticks(x, stage_labels)
-ax.set_ylabel("Validation Sharpe on common 99-month support")
-add_message_title(ax, "Equal weighting narrowly leads corrected conformal sizing")
+ax.set_ylabel(f"Validation Sharpe on common {COMMON_SUPPORT_N}-month support")
+add_message_title(ax, "Equal weighting and conformal sizing land within a hair")
 fig.show()
 
 # %% [markdown]
-# The common-support comparison makes the calibration cost visible: corrected
-# conformal sizing reaches Sharpe 2.955, just below the equal-weight carrier's
-# 2.961 over the same 99 months. The difference is too small to support an
-# allocation claim, so the simpler equal-weight carrier remains rank-1. §5
-# reads the cost-sensitivity sweep as a friction floor across the broader
-# allocation cohort rather than as a transition on this exact lineage.
+# The two Sharpes above are separated by far less than the width of either
+# confidence interval, which is not enough to prefer the more complex
+# allocator. The carrier stays equal-weight, and that is a tie broken on
+# simplicity rather than a measured improvement. §5 reads the cost-sensitivity
+# sweep as a friction floor across the allocation cohort rather than as a
+# transition on this lineage.
 
 # %% [markdown]
 # ## §3 Headline performance with uncertainty
 #
-# The rank-1 specification is chosen on the common comparison window. The
-# metric table then reports the carrier's complete 110-month validation record
-# with block-bootstrap 95% CIs from `backtest_metrics`; the equity overlay
-# shows that full trajectory against the equal-weight universe benchmark. The
-# bootstrap block captures serial dependence and need not match the one-month
-# rebalance step.
+# The specification is chosen on the common comparison window, and the metric
+# table then reports the carrier's complete validation record with
+# block-bootstrap 95% CIs from `backtest_metrics`. Those two windows are not
+# the same length; the spec block above prints both so the reader can see by
+# how much. The bootstrap block length captures serial dependence in the
+# return series and is not required to match the one-month rebalance step.
 
-# %%
+# %% tags=["results"]
 full = load_backtest_metrics(CASE_STUDY, backtest_hash=TOP_HASH).row(0, named=True)
 
 with sqlite3.connect(str(_db)) as _con:
@@ -597,7 +602,7 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-print("Rank-1 equal-weight carrier (validation window):")
+print("Equal-weight carrier (validation window):")
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
@@ -618,7 +623,7 @@ def _row(metric: str, point: str, lo: str, hi: str, status: str) -> dict:
     return {"metric": metric, "point": point, "ci95_lo": lo, "ci95_hi": hi, "status": status}
 
 
-# %%
+# %% tags=["results"]
 metric_specs = [
     ("Sharpe", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"),
     ("Sortino", "sortino", "sortino_ci95_lo", "sortino_ci95_hi"),
@@ -651,7 +656,7 @@ headline_rows.extend(
     ]
 )
 headline = pl.DataFrame(headline_rows)
-print("Rank-1 headline metrics with 95% CIs:")
+print("Carrier headline metrics with 95% CIs:")
 print(headline)
 
 # %%
@@ -715,13 +720,13 @@ print(
 # overfitting from CSCV on the per-fold Sharpe matrix; §6's val→ho
 # closure provides the orthogonal out-of-sample check.
 #
-# The cumulative-return plot shows the validation trajectory against
-# the EW universe. The y-axis encodes the cumulative product of monthly
-# returns from the dollar-neutral long-short structure, and over 110
-# months compounding produces large theoretical end-points. The
-# headline annualized-return CI reflects that compounding scale, not a
-# directly tradeable rate; §5 puts the gross profile against realistic
-# implementation friction.
+# The cumulative-return plot shows the validation trajectory against the EW
+# universe. The y-axis is the cumulative product of monthly returns from the
+# dollar-neutral long-short structure, so across a decade of months it reaches
+# end-points that are arithmetic rather than attainable: they assume every
+# month's gain is reinvested at the same leverage with no capacity limit and
+# no borrow constraint. The headline annualized-return CI inherits that
+# assumption. §5 puts the gross profile against implementation friction.
 
 # %% [markdown]
 # ### Second benchmark: Fama-French market
@@ -756,7 +761,7 @@ ew_diag = compute_benchmark_diagnostics(
     PERIODS_PER_YEAR,
 )
 
-# %%
+# %% tags=["results"]
 benchmark_table = pl.DataFrame(
     [
         {
@@ -783,14 +788,14 @@ print(benchmark_table)
 # %% [markdown]
 # ### Sub-period decomposition (5-year buckets)
 #
-# Pooled validation Sharpe averages over ~9 years of monthly
-# observations; the realized number can be anchored by a small number
-# of years rather than evenly distributed. The buckets below decompose
-# val into two ~5y windows plus the 12-month holdout. We resolve the
-# holdout through the unique complete-strategy-spec match within the
-# frozen training lineage - the same rule §6 uses for the paired closure.
+# A pooled Sharpe averages over the whole validation window, and an average
+# hides whether the return arrived steadily or in one stretch. The buckets
+# below split validation into two roughly five-year windows and place the
+# holdout beside them. The holdout is resolved through the unique
+# complete-strategy-spec match within the frozen training lineage, the same
+# rule §6 uses for the paired closure.
 
-# %%
+# %% tags=["results"]
 ho_panel = (
     pl.read_parquet(CASE_DIR / "run_log" / "backtest" / HO_HASH / "daily_returns.parquet")
     .sort("timestamp")
@@ -839,7 +844,7 @@ print(subperiod_table)
 # available in `backtest_fold_metrics`) localizes the realized Sharpe
 # across the CV folds.
 
-# %%
+# %% tags=["results"]
 strat_arr = aligned["strategy"].to_numpy()
 bench_arr = aligned["benchmark"].to_numpy()
 ts_arr = aligned["ts"].to_list()
@@ -886,13 +891,13 @@ else:
     print(fold_df.select("fold_id", "sharpe", "max_drawdown", "n_days"))
 
 # %% [markdown]
-# The validation-window max-drawdown CI quantifies the depth of the
-# worst peak-to-trough excursion over the 110 observed months; the lower
-# bound is a meaningful tail-risk read: if a worst case at the lower
-# bound were realized in deployment, depth would be materially deeper
-# than the point estimate. Annualized volatility reflects the
-# dollar-neutral leverage assumption; tail kurtosis and the tail ratio
-# characterize the symmetry of the realized return distribution.
+# Max drawdown is the worst peak-to-trough excursion the strategy actually
+# experienced, and its lower confidence bound is the one to plan against: it
+# is the depth a run of this length could plausibly have produced, so a
+# deployment sized to survive the point estimate but not the lower bound is
+# undercapitalized. Annualized volatility is stated under the dollar-neutral
+# leverage assumption; tail kurtosis and the tail ratio describe how
+# symmetric the realized distribution was.
 
 # %% [markdown]
 # ## §4b Inline diagnostic panels
@@ -995,7 +1000,7 @@ fig_tail.show()
 # layers cover the friction budget:
 #
 # 1. **Registry cost sweep** - the cost_sensitivity stage walked an
-#    11-level cost grid (0–50 bps per leg) on a base allocation lineage;
+#    11-level cost grid (0 to 50 bps per leg) on a base allocation lineage;
 #    the curve below shows how Sharpe responds to friction at the
 #    asset-class-realistic spread regime.
 # 2. **Micro-cap-realistic extended grid** - because both long and short
@@ -1099,11 +1104,11 @@ ax.axvspan(
 )
 ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation)")
-add_message_title(ax, "The validation edge survives the full 50-bps registry cost grid")
+add_message_title(ax, "The registry cost grid bends the Sharpe curve gently")
 ax.legend(loc="best", fontsize=8, frameon=False)
 fig.show()
 
-# %%
+# %% tags=["results"]
 crossing_rows = cost_curve.filter(pl.col("sharpe_ci_lo") > 0)
 if not crossing_rows.is_empty():
     breakeven = crossing_rows["cost_bps"].max()
@@ -1119,24 +1124,25 @@ print(
 print("See Chapter 18 for transaction-cost framework details.")
 
 # %% [markdown]
-# Across the protocol per-leg cost range (5-20 bps), the best-config
-# Sharpe stays strongly positive with the CI lower bound well above
-# zero. The slope is gentle: monthly cadence and a top-K = 50
-# concentration limit turnover, so cost erosion is a function of
-# round-trip cost × turnover rather than spread alone. This curve
-# answers the question "is this strategy robust to broker fees within
-# the asset-class-realistic spread regime?" The answer is yes across
-# the registry's tested range. The next sub-section
-# turns to the harder question: how much do the prices the strategy
-# actually trades at differ from the universe-mean spread?
+# The breakeven printed above is the per-leg cost at which the confidence
+# interval first touches zero, and it is the number this curve exists to
+# produce. What makes the slope gentle is turnover rather than the cost
+# assumption: a monthly rebalance into a fixed number of names replaces only
+# part of the book each period, and cost is paid on what changes hands, so
+# erosion scales with round-trip cost times turnover and not with the spread
+# alone.
+#
+# This curve answers whether broker fees at the asset-class-mean spread would
+# consume the edge. It cannot answer whether the strategy trades at that
+# spread, and the next sub-section shows that it does not.
 
 # %% [markdown]
 # ### Illiquidity profile of selected stocks
 #
-# The actual allocation weights identify the 50 long and 50 short
-# positions held each month. Joining those weights to the prepared
-# feature panel reveals the implemented portfolio's liquidity profile
-# without sorting on future realized returns.
+# The allocation weights say which names were actually held each month.
+# Joining them to the prepared feature panel describes the implemented book's
+# liquidity, and it does so without sorting on realized returns: the join key
+# is the position the strategy took, not what that position went on to earn.
 
 # %%
 _attr_returns_path = strat_returns_path
@@ -1171,7 +1177,7 @@ _selected = _weights.join(_features, on=["timestamp", "symbol"], how="inner", va
 if _selected.height != _weights.height:
     raise RuntimeError("Every realized portfolio weight must match one prepared feature row.")
 
-# %%
+# %% tags=["results"]
 _selected_long = _selected.with_columns(
     pl.when(pl.col("weight") > 0).then(pl.lit("Long")).otherwise(pl.lit("Short")).alias("segment")
 ).unpivot(index="segment", on=_liq_features, variable_name="feature", value_name="value")
@@ -1201,7 +1207,7 @@ for _offset, (_segment, _color) in enumerate(
 ax_liq.axhline(0, color=COLORS["slate"], linewidth=0.8)
 ax_liq.set_xticks(_x, _liq_features)
 ax_liq.set_ylabel("Mean rank-normalized feature")
-add_message_title(ax_liq, "Actual holdings reveal the carrier's liquidity profile")
+add_message_title(ax_liq, "The carrier holds smaller and harder-to-trade names")
 ax_liq.legend(frameon=False, ncol=3)
 fig_liq.show()
 
@@ -1215,12 +1221,11 @@ fig_liq.show()
 # ### Extended cost grid (micro-cap-realistic)
 #
 # Because the registry's cost_sensitivity stage caps at 50 bps per leg,
-# we extend the grid to capture micro-cap-realistic spreads, scaling
-# the rank-1's gross monthly returns by an explicit turnover × cost
-# product. This captures the Avramov, Cheng, and Metzker (2020)
-# critique materialized: ML profitability that looks strong at
-# universe-mean spreads can erode once economic restrictions of the
-# names actually selected are applied.
+# we extend the grid to micro-cap-realistic spreads, scaling the carrier's
+# gross monthly returns by an explicit turnover times cost product. This is
+# the Avramov, Cheng and Metzker (2020) critique applied to this case study:
+# machine-learning profitability measured at universe-mean spreads can erode
+# once the trading restrictions on the names actually selected are priced in.
 
 # %%
 _turnover_pcts = [0.10, 0.25, 0.50, 0.75, 1.00]
@@ -1265,7 +1270,7 @@ ax_ext.set_yticks(range(len(_turnover_pcts)))
 ax_ext.set_yticklabels([f"{t:.0%}" for t in _turnover_pcts])
 ax_ext.set_xlabel("One-way cost (bps)")
 ax_ext.set_ylabel("Monthly turnover")
-add_message_title(ax_ext, "High turnover and micro-cap costs can erase the edge")
+add_message_title(ax_ext, "Micro-cap costs bind before the universe-mean grid does")
 for i in range(len(_turnover_pcts)):
     for j in range(len(_cost_bps_extended)):
         val = _ext_heat.values[i, j]
@@ -1274,7 +1279,7 @@ for i in range(len(_turnover_pcts)):
 fig_ext.colorbar(im, ax=ax_ext, label="Sharpe (validation, post-friction)", shrink=0.8)
 fig_ext.show()
 
-# %%
+# %% tags=["results"]
 print("Extended turnover × cost sensitivity (Sharpe ratios):")
 pl.from_pandas(_ext_heat.reset_index())
 
@@ -1294,35 +1299,40 @@ for turnover in _turnover_pcts:
         )
 
 # %% [markdown]
-# The extended grid quantifies the binding constraint: the universe is
-# tradeable but the names actually selected can be expensive. At 50%
-# monthly turnover and 200 bps one-way cost, Sharpe falls to about 1.42;
-# at 500 bps it turns negative. These are scenarios, not cost estimates.
-# **Implementation framing**: this is not a kill condition under the §1
-# universal gates because the validation Sharpe CI lower bound is ≥ 0, but it is
-# the dominant capacity caveat. A practical deployment would either
-# restrict the universe to stocks above a liquidity threshold (which
-# would shrink the long-short spread) or accept the gross alpha as a
-# theoretical upper bound for what this feature set extracts. Chapter 18
-# develops the transaction-cost framework that translates this grid into
-# a deployment decision.
+# The grid above is a set of scenarios, not a cost estimate: nothing here
+# measures what this book would actually have paid. Each cell asks what the
+# Sharpe would have been at an assumed turnover and an assumed one-way cost,
+# and the reader supplies the assumption. Its use is to locate where the
+# result stops holding, which is a property of the strategy, rather than to
+# predict a number.
+#
+# Neither gate in §9 reads this grid, so nothing here changes the gate
+# outcome. It is a capacity caveat: a deployment could restrict the universe
+# to names above a liquidity threshold, which would also shrink the
+# long-short spread it is trying to capture, or treat the gross figure as an
+# upper bound on what this feature set extracts. Chapter 18 develops the
+# transaction-cost framework that turns this grid into a decision.
 
 # %% [markdown]
 # ## §6 Holdout closure with paired bootstrap
 #
-# The holdout window is calendar 2016: 12 monthly observations. With
-# only 12 periods, paired-bootstrap CIs are wide; the classification
-# this section produces is therefore as much about CI width as about
-# point-estimate magnitude. Two paired tests anchor the closure: (i) the
-# holdout backtest that uniquely matches the validation rank-1's complete
-# strategy spec within its training lineage versus the validation rank-1
-# itself ("did Sharpe carry?"), and (ii) the
-# holdout backtest versus the holdout-window equal-weight benchmark
-# ("did the strategy beat random in the holdout?").
+# The holdout is a single calendar year of monthly observations. That is few
+# enough that a paired-bootstrap interval will be wide whatever the effect is,
+# so a CI covering zero here says the window cannot resolve the difference and
+# does not say the difference is absent. Reading it the other way is the error
+# this section is arranged to prevent.
 #
-# Numbers come from `backtest_paired_metrics`, never from
-# val_sharpe minus holdout_sharpe arithmetic. The holdout mate is
-# the strict registered mate of the validation rank-1 carrier.
+# Two paired tests close the case study. The first compares the holdout
+# backtest that uniquely matches the carrier's complete strategy spec within
+# its training lineage against the carrier's own validation record: did the
+# Sharpe carry? The second compares that holdout backtest against the
+# holdout-window equal-weight benchmark: did selecting names do better than
+# holding the universe?
+#
+# Both numbers come from `backtest_paired_metrics`, which bootstraps the two
+# series jointly. Neither is validation Sharpe minus holdout Sharpe: that
+# difference has no interval, and the sampling error of the two windows does
+# not subtract.
 
 # %%
 print(f"Validation rank-1 hash:  {TOP_HASH}")
@@ -1387,7 +1397,7 @@ val_ho_rows = [
     ),
 ]
 
-# %%
+# %% tags=["results"]
 val_ho_rows.extend(
     [
         _diff_row(
@@ -1423,7 +1433,7 @@ print(
     "width reflects the 12-period truncated draw."
 )
 
-# %%
+# %% tags=["results"]
 ho_vs_ew = load_paired_metrics(
     CASE_STUDY,
     challenger_hash=HO_HASH,
@@ -1450,18 +1460,17 @@ print(
 print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
 
 # %% [markdown]
-# **Decay reading.** The holdout carrier reaches Sharpe 2.61, IC 0.061,
-# and max drawdown -5.2%. Its Sharpe is 0.12 below the complete validation
-# record, but the
-# paired 95% CI straddles zero because the holdout has only 12 months.
-# The point estimate therefore supports persistence, while the interval
-# does not establish a validation-to-holdout difference.
+# **Decay reading.** Read the two tables above in the same order the tests
+# were defined. The first row is the carrier against itself across the split:
+# a point estimate close to zero would mean the Sharpe carried, and the
+# interval says whether one year can tell. The second is the carrier against
+# the holdout-window equal-weight universe.
 #
-# **Strategy vs EW benchmark on holdout:** the diff-Sharpe CI against
-# the holdout-window EW universe answers whether the strategy beat
-# random selection on the held-out year. The strategy's 1.38 Sharpe
-# advantage has a wide interval that also straddles zero. Both paired
-# reads are uncertainty-limited rather than negative.
+# Where an interval covers zero on a window this short, the honest statement
+# is that the holdout did not resolve the comparison. It is not evidence that
+# the strategy decayed, and it is not evidence that it persisted. The status
+# column names which of those two situations each row is in, and neither of
+# them is a result about the strategy's edge.
 
 # %% [markdown]
 # ## §7 Benchmark-aware diagnostics
@@ -1473,7 +1482,7 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # benchmark to separate signal-driven factor exposure from
 # universe-driven exposure.
 
-# %%
+# %% tags=["results"]
 metrics = pa.compute_summary_stats()
 attr_df = pl.DataFrame(
     [
@@ -1491,11 +1500,12 @@ print(attr_df)
 # %% [markdown]
 # ### Layer 2 - FF5+MOM factor attribution
 #
-# Many of the 57 firm characteristics are themselves proxies for or
-# components of the FF5+MOM factors (book-to-market, operating
-# profitability, asset growth, momentum). The regression measures how
-# much of the carrier return those common factors span and whether a
-# residual remains beyond a passive factor portfolio.
+# Many of the firm characteristics in this feature set are themselves proxies
+# for, or components of, the FF5+MOM factors: book-to-market, operating
+# profitability, asset growth and momentum all appear on both sides. So a
+# model fitted on them may be reproducing a factor portfolio rather than
+# finding anything past one. The regression measures how much of the carrier's
+# return those common factors span, and whether a residual remains.
 
 # %%
 _factors = load_factor_data(start=_start, end=_end)
@@ -1537,7 +1547,7 @@ fig_attr.axes[0].set_ylim(top=3.1)
 fig_attr.axes[0].legend(loc="upper left", frameon=False)
 fig_attr.show()
 
-# %%
+# %% tags=["results"]
 _boot = compute_bootstrap_ci(
     _strategy_rets,
     _factors,
@@ -1633,26 +1643,24 @@ else:
     print("Prices parquet not found - placebo benchmark skipped.")
 
 # %% [markdown]
-# **Layer 1 / Layer 2 reading.** Information ratio against the EW
-# universe is positive in the validation window with the Layer-1
-# tracking-error read tightening the picture. The Layer-2 FF5+MOM
-# attribution explains about 20% of monthly return variation. HML and
-# momentum coefficients are significant at 5%, while the HML loading still
-# lies inside the random-portfolio interval; residual Sharpe exceeds the gross
-# figure. The placebo-benchmark
-# comparison answers whether the factor loadings are signal- or
-# universe-driven: any strategy beta that sits **outside** the random
-# 90% CI is selection-driven; a beta **inside** the CI reflects
-# universe composition more than ML stock picking. Together with §5's
-# extended cost grid, this is the deployment-relevant edge profile:
-# common factors do not explain away the result, while implementation
-# cost remains the binding concern.
+# **Layer 1 / Layer 2 reading.** The regression's R-squared says how much of
+# the monthly return variation the common factors span; what is left is the
+# residual the model would have to be earning if it is doing something the
+# factors do not.
+#
+# A significant loading is not by itself evidence of stock picking, which is
+# what the placebo comparison is for. Five hundred random dollar-neutral
+# portfolios drawn from the same universe inherit that universe's factor
+# tilts, so a strategy beta that falls **inside** their interval is telling
+# you about the universe rather than about the model. Only a beta **outside**
+# it is attributable to selection. Read each coefficient against its placebo
+# interval before reading it as a finding.
 
 # %% [markdown]
 # ## §8 Strategy tear sheet
 #
-# The diagnostic library renders the rank-1 lineage's tear sheet
-# directly from on-disk artifacts. This case study runs through the
+# The diagnostic library renders the carrier lineage's tear sheet directly
+# from on-disk artifacts. This case study runs through the
 # vectorized backtester, which emits `daily_returns.parquet`,
 # `weights.parquet`, and `spec.json` but **no** `trades.parquet`:
 # the source dataset (US firm characteristics) carries portfolio
@@ -1726,7 +1734,7 @@ else:
 # below stay strictly inside us_firm_characteristics; cross-case-study
 # comparison is Ch20's lane.
 
-# %%
+# %% tags=["results"]
 op_profile = pl.DataFrame(
     [
         {"property": "Carrier", "value": f"{RANK1_FAMILY}/{RANK1_CONFIG}/{RANK1_LABEL}"},
@@ -1749,7 +1757,7 @@ print(
 print(f"Info ratio (vs EW val): {_fmt_ci(getattr(metrics, 'information_ratio', None), None, None)}")
 print(f"Max drawdown: {val_full['max_drawdown']:.3f}")
 
-# %%
+# %% tags=["results"]
 gate1_status = gate1_validation_sharpe_geq_zero(val_full["sharpe_ci95_lo"])
 _gate1_phrase = {
     "pass": "≥ 0 (passes)",
@@ -1774,14 +1782,14 @@ print(f"  [{fmt_gate(gate2_status)}] Holdout strategy CI does not exclude zero n
 print(f"      {gate2_evidence}")
 
 # %% [markdown]
-# **What this analysis does not say.** The validation window covers
-# 110 monthly returns through 2015 on quarterly-updated firm
-# characteristics; the 2016 holdout is 12 monthly observations,
-# short enough that paired CIs span an order of magnitude. The
-# setup-primary label `fwd_ret_1m` is the EW benchmark and the
-# prose-reference label; the registered rank-1 trains on the
-# winsorized variant `fwd_ret_1m_win`, so the numerical conclusions
-# reported here pertain to that winsorized variant. The
+# **What this analysis does not say.** The validation window is monthly
+# returns on quarterly-updated firm characteristics, and the holdout is a
+# single calendar year - short enough that the paired intervals in §6 span an
+# order of magnitude, which is a limit of the window rather than a finding
+# about the strategy. The setup-primary label `fwd_ret_1m` is the EW benchmark
+# and the prose-reference label; the registered carrier trains on the
+# winsorized variant `fwd_ret_1m_win`, so every number here is about that
+# variant. The
 # winsorization clips the extreme tails of the regression target but
 # the strategy's executed positions are evaluated on un-winsorized
 # realized returns. The §5 micro-cap-realistic cost grid surfaces
@@ -1796,7 +1804,7 @@ print(f"      {gate2_evidence}")
 # %% [markdown]
 # **Forward pointer to Ch20.** This case study contributes the US
 # equity / monthly / cross-sectional-firm-characteristic datapoint to
-# Ch20 nb01's rank-1-Sharpe + holdout-decay aggregation; the §6 decay
+# Ch20 nb01's selected-Sharpe and holdout-decay aggregation; the §6 decay
 # magnitude and the §6 strategy-vs-EW holdout read feed Ch20 nb05's
 # decay-classification table; the §5 micro-cap-realistic cost grid
 # contributes the capacity-binding-constraint exemplar to Ch20 nb04's
