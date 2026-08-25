@@ -273,13 +273,22 @@ except (ValueError, sqlite3.OperationalError):
     # caught: a clean clone is the ordinary case here, not the exotic one.
     supersedes = None
 else:
-    # The declaration describes ONE generation: the one produced by superseding
-    # `declared_supersedes`. Offer it only when that is the generation in force, which is what
-    # makes the hash reproduce the tip rather than extend the chain past it. Asking merely
-    # whether any generation exists is not the same question, and gets the second run on a clean
-    # clone wrong: run 1 writes the first generation, whose own supersedes is None, and offering
-    # the hash again there would write a second generation the reader never asked for.
-    supersedes = declared_supersedes if current.supersedes == declared_supersedes else None
+    # A declared hash is good for exactly two things, and the two are what the notebook is for.
+    # `current.supersedes == declared` means the generation in force is the one this declaration
+    # produced, so offering it recomputes the tip - the re-run case. `current.hash == declared`
+    # means the declaration names the tip itself, so offering it publishes the next generation -
+    # the refit case. Anything else is withheld, and `create` then refuses and names the hash it
+    # requires, which is a better answer than this notebook guessing.
+    #
+    # Asking merely whether any generation exists is not the same question, and gets the second
+    # run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is
+    # None, and offering the hash again there writes a second generation nobody asked for.
+    # Testing only the first condition is also wrong, in the other direction: it withholds the
+    # hash from an author holding gen1 who declares gen1 to publish gen2, so the reader is fixed
+    # by making the publication impossible.
+    supersedes = (
+        declared_supersedes if declared_supersedes in (current.supersedes, current.hash) else None
+    )
 execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )

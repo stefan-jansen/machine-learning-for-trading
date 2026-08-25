@@ -1078,7 +1078,7 @@ def test_declared_supersedes_applies_only_to_the_generation_it_produces(tmp_path
             current = OfficialPopulation.one(study, name=name)
         except (ValueError, sqlite3.OperationalError):
             return None
-        return declared if current.supersedes == declared else None
+        return declared if declared in (current.supersedes, current.hash) else None
 
     # Run 1 on an empty registry: nothing to supersede, so the declaration is withheld.
     assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
@@ -1118,6 +1118,20 @@ def test_declared_supersedes_applies_only_to_the_generation_it_produces(tmp_path
 
     # And a declaration naming some other generation does not apply, so it cannot fork the chain.
     assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+
+    # The authoring case, which testing only `current.supersedes == declared` blocks. An author
+    # holding the tip and declaring THAT hash is publishing the next generation, not reproducing
+    # one, and withholding there would fix the reader by making the publication impossible.
+    tip = OfficialPopulation.one(study, name="gbm-declared-v1")
+    assert declared_for("gbm-declared-v1", tip.hash) == tip.hash
+    third = snapshot_official_models(
+        study,
+        [request(3.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", tip.hash),
+    )
+    assert third.hash != tip.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == third.hash
 
 
 def test_interrupted_linear_run_reuses_completed_fold_on_retry(tmp_path: Path, monkeypatch) -> None:
