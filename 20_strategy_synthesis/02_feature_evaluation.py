@@ -45,7 +45,7 @@ from IPython.display import Markdown, display
 
 warnings.filterwarnings("ignore")
 
-from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES
+from case_studies.utils.analytics import CASE_STUDY_IDS, SHORT_NAMES, load_triage_ledger
 from utils.paths import REPO_ROOT, get_chapter_dir
 from utils.style import show_with_alt
 
@@ -76,14 +76,7 @@ CS_LIST = CASE_STUDY_IDS[:MAX_CASE_STUDIES] if MAX_CASE_STUDIES else CASE_STUDY_
 
 
 # %%
-def _load_ledger(cs: str) -> pl.DataFrame | None:
-    p = REPO_ROOT / "case_studies" / cs / "evaluation" / "triage_ledger.parquet"
-    if not p.exists():
-        return None
-    return pl.read_parquet(p).with_columns(case_study=pl.lit(cs))
-
-
-ledgers = {cs: _load_ledger(cs) for cs in CS_LIST}
+ledgers = {cs: load_triage_ledger(cs) for cs in CS_LIST}
 available = [cs for cs, df in ledgers.items() if df is not None]
 missing = [cs for cs in CS_LIST if cs not in available]
 print(f"Loaded {len(available)}/{len(CS_LIST)} ledgers")
