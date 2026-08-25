@@ -38,11 +38,15 @@ _TEST_PRESET_PATCHES: dict[str, dict] = {
     # 1e-6 default (see tests/overrides.yaml's 11b_ipca entry for the
     # measured before/after). Regularizing is a conditioning fix, not a
     # bigger budget.
-    # No n_epochs or checkpoint_interval: IPCA is alternating least squares, not epoch
-    # training, and the adapter enforces that - `_resolve_model_configuration` raises
-    # "ipca checkpoint_interval must be 0" for anything else, which is what the shared
-    # presets declare. Patching an interval onto it made every migrated IPCA notebook fail
-    # in CI on a value production never uses.
+    #
+    # It carries no n_epochs or checkpoint_interval, and that asymmetry with the eight entries
+    # above is deliberate. IPCA is fitted by ALS once per fold and publishes a final checkpoint
+    # only, so it has no epochs to shorten and no interval to checkpoint on; `pca`, the other
+    # model of that shape, has no entry here at all. The two keys were present verbatim from the
+    # epoch-based neighbours and set checkpoint_interval to 1, which the latent-factor adapter
+    # rejects outright (latent_factors/adapter.py:236-239) because the value means nothing for
+    # these models - so every ipca run through that adapter failed at resolution. Do not restore
+    # them for symmetry with the block above.
     "ipca": {"factor_ridge": 1e-2, "gamma_ridge": 1e-2},
 }
 

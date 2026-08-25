@@ -314,7 +314,6 @@ def test_known_desynced_list_has_no_stale_entries() -> None:
 KNOWN_UNRENDERABLE = frozenset(
     {
         "case_studies/crypto_perps_funding/_archive/11_autoencoder.ipynb",
-        "case_studies/us_equities_panel/20_strategy_analysis.ipynb",
     }
 )
 

@@ -890,3 +890,38 @@ def test_tabm_selection_rejects_higher_ic_with_partial_decision_time_coverage(
     assert result["best_config_name"] == "full"
     assert result["grid_results"][0]["selectable"] is True
     assert result["grid_results"][1]["selectable"] is False
+
+
+def test_tabm_training_runtime_records_cores(monkeypatch):
+    """The TabM helper must hand the registry a core count, not just seconds.
+
+    `pre_run_gate.py` fails "the run reports how much of the machine it used"
+    when no training row carries `cores_used`, and that key appears only when
+    `cpu_s` accompanies `elapsed_s`. This helper omitted it, so no tabular_dl
+    row could clear the gate. The contract itself is held in
+    `test_training_runtime_records_cores.py`, which stays torch-free so it can
+    run in `test-unit`; this one lives here because it needs `tabular_dl`.
+    """
+    captured = {}
+
+    def _capture(case_study, training_hash, *, case_dir, measured):
+        captured.update(measured)
+
+    monkeypatch.setattr(
+        "case_studies.utils.registry.registration.record_training_runtime", _capture
+    )
+
+    class _Training:
+        hash = "abc123"
+        root = None
+
+    class _Study:
+        case_study = "etfs"
+
+    tabular_dl._record_tabm_training_runtime(
+        _Study(), _Training(), elapsed_s=100.0, cpu_s=350.0, preparation_s=4.0
+    )
+
+    assert captured["elapsed_s"] == 100.0
+    assert captured["cores_used"] == pytest.approx(3.5)
+    assert captured["fold_preparation_s"] == 4.0
