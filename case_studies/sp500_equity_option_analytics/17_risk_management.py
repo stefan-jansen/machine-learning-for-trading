@@ -389,10 +389,11 @@ def paired_overlay_metrics(row: dict) -> dict:
     )
     if aligned.is_empty():
         raise RuntimeError(f"Degenerate return pair for {row['risk_name']}")
-    # The shared inactive prefix is dropped inside `compute_paired_uncertainty`, over both
-    # series at once. Trimming it here per series is what broke this cell: an overlay sits out
-    # sessions its carrier trades, so the two sides arrived at different lengths and the paired
-    # bootstrap refused every one of them.
+    # The leading sessions on which neither side held a position are dropped inside
+    # `compute_paired_uncertainty`, over both series at once. Trimming per series is what broke
+    # this cell: an overlay sits out sessions its carrier trades, so the two sides arrived at
+    # different lengths and the paired bootstrap refused every one of them. A session the
+    # overlay sits out once trading has begun stays in - it is the effect being measured.
     paired = compute_paired_uncertainty(
         aligned["challenger_ret"],
         aligned["baseline_ret"],

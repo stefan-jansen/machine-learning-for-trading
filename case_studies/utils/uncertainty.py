@@ -420,9 +420,19 @@ def joint_returns(
     row the carrier keeps, and the two arrays part company. Joining on the timestamp
     beforehand does not save it either, because the per-side trim happens after.
 
-    So the same two decisions are taken once, over both series: keep a session only
-    where both sides are finite, and start at the first session where both are
-    non-zero. Returns two empty arrays when no such session exists.
+    So the same two decisions are taken once, over both series: keep a session only where
+    both sides are finite, and start at the first session where **either** side traded.
+
+    Either, not both. What the per-series trim removes is the bars before the first signal,
+    and for a pair the first signal is the first session on which anything held a position.
+    Starting where both are non-zero would instead delete the leading sessions where the
+    carrier traded and the overlay sat out - which is not a pre-sample artifact but the
+    largest instance of the effect the comparison exists to measure, and dropping it pulls
+    the measured difference toward zero in exactly the direction the overlay is being tested
+    for. An overlay flat for the whole sample therefore reports its full shortfall against
+    the carrier rather than reducing to an empty pair.
+
+    Returns two empty arrays only when no session has a finite value on both sides.
     """
     c = _as_return_array(challenger)
     b = _as_return_array(baseline)
@@ -434,10 +444,10 @@ def joint_returns(
     c, b = c[finite], b[finite]
     if c.size == 0:
         return c, b
-    both = np.flatnonzero((c != 0.0) & (b != 0.0))
-    if both.size == 0:
+    traded = np.flatnonzero((c != 0.0) | (b != 0.0))
+    if traded.size == 0:
         return c[:0], b[:0]
-    start = int(both[0])
+    start = int(traded[0])
     return c[start:], b[start:]
 
 
@@ -456,8 +466,8 @@ def compute_paired_uncertainty(
 
     The two series must arrive the same length and aligned by date, so that position ``i``
     is the same session on both sides; a pair that does not is refused with an empty mapping
-    rather than truncated. Which rows to drop - non-finite values, and the leading prefix
-    where neither side had a position - is then decided over both series at once by
+    rather than truncated. Which rows to drop - non-finite values, and the leading sessions
+    on which neither side held a position - is then decided over both series at once by
     :func:`joint_returns`, so a caller does not have to coerce them beforehand. Returns a
     flat dict for upsert into ``backtest_paired_metrics``, and an empty mapping when fewer
     than four sessions survive.
@@ -475,6 +485,7 @@ def compute_paired_uncertainty(
     # trims each series' own leading run of zeros, which is exactly what a risk overlay
     # produces - it sits out sessions its carrier trades - and the two arrays then part
     # company, so the size check above refused every overlay in `17_risk_management`.
+    # `joint_returns` drops only the leading sessions on which neither side traded.
     c, b = joint_returns(c_raw, b_raw)
     if c.size < 4:
         return {}

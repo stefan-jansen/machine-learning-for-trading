@@ -136,23 +136,48 @@ def test_an_overlay_that_sits_out_the_first_sessions_still_gets_a_paired_bootstr
     assert paired["sharpe_diff_ci95_lo"] <= paired["sharpe_diff"] <= paired["sharpe_diff_ci95_hi"]
 
 
-def test_a_paired_bootstrap_drops_only_the_prefix_where_neither_side_traded() -> None:
-    """The trim is the shared inactive prefix, not every session one side sat out.
+def test_a_paired_bootstrap_keeps_the_sessions_the_overlay_sat_out() -> None:
+    """Only the leading sessions on which NEITHER side traded are dropped.
 
-    An overlay that suppresses a session in the middle of the sample is exactly what the
-    comparison is measuring; dropping those rows would compare the overlay against a carrier it
-    never faced. Only the leading run where the pair has nothing to compare is removed.
+    A session the carrier traded and the overlay sat out is the largest instance of the effect
+    the comparison exists to measure, whether it falls at the start of the sample or in the
+    middle. Starting the sample where both sides are non-zero would delete exactly those rows
+    and pull the measured difference toward zero in the direction the overlay is being tested
+    for. The trim is the joint analogue of "bars before the first signal", so the sample starts
+    where anything first held a position.
     """
     from case_studies.utils.uncertainty import joint_returns
 
-    baseline = np.array([0.0, 0.0, 0.01, 0.02, 0.0, 0.03, -0.01])
-    challenger = np.array([0.0, 0.0, 0.01, 0.00, 0.0, 0.03, -0.02])
+    #                       both flat  | carrier only | both trade | overlay sits out
+    baseline = np.array([0.0, 0.0, 0.01, 0.02, 0.015, 0.03, -0.01])
+    challenger = np.array([0.0, 0.0, 0.00, 0.00, 0.012, 0.03, -0.02])
 
     c, b = joint_returns(challenger, baseline)
 
+    # Two leading sessions go; the two where only the carrier traded stay.
     assert c.size == b.size == 5
     np.testing.assert_allclose(b, baseline[2:])
     np.testing.assert_allclose(c, challenger[2:])
+
+
+def test_an_overlay_flat_for_the_whole_sample_is_compared_rather_than_refused() -> None:
+    """Holding nothing all sample is an answer about the overlay, not an absence of data.
+
+    Under a both-sides-traded start rule this pair has no starting session at all, so the
+    bootstrap returns an empty mapping and `17_risk_management` raises. The overlay did make a
+    decision on every one of these sessions; its return was zero. The difference is then the
+    carrier's own Sharpe, negated, over the sessions the carrier traded.
+    """
+    from case_studies.utils.uncertainty import _sample_stats, compute_paired_uncertainty
+
+    rng = np.random.default_rng(7)
+    baseline = rng.normal(0.0006, 0.01, size=50)
+    challenger = np.zeros(50)
+
+    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=2)
+
+    assert paired
+    assert paired["sharpe_diff"] == pytest.approx(-_sample_stats(baseline, 252).sharpe)
 
 
 def test_joint_returns_refuses_a_pair_that_did_not_arrive_aligned() -> None:
