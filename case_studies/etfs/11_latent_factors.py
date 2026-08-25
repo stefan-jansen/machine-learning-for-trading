@@ -65,7 +65,9 @@
 # [`05_evaluation`](05_evaluation.ipynb) for the walk-forward folds.
 #
 # **What it writes**: nothing. This notebook fits no model, registers no run and opens no holdout.
-# The five notebooks it points at each publish their own population, and
+# Of the five notebooks it points at, the four on the research boundary each publish their own
+# population; `11e_supervised_autoencoder` is still on the legacy runner and publishes none, which
+# section 3 reads out of the sources rather than asserting here.
 # [`13_model_analysis`](13_model_analysis.ipynb) is where they are compared against the other
 # families.
 
@@ -73,6 +75,7 @@
 """Index and coverage check for the ETF latent-factor family."""
 
 import ast
+import re
 from pathlib import Path
 
 import polars as pl
@@ -188,12 +191,42 @@ def declared_schedule(name: str) -> str:
 
 
 labels = declared_labels(study, "latent_factors")
+notebook_for = dict(zip(claims.get_column("config_name"), claims.get_column("notebook")))
+
+
+def published_population(name: str) -> str:
+    """Return the population name a member's notebook publishes, read from that notebook.
+
+    Assembling `etfs-{name}-validation-v1` here would name a population for every declared member,
+    including one whose notebook publishes none - a name the reader would look for in the registry
+    and not find. The default is read from the assignment that produces it instead.
+    """
+    source = (NOTEBOOK_DIR / f"{notebook_for[name]}.py").read_text()
+    if "run_model_population(" not in source:
+        return "none - legacy runner"
+    default = re.search(r'population_name = POPULATION_NAME or f"([^"]+)"', source)
+    if default is None:
+        raise ValueError(f"{notebook_for[name]}.py publishes a population under no readable name")
+    return default.group(1).replace("{MODEL_NAME}", name)
+
+
+def label_coverage(name: str) -> str:
+    """How many of the declared labels the member's notebook fits.
+
+    A migrated notebook resolves the declared menu and raises if a label it declared is missing, so
+    it fits all of them. The legacy runner takes one primary label and a variant cap instead, so
+    the count is not the menu's and is reported as what it is rather than as a number.
+    """
+    source = (NOTEBOOK_DIR / f"{notebook_for[name]}.py").read_text()
+    return str(len(labels)) if "run_model_population(" in source else "primary only"
+
+
 pl.DataFrame(
     {
         "config_name": sorted(declared_models),
-        "labels": [len(labels)] * len(declared_models),
+        "labels": [label_coverage(name) for name in sorted(declared_models)],
         "schedule declared": [declared_schedule(name) for name in sorted(declared_models)],
-        "population": [f"etfs-{name}-validation-v1" for name in sorted(declared_models)],
+        "population": [published_population(name) for name in sorted(declared_models)],
     }
 )
 

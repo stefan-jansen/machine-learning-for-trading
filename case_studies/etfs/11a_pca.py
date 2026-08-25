@@ -28,9 +28,9 @@
 # and each fund's exposure to them, and a forecast follows from the exposures rather than from a
 # feature row.
 #
-# **PCA is the member of that family that uses no features at all.** It takes the matrix of daily
-# returns over the training window, one column per fund, and finds the directions along which that
-# matrix varies most. `run_pca_fold` in
+# **PCA is the member of that family that uses no features at all.** It takes the matrix of the
+# forward returns it is asked to forecast over the training window, one column per fund, and finds
+# the directions along which that matrix varies most. `run_pca_fold` in
 # [`case_studies/utils/latent_factors/pca.py`](../utils/latent_factors/pca.py) deletes the
 # characteristic arrays on its first line: whatever `03_financial_features` and
 # `04_model_based_features` built, this estimator never sees it. That is the point of having it
@@ -105,10 +105,12 @@ study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or
 #
 # Every label whose training menu declares `latent_factors:` is fitted, and both do: `fwd_ret_21d`,
 # the total return over the 21 trading days after the decision date, and `fwd_ret_5d`, the same
-# thing over five. The estimator does not read the label at all - the factors come out of the
-# return panel - so what changes between the two rows below is only which forward return the
-# resulting ranking is scored against, and over how many validation dates. `LABELS` restricts the
-# run to a subset when you want one.
+# thing over five. The estimator reads none of the 71 feature columns, but it is not blind to the
+# label: the matrix it decomposes is filled from the request's own label column
+# ([`panel.py`](../utils/latent_factors/panel.py) line 140), so the two rows below are two separate
+# fits, each with its own loadings and premia, rather than one fit scored against two returns. What
+# changes between them is the panel as well as the scoring, and the number of validation dates.
+# `LABELS` restricts the run to a subset when you want one.
 
 # %%
 declared_labels(study, "latent_factors")
@@ -235,8 +237,8 @@ print(f"{len(requested_pairs)} label-configuration pairs")
 # `run_model_population` runs every resolved request. For one request it walks the folds, and on
 # each one:
 #
-# 1. takes the daily returns of the funds inside that fold's training window and arranges them as a
-#    matrix, one column per fund,
+# 1. takes that label's forward returns for the funds inside that fold's training window and
+#    arranges them as a matrix, one column per fund,
 # 2. subtracts each fund's own training-window mean and decomposes what is left, keeping the
 #    `n_factors` leading directions. Each fund gets a **loading** on each direction - a fixed
 #    number saying how much of that common movement it carries - and each training day gets a
@@ -255,12 +257,15 @@ print(f"{len(requested_pairs)} label-configuration pairs")
 # well defined - [`14_backtest`](14_backtest.ipynb) backtests this population, not whatever
 # predictions happen to be in the registry.
 #
-# `SUPERSEDES_POPULATION` names the population hash this run replaces, and is empty because this is
-# the first generation published under this name. A population is the set of prediction identities,
-# so anything that moves a training identity - a changed factor count as much as a changed label
-# menu - produces a different population under the same name, and the registry refuses to write it
-# without being told which snapshot it supersedes. A reduced-scale run passes it empty whatever the
-# default is: a population produced under a reduction is thrown away with the workspace it was
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed factor count as
+# much as a changed label menu - produces a different set under the same name, and the registry
+# refuses to write it without being told which snapshot it supersedes. It is empty here because
+# this notebook, run as it stands, reproduces the members already published under that name rather
+# than changing them, and reproducing a published list is not a replacement. Fill it in when you
+# have changed something that moves an identity and want the new set to take the name; the error
+# raised on the attempt tells you which hash to name. A reduced-scale run passes it empty whatever
+# the default is: a population produced under a reduction is thrown away with the workspace it was
 # written to, so it has no lineage to extend.
 
 # %%
@@ -462,7 +467,7 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 5. What to notice
 #
-# **The return panel on its own does not rank these funds.** On the primary label the mean
+# **The forward-return panel's own covariance structure does not rank these funds.** On the primary label the mean
 # validation IC is **-0.033**, and on the five-day variant **+0.010**. Neither is evidence of
 # skill, and the negative one is not an inverted signal either: the eight fold ICs behind it run
 # -0.076, -0.025, -0.003, +0.116, -0.104, +0.065, -0.182, -0.051, so the sign changes four times
@@ -492,7 +497,13 @@ show_plotly_with_alt(
 # [`13_model_analysis`](13_model_analysis.ipynb) is arranged to make with every family in front of
 # it.
 #
-# **Known limitations.** `n_factors` is declared rather than chosen, and nothing here tests whether
+# **Known limitations.** The matrix decomposed is the label's forward returns, and those overlap:
+# consecutive rows of the 21-day column share twenty of their twenty-one days. Much of the
+# covariance structure PCA finds is therefore that overlap rather than same-day co-movement, and
+# this is not the object a daily-return covariance matrix would be. It is the same target every
+# conditioned member of the family decomposes, which is what keeps the comparison in
+# [`11c_conditional_autoencoder`](11c_conditional_autoencoder.ipynb) a comparison about
+# conditioning rather than about the target. `n_factors` is declared rather than chosen, and nothing here tests whether
 # a different count would order the cross-section better - that would be a search, and a search
 # over validation IC is what this notebook is arranged to avoid. The number of funds in the panel
 # each fold decomposes falls from 94 in the first to 77 in the last, so the later folds are fitted

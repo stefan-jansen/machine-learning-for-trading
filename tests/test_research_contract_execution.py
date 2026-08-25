@@ -1134,3 +1134,52 @@ def test_prediction_retry_finishes_metrics_without_new_identity(
 
     assert finalized.hash == prediction_hash
     assert finalized.complete
+
+
+def test_reproducing_a_published_population_is_a_no_op_whatever_it_says_it_supersedes(
+    tmp_path: Path,
+) -> None:
+    """A notebook must be able to re-run itself. `supersedes` sits inside the hashed
+    snapshot as well as in its own column, so a second generation's hash depends on which
+    generation it replaced. The notebook that published it holds no record of that - all six
+    multi-generation ETF populations are produced by notebooks declaring
+    `SUPERSEDES_POPULATION = ""` - so re-running one recomputes the same members and a
+    different hash, and the name check rejects it as changed. Reproducing the published list
+    is not a change and must return the published snapshot."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    first = snapshot_official_models(study, [request(1.0)], population_name="pca-v1")
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="pca-v1", supersedes=first.hash
+    )
+    assert second.hash != first.hash
+
+    # The notebook re-run: same members as the published generation, and no predecessor to
+    # name, because the notebook never recorded one.
+    again = snapshot_official_models(study, [request(2.0)], population_name="pca-v1")
+
+    assert again.hash == second.hash
+    assert again.members == second.members
+    assert OfficialPopulation.one(study, name="pca-v1").hash == second.hash
+
+
+def test_a_member_list_that_actually_differs_still_needs_its_predecessor(tmp_path: Path) -> None:
+    """The relaxation above must not reach a list that changed. Publishing different members
+    under a live name without naming what they replace is what leaves a reader unable to tell
+    which snapshot a downstream result was computed over."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    snapshot_official_models(study, [request(1.0)], population_name="ipca-v1")
+
+    with pytest.raises(ValueError, match="supersedes"):
+        snapshot_official_models(study, [request(2.0)], population_name="ipca-v1")
