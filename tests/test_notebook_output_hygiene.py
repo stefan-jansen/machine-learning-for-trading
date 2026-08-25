@@ -23,6 +23,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -383,7 +385,7 @@ def test_known_unrenderable_list_has_no_stale_entries() -> None:
     )
 
 
-def test_an_untracked_notebook_is_not_committed_content(tmp_path_factory) -> None:
+def test_an_untracked_notebook_is_not_committed_content() -> None:
     """The four gates above say "committed", so an untracked file must not reach them.
 
     They used to walk the working tree, which meant a scratch or preserved copy in one
@@ -393,10 +395,17 @@ def test_an_untracked_notebook_is_not_committed_content(tmp_path_factory) -> Non
     under `.workspace/preserved/` failed the empty-tag gate while `test-unit` was green on the
     same commit.
 
-    The fixing script keeps the wider view on purpose: an untracked notebook is exactly the one
-    a user wants sanitized before adding it.
+    The fixture is written with `indent=1`, which is nbformat's own layout and the only one
+    that reproduces the defect: every pattern in `strip_empty_cell_tags.PATTERNS` requires a
+    newline after the tag entry, so a one-line `json.dumps` carries the fossil in form and
+    counts zero, and a test built on it would pass whatever the gate's scope was.
+
+    The first assertion is what makes the rest mean something: it fails if the working-tree
+    scan stops seeing the file, and the third fails if the tracked-only restriction is
+    reverted. The fixing script keeps the wider view on purpose - an untracked notebook is
+    exactly the one a user wants sanitized before adding it.
     """
-    scratch = REPO_ROOT / ".pytest-untracked-notebook"
+    scratch = REPO_ROOT / f".pytest-untracked-notebook-{os.getpid()}"
     scratch.mkdir(exist_ok=True)
     notebook = scratch / "untracked.ipynb"
     notebook.write_text(
@@ -408,14 +417,18 @@ def test_an_untracked_notebook_is_not_committed_content(tmp_path_factory) -> Non
                 "metadata": {},
                 "nbformat": 4,
                 "nbformat_minor": 5,
-            }
+            },
+            indent=1,
         ),
         encoding="utf-8",
     )
     try:
+        relative = str(notebook.relative_to(REPO_ROOT))
+        assert strip_text(notebook.read_text(encoding="utf-8"))[1] == 1, (
+            "the fixture must actually carry the fossil, or the assertions below are vacuous"
+        )
         assert notebook in _iter_notebooks(), "the fixing script must still see it"
         assert notebook not in iter_committed_notebooks()
-        assert str(notebook.relative_to(REPO_ROOT)) not in _empty_tag_offenders()
+        assert relative not in _empty_tag_offenders()
     finally:
-        notebook.unlink()
-        scratch.rmdir()
+        shutil.rmtree(scratch, ignore_errors=True)
