@@ -67,6 +67,7 @@ import pandas as pd
 import yaml
 
 import utils.style  # noqa: F401 - activates the ML4T visual style
+from case_studies.research import supersedes_for
 from case_studies.utils.causal import (
     classify_refutation,
     embargo_from_buffer,
@@ -88,6 +89,12 @@ RANDOM_SEED = 42
 CV_FOLDS = 5
 MAX_SAMPLES = 0
 N_PLACEBO = 100
+# Any edit to case_studies/utils/causal.py moves this notebook's causal identity, because
+# _causal_source_identity hashes that file whole. The registering write then refuses a second
+# current identity for the same label and names the hash it wants retired. Declare it here -
+# a bare hash, or a JSON object keyed by label - and the refusal has a route to be answered.
+# Empty is correct against a fresh registry, where there is nothing to supersede.
+SUPERSEDES_CAUSAL: str = ""
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -414,6 +421,7 @@ register_causal_run(
     max_symbols=MAX_SYMBOLS,
     development_end=DEVELOPMENT_END.date().isoformat(),
     notebook="12_causal_dml",
+    supersedes_hash=supersedes_for(SUPERSEDES_CAUSAL, PRIMARY_LABEL, labels=[PRIMARY_LABEL]),
 )
 
 # %% [markdown]
