@@ -14,35 +14,95 @@
 # ---
 
 # %% [markdown]
-# # Latent Factor Model Suite for the US Equities Panel
+# # Latent Factor Requests for the US Equities Panel
 #
-# The US equities panel now runs its latent-factor case study in separate
-# notebooks:
+# This index separates the two latent-factor computations while keeping their outputs under the
+# same public result contract. [`13a_pca`](13a_pca.ipynb) estimates statistical factors from the
+# finalized feature panel. [`13b_ipca`](13b_ipca.ipynb) estimates characteristic-conditioned
+# factors. Each notebook constructs its own resolved request, validates fitted state and prediction
+# coverage, and returns the corresponding catalog rows.
 #
-# - `13a_pca`
-# - `13b_ipca`
+# Predictive interpretation belongs in [`15_model_analysis`](15_model_analysis.ipynb). This index
+# does not compare metrics or choose between PCA and IPCA.
 #
-# Cross-model comparison remains in `15_model_analysis`.
+# **Learning objectives**
+#
+# - Distinguish the PCA and IPCA requests used by this case study.
+# - Select complete latent-factor results through the shared catalog boundary.
+# - Trace labels, checkpoints, and cross-validation identities without copying hashes.
+#
+# **Book reference**: Chapter 13
+#
+# **Prerequisites**: `13a_pca.py` and `13b_ipca.py` publish the latent-factor results indexed here.
 
 # %%
-"""Latent factor notebook index for the US equities panel case study."""
+"""Reference index for the latent-factor execution notebooks."""
 
-import warnings
+import os
+from pathlib import Path
 
-from case_studies.utils.analytics import load_best_ic_per_family
+import polars as pl
 
-warnings.filterwarnings("ignore")
+from case_studies.research import Study, open_study
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_equities_panel"
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
+
+# %% [markdown]
+# ## Result catalog
+#
+# Canonical execution reads the released study. Preview execution reads an isolated workspace.
+# Ordinary Polars filters select complete latent prediction rows by label, configuration,
+# checkpoint, and protocol. Hashes remain visible for provenance, but readers pass selected rows or
+# named compatible sets to downstream code rather than copying them.
 
 # %%
-best = load_best_ic_per_family(
-    families=["latent_factors"],
-    case_studies=[CASE_STUDY_ID],
-)
-
-if best.is_empty():
-    print("No latent-factor results are registered yet for this case study.")
+if EXECUTION_TIER == "canonical":
+    study = Study.open(CASE_STUDY_ID)
+elif EXECUTION_TIER == "preview":
+    study = open_study(
+        CASE_STUDY_ID,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+    )
 else:
-    print(best)
+    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
+
+latent_results = (
+    study.predictions.table(include_preview=EXECUTION_TIER == "preview")
+    .filter(
+        (pl.col("family") == "latent_factors")
+        & (pl.col("split") == "validation")
+        & (pl.col("execution_tier") == EXECUTION_TIER)
+        & pl.col("complete")
+    )
+    .select(
+        "label",
+        "config_name",
+        "checkpoint_kind",
+        "checkpoint_value",
+        "cv_identity",
+        "training_hash",
+        "prediction_hash",
+    )
+    .sort("label", "config_name", "checkpoint_kind", "checkpoint_value")
+)
+latent_results
+
+# %% [markdown]
+# ## Handoff
+#
+# Run the PCA and IPCA execution notebooks to create or reuse their exact result identities. Model
+# analysis reopens the named compatible sets for each label protocol. Strategy evaluation receives
+# every selected catalog row and checkpoint; this index makes no predictive or portfolio decision.
+
+# %% [markdown]
+# ## Key takeaways and limitations
+#
+# - PCA and IPCA expose the same result and catalog interfaces while fitting different factor
+#   structures.
+# - Catalog fields provide the reader-facing selection boundary; hashes remain provenance keys.
+# - This index summarizes available result identities. Estimation details and fitted-state checks
+#   remain in the two execution notebooks.

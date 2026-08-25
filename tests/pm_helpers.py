@@ -23,6 +23,24 @@ overrides.yaml schema (per-notebook, all optional):
         way the test runs at production scale while this file states a reduction.
         ``unusable_parameters`` is the detector and tests/test_pm_helpers.py
         fails the build on what it finds, with no allowlist.
+    research_preview: bool — default true. Chooses the TIER only; the isolated
+        workspace is injected either way, and there is deliberately no way to ask the
+        harness for the in-place production path. The harness runs a notebook that
+        declares both EXECUTION_TIER and WORKSPACE at the preview tier in a fresh
+        workspace,
+        because that pair means "this notebook can run self-contained at reduced
+        scale". That is exact for a notebook that WRITES at the tier it is given: a
+        model notebook fits something small and registers it into the workspace it
+        was handed, so it needs nothing else to be there. It is wrong for a notebook
+        that only READS at that tier - it is self-contained only if its producer ran
+        into the same workspace, and the per-notebook suite runs each notebook alone,
+        so it filters for preview rows nobody wrote and stops at its first cell. Set
+        this false for a reader, and it runs at its declared tier, in an isolated
+        workspace, against the canonical rows the fixture seeds - the third combination
+        `open_study`'s docstring names, "the same computation at full scale writing to an
+        isolated registry ... without being able to damage" the published one. Real
+        coverage rather than a skip. Do NOT instead seed preview-tier rows: that
+        fabricates predictions at a tier nothing fitted.
     skip: bool — hard skip in uv-native run (Docker tests ignore)
     skip_reason: str
     requires_import: str | list[str]
@@ -55,9 +73,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -617,6 +635,22 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
     def live(line: int) -> bool:
         return line > injected_at and not any(lo <= line <= hi for lo, hi in stale)
 
+    # A notebook declaring PREVIEW_REDUCTIONS receives these by translation rather than by name -
+    # `research_preview_parameters` folds them in - so the source never mentions them and the
+    # "never reads it" test below would report every one of them unreachable. The question is not
+    # dropped, it is redirected: the value lands in PREVIEW_REDUCTIONS, so that is the name whose
+    # reachability decides whether the override reaches anything. Exempting the name outright would
+    # pass a notebook that declares the mapping and never reads it, which is the exact condition
+    # this helper exists to catch.
+    cell_declares = (
+        {name for name, line in _top_level_bindings(tree) if tagged[-1][1] <= line <= injected_at}
+        if tagged
+        else set()
+    )
+    translated = (
+        set(PREVIEW_TRANSLATED_PARAMETERS) if TRANSLATION_TARGET in cell_declares else set()
+    )
+
     events: list[tuple[str, str, int]] = []
     _module_level_events(tree, events)
     branch = _branch_paths(tree)
@@ -638,17 +672,21 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
 
     problems = {}
     for name in names:
+        # A translated name is analysed through the mapping it is folded into, and any problem is
+        # reported against that mapping, because that is where the override actually has to land.
+        analysed = TRANSLATION_TARGET if name in translated else name
+        via = f" (it reaches the notebook as {TRANSLATION_TARGET})" if analysed != name else ""
         reads = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
-            if kind == "read" and bound == name and live(line)
+            if kind == "read" and bound == analysed and live(line)
         ]
         binds = [
             (seq, line)
             for seq, (kind, bound, line) in enumerate(events)
-            if kind == "bind" and bound == name and live(line)
+            if kind == "bind" and bound == analysed and live(line)
         ]
-        if name in opaque or name in readers:
+        if analysed in opaque or analysed in readers:
             # A function that reads the name is normally enough to leave the
             # entry alone: it may be called before any binding below, and the
             # tree does not say which happens first. The exception is a binding
@@ -661,11 +699,11 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
             reaching = [
                 seq
                 for seq, (kind, bound, line) in enumerate(events)
-                if kind == "call" and bound in readers.get(name, set()) and live(line)
+                if kind == "call" and bound in readers.get(analysed, set()) and live(line)
             ]
             first = min((seq for seq, _ in blocking), default=None)
             reachable = (
-                name in opaque
+                analysed in opaque
                 or first is None
                 or any(seq < first for seq in [*(r for r, _ in reads), *reaching])
             )
@@ -674,15 +712,15 @@ def unusable_parameters(py_path: Path, names: Iterable[str]) -> dict[str, str]:
             problems[name] = (
                 f"the binding on line {min(line for _, line in blocking)} overwrites the "
                 f"injected value before anything below {where} can call a function that "
-                "reads it"
+                f"reads it{via}"
             )
         elif not reads:
-            problems[name] = f"the notebook never reads it below {where}"
+            problems[name] = f"the notebook never reads it below {where}{via}"
         elif all(any(reaches(b, r) for b in binds) for r in reads):
             problems[name] = (
                 f"the binding on line {min(line for _, line in binds)} overwrites the "
                 f"injected value: every read below {where} is on a path that rebinds "
-                "the name first"
+                f"the name first{via}"
             )
     return problems
 
@@ -853,6 +891,30 @@ def register_kernelspec(python_exe: str, launcher: Path | None = None) -> tuple[
     return kernel_name, root
 
 
+def _declares_tier_and_workspace(py_path: Path) -> bool:
+    """Whether a notebook's parameters cell declares both EXECUTION_TIER and WORKSPACE.
+
+    The pair is what makes a notebook addressable by tier and workspace at all. It is read
+    here rather than inside `research_preview_parameters` because both the preview path and
+    the canonical-with-a-workspace path need the same answer.
+    """
+    source = py_path.read_text(encoding="utf-8")
+    bounds = next(
+        (
+            (first_line, last_line)
+            for header, first_line, last_line in _percent_cell_bounds(source)
+            if PARAMETERS_CELL_MARKER in header
+        ),
+        None,
+    )
+    if bounds is None:
+        return False
+    first_line, last_line = bounds
+    tree = ast.parse(source, filename=str(py_path))
+    declared = {name for name, line in _top_level_bindings(tree) if first_line <= line <= last_line}
+    return {"EXECUTION_TIER", "WORKSPACE"} <= declared
+
+
 def research_preview_parameters(
     py_path: Path,
     parameters: dict | None,
@@ -879,9 +941,34 @@ def research_preview_parameters(
     if {"EXECUTION_TIER", "WORKSPACE"} <= declared:
         resolved["EXECUTION_TIER"] = "preview"
         resolved["WORKSPACE"] = str(output_dir.resolve())
+        if "SUPERSEDES_POPULATION" in declared:
+            # A preview population is discarded with its workspace, so it extends no lineage
+            # and `run_model_population` refuses a non-None `supersedes` outright. The
+            # notebooks now default this to empty, so this clears an explicitly passed value
+            # rather than a default - a caller who names a canonical predecessor and asks for
+            # a preview is asking for two incompatible things, and the tier wins.
+            # Forced for the same reason the tier and the workspace are: the preview routing
+            # is this function's job, and nine notebooks each deciding it is nine chances to
+            # decide it differently.
+            resolved["SUPERSEDES_POPULATION"] = ""
     if "PREVIEW_REDUCTIONS" in declared:
         resolved = _collect_preview_reductions(resolved)
     return resolved
+
+
+# The override names `_collect_preview_reductions` folds into PREVIEW_REDUCTIONS, mapped to the
+# reduction key each becomes. `unusable_parameters` reads the same table, so a name that reaches a
+# notebook by translation is not reported unreachable for not appearing in its source. Two places
+# stating this list separately is what let one of them go stale: measured on
+# agent/us-equities-panel-notebooks, `06_linear` and `07_gbm` declare PREVIEW_REDUCTIONS and were
+# reported unreachable on MAX_FOLDS and MAX_SYMBOLS, which do reach them.
+TRANSLATION_TARGET = "PREVIEW_REDUCTIONS"
+
+PREVIEW_TRANSLATED_PARAMETERS: dict[str, tuple[str, Callable[[Any], Any]]] = {
+    "MAX_FOLDS": ("folds", lambda value: list(range(int(value)))),
+    "MAX_SYMBOLS": ("max_symbols", int),
+    "TRAIN_SAMPLE_FRAC": ("train_sample_frac", float),
+}
 
 
 def _collect_preview_reductions(parameters: dict) -> dict:
@@ -895,15 +982,10 @@ def _collect_preview_reductions(parameters: dict) -> dict:
     """
     resolved = dict(parameters)
     reductions = dict(resolved.get("PREVIEW_REDUCTIONS") or {})
-    max_folds = resolved.pop("MAX_FOLDS", None)
-    max_symbols = resolved.pop("MAX_SYMBOLS", None)
-    train_sample_frac = resolved.pop("TRAIN_SAMPLE_FRAC", None)
-    if max_folds is not None:
-        reductions.setdefault("folds", list(range(int(max_folds))))
-    if max_symbols is not None:
-        reductions.setdefault("max_symbols", int(max_symbols))
-    if train_sample_frac is not None:
-        reductions.setdefault("train_sample_frac", float(train_sample_frac))
+    for name, (key, cast) in PREVIEW_TRANSLATED_PARAMETERS.items():
+        value = resolved.pop(name, None)
+        if value is not None:
+            reductions.setdefault(key, cast(value))
     # A preview run that reduces nothing is a canonical run wearing the wrong tier, and the
     # request builder rejects it. Reducing the universe is the reduction that always applies.
     if not reductions:
@@ -929,9 +1011,25 @@ def injected_parameters(
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
-    if parameters and "PREVIEW_REDUCTIONS" in parameters:
-        return {k: v for k, v in parameters.items() if k != "PREVIEW_REDUCTIONS"}
-    return parameters
+    resolved = dict(parameters or {})
+    resolved.pop("PREVIEW_REDUCTIONS", None)
+    # Declining the preview tier must NOT decline the isolated workspace. They are two
+    # decisions and this flag used to collapse them: false left WORKSPACE at the
+    # notebook's declared "", `open_study` took the `workspace=None` branch
+    # (workspace.py:374) into `Study.regenerate`, and that is the in-place production
+    # path - which in a maintainer worktree, where case_studies/*/run_log links to the
+    # shared artifacts, writes to the real registry. It also calls activate(), resetting
+    # ML4T_OUTPUT_DIR for everything after it. Measured 2026-08-24: a test run of
+    # fx_pairs 13-16 wrote 13 official populations, 1 candidate set and 269 backtest runs
+    # into the published fx_pairs registry, and froze one population incomplete.
+    #
+    # Canonical-tier-with-a-workspace is the third combination `open_study`'s own
+    # docstring names: the same computation at full scale against an isolated registry,
+    # unable to damage the published one. That is what a reader under test needs, and the
+    # harness must never be able to reach the in-place path.
+    if output_dir is not None and _declares_tier_and_workspace(py_path):
+        resolved["WORKSPACE"] = str(output_dir.resolve())
+    return resolved or None
 
 
 def run_notebook(

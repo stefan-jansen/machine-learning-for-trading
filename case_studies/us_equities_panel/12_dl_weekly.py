@@ -38,7 +38,12 @@ import pandas as pd
 import polars as pl
 import torch
 
-from utils.modeling import RANDOM_SEED, load_configs, seed_everything
+from utils.modeling import (
+    RANDOM_SEED,
+    load_configs,
+    reduce_to_top_entities,
+    seed_everything,
+)
 from utils.paths import get_case_study_dir
 
 # %%
@@ -103,11 +108,33 @@ mb = (
 )
 print(f"  Weekly model-based features: {mb.shape[0]:,} rows, {mb.shape[1]} cols")
 
+# model_based.parquet is keyed on (symbol, timestamp, fold), not (symbol, timestamp): its three
+# columns are refitted inside each of the seventeen folds so that a fold sees only its own
+# training window. Joining it on (symbol, timestamp) alone did three things at once. It fanned
+# every weekly observation out to one row per fold, which left duplicate timestamps per symbol and
+# produced zero usable sequences - the "No valid folds created" this notebook died on. It put
+# every other fold's fitted values onto each row, so a fold's inputs carried a garch conditional
+# volatility estimated on windows that fold is not allowed to see. And because `fold` itself was
+# not excluded, the fold index went into the model as a feature.
+#
+# The runner already takes this artifact per fold: `temporal_by_fold` is selected one fold at a
+# time by `fold_temporal_frame` (utils/modeling.py:1454), which filters on `fold`, drops it, and
+# deduplicates on the join keys. Pass it there instead of pre-joining it here.
 feat_cols = [c for c in feat.columns if c not in ("symbol", "timestamp")]
-mb_cols = [c for c in mb.columns if c not in ("symbol", "timestamp")]
-features = feat.join(mb, on=["symbol", "timestamp"], how="inner")
-feature_names = feat_cols + mb_cols
-print(f"  Combined: {features.shape[0]:,} rows, {len(feature_names)} features")
+temporal_feature_names = [c for c in mb.columns if c not in ("symbol", "timestamp", "fold")]
+temporal_by_fold = mb
+features = feat
+# The temporal names belong in feature_names even though their values arrive per fold rather than
+# in `dataset`. prepare_fold_sequence_stores builds `use_cols` from feature_names and applies it
+# AFTER replace_temporal_columns has merged the fold's rows in (sequence_dataset.py:546,568), so a
+# temporal column absent from this list is merged and then immediately dropped - the model would
+# train on the financial features alone and report nothing about it. load_modeling_dataset carries
+# its temporal names in feature_names for the same reason.
+feature_names = feat_cols + temporal_feature_names
+print(
+    f"  Base features: {features.shape[0]:,} rows, {len(feat_cols)} financial "
+    f"+ {len(temporal_feature_names)} temporal joined per fold = {len(feature_names)} features"
+)
 
 labels = (
     pl.scan_parquet(CASE_DIR / "labels" / f"{PRIMARY_LABEL}.parquet")
@@ -117,13 +144,18 @@ labels = (
 print(f"  Weekly labels: {labels.shape[0]:,} rows")
 
 dataset = features.join(labels, on=["symbol", "timestamp"], how="inner")
-del feat, mb, features, labels
+del feat, features, labels
 collect()
 
-# Subsample to symbol filter if needed
+# Subsample to symbol filter if needed. Selecting by name takes whichever symbols sort first,
+# which says nothing about how much history they carry: on this panel the alphabetical head is
+# A, AA, AAL, AAMC, AAN, and AAL and AAMC only list part-way through the fold range. A reduced
+# run then builds folds whose training window is empty for most of the universe, every fold falls
+# under the sequence floor in prepare_fold_sequence_stores, and the run dies on "No valid folds
+# created". reduce_to_top_entities takes the symbols with the most rows, ties broken by name, and
+# is what every other reduced notebook here uses.
 if MAX_SYMBOLS > 0:
-    symbols = dataset.select("symbol").unique().sort("symbol").head(MAX_SYMBOLS)
-    dataset = dataset.join(symbols, on="symbol")
+    dataset = reduce_to_top_entities(dataset, "symbol", MAX_SYMBOLS)
     print(f"  Filtered to {MAX_SYMBOLS} symbols: {dataset.shape[0]:,} rows")
 
 # Convert to pandas (pipeline expects pandas)
@@ -220,12 +252,16 @@ print(f"Running {len(pytorch_configs)} PyTorch configs on {device}...")
 with open(LOG_FILE, "a") as f:
     f.write("=== PyTorch direct regression (weekly) ===\n")
 
+# %%
 pytorch_result = run_dl_cv(
     dataset_pd,
     splits,
     configs=pytorch_configs,
     n_features=len(feature_names),
     feature_names=feature_names,
+    temporal_by_fold=temporal_by_fold,
+    temporal_keys=["symbol", "timestamp"],
+    temporal_feature_names=temporal_feature_names,
     label_col=PRIMARY_LABEL,
     date_col="timestamp",
     entity_col="symbol",
@@ -235,10 +271,24 @@ pytorch_result = run_dl_cv(
     register=True,
     force_retrain=FORCE_RETRAIN,
     prediction_split=PREDICTION_SPLIT,
+    # feature_names is in the identity, not only in the training call. Without identity_params or
+    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
+    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
+    # so changing what the model trains on leaves the spec hash where it was. With
+    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
+    # skips it, and the notebook reports the old model's numbers under the new feature set. A
+    # clean registry retrains and looks correct, which is why this is invisible locally.
+    #
+    # This still does not capture the input artifact digests the way the shared path does through
+    # input_data_spec; 12 reads the parquet files directly rather than through
+    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
+    # that path.
+    identity_params={"feature_names": feature_names},
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
 )
 
+# %%
 print("\nPyTorch results:")
 print(f"  Best config: {pytorch_result['best_config_name']}")
 print(f"  Best epoch: {pytorch_result['best_epoch']}")
@@ -254,9 +304,9 @@ with open(LOG_FILE, "a") as f:
         f.write(f"  {r['config_name']}: IC={r['best_ic']:.4f} epoch={r['best_epoch']}\n")
 
 # %% [markdown]
-# ## Run DARTS N-BEATS (1-Step Forecasting)
+# ## Run Darts `NBEATSModel` (1-Step Forecasting)
 #
-# With `darts_output_chunk_length=1`, N-BEATS predicts a single weekly
+# With `darts_output_chunk_length=1`, `NBEATSModel` predicts a single weekly
 # return — eliminating the error compounding that degrades multi-step
 # daily forecasting. This is the fair comparison: same horizon, same data,
 # but the forecasting formulation vs direct regression.
@@ -288,12 +338,16 @@ print(f"Running DARTS N-BEATS (1-step weekly forecasting) on {device}...")
 with open(LOG_FILE, "a") as f:
     f.write("\n=== DARTS N-BEATS (weekly, 1-step) ===\n")
 
+# %%
 darts_result = run_dl_cv(
     dataset_pd,
     splits,
     configs=darts_configs,
     n_features=len(feature_names),
     feature_names=feature_names,
+    temporal_by_fold=temporal_by_fold,
+    temporal_keys=["symbol", "timestamp"],
+    temporal_feature_names=temporal_feature_names,
     label_col=PRIMARY_LABEL,
     date_col="timestamp",
     entity_col="symbol",
@@ -302,11 +356,25 @@ darts_result = run_dl_cv(
     max_train_sequences=MAX_TRAIN_SEQUENCES,
     register=True,
     force_retrain=FORCE_RETRAIN,
+    # feature_names is in the identity, not only in the training call. Without identity_params or
+    # input_data_spec, _config_identity_params returns None (deep_learning.py:1723-1747) and
+    # build_training_spec hashes family, config, label, n_folds, n_epochs and the preset params -
+    # so changing what the model trains on leaves the spec hash where it was. With
+    # FORCE_RETRAIN False the pre-filter at :1765-1782 then finds the previous run complete and
+    # skips it, and the notebook reports the old model's numbers under the new feature set. A
+    # clean registry retrains and looks correct, which is why this is invisible locally.
+    #
+    # This still does not capture the input artifact digests the way the shared path does through
+    # input_data_spec; 12 reads the parquet files directly rather than through
+    # load_modeling_dataset, so its identity remains weaker than its siblings' until it moves onto
+    # that path.
+    identity_params={"feature_names": feature_names},
     case_study=CASE_STUDY_ID,
     notebook=NOTEBOOK,
     prediction_split=PREDICTION_SPLIT,
 )
 
+# %%
 print("\nDARTS N-BEATS results:")
 print(f"  Best epoch: {darts_result['best_epoch']}")
 print(f"  Best IC: {darts_result['best_ic']:.4f}")
@@ -317,7 +385,7 @@ with open(LOG_FILE, "a") as f:
 # %% [markdown]
 # ## Summary
 #
-# Compare direct regression (LSTM, NLinear) against 1-step N-BEATS forecasting,
+# Compare direct regression (LSTM, NLinear) against 1-step `NBEATSModel` forecasting,
 # and against the tabular baselines (GBM, Ridge, TabM) already in the registry.
 
 # %%
@@ -348,6 +416,7 @@ all_results.append(
 results_df = pl.DataFrame(all_results).sort("ic", descending=True)
 print(results_df)
 
+# %%
 # Compare against registry baselines
 import sqlite3
 

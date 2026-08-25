@@ -90,7 +90,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "d808bf96955e"
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -256,11 +256,17 @@ plan.select(
 # same name, and the registry refuses to write it without being told which snapshot it
 # supersedes. That lineage is the only record of which generation is which.
 #
-# It defaults to the hash the published population actually superseded, not to empty. The hash
-# is part of what the snapshot is hashed over, so a run that left it empty would compute a
-# different population and be refused against the one on record. Carrying the value the
-# published run used is what lets this notebook re-run and resolve to the population it
-# published rather than to a new one.
+# It defaults to empty, and the run that published this population passed the predecessor hash
+# as a parameter instead. The hash is part of what the snapshot is hashed over
+# (`research/population.py:87`), so no default is right for both readers: a re-run that means
+# to resolve the published population must be handed the same hash the published run used,
+# while a first run against a fresh registry must be handed nothing. `run_log/` is not in the
+# repository, so a reader's first run starts from an empty registry, where a non-empty
+# supersede is refused outright - which is why empty is the default and the hash travels with
+# the one run that needs it.
+#
+# A reduced-scale run also leaves it empty. A population produced under a reduction is thrown
+# away with the workspace it was written to, so it has no lineage to extend.
 #
 # That default records what the published snapshot replaced, so it is only correct under that
 # population's name. A preview, and a run under a name of its own, start a lineage instead: the
