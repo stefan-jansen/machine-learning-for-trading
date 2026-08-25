@@ -626,10 +626,27 @@ def _sole_lock(study: Any) -> ResearchLock:
 # frame. So neither carrying them forward nor dropping them is correct - both produce a lock that
 # fails at execution, one silently wrong and one loudly.
 #
-# Recomputing them needs the holdout window's eligible key frame, which is data this function does
-# not have and which the family resolver builds during the run. Until that is threaded through,
-# refusing is the only honest option: a lock is the one artifact in the pipeline that cannot be
-# revised, so producing one that is known to fail at execution is worse than producing none.
+# WHAT THE FIX IS, so this is a specified task and not a vague blocker.
+#
+# `case_studies/utils/linear.py:675` computes the manifest at RECONSTRUCTION time with
+# `_expected_keys_from_dataset(mds.dataset, [split], ...)`, where `split` comes from
+# `locked_holdout_split(spec, ...)`, and then checks it against what the spec recorded. So the
+# computation exists; it just runs after the lock, against a value the lock was supposed to carry.
+#
+# Building the spec correctly means running that same computation BEFORE locking: open the dataset,
+# build the holdout split from the derived CV, compute the eligible keys, and record the digest,
+# row count and fold count. It is family-specific - `_expected_keys_from_dataset` lives in
+# `linear.py` and each family has its own - so it wants a per-family hook resolved through
+# `_family_module`, exactly as `reconstruct_locked_request` and `validate_locked_run` already are.
+#
+# Note also that `CVSpec` is NOT the vehicle. It carries `holdout_start`/`holdout_end`, but
+# `resolve()` passes them to `generate_cv_splits` as boundaries to seal VALIDATION against; it
+# selects validation folds and cannot emit a holdout fold. Nothing in the resolver produces a
+# holdout training fold today, which is why this had to be derived here in the first place.
+#
+# Until that hook exists, refusing is the only honest option: a lock is the one artifact in the
+# pipeline that cannot be revised, so producing one that is known to fail at execution is worse
+# than producing none.
 _FOLD_DERIVED_FIELDS = (
     ("computation", "expected_prediction_keys"),
     ("model", "effective_params_by_fold"),
