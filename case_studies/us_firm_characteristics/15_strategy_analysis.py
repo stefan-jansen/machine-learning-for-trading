@@ -982,10 +982,6 @@ print("Drawdown analysis (validation window):")
 print(dd)
 
 # %%
-roll = pa.compute_rolling_metrics(windows=[12], metrics=["sharpe", "beta"])
-print("Rolling-window keys:")
-print({k: type(v).__name__ for k, v in roll.items()} if isinstance(roll, dict) else roll)
-
 tail_table = pl.DataFrame(
     [
         {"metric": "Volatility (ann.)", "value": f"{full['volatility']:.4f}"},
