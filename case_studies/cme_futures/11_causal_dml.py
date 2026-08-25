@@ -42,6 +42,11 @@ from case_studies.cme_futures.research_workflow import (
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
+# The causal identity this run retires, per label, read from the registry and set by a
+# person. A first run for a label takes no entry; a refit whose identity moved is refused
+# without the hash it supersedes, and the refusal names the value required. Keyed by label
+# because this notebook resolves one estimand per entry in ALL_LABELS.
+SUPERSEDES_CAUSAL: dict = {}
 
 # %% [markdown]
 # ## Resolve the estimands
@@ -63,6 +68,7 @@ requests = tuple(
         label=label,
         execution_tier=EXECUTION_TIER,
         preview_reductions=PREVIEW_REDUCTIONS,
+        supersedes=SUPERSEDES_CAUSAL.get(label),
     ).resolve()
     for label in ALL_LABELS
 )
