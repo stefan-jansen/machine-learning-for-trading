@@ -98,3 +98,38 @@ def test_an_unknown_candidate_set_is_refused_by_name(
 
     with pytest.raises(ValueError, match="resolved to 0 identities"):
         evaluate_holdout(study, candidate_set_name="no-such-set", timeline=TIMELINE)
+
+
+def test_a_spec_carrying_validation_fold_derivations_refuses_to_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock cannot be revised, so producing one known to fail at execution is worse than none.
+
+    ``expected_prediction_keys`` describes which rows the fit was eligible to predict on.
+    ``validate_locked_expected_keys`` refuses a locked spec that has none, and refuses one whose
+    manifest describes a different frame - so a holdout spec that inherits the validation folds'
+    manifest fails at execution, and one with the field stripped fails there too. Recomputing it
+    needs the holdout window's eligible keys, which the family resolver builds during a run.
+
+    Until that is threaded through, the driver must stop at the lock rather than take one.
+    """
+    study, lock, prices = _locked_study(tmp_path, monkeypatch)
+    _install_fixture_adapter(monkeypatch, prices)
+    _pin_derivation_to_the_fixture(monkeypatch, lock)
+
+    from case_studies.research import holdout as module
+
+    monkeypatch.setattr(
+        module,
+        "_sole_lock",
+        lambda _study: (_ for _ in ()).throw(AssertionError("must not reach the recorded lock")),
+    )
+
+    spec = {
+        "computation": {"expected_prediction_keys": {"digest": "abc", "n_rows": 1, "n_folds": 1}}
+    }
+    with pytest.raises(NotImplementedError, match="re-keyed to the holdout fold"):
+        module._refuse_incomplete_holdout_spec(spec)
+
+    clean = {"computation": {"cv": {}}}
+    module._refuse_incomplete_holdout_spec(clean)
