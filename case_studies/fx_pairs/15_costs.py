@@ -49,6 +49,7 @@ from case_studies.research import (
     plan_backtests,
     research_name,
     run_backtests,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -120,6 +121,14 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     & pl.col("complete")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if TOP_N_PREDICTIONS is not None:
@@ -352,7 +361,12 @@ if not include_preview:
     print(f"Frozen expected cost population: {cost_population.hash}")
 
 # %% [markdown]
-# ## Execute the frozen cost grid
+# ## Execute the frozen cost grid, and validate its membership without making it selectable
+#
+# The population is validated in the cell that fills it: the expected set was written down before
+# the first member ran, and `require_complete` is what turns that declaration into a published
+# result. Publishing it does not make it selectable - a cost sensitivity is a curve through a
+# parameter the strategy does not choose, and later selection reads the allocation population.
 
 # %% tags=["results"]
 cost_results: list[BacktestResult] = []
@@ -389,12 +403,6 @@ for job in cost_jobs:
         }
     )
 
-pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
-
-# %% [markdown]
-# ## Validate sensitivity membership without making it selectable
-
-# %% tags=["results"]
 if not include_preview:
     if cost_population is None:
         raise RuntimeError("the canonical cost population was not frozen before execution")
@@ -402,6 +410,8 @@ if not include_preview:
     print(f"Official cost-sensitivity population: {cost_population.hash}")
 else:
     print("Preview cost curves remain outside official populations and candidate sets.")
+
+pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
 
 # %% [markdown]
 # ## Key takeaways

@@ -43,6 +43,7 @@ from case_studies.research import (
     plan_backtests,
     research_name,
     run_backtests,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import get_top_k_values_for
 from utils.paths import get_case_study_dir
@@ -64,8 +65,24 @@ POPULATION_NAME = ""
 # %% [markdown]
 # ## Select the exact prediction population
 #
-# Canonical production includes every current, complete validation prediction. Label, configuration,
-# or population limits are preview controls and cannot define the official baseline.
+# Canonical production includes every complete validation prediction the model notebooks currently
+# publish. Label, configuration, or population limits are preview controls and cannot define the
+# official baseline.
+#
+# **"Currently publish" is a question about lineage, and the catalog cannot answer it.** A row's
+# `identity_status` is derived from the schema version it was written under, so it says the registry
+# still understands the row - not that the row is the one its producer stands behind. The two agree
+# until a model notebook refits. Then it publishes a second generation of its population under the
+# same name, the first generation's prediction sets stay in the registry complete and current, and a
+# sweep selecting on the catalog alone runs over both. It would not fail; it would report every
+# member complete, over twice the population, and freeze the retired half into the baseline the rest
+# of the case study is measured against.
+#
+# `superseded_members` asks the registry which identities a later generation retired and no
+# generation in force still lists, which is exactly the set to drop. The `tabular_dl` and
+# `deep_learning` populations each have a retired generation here, because a training identity
+# covers the runner's own source file and both runners changed after their first fits were
+# registered. The count of what that excludes is printed rather than left implicit.
 
 # %% tags=["results"]
 set_global_seeds(SEED)
@@ -90,6 +107,11 @@ if include_preview:
     catalog = catalog.filter(pl.col("execution_tier") == "preview")
 else:
     catalog = catalog.filter(pl.col("execution_tier") == "canonical")
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    offered = catalog.height
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
+    print(f"Retired by a later generation, excluded: {offered - catalog.height} of {offered}")
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if TOP_N_PREDICTIONS is not None:
@@ -223,10 +245,15 @@ else:
     print("Preview backtests remain outside official populations and selection.")
 
 # %% [markdown]
-# ## Run every catalog row through the FX engine
+# ## Run every catalog row through the FX engine, then validate what was frozen
 #
 # Each selected row produces an independent backtest. The loop has no exception-and-continue path:
 # one failed member leaves the predeclared population incomplete and stops publication.
+#
+# The population is validated in the same cell that fills it, because the two are one act: the
+# expected set was written down before the first member ran, and `require_complete` is the only
+# thing that turns it from a declaration into a published result. It can pass only when every
+# planned model, checkpoint and portfolio size completed.
 
 # %% tags=["results"]
 backtests = []
@@ -262,19 +289,14 @@ backtest_rows = pl.DataFrame(
 )
 if set(backtest_rows.get_column("stage")) != {"signal"}:
     raise RuntimeError("equal-weight baseline runs must register with stage='signal'")
-backtest_rows
 
-# %% [markdown]
-# ## Validate the frozen baseline population
-#
-# This check can pass only when every planned model, checkpoint, and portfolio-size member completed.
-
-# %% tags=["results"]
 if not include_preview:
     if baseline_population is None:
         raise RuntimeError("the canonical baseline population was not frozen before execution")
     baseline_population.require_complete()
     print(f"Official equal-weight population: {baseline_population.hash}")
+
+backtest_rows
 
 # %% [markdown]
 # ## Key takeaways
