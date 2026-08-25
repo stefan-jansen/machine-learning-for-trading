@@ -516,6 +516,13 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         # measured on us_firm_characteristics, all 141 training rows carry a NULL `entry_point`
         # while 37 already carry the stem in `runtime_json.notebook_path`.
         #
+        # A CI fixture registry and a production registry will disagree on `entry_point`
+        # indefinitely, and neither is broken. The code fix does not backfill - a re-run whose
+        # fits identity-skip writes no new rows, so pre-fix rows keep their NULL - and only the
+        # run-log reset refills the column. A fixture is regenerated and sees the value; a
+        # production registry carries rows from both sides of the fix. Anyone querying this
+        # field has to know which of the two they are holding.
+        #
         # `json_extract` rather than a column: `notebook_path` is provenance, it lives in
         # `runtime_json`, and `registry/specs.py:_V2_PROVENANCE_FIELDS` keeps it out of the
         # training identity - so recording it moves no hash.
