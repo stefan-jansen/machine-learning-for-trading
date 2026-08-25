@@ -154,6 +154,13 @@ CREATE TABLE IF NOT EXISTS causal_runs (
     started_at       TEXT,
     elapsed_s        REAL,
     git_commit       TEXT,
+    -- The causal identity this run retires, mirroring official_populations. A causal
+    -- refit produces a second canonical identity for the same label, and without a
+    -- declared chain CausalResult.one sees two and refuses forever - there is no
+    -- recency rule to fall back on, and there should not be one in a registry that is
+    -- otherwise entirely spec-addressed. Declared by a person through the notebook's
+    -- SUPERSEDES_CAUSAL parameter, never inferred from created_at.
+    supersedes_hash  TEXT REFERENCES causal_runs(causal_hash),
     created_at       TEXT NOT NULL
 );
 
@@ -659,6 +666,12 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
         db, "causal_runs", "refutation_n_successful"
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
+
+    # Additive, and it costs no recompute: _causal_source_identity hashes
+    # case_studies/utils/causal.py and nothing else, so a column outside the spec
+    # moves no causal_hash and invalidates no registered row.
+    if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
+        db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

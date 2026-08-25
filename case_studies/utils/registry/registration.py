@@ -1705,6 +1705,74 @@ def register_cohort_metrics(
 # ---------------------------------------------------------------------------
 
 
+def current_causal_identities(
+    db, *, label: str, tier: str = "canonical", exclude: str | None = None
+) -> list[str]:
+    """The causal identities a reader would currently resolve for *label*.
+
+    A row is current when its spec carries a supported ``identity_version``, its
+    ``execution_tier`` is the one asked for, and no other row declares that it
+    supersedes it. That is the same set ``CausalResult.one`` counts, and keeping the
+    two derivations in one function is the point: they disagreed once already, which
+    is how a refit came to fail at read time in a different notebook from the one
+    that caused it.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    supersedes_column = (
+        "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
+    )
+    rows = db.execute(
+        f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
+        "WHERE label = ? ORDER BY causal_hash",
+        (label,),
+    ).fetchall()
+    retired = {row[2] for row in rows if row[2]}
+    current = []
+    for causal_hash, spec_json, _ in rows:
+        spec = json.loads(spec_json or "{}")
+        if spec.get("identity_version") not in SUPPORTED_IDENTITY_VERSIONS:
+            continue
+        if str(spec.get("execution_tier", tier)) != tier:
+            continue
+        if causal_hash in retired or causal_hash == exclude:
+            continue
+        current.append(causal_hash)
+    return current
+
+
+def _enforce_causal_supersedes(
+    db, *, causal_hash: str, label: str, tier: str, supersedes_hash: str | None
+) -> None:
+    """A second canonical identity for a label must say which one it retires.
+
+    Without the declaration the registry ends up holding two rows a reader cannot
+    choose between, and ``CausalResult.one`` refuses forever. Recency is not the
+    fallback: ``created_at`` ties on a fast refit, and a recency rule would be the
+    only one in a registry that is otherwise entirely spec-addressed. So the chain is
+    declared by a person, the way a changed population is.
+
+    Refusing here rather than at read time is what makes it fixable. The read happens
+    in a downstream notebook, hours later, with no idea which run introduced the
+    ambiguity.
+    """
+    others = current_causal_identities(db, label=label, tier=tier, exclude=causal_hash)
+    if supersedes_hash is not None:
+        if supersedes_hash == causal_hash:
+            raise ValueError(f"causal run {causal_hash} cannot supersede itself")
+        if supersedes_hash not in others:
+            raise ValueError(
+                f"causal run {causal_hash} declares it supersedes {supersedes_hash}, which is "
+                f"not a current {tier} identity for {label!r}. Current: {others or 'none'}"
+            )
+        return
+    if others:
+        raise ValueError(
+            f"registering {causal_hash} would leave {len(others) + 1} current {tier} causal "
+            f"identities for {label!r}, and a reader resolves a label to exactly one. Name the "
+            f"one this run retires: set SUPERSEDES_CAUSAL to {others[0] if len(others) == 1 else others}"
+        )
+
+
 def register_causal_run(
     case_study: str,
     causal_hash: str,
@@ -1726,6 +1794,7 @@ def register_causal_run(
     notebook: str | None,
     started_at: str | None,
     elapsed_s: float | None,
+    supersedes_hash: str | None = None,
     case_dir: Path | None = None,
 ) -> None:
     """Persist one causal-DML run to ``causal_runs``.
@@ -1734,15 +1803,31 @@ def register_causal_run(
     completeness contract (``ic_mean`` non-null, etc.) does not apply to
     treatment-effect estimates. Callers compute the spec and result fields
     upstream; this function owns the SQL row write.
+
+    ``supersedes_hash`` names the canonical identity this run retires, and a second
+    canonical identity for a label is refused without one. That refusal is the point:
+    ``CausalResult.one`` requires exactly one current identity per label, so an
+    undeclared refit leaves the registry in a state no reader can resolve, and it does
+    so silently at write time and loudly at read time in a different notebook. Mirrors
+    ``official_populations``, where a changed population under an existing name must
+    name the hash it supersedes.
     """
     if case_dir is None:
         case_dir = _case_dir(case_study)
     import json
 
-    version = (json.loads(spec_json) or {}).get("identity_version")
+    spec = json.loads(spec_json) or {}
+    version = spec.get("identity_version")
     immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=str(spec.get("execution_tier", "canonical")),
+            supersedes_hash=supersedes_hash,
+        )
         comparable_columns = (
             "label",
             "treatment",
@@ -1764,6 +1849,12 @@ def register_causal_run(
             f"SELECT {', '.join(comparable_columns)} FROM causal_runs WHERE causal_hash = ?",
             (causal_hash,),
         ).fetchone()
+        existing_supersedes = (
+            db.execute(
+                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            or (None,)
+        )[0]
         expected = (
             label,
             treatment,
@@ -1821,6 +1912,12 @@ def register_causal_run(
                     f"immutable causal result conflict for {causal_hash}: "
                     f"{', '.join(conflicting)} would change"
                 )
+            if supersedes_hash is not None and existing_supersedes is None:
+                db.execute(
+                    "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
+                    (supersedes_hash, causal_hash),
+                )
+                db.commit()
             if not backfilled:
                 return
         # ON CONFLICT DO UPDATE rather than INSERT OR REPLACE — consistent with
@@ -1833,8 +1930,9 @@ def register_causal_run(
                 n_folds, n_obs, dml_effect, dml_se_hac, p_value_hac,
                 naive_effect, confounding_bias_pct, refutation_p,
                 refutation_n_successful,
-                spec_json, notebook, started_at, elapsed_s, git_commit, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                spec_json, notebook, started_at, elapsed_s, git_commit,
+                supersedes_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(causal_hash) DO UPDATE SET
                 label=excluded.label,
                 treatment=excluded.treatment,
@@ -1853,7 +1951,8 @@ def register_causal_run(
                 notebook=excluded.notebook,
                 started_at=excluded.started_at,
                 elapsed_s=excluded.elapsed_s,
-                git_commit=excluded.git_commit
+                git_commit=excluded.git_commit,
+                supersedes_hash=excluded.supersedes_hash
             WHERE causal_runs.label IS NOT excluded.label
                OR causal_runs.treatment IS NOT excluded.treatment
                OR causal_runs.confounders_json IS NOT excluded.confounders_json
@@ -1869,6 +1968,7 @@ def register_causal_run(
                OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
+               OR causal_runs.supersedes_hash IS NOT excluded.supersedes_hash
             """,
             (
                 causal_hash,
@@ -1890,6 +1990,7 @@ def register_causal_run(
                 started_at,
                 elapsed_s,
                 _git_hash(),
+                supersedes_hash,
                 _utc_now(),
             ),
         )

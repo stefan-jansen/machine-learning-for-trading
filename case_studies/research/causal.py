@@ -42,19 +42,41 @@ class CausalResult:
         if not db_path.is_file():
             raise ValueError(f"causal selection for {label!r} resolved to 0 identities")
         with sqlite3.connect(db_path) as db:
+            # Same reason `open` below probes rather than naming the column: this read
+            # does not go through the migrating opener, and a registry written before
+            # supersedes_hash existed would raise OperationalError instead of
+            # resolving the single identity it does hold.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+            supersedes_column = (
+                "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
+            )
             rows = db.execute(
-                "SELECT causal_hash, spec_json FROM causal_runs WHERE label = ? ORDER BY causal_hash",
+                f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
+                "WHERE label = ? ORDER BY causal_hash",
                 (label,),
             ).fetchall()
+        # A refit produces a second canonical identity for the same label. Which one is
+        # live is declared, not inferred: `created_at` ties on a fast refit, and a
+        # recency rule would be the only one in a registry that is otherwise entirely
+        # spec-addressed. A row another row names as superseded is retired.
+        retired = {row[2] for row in rows if row[2]}
         current = [
             causal_hash
-            for causal_hash, spec_json in rows
+            for causal_hash, spec_json, _ in rows
             if json.loads(spec_json or "{}").get("identity_version") == IDENTITY_VERSION
             and json.loads(spec_json or "{}").get("execution_tier", tier.value) == tier.value
+            and causal_hash not in retired
         ]
         if len(current) != 1:
+            hint = ""
+            if len(current) > 1:
+                hint = (
+                    f" ({', '.join(current)}). A refit left more than one live, and none of "
+                    "them says which it retires - re-register the newer with SUPERSEDES_CAUSAL "
+                    "naming the older."
+                )
             raise ValueError(
-                f"causal selection for {label!r} resolved to {len(current)} identities"
+                f"causal selection for {label!r} resolved to {len(current)} identities{hint}"
             )
         return cls.open(
             study,

@@ -1466,6 +1466,7 @@ def register_causal_run(
     case_dir=None,
     started_at: str | None = None,
     elapsed_s: float | None = None,
+    supersedes_hash: str | None = None,
 ) -> str:
     """Register a causal DML run in the dedicated `causal_runs` table.
 
@@ -1550,6 +1551,11 @@ def register_causal_run(
         notebook=notebook,
         started_at=started_at or results.get("started_at"),
         elapsed_s=elapsed_s if elapsed_s is not None else results.get("elapsed_s"),
+        # The causal identity this run retires. A refit produces a second canonical
+        # identity for the same label and `CausalResult.one` resolves a label to exactly
+        # one, so the chain is declared here rather than guessed from `created_at`.
+        # Notebooks pass their SUPERSEDES_CAUSAL parameter through.
+        supersedes_hash=supersedes_hash,
         case_dir=case_dir,
     )
 
