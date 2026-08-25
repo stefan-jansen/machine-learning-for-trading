@@ -19,7 +19,10 @@ import pytest
 
 from case_studies.utils.paired_metrics import _holdout_lineage_for
 from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
-from case_studies.utils.strategy_analysis import select_holdout_self_backtest
+from case_studies.utils.strategy_analysis import (
+    resolve_holdout_self_backtest,
+    select_holdout_self_backtest,
+)
 
 TRAINING_HASH = "t_gbm_leaves_7_mae"
 STRATEGY = {"signal": {"method": "score_weighted_top_k", "top_k": 10}}
@@ -191,3 +194,74 @@ def test_an_ambiguous_pinned_lineage_raises_rather_than_choosing(case_study):
 
     with pytest.raises(ValueError, match="ambiguous"):
         select_holdout_self_backtest("etfs", "b_validation_200")
+
+
+def test_an_unevaluated_holdout_is_reported_as_a_state_not_as_a_missing_hash(case_study):
+    """The reason distinguishes "the holdout has not been run" from every other absence.
+
+    Three strategy-analysis notebooks call this and raise when it answers None, which is
+    what leaves `cs-etfs` red on `18_strategy_analysis` and stops us_firm_characteristics'
+    `15_strategy_analysis` at the same line. A reader working the notebooks in order
+    reaches them before the holdout stage has run, so the ordinary case has to be a
+    sentence rather than a traceback - and the sentence has to say which of the four
+    absences it is, because "the holdout has not been evaluated" and "holdout backtests
+    exist but none replays what was selected" call for different actions.
+    """
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+    db = sqlite3.connect(str(case_study / "run_log" / "registry.db"))
+    db.execute("DELETE FROM backtest_runs WHERE backtest_hash = 'b_holdout_200'")
+    db.execute("DELETE FROM prediction_sets WHERE prediction_hash = 'p_holdout_200'")
+    db.commit()
+    db.close()
+
+    resolution = resolve_holdout_self_backtest("etfs", "b_validation_200")
+
+    assert not resolution.found
+    assert resolution.backtest_hash is None
+    assert "has not been evaluated" in resolution.reason
+    # The validation run that was searched for, so the reader can see the search was
+    # well formed rather than being told only that something is missing.
+    assert "b_validation_200" in resolution.reason
+    assert TRAINING_HASH in resolution.reason
+
+
+def test_a_holdout_that_replays_a_different_strategy_is_a_different_reason(case_study):
+    """Registered holdout backtests that do not replay the selection are not an empty stage."""
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+    db = sqlite3.connect(str(case_study / "run_log" / "registry.db"))
+    db.execute(
+        "UPDATE backtest_runs SET spec_json = ? WHERE backtest_hash = 'b_holdout_200'",
+        (_spec(OTHER_STRATEGY),),
+    )
+    db.commit()
+    db.close()
+
+    resolution = resolve_holdout_self_backtest("etfs", "b_validation_200")
+
+    assert not resolution.found
+    assert "none of them replays" in resolution.reason
+    assert "has not been evaluated" not in resolution.reason
+
+
+def test_an_unregistered_validation_run_says_so_rather_than_reporting_an_empty_holdout(
+    case_study,
+):
+    """A caller passing a stale hash must not be told the holdout stage has not run."""
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+
+    resolution = resolve_holdout_self_backtest("etfs", "b_validation_not_registered")
+
+    assert not resolution.found
+    assert "is not registered" in resolution.reason
+    assert "has not been evaluated" not in resolution.reason
+
+
+def test_a_found_replay_carries_no_reason(case_study):
+    """The success path is unambiguous: a hash and nothing to explain."""
+    _build_registry(case_study, checkpoints=(200,), holdout_sharpes=(0.4,))
+
+    resolution = resolve_holdout_self_backtest("etfs", "b_validation_200")
+
+    assert resolution.found
+    assert resolution.backtest_hash == "b_holdout_200"
+    assert resolution.reason is None

@@ -65,6 +65,7 @@ from case_studies.utils.backtest_loaders import get_backtest_config, load_backte
 from case_studies.utils.backtest_presets import build_backtest_spec, strategy_view
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
+    load_existing_backtest_hashes,
     read_predictions,
     resolve_best_backtest_runs,
     resolve_best_predictions,
@@ -155,14 +156,24 @@ print(
 # that projection exceeds the budget - reporting that it did, because an allocator silently absent
 # from the comparison below would read as one that was tried and lost.
 
+# %% [markdown]
+# Two facts, and a reader needs both: what the **stage** holds before this run, and what **this
+# execution** did. `run_backtest` returns a cached result and a fresh fit through the same call,
+# so a warm re-run would otherwise report a completed sweep in no time at all - a wrong number
+# that looks exactly like a right one - while reporting only what this run computed would make
+# that same re-run look like an empty stage.
+
 # %%
 BUDGET_SECONDS = 3600
 MVO_METHODS = ("mvo", "mvo_ledoit_wolf")
 
 n_done = 0
+served = 0
 failures = []
 skip_mvo = False
 sweep_start = time.monotonic()
+registered_before = load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation")
+print(f"Allocation-stage backtests already registered: {len(registered_before):,}")
 
 for top_k in TOP_K_VALUES:
     print(f"\n--- top_k = {top_k} ---")
@@ -216,6 +227,8 @@ for top_k in TOP_K_VALUES:
                 )
                 continue
             elapsed = time.monotonic() - started
+            if result.backtest_hash in registered_before:
+                served += 1
 
             if alloc_name in MVO_METHODS and not skip_mvo:
                 remaining = len(top_preds) * len(TOP_K_VALUES) - 1
@@ -233,7 +246,11 @@ for top_k in TOP_K_VALUES:
                 f"Sharpe={result.metrics.get('sharpe', 0):+.3f}"
             )
 
-print(f"\nSweep complete in {(time.monotonic() - sweep_start) / 60:.1f} minutes")
+print(
+    f"\nSweep complete in {(time.monotonic() - sweep_start) / 60:.1f} minutes: "
+    f"{n_done - served - len(failures)} computed, {served} served from the registry, "
+    f"{len(failures)} failed"
+)
 if failures:
     failure_frame = pl.DataFrame(failures)
     print(f"{failure_frame.height} backtests raised. Distinct causes:")
@@ -306,32 +323,46 @@ show_plotly_with_alt(
 # back out of each row's own stored specification. They are not columns of the registry: they are
 # part of what the backtest hash was taken over, so reading them from the spec is reading the same
 # declaration the run was identified by rather than a second copy of it.
+#
+# It takes two readers, because neither carries both halves. `resolve_best_backtest_runs` returns
+# the stored specification and projects the model away; `BacktestExplorer.best` returns the model
+# and drops the specification. They share `backtest_hash`, which is what the join is on.
+
 
 # %%
-allocation_rows = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=100000
-)
-if allocation_rows.is_empty():
-    raise RuntimeError("the allocation stage registered no rows for this label")
-
-
 def _strategy_field(spec_json: str, section: str, field: str):
     """Read one declared field out of a registered backtest specification."""
     return strategy_view(json.loads(spec_json)).get(section, {}).get(field)
 
 
-allocation_rows = allocation_rows.with_columns(
-    pl.Series(
-        "allocator",
-        [_strategy_field(s, "allocation", "method") for s in allocation_rows["spec_json"]],
-    ),
-    pl.Series(
-        "top_k",
-        [_strategy_field(s, "signal", "top_k") for s in allocation_rows["spec_json"]],
-        dtype=pl.Int64,
-    ),
-    source=pl.col("family") + pl.lit("/") + pl.col("config_name").fill_null(pl.lit("default")),
-).drop("spec_json")
+specs = resolve_best_backtest_runs(
+    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=100000
+)
+if specs.is_empty():
+    raise RuntimeError("the allocation stage registered no rows for this label")
+allocation_rows = (
+    specs.with_columns(
+        pl.Series(
+            "allocator",
+            [_strategy_field(spec, "allocation", "method") for spec in specs["spec_json"]],
+        ),
+        pl.Series(
+            "top_k",
+            [_strategy_field(spec, "signal", "top_k") for spec in specs["spec_json"]],
+            dtype=pl.Int64,
+        ),
+    )
+    .drop("spec_json", "sharpe")
+    .join(
+        explorer.best(stage="allocation", top_n=100000, label=LABEL).select(
+            "backtest_hash", "source", "sharpe"
+        ),
+        on="backtest_hash",
+        how="inner",
+    )
+)
+if allocation_rows.is_empty():
+    raise RuntimeError("no allocation row carries both a stored specification and a source")
 
 # %% [markdown]
 # Beneath the spread comparison, the same rows crossed the other way: one row per concentration

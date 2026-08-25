@@ -72,7 +72,11 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.registry import read_predictions, resolve_best_backtest_runs
+from case_studies.utils.registry import (
+    load_existing_backtest_hashes,
+    read_predictions,
+    resolve_best_backtest_runs,
+)
 from case_studies.utils.sweep_config import (
     calibrate_trailing_stops,
     get_portfolio_risk_controls,
@@ -122,10 +126,20 @@ if top_combos.is_empty():
         "no allocation-stage backtests are registered, so there is nothing to overlay; "
         "run 15_portfolio_management first"
     )
+# `resolve_best_backtest_runs` returns the stored specification and the Sharpe, and nothing
+# about the model behind it - the family and configuration are projected away. The model is
+# read from the explorer and joined on `backtest_hash`, which both carry.
+explorer = BacktestExplorer(CASE_STUDY_ID)
+sources = dict(
+    explorer.best(stage="allocation", top_n=100000, label=LABEL)
+    .select("backtest_hash", "source")
+    .iter_rows()
+)
 for row in top_combos.iter_rows(named=True):
     allocator = strategy_view(json.loads(row["spec_json"])).get("allocation", {}).get("method")
     print(
-        f"  baseline Sharpe={row['sharpe']:+.3f}  {row['family']}/{row['config_name']}  "
+        f"  baseline Sharpe={row['sharpe']:+.3f}  "
+        f"{sources.get(row['backtest_hash'], 'unknown source')}  "
         f"alloc={allocator}  backtest={row['backtest_hash'][:8]}"
     )
 
@@ -191,13 +205,19 @@ print(
 
 # %%
 n_done = 0
+served = 0
 failures = []
 sweep_start = time.monotonic()
+# Two facts, and a reader needs both: what the stage held before this run, and what this
+# execution did. A warm re-run computes nothing and would otherwise report a completed sweep in
+# no time at all; reporting only what this run computed would make it look like an empty stage.
+registered_before = load_existing_backtest_hashes(CASE_STUDY_ID, stage="risk_overlay")
+print(f"Risk-overlay backtests already registered: {len(registered_before):,}")
 
 
 def run_overlay(pred_hash, base_spec, predictions, weights, risk_block, name):
     """Register one risk overlay on one combination, recording the cause of any failure."""
-    global n_done
+    global n_done, served
     spec = clone_backtest_spec(base_spec)
     spec["chapter"] = "ch19"
     spec["strategy"]["risk"] = risk_block
@@ -217,6 +237,8 @@ def run_overlay(pred_hash, base_spec, predictions, weights, risk_block, name):
     except Exception as error:
         failures.append({"control": name, "error": f"{type(error).__name__}: {error}"})
         return
+    if result.backtest_hash in registered_before:
+        served += 1
     n_done += 1
     print(
         f"    {name}: Sharpe={result.metrics.get('sharpe', 0):+.3f}, "
@@ -280,7 +302,10 @@ for index, combo_row in enumerate(top_combos.iter_rows(named=True)):
             rc["name"],
         )
 
-print(f"\nRisk sweep: {n_done} registered in {(time.monotonic() - sweep_start) / 60:.1f} minutes")
+print(
+    f"\nRisk sweep in {(time.monotonic() - sweep_start) / 60:.1f} minutes: "
+    f"{n_done - served} computed, {served} served from the registry, {len(failures)} failed"
+)
 if failures:
     failure_frame = pl.DataFrame(failures)
     print(f"{failure_frame.height} overlays raised. Distinct causes:")
@@ -300,7 +325,6 @@ else:
 # the rule found the losses worth avoiding, or merely closed positions.
 
 # %% tags=["results"]
-explorer = BacktestExplorer(CASE_STUDY_ID)
 risk_df = explorer.risk_impact()
 if risk_df.is_empty():
     raise RuntimeError("the risk-overlay stage registered no readable rows")
@@ -347,7 +371,7 @@ fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_xaxes(title_text="Maximum drawdown under the overlay")
 fig.update_yaxes(title_text="Change in Sharpe against the un-overlaid baseline")
 fig.update_layout(
-    title="Most rules pay for their drawdown reduction in return",
+    title="Sharpe change against drawdown, one point per overlay",
     height=460,
     width=880,
     margin=dict(t=90),
@@ -372,11 +396,18 @@ show_plotly_with_alt(
 # - and the grid above is the measurement of whether that different signal is worth listening to at
 # each threshold.
 #
-# **Tight thresholds and loose thresholds fail differently.** A threshold below the ordinary
-# intra-month movement of these funds fires on almost every position, which turns a monthly
-# strategy into a series of truncated holds and pays the round trip each time. A threshold far
-# above it fires on almost nothing, which is harmless and also does nothing. Neither end is where a
-# useful rule lives, and the table above is where to see which part of the middle is.
+# **A threshold below the ordinary intra-month movement of these funds is the one that hurts.** It
+# fires on almost every position, turning a monthly strategy into a series of truncated holds and
+# paying the round trip each time. Read the tightest rows of the table against the loosest: if the
+# ordering runs one way along the threshold, what the grid is measuring is how often the rule fires
+# rather than how well it selects what to exit.
+#
+# **A rule that fires rarely is not thereby a rule that does nothing.** That is the assumption
+# worth checking against the table rather than carrying into it: a threshold reached by only a
+# handful of positions still removes those positions, and if the ones it removes are the ones that
+# went on to lose, a rule with very few triggers can move the Sharpe more than a rule with many.
+# What separates the two is not the trigger count but which positions the trigger caught, and the
+# drawdown column beside the Sharpe is where that shows.
 #
 # **Calibrating from the adverse-excursion distribution is what makes a threshold about this
 # universe.** Three percent means one thing on a bond fund and another on a leveraged commodity

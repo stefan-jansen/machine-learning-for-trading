@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -149,39 +150,59 @@ def rank_backtests_on_common_support(
     return rank_returns_on_common_support(returns_by_hash, periods_per_year=periods_per_year)
 
 
-def select_holdout_self_backtest(
+@dataclass(frozen=True)
+class HoldoutSelfBacktest:
+    """The outcome of looking for a validation run's holdout replay.
+
+    ``select_holdout_self_backtest`` answers with a hash or with ``None``, and ``None``
+    covers four different states of the registry: the validation backtest is not
+    registered, its prediction set is not, no holdout prediction set exists for the
+    configuration at all, or holdout backtests exist and none replays the validation
+    strategy. A strategy-analysis notebook that raises on ``None`` therefore tells its
+    reader nothing about which, and the most common of the four - the holdout stage has
+    simply not been run yet - is a normal state for anyone working the notebooks in
+    order rather than a defect.
+
+    ``reason`` is a sentence for the rendered page. It names the validation run that was
+    searched for, so a reader can see the search was well formed and is not being told
+    that something went wrong.
+    """
+
+    backtest_hash: str | None
+    reason: str | None = None
+
+    @property
+    def found(self) -> bool:
+        return self.backtest_hash is not None
+
+
+def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
-) -> str | None:
-    """Return the holdout backtest_hash whose strategy spec exactly matches
-    the given validation rank-1 backtest's strategy spec.
+) -> HoldoutSelfBacktest:
+    """Find the holdout backtest that replays a validation run's strategy, or say why not.
 
-    This is the canonical ``val_rank1_self`` lineage anchor for the §6
-    holdout closure: the holdout backtest produced by replaying the val
-    rank-1 strategy on the holdout prediction set. Matching by strategy
-    spec (rather than by max-Sharpe over candidates sharing the
-    ``training_hash``) keeps the lookup robust against experimental
-    side-channel allocators - most importantly ``conformal_weighted`` -
-    that may share the holdout pred set but diverge from val rank-1's
-    allocator method. Without this guard, an allocator variant whose
-    holdout Sharpe happens to exceed the canonical lineage's silently
-    displaces the §6 anchor and the ``backtest_paired_metrics``
-    ``val_rank1_self`` pair (written against the canonical lineage's
-    holdout hash) goes unfound by the reader.
+    This is the canonical ``val_rank1_self`` lineage anchor for the section 6 holdout
+    closure: the holdout backtest produced by replaying the validation rank-1 strategy on
+    the holdout prediction set. Matching by strategy spec, rather than by taking the
+    highest holdout Sharpe among candidates sharing the ``training_hash``, keeps the
+    lookup robust against experimental side-channel allocators - ``conformal_weighted``
+    most of all - that share the holdout prediction set but diverge from the validation
+    rank-1's allocator. Without that guard an allocator variant whose holdout Sharpe
+    happens to be higher silently displaces the anchor, and the
+    ``backtest_paired_metrics`` ``val_rank1_self`` pair, written against the canonical
+    lineage's holdout hash, is then never found.
 
-    The checkpoint is part of the model configuration, so the replay is
-    pinned to the validation prediction set's own ``checkpoint_value`` and
-    ``checkpoint_kind`` as well as its ``training_hash``. One trained model
-    registers one prediction set per declared checkpoint, and the strategy
-    spec is identical across them, so ``training_hash`` alone leaves several
-    indistinguishable holdout candidates. Resolving those by holdout Sharpe -
-    which the previous ``ORDER BY bm.sharpe DESC`` did - reads the holdout to
-    choose among configurations, the one thing
-    ``reference/CASE_STUDY_PIPELINE.md`` §6 forbids outright. Exposure is a
-    function of how many checkpoints per configuration a case study advances.
+    The checkpoint is part of the model configuration, so the replay is pinned to the
+    validation prediction set's own ``checkpoint_value`` and ``checkpoint_kind`` as well
+    as its ``training_hash``. One trained model registers one prediction set per declared
+    checkpoint and the strategy spec is identical across them, so ``training_hash`` alone
+    leaves several indistinguishable holdout candidates. Resolving those by holdout
+    Sharpe - which an earlier ``ORDER BY bm.sharpe DESC`` did - reads the holdout to
+    choose among configurations, which ``reference/CASE_STUDY_PIPELINE.md`` section 6
+    forbids outright.
 
-    Returns ``None`` when no matching holdout backtest exists. Raises when the
-    pinned lineage is still ambiguous, rather than picking one.
+    Raises when the pinned lineage is still ambiguous, rather than picking one.
     """
     import sqlite3
 
@@ -194,7 +215,11 @@ def select_holdout_self_backtest(
             (val_backtest_hash,),
         ).fetchone()
         if row is None:
-            return None
+            return HoldoutSelfBacktest(
+                None,
+                f"the selected validation backtest {val_backtest_hash} is not registered in "
+                f"{case_study}'s run log, so there is nothing to look for a holdout replay of",
+            )
         val_pred_hash, val_spec_json = row
         val_strategy = json.loads(val_spec_json).get("strategy", {})
 
@@ -206,7 +231,12 @@ def select_holdout_self_backtest(
             (val_pred_hash,),
         ).fetchone()
         if train_row is None:
-            return None
+            return HoldoutSelfBacktest(
+                None,
+                f"the selected validation backtest {val_backtest_hash} names prediction set "
+                f"{val_pred_hash}, which is not registered, so the configuration to replay "
+                "cannot be identified",
+            )
         training_hash, checkpoint_value, checkpoint_kind = train_row
 
         # ``IS`` is SQLite's null-safe equality: a configuration with no
@@ -226,20 +256,47 @@ def select_holdout_self_backtest(
             (training_hash, checkpoint_value, checkpoint_kind),
         ).fetchall()
 
+    checkpoint = f"checkpoint {checkpoint_kind}={checkpoint_value}"
+    if not candidates:
+        return HoldoutSelfBacktest(
+            None,
+            f"no holdout backtest is registered for the configuration behind validation run "
+            f"{val_backtest_hash} (training {training_hash}, {checkpoint}), so the holdout "
+            "has not been evaluated for this case study",
+        )
+
     matched = [
         bh
         for bh, spec_json in candidates
         if json.loads(spec_json).get("strategy", {}) == val_strategy
     ]
     if not matched:
-        return None
+        return HoldoutSelfBacktest(
+            None,
+            f"{len(candidates)} holdout backtests are registered for the configuration behind "
+            f"validation run {val_backtest_hash} (training {training_hash}, {checkpoint}), and "
+            "none of them replays that run's strategy, so the anchor is not a replay of what "
+            "was selected",
+        )
     if len(set(matched)) > 1:
         raise ValueError(
             f"holdout replay for {val_backtest_hash} is ambiguous: "
             f"{sorted(set(matched))} share training_hash {training_hash}, "
-            f"checkpoint {checkpoint_kind}={checkpoint_value} and one strategy spec"
+            f"{checkpoint} and one strategy spec"
         )
-    return matched[0]
+    return HoldoutSelfBacktest(matched[0])
+
+
+def select_holdout_self_backtest(
+    case_study: str,
+    val_backtest_hash: str,
+) -> str | None:
+    """The holdout replay's hash, or ``None`` when there is not exactly one.
+
+    Kept for callers that only need the hash. A notebook that has to tell its reader
+    what is missing wants ``resolve_holdout_self_backtest``, which carries the reason.
+    """
+    return resolve_holdout_self_backtest(case_study, val_backtest_hash).backtest_hash
 
 
 def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:

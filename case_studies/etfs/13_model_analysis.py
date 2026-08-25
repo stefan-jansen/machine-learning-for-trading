@@ -43,7 +43,7 @@
 # - Read a family comparison from its confidence intervals rather than from its ordering.
 # - Separate a mean information coefficient from the fold-level consistency behind it.
 # - Say whether two model families are finding the same signal or different ones, and what follows.
-# - Say why structural and causal evidence do not belong in the same ranking as predictive scores.
+# - Say why structural and causal evidence are read apart from a predictive ranking.
 #
 # **Book reference**: this notebook bridges Part III (models, chapters 11 to 15) and Part IV
 # (strategy implementation, chapters 16 to 20). The chapter-insight notebooks compare one family
@@ -1091,6 +1091,11 @@ for model_name in ("cae", "sae"):
 # exactly one **current** causal identity, and a registry holding two undeclared ones raises rather
 # than picking the first - which is the difference between reading a result and reading a row that
 # happens to be there.
+#
+# The refutation p-value is nullable by contract: fewer than ten successful placebo draws leaves it
+# NULL, and the classification derived from it None, because a p-value from that few draws cannot
+# reject at any threshold. The cell prints "not run" rather than formatting a missing number, which would
+# fail after half the block had already printed.
 
 # %% tags=["results"]
 causal_study = open_study(CASE_STUDY)
@@ -1115,7 +1120,12 @@ if causal is not None:
         f"{metrics['dml_effect'] + interval:+.4f}, p {metrics['p_value_hac']:.4f})"
     )
     print(f"  Unadjusted (OLS): {metrics['naive_effect']:+.4f}")
-    print(f"  Refutation:       {metrics['refutation_class']} (p {metrics['refutation_p']:.4f})")
+    # NULL when fewer than ten placebo draws succeed; see the note above the cell.
+    refutation_p = metrics["refutation_p"]
+    print(
+        f"  Refutation:       {metrics['refutation_class'] or 'not run'}"
+        + ("" if refutation_p is None else f" (p {refutation_p:.4f})")
+    )
 
 # %% [markdown]
 # **The causal estimate and the predictive IC answer different questions, and neither settles the
@@ -1218,25 +1228,15 @@ print(
 # probability of backtest overfitting - all computed at the signal stage, over the configurations
 # actually swept.
 #
-# It reads `cohort_metrics`, which [`14_backtest`](14_backtest.ipynb) fills. On a registry where
-# the signal-stage backtest has not run, there is nothing to report and the notebook says so rather
-# than failing: a reader working forward through the case study reaches this notebook first.
+# It reads `cohort_metrics`, which is computed once the whole pipeline exists and written by
+# [`18_strategy_analysis`](18_strategy_analysis.ipynb) - the notebook that has every stage in front
+# of it. So on a first pass this table is empty, and it is empty for a reason worth stating: the
+# cost of a search cannot be priced until the search has happened. The notebook says so rather than
+# failing, and filling in on a second pass is the normal course rather than a repair.
 
 # %% tags=["results"]
-SELECTION_COLUMNS = (
-    "family",
-    "config_name",
-    "sharpe",
-    "sharpe_ci95_lo",
-    "sharpe_ci95_hi",
-    "dsr",
-    "expected_max_sharpe",
-    "reality_check_pvalue",
-    "pbo",
-    "k_variants",
-)
 sel_adj = selection_adjusted_leader_table(CASE_STUDY, stage="signal")
-if sel_adj.is_empty() or not set(SELECTION_COLUMNS) <= set(sel_adj.columns):
+if sel_adj.is_empty():
     print(
         "No signal-stage cohort metrics are registered, so the selection-adjusted view is empty. "
         "Run 14_backtest and re-run this notebook to fill it."

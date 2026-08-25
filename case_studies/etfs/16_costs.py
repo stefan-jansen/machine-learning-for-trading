@@ -64,6 +64,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
+from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -74,6 +75,7 @@ from case_studies.utils.backtest_presets import (
 )
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
+    load_existing_backtest_hashes,
     read_predictions,
     resolve_best_backtest_runs,
 )
@@ -134,10 +136,19 @@ if top_combos.is_empty():
         "no allocation-stage backtests are registered, so there is nothing to re-price; "
         "run 15_portfolio_management first"
     )
+# `resolve_best_backtest_runs` returns the stored specification and the Sharpe, and nothing
+# about the model behind it - the family and configuration are projected away. The model is
+# read from the explorer and joined on `backtest_hash`, which both carry.
+sources = dict(
+    BacktestExplorer(CASE_STUDY_ID)
+    .best(stage="allocation", top_n=100000, label=LABEL)
+    .select("backtest_hash", "source")
+    .iter_rows()
+)
 for row in top_combos.iter_rows(named=True):
     allocator = strategy_view(json.loads(row["spec_json"])).get("allocation", {}).get("method")
     print(
-        f"  Sharpe={row['sharpe']:+.3f}  {row['family']}/{row['config_name']}  "
+        f"  Sharpe={row['sharpe']:+.3f}  {sources.get(row['backtest_hash'], 'unknown source')}  "
         f"alloc={allocator}  backtest={row['backtest_hash'][:8]}"
     )
 
@@ -160,13 +171,21 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} tradeable fu
 def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
     """Re-price every leading combination at every level of one cost grid.
 
-    Returns the number of backtests registered and the failures, each with the exception that
-    caused it. A count on its own cannot distinguish a sweep that lost one level from one that
-    lost every level of one regime, and the two mean very different things about the curve.
+    Prints two facts a reader needs both of: what the stage held before this run, and what this
+    execution did. `run_backtest` returns a cached result and a fresh fit through the same call,
+    so a warm re-run would otherwise report a completed sweep in no time at all - a wrong number
+    that looks exactly like a right one - while reporting only what this run computed would make
+    that same re-run look like an empty stage.
+
+    Failures carry the exception that caused them. A count on its own cannot distinguish a sweep
+    that lost one level from one that lost every level of a regime, and the two mean very
+    different things about the curve.
     """
-    registered, failures = 0, []
+    registered, served, failures = 0, 0, []
     started = time.time()
     total = len(top_combos) * len(grid)
+    registered_before = load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
+    print(f"{regime}: {len(registered_before):,} cost-sensitivity backtests already registered")
 
     for combo_row in top_combos.iter_rows(named=True):
         pred_hash = combo_row["prediction_hash"]
@@ -206,6 +225,8 @@ def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
                     }
                 )
                 continue
+            if result.backtest_hash in registered_before:
+                served += 1
             registered += 1
             print(
                 f"  [{registered}/{total}] {regime} {allocator} @ {level}: "
@@ -213,8 +234,8 @@ def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
             )
 
     print(
-        f"{regime} sweep: {registered} registered, {len(failures)} failed, "
-        f"{time.time() - started:.0f}s"
+        f"{regime} sweep in {time.time() - started:.0f}s: {registered - served} computed, "
+        f"{served} served from the registry, {len(failures)} failed"
     )
     return registered, failures
 
@@ -308,33 +329,49 @@ print(f"per-share regime:   {ps_curve.height} allocator-level points")
 
 
 # %% tags=["results"]
-def breakeven(curve: pl.DataFrame) -> float | None:
-    """The cost level where the mean Sharpe first crosses zero, or None if it never does."""
+def breakeven(curve: pl.DataFrame) -> tuple[str, float | None]:
+    """Where the mean Sharpe first crosses zero, and which of three cases the curve is.
+
+    Returns one of "crosses" with the interpolated level, "never_positive" when the curve is
+    already at or below zero at the cheapest level on the grid, or "stays_positive" when it
+    has not crossed by the most expensive. The three are different findings and collapsing
+    them into "no breakeven" would report a strategy that never paid and one that always paid
+    with the same sentence.
+    """
     if curve.is_empty():
-        return None
+        return "empty", None
     mean_curve = curve.group_by("level").agg(pl.col("sharpe").mean()).sort("level")
     levels = mean_curve["level"].to_list()
     sharpes = mean_curve["sharpe"].to_list()
+    if sharpes[0] <= 0:
+        return "never_positive", levels[0]
     for (low, low_sharpe), (high, high_sharpe) in zip(
         zip(levels, sharpes, strict=True), zip(levels[1:], sharpes[1:], strict=True), strict=False
     ):
         if low_sharpe >= 0 > high_sharpe:
-            return low + (high - low) * low_sharpe / (low_sharpe - high_sharpe)
-    return None
+            return "crosses", low + (high - low) * low_sharpe / (low_sharpe - high_sharpe)
+    return "stays_positive", levels[-1]
 
 
 for name, curve, unit in [
     ("basis points per leg", bps_curve, "bps"),
     ("cents of half-spread", ps_curve, "¢"),
 ]:
-    crossing = breakeven(curve)
-    if curve.is_empty():
+    case, level = breakeven(curve)
+    if case == "empty":
         print(f"{name}: no registered rows")
-    elif crossing is None:
-        top = curve["level"].max()
-        print(f"{name}: mean Sharpe does not cross zero anywhere up to {top}{unit}")
+    elif case == "never_positive":
+        print(
+            f"{name}: mean Sharpe is already at or below zero at {level}{unit}, the cheapest "
+            "level on the grid, so there is no edge for cost to consume"
+        )
+    elif case == "stays_positive":
+        print(
+            f"{name}: mean Sharpe is still above zero at {level}{unit}, the most expensive "
+            "level on the grid, so the grid does not reach the breakeven"
+        )
     else:
-        print(f"{name}: mean Sharpe crosses zero at {crossing:.2f}{unit}")
+        print(f"{name}: mean Sharpe crosses zero at {level:.2f}{unit}")
 
 # %%
 fig = make_subplots(
@@ -398,9 +435,15 @@ show_plotly_with_alt(
 #
 # **The rebalancing cadence is what buys cost tolerance, and it is a design choice rather than a
 # result.** A position held for a month pays its round trip once and earns a month of return
-# against it; the same position held for a day pays it about twenty times over the same month. That
-# is why the breakeven printed above is where it is, and it is the single most consequential thing
-# the label horizon decided back in [`02_labels`](02_labels.ipynb).
+# against it; the same position held for a day pays it about twenty times over the same month. So
+# where the crossing falls - or whether the grid reaches one at all - was largely decided by the
+# label horizon back in [`02_labels`](02_labels.ipynb), long before any cost was charged.
+#
+# **A grid that does not reach the crossing has still answered something.** It bounds the friction
+# the strategy tolerates from below rather than locating it, and the honest report of that is the
+# bound, not an extrapolation of the curve past its last point. Widening the grid is what would
+# locate it, and that is a decision about what friction is worth modelling rather than a defect in
+# the sweep.
 #
 # **The two regimes are two different questions, and the declared one is the per-share panel.** A
 # basis-point cost says friction scales with the value traded. A per-share cost says it scales with
