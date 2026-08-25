@@ -11,10 +11,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from case_studies.research.holdout import evaluate_holdout
 from tests.test_locked_holdout_execution import _install_fixture_adapter, _locked_study
+
+# The fixture study's own observation grid. build_holdout_cv is pinned below, so the timeline is
+# only carried through the driver here; its own derivation is covered separately.
+TIMELINE = pd.bdate_range("2023-12-01", "2024-02-01")
 
 
 def _pin_derivation_to_the_fixture(monkeypatch: pytest.MonkeyPatch, lock) -> None:
@@ -38,7 +43,7 @@ def test_it_fits_the_locked_lineage_and_reports_that_it_did(
     fit_calls = _install_fixture_adapter(monkeypatch, prices)
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
-    outcome = evaluate_holdout(study, candidate_set_name="locked-selection")
+    outcome = evaluate_holdout(study, candidate_set_name="locked-selection", timeline=TIMELINE)
 
     assert outcome.evaluated_now is True
     assert outcome.lock.state == "HOLDOUT_EVALUATED"
@@ -59,10 +64,10 @@ def test_a_second_call_reads_the_recorded_evaluation_and_fits_nothing(
     fit_calls = _install_fixture_adapter(monkeypatch, prices)
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
-    first = evaluate_holdout(study, candidate_set_name="locked-selection")
+    first = evaluate_holdout(study, candidate_set_name="locked-selection", timeline=TIMELINE)
     fits_after_first = list(fit_calls)
 
-    second = evaluate_holdout(study, candidate_set_name="locked-selection")
+    second = evaluate_holdout(study, candidate_set_name="locked-selection", timeline=TIMELINE)
 
     assert first.evaluated_now is True
     assert second.evaluated_now is False
@@ -78,7 +83,7 @@ def test_the_recorded_selection_is_the_documented_rule_and_names_the_set(
     _install_fixture_adapter(monkeypatch, prices)
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
-    outcome = evaluate_holdout(study, candidate_set_name="locked-selection")
+    outcome = evaluate_holdout(study, candidate_set_name="locked-selection", timeline=TIMELINE)
 
     evidence = outcome.lock.record["selection_evidence"]
     assert evidence["metric"] == "validation_backtest_sharpe"
@@ -92,4 +97,4 @@ def test_an_unknown_candidate_set_is_refused_by_name(
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
     with pytest.raises(ValueError, match="resolved to 0 identities"):
-        evaluate_holdout(study, candidate_set_name="no-such-set")
+        evaluate_holdout(study, candidate_set_name="no-such-set", timeline=TIMELINE)

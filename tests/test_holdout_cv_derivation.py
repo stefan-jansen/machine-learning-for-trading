@@ -70,6 +70,13 @@ def _validation_spec(label: str = "fwd_ret_1m", folds: list[dict] | None = None)
     }
 
 
+# Real observation grids: a five-session week for the calendar-backed case studies, month ends
+# for us_firm_characteristics. The buffer is counted along these, so the grid is not incidental to
+# the test - it is the thing that separates a correct seal from a calendar-shortened one.
+SESSIONS = pd.bdate_range("2004-01-01", "2026-12-31")
+MONTH_ENDS = pd.date_range("2004-01-31", "2026-12-31", freq="ME")
+
+
 def _fold(cv: dict[str, Any]) -> dict[str, Any]:
     assert len(cv["folds"]) == 1, "a holdout is evaluated once, over one interval"
     return cv["folds"][0]
@@ -79,14 +86,22 @@ def test_the_evaluation_interval_is_the_case_studys_own_declared_holdout_window(
     setup = load_setup_config("us_firm_characteristics")
     declared = setup["evaluation"]
 
-    fold = _fold(build_holdout_cv(_validation_spec(), case_study="us_firm_characteristics"))
+    fold = _fold(
+        build_holdout_cv(
+            _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+        )
+    )
 
     assert pd.Timestamp(fold["val_start"]) == pd.Timestamp(declared["holdout_start"])
     assert pd.Timestamp(fold["val_end"]) == pd.Timestamp(declared["holdout_end"])
 
 
 def test_training_starts_at_the_earliest_fold_not_the_first_one_in_the_list() -> None:
-    fold = _fold(build_holdout_cv(_validation_spec(), case_study="us_firm_characteristics"))
+    fold = _fold(
+        build_holdout_cv(
+            _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+        )
+    )
 
     earliest = min(pd.Timestamp(entry["train_start"]) for entry in FOLDS)
     assert pd.Timestamp(fold["train_start"]) == earliest
@@ -96,13 +111,55 @@ def test_training_starts_at_the_earliest_fold_not_the_first_one_in_the_list() ->
     assert pd.Timestamp(fold["train_start"]) != pd.Timestamp(FOLDS[0]["train_start"])
 
 
-def test_training_ends_one_declared_label_buffer_before_the_holdout_opens() -> None:
-    setup = load_setup_config("etfs")
-    fold = _fold(build_holdout_cv(_validation_spec("fwd_ret_21d"), case_study="etfs"))
+def test_the_buffer_is_counted_in_observations_not_calendar_time() -> None:
+    """The defect this function was rewritten to remove, pinned as a property.
 
-    gap = pd.Timestamp(fold["val_start"]) - pd.Timestamp(fold["train_end"])
-    assert gap == pd.Timedelta(setup["labels"]["buffer"])
-    assert pd.Timestamp(fold["train_end"]) < pd.Timestamp(fold["val_start"])
+    etfs declares a `21D` buffer and trades a five-session week. Subtracting `pd.Timedelta("21
+    days")` leaves about fifteen sessions - short, and short in the direction that looks fine,
+    which is why `utils/cv_splits.py` already converts D-buffers to trading days and the causal
+    resolver already counts observations. This is the third construction of the same seal and it
+    has to agree with the other two.
+    """
+    cv = build_holdout_cv(_validation_spec("fwd_ret_21d"), case_study="etfs", timeline=SESSIONS)
+    fold = _fold(cv)
+
+    train_end = pd.Timestamp(fold["train_end"])
+    val_start = pd.Timestamp(fold["val_start"])
+    excluded = [d for d in SESSIONS if train_end < d < val_start]
+
+    assert cv["request"]["label_buffer_steps"] == 21
+    assert len(excluded) == 21, "the seal must span 21 observations, not 21 calendar days"
+    assert train_end < val_start
+
+    # What the calendar subtraction would have produced, stated so the two cannot be confused.
+    calendar_end = val_start - pd.Timedelta(load_setup_config("etfs")["labels"]["buffer"])
+    assert train_end < calendar_end, (
+        "a calendar-day subtraction lands later than the observation count, which is exactly the "
+        "under-buffering that puts the last training label inside the holdout"
+    )
+
+
+def test_a_month_buffer_on_a_monthly_panel_is_one_observation() -> None:
+    """The mirror failure: per-unit defaults read `1M` as 21 observations.
+
+    `embargo_from_buffer` refuses to divide a month by an observation step, and its other branch
+    takes periods_per_year. Falling through to the per-unit default there makes the seal 21 months
+    long on us_firm_characteristics, whose panel is monthly and whose own causal notebook resolves
+    the same buffer to 1.
+    """
+    cv = build_holdout_cv(
+        _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+    )
+    fold = _fold(cv)
+
+    assert cv["request"]["label_buffer_steps"] == 1
+    assert cv["request"]["periods_per_year"] == 12
+    excluded = [
+        d
+        for d in MONTH_ENDS
+        if pd.Timestamp(fold["train_end"]) < d < pd.Timestamp(fold["val_start"])
+    ]
+    assert len(excluded) == 1
 
 
 def test_a_buffer_shorter_than_the_outcome_horizon_is_refused_as_a_leak(
@@ -119,7 +176,7 @@ def test_a_buffer_shorter_than_the_outcome_horizon_is_refused_as_a_leak(
     assert module.build_holdout_cv is build_holdout_cv
 
     with pytest.raises(ValueError, match="shorter than the outcome horizon"):
-        build_holdout_cv(_validation_spec("fwd_ret_21d"), case_study="etfs")
+        build_holdout_cv(_validation_spec("fwd_ret_21d"), case_study="etfs", timeline=SESSIONS)
 
 
 def test_a_case_study_with_no_declared_holdout_window_is_refused_by_name(
@@ -130,7 +187,9 @@ def test_a_case_study_with_no_declared_holdout_window_is_refused_by_name(
     )
 
     with pytest.raises(ValueError, match="declares no holdout window"):
-        build_holdout_cv(_validation_spec(), case_study="us_firm_characteristics")
+        build_holdout_cv(
+            _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+        )
 
 
 def test_an_empty_training_interval_is_refused_rather_than_produced() -> None:
@@ -140,7 +199,11 @@ def test_an_empty_training_interval_is_refused_rather_than_produced() -> None:
     ]
 
     with pytest.raises(ValueError, match="holdout training interval is empty"):
-        build_holdout_cv(_validation_spec(folds=late), case_study="us_firm_characteristics")
+        build_holdout_cv(
+            _validation_spec(folds=late),
+            case_study="us_firm_characteristics",
+            timeline=MONTH_ENDS,
+        )
 
 
 def test_a_spec_with_no_resolved_folds_is_refused() -> None:
@@ -148,7 +211,7 @@ def test_a_spec_with_no_resolved_folds_is_refused() -> None:
     spec["computation"]["cv"]["folds"] = []
 
     with pytest.raises(ValueError, match="no resolved validation folds"):
-        build_holdout_cv(spec, case_study="us_firm_characteristics")
+        build_holdout_cv(spec, case_study="us_firm_characteristics", timeline=MONTH_ENDS)
 
 
 def test_folds_missing_a_boundary_are_named_rather_than_read_as_none() -> None:
@@ -156,7 +219,7 @@ def test_folds_missing_a_boundary_are_named_rather_than_read_as_none() -> None:
     del spec["computation"]["cv"]["folds"][1]["train_start"]
 
     with pytest.raises(ValueError, match=r"missing boundaries: \['train_start'\]"):
-        build_holdout_cv(spec, case_study="us_firm_characteristics")
+        build_holdout_cv(spec, case_study="us_firm_characteristics", timeline=MONTH_ENDS)
 
 
 def test_the_derived_interval_satisfies_the_lock_contract_it_will_be_checked_against() -> None:
@@ -170,7 +233,7 @@ def test_the_derived_interval_satisfies_the_lock_contract_it_will_be_checked_aga
     validation = _validation_spec()
     holdout = deepcopy(validation)
     holdout["computation"]["cv"] = build_holdout_cv(
-        validation, case_study="us_firm_characteristics"
+        validation, case_study="us_firm_characteristics", timeline=MONTH_ENDS
     )
 
     locked = _locked_training_spec(validation, holdout)
