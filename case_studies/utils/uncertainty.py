@@ -792,6 +792,29 @@ def load_daily_returns(case_study: str, backtest_hash: str) -> np.ndarray | None
     return _coerce_returns(df)
 
 
+def _normalized_timestamp(dtype) -> pl.Expr:
+    """Return an expression casting a daily-returns ``timestamp`` to ``Datetime("us")``, tz-naive.
+
+    Daily-returns parquets across stages and case studies write this column with inconsistent
+    dtypes - ``Date`` for monthly-rebalance aggregations, ``Datetime[ms]`` for some engine paths,
+    ``Datetime[us]`` for others. Polars refuses to join or compare across them, so anything that
+    puts two of these frames side by side has to normalize first.
+
+    This lived only inside :func:`_align_variants_on_timestamp`, which meant a caller that joined
+    two frames itself got the raw dtypes and a comparison error. Defining it once and applying it
+    where the frame is loaded is what makes every caller safe rather than only that one.
+    """
+    expr = pl.col("timestamp")
+    if dtype == pl.Date:
+        return expr.cast(pl.Datetime("us"))
+    if isinstance(dtype, pl.Datetime):
+        if getattr(dtype, "time_zone", None) is not None:
+            expr = expr.dt.replace_time_zone(None)
+        if getattr(dtype, "time_unit", "us") != "us":
+            expr = expr.cast(pl.Datetime("us"))
+    return expr
+
+
 def load_daily_returns_with_timestamp(case_study: str, backtest_hash: str) -> pl.DataFrame | None:
     """Load persisted daily returns as a (timestamp, ret) frame.
 
@@ -823,7 +846,7 @@ def load_daily_returns_with_timestamp(case_study: str, backtest_hash: str) -> pl
     if "timestamp" not in df.columns:
         return None
     return df.select(
-        pl.col("timestamp"),
+        _normalized_timestamp(df.schema["timestamp"]).alias("timestamp"),
         pl.col(ret_col).cast(pl.Float64).alias("ret"),
     ).drop_nulls()
 
@@ -836,13 +859,8 @@ def _align_variants_on_timestamp(
     Variants with too-few observations after alignment are dropped. Returns
     ``None`` if fewer than 2 variants survive or fewer than 4 timestamps remain.
 
-    Daily-returns parquets across stages/case-studies write the timestamp
-    column with inconsistent dtypes (``Date`` for monthly-rebalance
-    aggregations, ``Datetime[ms]`` for some engine paths, ``Datetime[μs]``
-    for others). The polars inner-join refuses to match across dtypes, so
-    every frame is normalized to ``Datetime[μs]`` before joining. Any
-    timezone is stripped — these are calendar-day rebalance stamps, not
-    instants — so the join is a pure key match.
+    Every frame is normalized through :func:`_normalized_timestamp` before joining, because
+    the polars inner-join refuses to match across the dtypes these parquets carry.
     """
     frames: dict[str, pl.DataFrame] = {}
     for name, frame in returns_by_hash.items():
@@ -850,15 +868,9 @@ def _align_variants_on_timestamp(
             continue
         if "timestamp" not in frame.columns or "ret" not in frame.columns:
             continue
-        ts_dtype = frame.schema["timestamp"]
-        ts_expr = pl.col("timestamp")
-        if ts_dtype == pl.Date:
-            ts_expr = ts_expr.cast(pl.Datetime("us"))
-        elif isinstance(ts_dtype, pl.Datetime):
-            if getattr(ts_dtype, "time_zone", None) is not None:
-                ts_expr = ts_expr.dt.replace_time_zone(None)
-            if getattr(ts_dtype, "time_unit", "us") != "us":
-                ts_expr = ts_expr.cast(pl.Datetime("us"))
+        # Still normalized here as well as in the loader: `returns_by_hash` may hold frames a
+        # caller assembled itself. One helper, so the two cannot drift apart.
+        ts_expr = _normalized_timestamp(frame.schema["timestamp"])
         frames[name] = frame.select(
             ts_expr.alias("timestamp"),
             pl.col("ret").cast(pl.Float64).alias(name),

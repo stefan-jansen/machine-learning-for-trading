@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from importlib.metadata import version
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -25,7 +26,12 @@ def _restore_output_root():
 
 
 def _resolve_nlinear_request(
-    tmp_path, monkeypatch, entity: str = "symbol", library: str = "pytorch"
+    tmp_path,
+    monkeypatch,
+    entity: str = "symbol",
+    library: str = "pytorch",
+    execution_tier: str = "canonical",
+    preview_reductions: dict | None = None,
 ):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -103,6 +109,8 @@ def _resolve_nlinear_request(
         label=label.name,
         config_name="nlinear_probe",
         overrides={"device": "cpu", "n_epochs": 3},
+        execution_tier=execution_tier,
+        preview_reductions=preview_reductions or {},
     ).resolve()
     return study, label, resolved
 
@@ -550,3 +558,26 @@ def test_sequence_publishes_predictions_under_the_expected_key_names(entity) -> 
         .sort("symbol")
         .equals(expected_keys.sort("symbol"))
     )
+
+
+def test_sequence_resolver_keeps_a_preview_request_inside_the_preview_root(
+    tmp_path, monkeypatch
+) -> None:
+    """Resolving under the preview tier must not repoint the output root at the workspace.
+
+    `LabelCatalog.get` activates the study on the tier it is handed, defaulting to canonical.
+    A resolver that omits the argument silently moves `ML4T_OUTPUT_DIR` from
+    `<workspace>/.preview` back to `<workspace>`, so a preview writes where a canonical run
+    would. Every sequence preview failed this way until the tier was threaded through.
+    """
+    study, _label, resolved = _resolve_nlinear_request(
+        tmp_path,
+        monkeypatch,
+        execution_tier="preview",
+        preview_reductions={"max_symbols": 2},
+    )
+
+    preview_root = study.output_root / ".preview"
+    assert Path(os.environ["ML4T_OUTPUT_DIR"]) == preview_root
+    assert study.storage_root("preview") == preview_root / study.case_study
+    assert resolved.spec["execution_tier"] == "preview"
