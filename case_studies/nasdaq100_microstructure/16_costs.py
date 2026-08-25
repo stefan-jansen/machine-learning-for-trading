@@ -19,17 +19,24 @@
 # **Chapter 18 — Transaction Costs and Execution**
 #
 # This is the primary cost-analysis notebook for the NASDAQ-100 case study.
-# Transaction costs at 15-minute cadence eliminate the signal on the full
-# universe: ~7 bps per bar × 26 rebalances per day produces massive annual drag.
-# Two levers recover a tradeable strategy, and this notebook quantifies both:
 #
-# 1. **Screen the universe for cost feasibility.** Restricting to the
-#    cheapest-to-trade names (the cost-feasible universe from the feasibility
-#    analysis) raises the same slot design from deeply negative to positive and
-#    cuts turnover several-fold — the screen the case study trades on.
-# 2. **Slow the cadence.** Cost dominance is **cadence-dependent**: dropping
-#    rebalance frequency to hourly or 4-hourly amortizes the per-trade cost so
-#    the signal becomes viable at institutional execution levels.
+# Trading costs enter a strategy once per trade, so what they take out over a
+# year depends on how often it trades and on how expensive each name is to trade.
+# At a 15-minute rebalancing interval, a strategy crosses the spread many times a
+# day on every position it holds, and the expected return over each of those
+# intervals is a fraction of a basis point. The two quantities are close enough
+# in size that the cost assumption decides the outcome.
+#
+# The notebook measures two levers against that, separately, so each can be
+# attributed:
+#
+# 1. **Which names to trade.** Restricting to the cheapest-to-trade names
+#    changes both what is paid per trade and how much trading the ordering
+#    provokes, because the expensive names are also the ones whose ranking moves
+#    around most.
+# 2. **How often to trade.** Rebalancing less frequently spreads each entry cost
+#    over a longer holding period. The signal is unchanged; what changes is how
+#    many times it is acted on.
 #
 # The notebook has three parts:
 # - **Sections 1–3**: Standard bps cost grid on full-universe allocation combos,
@@ -41,9 +48,12 @@
 #   realistic for equities, swept across rebalance frequencies.
 #
 # **Learning Objectives:**
-# 1. Run a cost grid sweep on full-universe combos to find breakeven
-# 2. Quantify how the cost-feasibility screen recovers Sharpe and cuts turnover
-# 3. Sweep cadence × per-share cost to find the viable implementation regime
+# 1. Sweep a cost grid over existing backtests to locate the cost level at
+#    which a strategy stops being profitable
+# 2. Separate the effect of restricting the universe from the effect of
+#    rebalancing less often, by varying one at a time
+# 3. Read a two-dimensional sweep of rebalancing frequency against per-share
+#    cost, and say what execution quality each region of it assumes
 #
 # **Book Reference:** Chapter 18, Sections 18.2–18.5
 #
@@ -259,17 +269,19 @@ else:
 # %% [markdown]
 # ## 4. Full Universe vs the Cost-Feasible Screen
 #
-# The first cost lever is *which names to trade*. The feasibility analysis
-# (Ch16 §B.3) flagged that the half-spread varies widely across the 114-name
-# panel; the expensive tail pays cost the intraday edge cannot cover. The
-# **cost-feasible universe** keeps the cheapest-to-trade names (frozen per
-# split) and drops that tail.
+# The first lever is which names to trade. Half the bid-ask spread is what a
+# trade pays to cross it, and that varies widely across the panel: the same
+# strategy pays several times more per trade in the least liquid names than in
+# the most liquid ones. The cost-feasible universe keeps the cheapest-to-trade
+# names, fixed per split so the screen cannot use information from the window it
+# is evaluated on.
 #
-# This section reads the *same* featured slot design (10 slots, 0.90 entry,
-# hold-only exit) on both universes directly from the registry — no new
-# backtests — and compares Sharpe and trade count. The screen is not a
-# parameter tweak: it changes which names the slot mechanism can hold, and with
-# it both the turnover and the sign of the net Sharpe.
+# This section reads the same slot design on both universes directly from the
+# registry, running no new backtests, and compares the outcome alongside the
+# trade count. Reporting both matters: the screen changes which names can be
+# held, so it changes how much trading the ordering provokes as well as what
+# each trade costs, and the two effects are not separable from the outcome
+# alone.
 
 # %%
 conn = sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db"))
@@ -340,22 +352,22 @@ if not screen_compare.is_empty() and screen_compare.height == 2:
 # because for equities the execution cost is a dollar amount per share (half
 # the bid-ask spread plus commission), not a percentage of notional:
 #
-# - 0.5¢/share ≈ sub-1 bps for a $100 stock (institutional DMA)
-# - 1¢/share ≈ 1 bps (good agency execution)
-# - 2¢/share ≈ 2 bps (typical NASDAQ-100 effective spread)
-# - 5¢/share ≈ 5 bps (retail-quality execution)
+# The cost axis is expressed in cents per share. For a stock priced around one
+# hundred dollars, a cent per share is close to one basis point of notional, so
+# the axis spans from direct-market-access execution at the low end, through the
+# effective spread a large-cap name typically quotes, to retail-quality
+# execution at the high end. Naming the axis in cents rather than basis points
+# keeps it comparable across stocks at different prices.
 #
-# **Axis semantics — total per-share cost, simplified from production
-# preset.** The grid value `cost_ps` on this heatmap represents *total*
-# per-share round-trip cost; we split it half/half across the engine's
-# `commission.per_share` and `slippage.fixed` knobs to walk a single
-# dollar-per-share axis. Production (Ch16/17 signal & allocation) uses
-# `set_backtest_costs_per_share` with a fixed IBKR Pro Tiered commission
-# (`$0.0035/share`) plus a measured per-asset half-spread map from
-# `liquidity_profile.parquet` — i.e. commission and spread are different
-# knobs with different scales. This section's spec is a deliberate
-# simplification so the cadence interaction can be read off a single cost
-# axis; it is not the production cost shape.
+# **What the cost axis is.** The grid value `cost_ps` is the total per-share
+# round-trip cost, split evenly between the engine's commission and slippage
+# settings so the whole cost moves along one axis. The signal and allocation
+# notebooks instead set a fixed per-share commission and add a per-asset
+# half-spread measured from the liquidity profile, which are separate quantities
+# on separate scales. The single axis here is what makes the interaction between
+# rebalancing frequency and cost readable in one chart; it is a comparison across
+# cadences under a simplified cost shape rather than a reproduction of the cost
+# model used to produce the registered results.
 
 # %%
 from case_studies.utils.backtest_runner import normalize_prediction_columns
@@ -409,11 +421,14 @@ else:
 # bar timestamp via an asof join. This is realistic: the portfolio manager
 # uses the most recent signal when the rebalance fires.
 
+# %% [markdown]
+# The cadences swept come from `backtest.sweep.cadence_sweep` in `setup.yaml`,
+# and the frequency tokens are derived from those names, so the sweep and the
+# configuration cannot disagree. An unrecognised cadence stops the notebook
+# rather than being skipped, because a silently dropped cadence would leave a
+# gap in the heatmap that reads as a region with no viable cost.
+
 # %%
-# Alternative cadences for the cadence × cost heatmap, driven by setup.yaml.
-# The notebook never declares its own cadence list — single source of truth is
-# ``backtest.sweep.cadence_sweep``. Labels and frequency tokens are derived
-# from the cadence names so they always stay in sync.
 CADENCES = get_cadence_sweep(CASE_STUDY_ID)
 _CADENCE_TO_FREQ = {
     "15_minute": "15m",
@@ -668,33 +683,31 @@ if not cadence_df.is_empty():
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The cost-feasibility screen is the upstream lever**: the same featured
-#    slot design averages a negative Sharpe on the full 114-name universe and a
-#    positive one on the cost-feasible subset, while trading roughly an order of
-#    magnitude less (Section 4). Removing the expensive-spread tail removes both
-#    the turnover source and the cost sink — this is the screen the carrier
-#    trades on.
-# 2. **Cadence is the second lever**: at the default 15-minute cadence the
-#    full-universe every-bar baseline churns thousands of trades; coarser
-#    cadences (30m–4h) amortize per-trade cost over a longer hold. The summary
-#    table above gives exact counts per cadence.
-# 3. **Per-share costs at coarser cadences**: The heatmap shows the per-share
-#    cost levels at which Sharpe stays above zero at hourly and 4-hour
-#    cadences. Institutional execution quality (sub-2¢/share) sits in that
-#    band; retail-quality execution does not.
-# 4. **4-hour cadence is the most cost-tolerant of the four cadences tested**.
-#    The tradeoff is fewer rebalances per day, discarding some intraday signal.
-# 5. **30-minute cadence is the cost-sensitive boundary**: Sharpe degrades
-#    sharply at higher per-share costs.
-# 6. **The cadence-cost interaction is the teaching surface**: Intraday signal
-#    presence does not imply intraday execution viability. Strategy design must
-#    jointly optimize rebalance frequency and execution infrastructure. The
-#    Ch20 strategy-analysis notebook re-runs this sensitivity in bps units on
-#    the top-Sharpe prediction surface and finds CI lower bound below zero across
-#    the entire grid for all three labels — point-estimate viability, not
-#    credibility-resolved positive edge.
-# 7. **Benchmark reality check**: This dollar-neutral strategy does not capture
-#    market direction. The strategy's value is uncorrelated returns, not
-#    absolute performance — but that case must be made explicitly, not assumed.
+# 1. **Costs are charged per trade, so trading frequency sets what they take.**
+#    A cost that is negligible against a multi-day return is decisive against a
+#    fifteen-minute one, and the same strategy can be profitable or not on that
+#    difference alone. Any strategy result quoted without its cost assumption is
+#    incomplete.
 #
-# **Next**: The risk management notebook (Ch19) tests risk overlays on the top combos.
+# 2. **Restricting the universe and slowing the cadence are different levers.**
+#    One changes what each trade costs and which names the ordering can act on;
+#    the other changes how many trades there are. They are measured separately
+#    here because a result that changed both at once cannot attribute its
+#    improvement to either.
+#
+# 3. **A screen on tradability is not a screen on the signal.** Keeping the
+#    cheapest-to-trade names uses no information about returns, and it is fixed
+#    per split so it cannot see the window it is evaluated on. That is what
+#    keeps it a cost decision rather than a selection.
+#
+# 4. **The breakeven cost is the number to carry forward.** It states the
+#    execution quality a strategy requires rather than the profit it produced
+#    under one assumption, and it can be checked against what a given venue and
+#    order size actually achieve.
+#
+# **Known limitations**: The cadence sweep splits its cost evenly between the
+# engine's commission and slippage settings so a single dollars-per-share axis
+# can be swept. Production costs use a fixed per-share commission plus a
+# measured per-asset half-spread, which are different quantities on different
+# scales. The sweep is therefore a comparison across cadences under one
+# simplified cost shape, not a reproduction of the production cost model.

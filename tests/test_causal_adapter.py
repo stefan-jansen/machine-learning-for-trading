@@ -34,23 +34,14 @@ def _causal_fixture(
     monkeypatch,
     entity: str = "symbol",
     label_buffer: str = "8H",
-    treatment_window: int | None = 21,
     label_horizon: str | None = None,
 ):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     setup_path = study.root / "config" / "setup.yaml"
-    treatment_col = "treatment" if treatment_window is None else "treatment_7d"
-    declared = (
-        ""
-        if treatment_window is None
-        else f"features:\n  windows:\n    treatment: {{7d: {treatment_window}}}\n"
-    )
     setup_path.write_text(
-        setup_path.read_text()
-        + declared
-        + f"causal:\n  treatment: {treatment_col}\n  confounders: [confounder]\n"
+        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
     )
     if label_horizon is not None:
         # Merged through a yaml round-trip rather than appended. `labels` already exists in
@@ -75,7 +66,7 @@ def _causal_fixture(
                     entity: f"S{symbol_index}",
                     "timestamp": timestamp,
                     "feature": float(symbol_index),
-                    treatment_col: float(symbol_index) + timestamp_index / 100,
+                    "treatment": float(symbol_index) + timestamp_index / 100,
                     "confounder": float(timestamp_index % 5),
                     "fwd_ret_8h": (symbol_index - 2.5) / 100 + timestamp_index / 10000,
                 }
@@ -87,7 +78,7 @@ def _causal_fixture(
     )
     mds = SimpleNamespace(
         dataset=frame,
-        feature_names=["feature", treatment_col, "confounder"],
+        feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_8h",
         label_buffer=label_buffer,
         date_col="timestamp",
@@ -132,7 +123,7 @@ def test_causal_request_resolves_timing_gap_and_preview_identity(tmp_path, monke
 
     assert resolved.spec["identity_version"] == 3
     assert computation["estimand"]["outcome"] == "fwd_ret_8h"
-    assert computation["estimand"]["treatment"] == "treatment_7d"
+    assert computation["estimand"]["treatment"] == "treatment"
     assert computation["estimand"]["treatment_observed_at"] == "decision_timestamp"
     assert computation["refutation"]["temporal_gap_policy"] == "reset"
     assert computation["refutation"]["observation_cadence"] == "0 days 08:00:00"
@@ -528,100 +519,30 @@ def test_causal_resolver_accepts_either_canonical_entity_key(tmp_path, monkeypat
     assert resolved.spec["computation"]["analysis_population"]["n_rows"] > 0
 
 
-def _resolved_refutation(study, label) -> dict:
-    return (
-        study.causal(
-            method="dml",
-            label=label.name,
-            execution_tier="preview",
-            preview_reductions={
-                "max_samples": 240,
-                "max_symbols": 6,
-                "n_folds": 2,
-                "n_placebo": 10,
-            },
-        )
-        .resolve()
-        .spec["computation"]["refutation"]
-    )
-
-
 @pytest.mark.parametrize(
-    ("label_buffer", "treatment_window", "expected_block", "expected_basis"),
-    [
-        # The case the resolver used to get wrong, and the one crypto is in: an
-        # 8-hour label on 8-hour bars is one step, so a block sized by the horizon
-        # alone is a full within-symbol shuffle. A 7-day rolling treatment stays
-        # autocorrelated over its own 21 bars regardless.
-        ("8H", 21, 21, "treatment_window"),
-        # The horizon wins when it is the longer scale.
-        ("48H", 2, 6, "label_buffer"),
-        # No declared window: the horizon is all there is to go on.
-        ("24H", None, 3, "label_buffer"),
-    ],
+    ("label_buffer", "expected_block"),
+    [("8H", 1), ("24H", 3), ("48H", 6)],
 )
-def test_the_placebo_block_spans_the_longer_of_horizon_and_treatment_window(
-    tmp_path, monkeypatch, label_buffer, treatment_window, expected_block, expected_basis
+def test_the_placebo_block_spans_the_label_horizon(
+    tmp_path, monkeypatch, label_buffer, expected_block
 ) -> None:
-    """Both scales create the dependence the placebo must preserve; the block spans both.
+    """The resolved spec's block size is the label horizon in bars, not the embargo.
 
-    The parametrization separates the two quantities, so a resolver that reads
-    only one of them fails a case. The first row is the defect that shipped:
-    `block_size = 1` on an 8h/8h panel with a rolling z-score treatment, which is
-    the iid shuffle `block_permute` exists to avoid.
+    On 8-hour bars a 24-hour label overlaps three observations, so a block of one
+    would leave the placebo free to break exactly the dependence the overlap
+    creates. Reverting the resolver to `block_size=embargo` passes only while the
+    embargo happens to be derived from the same buffer; this pins the horizon.
     """
-    study, label, _frame = _causal_fixture(
-        tmp_path, monkeypatch, label_buffer=label_buffer, treatment_window=treatment_window
-    )
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, label_buffer=label_buffer)
 
-    refutation = _resolved_refutation(study, label)
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
 
-    assert refutation["block_size"] == expected_block
-    assert refutation["block_size_basis"] == expected_basis
-    assert refutation["treatment_window_steps"] == treatment_window
-
-
-def test_an_undeclared_treatment_window_warns_rather_than_passing_silently(
-    tmp_path, monkeypatch
-) -> None:
-    """A treatment with no declared window is the case that hid the block-size defect."""
-    study, label, _frame = _causal_fixture(
-        tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
-    )
-
-    with pytest.warns(UserWarning, match="no construction window is declared"):
-        refutation = _resolved_refutation(study, label)
-
-    assert refutation["treatment_window_steps"] is None
-
-
-def test_a_canonical_run_refuses_an_undeclared_treatment_window(tmp_path, monkeypatch) -> None:
-    """Preview warns and proceeds; canonical will not register the result at all.
-
-    The warning still leaves a registered refutation whose block may be a full
-    within-symbol shuffle, and nothing downstream distinguishes it from one whose
-    block spanned the treatment. fx_pairs is the live case: `mom_skip_recent`
-    spans observations 21 through 252 and resolves to None here.
-    """
-    study, label, _frame = _causal_fixture(
-        tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
-    )
-
-    with pytest.raises(ValueError, match="no construction window is declared"):
-        study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
-
-
-def test_a_canonical_run_with_a_declared_window_still_resolves(tmp_path, monkeypatch) -> None:
-    """The refusal is about the missing declaration, not about the canonical tier."""
-    study, label, _frame = _causal_fixture(
-        tmp_path, monkeypatch, label_buffer="8H", treatment_window=21
-    )
-
-    resolved = study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
-
-    refutation = resolved.spec["computation"]["refutation"]
-    assert refutation["block_size"] == 21
-    assert refutation["block_size_basis"] == "treatment_window"
+    assert resolved.spec["computation"]["refutation"]["block_size"] == expected_block
 
 
 def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
@@ -648,12 +569,7 @@ def _session_causal_fixture(tmp_path, monkeypatch):
     )
     setup_path = study.root / "config" / "setup.yaml"
     setup_path.write_text(
-        setup_path.read_text()
-        # A one-bar window satisfies the canonical declaration guard without ever
-        # winning the block: these tests are about the holdout seal, and the block
-        # stays `max(buffer, 1) == buffer`.
-        + "features:\n  windows:\n    treatment: {1d: 1}\n"
-        + "causal:\n  treatment: treatment_1d\n  confounders: [confounder]\n"
+        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
     )
     sessions = [
         timestamp
@@ -668,7 +584,7 @@ def _session_causal_fixture(tmp_path, monkeypatch):
                     "symbol": f"S{symbol_index}",
                     "timestamp": timestamp.to_pydatetime(),
                     "feature": float(symbol_index),
-                    "treatment_1d": float(symbol_index) + session_index / 100,
+                    "treatment": float(symbol_index) + session_index / 100,
                     "confounder": float(session_index % 5),
                     "fwd_ret_5d": (symbol_index - 2.5) / 100 + session_index / 10000,
                 }
@@ -680,7 +596,7 @@ def _session_causal_fixture(tmp_path, monkeypatch):
     )
     mds = SimpleNamespace(
         dataset=frame,
-        feature_names=["feature", "treatment_1d", "confounder"],
+        feature_names=["feature", "treatment", "confounder"],
         label_col="fwd_ret_5d",
         label_buffer="5D",
         date_col="timestamp",
@@ -877,10 +793,8 @@ def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
     from the buffer passes everywhere except where they differ. On 8-hour bars a
     24-hour buffer over an 8-hour label is three bars against one.
     """
-    # A one-bar window keeps this test about the buffer/horizon split: the block is
-    # `max(buffer, 1)`, so the treatment never takes it.
     study, label, _frame = _causal_fixture(
-        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H", treatment_window=1
+        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H"
     )
 
     resolved = study.causal(

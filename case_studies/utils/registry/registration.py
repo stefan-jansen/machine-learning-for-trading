@@ -1749,12 +1749,7 @@ def declare_causal_supersedes(
                     f"it cannot also supersede {supersedes_hash}"
                 )
             return
-        # Honour what the enforcer returns, exactly as register_causal_run does. It returns
-        # None when the named predecessor is absent from this registry, and the column is a
-        # foreign key onto causal_hash - so writing the declared value anyway raises
-        # IntegrityError. A reader hits this on their second run: the first stored NULL, the
-        # fit is served from cache, and this repair path is what tries to fill the edge in.
-        effective = _enforce_causal_supersedes(
+        _enforce_causal_supersedes(
             db,
             causal_hash=causal_hash,
             label=label,
@@ -1762,13 +1757,9 @@ def declare_causal_supersedes(
             supersedes_hash=supersedes_hash,
             is_repair=True,
         )
-        if effective is None:
-            # Nothing to record, and nothing wrong: one identity is current, which is the
-            # state this function exists to reach.
-            return
         db.execute(
             "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
-            (effective, causal_hash),
+            (supersedes_hash, causal_hash),
         )
         db.commit()
     finally:
@@ -1783,11 +1774,8 @@ def _enforce_causal_supersedes(
     tier: str,
     supersedes_hash: str | None,
     is_repair: bool = False,
-) -> str | None:
+) -> None:
     """A second canonical identity for a label must say which one it retires.
-
-    Returns the edge that should actually be written, which is ``supersedes_hash``
-    except where the declaration resolves to nothing - see the empty-registry branch.
 
     Without the declaration the registry ends up holding two rows a reader cannot
     choose between, and ``CausalResult.one`` refuses forever. Recency is not the
@@ -1819,7 +1807,7 @@ def _enforce_causal_supersedes(
         # its second run. The check below would reject it: the predecessor is retired
         # by this row's own edge, so it is no longer in the current set and reads as
         # "not a current identity ... Current: none".
-        return supersedes_hash
+        return
     if stored is not None and supersedes_hash is not None:
         # One column holds one edge, so a row cannot retire two identities. The INSERT
         # this guards uses COALESCE, which keeps the stored value and drops the new one
@@ -1842,37 +1830,11 @@ def _enforce_causal_supersedes(
                 f"declaring that it supersedes {supersedes_hash} would retire that one too. "
                 f"It carries {stored or 'no declaration'}; re-register without SUPERSEDES_CAUSAL."
             )
-        return supersedes_hash
+        return
     others = current_causal_identities(db, label=label, tier=tier, exclude=causal_hash)
     if supersedes_hash is not None:
         if supersedes_hash == causal_hash:
             raise ValueError(f"causal run {causal_hash} cannot supersede itself")
-        if (
-            not others
-            and not db.execute(
-                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (supersedes_hash,)
-            ).fetchone()
-        ):
-            # Nothing is current for this label and the named predecessor is not in this
-            # registry at all, so there is nothing to retire and this write leaves exactly
-            # one current identity - the state the whole function exists to protect.
-            #
-            # Refusing this case made every committed SUPERSEDES_CAUSAL a reader-facing
-            # crash. `run_log/` is not shipped, so a reader's first run meets an empty
-            # registry, and the declaration that is correct on the machine which produced
-            # the chain raises "not a current canonical identity ... Current: none". Caught
-            # by review on 2026-08-25 against crypto_perps_funding/11_causal_dml.
-            #
-            # Both conditions are load-bearing. Skipping the check whenever the predecessor
-            # is merely unknown would let a typo through on a populated registry and leave
-            # two identities live, which is worse than the crash - that is what
-            # `test_superseding_something_that_is_not_current_is_refused` pins.
-            #
-            # No edge is written. `causal_runs.supersedes_hash` is a foreign key onto
-            # `causal_hash`, so an edge to a row that is not there is not storable; the
-            # declaration stays documentation in the notebook, which is where a reader
-            # comparing their registry to the author's would look for it anyway.
-            return None
         if supersedes_hash not in others:
             raise ValueError(
                 f"causal run {causal_hash} declares it supersedes {supersedes_hash}, which is "
@@ -1892,7 +1854,7 @@ def _enforce_causal_supersedes(
                 f"{len(remaining) + 1}. Chain the rows that already exist first: each "
                 "declares the one before it, oldest to newest."
             )
-        return supersedes_hash
+        return
     if others:
         raise ValueError(
             f"registering {causal_hash} would leave {len(others) + 1} current {tier} causal "
@@ -1900,7 +1862,6 @@ def _enforce_causal_supersedes(
             f"one this run retires: set SUPERSEDES_CAUSAL to "
             f"{others[0] if len(others) == 1 else others}"
         )
-    return supersedes_hash
 
 
 def register_causal_run(
@@ -1951,12 +1912,7 @@ def register_causal_run(
     immutable = version in SUPPORTED_IDENTITY_VERSIONS
     db = _open_registry(case_dir)
     try:
-        # The edge that is written is what the enforcer returns, not what the caller
-        # declared: `causal_runs.supersedes_hash` is a foreign key onto `causal_hash`, so
-        # a declaration naming a row this registry has never held cannot be stored at all.
-        # On a reader's empty registry that is exactly the case, and the write proceeds
-        # with no edge rather than failing on the constraint.
-        supersedes_hash = _enforce_causal_supersedes(
+        _enforce_causal_supersedes(
             db,
             causal_hash=causal_hash,
             label=label,

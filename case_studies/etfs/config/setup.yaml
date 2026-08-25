@@ -310,7 +310,19 @@ modeling:
       alignment: backward_asof
     model_kwargs:
       ipca:
-        max_iter: 100
+        # 100 -> 1000. The eight production folds converge at 53, 59, 69, 77, 85,
+        # 97, 107 and 110 alternations, so the old cap fell *inside* its own
+        # convergence distribution: folds 2 and 3 reported exactly 100 and were
+        # refused by the convergence guard, while fold 1 cleared by three. Which
+        # folds published was decided by where the cap happened to land. The
+        # legacy runner never checked convergence at this scale, so the
+        # truncation registered results and said nothing. 1000 is chosen against
+        # that measured maximum rather than inherited: it clears every fold by
+        # roughly nine times, and it still bounds a genuinely stuck fold to about
+        # 13 minutes at ~0.76s per alternation, where the library default of
+        # 10,000 would allow two hours. Folds that settle early pay nothing for
+        # the headroom, because the alternation stops when it settles.
+        max_iter: 1000
         tol: 0.00001
         factor_ridge: 0.01
         gamma_ridge: 0.01
@@ -321,16 +333,6 @@ modeling:
 
 causal:
   treatment: skip_recent_6_1
-  # Bars the treatment's own construction window spans, which is what the placebo block has
-  # to cover: permuting skip_recent_6_1 in blocks shorter than this destroys the serial
-  # dependence the refutation exists to preserve, and the resulting p-value reads like a
-  # refutation without being one. Declared here rather than inferred, because guessing which
-  # element of a window list a column was built from puts a wrong number behind a right-looking
-  # one. Derived from the construction, not chosen:
-  #
-  # `close.shift(21) / close.shift(6 * 21) - 1` in 03_financial_features: the six-month
-  # return that stops a month short. The oldest price it reads is 126 sessions back.
-  treatment_window: 126
   confounders: [vol_21d, vol_126d, regime, yield_curve_slope]
   method: walk_forward_dml
 

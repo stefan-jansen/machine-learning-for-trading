@@ -67,13 +67,13 @@ import pandas as pd
 import yaml
 
 import utils.style  # noqa: F401 - activates the ML4T visual style
+from case_studies.research import supersedes_for
 from case_studies.utils.causal import (
     classify_refutation,
     embargo_from_buffer,
     format_dml_summary,
     register_causal_run,
     run_dml_analysis,
-    treatment_block_size,
 )
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -89,6 +89,12 @@ RANDOM_SEED = 42
 CV_FOLDS = 5
 MAX_SAMPLES = 0
 N_PLACEBO = 100
+# Any edit to case_studies/utils/causal.py moves this notebook's causal identity, because
+# _causal_source_identity hashes that file whole. The registering write then refuses a second
+# current identity for the same label and names the hash it wants retired. Declare it here -
+# a bare hash, or a JSON object keyed by label - and the refusal has a route to be answered.
+# Empty is correct against a fresh registry, where there is nothing to supersede.
+SUPERSEDES_CAUSAL: str = ""
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -190,12 +196,7 @@ merged_clean = (
 
 EMBARGO_PERIODS = embargo_from_buffer(mds.label_buffer)
 
-# The placebo block spans the longer of two scales: the overlapping labels span the label
-# horizon, and the treatment's own construction window spans itself. This was the horizon
-# alone, which permuted a rolling column in blocks shorter than the window that makes it
-# autocorrelated - close enough to an independent shuffle that the p-value did not mean what
-# it read as. The window is declared in setup.yaml as `causal.treatment_window`.
-BLOCK_SIZE = treatment_block_size(setup, TREATMENT_COL, buffer_steps=EMBARGO_PERIODS)
+BLOCK_SIZE = EMBARGO_PERIODS
 
 # Causal estimation is a development-stage diagnostic. Keep the untouched
 # holdout out of nuisance fitting, effect estimation, and refutation tests.
@@ -420,6 +421,7 @@ register_causal_run(
     max_symbols=MAX_SYMBOLS,
     development_end=DEVELOPMENT_END.date().isoformat(),
     notebook="12_causal_dml",
+    supersedes_hash=supersedes_for(SUPERSEDES_CAUSAL, PRIMARY_LABEL, labels=[PRIMARY_LABEL]),
 )
 
 # %% [markdown]

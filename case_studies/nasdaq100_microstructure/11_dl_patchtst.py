@@ -14,67 +14,107 @@
 # ---
 
 # %% [markdown]
-# # PatchTST — NASDAQ-100 Microstructure
+# # PatchTST - NASDAQ-100 Microstructure
 #
-# PatchTST is the final DL architecture in the NASDAQ sequence. It tests whether
-# patching plus attention can capture the microstructure edge more effectively
-# than the simpler NLinear, LSTM, and TCN alternatives.
+# PatchTST cuts the window into short consecutive segments - patches - and treats
+# each patch as one item in a sequence. An attention mechanism then lets every
+# patch weigh every other patch directly, so the model can relate two stretches
+# of the window without passing information through everything in between.
+#
+# Patching is what makes that affordable. Attention costs grow with the square of
+# the number of items it compares, so attending over 60 individual observations
+# is far more expensive than attending over a handful of patches covering the
+# same window. Patching also gives each item more content than a single
+# observation, which matters when any one minute is mostly noise.
+#
+# The label looks 15 minutes ahead on a one-minute grid, so consecutive windows
+# overlap heavily and neighbouring rows are far from independent. That shapes
+# everything below: how windows are built, where folds are cut, and how much of
+# the training set is sampled.
 #
 # **Learning Objectives**:
-# - Evaluate whether patch-based attention adds value at 15-minute frequency
-# - Compare PatchTST against the full sequence of prior DL baselines
-# - Produce the final DL candidate for downstream model analysis and backtesting
+# - Fit an attention-based sequence model on a panel by declaring one request
+#   rather than assembling folds and windows in the notebook
+# - Read a learning curve across training epochs and say what it shows about
+#   capacity and noise
+# - Check that a fitted model produced predictions on every fold it was asked
+#   for, before any of those predictions are used
 #
 # **Book Reference**: Chapter 13
 #
-# **Prerequisites**: [`06_linear`](06_linear.ipynb), [`07_gbm`](07_gbm.ipynb), [`08_dl_nlinear`](08_dl_nlinear.ipynb), [`09_dl_lstm`](09_dl_lstm.ipynb), [`10_dl_tcn`](10_dl_tcn.ipynb)
+# **Prerequisites**: [`05_evaluation`](05_evaluation.ipynb)
 
 # %%
-"""PatchTST — nasdaq100_microstructure deep learning."""
+"""PatchTST - nasdaq100_microstructure deep learning."""
 
 import warnings
 
+import matplotlib.pyplot as plt
 import polars as pl
 import torch
 import yaml
 
-from case_studies.utils.analytics import load_best_ic_per_family
 from case_studies.utils.deep_learning import run_dl_cv
 from utils.modeling import append_holdout_fold_if_needed, load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
+from utils.reproducibility import set_global_seeds
 
 warnings.filterwarnings("ignore")
+
+# %% [markdown]
+# ### Settings
+#
+# `LOOKBACK` is how many one-minute observations enter each window, so 60 gives
+# the model the trailing hour. `MAX_TRAIN_SEQUENCES` caps how many windows are
+# drawn per fold: every row starts a window, so an uncapped fold would build
+# tens of millions of near-identical overlapping sequences. `N_EPOCHS` is how
+# many passes are made over that sample, and checkpoints are written along the
+# way so the run can be inspected and resumed at a known epoch rather than only
+# at the end.
+#
+# `MAX_FOLDS` and `FOLD_IDS` restrict which walk-forward folds run. They exist
+# for previews; a run that uses them covers less of the history than the fold
+# plan declares, and the fold set is part of what the run is registered under.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
 MODEL = "patchtst"
 PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
-PREDICTION_SPLIT = "validation"
+SEED = 42
 N_EPOCHS = 100
 LOOKBACK = 60
 BATCH_SIZE = 2048
 MAX_TRAIN_SEQUENCES = 750_000
 MAX_FOLDS = 0
 FOLD_IDS = []
+FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
+PREDICTION_SPLIT = "validation"
 
 # %%
+set_global_seeds(SEED)
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
-    print(f"Label from setup.yaml: {PRIMARY_LABEL}")
-else:
-    print(f"Label override: {PRIMARY_LABEL}")
 
-dl_config = setup.get("modeling", {}).get("dl", {})
-DEVICE = dl_config.get("device", "gpu")
-device_str = "cuda" if DEVICE == "gpu" and torch.cuda.is_available() else "cpu"
+# The configured device is part of what the run is registered under, so an
+# unavailable accelerator stops the run rather than quietly retraining on CPU
+# and registering the result as though it were the requested one.
+DEVICE = setup.get("modeling", {}).get("dl", {}).get("device", "gpu")
+if DEVICE == "gpu" and not torch.cuda.is_available():
+    raise RuntimeError(
+        f"{CASE_STUDY_ID}/config/setup.yaml requests modeling.dl.device=gpu and no "
+        f"CUDA device is visible. Make the GPU available, or set the device to cpu "
+        f"in setup.yaml so the change is recorded with the run."
+    )
+device_str = "cuda" if DEVICE == "gpu" else "cpu"
 
-print(f"Case study: {CASE_STUDY_ID} | Model: {MODEL}")
-print(f"Device: {device_str} | Epochs: {N_EPOCHS} | Lookback: {LOOKBACK}")
+print(f"Case study: {CASE_STUDY_ID} | architecture: {MODEL}")
+print(f"Label: {PRIMARY_LABEL} (from config/setup.yaml)")
+print(f"Device: {device_str} (configured {DEVICE})")
+print(f"Window: {LOOKBACK} one-minute observations | training epochs: {N_EPOCHS}")
 
 # %% [markdown]
 # ## 1. Load Data
@@ -98,49 +138,32 @@ dataset_pd = dataset.to_pandas()
 print(f"Entities: {dataset_pd[entity_col].nunique()}")
 
 # %% [markdown]
-# ## 2. Prior Baselines
-
-# %%
-prior_baselines = {}
-_baselines = load_best_ic_per_family(
-    ["linear", "gbm", "deep_learning"], case_studies=[CASE_STUDY_ID]
-)
-if not _baselines.is_empty():
-    for row in _baselines.iter_rows(named=True):
-        if row["family"] == "linear":
-            prior_baselines[f"{row['config_name'].title()} (Ch11)"] = row["ic_mean"]
-        elif row["family"] == "gbm":
-            prior_baselines["GBM (Ch12)"] = row["ic_mean"]
-        elif row["family"] == "deep_learning" and row["config_name"] in {
-            "nlinear",
-            "lstm_h64",
-            "tcn",
-        }:
-            label = {
-                "nlinear": "NLinear (Ch13.1)",
-                "lstm_h64": "LSTM (Ch13.2)",
-                "tcn": "TCN (Ch13.3)",
-            }[row["config_name"]]
-            prior_baselines[label] = row["ic_mean"]
-
-if prior_baselines:
-    for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=N/A")
-else:
-    print(
-        "  No prior results found — run 06_linear.py, 07_gbm.py, 08_dl_nlinear.py, "
-        "09_dl_lstm.py, and 10_dl_tcn.py first"
-    )
-
-# %% [markdown]
-# ## 3. PatchTST
+# ## 2. Declare the fitting request
+#
+# Configurations come from the label's config file rather than from literals
+# here, and the notebook keeps only the ones whose architecture is the one it is
+# about. The three training settings above are then applied to every retained
+# configuration, so what is fitted is visible in one place instead of being
+# spread between a config file and the runner's defaults.
+#
+# Nothing about the windows, folds or gaps is assembled here. The runner receives
+# the label's fold plan and the observation cadence and derives the rest, so this
+# notebook and the ones for the other architectures cannot drift apart in how
+# they cut a window.
 
 # %%
 dl_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
 dl_configs = [c for c in dl_configs if c["params"].get("architecture") == MODEL]
 if not dl_configs:
+    available = sorted(
+        {
+            c["params"].get("architecture", "?")
+            for c in load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "deep_learning")
+        }
+    )
     raise ValueError(
-        f"No '{MODEL}' configs found — add '{MODEL}' under 'deep_learning:' in the label config"
+        f"No '{MODEL}' configuration in the {PRIMARY_LABEL} deep_learning config. "
+        f"Declared architectures: {available}"
     )
 
 for cfg in dl_configs:
@@ -148,12 +171,9 @@ for cfg in dl_configs:
     cfg["batch_size"] = BATCH_SIZE
     cfg["params"]["lookback"] = LOOKBACK
 
-print(
-    f"Grid: {len(dl_configs)} configs × {dl_configs[0].get('n_epochs', 100)} epochs × "
-    f"{len(splits)} folds"
-)
+print(f"Fitting {len(dl_configs)} {MODEL} configuration(s) on {len(splits)} folds:")
 for cfg in dl_configs:
-    print(f"  {cfg['config_name']}: {cfg['params'].get('architecture', '?')}")
+    print(f"  {cfg['config_name']}: window {LOOKBACK}, batch {BATCH_SIZE}, {N_EPOCHS} epochs")
 
 # %%
 result = run_dl_cv(
@@ -177,66 +197,114 @@ result = run_dl_cv(
     temporal_by_fold=mds.temporal_by_fold,
     temporal_keys=mds.temporal_keys,
     temporal_feature_names=mds.temporal_feature_names,
+    seed=SEED,
 )
 
 # %% [markdown]
-# ## 4. Learning Curves
+# ## 3. Learning curves
+#
+# A checkpoint is written every few epochs and scored on the fold's validation
+# window, which gives one curve per configuration. The shape is what to read,
+# not any single point on it. A curve that climbs and then falls says the model
+# has started fitting noise and the useful capacity was reached earlier; a curve
+# that stays flat from the first checkpoint says the extra epochs are buying
+# nothing. At this label horizon the values are small in absolute terms, so read
+# the direction and the spread between configurations rather than the level.
 
 # %%
-grid_results = result["grid_results"]
-best_name = result["best_config_name"]
-best_epoch = result["best_epoch"]
-best_ic = result["best_ic"]
-
 curves = result["all_learning_curves"]
 if curves.height > 0:
-    checkpoints = sorted(curves["epoch"].unique().to_list())
-    display_cps = [cp for cp in checkpoints if cp % 20 == 0 or cp == checkpoints[-1]]
-
-    print(f"{'Config':15s}", end="")
-    for cp in display_cps:
-        print(f" {cp:>7d}", end="")
-    print()
-    print("-" * (15 + 8 * len(display_cps)))
-
-    for row in grid_results:
-        cfg_data = curves.filter(pl.col("config") == row["config_name"])
-        print(f"{row['config_name']:15s}", end="")
-        for cp in display_cps:
-            ep_row = cfg_data.filter(pl.col("epoch") == cp)
-            print(f" {ep_row['ic_mean'][0]:+7.4f}" if ep_row.height > 0 else "     N/A", end="")
-        print()
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for config_name in sorted(curves["config"].unique().to_list()):
+        series = curves.filter(pl.col("config") == config_name).sort("epoch")
+        ax.plot(series["epoch"], series["ic_mean"], marker="o", markersize=3, label=config_name)
+    ax.axhline(0.0, color="0.6", linewidth=0.8)
+    ax.set_xlabel("Training epoch")
+    ax.set_ylabel("Validation information coefficient")
+    ax.set_title(f"{MODEL} validation score across training epochs")
+    ax.legend(title="Configuration")
 
 # %% [markdown]
-# ## 5. Comparison
-
-# %%
-comparison_rows = [{"Model": name, "IC": ic} for name, ic in prior_baselines.items()]
-comparison_rows.append({"Model": best_name, "IC": best_ic})
-comparison = pl.DataFrame(comparison_rows).with_columns(
-    pl.when(pl.col("IC") == pl.col("IC").max())
-    .then(pl.lit("*"))
-    .otherwise(pl.lit(""))
-    .alias("Best")
-)
-comparison
-
-# %% [markdown]
-# ## 6. Save Results
-
-# %%
-predictions = result["predictions"]
-all_predictions = result["all_predictions"]
-fold_metrics = result["fold_metrics"]
-
-print(f"Predictions: {predictions.height:,} rows")
-print(f"All predictions: {all_predictions.height:,} rows")
-val_ic_mean = float(fold_metrics["ic_mean"].mean()) if fold_metrics.height > 0 else None
-
-# %% [markdown]
-# ## 7. Key Takeaways
+# ## 4. Check what was produced
 #
-# PatchTST now closes the NASDAQ DL sequence with clean provenance. If it
-# achieves a higher IC downstream, that result comes from a standalone
-# notebook and a dedicated training run rather than an architecture buried
-# as a side computation elsewhere.
+# Before these predictions are used anywhere, confirm the run covered the folds
+# it was asked for. A model that failed on one fold still leaves rows in the
+# registry for the others, and a downstream average over whatever is present
+# reads as a complete result. Comparing the folds returned against the folds
+# requested is what separates the two.
+
+# %%
+all_predictions = result["all_predictions"]
+requested_folds = sorted(int(f) for f in (FOLD_IDS or [s["fold"] for s in splits]))
+
+# A score is unusable when it is absent, undefined, or infinite. Counting only
+# nulls would pass a fold whose every score is NaN, because a float column built
+# from a NumPy array holds NaN rather than null.
+_unusable = (
+    pl.col("y_score").is_null() | pl.col("y_score").is_nan() | pl.col("y_score").is_infinite()
+)
+
+coverage = (
+    all_predictions.group_by("config")
+    .agg(
+        pl.col("fold_id").n_unique().alias("folds"),
+        pl.len().alias("rows"),
+        _unusable.sum().alias("unusable_scores"),
+    )
+    .sort("config")
+)
+coverage
+
+# %%
+incomplete = []
+for cfg in dl_configs:
+    name = cfg["config_name"]
+    produced = all_predictions.filter(pl.col("config") == name)
+    got = sorted(int(f) for f in produced["fold_id"].unique().to_list())
+    absent = [f for f in requested_folds if f not in got]
+    unusable = int(produced.select(_unusable.sum()).item()) if produced.height else 0
+    if absent or unusable:
+        incomplete.append((name, absent, unusable))
+
+print(f"Folds requested: {requested_folds}")
+if incomplete:
+    detail = "; ".join(
+        f"{name}: missing folds {absent}, {unusable} unusable scores"
+        for name, absent, unusable in incomplete
+    )
+    raise RuntimeError(
+        f"{MODEL} did not produce a complete prediction set for every configuration "
+        f"({detail}). These rows must not be compared or backtested."
+    )
+print("Every configuration covered every requested fold with a usable score on every row.")
+
+# %% [markdown]
+# ## 5. Key Takeaways
+#
+# 1. **A sequence model is a request, not a loop.** The window length, fold plan,
+#    observation cadence and gap policy are declared once and resolved by the
+#    shared runner. A notebook that rebuilds them locally will eventually cut a
+#    window differently from its sibling notebooks, and the two results stop
+#    being comparable without anything looking wrong.
+#
+# 2. **Overlapping labels make sequence counts misleading.** Every row starts a
+#    window, so a fold holds almost as many sequences as it has rows, and nearly
+#    all of them share most of their content. Capping how many are drawn is what
+#    keeps the fit tractable; it also means the effective sample is far smaller
+#    than the sequence count suggests.
+#
+# 3. **Check coverage before you compare.** Fold-level completeness is the
+#    precondition for any comparison across architectures. `13_model_analysis`
+#    is where those comparisons happen, on the population this notebook and its
+#    siblings register.
+#
+# 4. **Patch length is a modelling choice, not a detail.** It sets how many items
+#    attention compares and how much each one contains. Longer patches make the
+#    fit cheaper and blur short events; shorter patches preserve them and cost
+#    more. The window length alone does not determine it.
+#
+# **Known limitations**: The validation score here is a diagnostic of the fit, not
+# a basis for choosing a configuration or a checkpoint. Attention over patches is
+# what this architecture contributes, and it is the most expensive of the four to
+# fit. Whether that expense is repaid is a question for the comparison in
+# `13_model_analysis`, not for this notebook.

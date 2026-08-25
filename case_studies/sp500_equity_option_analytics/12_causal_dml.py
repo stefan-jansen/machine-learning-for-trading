@@ -67,7 +67,6 @@ from case_studies.utils.causal import (
     format_dml_summary,
     register_causal_run,
     run_dml_analysis,
-    treatment_block_size,
 )
 from utils.artifact_specs import resolve_label_horizon
 from utils.modeling import load_configs, load_modeling_dataset
@@ -256,12 +255,8 @@ if TREATMENT_COL != "ivrv_spread":
         f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
         "The block size below follows how ivrv_spread is built in 03_financial_features.py."
     )
-# Was `int(setup["features"]["windows"]["realized_vol"][0])`, hand-read here. Same number -
-# ivrv_spread is `iv_30_atm - rv_20` and realized_vol is [20, 63] - but read through the
-# shared helper, so this notebook and the five others answer the question one way. The window
-# is declared in setup.yaml as `causal.treatment_window`.
-BLOCK_SIZE = treatment_block_size(setup, TREATMENT_COL, buffer_steps=OUTCOME_HORIZON)
-TREATMENT_PERSISTENCE = BLOCK_SIZE
+TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
+BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 pre_holdout = np.sort(merged_clean.loc[merged_clean[date_col] < HOLDOUT_START, date_col].unique())
 if len(pre_holdout) <= BUFFER_PERIODS:
