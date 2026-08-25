@@ -496,8 +496,25 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
         # "which notebook", and the migrated path now fills it.
         #
         # Accepting either keeps the check meaningful on both paths during the migration rather
-        # than turning the unmigrated notebooks red to make the migrated ones green. Drop the
-        # `entry_point` half when the last notebook migrates.
+        # than turning the unmigrated notebooks red to make the migrated ones green.
+        #
+        # WHICH HALF SURVIVES WAS SETTLED 2026-08-25, and it is `entry_point` carrying the
+        # notebook stem: the migrated family runners write the stem there rather than the
+        # module, and the run-log reset refills the column. So the half to drop when the last
+        # notebook migrates is the `json_extract(runtime_json, ...)` one, not `entry_point`.
+        #
+        # An earlier version of this comment said the opposite, on the reasoning that
+        # `notebook_path` is the field whose name answers "which notebook". The decision went
+        # the other way because two fields answering one question is the defect, whichever name
+        # reads better: `entry_point` is a column, so a query does not have to reach into a JSON
+        # blob for it, and keeping both would leave the JSON field authoritative for migrated
+        # producers and the column authoritative for unmigrated ones - a split that outlives
+        # everyone who remembers why.
+        #
+        # Until then BOTH halves stay. Asserting `entry_point` alone is what went silently red
+        # for every migrated notebook in every case study, and this corpus is still mid-migration:
+        # measured on us_firm_characteristics, all 141 training rows carry a NULL `entry_point`
+        # while 37 already carry the stem in `runtime_json.notebook_path`.
         #
         # `json_extract` rather than a column: `notebook_path` is provenance, it lives in
         # `runtime_json`, and `registry/specs.py:_V2_PROVENANCE_FIELDS` keeps it out of the
