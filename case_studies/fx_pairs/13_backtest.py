@@ -41,6 +41,7 @@ from case_studies.research import (
     OfficialPopulation,
     open_study,
     plan_backtests,
+    population_supersedes,
     research_name,
     run_backtests,
     superseded_members,
@@ -61,6 +62,8 @@ RUN_SWEEP = True
 FORCE_REBACKTEST = False
 TOP_N_PREDICTIONS = None
 POPULATION_NAME = ""
+SUPERSEDES_EQUAL_WEIGHT_BASELINES: str = ""
+SUPERSEDES_VALIDATION_PREDICTIONS: str = ""
 
 # %% [markdown]
 # ## Select the exact prediction population
@@ -83,6 +86,16 @@ POPULATION_NAME = ""
 # `deep_learning` populations each have a retired generation here, because a training identity
 # covers the runner's own source file and both runners changed after their first fits were
 # registered. The count of what that excludes is printed rather than left implicit.
+#
+# **A published population can need a second generation too.** The two names this notebook
+# publishes are lists of identities, and the exclusion above changes both of them the moment a
+# model notebook refits: the prediction population loses the retired members, and every baseline
+# backtest resolved from them goes with it. `OfficialPopulation.create` refuses a changed list
+# under an existing name without being told which snapshot it replaces, so each name has its own
+# declaration and each is offered through `population_supersedes` on the same rule the model
+# notebooks use. Both are empty here because neither name has published a first generation yet;
+# after the first canonical run, a refit upstream is answered by filling in the hash that run
+# printed.
 
 # %% tags=["results"]
 set_global_seeds(SEED)
@@ -140,11 +153,15 @@ if catalog.get_column("prediction_hash").n_unique() != catalog.height:
     raise RuntimeError("the baseline population contains duplicate prediction identities")
 
 if not include_preview:
+    predictions_name = research_name(CASE_STUDY_ID, "validation-predictions", scope=POPULATION_NAME)
     prediction_population = OfficialPopulation.create(
         study,
-        name=research_name(CASE_STUDY_ID, "validation-predictions", scope=POPULATION_NAME),
+        name=predictions_name,
         member_kind="prediction",
         members=catalog.get_column("prediction_hash").to_list(),
+        supersedes=population_supersedes(
+            study, name=predictions_name, declared=SUPERSEDES_VALIDATION_PREDICTIONS
+        ),
     )
     prediction_population.require_complete()
     print(f"Frozen prediction population: {prediction_population.hash}")
@@ -234,11 +251,15 @@ if len(planned_hashes) != len(set(planned_hashes)):
 
 baseline_population = None
 if not include_preview:
+    baselines_name = research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME)
     baseline_population = OfficialPopulation.create(
         study,
-        name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
+        name=baselines_name,
         member_kind="backtest",
         members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=baselines_name, declared=SUPERSEDES_EQUAL_WEIGHT_BASELINES
+        ),
     )
     print(f"Frozen expected baseline population: {baseline_population.hash}")
 else:
@@ -259,9 +280,14 @@ else:
 # A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
 # unless the two are counted apart. `run_backtests` serves an identity that is already registered
 # and complete instead of running it again, which is what makes a re-run affordable and what makes
-# a bare member count say nothing about whether this run did any work. Read the registered set
-# once, before the first member, so every result can be attributed to one or the other.
-registered_before = set(study.backtests.table().get_column("backtest_hash"))
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
 backtests = []
 for job in jobs:
     execution = run_backtests(
@@ -273,6 +299,7 @@ for job in jobs:
     if len(execution.results) != job["expected"]:
         raise RuntimeError("a baseline member disappeared during execution")
     backtests.extend(execution.results)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
 
 expected_count = sum(job["expected"] for job in jobs)
 if len(backtests) != expected_count:
@@ -296,7 +323,7 @@ backtest_rows = pl.DataFrame(
 if set(backtest_rows.get_column("stage")) != {"signal"}:
     raise RuntimeError("equal-weight baseline runs must register with stage='signal'")
 
-served = sum(1 for result in backtests if result.hash in registered_before)
+served = run_status.count("reused")
 print(
     f"Equal-weight baselines: {len(backtests) - served} computed, {served} served from the registry, "
     f"{len(backtests)} in the population"

@@ -126,14 +126,20 @@ for horizon, values in computations.items():
 # Cross-fitting groups observations by complete decision timestamps, and the embargo is at least the
 # outcome horizon.
 #
-# The placebo permutes contiguous blocks within each currency pair rather than shuffling rows, and
-# the block spans the longer of the two scales that make neighbouring rows dependent. Overlapping
-# labels tie rows together across the outcome horizon. The treatment ties them together across its
-# own construction window, which for `mom_skip_recent` is the 252 sessions its return is measured
-# over - consecutive values share 251 of them - and that is what `causal.treatment_window` in
-# `setup.yaml` declares. A block shorter than the longer scale breaks the dependence the
-# permutation exists to preserve, which narrows the placebo distribution and makes the p-value read
-# stronger than the evidence is. Both scales are printed below.
+# The placebo permutes contiguous blocks within each currency pair rather than shuffling rows,
+# because two separate things make neighbouring rows dependent and a block has to span both.
+# Overlapping labels tie rows together across the outcome horizon. The treatment ties them together
+# across its own construction: `mom_skip_recent` is the return from `t-252` to `t-21`, so one value
+# covers 231 sessions and consecutive values overlap in 230 of them. `causal.treatment_window` in
+# `setup.yaml` declares 252, the maximum lookback, which is the larger of the two and therefore
+# spans the dependence either way.
+#
+# The table below prints the block the run actually used beside that declared window, and on this
+# registry they do not agree. `resolve_causal_request` sizes the block from the label buffer alone,
+# so the block is 1, 5 and 21 sessions for the three labels against a treatment whose dependence
+# runs 231. A block that short is close to an independent shuffle: it destroys the dependence the
+# permutation exists to preserve, which narrows the placebo distribution and makes `refutation_p`
+# read stronger than the evidence is. Read the two columns together rather than the p-value alone.
 
 # %%
 pl.DataFrame(

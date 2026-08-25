@@ -292,8 +292,14 @@ causal:
   method: walk_forward_dml
   # Sessions the treatment's own construction spans, read off the code that builds the
   # column rather than its name. `momentum_features` in 03_financial_features computes
-  # mom_skip_recent as close.shift(21) / close.shift(252) - 1, so one value depends on the
-  # 252 sessions ending at the decision and consecutive values overlap in 251 of them.
+  # mom_skip_recent as close.shift(21) / close.shift(252) - 1. Three quantities, and they
+  # are not the same number: the return is measured over the 231 sessions from t-252 to
+  # t-21, consecutive values of it overlap in 230 of those 231, and the maximum lookback -
+  # the oldest price any single value reads - is 252.
+  #
+  # 252 is declared because it is the largest of the three, so a block of that length spans
+  # the 231-session dependence whichever way the arithmetic is read. That is the reason to
+  # prefer it, rather than it being right by accident.
   #
   # It is declared because the placebo block has to span it. A block permutation exists to
   # keep the treatment's serial dependence while breaking its alignment with the outcome,
