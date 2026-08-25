@@ -24,7 +24,10 @@ from types import SimpleNamespace
 import pytest
 
 from case_studies.research.causal import CausalResult
-from case_studies.utils.registry.registration import register_causal_run
+from case_studies.utils.registry.registration import (
+    declare_causal_supersedes,
+    register_causal_run,
+)
 
 SPEC = '{"family":"causal_dml","identity_version":3}'
 LABEL = "fwd_ret_5d"
@@ -329,3 +332,52 @@ def test_the_repair_lands_even_though_the_fit_is_served_from_cache(tmp_path, mon
 
     assert repaired.hash == second.hash
     assert CausalResult.one(study, label=label.name).hash == second.hash
+
+
+def test_re_registering_an_unchanged_declaration_is_accepted(tmp_path) -> None:
+    """A wired notebook has to be idempotent on its second run.
+
+    Once `causal_second` declares it retires `causal_first`, that predecessor is no
+    longer current - its own successor's edge retired it - so validating the same
+    declaration against the current set reads as "not a current identity ... Current:
+    none". The declaration is unchanged, so nothing about it needs re-checking.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", effect=-0.03, supersedes="causal_first")
+
+    _register(case_dir, "causal_second", effect=-0.03, supersedes="causal_first")
+
+    assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_second"
+
+
+def test_retiring_one_of_several_is_refused(tmp_path) -> None:
+    """One column holds one edge, so one declaration retires one row.
+
+    Accepting it while another stays current would let the write succeed and leave the
+    label exactly as unresolvable as before - the failure moves back to the downstream
+    notebook, which is what declaring the chain at the write is here to prevent.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO causal_runs (causal_hash, label, spec_json, created_at) "
+            "VALUES ('causal_other', ?, ?, 'now')",
+            (LABEL, SPEC),
+        )
+
+    with pytest.raises(ValueError, match="would still be current"):
+        _register(case_dir, "causal_third", effect=-0.04, supersedes="causal_first")
+
+    # Chained oldest to newest, the same registry resolves. `declare_causal_supersedes`
+    # is the repair write for a row that already exists and must not be re-fitted.
+    declare_causal_supersedes(
+        "test_case",
+        "causal_other",
+        supersedes_hash="causal_first",
+        label=LABEL,
+        case_dir=case_dir,
+    )
+    _register(case_dir, "causal_third", effect=-0.04, supersedes="causal_other")
+    assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_third"

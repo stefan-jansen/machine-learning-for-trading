@@ -1764,37 +1764,39 @@ def _enforce_causal_supersedes(
 
     Without the declaration the registry ends up holding two rows a reader cannot
     choose between, and ``CausalResult.one`` refuses forever. Recency is not the
-    fallback: ``created_at`` ties on a fast refit, and a recency rule would be the
-    only one in a registry that is otherwise entirely spec-addressed. So the chain is
+    fallback: ``created_at`` ties on a fast refit, and it would be the only recency
+    rule in a registry that is otherwise entirely spec-addressed. So the chain is
     declared by a person, the way a changed population is.
 
     Refusing here rather than at read time is what makes it fixable. The read happens
     in a downstream notebook, hours later, with no idea which run introduced the
     ambiguity.
     """
+    stored = (
+        db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+        ).fetchone()
+        or (None,)
+    )[0]
+    if supersedes_hash is not None and stored == supersedes_hash:
+        # Re-registering a row that already carries this exact declaration changes
+        # nothing, and it has to be allowed or a wired notebook is not idempotent on
+        # its second run. The check below would reject it: the predecessor is retired
+        # by this row's own edge, so it is no longer in the current set and reads as
+        # "not a current identity ... Current: none".
+        return
     if causal_hash in causal_identities_retired(db, label=label):
         # Reproducing a retired identity is a no-op, but the declaration it carries is
         # not exempt from being checked. An author reproducing A from an older checkout
         # with SUPERSEDES_CAUSAL still pointing at B - the run that retired A - would
         # otherwise make both rows retired, and the reader would resolve to zero with
         # no hint at all. Worse than the two-identity state this exists to prevent.
-        stored = (
-            db.execute(
-                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
-            ).fetchone()
-            or (None,)
-        )[0]
         if supersedes_hash is not None and supersedes_hash != stored:
             raise ValueError(
                 f"causal run {causal_hash} is already retired by a later identity, and "
                 f"declaring that it supersedes {supersedes_hash} would retire that one too. "
                 f"It carries {stored or 'no declaration'}; re-register without SUPERSEDES_CAUSAL."
             )
-        # Re-registering a row some later run already retired changes nothing about
-        # what a reader resolves - reproducing a published number from an older
-        # checkout does exactly this. Refusing it would also hand the author the
-        # wrong instruction: the only current identity is the tip, and superseding
-        # that would invert the chain and retire the newer result.
         return
     others = current_causal_identities(db, label=label, tier=tier, exclude=causal_hash)
     if supersedes_hash is not None:
@@ -1805,12 +1807,26 @@ def _enforce_causal_supersedes(
                 f"causal run {causal_hash} declares it supersedes {supersedes_hash}, which is "
                 f"not a current {tier} identity for {label!r}. Current: {others or 'none'}"
             )
+        remaining = [other for other in others if other != supersedes_hash]
+        if remaining:
+            # One column holds one edge, so a single declaration retires a single row.
+            # Accepting it while others stay live would let the write succeed and leave
+            # the label exactly as unresolvable as before, with nothing saying so - the
+            # failure moves back to the downstream notebook, which is what declaring
+            # the chain at the write is here to prevent.
+            raise ValueError(
+                f"causal run {causal_hash} retires {supersedes_hash}, but {remaining} would "
+                f"still be current for {label!r}, so a reader still resolves to "
+                f"{len(remaining) + 1}. Chain those first: each identity declares the one "
+                "before it, oldest to newest."
+            )
         return
     if others:
         raise ValueError(
             f"registering {causal_hash} would leave {len(others) + 1} current {tier} causal "
             f"identities for {label!r}, and a reader resolves a label to exactly one. Name the "
-            f"one this run retires: set SUPERSEDES_CAUSAL to {others[0] if len(others) == 1 else others}"
+            f"one this run retires: set SUPERSEDES_CAUSAL to "
+            f"{others[0] if len(others) == 1 else others}"
         )
 
 
