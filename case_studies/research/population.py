@@ -373,40 +373,38 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
     hash is content-addressed, so the same generation seen in both is the same generation and the
     merge is a union rather than a precedence rule.
     """
-    rows: list[tuple[str, str, str | None]] = []
-    members: dict[str, set[str]] = {}
     roots = [study.release_case_root]
     if not study.read_only and study.root != study.release_case_root:
         roots.append(study.root)
-    seen_populations: set[str] = set()
-    for root in roots:
-        root_rows, root_members = _lineage(root, member_kind)
-        for row in root_rows:
-            if row[0] in seen_populations:
-                continue
-            seen_populations.add(row[0])
-            rows.append(row)
+    per_root = [_lineage(root, member_kind) for root in roots]
+
+    members: dict[str, set[str]] = {}
+    for _, root_members in per_root:
         for population_hash, member_hashes in root_members.items():
             members.setdefault(population_hash, set()).update(member_hashes)
-    if not any(row[2] is not None for row in rows):
+    names = {name for rows, _ in per_root for _, name, _ in rows}
+    if not any(supersedes is not None for rows, _ in per_root for *_, supersedes in rows):
         return frozenset()
 
-    by_name: dict[str, list[tuple[str, str | None]]] = {}
-    for population_hash, name, supersedes in rows:
-        by_name.setdefault(name, []).append((population_hash, supersedes))
-
     retired: set[str] = set()
-    for generations in by_name.values():
-        superseded = {supersedes for _, supersedes in generations if supersedes is not None}
-        if not superseded:
-            continue
-        # The generations this name still stands behind. Normally one; a forked chain leaves
-        # more, and taking the union is the conservative reading - a member any surviving tip
-        # still lists is not retired, so a fork can only under-report.
+    for name in names:
+        superseded: set[str] = set()
         in_force: set[str] = set()
-        for population_hash, _ in generations:
-            if population_hash not in superseded:
-                in_force |= members.get(population_hash, set())
+        # Whether a generation is a tip is decided **within the registry that holds it**, then
+        # unioned. Flattening both chains first and asking afterwards gets a lagging registry
+        # wrong: a generation the workspace has refit past is superseded there and still an
+        # unsuperseded tip in the release registry, and the flattened form would retire its
+        # members on the strength of the other root's chain. Under-retiring is the safe
+        # direction - a member wrongly kept is backtested and its result is verified, a member
+        # wrongly dropped silently narrows the sweep - so a disagreement between the two roots
+        # resolves in favour of keeping.
+        for rows, _ in per_root:
+            generations = [row for row in rows if row[1] == name]
+            root_superseded = {row[2] for row in generations if row[2] is not None}
+            superseded |= root_superseded
+            for population_hash, _, _ in generations:
+                if population_hash not in root_superseded:
+                    in_force |= members.get(population_hash, set())
         for population_hash in superseded:
             retired |= members.get(population_hash, set()) - in_force
     return frozenset(retired)

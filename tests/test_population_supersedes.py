@@ -266,3 +266,29 @@ class TestWhatALaterGenerationRetires:
             db.execute("ALTER TABLE official_populations RENAME COLUMN supersedes_hash TO gone")
         with pytest.raises(sqlite3.OperationalError, match="supersedes_hash"):
             superseded_members(study)
+    def test_a_generation_still_a_tip_in_the_other_registry_is_kept(self, tmp_path: Path) -> None:
+        """Whether a generation is a tip is decided within the registry that holds it.
+
+        The release registry lags: it holds generation one as an unsuperseded tip, because it
+        never saw the refit the author made in a workspace. Flattening both chains before
+        asking makes generation one a superseded hash on the strength of the workspace's chain
+        alone, and its members are retired out of a sweep the release registry still publishes
+        them for.
+
+        Under-retiring is the safe direction. A member wrongly kept is backtested and its
+        result verified; a member wrongly dropped silently narrows the sweep, which is the
+        failure this whole function exists to prevent.
+        """
+        release_root = _seed_release(tmp_path)
+        author = Study.open("etfs", release_root=release_root, workspace=tmp_path / "author")
+        first = _publish(author, MEMBERS_ONE)
+        released_db = author.release_case_root / "run_log" / "registry.db"
+        released_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(author.root / "run_log" / "registry.db", released_db)
+
+        # The refit happens in a workspace that carries generation one forward, so the
+        # workspace chain reads A -> B while the release registry still holds A as its tip.
+        refitter = Study.open("etfs", release_root=release_root, workspace=tmp_path / "refit")
+        shutil.copy(released_db, refitter.root / "run_log" / "registry.db")
+        _publish(refitter, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members(refitter) == frozenset()
