@@ -1747,6 +1747,7 @@ def declare_causal_supersedes(
             label=label,
             tier=tier,
             supersedes_hash=supersedes_hash,
+            is_repair=True,
         )
         db.execute(
             "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
@@ -1758,7 +1759,13 @@ def declare_causal_supersedes(
 
 
 def _enforce_causal_supersedes(
-    db, *, causal_hash: str, label: str, tier: str, supersedes_hash: str | None
+    db,
+    *,
+    causal_hash: str,
+    label: str,
+    tier: str,
+    supersedes_hash: str | None,
+    is_repair: bool = False,
 ) -> None:
     """A second canonical identity for a label must say which one it retires.
 
@@ -1771,6 +1778,14 @@ def _enforce_causal_supersedes(
     Refusing here rather than at read time is what makes it fixable. The read happens
     in a downstream notebook, hours later, with no idea which run introduced the
     ambiguity.
+
+    ``is_repair`` is what lets an already-broken registry be fixed. A new fit must
+    leave exactly one identity current, because that is the state it is responsible
+    for. Chaining rows that already exist cannot: with three stranded identities,
+    every single declaration leaves two current, so requiring one at every step
+    deadlocks - the middle row is refused because the newest is live and the newest is
+    refused because the middle is. A repair step is allowed to reduce the count
+    without finishing the job, and the reader's error still names what is left.
     """
     stored = (
         db.execute(
@@ -1808,17 +1823,18 @@ def _enforce_causal_supersedes(
                 f"not a current {tier} identity for {label!r}. Current: {others or 'none'}"
             )
         remaining = [other for other in others if other != supersedes_hash]
-        if remaining:
+        if remaining and not is_repair:
             # One column holds one edge, so a single declaration retires a single row.
-            # Accepting it while others stay live would let the write succeed and leave
-            # the label exactly as unresolvable as before, with nothing saying so - the
-            # failure moves back to the downstream notebook, which is what declaring
-            # the chain at the write is here to prevent.
+            # A *new* identity that retires one of several would let the write succeed
+            # and leave the label exactly as unresolvable as before, with nothing
+            # saying so - the failure moves back to the downstream notebook, which is
+            # what declaring the chain at the write is here to prevent. Repair first,
+            # then fit.
             raise ValueError(
                 f"causal run {causal_hash} retires {supersedes_hash}, but {remaining} would "
                 f"still be current for {label!r}, so a reader still resolves to "
-                f"{len(remaining) + 1}. Chain those first: each identity declares the one "
-                "before it, oldest to newest."
+                f"{len(remaining) + 1}. Chain the rows that already exist first: each "
+                "declares the one before it, oldest to newest."
             )
         return
     if others:
@@ -1884,6 +1900,13 @@ def register_causal_run(
             label=label,
             tier=str(spec.get("execution_tier", "canonical")),
             supersedes_hash=supersedes_hash,
+            # A row that already exists is not a new fit, so this call is a step in
+            # chaining what is already there rather than the write that must leave the
+            # label resolvable.
+            is_repair=db.execute(
+                "SELECT 1 FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            is not None,
         )
         comparable_columns = (
             "label",

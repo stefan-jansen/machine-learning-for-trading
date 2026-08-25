@@ -381,3 +381,47 @@ def test_retiring_one_of_several_is_refused(tmp_path) -> None:
     )
     _register(case_dir, "causal_third", effect=-0.04, supersedes="causal_other")
     assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_third"
+
+
+def test_three_stranded_identities_can_be_chained_back_to_one(tmp_path) -> None:
+    """The state a registry is actually found in, and the way out of it.
+
+    Requiring every declaration to leave exactly one current deadlocks here: with three
+    live rows, chaining the middle one is refused because the newest is still current,
+    and chaining the newest is refused because the middle still is. So a repair step -
+    a declaration on a row that already exists - is allowed to reduce the count without
+    finishing, while a new fit is not.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_a")
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        for name in ("causal_b", "causal_c"):
+            db.execute(
+                "INSERT INTO causal_runs (causal_hash, label, spec_json, created_at) "
+                "VALUES (?, ?, ?, 'now')",
+                (name, LABEL, SPEC),
+            )
+    with pytest.raises(ValueError, match="resolved to 3 identities"):
+        CausalResult.one(_study(case_dir), label=LABEL)
+
+    for newer, older in (("causal_b", "causal_a"), ("causal_c", "causal_b")):
+        declare_causal_supersedes(
+            "test_case", newer, supersedes_hash=older, label=LABEL, case_dir=case_dir
+        )
+
+    assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_c"
+
+
+def test_a_new_fit_into_a_broken_registry_is_still_refused(tmp_path) -> None:
+    """Repair first, then fit. A new identity owns the state it leaves behind."""
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_a")
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "INSERT INTO causal_runs (causal_hash, label, spec_json, created_at) "
+            "VALUES ('causal_b', ?, ?, 'now')",
+            (LABEL, SPEC),
+        )
+
+    with pytest.raises(ValueError, match="would still be current"):
+        _register(case_dir, "causal_new", effect=-0.05, supersedes="causal_a")
