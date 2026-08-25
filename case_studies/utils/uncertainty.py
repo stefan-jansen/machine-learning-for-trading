@@ -407,6 +407,40 @@ def compute_backtest_uncertainty(
 # ---------------------------------------------------------------------------
 
 
+def joint_returns(
+    challenger: np.ndarray | pl.Series, baseline: np.ndarray | pl.Series
+) -> tuple[np.ndarray, np.ndarray]:
+    """Coerce a paired return series to the precondition of a paired bootstrap.
+
+    :func:`compute_paired_uncertainty` requires two arrays of the same length whose
+    position ``i`` is the same session on both sides, and it refuses the pair rather
+    than bootstrap a misaligned one. Coercing each side on its own does not deliver
+    that: ``_coerce_returns`` drops non-finite values and the leading run of zeros
+    per series, so an overlay that suppresses a session the carrier traded loses a
+    row the carrier keeps, and the two arrays part company. Joining on the timestamp
+    beforehand does not save it either, because the per-side trim happens after.
+
+    So the same two decisions are taken once, over both series: keep a session only
+    where both sides are finite, and start at the first session where both are
+    non-zero. Returns two empty arrays when no such session exists.
+    """
+    c = _as_return_array(challenger)
+    b = _as_return_array(baseline)
+    if c.size != b.size:
+        raise ValueError(
+            f"a paired series must arrive aligned; got {c.size} and {b.size} observations"
+        )
+    finite = np.isfinite(c) & np.isfinite(b)
+    c, b = c[finite], b[finite]
+    if c.size == 0:
+        return c, b
+    both = np.flatnonzero((c != 0.0) & (b != 0.0))
+    if both.size == 0:
+        return c[:0], b[:0]
+    start = int(both[0])
+    return c[start:], b[start:]
+
+
 def compute_paired_uncertainty(
     challenger: np.ndarray | pl.Series,
     baseline: np.ndarray | pl.Series,
@@ -420,21 +454,28 @@ def compute_paired_uncertainty(
 ) -> dict[str, float]:
     """Paired stationary bootstrap on daily-return differences.
 
-    Inputs must be the same length and aligned by date. Returns a flat dict for
-    upsert into ``backtest_paired_metrics``.
+    The two series must arrive the same length and aligned by date, so that position ``i``
+    is the same session on both sides; a pair that does not is refused with an empty mapping
+    rather than truncated. Which rows to drop - non-finite values, and the leading prefix
+    where neither side had a position - is then decided over both series at once by
+    :func:`joint_returns`, so a caller does not have to coerce them beforehand. Returns a
+    flat dict for upsert into ``backtest_paired_metrics``, and an empty mapping when fewer
+    than four sessions survive.
     """
     from ml4t.diagnostic.evaluation.stats import _stationary_bootstrap_indices
 
-    c = _coerce_returns(challenger)
-    b = _coerce_returns(baseline)
-    # Caller's contract: pre-aligned by timestamp via inner-join. If the
-    # per-side leading-zero strip leaves the two arrays at different
-    # lengths, head/tail-truncation would misalign them (challenger
-    # position i and baseline position i would correspond to different
-    # original timestamps). Refuse rather than bootstrap a misaligned
-    # pair silently — callers must pre-align if they bypass _joint_coerce.
-    if c.size != b.size:
+    c_raw = _as_return_array(challenger)
+    b_raw = _as_return_array(baseline)
+    # Caller's contract: the two series arrive pre-aligned by timestamp, so position i is
+    # the same session on both sides. Nothing here can recover that if they do not, because
+    # truncating to the shorter one would compare different sessions. Refuse instead.
+    if c_raw.size != b_raw.size:
         return {}
+    # The coercion is taken once over both series rather than per side. `_coerce_returns`
+    # trims each series' own leading run of zeros, which is exactly what a risk overlay
+    # produces - it sits out sessions its carrier trades - and the two arrays then part
+    # company, so the size check above refused every overlay in `17_risk_management`.
+    c, b = joint_returns(c_raw, b_raw)
     if c.size < 4:
         return {}
 
@@ -741,7 +782,12 @@ def compute_reality_check(
 # ---------------------------------------------------------------------------
 
 
-def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+def _as_return_array(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    """The return series as a float array, with no row dropped.
+
+    Separate from :func:`_coerce_returns` because a paired comparison has to decide which
+    rows to drop over both series at once; see :func:`joint_returns`.
+    """
     if isinstance(x, pl.DataFrame):
         for col in ("daily_return", "ret", "return", "value"):
             if col in x.columns:
@@ -753,7 +799,11 @@ def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
         arr = x.to_numpy()
     else:
         arr = np.asarray(x).flatten()
-    arr = arr.astype(np.float64, copy=False)
+    return arr.astype(np.float64, copy=False)
+
+
+def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    arr = _as_return_array(x)
     arr = arr[np.isfinite(arr)]
     # Engine-mode parquets often carry leading zero rows from bars before the
     # first signal. Including them dilates uncertainty by underestimating

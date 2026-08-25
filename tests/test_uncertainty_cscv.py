@@ -111,6 +111,68 @@ def test_compute_cohort_metrics_populates_pbo_with_fold_returns() -> None:
     assert out["pbo_n_folds"] == float(n_folds)
 
 
+def test_an_overlay_that_sits_out_the_first_sessions_still_gets_a_paired_bootstrap() -> None:
+    """A risk overlay exists to sit out sessions, and that must not cost it the comparison.
+
+    The two series reach the bootstrap pre-aligned on the timestamp, so position i is the same
+    session on both sides. Coercing each side on its own breaks that: the leading run of zeros
+    is trimmed per series, so a challenger that stays flat while its carrier trades comes out
+    shorter and the equal-length precondition refuses the pair. ``17_risk_management`` raised on
+    every overlay for this reason. The trim has to be taken once, over both sides, so that what
+    is dropped is the prefix where neither side had a position.
+    """
+    from case_studies.utils.uncertainty import compute_paired_uncertainty
+
+    rng = np.random.default_rng(3)
+    baseline = rng.normal(0.0004, 0.01, size=60)
+    challenger = baseline + rng.normal(0.0, 0.002, size=60)
+    # The overlay is out of the market for the first three sessions the carrier trades.
+    challenger[:3] = 0.0
+
+    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=5)
+
+    assert paired["bootstrap_n"] == 20.0
+    assert np.isfinite(paired["sharpe_diff"])
+    assert paired["sharpe_diff_ci95_lo"] <= paired["sharpe_diff"] <= paired["sharpe_diff_ci95_hi"]
+
+
+def test_a_paired_bootstrap_drops_only_the_prefix_where_neither_side_traded() -> None:
+    """The trim is the shared inactive prefix, not every session one side sat out.
+
+    An overlay that suppresses a session in the middle of the sample is exactly what the
+    comparison is measuring; dropping those rows would compare the overlay against a carrier it
+    never faced. Only the leading run where the pair has nothing to compare is removed.
+    """
+    from case_studies.utils.uncertainty import joint_returns
+
+    baseline = np.array([0.0, 0.0, 0.01, 0.02, 0.0, 0.03, -0.01])
+    challenger = np.array([0.0, 0.0, 0.01, 0.00, 0.0, 0.03, -0.02])
+
+    c, b = joint_returns(challenger, baseline)
+
+    assert c.size == b.size == 5
+    np.testing.assert_allclose(b, baseline[2:])
+    np.testing.assert_allclose(c, challenger[2:])
+
+
+def test_joint_returns_refuses_a_pair_that_did_not_arrive_aligned() -> None:
+    """Position i must already be the same session; there is no way to recover it here."""
+    from case_studies.utils.uncertainty import joint_returns
+
+    with pytest.raises(ValueError, match="must arrive aligned"):
+        joint_returns(np.ones(10), np.ones(9))
+
+
+def test_a_paired_bootstrap_refuses_two_series_of_different_lengths() -> None:
+    """Truncating to the shorter one would silently compare different sessions."""
+    from case_studies.utils.uncertainty import compute_paired_uncertainty
+
+    rng = np.random.default_rng(11)
+    baseline = rng.normal(0.0004, 0.01, size=40)
+
+    assert compute_paired_uncertainty(baseline[:30], baseline, n_boot=10, seed=1) == {}
+
+
 def test_bootstrap_uncertainty_uses_seeded_generator() -> None:
     from case_studies.utils.uncertainty import (
         compute_backtest_uncertainty,

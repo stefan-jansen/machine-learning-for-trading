@@ -44,6 +44,7 @@ from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    joint_returns,
 )
 from utils.paths import get_case_study_dir
 
@@ -69,27 +70,6 @@ def _min_paired_n(ppy: int) -> int:
     if ppy <= 52:  # weekly
         return 12
     return 21  # daily / 8h / intraday
-
-
-def _joint_coerce(c_arr, b_arr):
-    """Filter NaN/non-finite jointly across paired series and trim leading
-    rows where *either* is zero. Matches ``_coerce_returns`` semantics but
-    preserves index alignment so ``compute_paired_uncertainty``'s
-    equal-length precondition survives — the upstream helper trims leading
-    zeros independently per series, which can desynchronize a paired
-    bootstrap if one side has more leading inactive bars than the other.
-    """
-    c = np.asarray(c_arr, dtype=np.float64)
-    b = np.asarray(b_arr, dtype=np.float64)
-    finite = np.isfinite(c) & np.isfinite(b)
-    c, b = c[finite], b[finite]
-    if c.size == 0:
-        return c, b
-    nonzero = np.flatnonzero((c != 0.0) & (b != 0.0))
-    if nonzero.size == 0:
-        return c[:0], b[:0]
-    start = int(nonzero[0])
-    return c[start:], b[start:]
 
 
 def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame:
@@ -589,7 +569,7 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        c_arr, b_arr = _joint_coerce(c_arr, b_arr)
+        c_arr, b_arr = joint_returns(c_arr, b_arr)
         n_overlap = c_arr.size
         if n_overlap < min_n:
             return {
@@ -628,7 +608,7 @@ def _populate_pair(
     )
     # disjoint path: paired carries n_c/n_b (post-coerce per-side sizes); use
     # min so n_overlap reflects what the bootstrap actually used. paired path:
-    # no n_c/n_b, n_overlap already the post-_joint_coerce length.
+    # no n_c/n_b, n_overlap already the post-`joint_returns` length.
     n_actual = n_overlap
     n_c = paired.get("n_c")
     n_b = paired.get("n_b")
@@ -721,7 +701,7 @@ def populate_paired_metrics(
                 min_n = _min_paired_n(ppy)
                 aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
                 if aligned.height >= min_n:
-                    c_arr, b_arr = _joint_coerce(
+                    c_arr, b_arr = joint_returns(
                         aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
                     )
                     if c_arr.size >= min_n:

@@ -387,12 +387,12 @@ def paired_overlay_metrics(row: dict) -> dict:
         .join(challenger.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
         .sort("timestamp")
     )
-    nonzero = aligned.with_row_index().filter(
-        (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("challenger_ret").abs() > 1e-15)
-    )
-    if nonzero.is_empty():
+    if aligned.is_empty():
         raise RuntimeError(f"Degenerate return pair for {row['risk_name']}")
-    aligned = aligned.slice(nonzero["index"].min())
+    # The shared inactive prefix is dropped inside `compute_paired_uncertainty`, over both
+    # series at once. Trimming it here per series is what broke this cell: an overlay sits out
+    # sessions its carrier trades, so the two sides arrived at different lengths and the paired
+    # bootstrap refused every one of them.
     paired = compute_paired_uncertainty(
         aligned["challenger_ret"],
         aligned["baseline_ret"],
@@ -403,13 +403,10 @@ def paired_overlay_metrics(row: dict) -> dict:
         seed=42,
     )
     if not paired:
-        # Two unrelated reasons return an empty mapping; the count separates them.
-        overlap = aligned.height
         raise RuntimeError(
-            f"Paired uncertainty failed for {row['risk_name']}: the aligned pair holds "
-            f"{overlap} observations, of which the first non-zero return leaves "
-            f"{len(aligned['challenger_ret'])}. It needs at least four, and the challenger "
-            "and baseline series must be the same length after alignment."
+            f"Paired uncertainty failed for {row['risk_name']}: the overlay and its carrier "
+            f"share {aligned.height} sessions, and too few of them fall after the first one "
+            "the pair both traded. A bootstrap needs at least four."
         )
     return {
         "backtest_hash": row["backtest_hash"],
