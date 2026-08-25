@@ -1865,7 +1865,7 @@ case_studies/sp500_options/10_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 15
   timeout: 300
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
