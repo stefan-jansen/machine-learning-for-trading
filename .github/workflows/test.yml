@@ -895,9 +895,11 @@ jobs:
   # gated to unrun. Measured 2026-08-24 in the full environment: 392 tests, 3m21s.
   #
   # torch alone does not reach them. Importing them pulls 110 distributions:
-  # ml4t-models brings shap, numba/llvmlite and xarray, and three files
-  # (test_darts_state, test_darts_temporal, test_latent_input_identity) bring
-  # darts with pytorch-lightning, transformers, accelerate and triton behind it.
+  # ml4t-models brings shap, numba/llvmlite and xarray, and four files
+  # (test_darts_state, test_darts_temporal, test_latent_input_identity, and
+  # test_dl_device_contract, whose sequence_identity_params reaches the darts
+  # identity branch) bring darts with pytorch-lightning, transformers,
+  # accelerate and triton behind it.
   # That is the whole project environment, which is why this runs in the image
   # the repo already builds rather than installing a package list.
   #

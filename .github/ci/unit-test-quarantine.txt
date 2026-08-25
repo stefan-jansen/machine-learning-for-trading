@@ -23,7 +23,7 @@
 # files are behind this boundary too even though LightGBM itself is a small
 # wheel. The multi-GB estimate this block used to carry is right, and it is not
 # torch that makes it so: importing them pulls 110 distributions, because
-# ml4t-models brings shap, numba and xarray, and three files bring darts with
+# ml4t-models brings shap, numba and xarray, and four files bring darts with
 # pytorch-lightning, transformers and triton behind it. A CPU torch wheel is
 # 184 MB and would not reach any of them.
 #

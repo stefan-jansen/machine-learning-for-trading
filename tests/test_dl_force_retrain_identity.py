@@ -2,14 +2,18 @@
 
 ``run_dl_cv`` builds each config's training spec once, folding in the caller's
 ``identity_params``, and registers results under that identity. Its
-``force_retrain`` branch rebuilds the spec on its own and omits
-``extra_params``, so it asks ``clear_prediction_sets`` to remove a hash nothing
+``force_retrain`` branch used to rebuild the spec on its own and omit
+``extra_params``, so it asked ``clear_prediction_sets`` to remove a hash nothing
 was ever registered under.
 
 Nothing downstream distinguishes "cleared nothing" from "there was nothing to
 clear": ``clear_prediction_sets`` returns a count, and a zero is unremarkable.
 A run that invalidates none of its stale predictions and then registers
 alongside them therefore looks exactly like a clean retrain.
+
+This ran as a strict ``xfail`` while the fix waited on an identity batch to pay
+for the refit. Putting the training device into the run identity is that batch,
+so the branch now reuses the spec it already built and this asserts it.
 """
 
 from __future__ import annotations
@@ -29,19 +33,6 @@ def _hash(spec: dict) -> str:
     return str(sorted(spec.items()))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "run_dl_cv's force_retrain branch rebuilds the spec without extra_params instead of "
-        "reusing the training_specs entry it already built. The one-line fix lands in "
-        "deep_learning.py, whose _sequence_source_identity sha256s its own file into "
-        "source_identity - a field absent from _V2_PROVENANCE_FIELDS and therefore hashed - so "
-        "any edit there moves every registered sequence-family training identity (15 training "
-        "rows and 300 prediction sets across cme_futures, crypto_perps_funding and fx_pairs). "
-        "It ships with the identity batch, which pays that refit once. strict=True so this "
-        "turns into a failure the moment the batch lands and the fix works."
-    ),
-)
 def test_force_retrain_clears_the_hash_it_registers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

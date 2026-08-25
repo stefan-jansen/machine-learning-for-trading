@@ -132,3 +132,40 @@ def test_a_cpu_fit_and_a_gpu_fit_of_one_config_are_not_the_same_run() -> None:
 def test_the_cuda_device_index_is_not_part_of_the_run_identity() -> None:
     """Which GPU it ran on is not a claim about where the numbers came from."""
     assert _training_hash("cuda:0") == _training_hash("cuda:1") == _training_hash("gpu")
+
+
+def test_a_darts_config_gets_the_device_alongside_its_own_identity_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One function answers for both backends, so the darts branch carries it too.
+
+    `run_dl_cv` decides whether a darts config is already complete and `run_darts_cv`
+    decides what it registers under. They were two transcriptions of one rule and stayed
+    equal only while the rule did not change; adding `device` to one alone would mean the
+    lookup could never find the registration, so every invocation refits from scratch and
+    writes to a hash nobody queries. `darts_training_identity` is stubbed because the real
+    one hashes a market data file this test has no need of.
+    """
+    from case_studies.utils import darts_forecasting
+
+    monkeypatch.setattr(
+        darts_forecasting,
+        "darts_training_identity",
+        lambda *_args, **_kwargs: {"input_chunk_length": 24, "output_chunk_length": 1},
+    )
+    config = {
+        "config_name": "tsmixer",
+        "library": "darts",
+        "params": {"architecture": "tsmixer"},
+    }
+    resolved = sequence_identity_params(
+        config,
+        identity_params=None,
+        input_data_spec={"labels": "abc"},
+        label_col="fwd_ret_15m",
+        case_study="nasdaq100_microstructure",
+        max_train_sequences=0,
+        device="cpu",
+    )
+    assert resolved["input_chunk_length"] == 24, "the darts branch was not taken"
+    assert resolved["device"] == "cpu"

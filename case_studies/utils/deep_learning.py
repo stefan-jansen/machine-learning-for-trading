@@ -1955,23 +1955,19 @@ def run_dl_cv(
         configs = pending_configs
 
     if register and case_study and force_retrain:
-        from case_studies.utils.registry import (
-            build_training_spec,
-            clear_prediction_sets,
-            training_hash_from_spec,
-        )
+        from case_studies.utils.registry import clear_prediction_sets, training_hash_from_spec
 
         for cfg in configs:
-            spec = build_training_spec(
-                cfg["family"],
-                cfg["config_name"],
-                label_col,
-                n_folds=len(splits),
-                n_epochs=cfg.get("n_epochs"),
-            )
+            # The spec this run registers under, not a second one built from a subset of
+            # its fields. Rebuilding here dropped `extra_params`, so the clear targeted a
+            # hash nothing was ever written to and every stale prediction set survived the
+            # retrain, sitting alongside the new one. The two used to coincide for a caller
+            # that passed neither `identity_params` nor `input_data_spec`, which is why it
+            # went unnoticed; `sequence_identity_params` always emits `device`, so from
+            # here on they could never coincide for anyone.
             removed = clear_prediction_sets(
                 case_study,
-                training_hash_from_spec(spec),
+                training_hash_from_spec(training_specs[cfg["config_name"]]),
                 split=prediction_split,
             )
             if removed["prediction_sets"]:
