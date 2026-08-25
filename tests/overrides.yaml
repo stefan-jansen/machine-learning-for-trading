@@ -1648,24 +1648,33 @@ case_studies/nasdaq100_microstructure/07_gbm:
   tier: weekly
   timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/09_dl_lstm:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/10_dl_tcn:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5

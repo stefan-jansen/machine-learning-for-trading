@@ -271,6 +271,43 @@ def _resolve_sequence_config(config: dict[str, Any], overrides: dict[str, Any]) 
     return resolved
 
 
+def resolve_dl_device(config: Mapping[str, Any] | None, requested: str | None = None) -> str:
+    """Resolve the sequence-training backend a case study declares, into a torch device.
+
+    ``config`` is a case study's ``modeling.dl`` block and ``requested`` is a runtime
+    override, empty meaning "use what the case study declared". The declaration is
+    required: a notebook that falls back to ``gpu`` when nothing declares one turns a
+    missing config section into a hardware requirement nobody wrote down, and a
+    CUDA-free environment then fails on it.
+
+    The resolved device is part of what a run is registered under, so an unavailable
+    accelerator raises here rather than letting the run retrain on CPU and register the
+    result as though it had the accelerator. Passing ``requested="cpu"`` is how a CPU run
+    is asked for and recorded as one.
+    """
+    declared = (config or {}).get("device")
+    source = "the DEVICE override"
+    if requested:
+        device = str(requested).lower()
+    elif declared:
+        device, source = str(declared).lower(), "modeling.dl.device"
+    else:
+        raise ValueError(
+            "modeling.dl.device must be declared explicitly in config/setup.yaml, "
+            "or supplied as the DEVICE parameter"
+        )
+    if device == "gpu":
+        device = "cuda"
+    if device not in {"cpu", "cuda"}:
+        raise ValueError(f"unsupported sequence device {device!r} (from {source})")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{source} requests a GPU and no CUDA device is visible. Make the GPU "
+            f"available, or set DEVICE='cpu' so the change is recorded with the run."
+        )
+    return device
+
+
 def _sequence_runtime_spec(
     device: str,
     *,
