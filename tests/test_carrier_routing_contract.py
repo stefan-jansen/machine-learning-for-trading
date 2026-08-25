@@ -122,6 +122,41 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
         assert assignments == []
 
 
+def test_mirrored_selection_restrictions_have_not_drifted() -> None:
+    """The two copies of each selection restriction must still hold the same value.
+
+    `case_studies/utils/strategy_analysis.py` and `20_strategy_synthesis/holdout.py`
+    each declare `LABEL_RESTRICTIONS` and `UNIVERSE_RESTRICTIONS`, and both carry a
+    "keep these in sync" comment where a mechanism should be. A comment is not a
+    mechanism: the same arrangement one directory over - `_CARRIER_PIN_PREDICATES`
+    hand-copying a carrier choice under a "keep in sync" note - had been out of sync
+    across a whole registry rebuild with nothing failing.
+
+    These two are exact duplicates rather than translations, so drift is directly
+    checkable and this test costs nothing. It says nothing about whether either value
+    is correct; it says the two copies agree, which is the property the comments
+    claim and nothing else enforces.
+    """
+    import importlib.util
+
+    repo = Path(__file__).parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "_holdout_for_sync_check", repo / "20_strategy_synthesis" / "holdout.py"
+    )
+    assert spec is not None and spec.loader is not None
+    holdout = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(holdout)
+
+    for name in ("LABEL_RESTRICTIONS", "UNIVERSE_RESTRICTIONS"):
+        here = getattr(strategy_analysis, name)
+        there = getattr(holdout, name)
+        assert here == there, (
+            f"{name} has drifted between case_studies/utils/strategy_analysis.py and "
+            f"20_strategy_synthesis/holdout.py: {here!r} against {there!r}. Both files "
+            "say to keep these in sync; whichever is right, they cannot disagree."
+        )
+
+
 def test_owner_pin_resolves_without_copying_config_name(
     tmp_path: Path, pinned_case_study: str
 ) -> None:
