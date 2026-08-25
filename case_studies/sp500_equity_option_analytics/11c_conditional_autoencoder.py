@@ -31,9 +31,11 @@
 #
 # **It is fitted by reconstruction, not by prediction, and the difference is narrower than that
 # sentence usually implies.** The panel this model reconstructs is the label panel: the runner fills
-# its return matrix from the configured label column, so what the objective reproduces is
-# `fwd_ret_5d` itself, the same quantity section 4 scores the IC on. The objective is therefore not
-# blind to the target, and a positive IC is less surprising than it would be if it were.
+# its return matrix from the label column that member was configured with, so what the objective
+# reproduces is that member's own label - `fwd_ret_5d` for the primary one, and `fwd_ret_10d` or
+# `fwd_ret_risk_adj_5d` for the other two rows of the table in section 4. Whichever it is, it is
+# the same column that member's IC is then scored on. The objective is therefore not blind to the
+# target, and a positive IC is less surprising than it would be if it were.
 #
 # What still separates reconstruction from forecasting is *which* returns and *how*. The fit sees
 # the training window's forward returns beside the characteristics of the same dates and compresses
@@ -268,7 +270,7 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 # 1. takes the characteristics of every stock in that fold's training window and passes them
 #    through a network that outputs `n_factors` exposures per stock,
 # 2. solves for the factor returns that, applied to those exposures, best reproduce that window's
-#    label values - `fwd_ret_5d`, the same column section 4 scores against,
+#    values of this member's own label column - the same column section 4 then scores it against,
 # 3. backpropagates the reconstruction error into the network, repeating for the declared number of
 #    epochs and publishing whenever the checkpoint schedule says so,
 # 4. forecasts each validation date by applying the fitted network to that date's characteristics
