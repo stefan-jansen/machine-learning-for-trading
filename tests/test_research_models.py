@@ -898,12 +898,12 @@ def test_thread_limit_does_not_leak_into_families_that_already_record_threads(
 
     tabm_study, *_ = _tabm_study(tmp_path / "tabm", monkeypatch)
     tabm_spec = (
-        # device="cpu" for the same reason the gbm and latent_factors resolves above
-        # carry it, and this one did not: tabm_runtime_spec resolves the torch device
-        # while building the spec, so the default config raises "CUDA was requested but
-        # is unavailable" on any machine without a GPU. The assertion is about the spec
-        # and says nothing about where the fit would run. It went unnoticed because
-        # this file ran in no CI job - the workstation has an RTX 3090.
+        # device="cpu" for the same reason the gbm resolve above and the latent_factors
+        # resolve below carry it, and this one did not: tabm_runtime_spec resolves the
+        # torch device while building the spec, so the default config raises "CUDA was
+        # requested but is unavailable" on any machine without a GPU. The assertion is
+        # about the spec and says nothing about where the fit would run. It went
+        # unnoticed because this file ran in no CI job - the workstation has a 3090.
         tabm_study.model(
             family="tabular_dl",
             label="fwd_ret_1d",
