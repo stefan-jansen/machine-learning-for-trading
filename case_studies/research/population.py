@@ -257,19 +257,34 @@ def supersedes_for_run(
     the snapshot is hashed over, so an empty value there would compute a different
     population and be refused against the published one.
 
-    That literal is only meaningful where a population of that name already exists. Two
-    situations reach the same notebook where one does not, and in both, passing the hash
-    is refused by `OfficialPopulation.create` before any fit happens:
+    The hash means something in exactly two states of the registry, and is withheld in
+    every other:
 
-    - **A reader's first run.** `run_log/` is not in the repository, so a fresh checkout
-      starts with an empty registry and the run is the first version of its population.
-    - **A run under a different `POPULATION_NAME`.** The notebooks document narrowing a
-      run by publishing it under a name of the caller's choosing; that name has no
-      earlier generation either, whatever the built-in default says.
+    - **The tip already supersedes it.** Re-running the committed notebook recomputes the
+      published tip, whose own `supersedes_hash` is the declared value. Passing it is what
+      reproduces that snapshot instead of computing a different one.
+    - **The tip *is* it.** An author refitting under a corrected parameter declares the
+      generation in force and publishes the next one. `cme_futures-gbm-validation-v1` was
+      written this way three times.
 
-    The declared value is passed through whenever a generation does exist, including when
-    it disagrees with the one on record - that disagreement is the registry's refusal to
-    make, not this function's, and its message names the hash required.
+    Asking merely whether the name has any generation gets a reader's second run on a
+    clean clone wrong, and that is the ordinary case rather than the exotic one: `run_log/`
+    is not in the repository, so run 1 finds an empty registry, withholds the hash and
+    writes a first generation whose own supersedes is None. Run 2 then sees a generation,
+    offers the hash again, and the registry refuses - the snapshot it requires is what run
+    1 wrote, not what the parameter cell names. Neither condition holds there, so the hash
+    stays withheld and run 2 recomputes run 1's snapshot and is served from cache.
+
+    A run under a caller-chosen `POPULATION_NAME` has no generation at all, and a preview
+    population is discarded with its workspace, so it has no lineage to extend.
+
+    Where a generation exists that the declaration describes neither way, the value is
+    withheld and `OfficialPopulation.create` refuses the run, naming the hash it requires.
+    That refusal belongs to the registry; this function does not second-guess it into a
+    hash that would write over the record.
+
+    Reported by the fx_pairs session, which found the second-run failure in the same
+    construction in `fx_pairs/07_gbm` (#614, fixed on main by #615).
     """
     if execution_tier != "canonical":
         # A preview population is discarded with its workspace, so it has no lineage to
@@ -277,6 +292,13 @@ def supersedes_for_run(
         return None
     if not declared:
         return None
-    if not OfficialPopulation.has_generation(study, name=population_name):
+    try:
+        current = OfficialPopulation.one(study, name=population_name)
+    except (ValueError, sqlite3.OperationalError):
+        # No generation in force: none was ever written, or the chain forked. `one` reads
+        # the registry directly, so a clean clone with no table at all raises
+        # OperationalError rather than ValueError.
         return None
-    return declared
+    if current.supersedes == declared or current.hash == declared:
+        return declared
+    return None

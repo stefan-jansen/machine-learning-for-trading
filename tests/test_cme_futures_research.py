@@ -1129,23 +1129,97 @@ def test_declared_supersedes_is_passed_through_once_a_generation_exists(tmp_path
     assert OfficialPopulation.one(study, name=name).hash == second.hash
 
 
+def test_a_reader_can_run_the_same_notebook_twice_on_a_clean_clone(tmp_path: Path):
+    """The sequence a reader actually performs, which the two tests above miss.
+
+    Each of those seeds the registry to the state it wants and resolves once. A reader
+    runs the committed notebook twice against one registry, publishing the same members
+    both times, and the second run is where a rule keyed on "does this name have any
+    generation" fails: run 1 writes a snapshot whose own supersedes is None, run 2 sees
+    a generation and offers the declared hash, and the registry refuses because the hash
+    it requires is what run 1 wrote, not what the parameter cell names.
+
+    Reported by the fx_pairs session against the same construction in their notebook.
+    """
+    study = _study(tmp_path)
+    name = "cme_futures-linear-validation-v1"
+    declared = "8337482ecb59"
+    members = _prediction(study)
+
+    first = _population(
+        study,
+        name,
+        members,
+        supersedes=supersedes_for_run(
+            study, population_name=name, declared=declared, execution_tier="canonical"
+        ),
+    )
+    assert first.supersedes is None
+
+    # Re-running the notebook unchanged recomputes the same members, so the second run
+    # must resolve to the same snapshot rather than trying to supersede one.
+    second = _population(
+        study,
+        name,
+        members,
+        supersedes=supersedes_for_run(
+            study, population_name=name, declared=declared, execution_tier="canonical"
+        ),
+    )
+    assert second.hash == first.hash
+    assert OfficialPopulation.one(study, name=name).hash == first.hash
+
+
 def test_a_disagreeing_supersedes_is_left_for_the_registry_to_refuse(tmp_path: Path):
     """The resolution must not second-guess a wrong hash into a right one.
 
-    The registry's refusal names the snapshot required; suppressing it here would
-    let a changed population overwrite the record silently.
+    A hash that names neither the generation in force nor the one it supersedes describes
+    no state this registry is in, so it is withheld. What must not happen is the run
+    proceeding: the changed population still has to be refused, by the registry, with the
+    message that names the snapshot required.
     """
     study = _study(tmp_path)
     name = "cme_futures-linear-validation-v1"
     first = _population(study, name, _prediction(study))
     stale = "0" * 12
 
-    assert (
-        supersedes_for_run(study, population_name=name, declared=stale, execution_tier="canonical")
-        == stale
+    resolved = supersedes_for_run(
+        study, population_name=name, declared=stale, execution_tier="canonical"
     )
+    assert resolved is None
     with pytest.raises(ValueError, match=f"must explicitly supersedes {first.hash}"):
-        _population(study, name, _current_prediction(study, alpha=2.0), supersedes=stale)
+        _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
+
+
+def test_an_author_declaring_the_generation_in_force_publishes_the_next_one(tmp_path: Path):
+    """Superseding is how a refit under a corrected parameter reaches the record.
+
+    `cme_futures-gbm-validation-v1` holds three generations, each written by a run that
+    declared the tip it replaced. Withholding the hash wherever the tip does not already
+    supersede it would fix a reader's second run by making that publication impossible,
+    so the tip's own hash has to resolve as well.
+    """
+    study = _study(tmp_path)
+    name = "cme_futures-gbm-validation-v1"
+    first = _population(study, name, _prediction(study))
+
+    resolved = supersedes_for_run(
+        study, population_name=name, declared=first.hash, execution_tier="canonical"
+    )
+    assert resolved == first.hash
+
+    second = _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
+    assert second.supersedes == first.hash
+    assert OfficialPopulation.one(study, name=name).hash == second.hash
+
+    # And the run that reproduces that tip declares the same hash, now matched by the
+    # other condition, so the committed notebook keeps resolving to the published record.
+    assert (
+        supersedes_for_run(
+            study, population_name=name, declared=first.hash, execution_tier="canonical"
+        )
+        == first.hash
+    )
 
 
 def test_a_narrowed_run_under_its_own_population_name_drops_the_builtin_hash(tmp_path: Path):
