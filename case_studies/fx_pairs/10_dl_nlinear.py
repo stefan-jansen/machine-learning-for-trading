@@ -44,6 +44,7 @@ from case_studies.research import (
     declared_labels,
     open_study,
     plan_models,
+    population_supersedes,
     sweep_labels,
 )
 from utils.modeling import load_configs
@@ -62,6 +63,7 @@ BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "7cf7405afc08"
 # The tier is a parameter, not something inferred from whether a reduction happens to be set.
 # Inferring it meant a run could be reduced and still open the case study's own artifacts in
 # place, which is the production path; a reader under test then wrote where the published run
@@ -215,12 +217,32 @@ checkpoint_schedule
 #
 # The runner validates every fold separately before any checkpoint becomes downstream-selectable.
 # Checkpoint rank correlation is retained as a diagnostic and does not remove other epochs.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities it publishes, so anything that moves a training identity produces a
+# different population under the same name, and the registry refuses to write it without being
+# told which snapshot it supersedes. That lineage is the only record of which generation is which,
+# and what moved the identities here was a change to the family's own source file rather than to
+# anything the notebook declares.
+#
+# `population_supersedes` decides whether the declared hash may be offered. It is offered when the
+# name already carries the generation this declaration produced, so a re-run resolves to the
+# population it published, and when the declaration names the generation in force, so a refit
+# publishes the next one. It is withheld everywhere else - on a reader's clean clone, where
+# `run_log/` is gitignored and the registry has no generation at all; under a caller's own
+# `POPULATION_NAME`; and in a preview, whose isolated registry holds nothing under this name.
 
 # %% tags=["results"]
 if len(plan.expected_prediction_hashes) != checkpoint_schedule.height * len(labels):
     raise RuntimeError("the plan does not cover every declared epoch checkpoint on every label")
+population_name = POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:nlinear"
 population = (
-    plan.create_population(name=POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:nlinear")
+    plan.create_population(
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
+    )
     if tier is ExecutionTier.CANONICAL
     else None
 )
