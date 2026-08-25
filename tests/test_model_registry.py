@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.pm_helpers import get_overrides, run_notebook
+from tests.pm_helpers import get_overrides, resolved_registry_path, run_notebook
 
 REPO_ROOT = Path(__file__).parent.parent
 PROD_CS_DIR = REPO_ROOT / "case_studies"
@@ -442,7 +442,15 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     timeout = overrides.get("timeout", default_timeout)
 
     # --- Snapshot registry state before run ---
-    registry_db = isolated_model_output / case_study / "run_log" / "registry.db"
+    # Resolved through the harness rather than named here: `research_preview=True` below
+    # puts a migrated Study notebook on the preview tier, which writes under
+    # `<workspace>/.preview`. Naming the canonical path in this file snapshotted and
+    # queried a database the run never opened, and the empty result surfaced as
+    # "found no training run with entry_point=..." on notebooks that had registered
+    # everything they were asked to.
+    registry_db = resolved_registry_path(
+        notebook_path, isolated_model_output, case_study, research_preview=True
+    )
     before = _registry_summary(registry_db)
 
     # --- Execute ---
