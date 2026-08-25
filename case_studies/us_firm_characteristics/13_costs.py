@@ -63,7 +63,11 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
-from case_studies.utils.registry import read_predictions, resolve_best_backtest_runs
+from case_studies.utils.registry import (
+    load_existing_backtest_hashes,
+    read_predictions,
+    resolve_best_backtest_runs,
+)
 from case_studies.utils.sweep_config import get_cost_grid_bps, get_top_n_predictions
 from utils.paths import get_case_study_dir
 
@@ -155,12 +159,19 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # a property of the rebalance cadence, not a virtue of the signal, and it is the
 # reason the curve below can stay flat over a range that would destroy a
 # higher-frequency strategy.
+#
+# A backtest hash covers the whole strategy spec, so a level already registered under
+# the same spec is served from the registry rather than recomputed. The summary below
+# counts those separately from the levels this run computed, so a fully cached re-run
+# does not report the same eleven backtests as a cold one.
 
 # %% tags=["results"]
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
 n_done = 0
 n_failed = 0
+n_reused = 0
 failures: Counter[str] = Counter()
+existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
 t0 = time.time()
 
 for combo_row in top_combos.iter_rows(named=True):
@@ -200,6 +211,8 @@ for combo_row in top_combos.iter_rows(named=True):
                 calendar=bt_config.calendar,
             )
 
+            if result.backtest_hash in existing_hashes:
+                n_reused += 1
             print(
                 f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
                 f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
@@ -215,7 +228,10 @@ for combo_row in top_combos.iter_rows(named=True):
             )
 
 elapsed = time.time() - t0
-print(f"\nCost sweep complete: {n_done} backtests in {elapsed:.0f}s ({n_failed} failed)")
+print(
+    f"\nCost sweep complete: {n_done} of {n_total} levels in {elapsed:.0f}s "
+    f"({n_done - n_reused} computed, {n_reused} served from the registry, {n_failed} failed)"
+)
 for reason, count in failures.most_common():
     print(f"  {count:>3} x {reason[:150]}")
 
@@ -337,5 +353,5 @@ if not cost_df.is_empty():
 # These are validation months throughout. Nothing here reads or selects on the holdout
 # period, which stays untouched until the strategy analysis notebook.
 #
-# **Next:** the risk management notebook adds a drawdown overlay and asks what it
-# costs in return to reduce the losses this strategy takes.
+# **Next:** the risk management notebook asks whether a stop-loss or a time exit can
+# be evaluated on this backtest path at all, before asking what one would cost.

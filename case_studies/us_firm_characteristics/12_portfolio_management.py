@@ -62,7 +62,11 @@ warnings.filterwarnings("ignore")
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
-from case_studies.utils.registry import read_predictions, resolve_best_predictions
+from case_studies.utils.registry import (
+    load_existing_backtest_hashes,
+    read_predictions,
+    resolve_best_predictions,
+)
 from case_studies.utils.sweep_config import (
     get_allocators,
     get_checkpoints_per_config,
@@ -145,6 +149,12 @@ print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 # noisily. They are absent by decision rather than by identification: this case study
 # keeps the allocation stage to the equal-weight baseline and the two alternatives that
 # need no lookback at all.
+#
+# A backtest hash covers the whole strategy spec, so a cell already registered under
+# the same spec is served from the registry rather than recomputed. The summary below
+# counts those separately from the cells this run computed: otherwise a re-run reports
+# the same eighty backtests as a cold one and reports them in almost no time, which
+# reads as a fast sweep rather than as no sweep.
 
 # %%
 TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
@@ -162,7 +172,9 @@ print(
 # %%
 n_done = 0
 n_failed = 0
+n_reused = 0
 failures: Counter[str] = Counter()
+existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation")
 sweep_start = time.monotonic()
 
 for top_k in TOP_K_VALUES:
@@ -205,6 +217,8 @@ for top_k in TOP_K_VALUES:
                     calendar=bt_config.calendar,
                 )
 
+                if result.backtest_hash in existing_hashes:
+                    n_reused += 1
                 print(
                     f"  [{n_done}/{n_total}] k={top_k} {source} x {alloc_name}: "
                     f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
@@ -218,7 +232,8 @@ for top_k in TOP_K_VALUES:
                 )
 
 print(
-    f"\nSweep completed in {(time.monotonic() - sweep_start) / 60:.1f} minutes ({n_failed} failed)"
+    f"\nSweep completed in {(time.monotonic() - sweep_start) / 60:.1f} minutes: "
+    f"{n_done - n_reused} computed, {n_reused} served from the registry, {n_failed} failed"
 )
 for reason, count in failures.most_common():
     print(f"  {count:>4} x {reason[:150]}")
@@ -423,5 +438,6 @@ print(top10.select("source", "allocator", "names_per_side", "sharpe", "cagr", "m
 # names are held, so a cost assumption that is too low flatters the more active rule
 # specifically. A comparison run at a single cost level cannot show that.
 #
-# **Next:** the costs notebook re-runs these strategies across a range of cost
-# assumptions and asks which results hold their ordering as costs rise.
+# **Next:** the costs notebook takes the single highest-Sharpe run out of this grid
+# and the baseline together, re-runs it across a range of cost assumptions, and reads
+# how fast its Sharpe decays as the charge rises.

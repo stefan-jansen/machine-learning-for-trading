@@ -184,7 +184,12 @@ if not IS_VECTORIZED and "close" in prices.columns:
         print("MAE/MFE calibration returned no results; using standard grid")
 else:
     position_controls = _position_grid
-    print("Skipping MAE/MFE calibration (vectorized or no close column)")
+    reason = (
+        "the backtest path is vectorized"
+        if IS_VECTORIZED
+        else "the price panel carries no close column"
+    )
+    print(f"Skipping MAE/MFE calibration: {reason}")
 
 portfolio_controls = get_portfolio_risk_controls(CASE_STUDY_ID)
 # Portfolio-limit overlays were purged 2026-05-17; this CS sweeps position-level
