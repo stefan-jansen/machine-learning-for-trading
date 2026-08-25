@@ -122,6 +122,55 @@ def test_carrier_pins_are_single_sourced_and_well_formed() -> None:
         assert assignments == []
 
 
+def _module_level_literal(path: Path, name: str) -> object:
+    """Read a module-level constant without importing the module.
+
+    `20_strategy_synthesis/holdout.py` imports lightgbm, which `test-unit` does not
+    install, so executing it to read two constants makes this test depend on the
+    modelling environment for no reason. Parsing gets the same values.
+
+    `ast.literal_eval` alone is not enough: these are declared as
+    ``frozenset({"..."})``, and a call node is not a literal. The frozenset call is
+    unwrapped here rather than evaluated, so nothing in the parsed file runs.
+    """
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            continue
+        value = node.value
+        assert value is not None, f"{name} in {path.name} is annotated with no value"
+        return _as_value(value)
+    raise AssertionError(f"{path.name} declares no module-level {name}")
+
+
+def _as_value(node: ast.expr) -> object:
+    if isinstance(node, ast.Call):
+        func = node.func
+        builtin = func.id if isinstance(func, ast.Name) else None
+        assert builtin in {"frozenset", "set"}, (
+            f"unsupported call {ast.dump(func)} in a mirrored constant; this reader "
+            "evaluates nothing, so extend it deliberately rather than importing"
+        )
+        assert len(node.args) == 1, f"{builtin}() with {len(node.args)} arguments"
+        return frozenset(_as_value(node.args[0]))
+    if isinstance(node, ast.Dict):
+        return {
+            _as_value(k): _as_value(v)
+            for k, v in zip(node.keys, node.values, strict=True)
+            if k is not None
+        }
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return [_as_value(e) for e in node.elts]
+    return ast.literal_eval(node)
+
+
 def test_mirrored_selection_restrictions_have_not_drifted() -> None:
     """The two copies of each selection restriction must still hold the same value.
 
@@ -137,19 +186,10 @@ def test_mirrored_selection_restrictions_have_not_drifted() -> None:
     is correct; it says the two copies agree, which is the property the comments
     claim and nothing else enforces.
     """
-    import importlib.util
-
-    repo = Path(__file__).parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "_holdout_for_sync_check", repo / "20_strategy_synthesis" / "holdout.py"
-    )
-    assert spec is not None and spec.loader is not None
-    holdout = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(holdout)
-
+    holdout = Path(__file__).parents[1] / "20_strategy_synthesis" / "holdout.py"
     for name in ("LABEL_RESTRICTIONS", "UNIVERSE_RESTRICTIONS"):
         here = getattr(strategy_analysis, name)
-        there = getattr(holdout, name)
+        there = _module_level_literal(holdout, name)
         assert here == there, (
             f"{name} has drifted between case_studies/utils/strategy_analysis.py and "
             f"20_strategy_synthesis/holdout.py: {here!r} against {there!r}. Both files "
