@@ -369,6 +369,12 @@ if not include_preview:
 # parameter the strategy does not choose, and later selection reads the allocation population.
 
 # %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work. Read the registered set
+# once, before the first member, so every result can be attributed to one or the other.
+registered_before = set(study.backtests.table().get_column("backtest_hash"))
 cost_results: list[BacktestResult] = []
 cost_rows = []
 for job in cost_jobs:
@@ -402,6 +408,12 @@ for job in cost_jobs:
             "prediction_hash": result.registry_record()["prediction_hash"],
         }
     )
+
+served = sum(1 for result in cost_results if result.hash in registered_before)
+print(
+    f"Cost siblings: {len(cost_results) - served} computed, {served} served from the registry, "
+    f"{len(cost_results)} in the population"
+)
 
 if not include_preview:
     if cost_population is None:
