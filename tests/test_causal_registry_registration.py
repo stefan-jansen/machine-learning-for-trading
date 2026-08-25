@@ -90,31 +90,14 @@ def _causal_hash(case_dir, **identity) -> str:
     )
 
 
-def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path) -> None:
+def test_registration_writes_a_registry_file(tmp_path) -> None:
+    """The only assertion the superseded knob test carried that its replacement does not.
+
+    A knob test compares hashes, and two hashes can differ with nothing written to disk.
+    This is what says a registration actually landed.
+    """
     case_dir = tmp_path / "test_case"
-    base = {
-        "block_size": 20,
-        "n_placebo": 200,
-        "seed": 42,
-        "horizon": 10,
-        "max_samples": 50_000,
-        "max_symbols": 100,
-        "development_end": "2020-01-01",
-    }
-    baseline = _causal_hash(case_dir, **base)
-    assert _causal_hash(case_dir, **base) == baseline
-
-    for knob, other in (
-        ("block_size", 5),
-        ("n_placebo", 100),
-        ("seed", 7),
-        ("horizon", 5),
-        ("max_samples", 10_000),
-        ("max_symbols", 25),
-        ("development_end", "2019-01-01"),
-    ):
-        assert _causal_hash(case_dir, **{**base, knob: other}) != baseline, knob
-
+    _causal_hash(case_dir, block_size=20, n_placebo=200, seed=42, horizon=10)
     assert (case_dir / "run_log" / "registry.db").is_file()
 
 

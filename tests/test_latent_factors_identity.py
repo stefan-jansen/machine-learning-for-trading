@@ -38,7 +38,6 @@ PINNED_VERSIONS = {
     "sae": 2,
     "sdf": 1,
 }
-PINNED_PCA_PREDICTIONS = "4d62f4ceefc58141"
 PINNED_IPCA_PREDICTIONS = "0be530a116515880"
 PINNED_CAE_PREDICTIONS = "82a8721e8c074459"
 PINNED_SAE_PREDICTIONS = "01594687acc5416c"
@@ -121,7 +120,29 @@ class TestTheDeclaredVersions:
         assert PINNED_VERSIONS["sae"] == SAE_RUNNER_VERSION
         assert PINNED_VERSIONS["sdf"] == SDF_RUNNER_VERSION
 
-    def test_pca_reproduces_its_pinned_predictions(self, panel) -> None:
+    def test_pca_forecasts_no_cross_section_on_a_zero_mean_panel(self, panel) -> None:
+        """PCA has no pinned digest, because on this fixture it has nothing to pin.
+
+        Measured: every predicted value comes out at 5.3e-17 or below, the whole
+        forecast is one row repeated, and its standard deviation is 3.1e-17. That is
+        floating-point dust, not a forecast, and it is correct - `ExpandingMeanFactorForecaster`
+        predicts the mean training factor return, the fixture draws its factors from a
+        zero-mean normal, so the expected return of every asset is zero by construction.
+
+        A digest of that dust was pinned here until 2026-08-25. It passed in this
+        worktree and failed in `test-unit-image` on
+        `'46f3b4d94810ba1f' == '4d62f4ceefc58141'`, which is what a pin on values with
+        no signal does: at 1e-17 every bit is accumulated rounding, so two BLAS
+        implementations cannot agree and neither is wrong. It could not have caught a
+        change to the runner either, because a runner producing a different zero would
+        look identical to one producing the same zero.
+
+        What is asserted instead is what the pipeline genuinely promises here: it runs,
+        it is reproducible, it is shaped and masked correctly, and it forecasts no
+        cross-section. Giving the fixture's factors a non-zero mean would make a real
+        forecast worth pinning - it would also change every other pin in this file, so
+        it is not done here.
+        """
         predictions, _ = run_pca_fold(
             panel["chars_train"],
             panel["returns_train"],
@@ -129,10 +150,28 @@ class TestTheDeclaredVersions:
             panel["returns_val"],
             N_FACTORS,
         )
+        again, _ = run_pca_fold(
+            panel["chars_train"],
+            panel["returns_train"],
+            panel["chars_val"],
+            panel["returns_val"],
+            N_FACTORS,
+        )
+        array = np.asarray(predictions)
 
-        assert _digest(np.asarray(predictions)) == PINNED_PCA_PREDICTIONS, (
-            "the PCA runner now fits a different result; bump PCA_RUNNER_VERSION in "
-            "case_studies/utils/latent_factors/pca.py and update this pin in the same commit"
+        assert np.array_equal(array, np.asarray(again), equal_nan=True), (
+            "two PCA fits on one panel disagree, so PCA_RUNNER_VERSION does not stand "
+            "for a reproducible fit"
+        )
+        assert array.shape == panel["returns_val"].shape
+        assert np.isfinite(array).all(), (
+            "returns_val is finite throughout, so no prediction may be NaN"
+        )
+        assert np.abs(array).max() < 1e-9, (
+            "PCA now forecasts a non-zero cross-section on a zero-mean factor panel. "
+            "Either the forecaster stopped predicting the mean training factor return, "
+            "or the fixture stopped drawing zero-mean factors - both change what every "
+            "other pin in this file measures"
         )
 
     def test_ipca_reproduces_its_pinned_predictions(self, panel) -> None:
