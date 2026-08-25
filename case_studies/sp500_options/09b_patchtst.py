@@ -41,8 +41,34 @@ from case_studies.sp500_options.research_workflow import (
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
+DEVICE: str = ""
 
-POPULATION_NAME = "sp500-options-sequence-validation-v1"
+POPULATION_NAME: str = ""
+
+# %% [markdown]
+# ### The device the population was fitted on
+#
+# A network trained on a GPU and the same network trained on a CPU accumulate their sums in a
+# different order and reach different weights, so the device is part of what the fitted model is
+# and sits inside the training identity rather than beside it. `PUBLISHED_DEVICE` is the device
+# this population was fitted on, and pinning it is what makes the notebook fit the same thing
+# wherever it runs. On a machine with no NVIDIA card the run stops here rather than quietly
+# training something else: set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same
+# requests there, under a name of their own. `08_tabular_dl` pins its device the same way.
+
+# %%
+PUBLISHED_DEVICE = "cuda"
+CANONICAL_POPULATION_NAME = "sp500-options-sequence-validation-v1"
+
+device = DEVICE or PUBLISHED_DEVICE
+population_name = POPULATION_NAME or CANONICAL_POPULATION_NAME
+if device != PUBLISHED_DEVICE and population_name == CANONICAL_POPULATION_NAME:
+    raise ValueError(
+        f"this run fits on {device!r}, not the published {PUBLISHED_DEVICE!r}, so its "
+        f"identities are not the ones {CANONICAL_POPULATION_NAME!r} holds; pass "
+        f"POPULATION_NAME to give them a population of their own"
+    )
+print(f"training device: {device}")
 
 # %% [markdown]
 # ## Declared request
@@ -58,6 +84,7 @@ resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
+    overrides={"device": device},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 resolved_model_plan(resolved)
@@ -73,7 +100,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_subset(
         study,
         resolved,
-        population=POPULATION_NAME,
+        population=population_name,
         require_population_complete=True,
     )
 else:

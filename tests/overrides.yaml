@@ -2010,13 +2010,34 @@ case_studies/sp500_options/08_tabular_dl:
       max_symbols: 5
   timeout: 300
 case_studies/sp500_options/09_deep_learning:
-  timeout: 60
-case_studies/sp500_options/09a_lstm:
-  # BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS are gone from the parameters
-  # cell; a preview declares its reductions in one mapping so the recorded identity says
-  # what was actually fitted. `09_deep_learning`, `09a_lstm` and `09b_patchtst` all default
-  # to the same canonical population name, so a preview has to name its own.
+  # The three sequence notebooks share this entry's shape, and this is where it is explained.
+  #
+  # BATCH_SIZE, LOOKBACK, MAX_FOLDS, MAX_SYMBOLS and N_EPOCHS are gone from every parameters
+  # cell; a preview declares its reductions in one mapping so the recorded identity says what
+  # was actually fitted. All three default to the same canonical population name, so a preview
+  # has to name its own.
+  #
+  # DEVICE is what makes them runnable here at all. The published sequence population is fitted
+  # on CUDA, and the device is inside the training identity, so each notebook refuses to fit
+  # anything else under the canonical name rather than quietly training a different model. This
+  # runner has no NVIDIA card, so a preview asks for a CPU and puts the result in the population
+  # it named above.
+  #
+  # This entry previously carried a 60-second timeout and no parameters, so a preview of it
+  # resolved the full declared sweep - three configurations across every fold - and had a minute
+  # to do it in.
   parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500-options-sequence-preview-nlinear
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      max_train_sequences: 512
+  timeout: 300
+case_studies/sp500_options/09a_lstm:
+  # Same shape and the same reasons as `09_deep_learning` above, which carries the explanation.
+  parameters:
+    DEVICE: cpu
     POPULATION_NAME: sp500-options-sequence-preview-lstm
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
@@ -2025,6 +2046,7 @@ case_studies/sp500_options/09a_lstm:
   timeout: 300
 case_studies/sp500_options/09b_patchtst:
   parameters:
+    DEVICE: cpu
     POPULATION_NAME: sp500-options-sequence-preview-patchtst
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
@@ -2043,7 +2065,19 @@ case_studies/sp500_options/10_causal_dml:
       n_placebo: 25
   timeout: 300
 case_studies/sp500_options/11_model_analysis:
-  timeout: 300
+  # This one cannot be made runnable by parameters, and the reason is structural rather than a
+  # missing fixture. The notebook resolves four named official populations, and
+  # `research/population.py::_refuse_preview_activation` refuses to create an official population
+  # from a preview run at all - a population is canonical by definition and would be written to
+  # the shared registry. So the model notebooks ahead of it in this job publish nothing it can
+  # resolve, and it stops at `resolved to 0 current identities among 0 snapshots`.
+  #
+  # Reading the registry directly instead is what the migration removed: membership comes from a
+  # named immutable snapshot and never from registry presence. It becomes runnable when the
+  # fixture ships a registry holding canonical populations under these four names; the one it
+  # ships today predates the research boundary and has no `official_populations` table.
+  skip: true
+  skip_reason: "Resolves four named official populations, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
 case_studies/sp500_options/12_backtest:
   # MAX_SYMBOLS and TOP_K are gone: the notebook takes its concentration grid from
   # setup.yaml and its universe from the signal, and neither name is bound any more.
@@ -2056,7 +2090,12 @@ case_studies/sp500_options/12_backtest:
 case_studies/sp500_options/13_portfolio_management:
   skip: true
   skip_reason: "Depends on 12_backtest signal-stage results - see that entry's skip_reason."
-case_studies/sp500_options/14_costs: {}
+case_studies/sp500_options/14_costs:
+  # An empty entry between two skipped siblings, which read as deliberate and did nothing. A
+  # preview run needs WORKSPACE plus the exact PREVIEW_BASELINE_HASHES of preview backtests, and
+  # those are 12_backtest's output - the same dependency 13 and 15 declare, one stage further on.
+  skip: true
+  skip_reason: "Depends on 12_backtest signal-stage results - see that entry's skip_reason."
 case_studies/sp500_options/15_risk_management:
   skip: true
   skip_reason: "Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry."

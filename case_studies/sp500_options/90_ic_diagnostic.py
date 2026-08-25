@@ -35,9 +35,9 @@ from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_s
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 
-from case_studies.sp500_options.research_workflow import REPO_ROOT
 from case_studies.utils.artifact_digest import value_digest
 from utils.modeling import generate_cv_splits, prepare_cv_folds
+from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -58,10 +58,14 @@ LABEL_BUFFER = "10D"
 if EXECUTION_TIER != "preview":
     raise ValueError("the IC mechanism diagnostic is excluded from canonical execution")
 set_global_seeds(SEED)
-# Finalized features and labels are inputs, so they are read from the case study in the repository.
-# `get_case_study_dir` redirects to ML4T_OUTPUT_DIR, which is where a run writes, not where the
-# stage 01-05 artifacts live: under an isolated preview root it resolves to an empty directory.
-case_dir = REPO_ROOT / "case_studies" / CASE_STUDY
+# Finalized features and labels are inputs, and `get_case_study_dir` is what finds them wherever
+# they are. It resolves to ML4T_OUTPUT_DIR when one is set, which is where the stage 01-05
+# artifacts live under test, and to the repository's own case-study directory otherwise, which is
+# where a maintainer checkout keeps them. Reading a repository-relative path directly finds
+# neither under test: `features/` and `labels/` are gitignored, so a plain checkout has no such
+# file. Nothing can hand this notebook an isolated preview root to resolve into instead - it
+# declares no WORKSPACE parameter, so the harness injects none.
+case_dir = get_case_study_dir(CASE_STUDY)
 financial = pl.read_parquet(case_dir / "features" / "financial.parquet")
 diagnostic_label = pl.read_parquet(case_dir / "labels" / f"{DIAGNOSTIC_LABEL}.parquet")
 unhedged_label = pl.read_parquet(case_dir / "labels" / f"{UNHEDGED_LABEL}.parquet")
