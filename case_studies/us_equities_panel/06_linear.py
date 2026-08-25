@@ -106,6 +106,7 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
+DIAGNOSTIC_CONFIG_NAMES = ["ols"]
 POPULATION_NAME = ""
 SUPERSEDES_POPULATION: str = ""
 
@@ -169,6 +170,12 @@ if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
         f"this run fits {configs.height} of the declared configurations, so it cannot publish "
         "the canonical population; pass POPULATION_NAME to give it its own"
     )
+
+unknown_diagnostics = sorted(
+    set(DIAGNOSTIC_CONFIG_NAMES) - set(configs.get_column("config_name").unique().to_list())
+)
+if not DIAGNOSTIC_CONFIG_NAMES or unknown_diagnostics:
+    raise ValueError(f"diagnostic configurations must be fitted here: {unknown_diagnostics}")
 
 # %% [markdown]
 # ## 2. Binding the declarations to the data
@@ -378,6 +385,71 @@ catalog.select(
     "ic_n_days",
     "full_coverage",
 )
+
+# %% [markdown]
+# ## Freeze the compatible result sets
+#
+# The population above is one immutable list covering every label this run fitted. `15_model_analysis`
+# and `16_backtest` do not open populations directly - they open *candidate sets*, named per
+# `(label, family)`, because a comparison is only meaningful within one label's protocol. Freezing
+# is what creates those names.
+#
+# Without this the two downstream notebooks name four sets that nothing produces, and they fail
+# differently: `15` raises when `CandidateSet.one` cannot find the name, while `16` would simply
+# backtest whatever subset of names does resolve. A missing name is a silently narrower strategy
+# chain, which is the failure the named-set design exists to prevent.
+#
+# The diagnostic subset is bounded on purpose. `15` holds every diagnostic member's prediction
+# frame in memory at once and correlates them pairwise, so the cost is quadratic in members. The
+# full grid is sixteen configurations on each of three labels; `ols` is the unpenalized baseline
+# every penalized configuration is a shrinkage of, which makes it the one that means something on
+# its own.
+#
+# Only an unnarrowed canonical run publishes. The guard on `narrows_declared_catalog` above already
+# refuses to publish the canonical *population* from a narrowed run; the same condition governs the
+# canonical set names, for the same reason - a name must not mean two different member sets.
+
+# %% tags=["results"]
+set_rows = []
+is_published_population = (
+    EXECUTION_TIER == "canonical" and not POPULATION_NAME and not PREVIEW_REDUCTIONS
+)
+if is_published_population:
+    for label_value in panel_labels:
+        label_name = label_value.replace("_", "-")
+        label_rows = execution.catalog_rows.filter(pl.col("label") == label_value)
+        full_set = study.predictions.freeze(
+            label_rows,
+            name=f"us-equities-{label_name}-linear-v1",
+        )
+        diagnostic_rows = label_rows.filter(pl.col("config_name").is_in(DIAGNOSTIC_CONFIG_NAMES))
+        if diagnostic_rows.height == 0:
+            raise ValueError(
+                f"no {label_value} rows for diagnostic configurations {DIAGNOSTIC_CONFIG_NAMES}"
+            )
+        diagnostic_set = study.predictions.freeze(
+            diagnostic_rows,
+            name=f"us-equities-{label_name}-linear-diagnostics-v1",
+        )
+        set_rows.extend(
+            [
+                {
+                    "role": "backtest population",
+                    "set_name": full_set.name,
+                    "members": len(full_set.members),
+                },
+                {
+                    "role": "bounded diagnostics",
+                    "set_name": diagnostic_set.name,
+                    "members": len(diagnostic_set.members),
+                },
+            ]
+        )
+compatible_sets = pl.DataFrame(
+    set_rows,
+    schema={"role": pl.String, "set_name": pl.String, "members": pl.Int64},
+)
+compatible_sets
 
 # %% [markdown]
 # ### How the penalty grid ranks

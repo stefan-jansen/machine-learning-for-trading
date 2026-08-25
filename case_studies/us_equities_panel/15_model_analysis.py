@@ -73,7 +73,11 @@ PREVIEW_MAX_PREDICTIONS = 0
 PREVIEW_MAX_DIAGNOSTICS = 0
 PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-linear-v1",
+    "us-equities-fwd-ret-5d-linear-v1",
+    "us-equities-fwd-ret-21d-linear-v1",
     "us-equities-fwd-ret-1d-gbm-v1",
+    "us-equities-fwd-ret-5d-gbm-v1",
+    "us-equities-fwd-ret-21d-gbm-v1",
     "us-equities-fwd-ret-1d-tabular-dl-v1",
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
@@ -103,7 +107,11 @@ OFFICIAL_POPULATION_NAMES = [
 # %% tags=["parameters"]
 DIAGNOSTIC_SET_NAMES = [
     "us-equities-fwd-ret-1d-linear-diagnostics-v1",
+    "us-equities-fwd-ret-5d-linear-diagnostics-v1",
+    "us-equities-fwd-ret-21d-linear-diagnostics-v1",
     "us-equities-fwd-ret-1d-gbm-diagnostics-v1",
+    "us-equities-fwd-ret-5d-gbm-diagnostics-v1",
+    "us-equities-fwd-ret-21d-gbm-diagnostics-v1",
     "us-equities-fwd-ret-1d-tabular-dl-diagnostics-v1",
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",

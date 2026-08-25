@@ -57,7 +57,11 @@ from utils.style import COLORS, show_with_alt, zero_line
 CASE_STUDY_ID = "us_equities_panel"
 PREDICTION_SET_NAMES = [
     "us-equities-fwd-ret-1d-linear-v1",
+    "us-equities-fwd-ret-5d-linear-v1",
+    "us-equities-fwd-ret-21d-linear-v1",
     "us-equities-fwd-ret-1d-gbm-v1",
+    "us-equities-fwd-ret-5d-gbm-v1",
+    "us-equities-fwd-ret-21d-gbm-v1",
     "us-equities-fwd-ret-1d-tabular-dl-v1",
     "us-equities-fwd-ret-1d-nlinear-v1",
     "us-equities-fwd-ret-1d-lstm-v1",
