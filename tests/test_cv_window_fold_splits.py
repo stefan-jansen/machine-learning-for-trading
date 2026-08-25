@@ -282,3 +282,33 @@ def test_fold_boundary_date_refuses_a_boundary_carrying_a_time_of_day() -> None:
 
     with pytest.raises(ValueError, match="time of day"):
         fold_boundary_date(pd.Timestamp("2020-01-06 09:30:00"))
+
+
+def test_a_fold_end_is_comparable_to_the_holdout_start_the_configuration_states(
+    isolated_case_study: Path,
+) -> None:
+    """An evaluation notebook seals its folds by comparing the latest fold end to the holdout.
+
+    ``setup.yaml`` states ``evaluation.holdout_start`` as a calendar date and the fold generator
+    returns pandas ``Timestamp`` boundaries, and Python refuses that comparison outright rather
+    than answering it. So the seal - the check that no validation window reaches the holdout -
+    raised a ``TypeError`` instead of passing or failing, which is what stopped
+    ``sp500_equity_option_analytics/05_evaluation``. Both sides have to be calendar dates for the
+    seal to mean anything.
+    """
+    from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
+
+    cs = "test_cs_fold_end_against_holdout"
+    label = "fwd_ret_5d"
+    cs_dir = isolated_case_study / cs
+    _seed_setup_yaml(cs_dir, with_buffer=True, label=label, horizon="5D")
+    _seed_label_parquet(cs_dir, label=label, date_col="timestamp")
+
+    setup = yaml.safe_load((cs_dir / "config" / "setup.yaml").read_text())
+    holdout_start = date.fromisoformat(str(setup["evaluation"]["holdout_start"]))
+
+    folds = modeling_fold_boundaries(cs, label)
+    assert folds is not None
+    latest_end = max(fold_boundary_date(f["val_end"]) for f in folds)
+
+    assert latest_end < holdout_start

@@ -91,7 +91,7 @@ from scipy.stats import spearmanr
 from scipy.stats import t as student_t
 
 import utils.style as style
-from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
 from case_studies.utils.feature_engineering import (
     assign_families,
     families_from_config,
@@ -278,6 +278,15 @@ producer_folds = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 if not producer_folds:
     msg = f"No canonical modeling folds for {CASE_STUDY_ID}/{PRIMARY_LABEL}"
     raise RuntimeError(msg)
+# That generator indexes the label timeline with a pandas `DatetimeIndex`, so a boundary
+# comes back as a `Timestamp` whatever dtype the label parquet holds. Section 3 compares a
+# fold's end against `holdout_start_date`, which the configuration states as a calendar
+# date, and a `Timestamp` raises against a `date` rather than answering. Converting once
+# here is what lets every span below be compared and filtered without a second parse.
+_SPAN_FIELDS = ("train_start", "train_end", "val_start", "val_end")
+producer_folds = [
+    {**f, **{field: fold_boundary_date(f[field]) for field in _SPAN_FIELDS}} for f in producer_folds
+]
 
 temporal_oos = pl.concat(
     [
@@ -869,13 +878,13 @@ if leader:
 # otherwise.
 
 # %%
-fold_boundaries = [(f["val_start"], f["val_end"]) for f in producer_folds]
+fold_windows = [(f["val_start"], f["val_end"]) for f in producer_folds]
 for f in producer_folds:
     print(
         f"fold {f['fold']}: fitted {f['train_start']} to {f['train_end']}, "
         f"validated {f['val_start']} to {f['val_end']}"
     )
-if max(end for _, end in fold_boundaries) >= holdout_start_date:
+if max(end for _, end in fold_windows) >= holdout_start_date:
     msg = "A validation fold ends at or after the holdout boundary"
     raise ValueError(msg)
 
@@ -883,7 +892,7 @@ fold_stats = {}
 for feat in ic_results:
     fold_ics = []
     ts = ic_timeseries[feat]
-    for fold_start, fold_end in fold_boundaries:
+    for fold_start, fold_end in fold_windows:
         fold_ic = ts.filter((pl.col(DATE_COL) >= fold_start) & (pl.col(DATE_COL) <= fold_end))
         if len(fold_ic) >= 5:
             fold_ics.append(float(fold_ic["ic"].mean()))
