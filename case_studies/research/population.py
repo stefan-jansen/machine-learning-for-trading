@@ -243,3 +243,119 @@ class OfficialPopulation:
                 f"official population {self.hash} is incomplete: {', '.join(failures)}"
             )
         return self.members
+
+
+def population_supersedes(study: Study, *, name: str, declared: str | None) -> str | None:
+    """Decide whether a declared population hash may be offered to :meth:`OfficialPopulation.create`.
+
+    A notebook that has published a population and then moved a training identity has to name the
+    snapshot it replaces, or ``create`` refuses the write. The hash it names is committed source,
+    so the same declaration has to be right in three situations the notebook cannot tell apart on
+    its own, and offering it unconditionally is wrong in two of them.
+
+    - **A clean clone.** ``run_log/`` is gitignored, so a reader starts with an empty registry -
+      often with no ``official_populations`` table at all, which raises ``OperationalError``
+      rather than ``ValueError``. ``create`` refuses a first version that claims to supersede
+      something, so the declared hash must be withheld and the reader's run publishes generation
+      one. This is the ordinary case for anyone who is not the author.
+    - **The re-run.** The generation in force is the one this declaration produced, which is
+      ``current.supersedes == declared``. Offering the hash recomputes the same snapshot, so the
+      notebook resolves to the population it published instead of writing a new one.
+    - **The refit.** The declaration names the tip itself, ``current.hash == declared``, and
+      offering it publishes the next generation over that tip.
+
+    Anything else is withheld, and ``create`` then refuses and names the hash it requires - a
+    better answer than this function guessing. Note that the two matching conditions are both
+    needed: testing only the first withholds the hash from an author holding generation one who
+    declares it in order to publish generation two, and testing only whether any generation exists
+    gets the second run on a clean clone wrong, because run 1 writes a generation whose own
+    ``supersedes`` is ``None`` and offering the hash again there writes a generation nobody asked
+    for.
+
+    A narrowed run passes here too and needs no special case: a caller-chosen ``POPULATION_NAME``
+    has no prior generation, so the lookup fails and the hash is withheld. So does a preview,
+    whose isolated registry holds no generation under this name either.
+    """
+    if not declared:
+        return None
+    try:
+        current = OfficialPopulation.one(study, name=name)
+    except (ValueError, sqlite3.OperationalError, KeyError):
+        return None
+    return declared if declared in (current.supersedes, current.hash) else None
+
+
+def superseded_members(study: Study, *, member_kind: str = "prediction") -> frozenset[str]:
+    """Identities whose own publisher has moved past them.
+
+    A downstream stage asks the registry which results it should consume, and the obvious
+    answer - every row that is ``complete`` and whose ``identity_status`` is ``"current"`` -
+    does not answer it. ``identity_status`` is derived from ``identity_version``
+    (``catalog.py``), which is the schema number the row was written under. It says the
+    registry still understands the row. It says nothing about whether the row is the one its
+    producer publishes, because that is a property of the population lineage and is recorded
+    in a different table.
+
+    The two agree until a model notebook refits. Then the notebook publishes a second
+    generation under the same name, the first generation's members stay in the registry -
+    complete, and current under a schema version that has not moved - and a stage selecting on
+    the catalog alone sweeps both. It does not fail: it succeeds over twice the population,
+    freezes the retired generation into whatever it publishes, and everything downstream
+    inherits a set that mixes two answers to the same question. That is worse than a refusal,
+    because nothing about the run looks wrong.
+
+    So ask the lineage instead. **The question is asked per name, and the name is the whole
+    point.** A name is one publisher's answer to one question, and its chain of generations is
+    that publisher changing its mind; a member is retired when the name that published it has
+    moved past it. Within a name, the comparison is member-wise rather than whole-generation:
+    a refit that moves three of ten identities retires three, and the seven that did not move
+    are still what that name publishes.
+
+    Asking it globally instead - "retired by someone, and listed by nobody in force" - is the
+    version that looks equivalent and is not, because the same identity is legitimately listed
+    under several names. A narrowed or preview run freezes its own snapshot of whatever the
+    catalog held on the day it ran, and that snapshot stays in force under its own name
+    forever. Measured on ``fx_pairs`` 2026-08-25: refitting ``tabular_dl`` retired 72
+    prediction sets, and ``fx_pairs:preflight-baselines``, frozen the day before, still listed
+    all 72 - so the global form returned nothing retired and the sweep would have run over both
+    generations exactly as if the check were absent. A stale snapshot under an unrelated name
+    cannot un-retire another name's superseded generation.
+    """
+    try:
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            rows = db.execute(
+                "SELECT population_hash, name, supersedes_hash FROM official_populations "
+                "WHERE member_kind = ?",
+                (member_kind,),
+            ).fetchall()
+            if not any(row[2] is not None for row in rows):
+                return frozenset()
+            members: dict[str, set[str]] = {}
+            for population_hash, member_hash in db.execute(
+                "SELECT population_hash, member_hash FROM official_population_members"
+            ):
+                members.setdefault(population_hash, set()).add(member_hash)
+    except sqlite3.OperationalError:
+        # A clean clone has no `official_populations` table at all, so nothing has been
+        # retired. Same reasoning as `population_supersedes`.
+        return frozenset()
+
+    by_name: dict[str, list[tuple[str, str | None]]] = {}
+    for population_hash, name, supersedes in rows:
+        by_name.setdefault(name, []).append((population_hash, supersedes))
+
+    retired: set[str] = set()
+    for generations in by_name.values():
+        superseded = {supersedes for _, supersedes in generations if supersedes is not None}
+        if not superseded:
+            continue
+        # The generations this name still stands behind. Normally one; a forked chain leaves
+        # more, and taking the union is the conservative reading - a member any surviving tip
+        # still lists is not retired, so a fork can only under-report.
+        in_force: set[str] = set()
+        for population_hash, _ in generations:
+            if population_hash not in superseded:
+                in_force |= members.get(population_hash, set())
+        for population_hash in superseded:
+            retired |= members.get(population_hash, set()) - in_force
+    return frozenset(retired)
