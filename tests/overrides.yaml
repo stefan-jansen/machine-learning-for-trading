@@ -1236,7 +1236,7 @@ case_studies/cme_futures/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 15
   timeout: 300
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
@@ -1324,7 +1324,7 @@ case_studies/crypto_perps_funding/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 15
   timeout: 300
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300
@@ -1379,12 +1379,21 @@ case_studies/etfs/06_linear:
 case_studies/etfs/07_gbm:
   timeout: 180
 case_studies/etfs/08_tabular_dl:
+  # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
+  # for a requested GPU, and the device is inside the training identity, so a CPU run
+  # declares a different member set and the notebook makes it name its own population.
+  # The epoch budget comes from the patched fixture presets, not from a parameter.
+  # The reductions are written out rather than left as MAX_FOLDS / MAX_SYMBOLS:
+  # pm_helpers folds those two into PREVIEW_REDUCTIONS at run time, but
+  # test_every_declared_parameter_reaches_its_notebook reads the notebook's source
+  # and sees two names it never binds.
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: etfs-tabular_dl-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+  timeout: 300
 case_studies/etfs/09_dl_lstm:
   parameters:
     BATCH_SIZE: 32
@@ -1439,7 +1448,7 @@ case_studies/etfs/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 5
+    N_PLACEBO: 15
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
@@ -1512,7 +1521,7 @@ case_studies/fx_pairs/11_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 15
   timeout: 120
 case_studies/fx_pairs/12_model_analysis:
   timeout: 300
@@ -1615,7 +1624,7 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 900
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 15
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
   timeout: 300
@@ -1745,7 +1754,7 @@ case_studies/sp500_equity_option_analytics/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 5
+    N_PLACEBO: 15
   timeout: 120
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
@@ -1840,7 +1849,7 @@ case_studies/sp500_options/10_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 15
   timeout: 120
 case_studies/sp500_options/11_model_analysis:
   timeout: 300
@@ -2017,7 +2026,7 @@ case_studies/us_equities_panel/14_causal_dml:
     MAX_SYMBOLS: 5
     PREVIEW_N_FOLDS: 2
     PREVIEW_MAX_SAMPLES: 5000
-    PREVIEW_N_PLACEBO: 10
+    PREVIEW_N_PLACEBO: 15
   timeout: 120
 case_studies/us_equities_panel/15_model_analysis:
   # 15 declares EXECUTION_TIER and WORKSPACE, so research_preview_parameters routes it to the
@@ -2167,7 +2176,7 @@ case_studies/us_firm_characteristics/09_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 5000
     MAX_SYMBOLS: 5
-    N_PLACEBO: 10
+    N_PLACEBO: 15
   timeout: 120
 case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300
