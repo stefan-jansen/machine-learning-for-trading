@@ -96,18 +96,27 @@ set_global_seeds(SEED)
 # plumbing smoke test: it can detect gross engine bias, but it cannot prove that
 # every research choice is unbiased.
 
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request; the values the backtest runs on are resolved here and
+# carry different names. Keeping them apart means a run can print both, and a resolved value can
+# never quietly overwrite the request that produced it. Precedence is the same throughout: an
+# injected parameter wins, otherwise the case study's own declaration.
+
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_PREDICTIONS is None:
-    TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "signal")
-
-if not LABEL:
-    LABEL = bt_config.primary_label
+TOP_N = (
+    TOP_N_PREDICTIONS
+    if TOP_N_PREDICTIONS is not None
+    else get_top_n_predictions(CASE_STUDY_ID, "signal")
+)
+BACKTEST_LABEL = LABEL or bt_config.primary_label
 
 print(f"""Protocol term sheet
   Case study:    {CASE_STUDY_ID}
-  Label:         {LABEL}
+  Label:         {BACKTEST_LABEL}
   Calendar:      {bt_config.calendar}
   Cadence:       {bt_config.cadence}
   Commission:    {bt_config.commission_bps:.1f} bps
@@ -117,19 +126,23 @@ print(f"""Protocol term sheet
 """)
 
 # %%
-prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
+prices = load_backtest_prices_for(
+    CASE_STUDY_ID, BACKTEST_LABEL, split="validation", max_symbols=MAX_SYMBOLS
+)
 n_assets = prices["symbol"].n_unique()
-if TOP_K == 0:
-    _feasible_top_k = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
+if TOP_K:
+    PLUMBING_TOP_K = TOP_K
+else:
+    _feasible_top_k = get_top_k_values_for(CASE_STUDY_ID, BACKTEST_LABEL, n_assets)
     if not _feasible_top_k:
         raise ValueError(
-            f"top_k_grid for {LABEL!r} in {CASE_STUDY_ID} has no value < "
+            f"top_k_grid for {BACKTEST_LABEL!r} in {CASE_STUDY_ID} has no value < "
             f"n_assets={n_assets}; declare a feasible k in setup.yaml"
         )
-    TOP_K = _feasible_top_k[0]
+    PLUMBING_TOP_K = _feasible_top_k[0]
 print(
     f"Price support: {len(prices):,} rows across {n_assets} historical symbols; "
-    f"plumbing-test top-K={TOP_K}"
+    f"plumbing-test top-K={PLUMBING_TOP_K}"
 )
 
 # %%
@@ -142,7 +155,7 @@ strategy_spec = build_backtest_spec(
     chapter="ch16",
     signal={
         "method": "score_weighted_top_k",
-        "top_k": TOP_K,
+        "top_k": PLUMBING_TOP_K,
         "long_short": bt_config.long_short,
     },
 )
@@ -152,7 +165,7 @@ try:
         CASE_STUDY_ID,
         prices,
         strategy_spec,
-        top_k=TOP_K,
+        top_k=PLUMBING_TOP_K,
         seed=SEED,
         initial_cash=bt_config.initial_cash,
         calendar=bt_config.calendar,
@@ -180,21 +193,21 @@ except ValueError as e:
 #
 # The top-$K$ grid isolates concentration while holding sizing constant at equal
 # weight. Weekly top-5, top-10, and top-20 portfolios reveal whether a ranking
-# signal survives as the selected tail broadens.
+# signal holds as the selected tail broadens.
 
 # %%
 pred_index = load_prediction_index(
     CASE_STUDY_ID,
-    label=LABEL,
+    label=BACKTEST_LABEL,
     split=SPLIT,
 )
 
 if pred_index.is_empty():
-    msg = f"No predictions found for {CASE_STUDY_ID}/{LABEL}/{SPLIT}"
+    msg = f"No predictions found for {CASE_STUDY_ID}/{BACKTEST_LABEL}/{SPLIT}"
     raise RuntimeError(msg)
 
-if TOP_N_PREDICTIONS > 0:
-    pred_index = pred_index.head(TOP_N_PREDICTIONS)
+if TOP_N > 0:
+    pred_index = pred_index.head(TOP_N)
 
 n_predictions = len(pred_index)
 print(f"Predictions to sweep: {n_predictions}")
@@ -206,7 +219,7 @@ else:
 
 # %%
 entry_schemes = get_entry_schemes_for(
-    CASE_STUDY_ID, LABEL, n_assets, long_short=bt_config.long_short
+    CASE_STUDY_ID, BACKTEST_LABEL, n_assets, long_short=bt_config.long_short
 )
 n_schemes = len(entry_schemes)
 
@@ -278,7 +291,7 @@ def _execute_one(pred_hash, spec, predictions, force_rebacktest):
             spec,
             prices=prices,
             predictions=predictions,
-            label=LABEL,
+            label=BACKTEST_LABEL,
             register=True,
             force_rebacktest=FORCE_REBACKTEST or force_rebacktest,
             initial_cash=bt_config.initial_cash,
@@ -337,8 +350,9 @@ print(
 # within its family and label. This prevents a checkpoint scored on fewer dates
 # from winning on a different evaluation sample.
 #
-# The holdout remains sealed. All ranks, intervals, and selection-adjustment
-# statistics in this notebook refer to validation data.
+# Every rank, interval and selection-adjustment statistic in this notebook is
+# computed on validation data, and the holdout stays available for one
+# evaluation after the strategy is fixed.
 
 # %%
 explorer = BacktestExplorer(CASE_STUDY_ID)
@@ -387,14 +401,15 @@ top.select(
 )
 
 # %% [markdown]
-# Downstream selection is label-specific and admits one checkpoint per distinct
-# model configuration. For `fwd_ret_5d`, NLinear leads at Sharpe 0.826; the
-# cross-label PCA result does not displace that primary-label lineage.
+# Downstream selection is label-specific and admits one checkpoint per distinct model
+# configuration. The primary label carries its own lineage: whichever configuration leads the
+# ranking above on another label does not displace it, because a strategy is built against one
+# target rather than against the strongest number in the sweep.
 
 # %%
 primary_advancing = resolve_best_predictions(
     CASE_STUDY_ID,
-    LABEL,
+    BACKTEST_LABEL,
     split=SPLIT,
     top_n=10,
     stage="signal",
@@ -493,10 +508,11 @@ fig.show()
 #
 # $$DSR = \Phi\left[\frac{(\hat{SR} - SR^*) \sqrt{T-1}}{\sqrt{1 - \hat{\gamma}_3 \hat{SR} + \frac{\hat{\gamma}_4 - 1}{4} \hat{SR}^2}}\right].$$
 #
-# PCA is the only family leader whose block-bootstrap Sharpe interval excludes
-# zero: 1.512 `[0.158, 2.979]`. Its latent-factor cohort has six eligible
-# variants and an effective-rank DSR p-value of 0.0045. PBO equals 0.0, but it
-# is estimated from only two validation folds and therefore has very low
+# Read three columns together, because each answers a different question. The **block-bootstrap
+# Sharpe interval** asks whether one return path clears zero on its own. The **effective-rank
+# DSR** asks whether it still clears once the correlated variants tried within its own family
+# and label are counted, which is the number that accounts for the search. **PBO** asks how often
+# the in-sample leader underperforms out of sample; on two validation folds it has very low
 # resolution. These diagnostics support a validation candidate, not an
 # out-of-sample claim.
 
@@ -544,7 +560,7 @@ ax.set_ylabel("Family leader")
 zero_line(ax, axis="x")
 add_message_title(
     ax,
-    "Only the PCA baseline clears zero",
+    "Which family leaders clear zero on their own return path",
     "Best eligible equal-weight baseline per model family across five labels",
 )
 fig.show()
@@ -552,10 +568,12 @@ fig.show()
 # %% [markdown]
 # ### Downstream Preview
 #
-# The best result at each available pipeline layer for the PCA prediction rises
-# from Sharpe 1.512 under equal weights to 1.685 after allocation. This is a
-# best-per-layer preview, not a fixed-spec causal attribution: each row selects
-# the strongest registered variant for the same prediction set.
+# Each row is the strongest registered variant at that pipeline layer for the same prediction
+# set. **That makes it a preview of what each layer can reach, not an attribution of the gain
+# to the layer**: every row has been selected, so a rise from one layer to the next mixes what
+# the layer contributes with what selecting over its variants contributes. A fixed
+# specification carried through every layer is what would separate the two, and it is not what
+# this table does.
 
 # %%
 stage_labels = {
@@ -578,22 +596,30 @@ progression.with_columns(
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. Coverage-aware ranking removes partial prediction histories before
-#    comparing registered equal-weight baselines. PCA on `fwd_ret_10d`, top 5,
-#    leads with validation Sharpe 1.512 `[0.158, 2.979]` and daily-pooled IC
-#    0.0815 `[0.0497, 0.1134]`.
-# 2. The PCA family cohort contains six eligible variants. Effective-rank DSR
-#    remains significant (p = 0.0045), while two-fold PBO is 0.0 and too
-#    coarse to support a strong stability claim.
-# 3. The primary `fwd_ret_5d` pipeline remains separate: NLinear leads its eligible
-#    configuration set at Sharpe 0.826. Downstream selection never mixes labels.
-# 4. IC and Sharpe are related but far from equivalent across the sweep;
-#    portfolio construction still changes the ranking. The current coefficient
-#    is reported directly in the figure rather than frozen into the prose.
-# 5. The holdout remains sealed. The current-constituent universe also embeds
-#    survivorship bias, so these validation results are research evidence rather
-#    than a prospective performance estimate.
+# 1. **Coverage-aware ranking comes before comparison.** A prediction set measured on fewer
+#    validation dates than its rivals is not comparable to them, so partial histories are
+#    removed before any Sharpe is ranked rather than after.
 #
-# **Next:** `15_portfolio_management` compares equal weight, score weighting,
-# inverse volatility, risk parity, HRP, MVO, and conformal weighting within each
-# label-specific lineage.
+# 2. **Selection is on validation backtest Sharpe, and it happens here.** IC ranked nothing
+#    upstream; every checkpoint of every model reached this notebook, and what advances is
+#    decided on money after costs rather than on rank correlation.
+#
+# 3. **A Sharpe that clears zero on its own has not yet cleared the search.** The
+#    effective-rank DSR is the column that counts the correlated variants tried within a family
+#    and label; two-fold PBO is reported beside it and is too coarse on this sample to support
+#    a stability claim either way.
+#
+# 4. **Each label keeps its own lineage.** The primary label's leader is chosen from the
+#    primary label's candidates, and a stronger number on another label does not displace it.
+#    Mixing them would select the label as well as the model, on the same validation data.
+#
+# 5. **IC and Sharpe are related and not interchangeable.** Portfolio construction reorders
+#    candidates that IC ranked one way, which is the entire reason selection waits until here.
+#    The measured coefficient is in the figure rather than frozen into this sentence.
+#
+# 6. **Everything here is validation data, on a current-constituent roster.** These are
+#    validation results on a universe that embeds survivorship bias, so they are research
+#    evidence rather than a prospective performance estimate.
+#
+# **Next:** [`15_portfolio_management`](15_portfolio_management.ipynb) compares the declared
+# allocators within each label-specific lineage.

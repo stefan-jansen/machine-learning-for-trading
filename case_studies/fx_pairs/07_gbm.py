@@ -75,15 +75,19 @@
 # %%
 """Fit the declared FX pairs gradient boosting population on the walk-forward folds."""
 
+import sqlite3
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    OfficialPopulation,
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -98,6 +102,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "06e9ea03f2f2"
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -149,10 +154,11 @@ configs
 # either knob, and says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        "complete declared catalog, so it cannot publish the canonical population; pass "
+        "POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -213,14 +219,42 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Slicing the window and cleaning its rows depends on the data and not on the model, so it is
+# work several configurations could share. Whether they do depends on how the requests reach the
+# runner. Handed over unresolved, they go to a batch path that walks folds on the outside and
+# configurations on the inside, so one prepared fold serves every configuration and only one is
+# held at a time. Resolved first - as they are here, so that the plan above can be shown against
+# the real data - each configuration prepares its own. On a cross-section of this size that costs
+# seconds and buys a plan that can be read before anything is fitted. On a panel large enough
+# that one prepared fold set does not comfortably fit in memory the trade runs the other way,
+# which is why the call also accepts requests that have not been resolved.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it supersedes.
+# That lineage is the only record of which generation is which.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record. Carrying the value the published run used
+# is what lets this notebook re-run and resolve to the population it published rather than to a
+# new one.
+#
+# It applies only where that generation exists. `run_log/` is gitignored, so a clean clone starts
+# with an empty registry, and `OfficialPopulation.create` refuses a first version that claims to
+# supersede something - "first population version cannot supersede another snapshot". The declared
+# hash is therefore offered when the name already has a generation and withheld when it does not,
+# which is the same condition on the narrowed-run path: a caller-chosen `POPULATION_NAME` has no
+# prior generation either.
+#
+# A reduced-scale run needs no override. A population produced under a reduction is thrown away
+# with the workspace it was written to, so it has no lineage to extend - and its isolated registry
+# holds no generation under this name, so the rule below withholds the hash there on its own.
 #
 # **One population covers every label**, because one run fits every label. A population is
 # immutable once written, so a notebook fitting one label per run under a single name publishes
@@ -229,7 +263,35 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "fx_pairs-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+declared_supersedes = SUPERSEDES_POPULATION or None
+try:
+    current = OfficialPopulation.one(study, name=population_name)
+except (ValueError, sqlite3.OperationalError):
+    # No generation in force under this name: none was ever written, the chain forked, or - on a
+    # reader's clean clone, where run_log/ is gitignored - the registry has no table to read at
+    # all. That last one raises OperationalError rather than ValueError, which is why both are
+    # caught: a clean clone is the ordinary case here, not the exotic one.
+    supersedes = None
+else:
+    # A declared hash is good for exactly two things, and the two are what the notebook is for.
+    # `current.supersedes == declared` means the generation in force is the one this declaration
+    # produced, so offering it recomputes the tip - the re-run case. `current.hash == declared`
+    # means the declaration names the tip itself, so offering it publishes the next generation -
+    # the refit case. Anything else is withheld, and `create` then refuses and names the hash it
+    # requires, which is a better answer than this notebook guessing.
+    #
+    # Asking merely whether any generation exists is not the same question, and gets the second
+    # run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is
+    # None, and offering the hash again there writes a second generation nobody asked for.
+    # Testing only the first condition is also wrong, in the other direction: it withholds the
+    # hash from an author holding gen1 who declares gen1 to publish gen2, so the reader is fixed
+    # by making the publication impossible.
+    supersedes = (
+        declared_supersedes if declared_supersedes in (current.supersedes, current.hash) else None
+    )
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=supersedes
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")

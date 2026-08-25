@@ -261,31 +261,17 @@ plan.select(
 # A reduced-scale run also leaves it empty. A population produced under a reduction is thrown
 # away with the workspace it was written to, so it has no lineage to extend.
 #
-# That default records what the published snapshot replaced, so it is only correct under that
-# population's name. A preview, and a run under a name of its own, start a lineage instead: the
-# first version of a population has no predecessor and is refused for claiming one. Passing a
-# hash explicitly under a custom name still supersedes.
-#
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
 # `14_backtest` resolve this population by name - rather than a label of convenience, which is
 # why a run that narrows the member set has to pass its own.
 
 # %%
-DEFAULT_POPULATION_NAME = "etfs-gbm-validation-v1"
-PUBLISHED_SUPERSEDES = "6d9536da2ab6"
-
-population_name = POPULATION_NAME or DEFAULT_POPULATION_NAME
-supersedes = SUPERSEDES_POPULATION or None
-starts_own_lineage = EXECUTION_TIER != "canonical" or (
-    population_name != DEFAULT_POPULATION_NAME and supersedes == PUBLISHED_SUPERSEDES
-)
-if starts_own_lineage:
-    supersedes = None
+population_name = POPULATION_NAME or "etfs-gbm-validation-v1"
 execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=supersedes,
+    supersedes=SUPERSEDES_POPULATION or None,
 )
 
 print(f"{len(execution.runs)} configurations fitted")

@@ -758,11 +758,16 @@ if gbm_importance is None:
         # Join best linear model predictions with features
         linear_preds = best_preds.filter(pl.col("family") == "linear")
         if linear_preds.height > 0:
-            # Align timestamp types (predictions are Datetime; features may be Date or String)
-            if features_df[DATE_COL].dtype == pl.String:
+            # The prediction frame's timestamp is the one to match, so the feature column is
+            # cast to whatever that is rather than to a unit named here. Naming one was the
+            # defect: features stored as a date were cast to millisecond datetime while the
+            # predictions carried microseconds, and Polars refuses a join across two datetime
+            # units rather than widening one of them.
+            timestamp_dtype = linear_preds.schema[DATE_COL]
+            if features_df.schema[DATE_COL] == pl.String:
                 features_df = features_df.with_columns(pl.col(DATE_COL).str.to_datetime())
-            elif features_df[DATE_COL].dtype == pl.Date:
-                features_df = features_df.with_columns(pl.col(DATE_COL).cast(pl.Datetime("ms")))
+            if features_df.schema[DATE_COL] != timestamp_dtype:
+                features_df = features_df.with_columns(pl.col(DATE_COL).cast(timestamp_dtype))
             merged = linear_preds.join(features_df, on=[DATE_COL, ENTITY_COL], how="inner")
 
             # Compute correlation of each feature with y_score per fold

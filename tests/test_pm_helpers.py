@@ -24,6 +24,7 @@ from tests.pm_helpers import (
     injected_parameters,
     missing_required_env,
     research_preview_parameters,
+    resolved_registry_path,
     unusable_parameters,
 )
 
@@ -373,6 +374,50 @@ def test_every_declared_parameter_reaches_its_notebook(overrides: dict) -> None:
     assert unreachable == {}
 
 
+def test_resolved_registry_path_follows_the_tier_the_harness_binds(tmp_path: Path) -> None:
+    """The path a caller snapshots must be the one the run under that tier opens.
+
+    Asserted against ``Study.storage_root`` rather than against a second spelling of
+    ``.preview``, so the two cannot drift: whatever the workspace decides a preview run
+    writes under is what the harness has to hand its caller. Naming the canonical path
+    in ``test_model_registry.py`` instead is what made migrated notebooks report
+    "found no training run" while having registered normally.
+    """
+    from case_studies.research import Study
+    from tests.test_research_workspace import _seed_release
+
+    release = _seed_release(tmp_path)
+    workspace = tmp_path / "workspace"
+    study = Study.open("etfs", workspace=workspace, release_root=release)
+
+    py = _notebook(
+        tmp_path / "nb",
+        '# %%\nimport os\n\n# %% tags=["parameters"]\n'
+        'EXECUTION_TIER = "canonical"\nWORKSPACE: str = ""\n\n'
+        "# %%\nprint(EXECUTION_TIER, WORKSPACE)\n",
+    )
+    injected = research_preview_parameters(py, None, workspace)
+    assert injected["EXECUTION_TIER"] == "preview"
+
+    resolved = resolved_registry_path(py, workspace, "etfs", research_preview=True)
+    assert resolved == study.storage_root("preview") / "run_log" / "registry.db"
+
+
+def test_resolved_registry_path_stays_canonical_for_an_unmigrated_notebook(
+    tmp_path: Path,
+) -> None:
+    """A notebook that declares no tier is not moved, so neither is its registry."""
+    py = _notebook(
+        tmp_path / "nb",
+        '# %%\nimport os\n\n# %% tags=["parameters"]\nMAX_SYMBOLS = 5\n\n'
+        "# %%\nprint(MAX_SYMBOLS)\n",
+    )
+
+    assert resolved_registry_path(py, tmp_path, "etfs", research_preview=True) == (
+        tmp_path / "etfs" / "run_log" / "registry.db"
+    )
+
+
 def _notebook(tmp_path: Path, body: str) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     py = tmp_path / "notebook.py"
@@ -571,9 +616,11 @@ def test_unusable_parameters_does_not_take_a_function_local_for_a_read(tmp_path:
 
 
 def test_unusable_parameters_ignores_a_committed_injected_parameters_cell(tmp_path: Path) -> None:
-    """`case_studies/etfs/11a_pca` has one: a leftover from a papermill run, which
-    the next run replaces. Reading it as notebook code would report the notebook
-    overwriting exactly what papermill is about to inject."""
+    """Papermill writes such a cell into any notebook it executes, and the next run
+    replaces it, so reading it as notebook code would report the notebook overwriting
+    exactly what papermill is about to inject. `case_studies/etfs/11a_pca` and
+    `11b_ipca` carried one committed each - the last two in the repo - until their
+    migrations rewrote the parameters cell; the helper still has to ignore one."""
     py = _notebook(
         tmp_path,
         '# %% tags=["parameters"]\nUSE_CACHE = True\n\n'

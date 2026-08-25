@@ -308,3 +308,52 @@ class CausalRequest:
 
     def run(self) -> CausalResult:
         return self.resolve().run()
+
+
+def supersedes_for(
+    declaration: str | None, label: str, *, labels: list[str] | None = None
+) -> str | None:
+    """Read one label's superseded causal identity out of a notebook parameter.
+
+    A refit produces a second canonical identity for the same label and
+    ``CausalResult.one`` resolves a label to exactly one, so the run has to say which
+    identity it retires. Papermill passes parameters as strings, so the declaration is
+    one of three things: empty, meaning nothing is being retired and the fit must leave
+    a single current identity on its own; a bare causal hash, for a notebook that fits
+    one label; or a JSON object mapping label to hash, for one that fits several.
+
+    A hash declared for a label the notebook does not fit is a typo rather than a
+    no-op - the run would proceed, retire nothing, and fail at registration - so it
+    raises here, before the fit is paid for.
+    """
+    text = (declaration or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            mapping = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"SUPERSEDES_CAUSAL is not valid JSON: {text!r}. Give a bare causal hash "
+                f'for a single-label notebook, or {{"<label>": "<hash>"}} for several.'
+            ) from error
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"SUPERSEDES_CAUSAL must be an object mapping label to hash, got {text!r}"
+            )
+        known = set(labels) if labels is not None else None
+        if known is not None:
+            unknown = sorted(set(mapping) - known)
+            if unknown:
+                raise ValueError(
+                    f"SUPERSEDES_CAUSAL names {unknown}, which this notebook does not fit. "
+                    f"It fits {sorted(known)}."
+                )
+        value = mapping.get(label)
+        return str(value) if value else None
+    if labels is not None and len(labels) > 1:
+        raise ValueError(
+            f"SUPERSEDES_CAUSAL is a bare hash but this notebook fits {sorted(labels)}. "
+            f'Use {{"<label>": "<hash>"}} so each label retires its own identity.'
+        )
+    return text

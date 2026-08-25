@@ -722,8 +722,10 @@ def run_model_population(
     if isinstance(requests, ModelPlan):
         if requests.study != study:
             raise ValueError("model plan belongs to another study")
+        plan = requests
         submitted = requests.requests
     else:
+        plan = None
         submitted = tuple(requests)
     if not submitted:
         raise ValueError("run_model_population requires at least one request")
@@ -766,11 +768,23 @@ def run_model_population(
         if not reductions:
             raise ValueError("preview execution requires every request to declare its reductions")
 
-    resolved = tuple(
-        request.resolve() if isinstance(request, ModelRequest) else request for request in submitted
-    )
-    declared = expected_prediction_hashes(resolved)
-    execution = run_models(study, requests=resolved)
+    if plan is not None:
+        # Execute the plan, rather than the requests behind it. Resolving each request here threw
+        # the plan's payload away and reloaded the modeling dataset once per configuration -
+        # measured at ~12.5s each on the nasdaq100_microstructure minute panel, which is the whole
+        # preview budget before a single tree is grown, and it holds one prepared fold set per
+        # configuration besides. `run_official_models` documents both halves of why the canonical
+        # branch hands unresolved requests to the batch runner instead; this branch had drifted
+        # from that policy while sitting in the same function.
+        declared = plan.expected_prediction_hashes
+        execution = plan.run()
+    else:
+        resolved = tuple(
+            request.resolve() if isinstance(request, ModelRequest) else request
+            for request in submitted
+        )
+        declared = expected_prediction_hashes(resolved)
+        execution = run_models(study, requests=resolved)
     produced = tuple(prediction.hash for run in execution.runs for prediction in run.predictions)
     if set(produced) != set(declared) or len(produced) != len(declared):
         missing = sorted(set(declared) - set(produced))

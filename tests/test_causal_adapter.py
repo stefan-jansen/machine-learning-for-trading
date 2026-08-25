@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import CausalResult, LabelDefinition, Study
 from case_studies.utils import causal
@@ -28,7 +29,13 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer: str = "8H"):
+def _causal_fixture(
+    tmp_path,
+    monkeypatch,
+    entity: str = "symbol",
+    label_buffer: str = "8H",
+    label_horizon: str | None = None,
+):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
@@ -36,6 +43,13 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer:
     setup_path.write_text(
         setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
     )
+    if label_horizon is not None:
+        # Merged through a yaml round-trip rather than appended. `labels` already exists in
+        # this setup, and a second top-level `labels:` key would replace it outright rather
+        # than add to it, taking the buffers with it.
+        setup = yaml.safe_load(setup_path.read_text())
+        setup.setdefault("labels", {}).setdefault("horizons", {})["fwd_ret_8h"] = label_horizon
+        setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
     rows = []
     for timestamp_index, timestamp in enumerate(
         pl.datetime_range(
@@ -59,7 +73,7 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer:
             )
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
-        LabelDefinition("fwd_ret_8h", "regression", label_buffer),
+        LabelDefinition("fwd_ret_8h", "regression", label_horizon or label_buffer),
         frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
@@ -765,3 +779,58 @@ def test_holdout_seal_holds_a_one_session_horizon_over_a_weekend_boundary(
     assert computation["estimand"]["holdout_endpoint_cutoff"] == last_session.isoformat()
     symbols = frame.get_column("symbol").n_unique()
     assert computation["analysis_population"]["n_rows"] == (len(pre_holdout) - 1) * symbols
+
+
+def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    """The two are different quantities, and only one of them describes outcome overlap.
+
+    The buffer keeps a fold's training rows clear of its validation labels; the
+    outcome horizon is how long one outcome stays open, which is what makes
+    successive outcomes overlap and therefore what the Newey-West bandwidth has to
+    cover. They agree in most case studies here, so a resolver that derives both
+    from the buffer passes everywhere except where they differ. On 8-hour bars a
+    24-hour buffer over an 8-hour label is three bars against one.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H"
+    )
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    computation = resolved.spec["computation"]
+    assert computation["estimand"]["outcome_horizon"] == str(pd.Timedelta("8h"))
+    assert computation["refutation"]["block_size"] == 3
+    assert resolved._context.horizon == 1
+
+
+def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> None:
+    """The placebo block and the per-entity seal assume the buffer is the longer one.
+
+    Both values are hand-authored in setup.yaml and nothing pairs them, so the
+    ordering that used to hold structurally now holds by configuration. Reversed,
+    the placebo block would be shorter than the dependence it holds fixed and the
+    seal would leave outcomes reaching into the holdout, neither with a symptom.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", label_horizon="24H"
+    )
+
+    with pytest.raises(ValueError, match="exceeds the CV buffer"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()

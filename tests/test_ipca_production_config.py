@@ -9,7 +9,11 @@ CASE_STUDIES = (
     "us_firm_characteristics",
 )
 ITERATION_BUDGETS = {
-    "etfs": 100,
+    # Lower than its neighbours because it was measured rather than inherited: the eight ETF folds
+    # converge between 53 and 110 alternations, so 1000 clears the slowest by roughly nine times
+    # while still bounding a stuck fold to about 13 minutes at ~0.76s each. See the reasoning in
+    # `git log -1 140b536c`.
+    "etfs": 1000,
     "sp500_equity_option_analytics": 10000,
     "us_equities_panel": 10000,
     "us_firm_characteristics": 10000,

@@ -16,15 +16,14 @@
 # %% [markdown]
 # # S&P 500 Equity+Options: Transaction Costs
 #
-# This notebook stress-tests the best eligible allocation lineage under two
+# This notebook stress-tests the leading eligible allocation lineage under two
 # execution-cost conventions. The headline curve charges a percentage of
 # traded notional. The companion curve uses a per-share commission plus a flat
-# dollar half-spread. Both are validation-only diagnostics; the 2021 holdout
-# remains sealed.
+# dollar half-spread. Both are diagnostics computed on validation data.
 #
 # **Learning objectives**
 #
-# 1. Carry one full-coverage allocation winner into a controlled cost sweep.
+# 1. Carry one full-coverage allocation lineage into a controlled cost sweep.
 # 2. Distinguish one-way cost per traded notional from round-trip cost.
 # 3. Compare percentage and per-share cost conventions without treating their
 #    x-axes as interchangeable.
@@ -85,14 +84,23 @@ LABEL = ""
 MAX_SYMBOLS = 0
 TOP_N_COMBOS = None
 
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request; the values this notebook runs on are resolved here under
+# different names, so a resolved value cannot overwrite the request that produced it. An injected
+# parameter wins; otherwise the case study's own declaration does.
+
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 REGISTRY_DB = CASE_DIR / "run_log" / "registry.db"
 bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "cost_sensitivity")
-if not LABEL:
-    LABEL = bt_config.primary_label
+TOP_N = (
+    TOP_N_COMBOS
+    if TOP_N_COMBOS is not None
+    else get_top_n_predictions(CASE_STUDY_ID, "cost_sensitivity")
+)
+COST_LABEL = LABEL or bt_config.primary_label
 
 COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 COST_GRID_HALF_SPREAD_USD = get_cost_grid_half_spread_usd(CASE_STUDY_ID)
@@ -100,12 +108,12 @@ PER_SHARE_COMMISSION = get_per_share_commission(CASE_STUDY_ID)
 DEFAULT_ONE_WAY_BPS = bt_config.commission_bps + bt_config.slippage_bps
 
 print(
-    f"Case study: {CASE_STUDY_ID}; label: {LABEL}; selected lineages: {TOP_N_COMBOS}; "
+    f"Case study: {CASE_STUDY_ID}; label: {COST_LABEL}; selected lineages: {TOP_N}; "
     f"configured one-way cost: {DEFAULT_ONE_WAY_BPS:.1f} bps"
 )
 
 # %% [markdown]
-# ## 1. Advance the best eligible strategy carrier
+# ## 1. Advance the leading eligible strategy
 #
 # The ranking compares the equal-weight baseline with the active alternative
 # allocators using validation Sharpe and maximum prediction coverage.
@@ -114,10 +122,10 @@ print(
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID, COST_LABEL, split="validation", stage="signal", top_n=9999
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID, COST_LABEL, split="validation", stage="allocation", top_n=9999
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -166,12 +174,10 @@ for row in candidate_pool.iter_rows(named=True):
             }
         )
 
-if len(eligible_rows) < TOP_N_COMBOS:
-    raise RuntimeError(
-        f"Expected {TOP_N_COMBOS} eligible strategy lineages, found {len(eligible_rows)}"
-    )
+if len(eligible_rows) < TOP_N:
+    raise RuntimeError(f"Expected {TOP_N} eligible strategy lineages, found {len(eligible_rows)}")
 
-top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N_COMBOS)
+top_combos = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).head(TOP_N)
 winner = top_combos.row(0, named=True)
 print(
     f"Selected {winner['source']} with {winner['allocator']} allocation, "
@@ -179,14 +185,15 @@ print(
 )
 
 # %% [markdown]
-# The corrected primary-label carrier is NLinear with score weighting and ten
-# stocks. Its allocation-stage Sharpe is 1.186 at the configured 6.5 bps
-# one-way charge, equivalent to 13 bps for a buy-and-sell round trip.
+# The line above names the strategy this sweep stresses - its source, allocator, concentration and
+# allocation-stage Sharpe at the case study's configured one-way charge. That charge is per leg,
+# so a buy-and-sell round trip pays it twice, and the grid below is what says whether the result
+# depends on it.
 
 # %%
 prices = load_backtest_prices_for(
     CASE_STUDY_ID,
-    LABEL,
+    COST_LABEL,
     split="validation",
     warmup_periods=warmup_periods_for(CASE_STUDY_ID),
     max_symbols=MAX_SYMBOLS,
@@ -199,8 +206,8 @@ print(
 # ## 2. Build the two cost surfaces
 #
 # The percentage grid splits each one-way charge equally between commission
-# and slippage. The per-share grid fixes commission at $0.0035 per share and
-# varies a uniform half-spread. It omits a per-order commission floor and does
+# and slippage. The per-share grid fixes commission at the declared
+# `PER_SHARE_COMMISSION` and varies a uniform half-spread. It omits a per-order commission floor and does
 # not estimate name-specific spreads, so it is an exploratory convention rather
 # than a second production-cost estimate.
 
@@ -303,7 +310,7 @@ for index, plan in enumerate(plans, start=1):
             plan["spec"],
             prices=prices,
             predictions=prediction_cache[prediction_hash],
-            label=LABEL,
+            label=COST_LABEL,
             register=True,
             initial_cash=bt_config.initial_cash,
             calendar=bt_config.calendar,
@@ -365,15 +372,37 @@ if cost_results.filter(pl.col("stage") != "cost_sensitivity").height:
 print(f"Loaded all {len(cost_results)} planned cost results")
 
 # %% [markdown]
-# The percentage-cost point estimate decays smoothly from 1.248 at zero cost
-# to 1.153 at 10 bps, 1.105 at 15 bps, and 0.769 at 50 bps. The interval's
-# lower bound first crosses zero at 10 bps; bootstrap noise makes the lower
-# bound non-monotonic beyond that point. The stress curve therefore supports a
-# gradual-decay conclusion, not precision about the true net Sharpe.
+# **The shape of the decay is the finding, not any single point on it.** A curve that falls
+# smoothly across the grid says the result degrades with cost rather than depending on one cost
+# assumption being right; a curve with a cliff would say the opposite.
+#
+# The interval matters more than the point estimate here. The cell below reports where each
+# first reaches zero inside the declared grid, and the lower bound's crossing is the one that
+# bounds what the curve supports - the point curve can stay above zero across the whole grid
+# while the band already straddles it. Bootstrap noise makes the lower bound non-monotonic
+# beyond its first crossing, so a later cost where it appears to recover is not a recovery.
 
 # %%
 bps_results = cost_results.filter(pl.col("regime") == "bps").sort("cost_value")
 per_share_results = cost_results.filter(pl.col("regime") == "per_share").sort("cost_value")
+
+
+def first_zero_cost(column: str) -> float | None:
+    """Lowest grid cost at which `column` reaches zero, or None if it never does."""
+    reached = bps_results.filter(pl.col(column) <= 0)
+    return reached["cost_value"].min() if reached.height else None
+
+
+def _crossing(column: str) -> str:
+    cost = first_zero_cost(column)
+    return f"{cost:.0f} bps" if cost is not None else "not within the grid"
+
+
+print(
+    f"Lower bound first reaches zero: {_crossing('sharpe_ci95_lo')}; "
+    f"point Sharpe first reaches zero: {_crossing('sharpe')}; "
+    f"grid runs to {bps_results['cost_value'].max():.0f} bps one-way"
+)
 
 fig, (ax_bps, ax_ps) = plt.subplots(
     2, 1, figsize=FIGSIZE["dual_v"], sharey=True, constrained_layout=True
@@ -399,7 +428,7 @@ ax_bps.set_xlabel("One-way cost per traded notional (bps)")
 ax_bps.set_ylabel("Annualized validation Sharpe")
 add_message_title(
     ax_bps,
-    "Point Sharpe stays above 0.76 through 50 bps",
+    "How far the cost grid has to go before the signal stops paying",
     f"Amber line: configured {DEFAULT_ONE_WAY_BPS:.1f} bps; band: 95% block bootstrap",
 )
 
@@ -423,7 +452,7 @@ ax_ps.set_xlabel(
 )
 add_message_title(
     ax_ps,
-    "A 10-cent half-spread leaves point Sharpe near 0.83",
+    "The same lineage under a flat per-share convention",
     "Exploratory flat-dollar convention; band: 95% block bootstrap",
 )
 
@@ -432,20 +461,28 @@ fig.show()
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. Cost selection is validation-only and carries the eligible NLinear,
-#    score-weighted, top-ten lineage forward without consulting the holdout.
-# 2. The configured 6.5 bps one-way charge is equivalent to 13 bps round trip.
-#    Its allocation-stage Sharpe of 1.186 lies between the 5 bps result of
-#    1.200 and the 7 bps result of 1.181.
-# 3. Percentage-cost point Sharpe declines to 1.153 at 10 bps, 1.105 at 15
-#    bps, and 0.769 at 50 bps. The bootstrap lower bound first crosses zero at
-#    10 bps, which limits confidence in the exact net level.
-# 4. Under the exploratory per-share convention, point Sharpe moves from 1.234
-#    with commission only to 1.194 at a one-cent half-spread and 0.829 at ten
-#    cents. Flat dollar spreads on split-adjusted historical prices are not a
-#    substitute for name-level execution data.
-# 5. The cost curve preserves the validation verdict across the grid, but it
-#    does not establish out-of-sample efficacy.
+# 1. **Cost selection is validation-only.** The eligible lineage is carried forward on validation
+#    evidence, and the holdout is not consulted anywhere in this notebook.
 #
-# **Next:** `17_risk_management` tests risk overlays on the same eligible
-# validation lineage. See Chapter 19 for the risk-control framework.
+# 2. **The configured charge is one point on a curve, not the answer.** The vertical marker shows
+#    where the case study's declared one-way cost falls; a one-way charge is paid on both legs, so
+#    the round trip is twice it. What matters is not the Sharpe at that point but how steeply the
+#    curve falls either side of it, because the declared value is itself an assumption.
+#
+# 3. **Read the bootstrap band, not only the point curve.** The cost at which the band's lower
+#    bound first reaches zero is the one that bounds what can be claimed, and the printout above
+#    reports it against the cost at which the point estimate reaches zero, which may lie beyond
+#    the declared grid. A point Sharpe still above zero with a band straddling it is not a
+#    strategy shown to clear that cost.
+#
+# 4. **The per-share convention is exploratory here and is not a second opinion.** A flat dollar
+#    half-spread applied to split-adjusted historical prices conflates split adjustment with
+#    realized friction, so it indicates sensitivity to a different cost shape rather than
+#    measuring this universe's actual execution cost. Name-level execution data is what would.
+#
+# 5. **A curve that stays positive across the grid does not establish out-of-sample efficacy.**
+#    It establishes that this validation result is not an artifact of one cost assumption, which
+#    is a narrower and more defensible claim.
+#
+# **Next:** [`17_risk_management`](17_risk_management.ipynb) tests risk overlays on the same
+# eligible validation lineage. See Chapter 19 for the risk-control framework.
