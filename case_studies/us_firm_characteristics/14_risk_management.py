@@ -16,41 +16,55 @@
 # %% [markdown]
 # # US Firm Characteristics: Risk Overlay Applicability
 #
-# **Chapter 19 — Risk Management**
+# **Chapter 19 - Risk Management**
 #
-# The cross-stage rank-1 is the equal-weight baseline `gbm/leaves_7_mse` at
-# iteration 500 and TOP_K 50, validation Sharpe 2.63 [2.07, 3.24]. This case
-# study uses the vectorized forward-return backtest path. That path evaluates
-# weights at the label horizon and cannot represent intra-period stop events.
+# A risk overlay is a rule that closes a position on something the position does
+# while it is held: a stop-loss when it falls a set distance below entry, a
+# trailing stop when it falls that distance below its own high, a time exit after
+# a fixed number of bars. Every one of those rules asks what the price did
+# *between* the moment the position was opened and the moment it would otherwise
+# be closed.
 #
-# The setup retains 14 position-level controls as the engine-path catalog, but
-# this notebook must not pretend to execute them on monthly outcome labels.
-# Portfolio-level controls are intentionally absent. The result is an explicit
-# applicability boundary with no registered risk-overlay variants.
+# This case study backtests on the vectorized forward-return path. That path
+# holds one weight vector per rebalance and multiplies it by the realized
+# forward return over the whole month; it never sees a price inside the month.
+# The information a stop needs is therefore not merely unused here, it is absent
+# from the data structure the backtest runs on. Simulating a stop on it would
+# mean inventing an intra-month path and reporting what the invention did.
 #
-# Sections 1-2 establish the parent and execution boundary. Section 3 confirms
-# that no risk-overlay rows were registered.
+# So this notebook establishes a boundary rather than a result. It selects the
+# parent run the overlays would have been applied to, states which controls the
+# configuration declares, and registers none of them. The registry query in
+# section 3 is what confirms that: an empty result there is the outcome, not a
+# missing input.
 #
 # **Learning Objectives:**
-# 1. Select the correct parent across baseline and allocation stages
-# 2. Identify whether the declared backtest mode can represent intra-period rules
-# 3. Connect the risk overlay reading back to Ch19 §19.8 governance framing
+# 1. Select the parent run across the baseline and allocation stages
+# 2. Decide whether a backtest path can represent a rule before configuring it
+# 3. Separate a governance control from a validation variant that competes on Sharpe
 #
-# **Book Reference:** Chapter 19, Sections 19.3–19.6, 19.8
+# **Book Reference:** Chapter 19, Sections 19.3-19.6, 19.8
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Prerequisites:** the Chapter 17 allocation sweep (`12_portfolio_management`),
+# whose runs are in `registry.db`.
 
 # %%
 """US Firm Characteristics: Risk: Engine-Level Risk Rules."""
 
 import json
+import time
 import warnings
 
 import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.backtest_explorer import BacktestExplorer
+from case_studies.utils.backtest_loaders import (
+    VECTORIZED_CASE_STUDIES,
+    get_backtest_config,
+    load_backtest_prices_for,
+)
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
     ensure_backtest_spec,
@@ -69,6 +83,10 @@ from utils.paths import get_case_study_dir
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
+# Reduces the price panel only. The vectorized path takes its universe and its P&L
+# from the predictions frame and reads the panel for the rebalance calendar alone, so
+# lowering this does not shrink a backtest here (agent-workspace #911). It is kept
+# because the same parameter is what reduces the engine-path case studies.
 MAX_SYMBOLS = 0
 MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
 TOP_N_COMBOS = None
@@ -81,18 +99,22 @@ if TOP_N_COMBOS is None:
 if not LABEL:
     LABEL = bt_config.primary_label
 
-from case_studies.utils.backtest_loaders import VECTORIZED_CASE_STUDIES
-
 IS_VECTORIZED = CASE_STUDY_ID in VECTORIZED_CASE_STUDIES
 MODE_LABEL = "vectorized" if IS_VECTORIZED else "engine"
 print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}, mode: {MODE_LABEL}")
 
 # %% [markdown]
-# ## 1. Load the Best Pre-Risk Run
+# ## 1. The Parent Run
 #
-# Risk analysis starts from the top validation run across the equal-weight
-# baseline and allocation stages. This preserves the established greedy funnel
-# when an allocator does not improve on its baseline parent.
+# An overlay is applied to something, so the first step is to say what. The
+# candidate is drawn from two stages at once: the equal-weight baselines from
+# `11_backtest` and the allocator variants from `12_portfolio_management`. Taking
+# the higher validation Sharpe of the two rather than always taking the allocator
+# keeps the funnel honest in the case where portfolio construction did not improve
+# on the equal-weight parent it was given.
+#
+# The selection is on validation. The holdout is not read here and no overlay is
+# scored against it.
 
 
 # %%
@@ -118,6 +140,7 @@ def _resolve_pre_risk_runs(case_study: str, label: str, *, split: str, top_n: in
     )
 
 
+# %% tags=["results"]
 top_combos = _resolve_pre_risk_runs(
     CASE_STUDY_ID,
     LABEL,
@@ -176,14 +199,28 @@ if MAX_RISK_VARIANTS > 0:
 # %% [markdown]
 # ## 2. Risk Overlay Sweep
 #
-# Engine-mode case studies run one backtest per position-level control here.
-# US Firm Characteristics is vectorized, so the position loop is deliberately
-# inactive; the asserted-empty portfolio-control list also produces no run.
+# On an engine-path case study this loop registers one backtest per position-level
+# control. Here the position loop is skipped because the path cannot represent the
+# rules, and the portfolio-control list is empty by configuration, so the loop body
+# has nothing to register and the count below is zero by construction rather than by
+# failure. The two are different outcomes and the counters separate them.
 
 # %%
 n_done = 0
+n_failed = 0
 
-for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
+# Every run inside this loop is fed `combo_weights`, and computing them means running
+# the parent's allocator again - MVO and HRP take minutes. If neither control list can
+# produce a run, that work has no consumer, so it is not started. Without this the
+# notebook pays the full allocator cost to register nothing.
+will_register = bool(portfolio_controls) or (not IS_VECTORIZED and bool(position_controls))
+if not will_register:
+    print(
+        "No control can run on this backtest path, so no allocation weights are "
+        "computed and no backtest is registered."
+    )
+
+for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True) if will_register else []):
     pred_hash = combo_row["prediction_hash"]
     base_spec = ensure_backtest_spec(
         CASE_STUDY_ID,
@@ -197,16 +234,12 @@ for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
 
     predictions = read_predictions(CASE_STUDY_ID, pred_hash)
 
-    # Precompute allocation weights ONCE per combo — avoids re-running
-    # expensive MVO/HRP for every risk variant (167s → 0s per variant)
-    import time
-
     t0 = time.time()
     combo_weights = precompute_weights(
         predictions, base_spec, prices, label=LABEL, case_study=CASE_STUDY_ID
     )
     print(
-        f"  Combo {combo_idx + 1}/{len(top_combos)}: {alloc_method} — "
+        f"  Combo {combo_idx + 1}/{len(top_combos)}: {alloc_method} - "
         f"weights precomputed in {time.time() - t0:.0f}s"
     )
 
@@ -245,7 +278,8 @@ for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
                     f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
                 )
             except Exception as e:
-                print(f"    {rc['name']}: FAILED — {e}")
+                n_failed += 1
+                print(f"    {rc['name']}: FAILED - {e}")
 
     # Portfolio-level risk limits
     for rc in portfolio_controls:
@@ -275,26 +309,28 @@ for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
                 f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
             )
         except Exception as e:
-            print(f"    {rc['name']}: FAILED — {e}")
+            n_failed += 1
+            print(f"    {rc['name']}: FAILED - {e}")
 
-print(f"\nRisk sweep complete: {n_done} backtests")
+print(f"\nRisk sweep complete: {n_done} registered, {n_failed} failed")
 
 # %% [markdown]
-# ## 3. Risk Impact Analysis
+# ## 3. What The Registry Holds
 #
-# This section is **read-only** — queries the registry for risk overlay
-# results and computes impact relative to the selected pre-risk baseline.
+# This section only reads. It asks the registry for every overlay run filed against
+# this case study and, for each, the change in Sharpe against the parent it was
+# applied to.
 #
-# An empty result is the expected outcome for this execution mode. It records
-# that no risk rule was evaluated rather than assigning a fabricated Sharpe or
-# drawdown effect to an inapplicable overlay.
+# An empty answer here is the point of the notebook rather than a gap in it. The
+# alternative - running the controls anyway on invented intra-month prices - would
+# put a Sharpe delta next to each rule, and a reader would have no way to tell that
+# number from one a stop had actually earned.
 
 # %%
-from case_studies.utils.backtest_explorer import BacktestExplorer
-
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
 # %%
+# %% tags=["results"]
 risk_df = explorer.risk_impact()
 
 if not risk_df.is_empty():
@@ -316,14 +352,19 @@ else:
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. The established cross-stage selector carries the equal-weight baseline
-#    `15356ec80a3e`, Sharpe 2.632, into the risk boundary.
-# 2. The vectorized monthly-outcome path cannot model intra-period stop-loss,
-#    trailing-stop, or time-exit events. Running those controls would require
-#    an engine-level return path, not a parameter toggle.
-# 3. Portfolio-level limits are intentionally absent. They remain governance
-#    controls rather than validation variants competing on Sharpe.
-# 4. No risk-overlay row is registered and the sealed holdout is not accessed.
+# 1. Whether a rule can be represented is a property of the backtest path, not a
+#    setting. A stop needs a price between rebalances; the vectorized forward-return
+#    path holds one return per rebalance and has none, so a stop cannot be evaluated
+#    on it at any parameter value.
+# 2. The configuration still declares the position-level controls, because the same
+#    file drives the engine-path case studies where they do run. Declared and
+#    applicable are separate questions, and this notebook answers the second.
+# 3. Portfolio-level limits are absent on purpose. A gross-exposure or per-name cap
+#    is a constraint the desk operates under, not a variant that competes for the
+#    highest validation Sharpe, and sweeping it as one invites keeping whichever cap
+#    was loosest on the grounds that it scored highest.
+# 4. Nothing was registered and the sealed holdout was not read, so the funnel enters
+#    the strategy analysis with the parent from section 1 unchanged.
 #
-# **Next:** Ch20 synthesis aggregates results from Ch16–19 across all case studies,
-# placing this case study's first-pass performance in context against the full suite.
+# **Next:** `15_strategy_analysis` confronts the selection this funnel performed and
+# is where the results are interpreted.
