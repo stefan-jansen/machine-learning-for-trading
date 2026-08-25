@@ -449,7 +449,15 @@ def test_reader_plan_accepts_flat_family_spec(tmp_path: Path) -> None:
     assert plan.item(0, "checkpoints") == len(spec["checkpoint_schedule"])
 
 
-def test_model_request_catalog_rejects_each_unknown_requested_config() -> None:
+def test_model_request_catalog_rejects_each_unknown_requested_config(seeded_output_dir) -> None:
+    """`seeded_output_dir` is what puts the training menus under the redirected root.
+
+    `model_request_catalog` reads `config/training/<label>.yaml` through
+    `get_case_study_dir`, which resolves under ML4T_OUTPUT_DIR. Without the fixture the
+    call raises `ConfigError` for the missing menu before it ever reaches the unknown
+    config name, so the test passes only where an earlier test happened to leave the
+    variable pointing at a seeded directory.
+    """
     with pytest.raises(ValueError, match="missing"):
         model_request_catalog(
             "linear",
@@ -1185,6 +1193,8 @@ def test_sdf_checkpoints_chosen_on_validation_never_reach_the_selection_pool() -
     of the published value: `_sdf_checkpoint_label` packs both phases onto one integer axis,
     so the signs are an artifact of that packing rather than a contract.
     """
+    pytest.importorskip("ml4t.models.stochastic_discount_factor.model")
+
     from ml4t.models.stochastic_discount_factor.model import (
         VAL_BEST_LOSS_CONDITIONAL,
         VAL_BEST_LOSS_UNCONDITIONAL,
