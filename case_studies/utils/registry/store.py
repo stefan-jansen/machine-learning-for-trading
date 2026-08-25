@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .specs import _validate_spec, canonical_json, training_hash_from_spec
+from .specs import (
+    IDENTITY_VERSION,
+    _validate_spec,
+    canonical_json,
+    training_hash_from_spec,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -584,6 +589,61 @@ def _declare_uncertainty_columns(db: sqlite3.Connection) -> None:
 def _table_has_column(db: sqlite3.Connection, table: str, column: str) -> bool:
     """Check if a table has a specific column."""
     return column in {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def current_causal_identities(
+    db, *, label: str, tier: str = "canonical", exclude: str | None = None
+) -> list[str]:
+    """The causal identities a reader would currently resolve for *label*.
+
+    A row is current when its spec carries the current ``identity_version``, its
+    ``execution_tier`` is the one asked for, and no other row declares that it
+    supersedes it.
+
+    This lives here, and not beside either caller, because it has to be one derivation.
+    ``CausalResult.one`` decides what a reader resolves and ``register_causal_run``
+    decides what may be written; if those two sets differ, a registration is refused
+    for an ambiguity the reader never sees, or permitted into one it cannot resolve.
+    The first draft duplicated the logic and the copies disagreed within the hour -
+    one counted every SUPPORTED_IDENTITY_VERSION, the other only the current one, so a
+    legacy row made the first v3 registration for its label impossible to satisfy.
+    The reader's rule is the authority, because it is the one a person hits.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    supersedes_column = (
+        "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
+    )
+    rows = db.execute(
+        f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
+        "WHERE label = ? ORDER BY causal_hash",
+        (label,),
+    ).fetchall()
+    retired = {row[2] for row in rows if row[2]}
+    current = []
+    for causal_hash, spec_json, _ in rows:
+        spec = json.loads(spec_json or "{}")
+        if spec.get("identity_version") != IDENTITY_VERSION:
+            continue
+        if str(spec.get("execution_tier", tier)) != tier:
+            continue
+        if causal_hash in retired or causal_hash == exclude:
+            continue
+        current.append(causal_hash)
+    return current
+
+
+def causal_identities_retired(db, *, label: str) -> set[str]:
+    """Every causal hash some other row declares it supersedes."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
+    if "supersedes_hash" not in columns:
+        return set()
+    return {
+        row[0]
+        for row in db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE label = ? AND supersedes_hash IS NOT NULL",
+            (label,),
+        ).fetchall()
+    }
 
 
 def _migrate_registry(db: sqlite3.Connection) -> None:

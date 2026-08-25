@@ -158,3 +158,88 @@ def test_two_undeclared_identities_say_what_to_do(tmp_path) -> None:
         CausalResult.one(_study(case_dir), label=LABEL)
     assert "SUPERSEDES_CAUSAL" in str(raised.value)
     assert "causal_first" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# The path that actually produces the rows a reader resolves.
+#
+# Everything above drives `register_causal_run` directly. Notebooks do not: they call
+# `study.causal(...).run()`, which goes through `run_resolved_causal_request`. Wiring
+# the enforcement to the low-level function while leaving that path unable to supply a
+# declaration would turn a recoverable read-time failure into a write-time one that
+# discards the fit - the fit runs, then the registration raises, and the only exit is
+# hand-editing the registry. Caught on review, so the coverage goes here.
+# ---------------------------------------------------------------------------
+
+_CANNED = {
+    "dml_result": {"theta": 0.02, "se_hac": 0.01, "n_obs": 120},
+    "p_value_hac": 0.04,
+    "naive_effect": 0.03,
+    "confounding_bias_pct": 50.0,
+    "refutation": {"empirical_p": 0.1, "n_successful": 100},
+    "started_at": "2026-08-15T00:00:00+00:00",
+    "elapsed_s": 1.0,
+}
+
+
+def _refit_under_a_changed_causal_module(monkeypatch, digest: str) -> None:
+    """What a refit is: the same request against a changed case_studies/utils/causal.py.
+
+    `_causal_source_identity` hashes that file, so editing it is what produces a second
+    identity for the same label. Simulating it here keeps the test about the chain
+    rather than about which edit was made.
+    """
+    from case_studies.utils import causal as causal_module
+
+    monkeypatch.setattr(causal_module, "run_dml_analysis", lambda *a, **k: dict(_CANNED))
+    monkeypatch.setattr(causal_module, "_causal_source_identity", lambda: {"causal.py": digest})
+
+
+def test_a_refit_through_the_request_path_is_refused_without_a_declaration(
+    tmp_path, monkeypatch
+) -> None:
+    from tests.test_causal_adapter import _causal_fixture
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    _refit_under_a_changed_causal_module(monkeypatch, "a" * 64)
+    first = study.causal(method="dml", label=label.name).run()
+
+    _refit_under_a_changed_causal_module(monkeypatch, "b" * 64)
+    with pytest.raises(ValueError, match="SUPERSEDES_CAUSAL"):
+        study.causal(method="dml", label=label.name).run()
+
+    assert CausalResult.one(study, label=label.name).hash == first.hash
+
+
+def test_a_refit_through_the_request_path_can_declare_what_it_retires(
+    tmp_path, monkeypatch
+) -> None:
+    from tests.test_causal_adapter import _causal_fixture
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    _refit_under_a_changed_causal_module(monkeypatch, "a" * 64)
+    first = study.causal(method="dml", label=label.name).run()
+
+    _refit_under_a_changed_causal_module(monkeypatch, "b" * 64)
+    second = study.causal(method="dml", label=label.name, supersedes=first.hash).run()
+
+    assert second.hash != first.hash
+    assert CausalResult.one(study, label=label.name).hash == second.hash
+
+
+def test_the_declaration_stays_out_of_the_identity(tmp_path, monkeypatch) -> None:
+    """A run that retires another must still be the run it says it is.
+
+    If `supersedes` reached the spec it would change the hash of every run that carries
+    one, so the row would supersede its predecessor and then not be the identity the
+    notebook computed.
+    """
+    from tests.test_causal_adapter import _causal_fixture
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    _refit_under_a_changed_causal_module(monkeypatch, "a" * 64)
+    plain = study.causal(method="dml", label=label.name).resolve()
+    declaring = study.causal(method="dml", label=label.name, supersedes="c" * 12).resolve()
+
+    assert declaring.identity == plain.identity
+    assert "supersedes" not in declaring.spec

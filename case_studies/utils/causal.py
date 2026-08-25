@@ -1359,6 +1359,8 @@ def run_resolved_causal_request(
     study: Study,
     spec: dict[str, Any],
     context: DMLResearchContext,
+    *,
+    supersedes: str | None = None,
 ):
     import math
 
@@ -1413,6 +1415,11 @@ def run_resolved_causal_request(
     register_record(
         study.case_study,
         causal_hash,
+        # The identity this run retires, from the notebook's SUPERSEDES_CAUSAL. A refit
+        # under a changed version of this file produces a second canonical identity for
+        # the same label, and a reader resolves a label to exactly one; register_record
+        # refuses the second without a declaration.
+        supersedes_hash=supersedes,
         label=context.outcome_col,
         treatment=context.treatment_col,
         confounders_json=json.dumps(list(context.confounder_cols)),

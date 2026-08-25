@@ -33,6 +33,8 @@ from .store import (
     _training_dir,
     _upsert_wide_metrics,
     _utc_now,
+    causal_identities_retired,
+    current_causal_identities,
 )
 
 logger = logging.getLogger(__name__)
@@ -1705,41 +1707,6 @@ def register_cohort_metrics(
 # ---------------------------------------------------------------------------
 
 
-def current_causal_identities(
-    db, *, label: str, tier: str = "canonical", exclude: str | None = None
-) -> list[str]:
-    """The causal identities a reader would currently resolve for *label*.
-
-    A row is current when its spec carries a supported ``identity_version``, its
-    ``execution_tier`` is the one asked for, and no other row declares that it
-    supersedes it. That is the same set ``CausalResult.one`` counts, and keeping the
-    two derivations in one function is the point: they disagreed once already, which
-    is how a refit came to fail at read time in a different notebook from the one
-    that caused it.
-    """
-    columns = {row[1] for row in db.execute("PRAGMA table_info(causal_runs)").fetchall()}
-    supersedes_column = (
-        "supersedes_hash" if "supersedes_hash" in columns else "NULL AS supersedes_hash"
-    )
-    rows = db.execute(
-        f"SELECT causal_hash, spec_json, {supersedes_column} FROM causal_runs "
-        "WHERE label = ? ORDER BY causal_hash",
-        (label,),
-    ).fetchall()
-    retired = {row[2] for row in rows if row[2]}
-    current = []
-    for causal_hash, spec_json, _ in rows:
-        spec = json.loads(spec_json or "{}")
-        if spec.get("identity_version") not in SUPPORTED_IDENTITY_VERSIONS:
-            continue
-        if str(spec.get("execution_tier", tier)) != tier:
-            continue
-        if causal_hash in retired or causal_hash == exclude:
-            continue
-        current.append(causal_hash)
-    return current
-
-
 def _enforce_causal_supersedes(
     db, *, causal_hash: str, label: str, tier: str, supersedes_hash: str | None
 ) -> None:
@@ -1755,6 +1722,13 @@ def _enforce_causal_supersedes(
     in a downstream notebook, hours later, with no idea which run introduced the
     ambiguity.
     """
+    if causal_hash in causal_identities_retired(db, label=label):
+        # Re-registering a row some later run already retired changes nothing about
+        # what a reader resolves - reproducing a published number from an older
+        # checkout does exactly this. Refusing it would also hand the author the
+        # wrong instruction: the only current identity is the tip, and superseding
+        # that would invert the chain and retire the newer result.
+        return
     others = current_causal_identities(db, label=label, tier=tier, exclude=causal_hash)
     if supersedes_hash is not None:
         if supersedes_hash == causal_hash:
@@ -1952,7 +1926,12 @@ def register_causal_run(
                 started_at=excluded.started_at,
                 elapsed_s=excluded.elapsed_s,
                 git_commit=excluded.git_commit,
-                supersedes_hash=excluded.supersedes_hash
+                -- Fill-once, matching the UPDATE above. A re-registration that
+                -- passes no declaration must not clobber one that was made: the row
+                -- it retired would go live again and the reader would see two.
+                -- Reachable through the migration backfill path, which skips the
+                -- early return.
+                supersedes_hash=COALESCE(excluded.supersedes_hash, causal_runs.supersedes_hash)
             WHERE causal_runs.label IS NOT excluded.label
                OR causal_runs.treatment IS NOT excluded.treatment
                OR causal_runs.confounders_json IS NOT excluded.confounders_json
@@ -1968,7 +1947,8 @@ def register_causal_run(
                OR causal_runs.refutation_n_successful IS NOT excluded.refutation_n_successful
                OR causal_runs.spec_json IS NOT excluded.spec_json
                OR causal_runs.notebook IS NOT excluded.notebook
-               OR causal_runs.supersedes_hash IS NOT excluded.supersedes_hash
+               OR (excluded.supersedes_hash IS NOT NULL
+                   AND causal_runs.supersedes_hash IS NOT excluded.supersedes_hash)
             """,
             (
                 causal_hash,
