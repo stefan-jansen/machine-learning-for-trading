@@ -123,9 +123,17 @@ for horizon, values in computations.items():
 # %% [markdown]
 # ## Inspect temporal controls
 #
-# Cross-fitting groups observations by complete decision timestamps. The embargo is at least the
-# outcome horizon, and the placebo permutes contiguous blocks within each currency pair so it does
-# not treat serial observations as exchangeable rows.
+# Cross-fitting groups observations by complete decision timestamps, and the embargo is at least the
+# outcome horizon.
+#
+# The placebo permutes contiguous blocks within each currency pair rather than shuffling rows, and
+# the block spans the longer of the two scales that make neighbouring rows dependent. Overlapping
+# labels tie rows together across the outcome horizon. The treatment ties them together across its
+# own construction window, which for `mom_skip_recent` is the 252 sessions its return is measured
+# over - consecutive values share 251 of them - and that is what `causal.treatment_window` in
+# `setup.yaml` declares. A block shorter than the longer scale breaks the dependence the
+# permutation exists to preserve, which narrows the placebo distribution and makes the p-value read
+# stronger than the evidence is. Both scales are printed below.
 
 # %%
 pl.DataFrame(
@@ -134,6 +142,7 @@ pl.DataFrame(
         "cross_fitting_folds": [c["cv"]["n_folds"] for c in computations.values()],
         "embargo_periods": [c["cv"]["embargo_periods"] for c in computations.values()],
         "fold_unit": [c["cv"]["fold_unit"] for c in computations.values()],
+        "treatment_window": [setup["causal"]["treatment_window"] for _ in computations],
         "placebo_method": [c["refutation"]["method"] for c in computations.values()],
         "placebo_block_size": [c["refutation"]["block_size"] for c in computations.values()],
         "analysis_rows": [c["analysis_population"]["n_rows"] for c in computations.values()],

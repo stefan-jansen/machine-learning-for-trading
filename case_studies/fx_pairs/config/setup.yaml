@@ -290,3 +290,19 @@ causal:
   treatment: mom_skip_recent
   confounders: [vol_gk_21d, vol_gk_63d, zscore_21d]
   method: walk_forward_dml
+  # Sessions the treatment's own construction spans, read off the code that builds the
+  # column rather than its name. `momentum_features` in 03_financial_features computes
+  # mom_skip_recent as close.shift(21) / close.shift(252) - 1, so one value depends on the
+  # 252 sessions ending at the decision and consecutive values overlap in 251 of them.
+  #
+  # It is declared because the placebo block has to span it. A block permutation exists to
+  # keep the treatment's serial dependence while breaking its alignment with the outcome,
+  # and a block shorter than the construction window breaks the dependence too - which
+  # narrows the placebo distribution and makes the p-value read stronger than the evidence
+  # is. Sized from the label buffer alone this case study would permute a 252-session
+  # momentum column in blocks of 1, 5 and 21.
+  #
+  # The register above cannot answer for this column: `features.windows.momentum` is a list
+  # of bar counts, not a suffix-keyed mapping, and `mom_skip_recent` is not built from any
+  # single element of it. Hence the explicit number here.
+  treatment_window: 252
