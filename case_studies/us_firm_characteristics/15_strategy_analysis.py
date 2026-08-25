@@ -1000,7 +1000,7 @@ fold_df = load_backtest_fold_metrics(CASE_STUDY, backtest_hash=TOP_HASH)
 print(f"Per-fold breakdown: {fold_df.height} rows.")
 if fold_df.is_empty():
     print(
-        "  (Empty - fold writer did not register fold metrics for this rank-1 "
+        "  (Empty - fold writer did not register fold metrics for this "
         "lineage. Headline CI in §3 stands in for fold variance.)"
     )
 else:
@@ -1450,7 +1450,7 @@ for turnover in _turnover_pcts:
 # not subtract.
 
 # %%
-print(f"Validation rank-1 hash:  {TOP_HASH}")
+print(f"Selected validation backtest: {TOP_HASH}")
 print(f"Holdout mate hash:       {HO_HASH}")
 print(f"Selected strategy: {RANK1_FAMILY}/{RANK1_CONFIG}/{RANK1_LABEL}, {RANK1_ALLOCATOR}")
 
@@ -1536,7 +1536,7 @@ val_ho_rows.extend(
     ]
 )
 val_ho_table = pl.DataFrame(val_ho_rows)
-print("val → holdout paired-bootstrap decay (rank-1 self):")
+print("Validation to holdout, paired bootstrap, the selected run against itself:")
 print(val_ho_table)
 print(f"prob_challenger_wins: {vh['prob_challenger_wins']:.3f}")
 print(f"CI status (Sharpe diff): {ci_status(vh['sharpe_diff_ci95_lo'], vh['sharpe_diff_ci95_hi'])}")
@@ -1609,7 +1609,7 @@ attr_df = pl.DataFrame(
         {"metric": "down capture", "value": _fmt(getattr(metrics, "down_capture", None))},
     ]
 )
-print("Layer 1: rank-1 vs validation EW universe (PortfolioAnalysis):")
+print("Layer 1: the selected run against the validation equal-weight universe:")
 print(attr_df)
 
 # %% [markdown]
