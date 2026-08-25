@@ -271,6 +271,7 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as _con:
         ).fetchone()[0]
     )
 RANK1_ALLOCATOR = (_spec.get("strategy", {}).get("allocation") or {}).get("method", "equal_weight")
+RANK1_TOP_K = int(_spec["strategy"]["signal"]["top_k"])
 
 
 # %% [markdown]
@@ -1685,10 +1686,14 @@ if _boot.get("n_boot", 0) > 0:
 # %% [markdown]
 # ### Placebo benchmark: random dollar-neutral portfolios
 #
-# To separate signal-driven factor exposure from universe-driven
-# exposure, we draw 500 random dollar-neutral portfolios from the same
-# universe and compare the strategy's factor loadings to the random
-# distribution.
+# To separate signal-driven factor exposure from universe-driven exposure, the cell
+# below draws random dollar-neutral portfolios from the same universe and compares the
+# strategy's factor loadings against that distribution.
+#
+# Each random book holds as many names per leg as the selected strategy does, read from
+# its spec rather than fixed here. A random portfolio of a different size has different
+# factor exposures by construction, so a fixed count would compare the strategy against
+# books it was never competing with the moment the selected concentration changed.
 
 # %%
 _prices_path = CASE_DIR / "labels" / "prices.parquet"
@@ -1713,7 +1718,7 @@ if _prices_path.exists():
         _fc_wide,
         _factors,
         n_sims=500,
-        top_k=50,
+        top_k=RANK1_TOP_K,
         model="ff5_mom",
         seed=SEED,
         periods_per_year=PERIODS_PER_YEAR,
@@ -1723,7 +1728,8 @@ if _prices_path.exists():
 if _prices_path.exists():
     if _placebo["n_sims"] > 0:
         print(
-            f"Placebo benchmark ({_placebo['n_sims']} random dollar-neutral portfolios, top_k=50):"
+            f"Placebo benchmark ({_placebo['n_sims']} random dollar-neutral "
+            f"portfolios of {RANK1_TOP_K} names per leg):"
         )
         print(
             f"  Random Mkt-RF: {_placebo['Mkt-RF_mean']:+.3f} "
@@ -1849,18 +1855,32 @@ else:
 # below stay strictly inside us_firm_characteristics; cross-case-study
 # comparison is Ch20's lane.
 
+# %% [markdown]
+# Every row describing the strategy is read out of the selected run's own backtest
+# spec rather than typed here, so the table describes the run that was selected rather
+# than the run that was selected when the table was written.
+
 # %% tags=["results"]
+_costs = _spec["backtest_config"]
+_cost_bps = (_costs["commission"]["rate"] + _costs["slippage"]["rate"]) * 10_000
+_execution = _costs["execution"]
 op_profile = pl.DataFrame(
     [
         {
             "property": "Selected strategy",
-            "value": f"{RANK1_FAMILY}/{RANK1_CONFIG}/{RANK1_LABEL}, {RANK1_ALLOCATOR}",
+            "value": f"{RANK1_FAMILY}/{RANK1_CONFIG}/{RANK1_LABEL}",
         },
-        {"property": "Signal", "value": "equal_weight_top_k, 50 names per leg"},
-        {"property": "Allocation", "value": "equal_weight"},
+        {
+            "property": "Signal",
+            "value": f"{_spec['strategy']['signal']['method']}, {RANK1_TOP_K} names per leg",
+        },
+        {"property": "Allocation", "value": RANK1_ALLOCATOR},
         {"property": "Trading cadence", "value": setup["decision"]["cadence"]},
-        {"property": "Execution", "value": "next bar open"},
-        {"property": "Registered cost", "value": "12.5 bps per leg"},
+        {
+            "property": "Execution",
+            "value": f"{_execution['execution_mode']} at {_execution['execution_price']}",
+        },
+        {"property": "Registered cost", "value": f"{_cost_bps:.1f} bps per leg"},
         {"property": "Validation Sharpe", "value": f"{val_full['sharpe']:.3f}"},
         {"property": "Holdout Sharpe", "value": f"{ho_full['sharpe']:.3f}"},
         {"property": "Validation max drawdown", "value": f"{val_full['max_drawdown']:.1%}"},
