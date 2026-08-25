@@ -549,6 +549,10 @@ class ResultsCatalog:
             self.study.case_study,
             resolved,
             case_dir=case_dir,
+            # A table column, not part of `resolved`, so recording it moves no training hash.
+            # `spec_json.provenance.entry_point` is a different field naming the runner module
+            # (`case_studies.utils.linear`); this one names the notebook.
+            entry_point=self.study.entry_point,
             runtime_provenance=runtime_provenance,
         )
         result = Result.open(

@@ -48,6 +48,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -81,13 +82,16 @@ TOP_N_PREDICTIONS = None
 # %% [markdown]
 # ## 1. Setup & Plumbing Test
 #
-# Before running the parametric sweep, we verify the engine backtest pipeline
-# is sound. A random signal should not produce spurious positive Sharpe. Under
-# quote-aware 15-minute execution with dominant costs, random turnover can
-# legitimately produce a negative Sharpe, so the failure condition here is
-# positive alpha that survives costs rather than simple distance from zero.
-# At 15-minute cadence with 114 stocks, even small pipeline artifacts can compound
-# rapidly — the plumbing test is not optional.
+# Before the sweep, check the machinery on a signal that carries no information.
+# Replacing the predictions with random scores and running the same engine should
+# not produce a profitable strategy. If it does, the profit came from the
+# pipeline rather than the signal - a lookahead in the fill timing, a misaligned
+# join, a cost model that never charges.
+#
+# The check is one-sided. Random trading pays the spread on every rebalance
+# without any compensating edge, so a clearly negative result is the expected
+# outcome and not a failure. What would fail is profit that persists after
+# costs.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -177,19 +181,30 @@ except ValueError as e:
 # ## 2. The Full-Universe Sweep (Act 1: Cost-Defeat)
 #
 # We begin with the naive approach the feasibility analysis warned against:
-# rank across **all 114 names** and trade the signal directly, with no
-# cost-feasibility screen. This is the full-universe sweep — every (prediction
-# × entry scheme) combination through the **same `run_backtest()` function** as
-# a single backtest. It establishes the baseline the rest of the chapter has to
-# beat: at 15-minute cadence, ranking over the full universe pays the expensive
-# tail on every rebalance, and the edge is consumed by cost.
+# rank across the whole universe and trade the ordering directly, with no
+# screen on how expensive a name is to trade. Every combination of prediction
+# and entry scheme runs through the same `run_backtest()` call as a single
+# backtest, so the sweep and a one-off backtest cannot diverge.
 #
-# A secondary question this sweep answers is whether the small IC advantage of
-# classification predictions (GBM multiclass, IC ~+0.008) translates to
-# higher Sharpe than regression predictions (IC ~+0.007). Under the engine's
-# next-bar-open execution with per-trade costs, the answer reverses what
-# simpler analyses suggested: smooth regression predictions produce fewer
-# position changes and less cost drag than discrete classification scores.
+# This is the baseline the rest of the chapter is measured against. Ranking over
+# the whole universe means the ordering will often place its strongest views on
+# the least liquid names in it, and at this rebalancing frequency each of those
+# positions is entered and exited repeatedly.
+#
+# The sweep also separates two things that are easily conflated: how well a
+# prediction orders the cross-section, and how much trading that ordering
+# provokes. A prediction whose scores change sharply from bar to bar produces
+# more position changes than one whose scores move smoothly, at the same
+# ordering quality. The cost of those changes is charged here and not in any
+# score.
+
+# %% [markdown]
+# A grid cell is skipped when its identity is already registered or already
+# queued by this sweep. Two schemes can resolve to one identity - a backtest is
+# defined by what it computes, not by the label its scheme carries - and without
+# the queued half of that test the first computes the result while the second
+# reuses its cache and is still counted as work done, so the sweep reports more
+# backtests than the registry holds.
 
 # %%
 pred_index = load_prediction_index(
@@ -206,6 +221,36 @@ if not pred_index.is_empty():
 if pred_index.is_empty():
     msg = f"No predictions found for {CASE_STUDY_ID}/{LABEL}/{SPLIT}"
     raise RuntimeError(msg)
+
+# `load_prediction_index` answers "what predictions exist in this registry" and leaves
+# admissibility to the caller. A backtest is asking a different question - "what should
+# I trade" - and the difference is exactly the conditions the catalog computes. Without
+# this filter the sweep consumes rows the official population cannot contain: a run that
+# reports every backtest completed and zero failed, off a population that resolves empty.
+# That is not a late failure, it is a loud success on the wrong rows, and it costs the
+# full sweep to discover.
+# `complete` is the whole test: `catalog.py:309` already requires `identity_status ==
+# "current"` before a row can be complete, and the tier is decided by which registry the
+# study opened, not by a column comparison. Re-asserting either here would reject a
+# preview run's own rows - the mistake `8fc28044` fixed on the registry path.
+_catalog = open_study(CASE_STUDY_ID, entry_point="14_backtest").predictions.table()
+_admissible = _catalog.filter(pl.col("complete")).select("prediction_hash")
+_offered = len(pred_index)
+pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
+if pred_index.is_empty():
+    msg = (
+        f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
+        "complete: every row is missing an artifact or a fold metric, or carries an identity "
+        "this schema version no longer recognises. Backtesting them would produce a full sweep "
+        "over a population that cannot be official. Re-run the model notebooks on the research "
+        "interface first."
+    )
+    raise RuntimeError(msg)
+if len(pred_index) < _offered:
+    print(
+        f"  Excluded {_offered - len(pred_index)} of {_offered} prediction sets: not complete",
+        flush=True,
+    )
 
 if TOP_N_PREDICTIONS > 0:
     pred_index = pred_index.head(TOP_N_PREDICTIONS)
@@ -243,6 +288,9 @@ failed = 0
 completed = 0
 skipped = 0
 existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="signal")
+# Identities already registered, plus the ones this sweep has queued. Both mean
+# "running this grid cell would add nothing", which is what the skip test needs.
+planned = set(existing_hashes)
 print(f"Existing signal-stage hashes in registry: {len(existing_hashes):,}", flush=True)
 
 for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
@@ -272,7 +320,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
         )
         backtest_hash = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
 
-        if backtest_hash in existing_hashes:
+        if backtest_hash in planned:
             skipped += 1
             if idx % 20 == 0 or idx == total_backtests:
                 elapsed = time.time() - t0
@@ -283,6 +331,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
                     flush=True,
                 )
             continue
+        planned.add(backtest_hash)
         pending_schemes.append((idx, scheme, spec))
 
     if not pending_schemes:
@@ -325,6 +374,7 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             completed += 1
             if result.backtest_hash:
                 existing_hashes.add(result.backtest_hash)
+                planned.add(result.backtest_hash)
         except Exception as e:
             failed += 1
             results.append(
@@ -391,17 +441,20 @@ print(
 )
 
 # %% [markdown]
-# ### The Naive Every-Bar Baseline Is Cost-Defeated
+# ### What turnover does to the same ordering
 #
-# The equal-weight top-k method re-ranks and rebalances every 15-minute bar.
-# On the full universe it pays tens of thousands of round trips over the
-# validation window and is **catastrophically** cost-defeated — a median Sharpe
-# far below zero. The slot mechanism cuts turnover by roughly an order of
-# magnitude; on the full universe its validation Sharpe is a coin-flip (median
-# slightly negative, a fifth of configurations positive), and the best slot
-# configurations reach the top of the sweep. Those full-universe slot winners do
-# **not** survive out of sample — that is what the cost-feasibility screen in
-# Section 4 and the holdout test in Ch18/Ch20 address.
+# The two entry schemes differ in how much trading they provoke from the same
+# ordering. Equal-weight top-k re-ranks and rebalances at every decision time, so
+# any name that drifts across the cut-off is sold and another bought. The slot
+# mechanism holds a fixed number of positions and replaces one only when a
+# candidate scores above the position it would displace, which leaves a position
+# alone while it stays competitive.
+#
+# Comparing the two on the same predictions isolates the cost of turnover from
+# the quality of the ordering, because only the trading rule differs. The
+# per-method summary below reports the spread of outcomes rather than one figure
+# per method: on a grid this size the extremes are the configurations most likely
+# to be reading noise, and the median says more about the method itself.
 
 # %%
 method_split = (
@@ -417,25 +470,35 @@ method_split = (
 print(method_split)
 
 # %% [markdown]
-# ### Top Full-Universe Strategies
+# ### The strongest validation configurations
 #
-# The strongest validation configurations are slot-mechanism runs reaching
-# Sharpe ~+2. They are kept here for the out-of-sample test in Ch20, where the
-# full-universe slot winners collapse — the in-sample ranking does not hold up.
+# The highest-scoring configurations from the sweep, kept for the out-of-sample
+# test later in the pipeline. Two cautions attach to this table.
+#
+# It is the top of a large grid, so the configurations in it are the ones that
+# suited this particular validation window best, and part of what put them there
+# is chance. The larger the grid, the more of the top is chance.
+#
+# Nothing here is a selection. The configuration carried forward is chosen once,
+# under the rule in the strategy analysis notebook, and tested on the holdout
+# exactly once.
 
 # %%
 top = full_signal.sort("sharpe", descending=True).head(10)
 print(top.select("source", "signal_method", "sharpe", "cagr", "max_drawdown"))
 
 # %% [markdown]
-# ### Model Family Comparison (Full Universe)
+# ### Model family comparison across the universe
 #
-# Which ML model families produce the most robust trading signals for 15-minute
-# intraday data? The best *model* by IC may not produce the best *strategy* by
-# Sharpe. GBM classification predictions (IC ~+0.008) lose ground under engine
-# execution because discrete scores cause excessive position flipping; deep
-# learning and gbm regression, with smoother outputs, fare better through
-# trade-count efficiency.
+# Grouping the sweep by the model family that produced each prediction asks
+# whether a family's ranking quality carries through to a traded result.
+#
+# The two need not agree, and the reason is turnover. A model can order the
+# cross-section well and still produce a poor strategy if its scores jump between
+# decision times, because each jump is a trade and each trade pays the spread. A
+# discrete score, such as one derived from predicted class membership, changes in
+# steps and provokes more of those than a continuous one at the same ordering
+# quality.
 
 # %%
 families = (
@@ -490,11 +553,12 @@ fig.show()
 # This diagnostic motivates the cadence × cost analysis in Ch18: reducing
 # the rebalance frequency is the structural solution to cost dominance.
 
-# %%
-# Query Sharpe and num_trades for full-universe signal-stage backtests
-# (universe_filter absent/null == full universe; the cost-feasible carrier rows
-# are excluded so the cost-dominance pattern is read on the naive baseline).
+# %% [markdown]
+# The query below reads the full-universe runs only. Rows produced under the
+# screened universe are excluded so the relationship between trade count and
+# outcome is read on the unscreened baseline rather than on a mixture of the two.
 
+# %%
 db_path = CASE_DIR / "run_log" / "registry.db"
 conn = sqlite3.connect(str(db_path))
 
@@ -591,12 +655,11 @@ if not trade_df.is_empty():
 # signals. The book then trades on composition changes rather than re-ranking
 # every bar. See `case_studies/utils/slot_strategy.py` for the mechanism.
 #
-# The featured design — 10 slots, 8-hour maximum hold, 0.90 entry percentile,
-# hold-only exit, long-only — was selected on the full-universe grid and the
-# validation robustness analysis (longer holds beat the 1–2h horizon on
-# out-of-sample stability; hold-only beats added take-profit / signal-exit
-# rules). These carrier backtests are registered on
-# `universe_filter='cost_feasible'`; this section queries them directly.
+# The design shown here fixes the number of concurrent slots, the maximum time a
+# position may be held, the percentile a signal must clear to enter, and the exit
+# rule. Each was fixed on the full-universe grid before this section runs. These
+# backtests are registered under `universe_filter='cost_feasible'` and are
+# queried directly.
 
 # %%
 conn = sqlite3.connect(str(db_path))
@@ -665,29 +728,31 @@ for r in eqw.iter_rows(named=True):
     print(f"  top_{int(r['top_k']):<2}: Sharpe {r['sharpe']:+.3f}  trades {r['num_trades']:.0f}")
 
 # %% [markdown]
-# ### Ensemble as a Stability Tool, Not a Sharpe Booster
+# ### What an ensemble of forecasts is for
 #
-# Across the gbm family the single-model validation Sharpes span a wide band and
-# the ranking is dominated by estimation noise: the best model in validation is
-# not reliably the best out of sample (this scramble is shown explicitly in the
-# Ch20 synthesis). The mean-forecast **ensemble** does not top that band — it
-# sits inside it — but it removes the need to bet on which single model will
-# generalize. Its value is robustness to model-selection noise, **not** a Sharpe
-# boost. This is the same conclusion the cross-case synthesis reaches in Ch20
-# §20.4: ensembling is a stability tool, not a universal Sharpe booster.
+# Averaging the forecasts of several models of one family produces a single
+# ordering that no one model determines. Across a grid this size, where the
+# outcomes span a wide band and the differences between neighbouring
+# configurations are within what noise can produce, the ordering of that band is
+# not reliable enough to bet on: the configuration at the top of a validation
+# window is not dependably the one that leads on a later window.
 #
-# The contrast that makes the point is the in-sample star: the highest validation
-# Sharpe in the whole screened set is a thin 5-slot linear configuration
-# (`ridge`, ~+2.1) — and it is exactly the configuration that collapses out of
-# sample (Ch20). Chasing the validation maximum is the mistake; the ensemble on
-# the robust design is what holds up.
+# The ensemble does not aim to sit above that band, and normally will not. What
+# it removes is the need to pick a member of it. That is worth having when the
+# ranking within the band is unstable, and worth nothing when one configuration
+# is genuinely better on grounds the validation window can establish.
+#
+# The comparison below sets the ensemble against the single configuration with
+# the highest validation outcome in the screened set. A thin configuration
+# holding few positions is the one most exposed to this instability, because
+# fewer positions mean each one contributes more of the result.
 
 # %%
 schematic = carrier.filter(
     (pl.col("family") == "linear") & (pl.col("method") == "slot_persistent_signal_exit")
 ).sort("sharpe", descending=True)
 if not schematic.is_empty():
-    print("In-sample star (validation max), collapses out of sample — see Ch20:")
+    print("Highest validation outcome among the screened linear configurations:")
     for r in schematic.iter_rows(named=True):
         print(f"  linear {int(r['slots'])}-slot: validation Sharpe {r['sharpe']:+.3f}")
 
@@ -720,30 +785,34 @@ print(dsr_cohorts)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. The plumbing test confirms the engine backtest pipeline produces no
-#    spurious alpha — necessary validation before interpreting sweep results.
-# 2. **Act 1 — turnover sets the Sharpe.** The naive every-bar equal-weight
-#    baseline on the full universe is catastrophically cost-defeated (median
-#    Sharpe far below zero, tens of thousands of trades). The slot mechanism cuts
-#    turnover ~10× and reaches the top of the validation sweep — but on the full
-#    universe its Sharpe is a coin-flip and the winners do not survive out of
-#    sample. This is the baseline the cost-feasibility screen has to beat.
-# 3. The IC-to-Sharpe scatter is not monotone — a higher IC does not guarantee
-#    a higher Sharpe. Label choice, portfolio construction, and especially
-#    trade frequency all mediate the relationship.
-# 4. The Sharpe-vs-trade-count diagnostic reveals cost dominance: configurations
-#    with thousands of trades per validation window pay ruinous turnover at
-#    15-minute cadence — the structural problem the slot mechanism addresses.
-# 5. **Act 2 — the cost-feasible carrier turns positive.** Restricting to the
-#    cost-feasible universe and replacing every-bar rebalancing with the
-#    turnover-controlled slot mechanism produces a positive validation Sharpe at
-#    ~900–1,000 trades. Equal-weight top-k on the *same* screened universe stays
-#    cost-defeated, so the turnover control — not the screen alone — does the
-#    work.
-# 6. The mean-forecast ensemble is a **stability tool, not a Sharpe booster**: it
-#    sits inside the single-model band but removes the model-selection lottery.
-#    The validation-max thin linear configuration is the overfitting trap that
-#    collapses out of sample (Ch20).
+# 1. **Check the machinery before reading the results.** A random signal put
+#    through the same engine should not produce a profitable strategy. That test
+#    catches lookahead in the fill timing, a misaligned join and a cost model
+#    that never charges, none of which are visible in a sweep's output.
+#
+# 2. **Turnover is a strategy decision, not an implementation detail.** The same
+#    ordering traded two ways produces two different results, because one rule
+#    reacts to every change in the ranking and the other only to changes large
+#    enough to displace a held position. At a short rebalancing interval the
+#    difference between them can exceed the difference between models.
+#
+# 3. **Ranking quality does not map onto traded outcome.** A prediction that
+#    orders the cross-section well can still lose money, because the score says
+#    nothing about how often the ordering changes, how liquid the names it
+#    favours are, or what it costs to act on it.
+#
+# 4. **Restricting the universe and controlling turnover are separate levers.**
+#    Running the same comparison on the screened universe with both trading
+#    rules shows which of the two is doing the work, and neither can be credited
+#    from a single result that changed both at once.
+#
+# 5. **An ensemble buys stability, not strength.** Averaging across a family's
+#    forecasts removes the need to bet on which member generalises. It is not a
+#    way to exceed the band, and reading it as one inverts what it is for.
+#
+# 6. **The top of a large grid is partly chance.** Nothing in this notebook
+#    selects a configuration. Selection happens once, under a stated rule, and
+#    the holdout is read once after it.
 #
 # **Next:** The allocation notebook (Ch17) carries the cost-feasible carrier
 # through portfolio sizing; the cost notebook (Ch18) quantifies the
