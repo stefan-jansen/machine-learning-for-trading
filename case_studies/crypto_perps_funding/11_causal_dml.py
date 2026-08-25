@@ -36,6 +36,7 @@ import os
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import open_study
+from case_studies.research import supersedes_for
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -44,6 +45,7 @@ LABEL = "fwd_ret_8h"
 CONFIG_NAME = "dml"
 PREVIEW_REDUCTIONS = {}
 OVERRIDES = {}
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Resolve the estimand and refutation contract
@@ -57,6 +59,7 @@ request = study.causal(
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
     overrides=OVERRIDES,
+    supersedes=supersedes_for(SUPERSEDES_CAUSAL, LABEL, labels=[LABEL]),
 )
 resolved = request.resolve()
 computation = resolved.spec["computation"]
