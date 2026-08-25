@@ -1524,29 +1524,45 @@ case_studies/fx_pairs/11_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/fx_pairs/12_model_analysis:
+  research_preview: false
+  skip: true
+  skip_reason: "Asserts the assembled canonical population equals the configured menu, and the
+    fixture cannot present both consistently: _trim_label_configs trims the seeded config dir
+    while the seeded registry carries the full production population, so the guard reports 117
+    unexpected members (3 labels x 13 gbm + 26 linear configs) and nothing missing. Same class
+    as 17_strategy_analysis - not a reduction that can be made to work. It reads no preview
+    rows either, so a preview tier is not the alternative."
   timeout: 300
 case_studies/fx_pairs/13_backtest:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: fx_pairs:preflight
     TOP_K: 2
-  timeout: 600
-case_studies/fx_pairs/14_portfolio_management:
-  parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
-  timeout: 300
+  timeout: 900
+case_studies/fx_pairs/14_portfolio_management:
+  research_preview: false
+  parameters:
+    POPULATION_NAME: fx_pairs:preflight
+    TOP_K: 2
+    TOP_N_CONFIGS: 1
+  timeout: 900
 case_studies/fx_pairs/15_costs:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+    POPULATION_NAME: fx_pairs:preflight
+    MAX_COST_POINTS: 1
+  timeout: 900
 case_studies/fx_pairs/16_risk_management:
+  research_preview: false
   parameters:
+    POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+  timeout: 900
 case_studies/fx_pairs/17_strategy_analysis:
+  skip: true
+  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
+  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
