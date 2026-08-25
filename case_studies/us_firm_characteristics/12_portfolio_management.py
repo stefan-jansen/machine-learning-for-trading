@@ -283,10 +283,31 @@ explorer = BacktestExplorer(CASE_STUDY_ID)
 # happened to land highest, and the average says whether the sizing rule helped
 # across the grid. A difference between the two rows that is small next to the
 # spread within either row is not evidence that one rule beat the other.
+#
+# Read the drawdown column with more care than the Sharpe column. It is an average
+# over paths that include any which went bankrupt, and a bankrupt path's drawdown is
+# not on the same scale as a solvent one - it is a ratio to a negative trough, so it
+# can be arbitrarily large and it dominates whatever it is averaged with. The count
+# printed above says how many.
 
 # %% tags=["results"]
+# A long-short book can lose more than its capital in a single period: the long leg
+# cannot fall past -100%, but a squeeze on a concentrated short costs more than the
+# account holds. The engine has no margin call, so equity compounds through zero and
+# every later period is arithmetic on a negative balance, which inverts the sign of
+# gains and losses. A `max_drawdown` below -100% is exactly that: the trough is
+# negative, so its ratio to the peak falls past -1.
+#
+# It matters more here than at the baseline, because score weighting concentrates the
+# short leg further inside an already short list. Counted before anything is averaged,
+# since a mean taken across a bankrupt path describes none of the runs in it.
+alloc_runs = explorer.best(stage="allocation", top_n=9999)
+insolvent = alloc_runs.filter(pl.col("max_drawdown") < -1.0)
+print(f"allocation runs whose equity went negative: {insolvent.height} of {alloc_runs.height}")
+
 alloc_comparison = explorer.compare_allocators()
 print(alloc_comparison)
+print("Note: the averages above include every run, insolvent ones among them.")
 
 # %%
 import matplotlib.pyplot as plt

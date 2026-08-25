@@ -44,6 +44,7 @@ import numpy as np
 import polars as pl
 import yaml
 
+from case_studies.research import supersedes_for
 from case_studies.utils.causal import (
     classify_refutation,
     embargo_from_buffer,
@@ -62,6 +63,15 @@ warnings.filterwarnings("ignore")
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 MAX_SYMBOLS = 0
+# The causal identity this run retires, as a bare hash. `_causal_source_identity`
+# hashes `case_studies/utils/causal.py` whole, so any edit to that file gives the same
+# fit a new identity, and a second current identity for one label makes
+# `CausalResult.one` unresolvable. Registration refuses the write rather than leaving
+# the ambiguity for a downstream notebook to hit hours later, so a refit has to say
+# here which identity it replaces. Empty means the fit must leave exactly one current
+# identity on its own. Papermill passes parameters through as strings, which is why
+# this is a str and not a mapping.
+SUPERSEDES_CAUSAL: str = ""
 # Each of these is zero or empty for "take the declared value". A run that passes one overrides
 # the declaration; a run that passes none reproduces the published analysis.
 LABEL = ""
@@ -345,6 +355,7 @@ causal_hash = register_causal_run(
     max_symbols=MAX_SYMBOLS,
     development_end=str(development_cutoff),
     config_name=dml_cfg["config_name"],
+    supersedes_hash=supersedes_for(SUPERSEDES_CAUSAL, PRIMARY_LABEL, labels=[PRIMARY_LABEL]),
     notebook="09_causal_dml",
 )
 print(f"Registered causal identity: {causal_hash}")

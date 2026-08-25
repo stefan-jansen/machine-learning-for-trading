@@ -405,6 +405,22 @@ print(repr(explorer))
 # those in turn.
 
 # %% tags=["results"]
+# A long-short book can lose more than its capital in one period: the long leg cannot
+# fall past -100%, but the short leg's loss is unbounded, and a squeeze on a
+# concentrated short costs more than the account holds. The engine has no margin call,
+# so equity compounds straight through zero and every later period is arithmetic on a
+# negative balance - which inverts the sign of gains and losses and makes the reported
+# Sharpe meaningless rather than merely bad. `max_drawdown` below -100% is exactly that
+# condition: the trough is negative, so the ratio to the peak falls past -1.
+all_runs = explorer.best(stage="signal", top_n=9999)
+ruined = all_runs.filter(pl.col("max_drawdown") < -1.0)
+print(f"runs whose equity went negative: {ruined.height} of {all_runs.height}")
+if ruined.height:
+    print(
+        "their reported Sharpe ranges "
+        f"{ruined['sharpe'].min():.2f} to {ruined['sharpe'].max():.2f}, and none of it means anything"
+    )
+
 top = explorer.best(stage="signal", top_n=10)
 
 # `best` reports `signal.method`, which is the same string for every entry scheme in
@@ -447,13 +463,20 @@ print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 # %% tags=["results"]
 families = explorer.compare_families(stage="signal")
 print(families)
+print(
+    "Note: these aggregate every registered run, including any whose equity went "
+    "negative. The figures below exclude those."
+)
 
 # %%
 import matplotlib.pyplot as plt
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-all_signal = explorer.best(stage="signal", top_n=9999)
+# Solvent runs only. A path that went bankrupt still has a Sharpe and an IC, and
+# plotting them puts a number with no meaning into the distribution the reader is
+# asked to read a conclusion off.
+all_signal = explorer.best(stage="signal", top_n=9999).filter(pl.col("max_drawdown") >= -1.0)
 if not all_signal.is_empty():
     axes[0].hist(all_signal["sharpe"].to_numpy(), bins=30, color=COLORS["blue"], edgecolor="white")
     axes[0].axvline(0, color=COLORS["amber"], linestyle="--", linewidth=1)
@@ -496,7 +519,10 @@ if not all_signal.is_empty():
         "Higher IC does not mean higher Sharpe inside a family",
         subtitle="One point per prediction set and entry scheme, coloured by model family",
     )
-    print(f"Strategies plotted: {scored.height:,} | dropped for no computed IC: {unscored:,}")
+    print(
+        f"Strategies plotted: {scored.height:,} | dropped for no computed IC: {unscored:,} "
+        f"| excluded as insolvent: {ruined.height:,}"
+    )
 
 fig.tight_layout()
 fig.show()

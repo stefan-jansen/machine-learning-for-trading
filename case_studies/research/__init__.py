@@ -1,6 +1,6 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
 from .catalog import BacktestCatalog, PredictionCatalog
-from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
+from .causal import CausalRequest, CausalResult, ResolvedCausalRequest, supersedes_for
 from .comparison import CandidateSet
 from .configs import (
     declared_labels,
@@ -48,6 +48,7 @@ from .strategy import Strategy
 from .workspace import Study, open_study
 
 __all__ = [
+    "supersedes_for",
     "AdapterBinding",
     "BacktestResult",
     "BacktestCatalog",
