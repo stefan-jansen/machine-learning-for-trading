@@ -558,9 +558,16 @@ def _restore_output_root():
         os.environ.pop("ML4T_OUTPUT_DIR", None)
     else:
         os.environ["ML4T_OUTPUT_DIR"] = previous
-    try:
-        from case_studies.research import workspace
-    except ImportError:
+    # Read out of sys.modules rather than importing. The module holds the only state this
+    # resets, so a test that never imported it left nothing to reset - and importing it here
+    # would make every test in the run pay for the import. `case_studies.research` pulls in
+    # `utils.config`, which raises FileNotFoundError at import when ML4T_DATA_PATH names a
+    # directory that is not there. The `test-unit` job is exactly that environment: it checks
+    # out no test-data, and its Chapter 21 step does not override the workflow-level path. An
+    # autouse fixture that imports turns that into a teardown error on every test in the step -
+    # 70 passed, 70 errors - against tests that read nothing from disk.
+    workspace = sys.modules.get("case_studies.research.workspace")
+    if workspace is None:
         return
     workspace._ACTIVE_OUTPUT_ROOT = None
     workspace._clear_root_sensitive_caches()
