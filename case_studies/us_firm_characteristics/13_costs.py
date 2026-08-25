@@ -156,7 +156,7 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 # reason the curve below can stay flat over a range that would destroy a
 # higher-frequency strategy.
 
-# %%
+# %% tags=["results"]
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
 n_done = 0
 n_failed = 0
@@ -269,7 +269,7 @@ if not cost_df.is_empty():
     ax.set_ylabel("Sharpe, net of the charge")
     add_message_title(
         ax,
-        "TITLE-COSTS",
+        "No level in the 50 bps grid turns the edge negative",
         subtitle="Validation months; the strategy is unchanged, only what it pays to trade",
     )
     ax.legend(frameon=False)
