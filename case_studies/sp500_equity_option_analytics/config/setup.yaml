@@ -344,6 +344,13 @@ modeling:
         checkpoint_epochs: [256, 512, 768, 1024]  # conditional-relative; publishes global 256..1280
         beta_checkpoint_epochs: [256]
         beta_default_checkpoint: 256
+      sae:
+        # Rows per gradient step. Declared because the alternative is not a smaller batch but
+        # no batching at all: SAEConfig.batch_size defaults to None and the library reads that
+        # as one batch holding the whole training window, about 250,000 rows here, which does
+        # not fit a 24 GB card. Its sibling run_cae_fold has carried this same value as a
+        # runner default all along; only the SAE runner never passed one.
+        batch_size: 10000
 
 causal:
   treatment: ivrv_spread
