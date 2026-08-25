@@ -17,12 +17,12 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 26 files, 392 tests, 3m21s.
+# 27 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
 # wheel. The multi-GB estimate this block used to carry is right, and it is not
-# torch that makes it so: importing all 26 pulls 110 distributions, because
+# torch that makes it so: importing them pulls 110 distributions, because
 # ml4t-models brings shap, numba and xarray, and three files bring darts with
 # pytorch-lightning, transformers and triton behind it. A CPU torch wheel is
 # 184 MB and would not reach any of them.
@@ -44,6 +44,7 @@ tests/test_deep_model_state.py
 # would land silently. It does need torch - case_studies/utils/deep_learning.py
 # imports it at module scope (:42) - so the entry is right and the cost is real.
 # Raised by fx_pairs on a push-gate review. Goes away with the torch decision.
+tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
 tests/test_gbm_identity.py

@@ -886,7 +886,7 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 26 test files that need the modelling environment.
+  # The 27 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -894,7 +894,7 @@ jobs:
   # correctly, but that job was never built, so the exclusion moved them from
   # gated to unrun. Measured 2026-08-24 in the full environment: 392 tests, 3m21s.
   #
-  # torch alone does not reach them. Importing all 26 pulls 110 distributions:
+  # torch alone does not reach them. Importing them pulls 110 distributions:
   # ml4t-models brings shap, numba/llvmlite and xarray, and three files
   # (test_darts_state, test_darts_temporal, test_latent_input_identity) bring
   # darts with pytorch-lightning, transformers, accelerate and triton behind it.
@@ -940,6 +940,7 @@ jobs:
             tests/test_deep_learning_adapter.py \
             tests/test_deep_learning_state.py \
             tests/test_deep_model_state.py \
+            tests/test_dl_device_contract.py \
             tests/test_dl_force_retrain_identity.py \
             tests/test_gbm_classification_target.py \
             tests/test_gbm_identity.py \
