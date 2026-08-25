@@ -41,7 +41,7 @@
 import polars as pl
 import yaml
 
-from case_studies.research import ExecutionTier, Study
+from case_studies.research import ExecutionTier, Study, supersedes_for
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
@@ -54,6 +54,7 @@ CV_FOLDS = 0
 MAX_SAMPLES = 0
 N_PLACEBO = 0
 FORCE_RETRAIN = False
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Resolve the estimand and analysis population
@@ -90,6 +91,7 @@ requests = {
         execution_tier=tier,
         preview_reductions=reductions,
         overrides={},
+        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(labels)),
     )
     for label in labels
 }

@@ -425,3 +425,48 @@ def test_a_new_fit_into_a_broken_registry_is_still_refused(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="would still be current"):
         _register(case_dir, "causal_new", effect=-0.05, supersedes="causal_a")
+
+
+def test_declaring_a_predecessor_for_a_hash_no_row_carries_is_refused(tmp_path) -> None:
+    """The repair is typed by hand from an error message, so a typo must not report success.
+
+    `_enforce_causal_supersedes` validates the predecessor against the current set and
+    never that `causal_hash` itself exists, so before this check the UPDATE matched zero
+    rows, committed, and returned None - the author saw success and the label still
+    resolved to two identities.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+
+    with pytest.raises(ValueError, match="nothing to declare a predecessor for"):
+        declare_causal_supersedes(
+            "test_case",
+            "deadbeefdeadbeef",  # no row carries this
+            supersedes_hash="causal_first",
+            label=LABEL,
+            case_dir=case_dir,
+        )
+
+    # And the registry is untouched: the refusal happens before the UPDATE.
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = db.execute("SELECT causal_hash, supersedes_hash FROM causal_runs").fetchall()
+    assert stored == [("causal_first", None)]
+
+
+def test_a_conflicting_declaration_is_refused_on_the_register_path_too(tmp_path) -> None:
+    """One column holds one edge, so both paths must answer a contradiction the same way.
+
+    The INSERT uses COALESCE, which keeps the stored value and drops the new one without
+    a word, while `declare_causal_supersedes` raises for the same case. Which function
+    the author happened to call decided whether the contradiction was reported.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", supersedes="causal_first")
+
+    with pytest.raises(ValueError, match="cannot also supersede"):
+        _register(case_dir, "causal_second", supersedes="causal_other")
+
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = dict(db.execute("SELECT causal_hash, supersedes_hash FROM causal_runs"))
+    assert stored == {"causal_first": None, "causal_second": "causal_first"}

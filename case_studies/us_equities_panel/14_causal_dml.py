@@ -45,7 +45,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from case_studies.research import Study, open_study
+from case_studies.research import Study, open_study, supersedes_for
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT, get_case_study_dir
 
@@ -74,6 +74,7 @@ MAX_SYMBOLS = 0
 PREVIEW_MAX_SAMPLES = 0
 PREVIEW_N_FOLDS = 0
 PREVIEW_N_PLACEBO = 0
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Configure the estimand and execution
@@ -154,6 +155,7 @@ request = study.causal(
     overrides={"nuisance_params": dict(NUISANCE_OVERRIDES)} if NUISANCE_OVERRIDES else {},
     execution_tier=EXECUTION_TIER,
     preview_reductions=preview_reductions,
+    supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=[label]),
 )
 resolved = request.resolve()
 
