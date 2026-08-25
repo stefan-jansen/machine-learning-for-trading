@@ -288,11 +288,18 @@ def sanitize_notebook(raw: str) -> tuple[str, int, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="report only; exit 1 if any leak found")
+    # Named notebooks, so a caller that has just produced one can sanitize that one.
+    # `run-production-notebook.sh` does exactly that, between stripping papermill's cell
+    # fossils and stamping provenance; without an argument it would rewrite every notebook
+    # in the tree as a side effect of running one.
+    ap.add_argument("notebooks", nargs="*", type=Path, help="default: every tracked notebook")
     args = ap.parse_args()
+
+    targets = [p.resolve() for p in args.notebooks] if args.notebooks else _iter_notebooks()
 
     dirty: list[tuple[Path, int]] = []
     blocked: list[tuple[Path, str]] = []
-    for nb in _iter_notebooks():
+    for nb in targets:
         raw = nb.read_text(encoding="utf-8")
         new, n, skipped = sanitize_notebook(raw)
         blocked += [(nb.relative_to(REPO_ROOT), s) for s in skipped]
@@ -316,7 +323,8 @@ def main() -> int:
             print(f"  {n:4d}  {rel}")
 
     if not dirty and not blocked:
-        print("clean: no machine-specific paths in any notebook's outputs or metadata")
+        scope = "the named notebook(s)" if args.notebooks else "any notebook"
+        print(f"clean: no machine-specific paths in {scope}'s outputs or metadata")
 
     return 1 if blocked or (args.check and dirty) else 0
 
