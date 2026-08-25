@@ -389,11 +389,16 @@ def paired_overlay_metrics(row: dict) -> dict:
     )
     if aligned.is_empty():
         raise RuntimeError(f"Degenerate return pair for {row['risk_name']}")
-    # The leading sessions on which neither side held a position are dropped inside
-    # `compute_paired_uncertainty`, over both series at once. Trimming per series is what broke
-    # this cell: an overlay sits out sessions its carrier trades, so the two sides arrived at
-    # different lengths and the paired bootstrap refused every one of them. A session the
-    # overlay sits out once trading has begun stays in - it is the effect being measured.
+    # The leading inactive sessions are dropped inside `compute_paired_uncertainty`, over both
+    # series at once. Trimming per series is what broke this cell: an overlay sits out sessions
+    # its carrier trades, so the two sides arrived at different lengths and the paired bootstrap
+    # refused every one of them.
+    #
+    # `challenger_overlays_baseline` says which pair this is, and here it is an overlay running
+    # on top of its carrier: both are live from the carrier's first traded session, so a session
+    # the overlay sits out is a position it chose to hold and stays in. It is the effect being
+    # measured. The default would drop those rows, which is right for a strategy that has a
+    # warmup before its first signal and wrong for every rule below.
     paired = compute_paired_uncertainty(
         aligned["challenger_ret"],
         aligned["baseline_ret"],
@@ -402,6 +407,7 @@ def paired_overlay_metrics(row: dict) -> dict:
         label=RISK_LABEL,
         n_boot=2000,
         seed=42,
+        challenger_overlays_baseline=True,
     )
     if not paired:
         raise RuntimeError(

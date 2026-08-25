@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warnings
 from math import comb
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -129,7 +130,9 @@ def test_an_overlay_that_sits_out_the_first_sessions_still_gets_a_paired_bootstr
     # The overlay is out of the market for the first three sessions the carrier trades.
     challenger[:3] = 0.0
 
-    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=5)
+    paired = compute_paired_uncertainty(
+        challenger, baseline, n_boot=20, seed=5, challenger_overlays_baseline=True
+    )
 
     assert paired["bootstrap_n"] == 20.0
     assert np.isfinite(paired["sharpe_diff"])
@@ -152,7 +155,7 @@ def test_a_paired_bootstrap_keeps_the_sessions_the_overlay_sat_out() -> None:
     baseline = np.array([0.0, 0.0, 0.01, 0.02, 0.015, 0.03, -0.01])
     challenger = np.array([0.0, 0.0, 0.00, 0.00, 0.012, 0.03, -0.02])
 
-    c, b = joint_returns(challenger, baseline)
+    c, b = joint_returns(challenger, baseline, challenger_overlays_baseline=True)
 
     # Two leading sessions go; the two where only the carrier traded stay.
     assert c.size == b.size == 5
@@ -174,10 +177,44 @@ def test_an_overlay_flat_for_the_whole_sample_is_compared_rather_than_refused() 
     baseline = rng.normal(0.0006, 0.01, size=50)
     challenger = np.zeros(50)
 
-    paired = compute_paired_uncertainty(challenger, baseline, n_boot=20, seed=2)
+    paired = compute_paired_uncertainty(
+        challenger, baseline, n_boot=20, seed=2, challenger_overlays_baseline=True
+    )
 
     assert paired
     assert paired["sharpe_diff"] == pytest.approx(-_sample_stats(baseline, 252).sharpe)
+
+
+def test_a_strategy_is_not_charged_for_the_sessions_before_its_first_signal() -> None:
+    """The default pairing drops the challenger's warmup, and it has to.
+
+    A strategy backtest's daily returns begin at the first bar, not at the first signal, so the
+    series carries a leading run of zeros while the equal-weight benchmark it is compared
+    against is invested from the first joined session. Those rows are pre-sample for the
+    strategy rather than a result, and keeping them would deflate its Sharpe against every
+    benchmark. This is the mirror of the risk-overlay case, which is why the caller has to say
+    which pair it holds rather than one rule serving both.
+    """
+    from case_studies.utils.uncertainty import compute_paired_uncertainty, joint_returns
+
+    rng = np.random.default_rng(19)
+    benchmark = rng.normal(0.0005, 0.008, size=60)
+    strategy = rng.normal(0.0009, 0.011, size=60)
+    # No signal yet for the first eight sessions the benchmark was invested through.
+    strategy[:8] = 0.0
+
+    c, b = joint_returns(strategy, benchmark)
+
+    assert c.size == b.size == 52
+    np.testing.assert_allclose(c, strategy[8:])
+    np.testing.assert_allclose(b, benchmark[8:])
+
+    # And the bootstrap agrees with the coercion it performs itself.
+    paired = compute_paired_uncertainty(strategy, benchmark, n_boot=20, seed=4)
+    overlay_reading = compute_paired_uncertainty(
+        strategy, benchmark, n_boot=20, seed=4, challenger_overlays_baseline=True
+    )
+    assert paired["sharpe_diff"] > overlay_reading["sharpe_diff"]
 
 
 def test_joint_returns_refuses_a_pair_that_did_not_arrive_aligned() -> None:
@@ -246,3 +283,52 @@ def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
         result = compute_backtest_uncertainty(sparse_returns, n_boot=100, seed=0)
 
     assert result["bootstrap_n"] == 100.0
+
+
+def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() -> None:
+    """Two producers write the same ``backtest_paired_metrics`` rows and must not disagree.
+
+    ``20_strategy_synthesis/01_aggregate_synthesis.py`` carries its own copy of the joint
+    coercion, ``_joint_coerce``, and ``case_studies/utils/paired_metrics.py`` reaches
+    ``joint_returns``. Both produce the signal-versus-equal-weight pair for the same case
+    study, so if their start rules ever part company, ``sharpe_diff`` for one pair depends on
+    which producer ran last. This runs the real Ch20 function - lifted out of the notebook
+    source rather than reimplemented - against the shared one over pairs with every
+    combination of leading inactivity.
+
+    The duplicate should go; until it does, this is what stops it drifting.
+    """
+    import ast
+
+    from case_studies.utils.uncertainty import joint_returns
+
+    source = Path("20_strategy_synthesis/01_aggregate_synthesis.py").read_text()
+    tree = ast.parse(source)
+    definition = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_joint_coerce"
+    )
+    namespace: dict = {"np": np}
+    exec(  # noqa: S102 - running the producer itself is the point of the check
+        compile(ast.Module(body=[definition], type_ignores=[]), "01_aggregate_synthesis", "exec"),
+        namespace,
+    )
+    ch20_coerce = namespace["_joint_coerce"]
+
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        n = int(rng.integers(5, 40))
+        challenger = rng.normal(0.0, 0.01, n)
+        benchmark = rng.normal(0.0, 0.01, n)
+        challenger[: rng.integers(0, 6)] = 0.0
+        benchmark[: rng.integers(0, 6)] = 0.0
+        if rng.random() < 0.2:
+            challenger[rng.integers(0, n)] = np.nan
+
+        theirs_c, theirs_b = ch20_coerce(challenger, benchmark)
+        ours_c, ours_b = joint_returns(challenger, benchmark)
+
+        assert ours_c.size == theirs_c.size
+        np.testing.assert_allclose(ours_c, theirs_c)
+        np.testing.assert_allclose(ours_b, theirs_b)
