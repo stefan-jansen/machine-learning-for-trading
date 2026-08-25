@@ -167,10 +167,20 @@ def test_every_declared_test_reduction_can_produce_a_refutation() -> None:
     overrides = yaml.safe_load((Path(__file__).resolve().parent / "overrides.yaml").read_text())
 
     def walk(node):
+        # Case-insensitive, and by suffix, because the same quantity is declared under
+        # three names: `n_placebo` inside PREVIEW_REDUCTIONS, and the Papermill
+        # parameters `N_PLACEBO` and `PREVIEW_N_PLACEBO` for the stages that have not
+        # migrated. Matching only the lowercase key found two declarations and missed
+        # nine, five of which requested fewer draws than the test needs at all.
+        #
+        # N_PLACEBO_PERMUTATIONS is deliberately not matched: the chapter-15 notebooks
+        # run their own permutation loop and never reach run_dml_analysis's threshold,
+        # so the boundary this checks is not theirs.
         if isinstance(node, dict):
-            if "n_placebo" in node:
-                yield int(node["n_placebo"])
-            for value in node.values():
+            for key, value in node.items():
+                lowered = str(key).lower()
+                if lowered == "n_placebo" or lowered.endswith("_n_placebo"):
+                    yield int(value)
                 yield from walk(value)
         elif isinstance(node, list):
             for value in node:
