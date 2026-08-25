@@ -14,6 +14,31 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
+    """Name one published artifact, isolated as a whole chain when a run is narrowed.
+
+    A run that narrows the catalog must not publish under the canonical name, because a
+    population is immutable per name and a partial snapshot would be frozen as the real
+    one. Isolating only what a stage *writes* is not enough. A later stage that resolves
+    its upstream by the canonical name reads the full population, computes over it, and
+    freezes that under the isolated name it was given - so the name says narrowed and the
+    contents are not, which is worse than either being wrong on its own. In a workspace
+    that does not hold the canonical populations the same run raises instead, so the
+    defect is invisible exactly where the populations already exist.
+
+    Both the writing stage and the reading stage call this with the same scope, so one
+    knob isolates every name in the chain. With no scope the result is byte-identical to
+    the canonical name, which is what lets a narrowed run be configured without moving
+    any published population.
+
+    A scope names one run of the chain, not one notebook in it. Giving each stage its own
+    scope isolates each stage from every other stage as well as from the canonical names,
+    so the second stage looks for an upstream population under a name the first stage
+    never wrote. Every notebook in one narrowed run takes the same scope.
+    """
+    return f"{scope}:{suffix}" if scope else f"{case_study_id}:{suffix}"
+
+
 def _refuse_preview_activation() -> None:
     """A population is written to the canonical registry whatever tier is active.
 
