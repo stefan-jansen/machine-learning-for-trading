@@ -163,21 +163,23 @@ _REGISTERING_SUFFIXES = frozenset(
 
 # Notebooks whose expected entry point is the MODEL name rather than their own stem.
 #
-# For `etfs/10_dl_tsmixer`, `sp500_options/09a_lstm` and `sp500_options/09b_patchtst` that is
-# what the notebook still writes: all three call `run_case_study_model(..., notebook=f"dl_{MODEL}")`.
+# Three of the four entries describe what the notebook still writes: `etfs/10_dl_tsmixer`,
+# `sp500_options/09a_lstm` and `sp500_options/09b_patchtst` all call
+# `run_dl_cv(..., notebook=f"dl_{MODEL}")`, and `deep_learning.py:1658` passes that straight
+# through as `entry_point=notebook`, so the expectation matches the value written.
 #
-# `cme_futures/09_dl_lstm` is a fourth case and this map is wrong about it. That notebook has
-# already been migrated - it reaches `open_study` through
-# `case_studies/cme_futures/research_workflow.py:82`, which forwards no `entry_point`, so its rows
-# record NULL and this entry expects a value nothing writes. It is the same defect as the two
-# removed below, in a case study this branch does not own; ml4t/agent-workspace#929 carries it.
+# The `cme_futures/09_dl_lstm` entry expects a value nothing writes. That notebook has been
+# migrated onto `open_study`, reaching it through
+# `case_studies/cme_futures/research_workflow.py:82`, which forwards no `entry_point`, so
+# `results.py` records `study.entry_point` and its rows carry NULL. Tracked as
+# ml4t/agent-workspace#930, which belongs to that case study rather than to this file.
 #
-# `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
-# their stem, which is the value that answers the question the column exists for - which
-# notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
-# studies can fit the same one. The remaining four entries are other case studies' to settle,
-# and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
-# the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
+# `sp500_equity_option_analytics` has no entry here: all ten of its registering notebooks pass
+# their own stem. That is the value which answers the question the column exists for - which
+# notebook produced this row - where `dl_lstm` names a model that more than one case study
+# fits. The fleet currently has both conventions in circulation: on 2026-08-25 the only two
+# non-NULL `entry_point` values in all nine registries were `09_dl_lstm` and `dl_tsmixer`, one
+# a stem and one a model name.
 _DL_FAMILY_ENTRY_POINTS = {
     ("cme_futures", "09_dl_lstm"): "dl_lstm",
     ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
