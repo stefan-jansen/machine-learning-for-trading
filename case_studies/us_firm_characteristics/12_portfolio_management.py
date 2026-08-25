@@ -75,12 +75,7 @@ from utils.paths import get_case_study_dir
 CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
 MAX_SYMBOLS = 0
-SKIP_EXPENSIVE_ALLOC = False
 TOP_N_PREDICTIONS = None
-# Wall-clock the allocation sweep may spend before the covariance-estimating
-# allocators are dropped from the remainder. Declared here rather than buried beside
-# the loop, because it decides which runs the notebook publishes.
-BUDGET_SECONDS = 3600
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
@@ -133,30 +128,30 @@ print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 # one spreads it across names the model ranked lower, so the grid trades conviction
 # against diversification.
 #
-# The declared menu is score weighting and conformal weighting. The moment-based
-# allocators - mean-variance optimisation and hierarchical risk parity - are absent
-# because they estimate a covariance matrix from a rolling window, and this panel
-# rebalances monthly over a window too short for that estimate to exist. `setup.yaml`
-# records that reasoning next to the menu.
+# The declared menu is score weighting and conformal weighting. Four allocators the
+# other case studies sweep are absent, for two different reasons; `setup.yaml` states
+# both, above its `execution:` block.
+#
+# Hierarchical risk parity and mean-variance optimisation estimate a correlation or
+# covariance matrix over the held names from a rolling window. The window here is
+# twelve monthly bars, so the matrix has rank at most eleven, while a long-short book
+# holds twice the concentration level - ten names at the narrowest grid point below and
+# a hundred at the widest. Both are therefore identified at the narrowest point and
+# unidentified at the other three. Shrinkage does not change that: the case-study
+# lookback is injected as the MVO window, so it is twelve observations there too.
+#
+# Inverse-volatility and risk-parity weighting need no matrix. Each weights by a
+# per-asset rolling standard deviation, which twelve observations do estimate, if
+# noisily. They are absent by decision rather than by identification: this case study
+# keeps the allocation stage to the equal-weight baseline and the two alternatives that
+# need no lookback at all.
 
 # %%
 TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
 print(f"TOP_K grid: {TOP_K_VALUES} (universe: {n_assets} assets)")
 
-_ALL_ALLOC_CONFIGS = get_allocators(CASE_STUDY_ID)
-
-# One definition of expensive, used by both the skip flag and the budget check. It
-# had been two that disagreed: the skip set was {mvo_ledoit_wolf, hrp} while the
-# budget check fired on {mvo, mvo_ledoit_wolf}, so `hrp` could never trip the budget
-# and plain `mvo` could trip it and then not be skipped. What makes an allocator
-# expensive here is estimating a covariance matrix per rebalance, which is what these
-# three do and what score and conformal weighting do not.
-_EXPENSIVE = {"mvo", "mvo_ledoit_wolf", "hrp"}
-if SKIP_EXPENSIVE_ALLOC:
-    ALLOC_CONFIGS = [a for a in _ALL_ALLOC_CONFIGS if a["method"] not in _EXPENSIVE]
-    print(f"Skipping expensive allocators: {', '.join(sorted(_EXPENSIVE))}")
-else:
-    ALLOC_CONFIGS = _ALL_ALLOC_CONFIGS
+ALLOC_CONFIGS = get_allocators(CASE_STUDY_ID)
+ADVANCED_HASHES = top_preds["prediction_hash"].to_list()
 
 n_total = len(top_preds) * len(TOP_K_VALUES) * len(ALLOC_CONFIGS)
 print(
@@ -168,12 +163,7 @@ print(
 n_done = 0
 n_failed = 0
 failures: Counter[str] = Counter()
-skip_expensive = SKIP_EXPENSIVE_ALLOC
 sweep_start = time.monotonic()
-n_expensive_total = (
-    len(top_preds) * len(TOP_K_VALUES) * sum(1 for a in ALLOC_CONFIGS if a["method"] in _EXPENSIVE)
-)
-n_expensive_done = 0
 
 for top_k in TOP_K_VALUES:
     print(f"\n--- TOP_K = {top_k} ---")
@@ -185,10 +175,6 @@ for top_k in TOP_K_VALUES:
 
         for alloc in ALLOC_CONFIGS:
             alloc_name = alloc["method"]
-
-            if skip_expensive and alloc_name in _EXPENSIVE:
-                continue
-
             n_done += 1
 
             spec = build_backtest_spec(
@@ -206,8 +192,6 @@ for top_k in TOP_K_VALUES:
                 allocation={**alloc, "top_k": top_k, "long_short": bt_config.long_short},
             )
 
-            t0 = time.monotonic()
-
             try:
                 result = run_backtest(
                     CASE_STUDY_ID,
@@ -220,23 +204,6 @@ for top_k in TOP_K_VALUES:
                     initial_cash=bt_config.initial_cash,
                     calendar=bt_config.calendar,
                 )
-
-                elapsed = time.monotonic() - t0
-
-                # Project from what is actually left, not from a constant. This counted
-                # (prediction, top_k) pairs and recomputed the same figure after every
-                # expensive run, so it ignored how many had already finished and
-                # undercounted by the number of expensive allocators in the menu.
-                if alloc_name in _EXPENSIVE and not skip_expensive:
-                    n_expensive_done += 1
-                    remaining = n_expensive_total - n_expensive_done
-                    projected = (time.monotonic() - sweep_start) + elapsed * remaining
-                    if projected > BUDGET_SECONDS:
-                        print(
-                            f"    >> dropping the expensive allocators: {remaining} left at "
-                            f"{elapsed:.1f}s each projects {projected / 60:.0f}m, over budget"
-                        )
-                        skip_expensive = True
 
                 print(
                     f"  [{n_done}/{n_total}] k={top_k} {source} x {alloc_name}: "
@@ -270,60 +237,140 @@ for reason, count in failures.most_common():
 # below it, sizing by score actively concentrates capital into the noisiest part of
 # the ranking.
 
+# %% [markdown]
+# Every query below is restricted to this label and to the ten predictions section 1
+# advanced. The registry accumulates: the Chapter 16 sweep registered a baseline for
+# every prediction at every concentration, this case study declares three labels, and a
+# re-run of this section adds nothing while reading everything. Unrestricted, the tables
+# would describe that accumulation rather than this sweep, and would keep reporting a
+# number after the sweep that produced it had been superseded.
+#
+# `best` returns neither the allocator nor the concentration - the two dimensions this
+# notebook varies. Both are in the backtest spec, so they are read back out of it and
+# joined on `backtest_hash`. Both stages are read in one pass, because the equal-weight
+# baseline needs the same two columns.
+
 # %%
 from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
+with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+    grid = (
+        pl.DataFrame(
+            conn.execute(
+                "SELECT backtest_hash, stage, spec_json FROM backtest_runs "
+                "WHERE stage IN ('signal', 'allocation')"
+            ).fetchall(),
+            schema=["backtest_hash", "stage", "spec_json"],
+            orient="row",
+        )
+        .with_columns(
+            allocator=pl.col("spec_json").str.json_path_match("$.strategy.allocation.method"),
+            names_per_side=pl.col("spec_json")
+            .str.json_path_match("$.strategy.signal.top_k")
+            .cast(pl.Int64),
+        )
+        .drop("spec_json")
+    )
+
+# %% [markdown]
+# Two frames carry every table below. The baseline is restricted to the concentrations
+# this sweep used as well as to the advanced predictions, so each equal-weight run is
+# the counterpart of a pair of allocation runs rather than one of the whole Chapter 16
+# sweep.
+
+# %%
+alloc_runs = explorer.best(
+    stage="allocation", top_n=9999, label=LABEL, prediction_hashes=ADVANCED_HASHES
+).join(grid.filter(pl.col("stage") == "allocation").drop("stage"), on="backtest_hash", how="inner")
+baseline_runs = (
+    explorer.best(stage="signal", top_n=9999, label=LABEL, prediction_hashes=ADVANCED_HASHES)
+    .join(grid.filter(pl.col("stage") == "signal").drop("stage"), on="backtest_hash", how="inner")
+    .filter(pl.col("names_per_side").is_in(TOP_K_VALUES))
+    .with_columns(allocator=pl.lit("equal_weight (ch16 baseline)"))
+)
+every_run = pl.concat([baseline_runs, alloc_runs], how="vertical_relaxed")
+
+# %% [markdown]
+# ### How many paths went bankrupt
+#
+# A long-short book can lose more than its capital in a single period. The long leg
+# cannot lose more than it cost, but a squeeze on a concentrated short costs more than
+# the account holds. The engine has no margin call, so equity compounds through zero and
+# every later period is arithmetic on a negative balance, which inverts the sign of
+# gains and losses. A `max_drawdown` worse than a total loss is exactly that: the trough
+# is negative, so its ratio to the peak falls below minus one.
+#
+# The count comes before any average, since a mean taken across a bankrupt path
+# describes none of the runs in it. It covers the baseline as well as the two
+# allocators, so what follows compares measured rates rather than a measured rate
+# against an expectation, and it is split by concentration, because concentration is
+# what a reader chooses. Every row is printed rather than polars' default ten: the
+# levels that produced no bankrupt path are as much of the answer as any level that
+# produced one, and eliding them leaves a clean grid indistinguishable from an
+# unprinted one.
+
+# %% tags=["results"]
+insolvency = (
+    every_run.group_by("allocator", "names_per_side")
+    .agg(runs=pl.len(), insolvent=(pl.col("max_drawdown") < -1.0).sum())
+    .sort("names_per_side", "allocator")
+)
+with pl.Config(tbl_rows=insolvency.height):
+    print(insolvency)
+
 # %% [markdown]
 # ### By allocator
 #
-# Sharpe averaged over every concentration level and prediction, one row per
-# allocator. Averaging is the point: a single high cell says which combination
-# happened to land highest, and the average says whether the sizing rule helped
-# across the grid. A difference between the two rows that is small next to the
-# spread within either row is not evidence that one rule beat the other.
+# Sharpe averaged over every concentration level and prediction: one row per allocator,
+# plus the equal-weight baseline averaged over the same predictions at the same
+# concentrations. Equal weighting is not an allocator and its specs carry no allocation
+# block, so it is averaged here alongside them rather than read from the allocator
+# table, over exactly the runs the count above covered.
 #
-# Read the drawdown column with more care than the Sharpe column. It is an average
-# over paths that include any which went bankrupt, and a bankrupt path's drawdown is
-# not on the same scale as a solvent one - it is a ratio to a negative trough, so it
-# can be arbitrarily large and it dominates whatever it is averaged with. The count
-# printed above says how many.
+# Averaging is the point: a single high cell says which combination happened to land
+# highest, and the average says whether the sizing rule helped across the grid. A
+# difference between rows that is small next to the spread within any of them is not
+# evidence that one rule did better than another.
+#
+# Read the drawdown column with more care than the Sharpe column. It is an average over
+# paths that include the bankrupt ones counted above, and a bankrupt path's drawdown is
+# not on the same scale as a solvent one - it is a ratio to a negative trough, so it can
+# be arbitrarily large and it dominates whatever it is averaged with.
 
 # %% tags=["results"]
-# A long-short book can lose more than its capital in a single period: the long leg
-# cannot fall past -100%, but a squeeze on a concentrated short costs more than the
-# account holds. The engine has no margin call, so equity compounds through zero and
-# every later period is arithmetic on a negative balance, which inverts the sign of
-# gains and losses. A `max_drawdown` below -100% is exactly that: the trough is
-# negative, so its ratio to the peak falls past -1.
-#
-# It matters more here than at the baseline, because score weighting concentrates the
-# short leg further inside an already short list. Counted before anything is averaged,
-# since a mean taken across a bankrupt path describes none of the runs in it.
-alloc_runs = explorer.best(stage="allocation", top_n=9999)
-insolvent = alloc_runs.filter(pl.col("max_drawdown") < -1.0)
-print(f"allocation runs whose equity went negative: {insolvent.height} of {alloc_runs.height}")
-
-alloc_comparison = explorer.compare_allocators()
-print(alloc_comparison)
+allocator_comparison = (
+    every_run.group_by("allocator")
+    .agg(
+        n=pl.len(),
+        avg_sharpe=pl.col("sharpe").mean(),
+        best_sharpe=pl.col("sharpe").max(),
+        avg_max_dd=pl.col("max_drawdown").mean(),
+    )
+    .sort("avg_sharpe", descending=True)
+)
+print(allocator_comparison)
 print("Note: the averages above include every run, insolvent ones among them.")
 
 # %%
 import matplotlib.pyplot as plt
 
-if not alloc_comparison.is_empty():
+if not allocator_comparison.is_empty():
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.barh(
-        alloc_comparison["allocator"].to_list(),
-        alloc_comparison["avg_sharpe"].to_list(),
+        allocator_comparison["allocator"].to_list(),
+        allocator_comparison["avg_sharpe"].to_list(),
         color=COLORS["blue"],
     )
     ax.set_xlabel("Sharpe, averaged over concentration and prediction")
     add_message_title(
         ax,
-        "Sizing rule moves the average less than the grid around it",
-        subtitle="Validation months, net of the declared commission and slippage",
+        "Both sizing rules average below equal weighting across the grid",
+        subtitle=(
+            "Validation months, averaged over concentration and prediction, "
+            "net of the declared commission and slippage"
+        ),
     )
     fig.tight_layout()
     fig.show()
@@ -339,31 +386,9 @@ if not alloc_comparison.is_empty():
 # mixed, which would say the grid found no reliable ordering.
 
 # %% tags=["results"]
-top10 = explorer.best(stage="allocation", top_n=10)
-
-# `best` reports `signal.method`, which is one string across the whole grid, and
-# drops both the allocator and the concentration - the two dimensions this notebook
-# varies. Both are in the same spec, so they are joined back here. Shared-code fix
-# filed as ml4t/agent-workspace#910.
-with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
-    grid = (
-        pl.DataFrame(
-            conn.execute(
-                "SELECT backtest_hash, spec_json FROM backtest_runs WHERE stage = 'allocation'"
-            ).fetchall(),
-            schema=["backtest_hash", "spec_json"],
-            orient="row",
-        )
-        .with_columns(
-            allocator=pl.col("spec_json").str.json_path_match("$.strategy.allocation.method"),
-            names_per_side=pl.col("spec_json")
-            .str.json_path_match("$.strategy.signal.top_k")
-            .cast(pl.Int64),
-        )
-        .drop("spec_json")
-    )
-
-top10 = top10.join(grid, on="backtest_hash", how="left")
+top10 = explorer.best(
+    stage="allocation", top_n=10, label=LABEL, prediction_hashes=ADVANCED_HASHES
+).join(grid.filter(pl.col("stage") == "allocation").drop("stage"), on="backtest_hash", how="left")
 print(top10.select("source", "allocator", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 
 # %% [markdown]

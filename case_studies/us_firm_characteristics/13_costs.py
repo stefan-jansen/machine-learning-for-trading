@@ -89,14 +89,14 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 # ## 1. Which run is swept
 #
 # The sweep starts from the highest-Sharpe validation run across *both* the
-# equal-weight baseline and the allocation stage, rather than from the allocation
-# stage alone. That matters when no allocator improves on the equal-weight parent it
-# was built from: taking the best allocation row regardless would carry forward a
-# strategy that the previous notebook had already shown to be worse than doing
-# nothing, and would then measure that strategy's cost sensitivity instead.
+# equal-weight baseline and the allocation stage. Both are candidates because an
+# allocator is an alternative to equal weighting rather than an improvement on it by
+# construction: where every allocator lands below the equal-weight parent it was built
+# from, an allocation-only rule would carry forward a strategy the previous notebook
+# measured as worse than doing nothing, and would then report that strategy's cost
+# sensitivity in place of the one a reader would trade.
 #
-# It also means this notebook can select a run from either stage, so which one it
-# picked is printed rather than assumed.
+# Which stage the selected run came from is therefore printed rather than assumed.
 
 
 # %%
@@ -205,10 +205,8 @@ for combo_row in top_combos.iter_rows(named=True):
                 f"Sharpe={result.metrics.get('sharpe', 0):.3f}"
             )
         except Exception as error:
-            # Counted and kept. Without this the summary below reported a completed
-            # sweep whatever happened, because there was no failure counter at all:
-            # every backtest could raise and the notebook would still print
-            # "Cost sweep complete: 11 backtests" and read an unwritten registry.
+            # Counted rather than swallowed: the summary below reports this count, and
+            # the check after the loop refuses to go on when nothing was registered.
             n_failed += 1
             failures[f"{type(error).__name__}: {error}"] += 1
             print(
@@ -220,6 +218,19 @@ elapsed = time.time() - t0
 print(f"\nCost sweep complete: {n_done} backtests in {elapsed:.0f}s ({n_failed} failed)")
 for reason, count in failures.most_common():
     print(f"  {count:>3} x {reason[:150]}")
+
+# %% [markdown]
+# Section 3 reads the registry rather than the loop above, so a sweep in which nothing
+# was written and one in which everything was written look identical from there: the
+# curve would be drawn from whatever an earlier run left behind. Counting the failures
+# is not enough on its own, so the count stops the notebook.
+
+# %%
+if n_total and n_failed == n_total:
+    raise RuntimeError(
+        f"every one of the {n_total} cost backtests failed, so nothing was registered; "
+        "the curve below would describe an earlier run"
+    )
 
 # %% [markdown]
 # ## 3. Cost Sensitivity Analysis
@@ -240,12 +251,37 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
+# %% [markdown]
+# The read is scoped to the prediction the sweep above carried. The cost-sensitivity
+# table accumulates across runs and labels, and the selection feeding this notebook
+# moves whenever an upstream stage is re-run, so an unscoped read pools the current
+# curve with every curve that preceded it and draws them as one series per allocator.
+
 # %%
-cost_df = explorer.cost_sensitivity()
+carriers = top_combos["prediction_hash"].unique().to_list() if not top_combos.is_empty() else []
+frames = [explorer.cost_sensitivity(prediction_hash=h) for h in carriers]
+frames = [frame for frame in frames if not frame.is_empty()]
+cost_df = pl.concat(frames) if frames else pl.DataFrame()
+
+# %% [markdown]
+# The figure below shows the slope; this is the curve it is drawn from. A reader
+# comparing a decay rate against their own estimate of what they would pay needs the
+# levels themselves, and reading them off a line is not the same as having them. Every
+# level is printed rather than polars' default ten, so the top of the grid - the level
+# that decides whether the curve reaches zero inside it - is never the row that is
+# elided.
+
+# %% tags=["results"]
+if cost_df.is_empty():
+    print("No cost sensitivity data in registry")
+else:
+    with pl.Config(tbl_rows=cost_df.height):
+        print(cost_df.sort("allocator", "cost_bps"))
+
+# %%
+import matplotlib.pyplot as plt
 
 if not cost_df.is_empty():
-    import matplotlib.pyplot as plt
-
     fig, ax = plt.subplots(figsize=(10, 6))
 
     for alloc in cost_df["allocator"].unique().sort().to_list():
@@ -275,8 +311,6 @@ if not cost_df.is_empty():
     ax.legend(frameon=False)
     fig.tight_layout()
     fig.show()
-else:
-    print("No cost sensitivity data in registry")
 
 # %% [markdown]
 # ## What this notebook establishes, and what it does not
@@ -292,8 +326,8 @@ else:
 # not be read as an estimate of what the strategy would earn. The slope is the part
 # that is this notebook's own, and it is what the strategy analysis notebook uses.
 #
-# These are validation months throughout. Nothing here reads or selects on the sealed
-# holdout.
+# These are validation months throughout. Nothing here reads or selects on the holdout
+# period, which stays untouched until the strategy analysis notebook.
 #
 # **Next:** the risk management notebook adds a drawdown overlay and asks what it
 # costs in return to reduce the losses this strategy takes.

@@ -80,13 +80,16 @@ from case_studies.utils.sweep_config import (
 )
 from utils.paths import get_case_study_dir
 
+# %% [markdown]
+# `MAX_SYMBOLS` reduces the price panel and nothing else. The vectorized path takes its
+# universe and its P&L from the predictions frame and reads the panel only for the
+# rebalance calendar, so lowering it does not shrink a backtest here. It stays in the
+# cell because the same parameter is what reduces the engine-path case studies, and a
+# test harness binds it uniformly across all of them.
+
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
 LABEL = ""
-# Reduces the price panel only. The vectorized path takes its universe and its P&L
-# from the predictions frame and reads the panel for the rebalance calendar alone, so
-# lowering this does not shrink a backtest here (agent-workspace #911). It is kept
-# because the same parameter is what reduces the engine-path case studies.
 MAX_SYMBOLS = 0
 MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
 TOP_N_COMBOS = None
@@ -113,8 +116,8 @@ print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}, mode: {MODE_LABEL}")
 # keeps the funnel honest in the case where portfolio construction did not improve
 # on the equal-weight parent it was given.
 #
-# The selection is on validation. The holdout is not read here and no overlay is
-# scored against it.
+# The selection runs on validation months alone, and every number below comes from
+# them. The holdout period stays for the strategy analysis notebook.
 
 
 # %%
@@ -209,10 +212,13 @@ if MAX_RISK_VARIANTS > 0:
 n_done = 0
 n_failed = 0
 
-# Every run inside this loop is fed `combo_weights`, and computing them means running
-# the parent's allocator again - MVO and HRP take minutes. If neither control list can
-# produce a run, that work has no consumer, so it is not started. Without this the
-# notebook pays the full allocator cost to register nothing.
+# %% [markdown]
+# Every run inside the loop below is fed `combo_weights`, and computing those means
+# running the parent's allocator again. Where neither control list can produce a run,
+# that work has no consumer, so the loop is not entered at all and the weights are
+# never computed.
+
+# %%
 will_register = bool(portfolio_controls) or (not IS_VECTORIZED and bool(position_controls))
 if not will_register:
     print(
@@ -321,33 +327,35 @@ print(f"\nRisk sweep complete: {n_done} registered, {n_failed} failed")
 # this case study and, for each, the change in Sharpe against the parent it was
 # applied to.
 #
-# An empty answer here is the point of the notebook rather than a gap in it. The
-# alternative - running the controls anyway on invented intra-month prices - would
-# put a Sharpe delta next to each rule, and a reader would have no way to tell that
-# number from one a stop had actually earned.
+# An empty answer here is the point of the notebook rather than a gap in it. A Sharpe
+# delta next to each rule would read exactly as one a stop had earned, and on this path
+# it could only come from an intra-month price series the data does not contain, so an
+# empty table is the honest form of the answer.
+
+# %% [markdown]
+# The read is scoped to the prediction the parent run carries. The registry accumulates
+# across labels and across earlier funnels, and this section's answer is a count of
+# rows, so an unscoped read would turn an overlay row filed under some other selection
+# into evidence about this one - which is the single way this notebook's argument could
+# be reported as refuted by rows that never tested it.
 
 # %%
 explorer = BacktestExplorer(CASE_STUDY_ID)
+parent_hash = top_combos["prediction_hash"][0]
 
-# %%
 # %% tags=["results"]
-risk_df = explorer.risk_impact()
+risk_df = explorer.risk_impact(prediction_hash=parent_hash)
 
-if not risk_df.is_empty():
-    # Best by risk type
-    for risk_type in risk_df["risk_type"].unique().sort().to_list():
-        subset = risk_df.filter(pl.col("risk_type") == risk_type).sort("sharpe", descending=True)
-        best = subset.head(1)
-        print(f"  Best {risk_type}: {best['risk_name'][0]} → Sharpe={best['sharpe'][0]:.3f}")
-
-    print(f"\nAll risk overlays ({len(risk_df)}):")
-    print(
-        risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta")
-        .sort("sharpe", descending=True)
-        .head(15)
-    )
+if risk_df.is_empty():
+    print("No risk overlay run is filed against the parent run, which is the outcome.")
 else:
-    print("No risk overlay data in registry")
+    print(f"Risk overlays filed against the parent run: {len(risk_df)}")
+    with pl.Config(tbl_rows=risk_df.height):
+        print(
+            risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta").sort(
+                "sharpe_delta", descending=True
+            )
+        )
 
 # %% [markdown]
 # ## Key Takeaways
@@ -363,8 +371,8 @@ else:
 #    is a constraint the desk operates under, not a variant that competes for the
 #    highest validation Sharpe, and sweeping it as one invites keeping whichever cap
 #    was loosest on the grounds that it scored highest.
-# 4. Nothing was registered and the sealed holdout was not read, so the funnel enters
-#    the strategy analysis with the parent from section 1 unchanged.
+# 4. The overlay stage registers nothing and reads no holdout month, so the funnel
+#    enters the strategy analysis carrying the parent run from section 1 unchanged.
 #
 # **Next:** `15_strategy_analysis` confronts the selection this funnel performed and
 # is where the results are interpreted.
