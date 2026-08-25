@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 from sanitize_notebook_paths import (  # noqa: E402
     BINARY_MIME,
     _iter_notebooks,
+    iter_committed_notebooks,
     sanitize_notebook,
     sanitize_text,
 )
@@ -55,7 +56,7 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
     not the same as there being nothing to fix.
     """
     offenders: list[str] = []
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         raw = nb.read_text(encoding="utf-8")
         _, n, skipped = sanitize_notebook(raw)
         if n or skipped:
@@ -239,7 +240,7 @@ def test_the_sanitizer_leaves_an_image_payload_alone_when_it_encodes_tmp() -> No
 def test_no_committed_notebook_carries_an_image_that_stopped_decoding() -> None:
     """The damage the rule above caused is detectable, so it is checked for."""
     broken: list[str] = []
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         parsed = json.loads(nb.read_text(encoding="utf-8"))
         for index, cell in enumerate(parsed.get("cells", [])):
             for output in cell.get("outputs", []):
@@ -267,7 +268,7 @@ KNOWN_DESYNCED: frozenset[str] = frozenset()
 def _empty_tag_offenders() -> dict[str, int]:
     """{relative path: count} for notebooks whose paired .py lacks the empty tags."""
     out: dict[str, int] = {}
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         if paired_py_has_fossil(nb):
             continue  # pair agrees; stripping one side is what would break it
         _, n = strip_text(nb.read_text(encoding="utf-8"))
@@ -331,7 +332,7 @@ def _unrenderable_plotly_offenders() -> dict[str, int]:
     that carries neither an `image/png` nor a `text/html` sibling to fall back on.
     """
     out: dict[str, int] = {}
-    for nb_path in _iter_notebooks():
+    for nb_path in iter_committed_notebooks():
         nb = json.loads(nb_path.read_text(encoding="utf-8"))
         count = 0
         for cell in nb.get("cells", []):
@@ -380,3 +381,41 @@ def test_known_unrenderable_list_has_no_stale_entries() -> None:
         "render. Remove them from the list in this file so it cannot silently mask a "
         "regression:\n  " + "\n  ".join(stale)
     )
+
+
+def test_an_untracked_notebook_is_not_committed_content(tmp_path_factory) -> None:
+    """The four gates above say "committed", so an untracked file must not reach them.
+
+    They used to walk the working tree, which meant a scratch or preserved copy in one
+    worktree failed a gate that CI - checking out only what git tracks - could never fail on
+    the same file. The author then sees a failure nobody else can reproduce, on a file the
+    gate has no business reading. Measured 2026-08-25 on `cs6/cme_futures`, where leftovers
+    under `.workspace/preserved/` failed the empty-tag gate while `test-unit` was green on the
+    same commit.
+
+    The fixing script keeps the wider view on purpose: an untracked notebook is exactly the one
+    a user wants sanitized before adding it.
+    """
+    scratch = REPO_ROOT / ".pytest-untracked-notebook"
+    scratch.mkdir(exist_ok=True)
+    notebook = scratch / "untracked.ipynb"
+    notebook.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {"cell_type": "code", "metadata": {"tags": []}, "source": [], "outputs": []}
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        assert notebook in _iter_notebooks(), "the fixing script must still see it"
+        assert notebook not in iter_committed_notebooks()
+        assert str(notebook.relative_to(REPO_ROOT)) not in _empty_tag_offenders()
+    finally:
+        notebook.unlink()
+        scratch.rmdir()
