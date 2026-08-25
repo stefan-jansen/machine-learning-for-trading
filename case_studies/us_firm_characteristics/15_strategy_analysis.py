@@ -1115,10 +1115,12 @@ fig_tail.show()
 # cost exposure (long + short legs) and short-leg borrow costs. Two
 # layers cover the friction budget:
 #
-# 1. **Registry cost sweep** - the cost_sensitivity stage walked an
-#    11-level cost grid (0 to 50 bps per leg) on a base allocation lineage;
-#    the curve below shows how Sharpe responds to friction at the
-#    asset-class-realistic spread regime.
+# 1. **Registry cost sweep** - the cost_sensitivity stage re-ran the selected
+#    strategy at each level of the declared cost grid, holding everything else
+#    fixed, so the curve below is the response of this one strategy to friction
+#    rather than a spread across configurations. `setup.yaml` declares
+#    `cost_sensitivity: 1`, so exactly one lineage is swept and the curve has one
+#    Sharpe per level.
 # 2. **Micro-cap-realistic extended grid** - because both long and short
 #    legs concentrate in small-cap, illiquid names, asset-class-mean
 #    spreads understate execution costs; the extended grid (up to 500
@@ -1141,9 +1143,11 @@ with sqlite3.connect(str(_db)) as _con:
             JOIN prediction_sets p   ON b.prediction_hash = p.prediction_hash
             WHERE b.stage = 'cost_sensitivity'
               AND p.split = 'validation'
+              AND b.prediction_hash = ?
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            """
+            """,
+            (TOP_PHASH,),
         ).fetchall(),
         schema=[
             "spec_json",
@@ -1168,20 +1172,21 @@ def _cost_bps(spec_str: str) -> float:
 cost_df = cost_df.with_columns(
     pl.col("spec_json").map_elements(_cost_bps, return_dtype=pl.Float64).alias("cost_bps")
 )
-cost_curve = (
-    cost_df.group_by("cost_bps")
-    .agg(
-        sharpe_max=pl.col("sharpe").max(),
-        sharpe_min=pl.col("sharpe").min(),
-        sharpe_median=pl.col("sharpe").median(),
-        sharpe_ci_lo=pl.col("sharpe_ci95_lo").min(),
-        sharpe_ci_hi=pl.col("sharpe_ci95_hi").max(),
-        n=pl.len(),
+# Empty here means the cost stage swept a different lineage from the one selected
+# above, which is a disagreement between two selection paths rather than a missing
+# sweep, and it has to stop rather than draw an empty axis.
+if cost_df.is_empty():
+    raise RuntimeError(
+        f"No cost_sensitivity run is registered against the selected prediction "
+        f"{TOP_PHASH}. The cost notebook swept a different lineage, so its curve does "
+        "not describe the strategy this section reports."
     )
-    .sort("cost_bps")
+cost_curve = cost_df.select("cost_bps", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi").sort(
+    "cost_bps"
 )
-print("Cost sensitivity curve (validation, all configs):")
-print(cost_curve)
+print("Cost sensitivity of the selected strategy (validation):")
+with pl.Config(tbl_rows=cost_curve.height):
+    print(cost_curve)
 
 # %%
 cost_range = setup["costs"]["per_leg_cost_bps_range"]
@@ -1189,26 +1194,18 @@ fig, ax = plt.subplots(figsize=(9, 4))
 xs = cost_curve["cost_bps"].to_numpy()
 ax.fill_between(
     xs,
-    cost_curve["sharpe_ci_lo"].to_numpy(),
-    cost_curve["sharpe_ci_hi"].to_numpy(),
+    cost_curve["sharpe_ci95_lo"].to_numpy(),
+    cost_curve["sharpe_ci95_hi"].to_numpy(),
     alpha=0.18,
     color=COLORS["slate"],
-    label="CI envelope across configs",
+    label="bootstrap confidence interval",
 )
 ax.plot(
     xs,
-    cost_curve["sharpe_median"].to_numpy(),
+    cost_curve["sharpe"].to_numpy(),
     color=COLORS["blue"],
     linewidth=1.4,
-    label="median Sharpe",
-)
-ax.plot(
-    xs,
-    cost_curve["sharpe_max"].to_numpy(),
-    color=COLORS["amber"],
-    linewidth=1.0,
-    linestyle="--",
-    label="best-config Sharpe",
+    label="Sharpe, net of the charge",
 )
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.8, linestyle="--")
 ax.axvspan(
@@ -1220,17 +1217,29 @@ ax.axvspan(
 )
 ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation)")
-add_message_title(ax, "The registry cost grid bends the Sharpe curve gently")
+add_message_title(
+    ax,
+    "Sharpe declines slowly across the whole declared cost grid",
+    subtitle="Validation months; the strategy is unchanged, only what it pays to trade",
+)
 ax.legend(loc="best", fontsize=8, frameon=False)
 fig.show()
 
 # %% tags=["results"]
-crossing_rows = cost_curve.filter(pl.col("sharpe_ci_lo") > 0)
-if not crossing_rows.is_empty():
-    breakeven = crossing_rows["cost_bps"].max()
-    print(f"Best-config Sharpe CI lower bound stays > 0 up to: {breakeven:.0f} bps")
+crossing_rows = cost_curve.filter(pl.col("sharpe_ci95_lo") > 0)
+if crossing_rows.is_empty():
+    print("The Sharpe CI lower bound is at or below zero at every level of the grid.")
+elif crossing_rows.height == cost_curve.height:
+    print(
+        f"The Sharpe CI lower bound stays above zero at every level up to "
+        f"{cost_curve['cost_bps'].max():.0f} bps, the top of the grid, so the level at "
+        "which it would cross lies outside the range swept."
+    )
 else:
-    print("Best-config Sharpe CI lower bound never exceeds 0 across the cost grid.")
+    print(
+        f"The Sharpe CI lower bound stays above zero up to "
+        f"{crossing_rows['cost_bps'].max():.0f} bps per leg."
+    )
 
 print(
     f"Protocol per-leg cost: {cost_range} bps. "
@@ -1240,13 +1249,15 @@ print(
 print("See Chapter 18 for transaction-cost framework details.")
 
 # %% [markdown]
-# The breakeven printed above is the per-leg cost at which the confidence
-# interval first touches zero, and it is the number this curve exists to
-# produce. What makes the slope gentle is turnover rather than the cost
-# assumption: a monthly rebalance into a fixed number of names replaces only
-# part of the book each period, and cost is paid on what changes hands, so
-# erosion scales with round-trip cost times turnover and not with the spread
-# alone.
+# The line printed above reports the per-leg cost at which the confidence interval
+# first touches zero, or says that it does not inside the grid - which is the weaker
+# of the two statements, because it locates the crossing somewhere beyond the range
+# tested rather than at a level.
+#
+# What makes the decline slow is turnover rather than the cost assumption: a monthly
+# rebalance into a fixed number of names replaces only part of the book each period,
+# and cost is paid on what changes hands, so erosion scales with round-trip cost times
+# turnover and not with the spread alone.
 #
 # This curve answers whether broker fees at the asset-class-mean spread would
 # consume the edge. It cannot answer whether the strategy trades at that
