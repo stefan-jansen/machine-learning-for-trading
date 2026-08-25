@@ -1055,6 +1055,85 @@ def test_resolving_a_population_by_name_returns_the_generation_in_force(tmp_path
     assert OfficialPopulation.one(study, name="gbm-v1").hash == third.hash
 
 
+def test_declared_supersedes_applies_only_to_the_generation_it_produces(tmp_path: Path) -> None:
+    """A notebook declaring the hash it supersedes must reproduce a tip, never extend past one.
+
+    fx_pairs/07_gbm carries a non-empty ``SUPERSEDES_POPULATION`` so that re-running it resolves
+    to the published generation rather than writing a new one. That declaration describes exactly
+    one generation - the one produced by superseding that hash - so it applies only while that
+    generation is the one in force. Asking instead whether *any* generation exists gets the second
+    run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is None,
+    and offering the hash again there writes a second generation nobody asked for.
+    """
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    def declared_for(name: str, declared: str | None) -> str | None:
+        """The notebook's rule, in one place, so the assertions below exercise it rather than restate it."""
+        try:
+            current = OfficialPopulation.one(study, name=name)
+        except (ValueError, sqlite3.OperationalError):
+            return None
+        return declared if declared in (current.supersedes, current.hash) else None
+
+    # Run 1 on an empty registry: nothing to supersede, so the declaration is withheld.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    first = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+
+    # Run 2 on that same registry is the case the wrong rule breaks. The generation in force is
+    # the first one, whose supersedes is None, so the declaration still does not apply and the
+    # rerun resolves to the identical hash rather than writing a second generation.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    rerun = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+    assert rerun.hash == first.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == first.hash
+
+    # Now supersede for real, and the declaration naming the retired hash becomes the one that
+    # reproduces the tip - which is the state a maintainer's registry is in.
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="gbm-declared-v1", supersedes=first.hash
+    )
+    assert declared_for("gbm-declared-v1", first.hash) == first.hash
+    again = snapshot_official_models(
+        study,
+        [request(2.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", first.hash),
+    )
+    assert again.hash == second.hash
+
+    # And a declaration naming some other generation does not apply, so it cannot fork the chain.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+
+    # The authoring case, which testing only `current.supersedes == declared` blocks. An author
+    # holding the tip and declaring THAT hash is publishing the next generation, not reproducing
+    # one, and withholding there would fix the reader by making the publication impossible.
+    tip = OfficialPopulation.one(study, name="gbm-declared-v1")
+    assert declared_for("gbm-declared-v1", tip.hash) == tip.hash
+    third = snapshot_official_models(
+        study,
+        [request(3.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", tip.hash),
+    )
+    assert third.hash != tip.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == third.hash
+
+
 def test_interrupted_linear_run_reuses_completed_fold_on_retry(tmp_path: Path, monkeypatch) -> None:
     study = _linear_study(tmp_path, monkeypatch)
     request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
