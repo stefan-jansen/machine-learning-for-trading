@@ -317,8 +317,8 @@ if best_preds.height > 0 and fold_ranges.height > 0:
 # model families were trained on all labels, and the five modeling
 # chapters contribute different kinds of evidence: Ch11-13 produce
 # predictive forecasts; Ch14 extracts latent structure; Ch15 estimates
-# causal effects. Forcing all of these into a single ranking would be
-# misleading.
+# causal effects. A single ranking over all of them would compare answers
+# to different questions.
 
 # %%
 # Coverage map: family × label × evidence type
@@ -443,36 +443,57 @@ print(
 )
 
 # %% [markdown]
-# **No family clears credibility on the regression target; the
-# spread between families is small.** On `fwd_ret_5d`, the highest-IC
-# configurations cluster within a +0.020 band of zero, and every
-# family's HAC 95% CI straddles zero:
+# ### One row per family, with the interval beside the point estimate
 #
-# - **Tabular DL (`tabm_s`, epoch 75)**: IC = +0.0156,
-#   CI [-0.0028, +0.0340], $t_\text{HAC} = 1.66$.
-# - **Latent factors (SDF)**: +0.0124, CI [-0.0189, +0.0438],
-#   $t = 0.78$.
-# - **Deep learning (NLinear, epoch 5)**: +0.0105, CI [-0.0102, +0.0313],
-#   $t = 1.00$.
-# - **GBM (`default_huber`, 500 trees)**: +0.0074, CI [-0.0090, +0.0238],
-#   $t = 0.89$.
-# - **Linear (`ridge_a100.0`)**: -0.0062, CI [-0.0343, +0.0220],
-#   $t = -0.43$. The point estimate is negative and the CI straddles zero.
+# The ranking above is per configuration and checkpoint, so a family with many checkpoints fills
+# it. This reduces each family to its highest-IC row and puts a HAC interval, at two standard
+# errors, beside the point estimate - the comparison the rest of the section is read against.
 #
-# This is the most informationally efficient equity universe in
-# the book, and all five highest-IC configurations sit on the
-# below-credibility / straddles-zero side of the continuum on
-# `fwd_ret_5d`. The daily-pooled IC distribution puts the four
-# positive highest-IC estimates within their joint CI overlap -
-# point-estimate gaps between families do not survive HAC
-# inference at the 5% level. The directional reframings (§6) and
-# the longer / risk-adjusted horizons (§6) tell a different story
-# and are where the equity+option feature set earns its place.
+# `covers_zero` is the column to read first. Where it is true for every family, the ordering of
+# the point estimates is not a ranking that inference supports, and the gap between two families
+# is smaller than what either estimate is measured to. Reading the ordering anyway is the mistake
+# this table is arranged to prevent.
+
+# %% tags=["results"]
+family_leaders = (
+    all_metrics.filter(pl.col("ic_mean_daily").is_not_null() & pl.col("ic_se_hac").is_not_null())
+    .filter(pl.col("ic_se_hac") > 0)
+    .sort("ic_mean_daily", descending=True, nulls_last=True)
+    .group_by("family", maintain_order=True)
+    .first()
+    .select(
+        "family",
+        "config_name",
+        "checkpoint_value",
+        "ic_mean_daily",
+        "ic_se_hac",
+        t_hac=pl.col("ic_mean_daily") / pl.col("ic_se_hac"),
+        ci_lo=pl.col("ic_mean_daily") - 1.96 * pl.col("ic_se_hac"),
+        ci_hi=pl.col("ic_mean_daily") + 1.96 * pl.col("ic_se_hac"),
+    )
+    .with_columns(covers_zero=(pl.col("ci_lo") <= 0) & (pl.col("ci_hi") >= 0))
+    .sort("ic_mean_daily", descending=True)
+)
+print(f"families compared: {family_leaders.height}")
+print(f"intervals covering zero: {family_leaders.get_column('covers_zero').sum()}")
+family_leaders
+
+# %% [markdown]
+# **The spread between families is small relative to what any of them is measured to.** This is
+# the most informationally efficient equity universe in the book, and the regression target on
+# `fwd_ret_5d` is where that shows: the point estimates sit close together and close to zero,
+# and the intervals overlap each other heavily.
+#
+# What follows from that is a constraint on how the rest of this notebook may be read. A family
+# ordering taken off point estimates whose intervals overlap is not evidence about the families;
+# it is evidence about which random draw this sample happens to be. The directional reframings
+# and the longer and risk-adjusted horizons in §6 are a different question asked of the same
+# features, and that is where the equity-and-option feature set is worth judging.
 
 # %% [markdown]
 # ### Which Model Families Extract the Most Signal?
 #
-# The primary comparison uses the best configuration from each family,
+# The primary comparison uses the highest-IC configuration from each family,
 # evaluated by both mean IC and consistency across the 2 folds. With
 # only 2 data points per family, statistical conclusions are inherently
 # weak: the broad cross-section improves precision within each
@@ -583,8 +604,8 @@ if fold_ic.height > 0:
     )
 
 # %% [markdown]
-# With 2 folds and highest-IC point estimates compressed within
-# ±0.020 of zero (§3), the box plots are minimally informative -
+# With two folds, and the highest-IC point estimates compressed close to zero (§3),
+# the box plots are minimally informative -
 # each "distribution" is two dots, and the inter-family overlap is
 # almost complete. The four positive highest-IC configurations
 # (`tabm_s`, SDF, NLinear, and `default_huber`) cluster together; the
@@ -718,10 +739,7 @@ if cp_families:
     plot_learning_curves(
         cp_data,
         cp_families,
-        titles={
-            "latent_factors": "Latent-factor IC is checkpoint sensitive",
-            "tabular_dl": "TabM peaks at epoch 75",
-        },
+        titles={family: f"{family} IC across the published checkpoints" for family in cp_families},
     )
 
 # %% [markdown]
@@ -734,9 +752,10 @@ if cp_families:
 # - **Latent factors**: oscillatory IC across checkpoints
 #   on this broad panel; checkpoint selection is fragile and
 #   the late-epoch ceiling is close to the early-epoch best.
-# - **Tabular DL (TabM)**: improves through the registered checkpoints and
-#   reaches the family's highest IC with `tabm_s` at epoch 75 (+0.0156),
-#   followed closely by epoch 100 (+0.0152).
+# - **Tabular DL (TabM)**: the schedule is read off the curve rather than named here. The
+#   checkpoint each configuration reaches its highest IC at moves when the declared schedule
+#   moves - `08_tabular_dl` publishes the presets' full epoch budget at the declared interval -
+#   so an epoch quoted in this prose would describe a grid the notebooks no longer run.
 #
 # The current GBM and Ch13 rows retain only one selected checkpoint per
 # configuration, so this notebook does not manufacture learning curves by
@@ -924,7 +943,7 @@ if gbm_importance is not None and gbm_importance.height > 0:
 # a risk-adjusted variant (`fwd_ret_risk_adj_5d`), and two directional
 # reframings (`fwd_dir_5d`, `fwd_dir_10d`). The forest below renders
 # the highest-IC config per family for each label as a point estimate
-# with its HAC 95% CI; tiles labeled "no run" mean a family was not
+# with its HAC interval; tiles labeled "no run" mean a family was not
 # trained on that label, which is itself part of the diagnosis.
 
 # %%
@@ -966,7 +985,7 @@ plot_label_horizon_forest(
         "fwd_dir_5d": "fwd_dir_5d (binary direction, weekly)",
         "fwd_dir_10d": "fwd_dir_10d (binary direction, biweekly)",
     },
-    title="PCA clears zero at longer and risk-adjusted horizons",
+    title="Where each family lands, one panel per label",
 )
 
 # %% [markdown]
@@ -980,27 +999,17 @@ plot_label_horizon_forest(
 # were retrained on the binary targets. Causal_dml's missing tiles
 # are the same: the family ran a single ATE on the primary label.
 #
-# The horizon picture is materially different from the §3 reading on
-# the primary label:
+# **Read the panels for which intervals clear zero, not for which point estimate is highest.**
+# The primary label in §3 had every family's interval covering zero; the alternate regression
+# labels need not, and where one does not, that is the strongest statement this notebook makes
+# about any target. The table below counts it rather than leaving it to the eye.
 #
-# - **PCA clears the interval gate on two alternate labels.** On
-#   `fwd_ret_10d`, PCA reaches +0.0815 with HAC 95% CI
-#   [+0.0497, +0.1134] and $t = 5.02$. On `fwd_ret_risk_adj_5d`,
-#   PCA reaches +0.0444 with CI [+0.0222, +0.0666] and $t = 3.93$.
-# - **Directional reframings are weak on this case study**: linear
-#   `logistic_l1_C0.001` leads its family on `fwd_dir_5d` (-0.0006),
-#   while `logistic_l2_C100.0` leads on `fwd_dir_10d` (+0.0019). Both
-#   CIs straddle zero, and GBM's `default_binary` is essentially
-#   noise on `fwd_dir_5d` (+0.0058) and slightly negative on
-#   `fwd_dir_10d` (-0.0053). Unlike crypto perps or fx, where
-#   directional reframing rescued GBM/linear credibility, here the
-#   binary recasting does not gain CI separation.
-#
-# The latent ranking changes with the target. SDF leads the latent family
-# on `fwd_ret_5d`, while PCA leads at both alternate regression labels.
-# The supervised families do not displace those alternate-label PCA
-# estimates. This is label-routing evidence, not evidence that one family
-# dominates across horizons.
+# Two things are worth reading off the panel beyond that. **Which family leads changes with the
+# target** - a family that leads on one label need not lead on another, and where that happens
+# it is evidence about routing a label to a model rather than about one family dominating.
+# **The directional reframings are a separate question**: recasting the target as a sign is a
+# different problem, and in some case studies it rescues a family whose regression estimate is
+# indistinguishable from zero. Whether it does so here is in the panel.
 
 # %% [markdown]
 # ### Regime Sensitivity
@@ -1043,13 +1052,15 @@ if regime_df.height > 0:
     )
 
 # %% [markdown]
-# The regime results do not support a single high-volatility advantage.
-# SDF changes from +0.0269 in low volatility to -0.0020 in high volatility,
-# while GBM remains positive but weakens from +0.0110 to +0.0037. TabM rises
-# from +0.0034 to +0.0278, and NLinear rises from +0.0077 to +0.0134. Linear
-# is weak in low volatility and turns negative at -0.0135 in high volatility.
-# These shifts argue against a static family ranking,
-# but two validation folds are too little evidence for regime-timed weights.
+# **What to look for is whether the families move together or in opposite directions.** The
+# premise of the section is that option features should carry more information when implied
+# volatility surfaces are informative, which would show as most families improving in the
+# high-volatility bucket. Families changing sign in opposite directions is the other outcome,
+# and it argues against a static family ranking rather than for regime timing.
+#
+# Either reading is bounded by the same limit: two validation folds split into volatility
+# buckets leaves very few dates per bucket, so a sign change here is not enough evidence to
+# weight a strategy by regime. The measurement is worth making and is not worth trading on.
 
 # %% [markdown]
 # ## 7. Structural and Causal Evidence
@@ -1120,7 +1131,7 @@ if "pca" in lf_extras:
     axes[1].set_title("Cumulative variance", loc="left")
     axes[1].axhline(0.5, ls="--", color=COLORS["neutral"], alpha=0.5)
     fig.suptitle(
-        f"Five PCA factors explain {sum(mean_var):.1%} of validation variance",
+        "How much of the validation variance the retained factors account for",
         x=0.02,
         ha="left",
         fontweight="semibold",
@@ -1302,24 +1313,25 @@ else:
     print("No causal DML results available for this case study")
 
 # %% [markdown]
-# Causal DML estimates the conditional effect of `ivrv_spread` on weekly
-# forward returns after adjustment for the declared confounders. The
-# corrected development-period run reports an effect of -0.022823 with
-# Driscoll-Kraay SE 0.020006 ($t = -1.14$, $p = 0.257$). The naive
-# same-sample naive coefficient is -0.022934, for a signed adjustment of
-# -0.49%. The within-entity block-permutation diagnostic passes at $p = 0.01$.
+# Causal DML estimates the conditional effect of `ivrv_spread` on weekly forward returns after
+# adjustment for the declared confounders. The line above prints the adjusted effect, its
+# Driscoll-Kraay standard error, the naive same-sample coefficient, the signed adjustment
+# between them, and the block-permutation p-value.
 #
-# The diagnostics disagree: the coefficient is not distinguishable from
-# zero under panel-robust inference, while its magnitude is unusual in the
-# finite permutation distribution. This is not the same information the
-# supervised models use. The DML coefficient is a conditional treatment
-# estimate, not a cross-sectional IC, and its causal interpretation still
-# depends on conditional ignorability, overlap, and SUTVA.
+# **The two diagnostics can disagree, and reading them as one number is the error to avoid.**
+# Panel-robust inference asks whether the coefficient is distinguishable from zero. The block
+# permutation asks whether its magnitude is unusual once the treatment-outcome timing is
+# disturbed. A coefficient can be indistinguishable from zero under the first and unusual under
+# the second, because they are testing different things, and neither of them tests unobserved
+# confounding.
 #
-# For strategy design, `ivrv_spread` remains a plausible feature with a
-# negative adjusted coefficient. The evidence is not strong enough to use
-# that sign as a binding portfolio prior or to claim that the channel is
-# causally established.
+# `bias%` is the quantity to be most careful with. It is the gap between the naive and adjusted
+# coefficients as a share of the adjusted one, on the same rows, and a small value means the
+# declared confounders barely move the estimate - not that there is nothing to adjust for.
+#
+# The DML coefficient is a conditional treatment estimate rather than a cross-sectional IC, so
+# it does not enter the family comparison above. Its causal reading still rests on conditional
+# ignorability, overlap and SUTVA, none of which any output here tests.
 
 # %% [markdown]
 # ### Calibration: Do Prediction Intervals Reach Their Nominal Coverage?
@@ -1357,30 +1369,22 @@ if conformal_df.height > 0:
     print(pivot)
 
 # %% [markdown]
-# All five families materially **under-cover** at every level. Empirical
-# coverage is 18–40 pp below nominal at 80%, 17–39 pp below at 90%, and
-# 13–33 pp below at 95%. Residuals in the later validation fold are much
-# wider than the earliest-fold calibration suggests:
+# **Read each family's empirical coverage against the nominal level in the same column, and the
+# width beside it.** Coverage below nominal means the interval is too narrow out of time:
+# residuals in the later fold are wider than the earliest fold's calibration set implied. Width
+# is in units of the actuals' standard deviation, so a family can only claim tighter intervals
+# if it reaches comparable coverage while showing a smaller width.
 #
-# - **Linear `ridge_a100.0`**: 0.597 / 0.716 / 0.804 (vs nominal
-#   0.80 / 0.90 / 0.95), widths 1.39 / 1.92 / 2.51σ - the tightest
-#   intervals, but still substantially below target coverage.
-# - **Latent factors `sdf`**: 0.615 / 0.734 / 0.815, widths
-#   1.47 / 2.03 / 2.62 standard deviations.
-# - **Tabular DL `tabm_s`**: 0.603 / 0.725 / 0.808, widths
-#   1.46 / 2.03 / 2.64 standard deviations.
-# - **GBM `default_huber`**: 0.597 / 0.714 / 0.797, widths
-#   1.49 / 2.06 / 2.65 standard deviations.
-# - **Deep learning `nlinear`**: 0.398 / 0.513 / 0.619, widths
-#   1.48 / 2.01 / 2.59σ. It has the largest coverage shortfall at
-#   every nominal level.
+# The shortfall to watch for is a systematic one - every family below nominal at every level -
+# rather than one family missing. A systematic shortfall is a statement about the sample, not
+# about the models: it says the calibration fold and the evaluation folds are not exchangeable,
+# which is what a split-conformal interval assumes and what a regime change breaks.
 #
-# The calibration result is non-trivial for Ch19 risk management.
-# All five static intervals are too narrow out of time, so a deployed
-# sleeve that froze the earliest-fold quantile would understate residual
-# uncertainty and risk oversizing positions. NLinear shows the most severe
-# shift. ACI extensions (Ch12 §12.6) that update interval width online are
-# the right next step before using these intervals for sizing.
+# **This is the section that matters for position sizing.** An interval that under-covers out of
+# time understates residual uncertainty, and a sleeve that froze the earliest fold's quantile
+# would sit larger than the risk it believed it was taking. Where the shortfall is systematic,
+# the online-updating extensions in Chapter 12, Section 12.6 are the next step before any of
+# these intervals is used to size anything.
 
 # %% [markdown]
 # ## 8. Pre-Backtest Judgment and Handoff
@@ -1460,93 +1464,84 @@ print("Synthesis Table:")
 print(synthesis)
 
 # %% [markdown]
+# ### Which label-and-family pairs have an interval that excludes zero
+#
+# This is the one question the whole notebook has been building towards, so it is counted rather
+# than described. A pair whose HAC interval excludes zero is the strongest statement available
+# here; everything else is a point estimate whose ordering is smaller than its own uncertainty.
+
+# %% tags=["results"]
+credible = (
+    multi_label_df.filter(pl.col("ic_ci_lo").is_not_null() & pl.col("ic_ci_hi").is_not_null())
+    .with_columns(excludes_zero=(pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))
+    .sort("ic_mean_daily", descending=True, nulls_last=True)
+)
+print(f"{credible.height} label-family pairs carry an interval")
+print(f"{credible.get_column('excludes_zero').sum()} of them exclude zero")
+credible.select(
+    "label", "family", "config_name", "ic_mean_daily", "ic_ci_lo", "ic_ci_hi", "excludes_zero"
+)
+
+# %% [markdown]
 # ### Recommendations
 #
-# Reading is organized by CI tier on the primary label, then by which
-# alternate label rescues credibility. With every highest-IC family on
-# `fwd_ret_5d` straddling zero, no family advances "strong" on the
-# weekly regression target.
+# **Read the table above before the prose below.** What advances to a backtest is decided by
+# which pairs exclude zero, not by which point estimate is highest, and the composition of that
+# set is what these recommendations turn on.
 #
-# **CI-credible on `fwd_ret_5d` (primary):** none. All four families
-# with a daily-pooled IC point estimate above zero (`tabm_s` +0.0156,
-# SDF +0.0124, NLinear +0.0105, `default_huber` +0.0074) have
-# HAC 95% CIs that straddle zero; `ridge_a100.0` sits at -0.0062, also
-# straddles-zero.
+# The reading is in three tiers.
 #
-# **CI-credible on alternate labels:**
-# - **PCA on `fwd_ret_10d`**: daily-pooled IC +0.0815, HAC 95% CI
-#   [+0.0497, +0.1134], $t = 5.02$.
-# - **PCA on `fwd_ret_risk_adj_5d`**: daily-pooled IC +0.0444, HAC 95% CI
-#   [+0.0222, +0.0666], $t = 3.93$.
+# **Pairs whose interval excludes zero** are the candidates with evidence behind them. Where the
+# primary label produces none and an alternate label produces some, the conclusion is that the
+# sleeve should be **label-routed** - run on the label where the evidence is, rather than on the
+# primary label because that is the one the case study is named after. That option exists here
+# only because every family was fitted against every declared label rather than the traded one.
 #
-# **Positive on the primary label, but its interval straddles zero:**
-# - **Latent factors (SDF)**: highest primary-label latent IC is +0.0124.
-#   Its interval includes zero, so the stronger structural evidence comes
-#   from the alternate-label PCA runs above.
-# - **Tabular DL (`tabm_s`)**: only trained on `fwd_ret_5d`; +0.0156
-#   point estimate and the largest HAC t-stat among the positive families
-#   ($t = 1.66$). It was not trained on the alternate labels and
-#   would be the natural next training target if a TabM sleeve is
-#   wanted.
-# - **Deep learning (NLinear)**: only trained on `fwd_ret_5d`;
-#   +0.0105 with CI straddling zero ($t = 1.00$). As with TabM,
-#   alternate-label runs would clarify whether the temporal
-#   architecture rescues credibility on `fwd_ret_10d`.
-# - **GBM (`default_huber`)**: the primary-label leader is +0.0074.
-#   GBM family leaders range from +0.0071 to +0.0158 across regression
-#   labels and fall below zero on `fwd_dir_10d`.
+# **Pairs with a positive point estimate whose interval covers zero** are not evidence, and are
+# not disqualified either. If they advance, they advance on what a backtest measures - money
+# after costs and turnover - rather than on rank correlation. A family trained on the primary
+# label alone reads the same way: its absence from the alternate labels is a gap in coverage
+# rather than a result about the family, and training it there is how to close it.
 #
-# **Causal DML (separate framing):**
-# - **`ivrv_spread` on `fwd_ret_5d`**: adjusted coefficient -0.022823,
-#   Driscoll-Kraay $t = -1.14$, $p = 0.257$, signed bias -0.49%, and
-#   permutation $p = 0.01$. The sign is negative, but panel-robust
-#   inference does not separate it from zero.
+# **The causal estimate is a separate framing and does not compete in this ranking.** It is a
+# conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **Conformal calibration caveats (§7):**
-# - All five family leaders **under-cover** at every nominal level when the
-#   earliest validation fold calibrates the later fold. Static intervals
-#   would understate uncertainty and risk oversizing; NLinear has the
-#   largest coverage shortfall.
+# **The calibration result in §7 constrains every tier.** Where intervals under-cover out of
+# time, no candidate should have its interval used for position sizing without the
+# online-updating correction, whatever its IC.
 #
 # ### Forecast Representation
 #
 # For backtesting, predictions should be used as:
-# - **Rank-based selection**: sort by `y_score`, select top-N stocks
-#   (top decile = about 55 stocks in the current validation panels)
-# - **Label routing**: latent-factor sleeve runs on
-#   the alternate-label PCA candidates, not the primary-label latent
-#   estimate. Supervised sleeves remain exploratory on `fwd_ret_5d`.
-# - **Ensemble**: low pairwise correlation across families means
-#   small averaging gains; weight by CI tightness, not by point
-#   estimate magnitude.
+#
+# - **Rank-based selection**: sort by `y_score` and take the top decile of the cross-section,
+#   which is the cut the decile-spread diagnostic in §5 measured.
+# - **Label routing**: run each sleeve on the label its own evidence supports, per the table
+#   above, rather than routing every family to the primary label.
+# - **Ensemble**: the pairwise rank correlations in §5 decide whether averaging helps. Low
+#   correlation among families whose intervals all cover zero is diversity among weak signals,
+#   and averaging weak signals does not produce a strong one. Weight by how tight an interval
+#   is rather than by how large a point estimate is.
 
 # %% [markdown]
 # ### The Option Feature Question
 #
-# Do option-derived features justify their data cost? The evidence
-# is more nuanced than the original framing of this case study
-# suggested:
+# Do option-derived features justify their data cost? This notebook can bound the answer and
+# cannot settle it, and the boundary is worth stating exactly.
 #
-# - Five of the top 15 features by importance are option-derived. The
-#   alternate-label panel shows that structural PCA is the family-label
-#   combination that reaches CI credibility at the 10-day and
-#   risk-adjusted horizons.
-# - The corrected causal DML estimate has a negative sign, but its
-#   Driscoll-Kraay p-value is 0.257. It does not establish that the
-#   volatility-risk-premium channel survives panel-robust inference.
-# - However, on the primary `fwd_ret_5d` regression, the
-#   equity+option feature set does not produce a CI-credible config
-#   in any family - including latent factors. Under HAC inference,
-#   all highest-IC estimates on `fwd_ret_5d` cluster within their
-#   joint CI overlap (point-estimate gaps between families are
-#   smaller than the HAC standard error).
+# **What it shows**: how many option-derived features appear among the ranked importances in §5,
+# and which label-and-family pairs reach an interval excluding zero. Both are printed above.
 #
-# Practical answer: option features participate in the strongest
-# alternate-label structural results, but this notebook does not run an
-# equity-only ablation. The data therefore remains justified for testing
-# the structural and risk-adjusted routes, while the claim of incremental
-# value remains open. It is not sufficient to make a supervised family
-# CI-credible on `fwd_ret_5d`.
+# **What it does not show**: whether those features added anything. No equity-only ablation is
+# run anywhere in this case study, so there is no comparison against the same models fitted
+# without the option surface. A feature ranking high in importance means the model used it, not
+# that the model would have done worse without it - a correlated equity feature may carry the
+# same information at no data cost.
+#
+# **What follows for a reader deciding whether to buy the data**: the question is open, and the
+# ablation is the experiment that would close it. Fitting the declared menu on the equity
+# features alone and comparing the two populations would replace this paragraph with a
+# measurement.
 #
 # ### What This Analysis Does Not Tell Us
 #
@@ -1577,33 +1572,27 @@ print(synthesis)
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **No family clears credibility on `fwd_ret_5d`**: highest-IC
-#    point estimates cluster within +/-0.020 of zero: `tabm_s` +0.0156,
-#    SDF +0.0124, NLinear +0.0105, `default_huber` +0.0074,
-#    and `ridge_a100.0` -0.0062 - and every HAC 95% CI straddles zero.
-#    Daily-pooled IC with the HAC adjustment is the controlling
-#    measure here; cross-family point-estimate gaps are smaller
-#    than the HAC standard error
-# 2. **Two alternate labels clear the interval gate for PCA**:
-#    PCA reaches daily-pooled IC +0.0815 on `fwd_ret_10d` and +0.0444 on
-#    `fwd_ret_risk_adj_5d`; both HAC 95% CIs exclude zero. The
-#    latent-factor sleeve should be label-routed rather than inferred
-#    from the primary `fwd_ret_5d`
-# 3. **Causal DML remains diagnostic, not confirmatory**: the corrected
-#    coefficient is -0.022823 with Driscoll-Kraay $t = -1.14$ and
-#    $p = 0.257$. The permutation diagnostic passes at 0.01, but the
-#    panel-robust interval includes zero and identification assumptions
-#    remain untested
-# 4. **Prediction diversity is high but rests on weak signals**:
-#    pairwise rank correlations are low across the highest-IC
-#    configurations. Because no family clears credibility on the
-#    primary label, this is "diverse weak signals" not "diverse
-#    strong signals". Ensemble averaging gives small gains;
-#    label-routed allocation is the better Ch20 input
-# 5. **Conformal intervals uniformly under-cover out of time**: all five
-#    family leaders miss nominal coverage by about 13-40 pp across the three
-#    levels. NLinear has the largest shortfall. None reaches nominal
-#    calibration on the later validation fold, so static interval sizing
-#    is not deployment-ready
+# 1. **Read intervals, not orderings.** On the primary regression label the families' point
+#    estimates sit close together relative to their own standard errors, so the ordering between
+#    them is not a result. The table in §8 counts which label-and-family pairs have an interval
+#    excluding zero, and that count is the finding.
+#
+# 2. **Evidence can live on a label other than the traded one.** Because every family was fitted
+#    against every declared label, a sleeve can be routed to the target its own evidence
+#    supports. That option exists only because nothing selected a single label upstream.
+#
+# 3. **The causal estimate answers a different question and is not a ranking signal.** It is a
+#    conditional effect of one declared treatment, its panel-robust inference and its
+#    permutation diagnostic can disagree, and neither tests the identifying assumptions.
+#
+# 4. **Prediction diversity is worth having only if the signals are worth averaging.** Low
+#    pairwise rank correlation across families whose intervals cover zero is diversity among
+#    weak signals; label-routed allocation is the better input to Chapter 20 than an ensemble
+#    of them.
+#
+# 5. **Nothing here selects anything.** IC measures whether a ranking is correct, not whether a
+#    strategy trading it makes money after costs and turnover.
+#    [`14_backtest`](14_backtest.ipynb) selects on validation backtest Sharpe, over every
+#    checkpoint of every model this notebook compared.
 #
 # **Next**: [`14_backtest`](14_backtest.ipynb) applies these predictions to simulated trading.

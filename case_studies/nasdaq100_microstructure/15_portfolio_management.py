@@ -142,12 +142,16 @@ print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 # allocation config added to the strategy spec. The spec hash automatically
 # differentiates these from signal-stage backtests.
 #
-# Covariance-based allocators (MVO, HRP, risk-parity) must estimate
-# short-horizon correlations from 15-minute returns — a noisier signal than
-# daily, and prohibitively slow over 1.3M bars — so they are skipped by default
-# for this case study. The comparison that matters here is not which allocator
-# wins but how far below zero all of them sit: every-bar rebalancing across the
-# full universe pays turnover cost no weighting scheme can offset.
+# Covariance-based allocators - mean-variance, hierarchical risk parity, risk
+# parity - need a correlation matrix estimated from the same short-horizon
+# returns being traded. At this frequency that estimate is both noisy and
+# expensive to compute over the full history, so they are skipped by default.
+#
+# The comparison to draw from this grid is between allocators under one trading
+# rule, not between allocators and anything else. Every configuration here
+# rebalances at every decision time across the whole universe, so they all carry
+# the same turnover, and a weighting scheme redistributes capital across
+# positions without changing how often those positions turn over.
 
 # %%
 TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
@@ -290,13 +294,12 @@ if not alloc_comparison.is_empty():
     fig.show()
 
 # %% [markdown]
-# ### Top 10 Combinations
+# ### The strongest allocation combinations
 #
-# Least-negative (prediction × TOP_K × allocator) triples by allocation-stage
-# Sharpe. Even the best of these is well below zero — they pass to the cost
-# notebook (Ch18) not as viable strategies but as the input surface for the
-# cadence sweep, which shows how much of the gap closes when trade frequency
-# drops.
+# The highest-scoring combinations of prediction, position count and allocator.
+# They pass to the cost notebook as the input surface for the rebalancing-cadence
+# sweep, which varies how often the same ordering is traded. Nothing is selected
+# here.
 
 # %%
 top10 = explorer.best(stage="allocation", top_n=10)
@@ -305,22 +308,29 @@ print(top10.select("source", "sharpe", "cagr", "max_drawdown"))
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. On the full universe at 15-minute cadence, every allocator is deeply
-#    negative. The spread between best and worst allocator is second-order to
-#    the spread between every-bar rebalancing and the slot mechanism: weighting
-#    scheme is the wrong lever when turnover is the binding constraint.
-# 2. Covariance-based allocators (MVO, HRP) are skipped by default: estimating
-#    correlations from 1.3M 15-minute bars is prohibitively slow and noisier
-#    than daily. Set `SKIP_EXPENSIVE_ALLOC = False` to include them — they do
-#    not change the conclusion.
-# 3. Larger TOP_K spreads cost drag across more positions but cannot offset
-#    every-bar turnover; concentration is a marginal adjustment within a
-#    uniformly loss-making regime.
-# 4. The portfolio-construction lesson here is diagnostic: allocation sits
-#    downstream of the cost problem. The cost-feasible carrier (Ch16 §4) solves
-#    that problem upstream, at the signal stage, by controlling turnover through
-#    the slot mechanism rather than through position weights.
+# 1. **An allocator decides sizes, not turnover.** Every configuration in this
+#    grid rebalances at the same times, so the differences between them are
+#    differences in how capital is spread across positions. When the cost of
+#    turning positions over dominates, redistributing weight across them cannot
+#    recover it, and the allocator comparison is measuring a second-order effect.
 #
-# **Next**: The costs notebook (Ch18) compares the full universe against the
-# cost-feasible screen and sweeps cadence × per-share cost to locate the viable
-# implementation regime.
+# 2. **Covariance-based allocation needs an estimate the data may not support.**
+#    Mean-variance and hierarchical risk parity require a correlation matrix
+#    between assets. Estimated from short-horizon returns, that matrix is noisy,
+#    and a weighting scheme built on a noisy correlation is not more principled
+#    than an equal weighting - it is differently wrong and more expensive.
+#
+# 3. **Position count is a concentration decision.** Holding more names spreads
+#    the same capital more thinly, which reduces the contribution of any single
+#    position, correct or not, and increases the number of positions paying
+#    costs. It moves the outcome without addressing what drives it.
+#
+# 4. **Allocation sits downstream of the cost problem.** Position sizing can only
+#    distribute whatever the signal and the trading rule leave behind. The lever
+#    that acts on the cost itself is how often the strategy trades, which is what
+#    the cost notebook sweeps.
+#
+# **Known limitations**: Every result here is computed on the whole universe at
+# one rebalancing frequency, so it describes allocation under those conditions
+# only. Covariance-based allocators are excluded by default and their inclusion
+# is a configuration change, not a change to the comparison being made.
