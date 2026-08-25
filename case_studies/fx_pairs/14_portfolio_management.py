@@ -364,6 +364,12 @@ if not include_preview:
 # declaration into a published result.
 
 # %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work. Read the registered set
+# once, before the first member, so every result can be attributed to one or the other.
+registered_before = set(study.backtests.table().get_column("backtest_hash"))
 allocation_results = []
 for job in jobs:
     execution = run_backtests(
@@ -389,6 +395,12 @@ if any(
     for result in allocation_results
 ):
     raise RuntimeError("the allocation population is incomplete or misclassified")
+
+served = sum(1 for result in allocation_results if result.hash in registered_before)
+print(
+    f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
+    f"{len(allocation_results)} in the population"
+)
 
 
 def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:

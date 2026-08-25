@@ -256,6 +256,12 @@ else:
 # planned model, checkpoint and portfolio size completed.
 
 # %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work. Read the registered set
+# once, before the first member, so every result can be attributed to one or the other.
+registered_before = set(study.backtests.table().get_column("backtest_hash"))
 backtests = []
 for job in jobs:
     execution = run_backtests(
@@ -289,6 +295,12 @@ backtest_rows = pl.DataFrame(
 )
 if set(backtest_rows.get_column("stage")) != {"signal"}:
     raise RuntimeError("equal-weight baseline runs must register with stage='signal'")
+
+served = sum(1 for result in backtests if result.hash in registered_before)
+print(
+    f"Equal-weight baselines: {len(backtests) - served} computed, {served} served from the registry, "
+    f"{len(backtests)} in the population"
+)
 
 if not include_preview:
     if baseline_population is None:
