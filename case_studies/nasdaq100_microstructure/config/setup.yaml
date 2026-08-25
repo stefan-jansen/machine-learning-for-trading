@@ -601,6 +601,14 @@ labels:
     fwd_dir_15m: fwd_ret_15m
 
 modeling:
+  dl:
+    # The backend the sequence families are trained on in production. Declared rather
+    # than defaulted: the four deep-learning notebooks refuse to train on a device other
+    # than the one asked for, because the device is part of what the run is registered
+    # under, and a notebook that invents `gpu` from a missing section makes a
+    # CUDA-free environment fail on a requirement nobody wrote down. A run on other
+    # hardware sets the notebook's DEVICE parameter, which is then what gets registered.
+    device: gpu
   gbm:
     libraries: [lightgbm]
     preset: default
