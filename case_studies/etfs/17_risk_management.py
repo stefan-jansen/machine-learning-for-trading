@@ -14,46 +14,58 @@
 # ---
 
 # %% [markdown]
-# # ETF Risk Management: Engine-Level Risk Rules
+# # ETF risk overlays: what a stop costs when the holding period is a month
 #
-# **Chapter 19 — Risk Management**
+# A risk overlay is a rule that closes a position before the strategy would have. A stop-loss
+# closes it when it has lost a fixed amount, a trailing stop when it has given back a fixed amount
+# of its gain, a time exit when it has been held long enough. Each is uncontroversial as an idea
+# and each does the same thing to the return distribution: it removes the left tail and, because it
+# cannot tell which is which, part of the right one too.
 #
-# The ETF rotation strategy has allocation-stage Sharpe above +0.7 and a cost
-# breakeven well above realistic ETF execution costs. Risk management for this
-# strategy is therefore an optimization problem — can overlays improve the drawdown
-# profile without eroding the Sharpe that cost analysis confirmed?
-# — rather than a rescue operation. Monthly holding periods create a specific challenge
-# for position-level rules: a stop-loss or trailing stop that triggers mid-month forces
-# an early exit and potentially leaves capital idle until the next rebalance, which may
-# hurt performance more than the loss it prevented.
+# **The reason this is a real question here and not a formality is the rebalancing cadence.** This
+# strategy holds a fund for a month and then re-ranks. A stop that fires on day nine has not
+# avoided a month of loss; it has ended a position nine days early and left the capital idle until
+# the rebalance that would have closed the position anyway. Whether that helps depends entirely on
+# what the fund did over the remaining days, which is the thing nobody knows at the time.
 #
-# **Purpose:** Test position-level risk controls — stop-loss, trailing stop, time exit —
-# on the top ETF rotation configurations to determine which overlays improve the
-# risk-adjusted profile of a monthly momentum strategy and which degrade it.
+# So the overlay grid spans thresholds from very tight to very loose, and the tight end is expected
+# to fire on ordinary intra-month movement rather than on anything the strategy should react to.
+# Where the grid turns from harmful to harmless is what this notebook is for.
 #
-# **Learning Objectives:**
-# - Apply position-level rules (stop-loss, trailing stop, time exit) to monthly ETF
-#   positions and measure their effect on drawdown and Sharpe
-# - Calibrate trailing stops via the MAE (maximum adverse excursion) distribution of
-#   in-sample positions and contrast MAE-calibrated thresholds with fixed-percent stops
-# - Interpret which risk overlay types are structurally compatible with monthly
-#   rebalancing frequency and cross-asset momentum signals
+# **Learning objectives**
 #
-# **Book Reference:** Chapter 19, Sections 19.3–19.6
+# - Say what a position-level risk rule does to both tails of a return distribution, not only the
+#   left one.
+# - Say why a rule's trigger frequency has to be read against the strategy's holding period.
+# - Calibrate a trailing threshold from the observed adverse-excursion distribution rather than
+#   from a round number, and say what that changes.
+# - Read a risk overlay against its own baseline rather than against zero.
 #
-# **Prerequisites:** Completed Ch17 allocation sweep with results in `registry.db`.
+# **Book reference**: Chapter 19, Sections 19.3 to 19.6.
+#
+# **Prerequisites**: [`15_portfolio_management`](15_portfolio_management.ipynb), whose allocation
+# stage supplies the combinations the overlays are applied to.
+#
+# **What it writes**: one row in `backtest_runs` per combination and risk control, at
+# `stage='risk_overlay'`. [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole
+# pipeline, this stage included.
 
 # %%
-"""ETF Risk Management: Engine-Level Risk Rules."""
+"""Apply position and portfolio risk overlays to the leading ETF allocation combinations."""
 
 import json
+import time
 import warnings
 
+import plotly.graph_objects as go
 import polars as pl
 
-warnings.filterwarnings("ignore")
-
-from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.backtest_explorer import BacktestExplorer
+from case_studies.utils.backtest_loaders import (
+    VECTORIZED_CASE_STUDIES,
+    get_backtest_config,
+    load_backtest_prices_for,
+)
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
     ensure_backtest_spec,
@@ -67,107 +79,152 @@ from case_studies.utils.sweep_config import (
     get_position_risk_controls,
     get_top_n_predictions,
 )
-from utils.paths import get_case_study_dir
+from utils.style import COLORS, show_plotly_with_alt
+
+warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "etfs"
 LABEL = ""
 MAX_SYMBOLS = 0
-MAX_RISK_VARIANTS = 0  # 0 = all; >0 limits position + portfolio controls each
-TOP_N_COMBOS = None
+MAX_RISK_VARIANTS = 0  # 0 = every declared control; >0 caps position and portfolio controls each
+TOP_N_COMBOS: int | None = None
+
+# %% [markdown]
+# ## 1. What the overlays are applied to
+#
+# The combinations are the allocation-stage leaders, the same ones [`16_costs`](16_costs.ipynb)
+# re-prices. Nothing is re-selected here either: the prediction, the concentration and the
+# allocator are held exactly as registered, and the only thing added is the rule. That is what makes
+# each overlay's Sharpe comparable with the baseline it came from.
+#
+# **Position rules need a bar-by-bar engine.** A stop-loss has to be evaluated on every bar of the
+# holding period to know whether it fired, so a case study whose backtests are computed as a
+# vectorized weight-times-return product cannot express one. This case study runs on the engine, so
+# both rule families are available; the check below reports which, rather than assuming.
 
 # %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_COMBOS is None:
     TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "risk_overlay")
 if not LABEL:
     LABEL = bt_config.primary_label
-
-from case_studies.utils.backtest_loaders import VECTORIZED_CASE_STUDIES
-
 IS_VECTORIZED = CASE_STUDY_ID in VECTORIZED_CASE_STUDIES
-MODE_LABEL = "vectorized" if IS_VECTORIZED else "engine"
-print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}, mode: {MODE_LABEL}")
+print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}")
+print(f"Backtest mode: {'vectorized' if IS_VECTORIZED else 'engine'}")
 
-# %% [markdown]
-# ## 1. Load Top Combos from Allocation Stage
-#
-# The risk sweep operates on the same top allocation-stage configurations used in the
-# cost analysis. Each combo represents a (prediction, allocator, TOP_K) combination
-# whose net Sharpe at realistic costs we already know. Risk overlays will be evaluated
-# relative to these allocation-stage baselines.
-
-# %%
+# %% tags=["results"]
 top_combos = resolve_best_backtest_runs(
     CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
 )
-
 if top_combos.is_empty():
-    msg = "No allocation-stage results found. Run the portfolio management notebook first."
-    raise RuntimeError(msg)
-
-# Summarize the top allocation-stage backtests we'll be re-using as the
-# baseline for the risk overlay sweep below. Specs are normalized to v2 by
-# ensure_backtest_spec() inside run_backtest(), so no pre-check needed here.
+    raise RuntimeError(
+        "no allocation-stage backtests are registered, so there is nothing to overlay; "
+        "run 15_portfolio_management first"
+    )
 for row in top_combos.iter_rows(named=True):
-    spec = json.loads(row["spec_json"])
-    alloc = strategy_view(spec).get("allocation", {}).get("method", "equal_weight")
-    print(f"  Sharpe={row['sharpe']:.3f}  alloc={alloc}  bt_hash={row['backtest_hash'][:8]}")
+    allocator = strategy_view(json.loads(row["spec_json"])).get("allocation", {}).get("method")
+    print(
+        f"  baseline Sharpe={row['sharpe']:+.3f}  {row['family']}/{row['config_name']}  "
+        f"alloc={allocator}  backtest={row['backtest_hash'][:8]}"
+    )
 
 # %%
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="validation", max_symbols=MAX_SYMBOLS)
+print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} tradeable funds")
 
 # %% [markdown]
-# ### MAE/MFE-Calibrated Trailing Stops
+# ## 2. The grid, and where the thresholds come from
 #
-# Trailing stop thresholds calibrated from Maximum Adverse Excursion (MAE) and
-# Maximum Favorable Excursion (MFE) distributions set thresholds that reflect the
-# actual intra-month volatility of ETF positions. Thresholds set too tight relative
-# to typical intra-month noise will trigger frequently on normal price variation and
-# produce excessive turnover. Thresholds set to the 5th percentile of MAE reflect
-# only positions that moved unusually far against the momentum signal.
+# The declared grid is a set of round numbers - stops at three, five, ten and fifteen percent,
+# trailing stops from one to twenty, time exits at ten, twenty and forty bars. Round numbers are
+# what a reader would reach for, which is exactly why they are worth testing: a one percent
+# trailing stop on a fund whose ordinary daily move is around one percent fires on nothing in
+# particular.
+#
+# The calibrated thresholds are the alternative. **Maximum adverse excursion** is how far a
+# position went against you before it closed, measured over the positions this strategy actually
+# held. Taking a percentile of that distribution sets a threshold in the units of what this
+# universe does rather than in round numbers, so a rule at the 25th percentile fires on the quarter
+# of positions that moved furthest against the signal and leaves the rest to resolve at the
+# rebalance. The two sit in the same grid so the comparison is direct.
 
 # %%
-_position_grid = get_position_risk_controls(CASE_STUDY_ID)
+declared_position = get_position_risk_controls(CASE_STUDY_ID)
+position_controls = list(declared_position)
 if not IS_VECTORIZED and "close" in prices.columns:
     calibrated = calibrate_trailing_stops(prices)
-    if calibrated:
-        existing_thresholds = {rc.get("threshold", 0) for rc in _position_grid}
-        new_calibrated = [c for c in calibrated if c["threshold"] not in existing_thresholds]
-        position_controls = _position_grid + new_calibrated
-        print(f"MAE/MFE calibration added {len(new_calibrated)} thresholds")
-    else:
-        position_controls = _position_grid
-        print("MAE/MFE calibration returned no results; using standard grid")
+    declared_thresholds = {rc.get("threshold") for rc in declared_position}
+    added = [rc for rc in (calibrated or []) if rc["threshold"] not in declared_thresholds]
+    position_controls = declared_position + added
+    print(
+        f"MAE calibration added {len(added)} thresholds to the {len(declared_position)} declared"
+        if added
+        else "MAE calibration produced no threshold the declared grid does not already carry"
+    )
 else:
-    position_controls = _position_grid
-    print("Skipping MAE/MFE calibration (vectorized or no close column)")
+    print("MAE calibration skipped: no bar-level close prices to measure excursions on")
 
 portfolio_controls = get_portfolio_risk_controls(CASE_STUDY_ID)
 if MAX_RISK_VARIANTS > 0:
     position_controls = position_controls[:MAX_RISK_VARIANTS]
     portfolio_controls = portfolio_controls[:MAX_RISK_VARIANTS]
-    print(f"Risk variants limited to {MAX_RISK_VARIANTS} each")
+    print(f"Reduced run: at most {MAX_RISK_VARIANTS} controls of each kind")
+
+print(f"Position controls:  {len(position_controls)}")
+print(f"Portfolio controls: {len(portfolio_controls)}")
+if not portfolio_controls:
+    # Said rather than left to be inferred from a section that produces no rows. A reader who sees
+    # only position rules below should know that is a declaration in setup.yaml and not a failure.
+    print("  none declared for this case study, so only position rules are swept")
+print(
+    f"Grid: {len(top_combos)} combinations x "
+    f"{len(position_controls) + len(portfolio_controls)} controls"
+)
 
 # %% [markdown]
-# ## 2. Risk Overlay Sweep
+# ## 3. The sweep
 #
-# For each top combo, we run one backtest per risk control configuration — no
-# baseline is needed here since the allocation-stage backtests already serve as the
-# reference. Position-level rules execute inside the engine on each bar; portfolio-level
-# limits check aggregate drawdown or loss thresholds and can pause or flatten the book.
-#
-# For a monthly ETF strategy, the structural risk question is whether position-level
-# rules interact badly with the rebalancing cadence. A stop-loss that exits a position
-# on day 15 of a 20-trading-day month leaves capital undeployed until month-end, at
-# which point the next rebalance would have exited the position anyway. Whether the
-# early exit helps or hurts depends on what the position does in the remaining days.
+# The allocation weights are computed **once per combination** and reused for every risk variant of
+# it. Weights are a property of the prediction, the concentration and the allocator, none of which
+# a risk rule changes, and the expensive allocators would otherwise be re-solved once per rule.
 
 # %%
 n_done = 0
+failures = []
+sweep_start = time.monotonic()
 
-for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
+
+def run_overlay(pred_hash, base_spec, predictions, weights, risk_block, name):
+    """Register one risk overlay on one combination, recording the cause of any failure."""
+    global n_done
+    spec = clone_backtest_spec(base_spec)
+    spec["chapter"] = "ch19"
+    spec["strategy"]["risk"] = risk_block
+    try:
+        result = run_backtest(
+            CASE_STUDY_ID,
+            pred_hash,
+            spec,
+            prices=prices,
+            predictions=predictions,
+            label=LABEL,
+            register=True,
+            initial_cash=bt_config.initial_cash,
+            calendar=bt_config.calendar,
+            precomputed_weights=weights,
+        )
+    except Exception as error:
+        failures.append({"control": name, "error": f"{type(error).__name__}: {error}"})
+        return
+    n_done += 1
+    print(
+        f"    {name}: Sharpe={result.metrics.get('sharpe', 0):+.3f}, "
+        f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
+    )
+
+
+for index, combo_row in enumerate(top_combos.iter_rows(named=True)):
     pred_hash = combo_row["prediction_hash"]
     base_spec = ensure_backtest_spec(
         CASE_STUDY_ID,
@@ -177,15 +234,10 @@ for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
         prediction_hash=pred_hash,
         initial_cash=bt_config.initial_cash,
     )
-    alloc_method = strategy_view(base_spec).get("allocation", {}).get("method", "equal_weight")
-
+    allocator = strategy_view(base_spec).get("allocation", {}).get("method", "equal_weight")
     predictions = read_predictions(CASE_STUDY_ID, pred_hash)
 
-    # Precompute allocation weights ONCE per combo — avoids re-running
-    # expensive MVO/HRP for every risk variant (167s → 0s per variant)
-    import time
-
-    t0 = time.time()
+    weights_started = time.monotonic()
     combo_weights = precompute_weights(
         predictions,
         base_spec,
@@ -195,153 +247,154 @@ for combo_idx, combo_row in enumerate(top_combos.iter_rows(named=True)):
         prediction_hash=pred_hash,
     )
     print(
-        f"  Combo {combo_idx + 1}/{len(top_combos)}: {alloc_method} — "
-        f"weights precomputed in {time.time() - t0:.0f}s"
+        f"  combination {index + 1}/{len(top_combos)} ({allocator}): weights computed in "
+        f"{time.monotonic() - weights_started:.0f}s"
     )
 
-    # Position-level risk rules (engine only)
     if not IS_VECTORIZED:
         for rc in position_controls:
-            spec_risk = clone_backtest_spec(base_spec)
-            spec_risk["chapter"] = "ch19"
-            if rc["type"] == "time_exit":
-                spec_risk["strategy"]["risk"] = {
-                    "name": rc["name"],
-                    "position_rules": [{"type": rc["type"], "bars": rc["bars"]}],
-                }
-            else:
-                spec_risk["strategy"]["risk"] = {
-                    "name": rc["name"],
-                    "position_rules": [{"type": rc["type"], "threshold": rc["threshold"]}],
-                }
-
-            try:
-                result = run_backtest(
-                    CASE_STUDY_ID,
-                    pred_hash,
-                    spec_risk,
-                    prices=prices,
-                    predictions=predictions,
-                    label=LABEL,
-                    register=True,
-                    initial_cash=bt_config.initial_cash,
-                    calendar=bt_config.calendar,
-                    precomputed_weights=combo_weights,
-                )
-                n_done += 1
-                print(
-                    f"    {rc['name']}: Sharpe={result.metrics.get('sharpe', 0):.3f}, "
-                    f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
-                )
-            except Exception as e:
-                print(f"    {rc['name']}: FAILED — {e}")
-
-    # Portfolio-level risk limits
-    for rc in portfolio_controls:
-        spec_risk = clone_backtest_spec(base_spec)
-        spec_risk["chapter"] = "ch19"
-        spec_risk["strategy"]["risk"] = {
-            "name": rc["name"],
-            "portfolio_limits": [{"type": rc["type"], "threshold": rc["threshold"]}],
-        }
-
-        try:
-            result = run_backtest(
-                CASE_STUDY_ID,
+            rule = (
+                {"type": rc["type"], "bars": rc["bars"]}
+                if rc["type"] == "time_exit"
+                else {"type": rc["type"], "threshold": rc["threshold"]}
+            )
+            run_overlay(
                 pred_hash,
-                spec_risk,
-                prices=prices,
-                predictions=predictions,
-                label=LABEL,
-                register=True,
-                initial_cash=bt_config.initial_cash,
-                calendar=bt_config.calendar,
-                precomputed_weights=combo_weights,
+                base_spec,
+                predictions,
+                combo_weights,
+                {"name": rc["name"], "position_rules": [rule]},
+                rc["name"],
             )
-            n_done += 1
-            print(
-                f"    {rc['name']}: Sharpe={result.metrics.get('sharpe', 0):.3f}, "
-                f"MaxDD={result.metrics.get('max_drawdown', 0):.2%}"
-            )
-        except Exception as e:
-            print(f"    {rc['name']}: FAILED — {e}")
 
-print(f"\nRisk sweep complete: {n_done} backtests")
+    for rc in portfolio_controls:
+        run_overlay(
+            pred_hash,
+            base_spec,
+            predictions,
+            combo_weights,
+            {
+                "name": rc["name"],
+                "portfolio_limits": [{"type": rc["type"], "threshold": rc["threshold"]}],
+            },
+            rc["name"],
+        )
 
-# %% [markdown]
-# ## 3. Risk Impact Analysis
-#
-# This section is **read-only** — queries the registry for risk overlay results.
-# For each overlay, `sharpe_delta` measures the change relative to the allocation-stage
-# baseline (positive = improvement, negative = degradation). For a high-Sharpe monthly
-# strategy, the threshold for an overlay to be worth adopting is a positive Sharpe delta
-# with meaningful drawdown reduction — not just drawdown reduction at the cost of Sharpe.
-
-# %%
-from case_studies.utils.backtest_explorer import BacktestExplorer
-
-explorer = BacktestExplorer(CASE_STUDY_ID)
-
-# %%
-risk_df = explorer.risk_impact()
-
-if not risk_df.is_empty():
-    # Best by risk type
-    for risk_type in risk_df["risk_type"].unique().sort().to_list():
-        subset = risk_df.filter(pl.col("risk_type") == risk_type).sort("sharpe", descending=True)
-        best = subset.head(1)
-        print(f"  Best {risk_type}: {best['risk_name'][0]} → Sharpe={best['sharpe'][0]:.3f}")
-
-    print(f"\nAll risk overlays ({len(risk_df)}):")
-    print(
-        risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta")
-        .sort("sharpe", descending=True)
-        .head(15)
-    )
+print(f"\nRisk sweep: {n_done} registered in {(time.monotonic() - sweep_start) / 60:.1f} minutes")
+if failures:
+    failure_frame = pl.DataFrame(failures)
+    print(f"{failure_frame.height} overlays raised. Distinct causes:")
+    print(failure_frame.group_by("error").len().sort("len", descending=True))
 else:
-    print("No risk overlay data in registry")
+    print("no overlay raised")
 
 # %% [markdown]
-# **Risk overlay interpretation.** Within the position-level overlay family, the
-# MAE-calibrated trailing stops outperform fixed-percent stops by a clear margin.
-# Calibrating the trailing threshold to the 25th percentile of the in-sample MAE
-# distribution at a 20-bar horizon (`trailing_mae_p25_h20`) produces an overlay that
-# fires only on positions that have moved unusually far from entry by historical
-# standards, leaving typical-volatility positions to resolve at month-end. Stop-loss
-# rules at the same percentage level are uniformly worse because they cap the upside
-# distribution while still firing on the negative tail.
+# ## 4. What each rule cost and what it bought
 #
-# The reason is structural. A position-level stop-loss that exits at a 5% drawdown
-# triggers throughout the month, interrupting the monthly holding period before the
-# rebalance resolves the position naturally. Tight trailing stops (2–3%) are
-# particularly costly for monthly ETF positions because they fire on intra-month
-# noise: an ETF with a 15% annualized volatility has an expected daily move of roughly
-# 1%, so a 2% trailing stop triggers on roughly half of all positions within their
-# first week. MAE-calibrated stops shift the threshold to a percentile of the
-# historical adverse-excursion distribution rather than a fixed price level — they
-# trigger only on positions whose drawdown exceeds the in-sample typical range.
+# `sharpe_delta` is the change against the allocation-stage baseline the overlay was applied to,
+# which is the only comparison that isolates the rule. Against zero every row would look fine,
+# because the strategy was already positive before any rule was added.
+#
+# An overlay is worth adopting when it reduces the drawdown **and** does not spend the Sharpe to do
+# it. Drawdown reduction on its own is available for free by holding less: the question is whether
+# the rule found the losses worth avoiding, or merely closed positions.
+
+# %% tags=["results"]
+explorer = BacktestExplorer(CASE_STUDY_ID)
+risk_df = explorer.risk_impact()
+if risk_df.is_empty():
+    raise RuntimeError("the risk-overlay stage registered no readable rows")
+risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta").sort(
+    "sharpe_delta", descending=True
+)
+
+# %% tags=["results"]
+for risk_type in risk_df["risk_type"].unique().sort().to_list():
+    subset = risk_df.filter(pl.col("risk_type") == risk_type).sort("sharpe_delta", descending=True)
+    leader = subset.row(0, named=True)
+    print(
+        f"{risk_type:15s} best of {subset.height}: {leader['risk_name']} "
+        f"(Sharpe {leader['sharpe']:+.3f}, change {leader['sharpe_delta']:+.3f})"
+    )
+improving = risk_df.filter(pl.col("sharpe_delta") > 0)
+print(f"\n{improving.height} of {risk_df.height} overlays raised the Sharpe of their baseline")
 
 # %% [markdown]
-# ## Key Takeaways
+# ### Sharpe against drawdown, one point per overlay
 #
-# Risk overlays for ETF rotation at monthly frequency produce a clear pattern within
-# the position-level family: MAE-calibrated trailing stops at a 20-bar horizon are
-# the strongest single overlay; tight fixed-percent stops and short time exits hurt
-# both Sharpe and drawdown. The monthly holding period creates a mismatch between
-# the rebalancing cadence and the trigger frequency of tight stop rules — most are
-# designed for daily or intraday strategies where stop-and-flip is a coherent
-# response to adverse price action.
+# The vertical axis is the change in Sharpe against the baseline and the horizontal axis is the
+# drawdown the overlay produced. A rule in the upper left reduced the drawdown without spending the
+# Sharpe; one in the lower left bought its drawdown reduction with return; one on the right did
+# neither. The dashed horizontal line is the baseline: everything below it made the strategy worse
+# on the measure that matters.
+
+# %%
+fig = go.Figure()
+for risk_type in risk_df["risk_type"].unique().sort().to_list():
+    subset = risk_df.filter(pl.col("risk_type") == risk_type)
+    fig.add_trace(
+        go.Scatter(
+            x=subset["max_drawdown"].to_list(),
+            y=subset["sharpe_delta"].to_list(),
+            mode="markers",
+            name=risk_type,
+            text=subset["risk_name"].to_list(),
+            hovertemplate="%{text}<br>drawdown %{x:.1%}<br>Sharpe change %{y:+.3f}<extra></extra>",
+            marker=dict(size=9, opacity=0.8),
+        )
+    )
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig.update_xaxes(title_text="Maximum drawdown under the overlay")
+fig.update_yaxes(title_text="Change in Sharpe against the un-overlaid baseline")
+fig.update_layout(
+    title="Most rules pay for their drawdown reduction in return",
+    height=460,
+    width=880,
+    margin=dict(t=90),
+)
+_delta = risk_df["sharpe_delta"]
+_dd = risk_df["max_drawdown"]
+show_plotly_with_alt(
+    fig,
+    "Scatter of each risk overlay's change in Sharpe against the maximum drawdown it produced, one "
+    "series per rule family, with a dashed line at no change. Counted from the frame: "
+    f"{risk_df.height} overlays, Sharpe change from {_delta.min():+.3f} to {_delta.max():+.3f}, "
+    f"drawdown from {_dd.min():.1%} to {_dd.max():.1%}, and "
+    f"{int((_delta > 0).sum())} overlays above the baseline.",
+)
+
+# %% [markdown]
+# ## 5. What to notice
 #
-# The practical implication is that risk management for this strategy benefits from
-# overlays that filter for the unusual rather than the merely uncomfortable. An
-# MAE-calibrated trailing stop captures the rare positions that decay far past
-# typical in-sample drawdown without aborting the more common positions whose
-# month-long evolution is what produces the strategy's edge.
+# **A stop is a bet that the next move continues, placed by a strategy whose whole thesis is
+# monthly.** The signal says these funds are the ones to hold for the coming month. A rule that
+# closes one on day nine is overriding that signal with a different one - price action since entry
+# - and the grid above is the measurement of whether that different signal is worth listening to at
+# each threshold.
 #
-# With a cost breakeven well above realistic ETF friction and an MAE-calibrated
-# trailing overlay as the primary risk control, the ETF rotation strategy has a
-# favorable signal-to-risk profile for a monthly strategy.
+# **Tight thresholds and loose thresholds fail differently.** A threshold below the ordinary
+# intra-month movement of these funds fires on almost every position, which turns a monthly
+# strategy into a series of truncated holds and pays the round trip each time. A threshold far
+# above it fires on almost nothing, which is harmless and also does nothing. Neither end is where a
+# useful rule lives, and the table above is where to see which part of the middle is.
 #
-# **Next:** Ch20 synthesis aggregates the full pipeline results — from model analysis
-# through backtest, allocation, costs, and risk — across all nine case studies to
-# identify cross-cutting patterns in what makes ML strategies implementable.
+# **Calibrating from the adverse-excursion distribution is what makes a threshold about this
+# universe.** Three percent means one thing on a bond fund and another on a leveraged commodity
+# fund, and a single round number applied to both is really two different rules. A percentile of
+# the observed excursions is one rule.
+#
+# **Read the change, not the level.** Every overlay here inherits a baseline that was already
+# positive, so a row with a good Sharpe may still be a rule that cost its strategy something. The
+# `sharpe_delta` column is the one that answers whether the rule earned its place.
+#
+# **Known limitations.** The thresholds are evaluated on the same validation folds the strategies
+# were selected on, so an overlay that looks best here has been chosen on the same data twice over,
+# and nothing in this stage deflates for that. The MAE calibration reads excursions from the whole
+# price history rather than from a training window that precedes each fold. Portfolio-level limits
+# are declared empty for this case study, so nothing here says anything about them. And the holdout
+# is not consulted.
+
+# %% [markdown]
+# **Next**: [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole pipeline -
+# signal, allocation, costs and this overlay stage - as one progression, and is where the holdout
+# is finally opened.
