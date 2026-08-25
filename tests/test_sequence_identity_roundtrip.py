@@ -11,8 +11,15 @@ lookup spec without it. The failure is not a cache miss costing a refit: the con
 registers under the device-qualified hash, and the post-training rebuild still finds nothing and
 raises "Training completed but registered checkpoints are incomplete".
 
-These tests pin the drift itself, so the next identity-bearing field fails here rather than in a
-production notebook run.
+These tests pin the builder's contract - which fields are identity-bearing and which are not - so
+that changing one fails here rather than in a production notebook run.
+
+They deliberately do **not** assert anything about what ``etfs/09_dl_lstm`` and ``10_dl_tsmixer``
+currently pass. A test comparing the builder against a transcription of those call sites written
+here would compare this file to itself: it stays green whatever the notebooks do, so it cannot
+detect the drift it appears to be about. The check that those call sites reach the registration
+belongs in the commit that converts them onto ``sequence_identity_params``, where it goes green
+because the notebook changed rather than because the literal did.
 """
 
 from __future__ import annotations
@@ -70,44 +77,6 @@ def test_the_device_is_part_of_the_identity() -> None:
 def test_the_device_index_is_not_part_of_the_identity() -> None:
     """``cuda:0`` and ``cuda:1`` make the same claim about what the numbers came from."""
     assert _canonical(TORCH_CONFIG, device="cuda:0") == _canonical(TORCH_CONFIG, device="cuda:1")
-
-
-def test_hand_rolling_the_torch_lookup_spec_does_not_reach_the_registration() -> None:
-    """The exact shape ``etfs/09_dl_lstm`` built, and why it could never match.
-
-    This is not a test that the fields differ - it is a test that a caller assembling the
-    documented field list by hand lands on a different identity than the builder does, which is
-    what makes transcription unsafe rather than merely repetitive.
-    """
-    hand_rolled = {
-        "n_epochs": 20,
-        "batch_size": TORCH_CONFIG["batch_size"],
-        "input_data_spec": INPUT_DATA_SPEC,
-        "lookback": TORCH_CONFIG["params"]["lookback"],
-        "max_train_sequences": 0,
-    }
-
-    assert hand_rolled != _canonical(TORCH_CONFIG)
-    assert "device" not in hand_rolled
-
-
-def test_calling_the_darts_sub_builder_directly_does_not_reach_the_registration() -> None:
-    """The shape ``etfs/10_dl_tsmixer`` built.
-
-    ``darts_training_identity`` is a component of the identity, not the identity. Calling it
-    directly returns a spec the registration never uses.
-    """
-    from case_studies.utils.darts_forecasting import darts_training_identity
-
-    sub_builder_only = darts_training_identity(
-        DARTS_CONFIG,
-        "fwd_ret_21d",
-        case_study="etfs",
-        input_data_spec=INPUT_DATA_SPEC,
-        max_train_sequences=0,
-    )
-
-    assert sub_builder_only != _canonical(DARTS_CONFIG)
 
 
 @pytest.mark.parametrize("config", [TORCH_CONFIG, DARTS_CONFIG], ids=["torch", "darts"])
