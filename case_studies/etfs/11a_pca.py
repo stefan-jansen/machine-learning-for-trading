@@ -106,7 +106,7 @@ study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or
 # Every label whose training menu declares `latent_factors:` is fitted, and both do: `fwd_ret_21d`,
 # the total return over the 21 trading days after the decision date, and `fwd_ret_5d`, the same
 # thing over five. The estimator reads none of the 71 feature columns, but it is not blind to the
-# label: the `returns` matrix that `build_persistent_panel`
+# label: the `returns` matrix that `prepare_panel_data`
 # ([`panel.py`](../utils/latent_factors/panel.py)) fills from the request's own label column is the
 # one `run_pca_fold` receives as `returns_train`, so the two rows below are two separate fits, each
 # with its own loadings and premia, rather than one fit scored against two returns. What

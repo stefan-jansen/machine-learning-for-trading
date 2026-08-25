@@ -222,7 +222,7 @@ def published_population(source: str, tree: ast.Module, name: str) -> str:
         return "none - legacy runner"
     default = re.search(r'population_name = POPULATION_NAME or f"([^"]+)"', source)
     if default is None:
-        raise ValueError(f"{name} publishes a population under no readable name")
+        raise ValueError(f"{notebook_for[name]}.py publishes a population under no readable name")
     return default.group(1).replace("{MODEL_NAME}", name)
 
 
