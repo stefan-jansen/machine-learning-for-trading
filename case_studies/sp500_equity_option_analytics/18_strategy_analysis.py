@@ -113,15 +113,16 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # %% [markdown]
 # ## 1. Reconstruct the corrected carrier
 #
-# The funnel advances ten distinct full-coverage baseline configurations on the
-# primary label, filters allocation rows to the active five-method grid, and
-# filters risk rows to the 14 predeclared controls. Historical conformal rows,
-# alternate labels, and full-validation MAE-calibrated rules cannot enter.
+# The funnel advances the full-coverage baseline configurations `setup.yaml`
+# declares for the allocation stage on the primary label, filters allocation rows
+# to the allocators it declares, and filters risk rows to the predeclared
+# controls. Historical conformal rows, alternate labels, and full-validation
+# MAE-calibrated rules cannot enter.
 #
-# Coverage is measured against the sealed validation window
+# Coverage is measured against the canonical validation window
 # (``coverage_window="canonical"``), not the raw stored day count: this
-# registry's sweep predates the outcome-horizon seal, and some checkpoints
-# carry a few pre-seal decision dates that inflate their raw count without
+# registry's sweep predates the outcome-horizon boundary, and some checkpoints
+# carry a few decision dates from before it that inflate their raw count without
 # covering any more of the modeling window.
 
 # %%
@@ -185,8 +186,9 @@ strategy_carrier = (
 # before the holdout opens. The registry was swept before that boundary was
 # adopted, so its last validation fold runs to the holdout start and carries a
 # horizon's worth of decisions whose outcome is only observable inside the
-# holdout - here, five sessions, about 1% of validation rows. Everything below
-# reads the sealed span, so the holdout stays sealed with respect to selection.
+# holdout. The printout below reports how many decisions and return days that
+# comes to. Everything after it reads the canonical span, which is what keeps the
+# holdout out of selection.
 
 # %%
 validation_window = canonical_window(CASE_STUDY, LABEL, split="validation")
@@ -194,8 +196,8 @@ if validation_window is None:
     raise RuntimeError(f"No canonical validation window derivable for {LABEL}")
 
 
-def seal(frame: pl.DataFrame | None) -> pl.DataFrame | None:
-    """Cut a timestamped artifact to the sealed validation window."""
+def to_canonical_window(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+    """Cut a timestamped artifact to the canonical validation window."""
     if frame is None:
         return None
     return frame.filter(
@@ -203,15 +205,15 @@ def seal(frame: pl.DataFrame | None) -> pl.DataFrame | None:
     )
 
 
-def sealed_daily_returns(backtest_hash: str) -> pl.DataFrame | None:
-    """Registered daily returns for one backtest, cut to the sealed window."""
-    return seal(load_daily_returns_with_timestamp(CASE_STUDY, backtest_hash))
+def canonical_daily_returns(backtest_hash: str) -> pl.DataFrame | None:
+    """Registered daily returns for one backtest, cut to the canonical window."""
+    return to_canonical_window(load_daily_returns_with_timestamp(CASE_STUDY, backtest_hash))
 
 
 registered_predictions = read_predictions(CASE_STUDY, strategy_carrier["prediction_hash"])
-carrier_predictions = seal(registered_predictions)
+carrier_predictions = to_canonical_window(registered_predictions)
 if carrier_predictions.is_empty():
-    raise RuntimeError("The strategy carrier has no decisions inside the sealed validation window")
+    raise RuntimeError("The strategy carrier has no decisions in the canonical validation window")
 latest_decision = carrier_predictions["timestamp"].max()
 latest_decision_date = (
     latest_decision.date() if hasattr(latest_decision, "date") else latest_decision
@@ -221,7 +223,7 @@ registered_returns = load_daily_returns_with_timestamp(
 )
 if registered_returns is None:
     raise RuntimeError("The strategy carrier has no registered daily-return artifact")
-carrier_returns = seal(registered_returns)
+carrier_returns = to_canonical_window(registered_returns)
 # Measured on the UNSEALED frame. Sealing first makes the comparison one-sided: the
 # min/max of an already-trimmed frame can only fall short of the window, never past
 # it, so a registered artifact that overruns the seal reads as a clean match.
@@ -237,10 +239,10 @@ if registered_window[0] > validation_window[0] or registered_window[1] < validat
 dropped = len(registered_predictions) - len(carrier_predictions)
 dropped_returns = len(registered_returns) - len(carrier_returns)
 print(
-    f"Sealed validation window: {validation_window[0]} to {validation_window[1]}; "
+    f"Canonical validation window: {validation_window[0]} to {validation_window[1]}; "
     f"carrier latest decision: {latest_decision_date}; "
-    f"decisions dropped past the seal: {dropped}; "
-    f"return days dropped past the seal: {dropped_returns}"
+    f"decisions dropped past the window: {dropped}; "
+    f"return days dropped past the window: {dropped_returns}"
 )
 
 # %%
@@ -316,13 +318,13 @@ no_overlay = {
     "sharpe": strategy_carrier["sharpe"],
 }
 risk_candidates = pl.concat([risk_surface, pl.DataFrame([no_overlay])], how="diagonal_relaxed")
-risk_winner = risk_candidates.sort("sharpe", descending=True).row(0, named=True)
+risk_leader = risk_candidates.sort("sharpe", descending=True).row(0, named=True)
 
 # %% [markdown]
-# The equal-weight starting point comes from the same pool the carrier was
-# drawn from, so baseline and carrier are judged under one eligibility rule.
+# The equal-weight starting point comes from the same pool the allocation lineage
+# was drawn from, so baseline and lineage are judged under one eligibility rule.
 # Querying it separately would re-apply the raw stored day count and drop this
-# carrier's prediction, which passes coverage only in the sealed window.
+# lineage's prediction, which passes coverage only in the canonical window.
 
 # %%
 carrier_baselines = baseline_pool.filter(
@@ -335,8 +337,9 @@ if carrier_baselines.is_empty():
 baseline_row = carrier_baselines.sort("sharpe", descending=True).row(0, named=True)
 
 # %% [markdown]
-# The visible carrier path retains the equal-weight starting point, the best
-# pre-risk strategy, and the risk decision only when it improves validation.
+# The visible carrier path retains the equal-weight starting point, the
+# highest-Sharpe pre-risk strategy, and the risk decision only when it improves
+# validation.
 
 # %%
 carrier_rows = [
@@ -354,12 +357,12 @@ if strategy_carrier["backtest_hash"] != baseline_row["backtest_hash"]:
             "sharpe": strategy_carrier["sharpe"],
         }
     )
-if risk_winner["backtest_hash"] != strategy_carrier["backtest_hash"]:
+if risk_leader["backtest_hash"] != strategy_carrier["backtest_hash"]:
     carrier_rows.append(
         {
-            "stage": risk_winner["risk_name"],
-            "backtest_hash": risk_winner["backtest_hash"],
-            "sharpe": risk_winner["sharpe"],
+            "stage": risk_leader["risk_name"],
+            "backtest_hash": risk_leader["backtest_hash"],
+            "sharpe": risk_leader["sharpe"],
         }
     )
 carrier = pl.DataFrame(carrier_rows)
@@ -400,7 +403,7 @@ print(
     f"Carrier: prediction={strategy_carrier['prediction_hash']}; "
     f"model={carrier_family}/{carrier_config}; "
     f"allocator={strategy_carrier['allocator']}; top_k={strategy_carrier['top_k']}; "
-    f"risk={risk_winner['risk_name']}"
+    f"risk={risk_leader['risk_name']}"
 )
 print(
     "Validation Sharpe by stage: "
@@ -417,7 +420,7 @@ carrier
 # The printout above names the corrected primary-label carrier and its Sharpe
 # at each stage of the funnel. Read the model, allocator, and risk rule from
 # that line rather than from a fixed description here: eligibility is measured
-# against the sealed window, so the carrier is whatever the corrected filter
+# against the canonical window, so what advances is whatever the corrected filter
 # selects, not a name pinned in prose.
 
 # %%
@@ -462,7 +465,7 @@ ax_stage.set_xticks(x, [as_label(stage) for stage in carrier["stage"].to_list()]
 ax_stage.set_ylabel("Annualized validation Sharpe")
 add_message_title(
     ax_stage,
-    f"Allocation and a fixed risk control lift the {carrier_family.upper()} carrier",
+    "Validation Sharpe at each stage of the funnel",
     f"Validation 2019-2020; {CONFIGURED_COST_BPS:.1f} bps/side; 95% block-bootstrap intervals",
 )
 fig_stage.show()
@@ -470,7 +473,7 @@ fig_stage.show()
 # %% [markdown]
 # ## 2. Cost survival on the same allocation lineage
 #
-# The cost diagnostic belongs to the allocation carrier, before the risk rule.
+# The cost diagnostic is measured on the allocation lineage, before the risk rule.
 # Exact planned hashes keep alternate lineages and removed allocators out of the
 # curve.
 
@@ -537,8 +540,16 @@ if cost_surface.filter(pl.col("stage") != "cost_sensitivity").height:
 
 # %%
 bps = cost_surface.filter(pl.col("regime") == "bps").sort("cost_value")
-crossings = bps.filter(pl.col("sharpe_ci95_lo") <= 0)
-first_crossing = crossings["cost_value"].min() if crossings.height else None
+
+
+def first_zero_cost(column: str) -> float | None:
+    """Lowest grid cost at which `column` reaches zero, or None if it never does."""
+    reached = bps.filter(pl.col(column) <= 0)
+    return reached["cost_value"].min() if reached.height else None
+
+
+first_crossing = first_zero_cost("sharpe_ci95_lo")
+point_crossing = first_zero_cost("sharpe")
 max_bps = bps["cost_value"].max()
 
 fig_cost, ax_cost = plt.subplots(figsize=FIGSIZE["single"], constrained_layout=True)
@@ -561,58 +572,67 @@ ax_cost.set_xlabel("One-way cost per traded notional (bps)")
 ax_cost.set_ylabel("Annualized validation Sharpe")
 if first_crossing is not None:
     ax_cost.axvline(first_crossing, color=COLORS["neutral"], linestyle=":", linewidth=1)
+    ax_cost.annotate(
+        "lower bound reaches zero",
+        (first_crossing, ax_cost.get_ylim()[1]),
+        xytext=(4, -8),
+        textcoords="offset points",
+        fontsize=8,
+        color=COLORS["slate"],
+        va="top",
+    )
 add_message_title(
     ax_cost,
-    (
-        f"The point path stays positive to {max_bps:.0f} bps, "
-        f"the interval only to {first_crossing:.0f} bps"
-        if first_crossing is not None
-        else f"The carrier stays positive through the {max_bps:.0f} bps stress"
-    ),
+    "Where the point path and its lower bound stand across the cost grid",
     "Validation 2019-2020; one-way costs; 95% block-bootstrap band",
 )
 fig_cost.show()
 
+
 # %%
+def _crossing(cost: float | None) -> str:
+    return f"{cost:.0f} bps" if cost is not None else "not within the grid"
+
+
 print(
-    f"Point Sharpe at {max_bps:.0f} bps: {bps['sharpe'][-1]:.3f}; "
-    + (
-        f"lower bound first crosses zero at {first_crossing:.0f} bps"
-        if first_crossing is not None
-        else "lower bound stays above zero across the grid"
-    )
+    f"Lower bound first reaches zero: {_crossing(first_crossing)}; "
+    f"point Sharpe first reaches zero: {_crossing(point_crossing)}; "
+    f"grid runs to {max_bps:.0f} bps one-way, where point Sharpe is {bps['sharpe'][-1]:.3f}"
 )
 
 # %% [markdown]
-# The point estimate decays gradually across the test grid, while its
-# uncertainty lower bound crosses zero far earlier, at the cost level printed
-# above. Cost survival is therefore a robustness result for the point path, not
-# a precise estimate of net performance.
+# The printout above gives the cost at which each of the two first reaches zero,
+# or says that it does not inside the grid. The lower bound's crossing, not the
+# point path's, is what bounds a cost claim: a point Sharpe still above zero with
+# a band that straddles it is a robustness result, not an estimate of net
+# performance.
 
 # %% [markdown]
 # ## 3. Paired risk effect and risk-cohort selection adjustment
 #
-# The risk winner is compared with its exact allocation baseline on aligned
-# timestamps. The risk-only cohort then asks how much of the apparent winner
-# could arise from choosing among 14 controls. It does not erase the earlier
+# The leading overlay is compared with its exact allocation baseline on aligned
+# timestamps. The risk-only cohort then asks how much of that apparent lead
+# could arise from choosing among the declared controls. It does not erase the earlier
 # model and allocation search, so it is a lower bound on the total search cost.
 
 # %%
-baseline_returns = sealed_daily_returns(strategy_carrier["backtest_hash"])
-winner_returns = sealed_daily_returns(risk_winner["backtest_hash"])
-if baseline_returns is None or winner_returns is None:
+baseline_returns = canonical_daily_returns(strategy_carrier["backtest_hash"])
+leader_returns = canonical_daily_returns(risk_leader["backtest_hash"])
+if baseline_returns is None or leader_returns is None:
     raise RuntimeError("Missing daily returns for the corrected carrier")
 aligned = (
     baseline_returns.rename({"ret": "baseline_ret"})
-    .join(winner_returns.rename({"ret": "winner_ret"}), on="timestamp", how="inner")
+    .join(leader_returns.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
     .sort("timestamp")
 )
 nonzero = aligned.with_row_index().filter(
-    (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("winner_ret").abs() > 1e-15)
+    (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("challenger_ret").abs() > 1e-15)
 )
+if nonzero.is_empty():
+    raise RuntimeError("The overlay and its baseline are flat across the canonical window")
 aligned = aligned.slice(nonzero["index"].min())
 paired_risk = compute_paired_uncertainty(
-    aligned["winner_ret"],
+    aligned["challenger_ret"],
     aligned["baseline_ret"],
     periods_per_year=PERIODS_PER_YEAR,
     case_study=CASE_STUDY,
@@ -622,12 +642,12 @@ paired_risk = compute_paired_uncertainty(
 )
 
 # %% [markdown]
-# Selection adjustment uses only the 14 predeclared risk overlays and keeps
+# Selection adjustment uses only the predeclared risk overlays and keeps
 # the no-overlay carrier as the economic benchmark.
 
 # %%
 returns_by_hash = {
-    backtest_hash: sealed_daily_returns(backtest_hash)
+    backtest_hash: canonical_daily_returns(backtest_hash)
     for backtest_hash in risk_surface["backtest_hash"]
 }
 fold_returns_by_hash = {
@@ -645,8 +665,8 @@ risk_cohort = compute_cohort_metrics(
     rademacher_seed=SEED,
 )
 if (
-    risk_winner["risk_type"] != "none"
-    and risk_cohort.get("leader_hash") != risk_winner["backtest_hash"]
+    risk_leader["risk_type"] != "none"
+    and risk_cohort.get("leader_hash") != risk_leader["backtest_hash"]
 ):
     raise RuntimeError("Risk cohort leader does not match the corrected carrier")
 
@@ -663,7 +683,7 @@ risk_diagnostics = pl.DataFrame(
     ]
 )
 print(
-    f"Paired improvement of {risk_winner['risk_name']} over its allocation baseline: "
+    f"Paired improvement of {risk_leader['risk_name']} over its allocation baseline: "
     f"{paired_risk['sharpe_diff']:+.3f} "
     f"[{paired_risk['sharpe_diff_ci95_lo']:.3f}, {paired_risk['sharpe_diff_ci95_hi']:.3f}]"
 )
@@ -672,7 +692,7 @@ risk_diagnostics
 # %% [markdown]
 # The paired interval above is the risk rule's own effect, measured against its
 # exact allocation baseline on aligned timestamps. The selection-adjusted
-# diagnostics in the same table account for choosing among the 14 fixed
+# diagnostics in the same table account for choosing among the fixed
 # controls, but only two validation folds remain available for temporal
 # stability analysis, so the cohort statistics rest on a thin sample.
 
@@ -681,10 +701,10 @@ risk_diagnostics
 #
 # The 2021 holdout has already been observed on an IPCA risk-adjusted-return
 # lineage. The corrected carrier uses a different family, label, allocation,
-# and risk rule. Running it now would turn the holdout into another selection
-# round. This notebook therefore checks that no holdout prediction exists for
-# the corrected carrier's own training run, and reports the stored IPCA row
-# only as historical context.
+# and risk rule, so a run on it would make the holdout another selection round.
+# This notebook therefore checks that no holdout prediction exists for the
+# corrected lineage's own training run, and reports the stored IPCA row only as
+# historical context.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -774,7 +794,7 @@ assessment = pl.DataFrame(
             "status": "PASS",
             "evidence": (
                 f"{carrier_family}/{carrier_config} / {strategy_carrier['allocator']} / "
-                f"top {strategy_carrier['top_k']} / {risk_winner['risk_name']}"
+                f"top {strategy_carrier['top_k']} / {risk_leader['risk_name']}"
             ),
         },
         {
@@ -821,19 +841,19 @@ assessment
 #
 # 1. The corrected v3.1 validation carrier is the model, allocator, top-k, and
 #    risk rule named in the assessment table above. Eligibility is decided by
-#    coverage of the sealed validation window, so a checkpoint whose extra
+#    coverage of the canonical validation window, so a checkpoint whose extra
 #    decision dates fall outside that window earns no advantage.
-# 2. Validation Sharpe rises across the three funnel stages shown in the stage
-#    chart, and the interval at every stage is wide: the point path improves
-#    far more convincingly than the uncertainty around it narrows.
+# 2. The stage chart shows Sharpe at each stage the funnel actually produced,
+#    which is between one and three points depending on whether allocation and
+#    the risk rule each improved on what came before. The interval at every
+#    stage is wide: the point path moves far more than the uncertainty around it
+#    narrows.
 # 3. The risk rule's paired improvement is reported with its own interval
-#    against the exact allocation baseline. Selection adjustment covers the 14
-#    fixed controls, but only two validation folds remain for stability
-#    analysis.
-# 4. The allocation carrier keeps a positive point Sharpe through the top of
-#    the cost grid, while its uncertainty band crosses zero much earlier. Cost
-#    survival here is a statement about the point path, not about net
-#    performance.
+#    against the exact allocation baseline. Selection adjustment covers the fixed
+#    controls, but only two validation folds remain for stability analysis.
+# 4. The cost curve is read from its lower bound, not its point path. The cell
+#    under the cost chart reports where each first reaches zero, and the lower
+#    bound's crossing is the one a cost claim has to respect.
 # 5. The existing IPCA holdout rows are historical and not comparable to the
 #    corrected carrier. No matching holdout was run, because the 2021 window
 #    has already been observed.

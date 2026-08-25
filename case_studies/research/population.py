@@ -120,13 +120,28 @@ class OfficialPopulation:
         db = _open_registry(study.root)
         try:
             latest = db.execute(
-                "SELECT population_hash FROM official_populations WHERE name = ? "
+                "SELECT population_hash, snapshot_json FROM official_populations WHERE name = ? "
                 "ORDER BY created_at DESC LIMIT 1",
                 (name,),
             ).fetchone()
             if latest is not None:
                 if latest[0] == population_hash:
                     return cls.open(study, population_hash)
+                # A population is the list of identities published under a name; `supersedes`
+                # is lineage about that list and is stored in its own column beside it. Because
+                # it also sits inside the hashed snapshot, a second generation's hash depends on
+                # which generation it replaced - so the notebook that produced it, re-run
+                # unchanged, computes a different hash from the same members and reads as a
+                # change. Every notebook publishing a second generation declares
+                # `SUPERSEDES_POPULATION = ""` and states in prose that it is the first, which
+                # is what that failure looks like from the reader's side. Matching on the
+                # members makes reproducing the published list a no-op, whatever the caller
+                # says it supersedes, and leaves the guard below to the case where the list
+                # genuinely differs.
+                published = json.loads(latest[1])
+                same_list = published.get("members") == list(normalized)
+                if same_list and published.get("member_kind") == member_kind:
+                    return cls.open(study, latest[0])
                 if supersedes != latest[0]:
                     raise ValueError(
                         f"a changed population named {name!r} must explicitly supersedes "

@@ -75,12 +75,15 @@
 # %%
 """Fit the declared FX pairs gradient boosting population on the walk-forward folds."""
 
+import sqlite3
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
+    OfficialPopulation,
     declared_labels,
     load_model_configs,
     model_requests,
@@ -242,10 +245,16 @@ plan.select(
 # is what lets this notebook re-run and resolve to the population it published rather than to a
 # new one.
 #
-# A reduced-scale run passes it empty. A population produced under a reduction is thrown away
-# with the workspace it was written to, so it has no lineage to extend, and the call refuses a
-# supersede rather than accept one it will not record. Pass `SUPERSEDES_POPULATION=` alongside
-# the reductions.
+# It applies only where that generation exists. `run_log/` is gitignored, so a clean clone starts
+# with an empty registry, and `OfficialPopulation.create` refuses a first version that claims to
+# supersede something - "first population version cannot supersede another snapshot". The declared
+# hash is therefore offered when the name already has a generation and withheld when it does not,
+# which is the same condition on the narrowed-run path: a caller-chosen `POPULATION_NAME` has no
+# prior generation either.
+#
+# A reduced-scale run needs no override. A population produced under a reduction is thrown away
+# with the workspace it was written to, so it has no lineage to extend - and its isolated registry
+# holds no generation under this name, so the rule below withholds the hash there on its own.
 #
 # **One population covers every label**, because one run fits every label. A population is
 # immutable once written, so a notebook fitting one label per run under a single name publishes
@@ -254,8 +263,34 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "fx_pairs-gbm-validation-v1"
+declared_supersedes = SUPERSEDES_POPULATION or None
+try:
+    current = OfficialPopulation.one(study, name=population_name)
+except (ValueError, sqlite3.OperationalError):
+    # No generation in force under this name: none was ever written, the chain forked, or - on a
+    # reader's clean clone, where run_log/ is gitignored - the registry has no table to read at
+    # all. That last one raises OperationalError rather than ValueError, which is why both are
+    # caught: a clean clone is the ordinary case here, not the exotic one.
+    supersedes = None
+else:
+    # A declared hash is good for exactly two things, and the two are what the notebook is for.
+    # `current.supersedes == declared` means the generation in force is the one this declaration
+    # produced, so offering it recomputes the tip - the re-run case. `current.hash == declared`
+    # means the declaration names the tip itself, so offering it publishes the next generation -
+    # the refit case. Anything else is withheld, and `create` then refuses and names the hash it
+    # requires, which is a better answer than this notebook guessing.
+    #
+    # Asking merely whether any generation exists is not the same question, and gets the second
+    # run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is
+    # None, and offering the hash again there writes a second generation nobody asked for.
+    # Testing only the first condition is also wrong, in the other direction: it withholds the
+    # hash from an author holding gen1 who declares gen1 to publish gen2, so the reader is fixed
+    # by making the publication impossible.
+    supersedes = (
+        declared_supersedes if declared_supersedes in (current.supersedes, current.hash) else None
+    )
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study, resolved, population_name=population_name, supersedes=supersedes
 )
 
 print(f"{len(execution.runs)} configurations fitted")
