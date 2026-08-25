@@ -9,7 +9,12 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import EligibilityManifest, ResolvedSpec, Study
+from case_studies.research import (
+    EligibilityManifest,
+    ResolvedSpec,
+    Study,
+    prediction_rows_at,
+)
 from case_studies.utils.registry import register_prediction_set, register_training_run
 from tests.test_research_registry import _predictions
 from tests.test_research_workspace import _seed_release
@@ -362,3 +367,41 @@ def test_catalog_says_which_sibling_a_regression_auc_was_scored_against(tmp_path
     assert rows[scored]["direction_label"] == "fwd_dir_21d"
     assert rows[unscored]["direction_label"] is None
     assert study.predictions.table().schema["direction_label"] == pl.String
+
+
+def test_prediction_rows_at_reads_the_case_dir_it_is_given_not_the_activated_root(
+    tmp_path: Path,
+) -> None:
+    """An admissibility filter must read the registry its caller read, and move no root.
+
+    ``nasdaq100_microstructure/14_backtest`` asked ``open_study(case_study)`` which of its
+    predictions were complete. With no workspace that is the canonical regeneration path, so
+    ``activate()`` re-pointed ``ML4T_OUTPUT_DIR`` at the published case study: the guard then
+    filtered the notebook's predictions against a different registry - the join drops every row
+    and a healthy population reads as inadmissible - and every later resolution in the notebook,
+    including where ``run_backtest(register=True)`` writes, followed the activated root.
+
+    Two registries here hold different rows, and the argument decides which one is read.
+    """
+    release = _seed_release(tmp_path)
+    release_case = release / "case_studies" / "etfs"
+    released = _publish(release_case, spec=_resolved_spec(alpha=1.0))
+
+    workspace = tmp_path / "workspace"
+    study = Study.open("etfs", workspace=workspace, release_root=release)
+    in_workspace = _publish(study.root, spec=_resolved_spec(alpha=2.0))
+    assert released != in_workspace
+
+    os.environ["ML4T_OUTPUT_DIR"] = str(workspace)
+
+    assert prediction_rows_at(study.root)["prediction_hash"].to_list() == [in_workspace]
+    assert prediction_rows_at(release_case)["prediction_hash"].to_list() == [released]
+    assert os.environ.get("ML4T_OUTPUT_DIR") == str(workspace)
+
+    rows = prediction_rows_at(study.root)
+    assert rows.filter(pl.col("complete"))["prediction_hash"].to_list() == [in_workspace]
+
+    # The contrast that makes the helper necessary: reading through a study activates a root,
+    # and here unsets the one the caller resolved against.
+    Study.open("etfs", release_root=release).predictions.table()
+    assert "ML4T_OUTPUT_DIR" not in os.environ

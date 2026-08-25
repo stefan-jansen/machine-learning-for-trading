@@ -48,7 +48,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import open_study
+from case_studies.research import prediction_rows_at
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -231,9 +231,13 @@ if pred_index.is_empty():
 # full sweep to discover.
 # `complete` is the whole test: `catalog.py:309` already requires `identity_status ==
 # "current"` before a row can be complete, and the tier is decided by which registry the
-# study opened, not by a column comparison. Re-asserting either here would reject a
+# rows were read from, not by a column comparison. Re-asserting either here would reject a
 # preview run's own rows - the mistake `8fc28044` fixed on the registry path.
-_catalog = open_study(CASE_STUDY_ID, entry_point="14_backtest").predictions.table()
+# The catalog is read off `CASE_DIR`, the directory `load_prediction_index` just read, and
+# not by opening a `Study`: every `Study.open` branch ends in `activate()`, which would both
+# answer for a different registry than the one being filtered and re-point the rest of the
+# notebook - including where `run_backtest(register=True)` writes - at the activated root.
+_catalog = prediction_rows_at(CASE_DIR)
 _admissible = _catalog.filter(pl.col("complete")).select("prediction_hash")
 _offered = len(pred_index)
 pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
