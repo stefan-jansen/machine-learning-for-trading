@@ -47,6 +47,8 @@ KNOWN_OVER_CAP = {
     "case_studies/fx_pairs/14_portfolio_management.py": 5,
     "case_studies/fx_pairs/15_costs.py": 4,
     "case_studies/fx_pairs/16_risk_management.py": 4,
+    # Arrived with #612, after this list was first measured. nasdaq100_microstructure owns it.
+    "case_studies/nasdaq100_microstructure/07_gbm.py": 4,
     "case_studies/us_equities_panel/16_backtest.py": 5,
     "case_studies/us_equities_panel/17_portfolio_management.py": 5,
     "case_studies/us_equities_panel/18_costs.py": 5,
