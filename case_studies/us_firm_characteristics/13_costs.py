@@ -51,7 +51,7 @@ from collections import Counter
 
 import polars as pl
 
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -282,7 +282,7 @@ else:
 import matplotlib.pyplot as plt
 
 if not cost_df.is_empty():
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 4))
 
     for alloc in cost_df["allocator"].unique().sort().to_list():
         subset = cost_df.filter(pl.col("allocator") == alloc).sort("cost_bps")
@@ -310,7 +310,15 @@ if not cost_df.is_empty():
     )
     ax.legend(frameon=False)
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Line chart of validation Sharpe against the total commission and slippage "
+        "charged per leg, from zero to fifty basis points. The line starts just above "
+        "3.1 and falls almost straight to about 2.8 at the right edge, staying far "
+        "above the dashed zero reference across the whole grid. A dotted vertical "
+        "marker near the left shows the cost level the rest of the case study was "
+        "charged at, with most of the swept range lying to its right.",
+    )
 
 # %% [markdown]
 # ## What this notebook establishes, and what it does not

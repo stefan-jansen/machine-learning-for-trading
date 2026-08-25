@@ -55,7 +55,7 @@ from collections import Counter
 
 import polars as pl
 
-from utils.style import COLORS, add_message_title
+from utils.style import COLORS, add_message_title, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -357,12 +357,15 @@ print("Note: the averages above include every run, insolvent ones among them.")
 import matplotlib.pyplot as plt
 
 if not allocator_comparison.is_empty():
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
     ax.barh(
         allocator_comparison["allocator"].to_list(),
         allocator_comparison["avg_sharpe"].to_list(),
         color=COLORS["blue"],
     )
+    # barh fills from the bottom, so without this the frame's descending order
+    # arrives on the page ascending and the figure contradicts the table above it.
+    ax.invert_yaxis()
     ax.set_xlabel("Sharpe, averaged over concentration and prediction")
     add_message_title(
         ax,
@@ -373,7 +376,14 @@ if not allocator_comparison.is_empty():
         ),
     )
     fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Horizontal bar chart of average validation Sharpe for three ways of sizing "
+        "the selected names. The equal-weight Chapter 16 baseline is longest, with "
+        "conformal weighting and score weighting close behind each other and both "
+        "visibly shorter. All three sit between 1.7 and 1.9, so the gap between the "
+        "sizing rules is small next to their common level.",
+    )
 
 # %% [markdown]
 # ### The upper tail of the allocation grid
