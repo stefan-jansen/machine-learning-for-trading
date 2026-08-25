@@ -681,20 +681,18 @@ fig.show()
 # table then reports the selected run's complete validation record with
 # block-bootstrap confidence intervals from `backtest_metrics`. Those two windows are not
 # the same length; the spec block above prints both so the reader can see by
-# how much. The bootstrap block length captures serial dependence in the
-# return series and is not required to match the one-month rebalance step.
+# how much.
+#
+# The bootstrap block length captures serial dependence in the return series and is not
+# required to match the one-month rebalance step, but it cannot be shorter than it: a
+# block inside a holding period resamples within one position and understates the
+# dependence the interval exists to carry. The audit at the end of the cell below
+# computes that relation rather than asserting it, and stops the notebook if it fails.
 
 # %% tags=["results"]
 full = load_backtest_metrics(CASE_STUDY, backtest_hash=TOP_HASH).row(0, named=True)
 
-with sqlite3.connect(str(_db)) as _con:
-    top_spec = json.loads(
-        _con.execute(
-            "SELECT spec_json FROM backtest_runs WHERE backtest_hash=?",
-            (TOP_HASH,),
-        ).fetchone()[0]
-    )
-top_strategy = top_spec["strategy"]
+top_strategy = _spec["strategy"]
 top_signal = top_strategy["signal"]
 top_allocation = top_strategy.get("allocation") or {}
 
@@ -719,15 +717,21 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-print("Equal-weight selection (validation window):")
+print("Selected run, validation window:")
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
 _block = int(full["bootstrap_block_length"])
 _rstep = setup["labels"]["rebalance_step"][RANK1_LABEL]
+if _block < _rstep:
+    raise RuntimeError(
+        f"bootstrap block is {_block} months against a {_rstep}-month rebalance step. A "
+        "block shorter than the holding period resamples inside it, so the confidence "
+        "intervals below would understate the serial dependence they exist to carry."
+    )
 print(
-    f"  dependence audit: bootstrap block={_block} months; "
-    f"rebalance step={_rstep} month; block >= step"
+    f"  dependence audit: bootstrap block={_block} months, rebalance step={_rstep} month, "
+    "so the block spans at least one holding period"
 )
 
 
