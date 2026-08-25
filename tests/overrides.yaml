@@ -2022,11 +2022,15 @@ case_studies/us_equities_panel/14_causal_dml:
   # CV_FOLDS, MAX_SAMPLES and N_PLACEBO became PREVIEW_N_FOLDS,
   # PREVIEW_MAX_SAMPLES and PREVIEW_N_PLACEBO: the reduced fold count, sample
   # cap and placebo count are part of the preview identity now, not free knobs.
+  # 24 placebo draws, not fewer: the plus-one correction floors the empirical p at
+  # 1/(n+1), so classify_refutation (utils/causal.py:753) returns "Underpowered" for
+  # any n below 20 and the draws are spent on a verdict that cannot be reached. 20 is
+  # the first reachable count; 24 leaves margin for draws that fail.
   parameters:
     MAX_SYMBOLS: 5
     PREVIEW_N_FOLDS: 2
     PREVIEW_MAX_SAMPLES: 5000
-    PREVIEW_N_PLACEBO: 15
+    PREVIEW_N_PLACEBO: 24
   timeout: 120
 case_studies/us_equities_panel/15_model_analysis:
   # 15 declares EXECUTION_TIER and WORKSPACE, so research_preview_parameters routes it to the
