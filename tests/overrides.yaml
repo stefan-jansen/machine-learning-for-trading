@@ -2103,8 +2103,16 @@ case_studies/sp500_options/16_strategy_analysis:
   skip: true
   skip_reason: 'Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry.'
 case_studies/sp500_options/90_ic_diagnostic:
-  parameters:
-    MAX_SYMBOLS: 5
+  # MAX_SYMBOLS was 5 while the notebook screens every cross-section at MIN_SYMBOLS_PER_DATE = 10,
+  # so the cap guaranteed that no date could ever qualify - a reduction that made the run
+  # impossible rather than smaller. It is gone; the fixture is already small.
+  #
+  # That still leaves this notebook unrunnable here, for the reason 04_model_based_features is:
+  # `02_labels` builds contract_returns from the raw option chain, which carries 8 symbols where
+  # the daily straddle panel carries 22, so the regenerated label spans 8 names and no date
+  # reaches 10. It becomes runnable when the raw chain covers the daily panel's symbol set.
+  skip: true
+  skip_reason: "Screens cross-sections at MIN_SYMBOLS_PER_DATE = 10, and the fixture's raw option chain carries 8 symbols where its daily panel carries 22, so no date qualifies. Runnable when the raw chain covers the daily panel's symbols."
   timeout: 120
 case_studies/us_equities_panel/01_feasibility_analysis:
   timeout: 120

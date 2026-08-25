@@ -51,6 +51,16 @@ DIAGNOSTIC_LABEL = "fwd_ret_dh_10d"
 UNHEDGED_LABEL = "fwd_ret_10d"
 LABEL_BUFFER = "10D"
 
+# How many names a date needs before its cross-sectional correlation is computed at all. One
+# number, used by both IC computations below, because they measure the same quantity on the same
+# panel and a reader compares them directly. They carried 5 and 20, neither explained, which made
+# the two figures answer slightly different questions without saying so: a date with eight names
+# contributed to one and not the other. Ten is the floor `04_model_based_features` screens its
+# incremental features on, so the whole case study now reports IC over the same minimum
+# cross-section. A rank correlation over fewer names is mostly the sampling noise of which names
+# happened to quote that day.
+MIN_SYMBOLS_PER_DATE = 10
+
 # %% [markdown]
 # ## Financial features and label-specific folds
 
@@ -241,7 +251,7 @@ def summarize_ablation(features: list[str]) -> dict:
         ret_col="y_true",
         date_col="timestamp",
         entity_col="symbol",
-        min_obs=5,
+        min_obs=MIN_SYMBOLS_PER_DATE,
     ).drop_nulls("ic")
     uncertainty = compute_ic_uncertainty(daily.select("ic"), horizon=10, n_boot=1000)
     return {
@@ -322,11 +332,18 @@ def mean_daily_ic(frame: pl.DataFrame, feature: str, target: str) -> float:
         ret_col="y_true",
         date_col="timestamp",
         entity_col="symbol",
-        min_obs=20,
+        min_obs=MIN_SYMBOLS_PER_DATE,
     ).drop_nulls("ic")
+    if not daily.height:
+        # An empty series averages to null, and reporting that as a type error described the
+        # symptom rather than the cause: what happened is that no date carried
+        # MIN_SYMBOLS_PER_DATE names, so there was never an IC to average.
+        raise RuntimeError(
+            f"no date in the validation panel carries {MIN_SYMBOLS_PER_DATE} names, so "
+            f"{feature!r} has no daily IC series against {target!r} to average; the panel spans "
+            f"{frame['symbol'].n_unique()} names in total"
+        )
     mean_ic = daily.select(pl.col("ic").mean()).item()
-    if not isinstance(mean_ic, (int, float)):
-        raise TypeError("daily IC mean is not numeric")
     return float(mean_ic)
 
 
