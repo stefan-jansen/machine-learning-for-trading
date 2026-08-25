@@ -545,10 +545,32 @@ for family, buckets in bucket_results.items():
         }
     )
 
-decile_spreads = pl.DataFrame(spread_rows).sort("spread_bps", descending=True)
+# Built with an explicit schema, because `pl.DataFrame([])` is a frame with no
+# columns at all and sorting it raises rather than returning nothing. Every family
+# can be skipped above - a registry holding no bucketed predictions for any of them
+# is the ordinary state of a fresh one - and a table that cannot be built is a fact
+# to report, not an error.
+decile_spreads = pl.DataFrame(
+    spread_rows,
+    schema={
+        "family": pl.Utf8,
+        "top_decile_bps": pl.Float64,
+        "bottom_decile_bps": pl.Float64,
+        "spread_bps": pl.Float64,
+        "clears_low_cost": pl.Boolean,
+        "clears_high_cost": pl.Boolean,
+    },
+).sort("spread_bps", descending=True)
 print(f"round-trip cost assumption: {round_trip_lo} to {round_trip_hi} bps per rebalance")
-print(f"families whose spread clears the low-cost end: {decile_spreads['clears_low_cost'].sum()}")
-print(f"families whose spread clears the high-cost end: {decile_spreads['clears_high_cost'].sum()}")
+if decile_spreads.is_empty():
+    print("families with a bucketed decile spread: 0")
+else:
+    print(
+        f"families whose spread clears the low-cost end: {decile_spreads['clears_low_cost'].sum()}"
+    )
+    print(
+        f"families whose spread clears the high-cost end: {decile_spreads['clears_high_cost'].sum()}"
+    )
 decile_spreads
 
 # %% [markdown]
@@ -1211,12 +1233,31 @@ for row in family_leaders.iter_rows(named=True):
         }
     )
 
-synthesis = pl.DataFrame(synthesis_rows).sort("ic", descending=True)
-print(f"families with an interval excluding zero: {synthesis['interval_excludes_zero'].sum()}")
-print(
-    "families with an interval excluding zero and a spread above the low-cost round trip: "
-    f"{synthesis.filter(pl.col('interval_excludes_zero') & (pl.col('spread_bps') > round_trip_lo)).height}"
-)
+# Same reason as `decile_spreads` above: an empty `family_leaders` gives an empty row
+# list, and a frame built from one has no columns to sort on or filter by.
+synthesis = pl.DataFrame(
+    synthesis_rows,
+    schema={
+        "family": pl.Utf8,
+        "config": pl.Utf8,
+        "ic": pl.Float64,
+        "ci_lo": pl.Float64,
+        "ci_hi": pl.Float64,
+        "interval_excludes_zero": pl.Boolean,
+        "folds_positive": pl.Int64,
+        "folds": pl.Int64,
+        "worst_fold_ic": pl.Float64,
+        "spread_bps": pl.Float64,
+    },
+).sort("ic", descending=True)
+if synthesis.is_empty():
+    print("families with a leader row: 0")
+else:
+    print(f"families with an interval excluding zero: {synthesis['interval_excludes_zero'].sum()}")
+    print(
+        "families with an interval excluding zero and a spread above the low-cost round trip: "
+        f"{synthesis.filter(pl.col('interval_excludes_zero') & (pl.col('spread_bps') > round_trip_lo)).height}"
+    )
 synthesis
 
 # %% [markdown]
