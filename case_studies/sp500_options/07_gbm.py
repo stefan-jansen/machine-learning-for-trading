@@ -139,7 +139,10 @@ configs = load_model_configs(
     labels=LABELS or None,
     config_names=CONFIG_NAMES or None,
 )
-configs
+# `model_class` is empty for every row: the LightGBM presets under `case_studies/config/lgb/`
+# declare their objective in `params` and carry no `model_class` key, unlike the linear presets
+# where it names the estimator. Showing the column would put a blank field in front of the reader.
+configs.drop("model_class")
 
 # %% [markdown]
 # `LABELS` and `CONFIG_NAMES` both narrow what is fitted, and a narrowed run declares a different
@@ -375,6 +378,11 @@ def objective_of(name: str) -> str:
     return next((key for key in objectives if name.endswith(key)), "mse")
 
 
+# %% [markdown]
+# One trace per configuration, coloured by the objective its name declares, so the question of
+# whether the loss function is what separates them can be read off the chart rather than argued.
+
+# %%
 fig_curves = go.Figure()
 for config_name in curves.get_column("config_name").unique(maintain_order=True):
     series = curves.filter(pl.col("config_name") == config_name)
@@ -402,10 +410,12 @@ show_plotly_with_alt(
     fig_curves,
     "Line chart of mean validation information coefficient against boosting iteration, one line "
     "per configuration, coloured by loss function: blue for squared error, amber for absolute "
-    "error, copper for Huber. A dashed line marks zero. The colours divide across it: the copper "
-    "Huber lines run above zero for most of the range, the blue squared-error lines below it, "
-    "and the amber absolute-error lines cross back and forth near it. Most lines reach their "
-    "highest point in the first fifth of the range and drift afterwards.",
+    "error, copper for Huber. A dashed line marks zero. The blue squared-error lines run below "
+    "it across the whole range without exception. The copper Huber and amber absolute-error "
+    "lines run above it for most of the range and are interleaved with one another rather than "
+    "separated; two Huber lines and one absolute-error line dip below zero as trees are added. "
+    "Ten of the fifteen reach their highest point at the first or second checkpoint and drift "
+    "afterwards.",
 )
 
 # %% [markdown]
@@ -453,10 +463,11 @@ show_plotly_with_alt(
     fig_obj,
     "Bar chart of mean validation information coefficient for every full-coverage configuration "
     "at its final boosting iteration, sorted descending and coloured by loss function, against a "
-    "dashed zero line. The bars divide by colour rather than by leaf count: every copper Huber "
-    "bar stands above the line at the left of the ranking, every blue squared-error bar hangs "
-    "below it at the right, and the amber absolute-error bars sit between them across the zero "
-    "line. Leaf count varies within each colour group without ordering it.",
+    "dashed zero line. The bars divide by colour rather than by leaf count: every blue "
+    "squared-error bar hangs below the line, and together they take the five rightmost places "
+    "with nothing else among them. The copper Huber and amber absolute-error bars are "
+    "interleaved to the left of that block, mostly above the line, with two copper and one "
+    "amber bar just below it. Leaf count varies within each colour group without ordering it.",
 )
 
 # %% [markdown]
@@ -489,13 +500,15 @@ spread
 # %% [markdown]
 # ## 5. What to notice
 #
-# **The objectives separate, in the predicted order, and almost without overlap.** Every
-# squared-error configuration ends training on the wrong side of zero. Every Huber configuration
-# ends on the right side of it. Absolute error sits between them and straddles zero. The
-# separation is by loss function and not by capacity: the deepest and shallowest settings appear
-# at both ends of the ranking, while the colour of a bar predicts which half of the table it is
-# in. This is the answer to the question `06_linear` could only ask, and it is as clean as this
-# kind of comparison gets.
+# **Squared error separates from the two robust objectives, and that is the whole of the
+# separation.** Every squared-error configuration ends training below zero, and every one of them
+# ends below every Huber and every absolute-error configuration: the five squared-error settings
+# take the bottom five places in the ranking with nothing else among them. Above that block the
+# other two objectives interleave rather than order. The leading Huber and the leading absolute-
+# error configuration tie for first, two Huber settings end just below zero, and four of the five
+# absolute-error settings end above it. So what the grid supports is squared error against the
+# rest, not the three-way ordering the mechanism might lead you to expect. Capacity orders nothing
+# either way: the shallowest setting appears both in the top three and in last place.
 #
 # **The mechanism is the payoff shape, and the linear result is consistent with it.** A short
 # straddle earns at most the premium and can lose many multiples of it, so the label's mass sits
@@ -504,7 +517,8 @@ spread
 # successive tree is fitted to - and getting those few right does nothing for a rank correlation,
 # which only asks whether the positions were ordered correctly. Huber caps how much any one
 # observation can pull, spends its capacity on the body of the distribution where most of the
-# ranking is decided, and comes out positive. The linear model in `06_linear` minimizes squared
+# ranking is decided, and ends above squared error everywhere in this grid. The linear model in
+# `06_linear` minimizes squared
 # error and finished close to where the squared-error configurations here finish, which is what
 # this reading predicts.
 #
@@ -518,11 +532,12 @@ spread
 # **Read the magnitudes with the sample in mind.** The positive numbers are small, they rest on
 # two validation folds covering 2019 and 2020, and the second of those is one event that a
 # short-volatility position exists to be paid for. A single regime can move a two-fold average a
-# long way. What the results support is the ordering of the objectives, which is consistent and
-# has a mechanism behind it; what they do not support is any particular configuration's value.
+# long way. What the results support is squared error's separation from the other two, which is
+# consistent across the grid and has a mechanism behind it; what they do not support is a ranking
+# of Huber against absolute error, or any particular configuration's value.
 #
-# **Most configurations peak early.** Twelve of the fifteen reach their highest IC within the first
-# fifth of the declared iterations and drift afterwards. Combined with the objective finding, the
+# **Most configurations peak early.** Ten of the fifteen reach their highest IC at the first or
+# second checkpoint - inside the first fifth of the declared iterations - and drift afterwards. Combined with the objective finding, the
 # picture is of a model that extracts what is available quickly and then spends the remaining
 # iterations fitting the tail of the training window - which is precisely what squared error
 # rewards it for doing, and part of why that objective ends up furthest below zero.
