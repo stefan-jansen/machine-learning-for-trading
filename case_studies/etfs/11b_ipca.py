@@ -283,15 +283,15 @@ print(f"{len(requested_pairs)} label-configuration pairs")
 # predictions happen to be in the registry.
 #
 # `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
-# prediction identities, so anything that moves a training identity - a changed tolerance as much as a changed label menu -
-# produces a different set under the same name, and the registry refuses to write it without being
-# told which snapshot it supersedes. It is empty here because this notebook, run as it stands,
-# reproduces the members already published under that name rather than changing them, and
-# reproducing a published list is not a replacement. Fill it in when you have changed something
-# that moves an identity and want the new set to take the name; the error raised on the attempt
-# tells you which hash to name. A reduced-scale run passes it empty whatever the default is: a
-# population produced under a reduction is thrown away with the workspace it was written to, so it
-# has no lineage to extend.
+# prediction identities, so anything that moves a training identity - a changed tolerance as much
+# as a changed label menu - produces a different set under the same name, and the registry refuses
+# to write it without being told which snapshot it supersedes. It is empty here because this
+# notebook, run as it stands, reproduces the members already published under that name rather than
+# changing them, and reproducing a published list is not a replacement. Fill it in when you have
+# changed something that moves an identity and want the new set to take the name; the error raised
+# on the attempt tells you which hash to name. A reduced-scale run passes it empty whatever the
+# default is: a population produced under a reduction is thrown away with the workspace it was
+# written to, so it has no lineage to extend.
 
 # %%
 population_name = POPULATION_NAME or f"etfs-{MODEL_NAME}-validation-v1"
