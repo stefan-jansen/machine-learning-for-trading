@@ -1707,6 +1707,56 @@ def register_cohort_metrics(
 # ---------------------------------------------------------------------------
 
 
+def declare_causal_supersedes(
+    case_study: str,
+    causal_hash: str,
+    *,
+    supersedes_hash: str,
+    label: str,
+    tier: str = "canonical",
+    case_dir: Path | None = None,
+) -> None:
+    """Record which identity *causal_hash* retires, without re-running the fit.
+
+    The repair path needs this. A registry holding two undeclared identities is fixed
+    by re-registering the newer one naming the older, and re-registering reproduces the
+    same hash - so the fit is served from cache and never reaches the write. Fill-once,
+    and validated the same way the registering path is: a predecessor that is not
+    itself current is refused rather than recorded.
+    """
+    if case_dir is None:
+        case_dir = _case_dir(case_study)
+    db = _open_registry(case_dir)
+    try:
+        stored = (
+            db.execute(
+                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            or (None,)
+        )[0]
+        if stored is not None:
+            if stored != supersedes_hash:
+                raise ValueError(
+                    f"causal run {causal_hash} already declares it supersedes {stored}; "
+                    f"it cannot also supersede {supersedes_hash}"
+                )
+            return
+        _enforce_causal_supersedes(
+            db,
+            causal_hash=causal_hash,
+            label=label,
+            tier=tier,
+            supersedes_hash=supersedes_hash,
+        )
+        db.execute(
+            "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
+            (supersedes_hash, causal_hash),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 def _enforce_causal_supersedes(
     db, *, causal_hash: str, label: str, tier: str, supersedes_hash: str | None
 ) -> None:
@@ -1723,6 +1773,23 @@ def _enforce_causal_supersedes(
     ambiguity.
     """
     if causal_hash in causal_identities_retired(db, label=label):
+        # Reproducing a retired identity is a no-op, but the declaration it carries is
+        # not exempt from being checked. An author reproducing A from an older checkout
+        # with SUPERSEDES_CAUSAL still pointing at B - the run that retired A - would
+        # otherwise make both rows retired, and the reader would resolve to zero with
+        # no hint at all. Worse than the two-identity state this exists to prevent.
+        stored = (
+            db.execute(
+                "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = ?", (causal_hash,)
+            ).fetchone()
+            or (None,)
+        )[0]
+        if supersedes_hash is not None and supersedes_hash != stored:
+            raise ValueError(
+                f"causal run {causal_hash} is already retired by a later identity, and "
+                f"declaring that it supersedes {supersedes_hash} would retire that one too. "
+                f"It carries {stored or 'no declaration'}; re-register without SUPERSEDES_CAUSAL."
+            )
         # Re-registering a row some later run already retired changes nothing about
         # what a reader resolves - reproducing a published number from an older
         # checkout does exactly this. Refusing it would also hand the author the

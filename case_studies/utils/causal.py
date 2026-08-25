@@ -1365,6 +1365,9 @@ def run_resolved_causal_request(
     import math
 
     from case_studies.research.causal import CausalResult
+    from case_studies.utils.registry.registration import (
+        declare_causal_supersedes,
+    )
     from case_studies.utils.registry.registration import register_causal_run as register_record
     from case_studies.utils.registry.specs import canonical_json, training_hash_from_spec
 
@@ -1380,6 +1383,23 @@ def run_resolved_causal_request(
     if cached is not None:
         if training_hash_from_spec(cached.spec) != causal_hash or not cached.complete:
             raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
+        if supersedes is not None:
+            # The declaration has to land even when the fit does not re-run, because
+            # that is the shape of the repair. A registry already holding two
+            # undeclared identities tells the author to re-register the newer one
+            # naming the older; doing so reproduces the same causal_hash, so the cache
+            # answers and the fit is skipped. Returning here without writing would drop
+            # the declaration silently and leave the label unresolvable, with the
+            # notebook reporting success. register_causal_run fills the column
+            # once and validates what it is given.
+            declare_causal_supersedes(
+                study.case_study,
+                causal_hash,
+                supersedes_hash=supersedes,
+                label=context.outcome_col,
+                tier=str(spec["execution_tier"]),
+                case_dir=study.storage_root(spec["execution_tier"]),
+            )
         return cached
 
     nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)

@@ -160,6 +160,61 @@ def test_two_undeclared_identities_say_what_to_do(tmp_path) -> None:
     assert "causal_first" in str(raised.value)
 
 
+def test_reproducing_a_retired_identity_leaves_the_tip_alone(tmp_path) -> None:
+    """An older checkout reproducing a published number must not disturb the chain."""
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", effect=-0.03, supersedes="causal_first")
+
+    _register(case_dir, "causal_first")
+
+    assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_second"
+
+
+def test_a_retired_identity_cannot_declare_it_retires_its_own_successor(tmp_path) -> None:
+    """Otherwise both rows end up retired and the reader resolves to zero.
+
+    Reachable by reproducing an older run with SUPERSEDES_CAUSAL still set to the value
+    the *newer* run used - the parameter is sticky in a notebook, the hash is not. A
+    worse state than the two-identity one, because the error names no candidates.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", effect=-0.03, supersedes="causal_first")
+
+    with pytest.raises(ValueError, match="already retired"):
+        _register(case_dir, "causal_first", supersedes="causal_second")
+
+
+def test_a_re_registration_without_a_declaration_does_not_clear_one(tmp_path) -> None:
+    """Fill-once has to hold on the ON CONFLICT path too, not only the UPDATE.
+
+    The route in is the migration backfill: a row stored with a NULL
+    refutation_n_successful is re-registered with a real one, which skips the early
+    return and reaches the insert. If that insert wrote NULL over the declaration, the
+    row it retired would go live again and the reader would see two.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", effect=-0.03, supersedes="causal_first")
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.execute(
+            "UPDATE causal_runs SET refutation_n_successful = NULL WHERE causal_hash = ?",
+            ("causal_second",),
+        )
+
+    _register(case_dir, "causal_second", effect=-0.03)
+
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = db.execute(
+            "SELECT supersedes_hash, refutation_n_successful FROM causal_runs "
+            "WHERE causal_hash = ?",
+            ("causal_second",),
+        ).fetchone()
+    assert stored == ("causal_first", 100)
+    assert CausalResult.one(_study(case_dir), label=LABEL).hash == "causal_second"
+
+
 # ---------------------------------------------------------------------------
 # The path that actually produces the rows a reader resolves.
 #
@@ -243,3 +298,34 @@ def test_the_declaration_stays_out_of_the_identity(tmp_path, monkeypatch) -> Non
 
     assert declaring.identity == plain.identity
     assert "supersedes" not in declaring.spec
+
+
+def test_the_repair_lands_even_though_the_fit_is_served_from_cache(tmp_path, monkeypatch) -> None:
+    """The recovery path for the rows that already exist, end to end.
+
+    A registry holding two undeclared identities is repaired by re-running the newer
+    one with SUPERSEDES_CAUSAL naming the older. That reproduces the same causal_hash,
+    so `run_resolved_causal_request` serves it from cache and never reaches the
+    registering write - and before this the declaration was dropped there in silence,
+    leaving the label unresolvable while the notebook reported success.
+    """
+    from tests.test_causal_adapter import _causal_fixture
+
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
+    _refit_under_a_changed_causal_module(monkeypatch, "a" * 64)
+    first = study.causal(method="dml", label=label.name).run()
+    _refit_under_a_changed_causal_module(monkeypatch, "b" * 64)
+    second = study.causal(method="dml", label=label.name, supersedes=first.hash).run()
+
+    # Strand them, which is the state cme_futures is in: two identities, no chain.
+    db_path = study.root / "run_log" / "registry.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute("UPDATE causal_runs SET supersedes_hash = NULL")
+    with pytest.raises(ValueError, match="resolved to 2 identities"):
+        CausalResult.one(study, label=label.name)
+
+    # The documented repair, which recomputes an identity that is already stored.
+    repaired = study.causal(method="dml", label=label.name, supersedes=first.hash).run()
+
+    assert repaired.hash == second.hash
+    assert CausalResult.one(study, label=label.name).hash == second.hash
