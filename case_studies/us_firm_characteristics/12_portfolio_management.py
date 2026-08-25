@@ -63,6 +63,7 @@ from case_studies.utils.backtest_loaders import get_backtest_config, load_backte
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
+    backtest_dir,
     load_existing_backtest_hashes,
     read_predictions,
     resolve_best_predictions,
@@ -152,9 +153,25 @@ print(f"Prices: {len(prices):,} rows, {n_assets} assets")
 #
 # A backtest hash covers the whole strategy spec, so a cell already registered under
 # the same spec is served from the registry rather than recomputed. The summary below
-# counts those separately from the cells this run computed: otherwise a re-run reports
-# the same eighty backtests as a cold one and reports them in almost no time, which
-# reads as a fast sweep rather than as no sweep.
+# reports two separate facts. What the stage contains is what a reader needs, and it is
+# the same number whether this execution was cold or warm. What this execution did is
+# what a maintainer needs. Reported as one number they are indistinguishable, and a
+# warm re-run publishes a page claiming eighty backtests it did not run.
+#
+# The three execution counts sum to the cells attempted. `n_done` counts attempts, so a
+# failure has to come out of the computed figure or it is reported twice - once as
+# computed and once as failed.
+#
+# The reuse count is taken against the hashes that were already complete AND had their
+# returns file on disk before the sweep, which are the two conditions `run_backtest`
+# checks before serving from the registry. A snapshot of merely registered hashes is
+# not the same test - a row with no returns file is recomputed and would be counted as
+# reused, which is wrong in the direction that hides work.
+#
+# `run_backtest` fills allocator defaults inside the call - a conformal spec gains its
+# calibration version and minimum calibration count there - so a hash built from the
+# spec this notebook holds is not the registered one. The set is therefore keyed on
+# the hash the runner returns.
 
 # %%
 TOP_K_VALUES = get_top_k_values_for(CASE_STUDY_ID, LABEL, n_assets)
@@ -174,7 +191,11 @@ n_done = 0
 n_failed = 0
 n_reused = 0
 failures: Counter[str] = Counter()
-existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation")
+reusable_before = {
+    _hash
+    for _hash in load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation")
+    if (backtest_dir(CASE_STUDY_ID, _hash) / "daily_returns.parquet").exists()
+}
 sweep_start = time.monotonic()
 
 for top_k in TOP_K_VALUES:
@@ -217,7 +238,7 @@ for top_k in TOP_K_VALUES:
                     calendar=bt_config.calendar,
                 )
 
-                if result.backtest_hash in existing_hashes:
+                if result.backtest_hash in reusable_before:
                     n_reused += 1
                 print(
                     f"  [{n_done}/{n_total}] k={top_k} {source} x {alloc_name}: "
@@ -231,9 +252,12 @@ for top_k in TOP_K_VALUES:
                     f"FAILED - {type(error).__name__}: {error}"
                 )
 
+stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="allocation"))
+print(f"\nAllocation stage: {stage_total} backtests registered.")
 print(
-    f"\nSweep completed in {(time.monotonic() - sweep_start) / 60:.1f} minutes: "
-    f"{n_done - n_reused} computed, {n_reused} served from the registry, {n_failed} failed"
+    f"This execution: {n_done - n_reused - n_failed} computed, {n_reused} reused, "
+    f"{n_failed} failed, over {n_done} cells attempted in "
+    f"{(time.monotonic() - sweep_start) / 60:.1f} minutes."
 )
 for reason, count in failures.most_common():
     print(f"  {count:>4} x {reason[:150]}")

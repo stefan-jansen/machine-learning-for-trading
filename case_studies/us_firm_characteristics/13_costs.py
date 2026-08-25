@@ -64,6 +64,7 @@ from case_studies.utils.backtest_presets import (
 )
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
+    backtest_dir,
     load_existing_backtest_hashes,
     read_predictions,
     resolve_best_backtest_runs,
@@ -162,8 +163,24 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} assets")
 #
 # A backtest hash covers the whole strategy spec, so a level already registered under
 # the same spec is served from the registry rather than recomputed. The summary below
-# counts those separately from the levels this run computed, so a fully cached re-run
-# does not report the same eleven backtests as a cold one.
+# reports two separate facts: what the stage contains, which is the same number whether
+# this execution was cold or warm and is what a reader needs, and what this execution
+# did, which is what a maintainer needs. Reported as one number they are
+# indistinguishable, and a warm re-run publishes a page claiming eleven backtests it
+# did not run.
+#
+# The three execution counts sum to the levels attempted. `n_done` counts attempts, so a
+# failure has to come out of the computed figure or it is reported twice.
+#
+# The reuse count asks `backtest_run_status`, which is the same call `run_backtest`
+# makes to decide, rather than checking the hash against a snapshot of the registry
+# taken before the loop. The two differ where a row is registered but has no
+# `daily_returns.parquet`: the runner recomputes it and a snapshot reports it as
+# reused, which is wrong in the direction that hides work.
+#
+# `run_backtest` fills allocator defaults inside the call, so a hash built from the
+# spec this notebook holds is not necessarily the registered one. The set is keyed on
+# the hash the runner returns.
 
 # %% tags=["results"]
 n_total = len(top_combos) * len(COST_GRID_BPS) if not top_combos.is_empty() else 0
@@ -171,7 +188,11 @@ n_done = 0
 n_failed = 0
 n_reused = 0
 failures: Counter[str] = Counter()
-existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
+reusable_before = {
+    _hash
+    for _hash in load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
+    if (backtest_dir(CASE_STUDY_ID, _hash) / "daily_returns.parquet").exists()
+}
 t0 = time.time()
 
 for combo_row in top_combos.iter_rows(named=True):
@@ -211,7 +232,7 @@ for combo_row in top_combos.iter_rows(named=True):
                 calendar=bt_config.calendar,
             )
 
-            if result.backtest_hash in existing_hashes:
+            if result.backtest_hash in reusable_before:
                 n_reused += 1
             print(
                 f"  [{n_done}/{n_total}] {alloc_method} @ {cost_bps:g} bps: "
@@ -228,24 +249,34 @@ for combo_row in top_combos.iter_rows(named=True):
             )
 
 elapsed = time.time() - t0
+stage_total = len(load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity"))
+print(f"\nCost-sensitivity stage: {stage_total} backtests registered.")
 print(
-    f"\nCost sweep complete: {n_done} of {n_total} levels in {elapsed:.0f}s "
-    f"({n_done - n_reused} computed, {n_reused} served from the registry, {n_failed} failed)"
+    f"This execution: {n_done - n_reused - n_failed} computed, {n_reused} reused, "
+    f"{n_failed} failed, over {n_done} of {n_total} declared levels "
+    f"attempted in {elapsed:.0f}s."
 )
 for reason, count in failures.most_common():
     print(f"  {count:>3} x {reason[:150]}")
 
 # %% [markdown]
-# Section 3 reads the registry rather than the loop above, so a sweep in which nothing
-# was written and one in which everything was written look identical from there: the
-# curve would be drawn from whatever an earlier run left behind. Counting the failures
-# is not enough on its own, so the count stops the notebook.
+# Section 3 reads the registry rather than the loop above, so a sweep that wrote nothing
+# and one that wrote everything look identical from there: the curve would be drawn from
+# whatever an earlier run left behind. Counting the failures is not enough on its own,
+# so the count stops the notebook.
+#
+# Any failure stops it, not only a total one. Section 3 tells the reader that every level
+# is printed and that the top of the grid is what decides whether the curve reaches zero
+# inside it, so a single missing level can be the one the section is about. A grid with a
+# hole in it is not a smaller grid.
 
 # %%
-if n_total and n_failed == n_total:
+if n_failed:
     raise RuntimeError(
-        f"every one of the {n_total} cost backtests failed, so nothing was registered; "
-        "the curve below would describe an earlier run"
+        f"{n_failed} of {n_total} cost levels failed, so the grid section 3 renders is "
+        "incomplete. Its prose tells the reader every level is shown and that the top of "
+        "the grid decides whether the curve reaches zero inside it, and a missing level "
+        "may be exactly that one - so a partial sweep is not a partial result here."
     )
 
 # %% [markdown]

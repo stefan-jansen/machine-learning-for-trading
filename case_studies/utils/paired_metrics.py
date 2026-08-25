@@ -50,10 +50,6 @@ from utils.paths import get_case_study_dir
 # Cross-stage rank-1 pooling stages — mirrors holdout.py::HOLDOUT_SELECTION_STAGES.
 _PAIRED_STAGES = ("signal", "allocation", "risk_overlay")
 
-# Frequency → periods-per-year. Frequencies absent from the map (e.g. "15min")
-# fall through to 252, matching the Ch20 producer's ``.get(..., 252)``.
-_PPY_BY_FREQ = {"daily": 252, "weekly": 52, "monthly": 12, "8h": 1095}
-
 
 def _min_paired_n(ppy: int) -> int:
     """Minimum series length for paired-bootstrap stability, frequency-aware.
@@ -655,7 +651,7 @@ def populate_paired_metrics(
     label_restriction: frozenset[str] | None = None,
     rung: dict | None = None,
     carrier_pin_predicate: pl.Expr | None = None,
-    freq: str = "daily",
+    periods_per_year: int | None = None,
     verbose: bool = True,
     write_case_dir: Path | None = None,
 ) -> list[dict]:
@@ -672,11 +668,27 @@ def populate_paired_metrics(
       the rung-pinned CSs (sp500_options, nasdaq100_microstructure); None else.
     * ``carrier_pin_predicate`` — polars expr for the carrier-pinned CS
       (us_firm_characteristics → ``config_name == 'default_huber'``); None else.
-    * ``freq`` — cadence key for periods-per-year (``FREQ_MAP[cs]``).
+    * ``periods_per_year`` — the annualization factor. Defaults to the case
+      study's own ``evaluation.periods_per_year`` declaration rather than to a
+      cadence, so a caller that omits it gets its own scale instead of someone
+      else's.
 
-    ``cme_futures`` uses all defaults (no restriction, daily). Returns the list
-    of per-pair summary dicts (mirrors the ``paired_rows`` + ``extra_paired_rows``
-    the Ch20 producer builds); each pair is also written to
+    This used to be ``freq: str = "daily"``, resolved through a name-to-count map.
+    That default is silently right for the six case studies that annualize at
+    252 and silently wrong for the rest: ``us_firm_characteristics`` is monthly,
+    so every Sharpe difference and interval it wrote was scaled by sqrt(252)
+    rather than sqrt(12), a factor of 4.58 on numbers a notebook prints as its
+    holdout closure. Worse, ``_min_paired_n(252)`` returns 21, so the twelve
+    observation holdout pairs were skipped and the table was missing rows with
+    nothing recording the omission.
+
+    An integer rather than a cadence name because the name was only ever
+    converted back to a number, and the caller holds the number. Reading the
+    declaration by default is what stops the next non-252 case study inheriting
+    the wrong scale by saying nothing.
+
+    Returns the list of per-pair summary dicts (mirrors the ``paired_rows`` +
+    ``extra_paired_rows`` the Ch20 producer builds); each pair is also written to
     ``backtest_paired_metrics`` via ``register_paired_metrics``.
 
     ``write_case_dir`` redirects the registry *write* to an alternate case dir
@@ -685,7 +697,11 @@ def populate_paired_metrics(
     """
     if explorer is None:
         explorer = BacktestExplorer(cs)
-    ppy = _PPY_BY_FREQ.get(freq, 252)
+    if periods_per_year is None:
+        from case_studies.utils.uncertainty import periods_per_year_from_setup
+
+        periods_per_year = int(periods_per_year_from_setup(cs))
+    ppy = int(periods_per_year)
     rows: list[dict] = []
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
