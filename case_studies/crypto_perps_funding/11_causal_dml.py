@@ -45,11 +45,19 @@ LABEL = "fwd_ret_8h"
 CONFIG_NAME = "dml"
 PREVIEW_REDUCTIONS = {}
 OVERRIDES = {}
-# The 2026-08-24 run, whose identity this one retires. A causal identity still hashes the
-# whole of case_studies/utils/causal.py, so any edit to that file moves it, and a label
-# resolves to exactly one canonical identity - naming the predecessor is how the newer
-# run replaces it instead of sitting alongside it.
-SUPERSEDES_CAUSAL: str = "4a7d323f9c80"
+# The causal identity this run retires, empty by default because a reader has nothing to
+# retire. `run_log/` is not shipped, so a first run meets an empty registry, and a
+# predecessor named here that is not in it is rejected at the registering write - after the
+# DML fit and every placebo refit have been paid for.
+#
+# It is still needed on the machine that holds the chain. A causal identity hashes the whole
+# of `case_studies/utils/causal.py`, so any edit to that file moves it, and `CausalResult.one`
+# resolves a label to exactly one canonical identity: a re-run that does not name what it
+# replaces leaves two live and the next notebook fails with "resolved to 2 identities". Pass
+# it for that one-time repair instead of committing it:
+#
+#   papermill 11_causal_dml.ipynb out.ipynb -p SUPERSEDES_CAUSAL <the hash being retired>
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Resolve the estimand and refutation contract

@@ -795,3 +795,51 @@ def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
             "SELECT entry_point FROM training_runs WHERE training_hash = ?", (training.hash,)
         ).fetchone()
     assert recorded == ("06_linear",)
+
+
+def test_a_second_study_previewing_into_one_workspace_repoints_the_input_links(
+    tmp_path: Path,
+) -> None:
+    """Two studies, one workspace, in sequence: the second must not inherit the first's inputs.
+
+    `activate` links `labels` and `features` into `<workspace>/.preview/<case>/` so a preview
+    reads real inputs while writing only to the workspace. The link belongs to whichever study
+    is active. When a second study with different input directories activates into the same
+    workspace, the link has to follow it: leaving it is worse than any error, because the
+    preview would then read the previous study's labels under the current study's name.
+
+    This is the case that shipped. `_ensure_input_link` refused a link resolving elsewhere while
+    `_ensure_config_link`, ten lines below, repaired exactly that situation for `config`. Two
+    functions handling one situation two ways, and the refusal is the wrong half.
+
+    It never surfaced in CI, which is the part worth keeping: a plain clone has regular
+    generated directories, so every study routes through the same branch and resolves the same
+    inputs. Only a maintainer worktree, whose `labels`/`features`/`run_log` are symlinks into
+    shared data, reaches the branch where two studies disagree - and there the failure is
+    ordered, so a notebook passes alone and fails after its predecessor in the same session.
+    """
+    first_release, _ = _seed_regeneration_release(tmp_path / "first")
+    second_release, _ = _seed_regeneration_release(tmp_path / "second")
+    workspace = tmp_path / "workspace"
+
+    first = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=workspace,
+        release_root=first_release,
+    )
+    first_labels = (first.root / "labels").resolve(strict=True)
+
+    second = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=workspace,
+        release_root=second_release,
+    )
+    second_labels = (second.root / "labels").resolve(strict=True)
+
+    assert first_labels != second_labels, "fixture must give the two studies different inputs"
+
+    link = workspace / ".preview" / "etfs" / "labels"
+    assert link.is_symlink()
+    assert link.resolve(strict=True) == second_labels
