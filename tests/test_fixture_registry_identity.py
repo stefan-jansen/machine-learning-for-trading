@@ -32,13 +32,22 @@ from case_studies.utils.registry.store import REGISTRY_SCHEMA_SQL
 from tests.fixtures.seed_results import seed_results
 
 CASE_STUDY = "fx_pairs"
-SHIPPED = Path.home() / "ml4t" / "test-data" / "intermediates"
 
 
 @pytest.fixture(scope="module")
-def seeded(tmp_path_factory) -> Path:
-    """Reproduce conftest's order: copy the shipped intermediates, then seed."""
-    src = SHIPPED / CASE_STUDY
+def seeded(tmp_path_factory, intermediates_dir) -> Path:
+    """Reproduce conftest's order: copy the shipped intermediates, then seed.
+
+    The intermediates root comes from ``conftest``'s own fixture rather than from a
+    constant here. This module used to hard-code ``~/ml4t/test-data/intermediates``,
+    which is where the checkout sits on a workstation and nowhere a runner ever looks:
+    CI checks test-data out under the workspace. Every test here therefore skipped in
+    every CI job, and a file whose own premise is that a check which cannot run must
+    not read as a pass was reading as a pass on the strength of six skips.
+    """
+    if intermediates_dir is None:
+        pytest.skip("no test-data intermediates on this checkout")
+    src = intermediates_dir / CASE_STUDY
     if not (src / "run_log" / "registry.db").is_file():
         pytest.skip(f"no shipped registry at {src}")
     root = tmp_path_factory.mktemp("seed893")

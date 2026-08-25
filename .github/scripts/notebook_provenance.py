@@ -145,6 +145,11 @@ PRODUCTION_SAFE_PARAMETERS: dict[str, object] = {
     # adds a declaration rather than removing work, so it cannot reduce the run, and
     # population.py raises unless it equals the current population hash exactly.
     "SUPERSEDES_POPULATION": VALIDATED_BY_CONSUMER,
+    # The causal identity this run retires. Same shape as SUPERSEDES_POPULATION and
+    # for the same reason: it adds a declaration rather than removing work, so it
+    # cannot reduce the run, and register_causal_run refuses a hash that is not a
+    # current canonical identity for the same label.
+    "SUPERSEDES_CAUSAL": VALIDATED_BY_CONSUMER,
 }
 
 
