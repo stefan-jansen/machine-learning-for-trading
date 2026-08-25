@@ -880,11 +880,23 @@ def populate_paired_metrics(
 
     # Pairs #4-6: stage transitions on the validation rank-1 lineage.
     #
-    # Each of these runs the challenger on top of its own baseline - an allocation over the
-    # signal it allocates, a cost model over that allocation, a risk overlay over that. Both
-    # sides are live from the same session, so a session the challenger sits out is a decision
-    # it made rather than a warmup before it had a signal, and it belongs in the comparison.
-    # Pair #6 is the same quantity `17_risk_management` computes, and the two have to agree.
+    # These keep the default trim rather than the overlay one, and the reason is that neither
+    # thing the overlay rule needs is established here.
+    #
+    # `champion_lineage` takes the best-Sharpe backtest at each stage independently, sharing
+    # only the prediction hash, so the allocation entry is not necessarily the parent of the
+    # cost entry and the risk entry is not necessarily built on the cost entry. The pair is a
+    # stage comparison, not a demonstrated parent and child.
+    #
+    # And a challenger at these stages can carry a real warmup. `conformal_weighted` keeps only
+    # the timestamps that have prior-only calibration (backtest_runner.py:2240), so its leading
+    # sessions are absent because it could not yet act, not because it chose not to. Trimming
+    # them is right, and the overlay rule would keep them.
+    #
+    # `17_risk_management` and `18_strategy_analysis` do use the overlay rule, because there the
+    # overlay is paired with its own no-overlay carrier by construction rather than by a
+    # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with the
+    # Ch20 synthesis, which computes the same three transitions - see agent-workspace#928.
     lineage = explorer.champion_lineage(leader_phash)
     for prev_stage, this_stage, kind in [
         ("signal", "allocation", "signal_leader"),
@@ -911,7 +923,6 @@ def populate_paired_metrics(
                 prev_returns,
                 ppy,
                 leader_label,
-                challenger_overlays_baseline=True,
                 write_case_dir=write_case_dir,
             )
         )

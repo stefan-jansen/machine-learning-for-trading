@@ -991,7 +991,19 @@ print(f"{scored.height:,} scored rows over {scored['timestamp'].n_unique():,} de
 
 
 # %%
-MIN_CROSS_SECTION = 10
+# Two floors, and they count different things. `MIN_CROSS_SECTION` is a number of securities on
+# one date, below which a rank correlation is noise rather than a measurement. `MIN_IC_DATES` is
+# a number of dates, below which the HAC standard error over those correlations means nothing.
+# One constant used to serve both, which read as deliberate and was not: the second comparison
+# was measuring a series length against a universe size.
+#
+# The cross-section floor is clamped to the universe this run actually loaded. At full width
+# `MAX_SYMBOLS` is None and the clamp does nothing, so production is unchanged; under a reduced
+# run it is what keeps this section measuring something. A fixed floor of ten against a five-name
+# reduction does not shrink the section, it empties it - every date falls short, every feature
+# reports no IC, and the run stays green over a measurement it never made.
+MIN_CROSS_SECTION = min(10, scored["symbol"].n_unique())
+MIN_IC_DATES = 10
 
 
 def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
@@ -1016,10 +1028,11 @@ def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
 ic_rows = []
 for column in FEATURE_COLS:
     series = ic_series(scored, column)
-    if len(series) <= MIN_CROSS_SECTION:
+    if len(series) <= MIN_IC_DATES:
         print(
             f"{column}: only {len(series)} dates carry a cross-section of at least "
-            f"{MIN_CROSS_SECTION} securities, so no IC is reported for it"
+            f"{MIN_CROSS_SECTION} securities, and {MIN_IC_DATES} are needed for a standard "
+            "error, so no IC is reported for it"
         )
         continue
     stats = compute_ic_hac_stats(series, label_horizon=LABEL_HORIZON)
@@ -1128,7 +1141,7 @@ paired = (
 )
 # `compute_ic_hac_stats` reads row order as time order and a join does not promise one.
 assert paired["timestamp"].is_sorted(), "the paired series is not in date order"
-COMPARABLE = paired.height > MIN_CROSS_SECTION
+COMPARABLE = paired.height > MIN_IC_DATES
 print(f"{paired_rows.height:,} rows carry both variants, over {paired.height:,} dates")
 if COMPARABLE:
     memory_stats = compute_ic_hac_stats(memory_series, label_horizon=LABEL_HORIZON)

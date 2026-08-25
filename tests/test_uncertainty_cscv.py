@@ -302,7 +302,8 @@ def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() 
 
     from case_studies.utils.uncertainty import joint_returns
 
-    source = Path("20_strategy_synthesis/01_aggregate_synthesis.py").read_text()
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
     tree = ast.parse(source)
     definition = next(
         node
