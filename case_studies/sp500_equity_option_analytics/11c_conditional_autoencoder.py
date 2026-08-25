@@ -29,12 +29,21 @@
 # available here and is not available there. Everything else - the factors, the folds, the labels,
 # the way a forecast is formed - is unchanged.
 #
-# **It is fitted by reconstruction, not by prediction.** The objective is to reproduce the returns
-# the panel actually realized from a small number of factors, and nothing in that objective mentions
-# the forward return the notebook is scored on. The model is not asked to order next week's returns;
-# it is trying to describe the cross-section compactly, and the IC below asks whether a compact
-# description of co-movement happens to order the forward return as well. That is a real question
-# with an unfavourable prior, and *Chapter 14*, Section 14.5 is where the book sets out why.
+# **It is fitted by reconstruction, not by prediction, and the difference is narrower than that
+# sentence usually implies.** The panel this model reconstructs is the label panel: the runner fills
+# its return matrix from the configured label column, so what the objective reproduces is
+# `fwd_ret_5d` itself, the same quantity section 4 scores the IC on. The objective is therefore not
+# blind to the target, and a positive IC is less surprising than it would be if it were.
+#
+# What still separates reconstruction from forecasting is *which* returns and *how*. The fit sees
+# the training window's forward returns beside the characteristics of the same dates and compresses
+# both into a handful of factors; it is never shown a date it must then order. The forecast in step
+# 4 below applies fixed factor means to a validation date's own exposures, which is an
+# extrapolation the objective never optimized and could not have. So the IC below asks whether a
+# compact description of one window's cross-section transfers to the next one - a real question
+# with an unfavourable prior, and *Chapter 14*, Section 14.5 is where the book sets out why: the
+# directions a cross-section co-moves along are the directions it is *risky* along, and a risk
+# factor is not obliged to be a return factor.
 #
 # **This is the first member of the family with a genuine stopping point.** PCA and IPCA are solved:
 # one fold produces one answer. This one is trained, so `config/cae/cae.yaml` declares
@@ -45,7 +54,8 @@
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
 # - State what a conditional autoencoder changes relative to IPCA, and what it leaves alone.
-# - Explain why a reconstruction objective is not a forecasting objective, and what that predicts
+# - Explain why reconstructing one window is not forecasting the next, given that both are
+#   measured on the same label column, and what that predicts
 #   about the IC.
 # - Read a checkpoint schedule as a property of the estimator rather than as a tuning knob.
 # - Say why the epoch with the highest validation IC is not thereby selected.
@@ -99,7 +109,10 @@ MODEL_NAME = "cae"
 
 # %%
 study = open_study(
-    "sp500_equity_option_analytics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+    "sp500_equity_option_analytics",
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="11c_conditional_autoencoder",
 )
 
 # %% [markdown]
@@ -254,8 +267,8 @@ print(f"{len(plan.expected_prediction_hashes)} validation prediction sets")
 #
 # 1. takes the characteristics of every stock in that fold's training window and passes them
 #    through a network that outputs `n_factors` exposures per stock,
-# 2. solves for the factor returns that, applied to those exposures, best reproduce the realized
-#    returns of the training window,
+# 2. solves for the factor returns that, applied to those exposures, best reproduce that window's
+#    label values - `fwd_ret_5d`, the same column section 4 scores against,
 # 3. backpropagates the reconstruction error into the network, repeating for the declared number of
 #    epochs and publishing whenever the checkpoint schedule says so,
 # 4. forecasts each validation date by applying the fitted network to that date's characteristics
@@ -478,18 +491,19 @@ show_plotly_with_alt(
 # nothing else, which is a rarer thing than it sounds and is the reason the family is split this
 # way.
 #
-# **A reconstruction objective is not a forecasting objective, and the epoch chart is where that
+# **Reconstructing a window is not forecasting the next one, and the epoch chart is where that
 # stops being a caveat and becomes a measurement.** Training reduces reconstruction error on the
-# training window by construction. Whether the IC follows is an empirical question the schedule
-# answers directly, and *Chapter 14*, Section 14.5 sets out why the answer is often no: the
-# directions along which a cross-section co-moves are the directions along which it is *risky*, and
-# a risk factor is not obliged to be a return factor.
+# training window by construction, and it reduces it against the very column the IC is computed on -
+# so this is not a case of two unrelated quantities happening to agree. Whether driving that error
+# down on one window raises the IC on the next is the empirical question, and the schedule answers
+# it directly. *Chapter 14*, Section 14.5 sets out why the answer is often no.
 #
 # **More capacity than IPCA is not more information than IPCA.** The network sees exactly the
 # characteristics the linear map saw. It can represent more functions of them, which helps only if
 # the true relation is one of the functions IPCA could not reach. Where it is not, the extra
 # capacity finds structure in the training window that does not survive into the validation one -
-# the standard bargain, made here against a target the objective never mentions.
+# the standard bargain, and one the shared target makes easier to lose rather than harder, because
+# the extra capacity is spent fitting the training window's own forward returns more exactly.
 #
 # **Ten checkpoints are ten observations of one fit, not ten candidates.** They are published so
 # that [`14_backtest`](14_backtest.ipynb) can carry the entire schedule into its own sweep and
