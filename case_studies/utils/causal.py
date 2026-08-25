@@ -1298,6 +1298,25 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     # is the iid shuffle `block_permute` exists to avoid.
     treatment_window_steps = _treatment_persistence_steps(setup, treatment)
     if treatment_window_steps is None:
+        # A canonical run refuses rather than warns. The warning was a strict improvement
+        # on the silent one-bar block that shipped before it, but it is still a registered
+        # result whose refutation is weaker than it reads: fx_pairs' `mom_skip_recent`
+        # spans observations 21 through 252, resolves to None here, and would take a
+        # one-bar block against its one-day label - a full within-symbol shuffle, which is
+        # exactly the dependence the placebo exists to preserve. Nothing downstream can
+        # tell that result from one whose block was sized correctly.
+        #
+        # Preview keeps the warning. The tier exists to run reduced and be thrown away, and
+        # failing it would block CI on every case study that has not yet declared a window
+        # without protecting any registered number.
+        if tier is not ExecutionTier.PREVIEW:
+            raise ValueError(
+                f"{study.case_study}: features.windows declares no construction window for "
+                f"treatment {treatment!r}, so the placebo block would span only the label "
+                f"horizon ({horizon_steps} bars). Declare the treatment's window in "
+                "setup.yaml under `features.windows`; a canonical refutation will not be "
+                "registered against a block that cannot be shown to span the treatment."
+            )
         warnings.warn(
             f"{study.case_study}: features.windows declares no construction window for "
             f"treatment {treatment!r}, so the placebo block spans only the label horizon "

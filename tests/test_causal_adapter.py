@@ -584,6 +584,33 @@ def test_an_undeclared_treatment_window_warns_rather_than_passing_silently(
     assert refutation["treatment_window_steps"] is None
 
 
+def test_a_canonical_run_refuses_an_undeclared_treatment_window(tmp_path, monkeypatch) -> None:
+    """Preview warns and proceeds; canonical will not register the result at all.
+
+    The warning still leaves a registered refutation whose block may be a full
+    within-symbol shuffle, and nothing downstream distinguishes it from one whose
+    block spanned the treatment. fx_pairs is the live case: `mom_skip_recent`
+    spans observations 21 through 252 and resolves to None here.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, label_buffer="8H")
+
+    with pytest.raises(ValueError, match="declares no construction window"):
+        study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
+
+
+def test_a_canonical_run_with_a_declared_window_still_resolves(tmp_path, monkeypatch) -> None:
+    """The refusal is about the missing declaration, not about the canonical tier."""
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", treatment_window=21
+    )
+
+    resolved = study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
+
+    refutation = resolved.spec["computation"]["refutation"]
+    assert refutation["block_size"] == 21
+    assert refutation["block_size_basis"] == "treatment_window"
+
+
 def test_causal_resolver_rejects_an_unsupported_entity_key(tmp_path, monkeypatch) -> None:
     study, label, _frame = _causal_fixture(tmp_path, monkeypatch, entity="ticker")
 

@@ -1324,7 +1324,7 @@ case_studies/crypto_perps_funding/11_causal_dml:
       max_samples: 5000
       max_symbols: 5
       n_folds: 2
-      n_placebo: 10
+      n_placebo: 25
   timeout: 300
 case_studies/crypto_perps_funding/12_model_analysis:
   timeout: 300

@@ -168,17 +168,25 @@ causal_summary
 # refutation_p is nullable by contract (`case_studies/utils/causal.py`), so it is reported as absent
 # rather than formatted. A run whose refutation did not produce an empirical p-value is a
 # weaker result, and saying so is more useful than omitting the sentence or failing to render.
+#
+# `refutation_n_successful` is the denominator the p-value was actually computed over, and it
+# is not the requested count: `empirical_permutation_p` drops placebos whose second stage
+# returned NaN. It arrived with a migration, so a row written before the column existed
+# carries None, and `CausalResult.open` then publishes no `refutation_class` at all rather
+# than classifying on the p-value alone. This run is one of those rows.
 _refutation = causal.metrics["refutation_p"]
+_n_successful = causal.metrics["refutation_n_successful"]
+_refutation_class = causal.metrics["refutation_class"]
 _n_placebo = causal.spec["computation"]["refutation"]["n_placebo"]
 _floor = 1.0 / (_n_placebo + 1)
 if _refutation is None:
     _refutation_text = "No temporal refutation p-value was registered for this estimate."
 elif _refutation <= _floor:
-    # Reaching the floor is only possible when every placebo fit succeeded and none was
-    # as extreme as the observed effect: p = (1 + exceedances) / (1 + successful), which
-    # is at or below 1/(n+1) only when the numerator is 1 and the denominator is the full
-    # requested count. So the requested count is the right denominator on this branch even
-    # though `empirical_permutation_p` drops placebos whose second stage returned NaN.
+    # The floor pins the denominator even when the column is absent. The p-value is
+    # (1 + exceedances) / (1 + successful) with at least one in the numerator, and
+    # successful <= requested, so p <= 1/(requested + 1) is only reachable when every
+    # requested placebo succeeded and none was as extreme as the observed effect. So this
+    # branch may state the count and the exceedances without reading either back.
     #
     # What the floor does NOT establish is that the underlying permutation tail probability
     # is at most 1/(n+1). That is a property of all permutations; this is a sample of n of
@@ -191,10 +199,38 @@ elif _refutation <= _floor:
         f"probability itself - resolving that finer needs more permutations, not a smaller "
         f"reported number."
     )
+    # Being at the floor is not the same as being able to reject from there. Below 20
+    # draws the floor itself sits above 5 %, so the run is simultaneously as extreme as
+    # its permutation count allows and unable to reject at all - the verdict has to be
+    # said out loud rather than left to the reassuring half of the sentence.
+    if _refutation_class == "Underpowered":
+        _refutation_text += (
+            f" Even so, the registered verdict is **Underpowered**: with {_n_placebo} "
+            "permutations the floor is above 5 %, so no outcome of this test could have "
+            "rejected."
+        )
+elif _n_successful is None:
+    # Off the floor the denominator matters and is not recoverable, so the count is not
+    # asserted and no pass/fail verdict is published - the registry withholds one for
+    # exactly this reason.
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, a Monte Carlo estimate "
+        f"over at most the {_n_placebo} requested permutations. How many of them actually "
+        "produced a second-stage fit is not registered for this run, so the effective "
+        "sample behind the estimate - and with it whether the draws could have rejected at "
+        "all - cannot be read back, and no pass/fail verdict is published."
+    )
 else:
     _refutation_text = (
         f"The temporal refutation p-value is **{_refutation:.3f}**, a Monte Carlo estimate "
-        f"over {_n_placebo} requested permutations and no finer than that sample supports."
+        f"over the **{_n_successful}** of {_n_placebo} requested permutations whose second "
+        f"stage produced a fit, and no finer than that sample supports. The registered "
+        f"verdict is **{_refutation_class}**"
+        + (
+            " - too few successful draws to reject at 5 % whatever the data showed. "
+            if _refutation_class == "Underpowered"
+            else ". "
+        )
     )
 
 _effect = causal.metrics["dml_effect"]
