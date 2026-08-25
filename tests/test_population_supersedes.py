@@ -10,6 +10,8 @@ every case below is one that has already broken a notebook when it was decided b
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -129,12 +131,47 @@ class TestWhatALaterGenerationRetires:
         _publish(study, MEMBERS_ONE)
         assert superseded_members(study) == frozenset()
 
-    def test_a_clean_clone_retires_nothing(self, tmp_path: Path) -> None:
-        # No `official_populations` table at all, which raises rather than returning no rows.
+    def test_a_registry_with_no_population_table_retires_nothing(self, tmp_path: Path) -> None:
+        """A reader's clean clone, and the branch a schema-complete workspace cannot reach.
+
+        `Study.open(workspace=...)` runs `_open_registry`, which creates
+        `official_populations` empty, so a study built that way exits through the
+        no-generations return and never touches the missing-table handler. Dropping the table
+        from both registries is what puts that handler under test.
+        """
         fresh = Study.open(
             "etfs", workspace=tmp_path / "fresh", release_root=_seed_release(tmp_path)
         )
+        for root in (fresh.root, fresh.release_case_root):
+            db_path = root / "run_log" / "registry.db"
+            if not db_path.exists():
+                continue
+            with sqlite3.connect(db_path) as db:
+                db.execute("DROP TABLE IF EXISTS official_populations")
+                db.execute("DROP TABLE IF EXISTS official_population_members")
         assert superseded_members(fresh) == frozenset()
+
+    def test_a_workspace_reads_the_released_registry_s_lineage(self, tmp_path: Path) -> None:
+        """The overlay, which is where reading only `study.root` gets it wrong.
+
+        `PredictionCatalog.table()` offers released rows the workspace registry does not hold,
+        and their lineage lives in the released registry - which `Study.open` never copies. A
+        workspace gets its own `official_populations`, created schema-complete and empty, so
+        reading only `study.root` returns nothing retired and the filter is a no-op. Same
+        failure mode as the global form, by a different route.
+        """
+        release_root = _seed_release(tmp_path)
+        published = Study.open("etfs", release_root=release_root, workspace=tmp_path / "author")
+        first = _publish(published, MEMBERS_ONE)
+        _publish(published, MEMBERS_TWO, supersedes=first.hash)
+        # Move what the author published into the release root, which is what a reader sees.
+        released_db = published.release_case_root / "run_log" / "registry.db"
+        released_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(published.root / "run_log" / "registry.db", released_db)
+
+        reader = Study.open("etfs", release_root=release_root, workspace=tmp_path / "reader")
+        assert reader.root != reader.release_case_root
+        assert superseded_members(reader) == frozenset(MEMBERS_ONE)
 
     def test_a_refit_retires_the_generation_it_replaced(self, study: Study) -> None:
         first = _publish(study, MEMBERS_ONE)

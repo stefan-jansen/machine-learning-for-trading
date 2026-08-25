@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from case_studies.utils.registry.specs import canonical_json, compute_hash
@@ -285,6 +286,49 @@ def population_supersedes(study: Study, *, name: str, declared: str | None) -> s
     return declared if declared in (current.supersedes, current.hash) else None
 
 
+def _lineage(
+    case_dir: Path, member_kind: str
+) -> tuple[list[tuple[str, str, str | None]], dict[str, set[str]]]:
+    """One registry's population lineage: its generations, and what each one lists.
+
+    Opened with the timeouts ``_open_registry`` applies, because concurrent writers are the
+    expected case for a registry and a momentary lock would otherwise raise instantly - and the
+    caller turns any failure here into "nothing is retired", which is the silent wrong answer
+    this whole module exists to prevent. Opening through ``_open_registry`` itself would create
+    the database and its schema as a side effect, which is wrong for a read against a release
+    root that may legitimately not exist.
+
+    A missing file or a missing table means no generation was ever written and is answered with
+    nothing, which is the ordinary state of a reader's clean clone. Every other
+    ``OperationalError`` propagates: a lock timeout, an I/O error and a half-migrated schema are
+    not evidence that nothing has been retired.
+    """
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.exists():
+        return [], {}
+    db = sqlite3.connect(str(db_path), timeout=120.0)
+    try:
+        db.execute("PRAGMA busy_timeout = 60000")
+        try:
+            rows = db.execute(
+                "SELECT population_hash, name, supersedes_hash FROM official_populations "
+                "WHERE member_kind = ?",
+                (member_kind,),
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            return [], {}
+        members: dict[str, set[str]] = {}
+        for population_hash, member_hash in db.execute(
+            "SELECT population_hash, member_hash FROM official_population_members"
+        ):
+            members.setdefault(population_hash, set()).add(member_hash)
+    finally:
+        db.close()
+    return rows, members
+
+
 def superseded_members(study: Study, *, member_kind: str = "prediction") -> frozenset[str]:
     """Identities whose own publisher has moved past them.
 
@@ -320,24 +364,31 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
     all 72 - so the global form returned nothing retired and the sweep would have run over both
     generations exactly as if the check were absent. A stale snapshot under an unrelated name
     cannot un-retire another name's superseded generation.
+
+    Both registries are read, in the order :class:`PredictionCatalog` overlays them. A workspace
+    study offers released rows the workspace registry does not hold, and their lineage lives in
+    the released registry - which ``Study.open`` never copies. Reading only ``study.root`` there
+    returns nothing retired, because the workspace's ``official_populations`` table is created
+    schema-complete and empty, and the filter is a no-op again by a different route. A population
+    hash is content-addressed, so the same generation seen in both is the same generation and the
+    merge is a union rather than a precedence rule.
     """
-    try:
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-            rows = db.execute(
-                "SELECT population_hash, name, supersedes_hash FROM official_populations "
-                "WHERE member_kind = ?",
-                (member_kind,),
-            ).fetchall()
-            if not any(row[2] is not None for row in rows):
-                return frozenset()
-            members: dict[str, set[str]] = {}
-            for population_hash, member_hash in db.execute(
-                "SELECT population_hash, member_hash FROM official_population_members"
-            ):
-                members.setdefault(population_hash, set()).add(member_hash)
-    except sqlite3.OperationalError:
-        # A clean clone has no `official_populations` table at all, so nothing has been
-        # retired. Same reasoning as `population_supersedes`.
+    rows: list[tuple[str, str, str | None]] = []
+    members: dict[str, set[str]] = {}
+    roots = [study.release_case_root]
+    if not study.read_only and study.root != study.release_case_root:
+        roots.append(study.root)
+    seen_populations: set[str] = set()
+    for root in roots:
+        root_rows, root_members = _lineage(root, member_kind)
+        for row in root_rows:
+            if row[0] in seen_populations:
+                continue
+            seen_populations.add(row[0])
+            rows.append(row)
+        for population_hash, member_hashes in root_members.items():
+            members.setdefault(population_hash, set()).update(member_hashes)
+    if not any(row[2] is not None for row in rows):
         return frozenset()
 
     by_name: dict[str, list[tuple[str, str | None]]] = {}
