@@ -86,7 +86,11 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
-from case_studies.utils.notebook_contracts import excluded_families, filter_active_model_rows
+from case_studies.utils.notebook_contracts import (
+    degenerate_prediction_hashes,
+    excluded_families,
+    filter_active_model_rows,
+)
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 
@@ -174,17 +178,21 @@ if excluded_families(CASE_STUDY):
 # caution.
 
 # %% [markdown]
-# Every row below is one registered prediction set. Three conditions decide which are admissible,
-# and they are applied here rather than at the point each figure is drawn, so that no chart can be
-# built from a row the comparison would not accept.
+# Every row below is one registered prediction set, and one condition decides which are
+# admissible: `complete`. It is applied here rather than at the point each figure is drawn, so
+# that no chart can be built from a row the comparison would not accept.
 #
-# - **`complete`.** A run that failed partway still leaves rows in the registry. Its score is an
-#   average over the folds that finished, which is not the quantity every other row reports.
-# - **Canonical tier.** A preview is a deliberately reduced computation in a throwaway workspace.
-#   It is registered so it can be checked, never so it can be compared against a full-width fit.
-# - **A versioned identity.** A row registered before the identity scheme carries no digest of the
-#   labels and features it was fitted on, so nothing can establish what it was actually trained
-#   against. It stays inspectable and cannot enter a comparison.
+# `complete` is more than "the run finished". A run that failed partway still leaves rows in the
+# registry, and its score is an average over the folds that finished, which is not the quantity
+# every other row reports. The catalog also requires a current identity before it calls a row
+# complete (`case_studies/research/catalog.py:308-314`): a row registered before the identity
+# scheme carries no digest of the labels and features it was fitted on, so nothing can establish
+# what it was trained against. It stays inspectable and cannot enter a comparison.
+#
+# Execution tier is deliberately not tested. A preview is a reduced computation in a throwaway
+# workspace, so whether preview rows are in front of this notebook at all is settled by which
+# registry `study` opened, not by a column. Re-asserting it as a filter would reject a preview
+# run's own rows unconditionally, which is the defect `8fc28044` fixed on the registry path.
 #
 # This is the correction that unfroze this notebook. Selection used to run over whatever the
 # registry held, filtered only by which families the case study excludes - so the representative
@@ -212,15 +220,14 @@ all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
 
 # Say what was set aside and why, rather than letting the row count speak for itself.
 if _rejected.height:
-    _reasons = _rejected.select(
-        incomplete=(~pl.col("complete")).sum(),
-        preview=(pl.col("execution_tier") != "canonical").sum(),
-        legacy=(pl.col("identity_status") == "legacy").sum(),
-    ).row(0, named=True)
+    # One condition was tested, so there is one count to report. A legacy identity is named
+    # separately because it is the one cause of incompleteness that no re-run of the same code
+    # will clear - the row has to be refitted under the current identity scheme.
+    _legacy = _rejected.filter(pl.col("identity_status") == "legacy").height
+    _detail = f", {_legacy} of them for a legacy identity" if _legacy else ""
     print(
-        f"{_rejected.height} of {_catalog.height} registered prediction sets are not admissible: "
-        + ", ".join(f"{v} {k}" for k, v in _reasons.items() if v)
-        + " (a row can fail more than one condition)"
+        f"{_rejected.height} of {_catalog.height} registered prediction sets are not complete"
+        f"{_detail}"
     )
 else:
     print(f"all {_catalog.height} registered prediction sets are admissible")
@@ -236,17 +243,34 @@ for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
     except (ValueError, FileNotFoundError) as _exc:
         print(f"no current official population for {_family} ({_name}): {_exc}")
 
+# A population is declared before anything is fitted; degeneracy is only visible afterwards.
+# `load_all_metrics` drops any prediction set with a constant-prediction fold, because its
+# pooled IC is computed over the surviving folds only and is not a model result. Those rows are
+# declared members that correctly never reach a leaderboard, so the comparison allows for them
+# and says how many rather than reporting a correct exclusion as a missing member.
+_degenerate = degenerate_prediction_hashes(study.root)
+
 for _family, _members in _population_members.items():
     _have = set(
         all_labels_metrics.filter(pl.col("family") == _family).get_column("prediction_hash")
     )
-    _missing, _extra = _members - _have, _have - _members
+    _dropped = _members & _degenerate
+    _missing, _extra = _members - _degenerate - _have, _have - _members
+    if not _have and _members:
+        print(
+            f"{_family}: none of the {len(_members)} declared members has been produced yet - "
+            "the cohort has not run, so this family is absent from every comparison below"
+        )
+        continue
     if _missing or _extra:
         raise RuntimeError(
             f"{_family}: admissible rows do not match the declared population - "
             f"{len(_missing)} declared members absent, {len(_extra)} admissible rows undeclared"
         )
-    print(f"{_family}: all {len(_members)} declared population members present and admissible")
+    _note = f" ({len(_dropped)} declared members degenerate and excluded)" if _dropped else ""
+    print(
+        f"{_family}: all {len(_members) - len(_dropped)} comparable declared members present{_note}"
+    )
 
 if all_metrics.height == 0:
     raise RuntimeError(f"No metrics found for {CASE_STUDY} / {PRIMARY_LABEL}")

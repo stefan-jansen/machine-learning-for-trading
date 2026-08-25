@@ -648,6 +648,24 @@ def _resolve_authoritative_selection(
     return tuple(resolved)
 
 
+def prediction_rows_at(case_dir: str | Path) -> pl.DataFrame:
+    """The prediction catalog for a case-study directory the caller has already resolved.
+
+    A notebook that resolved its case directory through ``get_case_study_dir`` cannot open a
+    ``Study`` to ask which of its predictions are admissible. Every ``Study.open`` branch ends
+    in ``activate()``, which pops ``ML4T_OUTPUT_DIR`` on the read-only branch and rewrites it
+    otherwise, then clears the root-sensitive caches (``workspace.py:264-292``). Two things go
+    wrong at once: the catalog answers for whichever registry the activation selected rather
+    than the one the notebook read its predictions from, so a join between them drops every
+    row and reports a healthy population as inadmissible; and every later resolution in that
+    notebook follows the activated root, which for the canonical no-workspace path is the
+    published case study, so an isolated run registers its results into the real registry.
+
+    This reads the registry under ``case_dir`` and changes no process state.
+    """
+    return _frame(_registry_rows(Path(case_dir), "workspace")).sort("prediction_hash")
+
+
 class PredictionCatalog:
     def __init__(self, study: Study) -> None:
         self.study = study

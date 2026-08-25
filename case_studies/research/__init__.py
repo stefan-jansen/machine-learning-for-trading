@@ -1,5 +1,5 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
-from .catalog import BacktestCatalog, PredictionCatalog
+from .catalog import BacktestCatalog, PredictionCatalog, prediction_rows_at
 from .causal import (
     CausalRequest,
     CausalResult,
@@ -112,6 +112,7 @@ __all__ = [
     "require_declared_menu_coverage",
     "expected_prediction_hashes",
     "planned_model_plan",
+    "prediction_rows_at",
     "primary_label",
     "population_supersedes",
     "research_name",
