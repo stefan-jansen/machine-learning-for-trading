@@ -37,11 +37,13 @@ from case_studies.cme_futures.research_workflow import (
     open_study,
     product_universe_table,
 )
+from case_studies.research import supersedes_for
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
 PREVIEW_REDUCTIONS: dict = {}
+SUPERSEDES_CAUSAL: str = ""
 
 # %% [markdown]
 # ## Resolve the estimands
@@ -63,6 +65,7 @@ requests = tuple(
         label=label,
         execution_tier=EXECUTION_TIER,
         preview_reductions=PREVIEW_REDUCTIONS,
+        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(ALL_LABELS)),
     ).resolve()
     for label in ALL_LABELS
 )
