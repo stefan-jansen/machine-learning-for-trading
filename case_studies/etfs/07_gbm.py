@@ -95,6 +95,7 @@
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+import yaml
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
@@ -107,6 +108,7 @@ from case_studies.research import (
     resolved_model_plan,
     run_model_population,
 )
+from utils.artifact_specs import resolve_label_horizon
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -116,7 +118,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = "6d9536da2ab6"
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study("etfs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -227,10 +229,15 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Slicing the window and cleaning its rows depends on the data and not on the model, so it is
+# work several configurations could share. Whether they do depends on how the requests reach the
+# runner. Handed over unresolved, they go to a batch path that walks folds on the outside and
+# configurations on the inside, so one prepared fold serves every configuration and only one is
+# held at a time. Resolved first - as they are here, so that the plan above can be shown against
+# the real data - each configuration prepares its own. On a cross-section of this size that costs
+# seconds and buys a plan that can be read before anything is fitted. On a panel large enough
+# that one prepared fold set does not comfortably fit in memory the trade runs the other way,
+# which is why the call also accepts requests that have not been resolved.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -242,11 +249,17 @@ plan.select(
 # same name, and the registry refuses to write it without being told which snapshot it
 # supersedes. That lineage is the only record of which generation is which.
 #
-# It defaults to the hash the published population actually superseded, not to empty. The hash
-# is part of what the snapshot is hashed over, so a run that left it empty would compute a
-# different population and be refused against the one on record. Carrying the value the
-# published run used is what lets this notebook re-run and resolve to the population it
-# published rather than to a new one.
+# It defaults to empty, and the run that published this population passed the predecessor hash
+# as a parameter instead. The hash is part of what the snapshot is hashed over
+# (`research/population.py:87`), so no default is right for both readers: a re-run that means
+# to resolve the published population must be handed the same hash the published run used,
+# while a first run against a fresh registry must be handed nothing. `run_log/` is not in the
+# repository, so a reader's first run starts from an empty registry, where a non-empty
+# supersede is refused outright - which is why empty is the default and the hash travels with
+# the one run that needs it.
+#
+# A reduced-scale run also leaves it empty. A population produced under a reduction is thrown
+# away with the workspace it was written to, so it has no lineage to extend.
 #
 # The default name is the contract with the notebooks downstream - `13_model_analysis` and
 # `14_backtest` resolve this population by name - rather than a label of convenience, which is
@@ -658,11 +671,25 @@ objective_summary
 # The mechanism above is a claim about the label, not the model, so it is checkable without
 # fitting anything. Excess kurtosis measures how much of a distribution's variance comes from
 # rare large moves; where the loss functions separate, the heavier-tailed label should separate
-# them further. The rows are cut at the development boundary the fits were resolved against, so
-# nothing held back for the holdout is described here.
+# them further. That is the prediction; section 5 reports what the two frames actually show.
+#
+# Each label is cut on the date it **resolves**, not the date it is observed, and against its
+# own development boundary rather than a boundary shared with the other label. Both parts
+# matter here. A 21-session label observed inside the development window can have its forward
+# window closing after the boundary, which makes it a holdout row that a filter on the
+# observation date would have kept - the rule `02_labels` states and applies. And the two
+# labels resolve their last validation fold on different dates, so one shared cut would
+# describe `fwd_ret_21d` rows the 21-day fits never saw.
 
 # %% tags=["results"]
-development_end = plan.get_column("validation_end").max()
+development_end = {
+    label: plan.filter(pl.col("label") == label).get_column("validation_end").max()
+    for label in panel_labels
+}
+setup = yaml.safe_load((study.root / "config" / "setup.yaml").read_text())
+label_horizon = {
+    label: int(resolve_label_horizon("etfs", label, setup).rstrip("Dd")) for label in panel_labels
+}
 tails = pl.DataFrame(
     [
         {
@@ -681,7 +708,13 @@ tails = pl.DataFrame(
                 label,
                 study.labels.get(label, execution_tier=EXECUTION_TIER)
                 .load()
-                .filter(pl.col("timestamp") <= development_end)
+                .with_columns(
+                    pl.col("timestamp")
+                    .shift(-label_horizon[label])
+                    .over("symbol")
+                    .alias("_label_end")
+                )
+                .filter(pl.col("_label_end") <= development_end[label])
                 .get_column(label)
                 .drop_nulls()
                 .to_numpy(),
@@ -739,12 +772,22 @@ spread
 # labels Huber has the highest `mean_ic`, absolute error is next and squared error is last, and
 # squared error is also the only objective whose `above_zero` is not 5 of 5. The families order
 # on their averages but they overlap on individual configurations, so this is a statement about
-# objectives and not a ranking of the fifteen. That much is what the label's tails predict.
-# Squared error weights an observation by the square of its error, so the largest moves dominate
-# what each successive tree is fitted to, while the information coefficient is a rank correlation
-# that cares about order rather than magnitude: effort spent getting the extremes right buys
-# nothing on this metric. **An objective is a claim about which errors matter, and it is worth
-# choosing to match the metric the result will be judged on.**
+# objectives and not a ranking of the fifteen. Squared error weights an observation by the square
+# of its error, so the largest moves dominate what each successive tree is fitted to, while the
+# information coefficient is a rank correlation that cares about order rather than magnitude:
+# effort spent getting the extremes right buys nothing on this metric. **An objective is a claim
+# about which errors matter, and it is worth choosing to match the metric the result will be
+# judged on.**
+#
+# **The ordering is what the tails predict; the size of the gap is not.** The prediction in
+# section 4 was that the heavier-tailed label should separate the objectives further. `tails`
+# puts `fwd_ret_5d` at excess kurtosis 10.26 against `fwd_ret_21d`'s 7.00, so five-day is the
+# heavier-tailed label. But the Huber-minus-squared-error gap in `objective_summary` is 0.0143
+# on `fwd_ret_21d` and 0.0075 on `fwd_ret_5d` - the heavier-tailed label separates them by
+# about half as much. The direction survives on both labels and the magnitude runs the other
+# way, so tail heaviness is not what sets how far apart the objectives land. Whatever does is
+# not measured here: the two labels differ in horizon, in autocorrelation and in how much of
+# each one a fold contains, and this notebook holds none of those fixed.
 #
 # **The boosted population does not beat the linear one.** The strongest full-coverage
 # configuration here ranks below the strongest full-coverage configuration in

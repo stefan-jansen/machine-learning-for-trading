@@ -84,6 +84,7 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
@@ -98,6 +99,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "06e9ea03f2f2"
 
 # %%
 study = open_study("fx_pairs", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -149,10 +151,11 @@ configs
 # either knob, and says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run declares {configs.height} label-configuration pairs, which is not the "
+        "complete declared catalog, so it cannot publish the canonical population; pass "
+        "POPULATION_NAME to give it its own"
     )
 
 # %% [markdown]
@@ -213,14 +216,36 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Slicing the window and cleaning its rows depends on the data and not on the model, so it is
+# work several configurations could share. Whether they do depends on how the requests reach the
+# runner. Handed over unresolved, they go to a batch path that walks folds on the outside and
+# configurations on the inside, so one prepared fold serves every configuration and only one is
+# held at a time. Resolved first - as they are here, so that the plan above can be shown against
+# the real data - each configuration prepares its own. On a cross-section of this size that costs
+# seconds and buys a plan that can be read before anything is fitted. On a panel large enough
+# that one prepared fold set does not comfortably fit in memory the trade runs the other way,
+# which is why the call also accepts requests that have not been resolved.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
 # complete, which is what makes the downstream comparison well defined.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it supersedes.
+# That lineage is the only record of which generation is which.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record. Carrying the value the published run used
+# is what lets this notebook re-run and resolve to the population it published rather than to a
+# new one.
+#
+# A reduced-scale run passes it empty. A population produced under a reduction is thrown away
+# with the workspace it was written to, so it has no lineage to extend, and the call refuses a
+# supersede rather than accept one it will not record. Pass `SUPERSEDES_POPULATION=` alongside
+# the reductions.
 #
 # **One population covers every label**, because one run fits every label. A population is
 # immutable once written, so a notebook fitting one label per run under a single name publishes
@@ -229,7 +254,9 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "fx_pairs-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+)
 
 print(f"{len(execution.runs)} configurations fitted")
 print(f"population {population.name}: {len(population.members)} prediction sets")

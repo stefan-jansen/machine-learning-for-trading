@@ -57,6 +57,7 @@ from case_studies.utils.registry.store import (
     flush_fold_predictions,
     flush_fold_training_log,
 )
+from case_studies.utils.runtime import cpu_seconds
 from case_studies.utils.sequence_dataset import (
     FoldSequenceDataset,
     collate_with_metadata,
@@ -314,7 +315,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported sequence preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     mds = load_modeling_dataset(
         study.case_study,
         label_ref.name,
@@ -790,7 +791,11 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     complete_predictions = tuple(
         result for result in predictions if isinstance(result, PredictionResult)
     )
-    return ModelRun(training=training, predictions=complete_predictions)
+    return ModelRun(
+        training=training,
+        predictions=complete_predictions,
+        diagnostics={"reused": True},
+    )
 
 
 def _predict_reconstructed_sequence(
@@ -1121,6 +1126,8 @@ def run_resolved_request(
     else:
         staging = train_dir / f".models.{uuid.uuid4().hex}.tmp"
         _configure_sequence_runtime(computation["numerics"])
+        fit_wall_t0 = time.perf_counter()
+        fit_cpu_t0 = cpu_seconds()
         try:
             result = run_dl_cv(
                 context.dataset_pd,
@@ -1148,6 +1155,8 @@ def run_resolved_request(
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        fit_wall_s = time.perf_counter() - fit_wall_t0
+        fit_cpu_s = cpu_seconds() - fit_cpu_t0
 
     prediction_results = _publish_sequence_predictions(
         study, computation, context, training, result
@@ -1160,7 +1169,34 @@ def run_resolved_request(
                 float(row.get("elapsed_s", 0.0)) for row in result["grid_results"]
             )
         runtime_path.write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
-    return ModelRun(training=training, predictions=prediction_results)
+    if result["grid_results"] and not reused_fitted_state:
+        # The seconds above land in runtime.json, which is the artifact compared byte for byte
+        # when the same identity is registered again and which no query reads.
+        # `training_runs.elapsed_s` is the column `reference/case-study-runtimes.md` is built
+        # from, and it was NULL on every sequence row the fleet had registered. Only the fitting
+        # path records: a run served from persisted state has no fit cost, and writing one would
+        # overwrite what its original fit measured.
+        from case_studies.utils.registry.registration import record_training_runtime
+        from case_studies.utils.runtime import resource_measurement
+
+        record_training_runtime(
+            study.case_study,
+            training.hash,
+            case_dir=training.root,
+            # Both numbers come from the same interval - the fit block - because
+            # `cores_used` is their ratio, and a CPU total measured over one span divided by
+            # a wall total measured over another is not a core count. The per-fold sum still
+            # goes to runtime.json above; this is what the registry is priced from.
+            measured=resource_measurement(
+                elapsed_s=fit_wall_s,
+                cpu_s=fit_cpu_s,
+            ),
+        )
+    return ModelRun(
+        training=training,
+        predictions=prediction_results,
+        diagnostics={"reused": reused_fitted_state},
+    )
 
 
 def validate_locked_run(

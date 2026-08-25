@@ -47,6 +47,7 @@ POOLED_FALLBACK: str = "pooled_prior_oos"
 
 HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "etfs/fwd_ret_21d": 21,
+    "etfs/fwd_ret_5d": 5,
     "cme_futures/fwd_ret_5d": 5,
     "cme_futures/fwd_ret_21d": 21,
     "fx_pairs/fwd_ret_1d": 1,
@@ -54,11 +55,21 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "fx_pairs/fwd_ret_21d": 21,
     "crypto_perps_funding/fwd_ret_24h": 3,
     "crypto_perps_funding/fwd_ret_8h": 1,
+    "crypto_perps_funding/fwd_dir_8h": 1,
+    "crypto_perps_funding/fwd_dir_8h_3c": 1,
     "nasdaq100_microstructure/fwd_ret_15m": 1,
     "nasdaq100_microstructure/fwd_ret_60m": 4,
     "nasdaq100_microstructure/fwd_ret_5m": 1,
     "sp500_equity_option_analytics/fwd_ret_5d": 5,
     "sp500_equity_option_analytics/fwd_ret_risk_adj_5d": 5,
+    # The three below joined the table when this case study declared the conformal_weighted
+    # allocator, which sizes every declared label rather than the primary alone. Each value is
+    # the label's own horizon from labels.horizons in sessions, the panel's step: a ten-session
+    # return needs ten sessions of embargo for the calibration residuals to stop overlapping the
+    # holdout, and the direction labels reach exactly as far as the returns they are signs of.
+    "sp500_equity_option_analytics/fwd_ret_10d": 10,
+    "sp500_equity_option_analytics/fwd_dir_5d": 5,
+    "sp500_equity_option_analytics/fwd_dir_10d": 10,
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,

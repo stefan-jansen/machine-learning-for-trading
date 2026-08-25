@@ -36,6 +36,7 @@ import os
 import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import open_study
+from case_studies.research import supersedes_for
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
@@ -44,6 +45,11 @@ LABEL = "fwd_ret_8h"
 CONFIG_NAME = "dml"
 PREVIEW_REDUCTIONS = {}
 OVERRIDES = {}
+# The 2026-08-24 run, whose identity this one retires. A causal identity still hashes the
+# whole of case_studies/utils/causal.py, so any edit to that file moves it, and a label
+# resolves to exactly one canonical identity - naming the predecessor is how the newer
+# run replaces it instead of sitting alongside it.
+SUPERSEDES_CAUSAL: str = "4a7d323f9c80"
 
 # %% [markdown]
 # ## Resolve the estimand and refutation contract
@@ -57,6 +63,7 @@ request = study.causal(
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
     overrides=OVERRIDES,
+    supersedes=supersedes_for(SUPERSEDES_CAUSAL, LABEL, labels=[LABEL]),
 )
 resolved = request.resolve()
 computation = resolved.spec["computation"]

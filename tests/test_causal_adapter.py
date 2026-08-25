@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import CausalResult, LabelDefinition, Study
 from case_studies.utils import causal
@@ -33,7 +34,8 @@ def _causal_fixture(
     monkeypatch,
     entity: str = "symbol",
     label_buffer: str = "8H",
-    treatment_window: int | None = None,
+    treatment_window: int | None = 21,
+    label_horizon: str | None = None,
 ):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
@@ -50,6 +52,13 @@ def _causal_fixture(
         + declared
         + f"causal:\n  treatment: {treatment_col}\n  confounders: [confounder]\n"
     )
+    if label_horizon is not None:
+        # Merged through a yaml round-trip rather than appended. `labels` already exists in
+        # this setup, and a second top-level `labels:` key would replace it outright rather
+        # than add to it, taking the buffers with it.
+        setup = yaml.safe_load(setup_path.read_text())
+        setup.setdefault("labels", {}).setdefault("horizons", {})["fwd_ret_8h"] = label_horizon
+        setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
     rows = []
     for timestamp_index, timestamp in enumerate(
         pl.datetime_range(
@@ -73,7 +82,7 @@ def _causal_fixture(
             )
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
-        LabelDefinition("fwd_ret_8h", "regression", label_buffer),
+        LabelDefinition("fwd_ret_8h", "regression", label_horizon or label_buffer),
         frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
@@ -123,7 +132,7 @@ def test_causal_request_resolves_timing_gap_and_preview_identity(tmp_path, monke
 
     assert resolved.spec["identity_version"] == 3
     assert computation["estimand"]["outcome"] == "fwd_ret_8h"
-    assert computation["estimand"]["treatment"] == "treatment"
+    assert computation["estimand"]["treatment"] == "treatment_7d"
     assert computation["estimand"]["treatment_observed_at"] == "decision_timestamp"
     assert computation["refutation"]["temporal_gap_policy"] == "reset"
     assert computation["refutation"]["observation_cadence"] == "0 days 08:00:00"
@@ -546,9 +555,9 @@ def _resolved_refutation(study, label) -> dict:
         # autocorrelated over its own 21 bars regardless.
         ("8H", 21, 21, "treatment_window"),
         # The horizon wins when it is the longer scale.
-        ("48H", 2, 6, "label_horizon"),
+        ("48H", 2, 6, "label_buffer"),
         # No declared window: the horizon is all there is to go on.
-        ("24H", None, 3, "label_horizon"),
+        ("24H", None, 3, "label_buffer"),
     ],
 )
 def test_the_placebo_block_spans_the_longer_of_horizon_and_treatment_window(
@@ -576,7 +585,9 @@ def test_an_undeclared_treatment_window_warns_rather_than_passing_silently(
     tmp_path, monkeypatch
 ) -> None:
     """A treatment with no declared window is the case that hid the block-size defect."""
-    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, label_buffer="8H")
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
+    )
 
     with pytest.warns(UserWarning, match="declares no construction window"):
         refutation = _resolved_refutation(study, label)
@@ -592,7 +603,9 @@ def test_a_canonical_run_refuses_an_undeclared_treatment_window(tmp_path, monkey
     block spanned the treatment. fx_pairs is the live case: `mom_skip_recent`
     spans observations 21 through 252 and resolves to None here.
     """
-    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, label_buffer="8H")
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
+    )
 
     with pytest.raises(ValueError, match="declares no construction window"):
         study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
@@ -635,7 +648,12 @@ def _session_causal_fixture(tmp_path, monkeypatch):
     )
     setup_path = study.root / "config" / "setup.yaml"
     setup_path.write_text(
-        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
+        setup_path.read_text()
+        # A one-bar window satisfies the canonical declaration guard without ever
+        # winning the block: these tests are about the holdout seal, and the block
+        # stays `max(buffer, 1) == buffer`.
+        + "features:\n  windows:\n    treatment: {1d: 1}\n"
+        + "causal:\n  treatment: treatment_1d\n  confounders: [confounder]\n"
     )
     sessions = [
         timestamp
@@ -650,7 +668,7 @@ def _session_causal_fixture(tmp_path, monkeypatch):
                     "symbol": f"S{symbol_index}",
                     "timestamp": timestamp.to_pydatetime(),
                     "feature": float(symbol_index),
-                    "treatment": float(symbol_index) + session_index / 100,
+                    "treatment_1d": float(symbol_index) + session_index / 100,
                     "confounder": float(session_index % 5),
                     "fwd_ret_5d": (symbol_index - 2.5) / 100 + session_index / 10000,
                 }
@@ -662,7 +680,7 @@ def _session_causal_fixture(tmp_path, monkeypatch):
     )
     mds = SimpleNamespace(
         dataset=frame,
-        feature_names=["feature", "treatment", "confounder"],
+        feature_names=["feature", "treatment_1d", "confounder"],
         label_col="fwd_ret_5d",
         label_buffer="5D",
         date_col="timestamp",
@@ -845,3 +863,60 @@ def test_holdout_seal_holds_a_one_session_horizon_over_a_weekend_boundary(
     assert computation["estimand"]["holdout_endpoint_cutoff"] == last_session.isoformat()
     symbols = frame.get_column("symbol").n_unique()
     assert computation["analysis_population"]["n_rows"] == (len(pre_holdout) - 1) * symbols
+
+
+def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    """The two are different quantities, and only one of them describes outcome overlap.
+
+    The buffer keeps a fold's training rows clear of its validation labels; the
+    outcome horizon is how long one outcome stays open, which is what makes
+    successive outcomes overlap and therefore what the Newey-West bandwidth has to
+    cover. They agree in most case studies here, so a resolver that derives both
+    from the buffer passes everywhere except where they differ. On 8-hour bars a
+    24-hour buffer over an 8-hour label is three bars against one.
+    """
+    # A one-bar window keeps this test about the buffer/horizon split: the block is
+    # `max(buffer, 1)`, so the treatment never takes it.
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H", treatment_window=1
+    )
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    computation = resolved.spec["computation"]
+    assert computation["estimand"]["outcome_horizon"] == str(pd.Timedelta("8h"))
+    assert computation["refutation"]["block_size"] == 3
+    assert resolved._context.horizon == 1
+
+
+def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> None:
+    """The placebo block and the per-entity seal assume the buffer is the longer one.
+
+    Both values are hand-authored in setup.yaml and nothing pairs them, so the
+    ordering that used to hold structurally now holds by configuration. Reversed,
+    the placebo block would be shorter than the dependence it holds fixed and the
+    seal would leave outcomes reaching into the holdout, neither with a symptom.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", label_horizon="24H"
+    )
+
+    with pytest.raises(ValueError, match="exceeds the CV buffer"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()

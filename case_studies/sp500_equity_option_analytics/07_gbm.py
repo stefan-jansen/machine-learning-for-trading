@@ -220,10 +220,16 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Preparing a fold - slicing the window, cleaning the rows - depends on the data and not on the
+# model, so it does not differ between the configurations of one label. When it happens is decided
+# by which path the run takes, and for gradient boosting **resolving is what prepares the folds**:
+# `resolve_model_request` calls `prepare_gbm_folds_from_mds` and hands the prepared set to the
+# fit, which only reads it. So the cell above, which resolves every request before the call so it
+# can show the plan, gives each configuration its own prepared fold set and holds all of them at
+# once. The path that prepares one fold set and walks the whole grid against it, holding one fold
+# at a time, is the batch path in `case_studies/utils/gbm.py`, reached by handing
+# `run_model_population` unresolved requests instead. Which to take is a question about the size of
+# the panel, and on this one the plan is worth more than the memory it costs.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -551,7 +557,7 @@ fig_obj.update_xaxes(
     col=1,
 )
 fig_obj.update_layout(
-    title="Which side of zero the grid sits on is set by the label, not by the loss function",
+    title="The label sets which side of zero the grid sits on, not the loss function",
     height=260 * len(panel_labels),
     width=1000,
     margin=dict(t=90),

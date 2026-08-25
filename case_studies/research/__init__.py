@@ -1,6 +1,6 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
 from .catalog import BacktestCatalog, PredictionCatalog
-from .causal import CausalRequest, CausalResult, ResolvedCausalRequest
+from .causal import CausalRequest, CausalResult, ResolvedCausalRequest, supersedes_for
 from .comparison import CandidateSet
 from .configs import (
     declared_labels,
@@ -42,12 +42,13 @@ from .model_planning import (
     require_declared_menu_coverage,
 )
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
-from .population import OfficialPopulation
+from .population import OfficialPopulation, research_name
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
-from .strategy import Strategy
+from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
 __all__ = [
+    "supersedes_for",
     "AdapterBinding",
     "BacktestResult",
     "BacktestCatalog",
@@ -80,6 +81,7 @@ __all__ = [
     "ResolvedCVSpec",
     "Result",
     "Strategy",
+    "strategy_warmup_periods",
     "Study",
     "StateTransitionPolicy",
     "TrainingResult",
@@ -99,6 +101,7 @@ __all__ = [
     "expected_prediction_hashes",
     "planned_model_plan",
     "primary_label",
+    "research_name",
     "resolved_model_plan",
     "run_backtests",
     "run_locked_holdout",
