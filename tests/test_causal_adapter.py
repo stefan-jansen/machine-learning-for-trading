@@ -891,3 +891,32 @@ def test_the_block_spans_the_treatment_when_it_outlasts_the_buffer(tmp_path, mon
     assert refutation["block_size_basis"] == "treatment_window"
     assert refutation["treatment_window_steps"] == 21
     assert refutation["label_buffer_steps"] < 21
+
+
+def test_the_outcome_horizon_is_registered_and_is_not_the_buffer(tmp_path, monkeypatch) -> None:
+    """The bandwidth the second stage is HAC-corrected at has to be readable from the spec.
+
+    ``run_dml_analysis`` is already given the outcome horizon in observation periods, and until
+    now the resolver computed it and threw it away. A notebook comparing bandwidth against block
+    size then had nothing registered to read: crypto's ``12_model_analysis`` printed a value it
+    derived from a key that had never existed under any version of the resolver.
+
+    The assertion that carries this is the second one. ``label_buffer_steps`` is the CV gap and
+    may be deliberately longer than the outcome it seals, so a horizon read off the buffer is
+    wrong in exactly the case where the two differ - which is the fixture here.
+    """
+    # A buffer three cadences long over an eight-hour panel, sealing a one-cadence outcome.
+    # That gap is the case the two quantities are told apart in: a horizon read off the
+    # buffer would report 3 where the label resolves in 1.
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, treatment_window=21, label_buffer="24H", label_horizon="8H"
+    )
+
+    refutation = (
+        study.causal(method="dml", label=label.name, execution_tier="canonical")
+        .resolve()
+        .spec["computation"]["refutation"]
+    )
+
+    assert refutation["label_buffer_steps"] == 3
+    assert refutation["label_horizon_steps"] == 1

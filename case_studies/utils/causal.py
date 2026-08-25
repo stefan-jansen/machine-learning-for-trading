@@ -1440,6 +1440,13 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             "block_size": block_size,
             "block_size_basis": block_size_basis,
             "label_buffer_steps": buffer_steps,
+            # The quantity the second-stage HAC bandwidth is sized by, which until now was
+            # computed here, passed to run_dml_analysis and then discarded. A notebook reasoning
+            # about bandwidth against block size had no registered number to read, so it either
+            # recomputed one or printed a value it could not read back - crypto's 12_model_analysis
+            # did the latter, against a key that had never existed. It is not the buffer: the
+            # buffer is the CV gap and can be deliberately longer than the outcome it seals.
+            "label_horizon_steps": outcome_horizon_steps,
             "treatment_window_steps": treatment_window_steps,
             "seed": seed,
             "temporal_gap_policy": "reset",
