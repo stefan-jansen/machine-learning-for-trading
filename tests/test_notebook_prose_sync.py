@@ -176,3 +176,29 @@ def test_an_unstamped_notebook_is_refused(repo):
     py, nb_path = _write_pair(repo, PY_BEFORE)
     with pytest.raises(SystemExit, match="no provenance stamp"):
         provenance.sync_prose(nb_path)
+
+
+def test_a_partial_loss_of_outputs_is_caught(repo, monkeypatch):
+    """`was_executed` is True as soon as ONE cell has an output, so it was the wrong guard.
+
+    An update that keeps the first cell's outputs and drops the rest would have passed it,
+    and the notebook would then be re-stamped as a complete execution while most of it
+    renders blank. The guard compares outputs per code cell instead.
+    """
+    py, nb_path = _write_pair(repo, PY_BEFORE)
+    _stamp(nb_path, py)
+    py.write_text(PY_BEFORE.replace("# Some prose.", "# Some other prose."))
+
+    real_run = subprocess.run
+
+    def strip_second_cell(*args, **kwargs):
+        result = real_run(*args, **kwargs)
+        nb = json.loads(nb_path.read_text())
+        code = [c for c in nb["cells"] if c["cell_type"] == "code"]
+        code[-1]["outputs"] = []
+        nb_path.write_text(json.dumps(nb, indent=1) + "\n")
+        return result
+
+    monkeypatch.setattr(provenance.subprocess, "run", strip_second_cell)
+    with pytest.raises(SystemExit, match=r"lost theirs"):
+        provenance.sync_prose(nb_path)

@@ -825,6 +825,11 @@ def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
     return [cell for cell in comparable if cell[1] == "code" or len(cell) != 2]
 
 
+def _output_counts(nb: dict) -> list[int]:
+    """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
+    return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+
+
 def sync_prose(nb_path: Path) -> str:
     """Fold a prose-only ``.py`` edit into an executed notebook, without re-running it.
 
@@ -896,6 +901,8 @@ def sync_prose(nb_path: Path) -> str:
             "not the ones this source produces. Re-run the notebook."
         )
 
+    before_counts = _output_counts(nb)
+
     jupytext = REPO_ROOT / ".venv" / "bin" / "jupytext"
     result = subprocess.run(
         [str(jupytext) if jupytext.exists() else "jupytext", "--to", "ipynb", "--update", str(py)],
@@ -907,12 +914,23 @@ def sync_prose(nb_path: Path) -> str:
     if result.returncode != 0:
         raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
 
-    nb = json.loads(nb_path.read_text(encoding="utf-8"))
-    if not was_executed(nb):
+    # Per cell, not "the notebook still has some outputs". `was_executed` is True as soon as
+    # ONE code cell carries an output, so it cannot see an update that kept the first cell's
+    # and dropped the rest - which is the failure mode that matters, because the notebook
+    # would then be re-stamped as a complete execution while most of it renders blank.
+    after_counts = _output_counts(json.loads(nb_path.read_text(encoding="utf-8")))
+    if after_counts != before_counts:
+        lost = [i + 1 for i, (b, a) in enumerate(zip(before_counts, after_counts)) if a < b]
         raise SystemExit(
-            f"{rel}: the update dropped the outputs, which is the one thing it exists to "
-            "avoid. The file has been left as jupytext wrote it - restore it from git."
+            f"{rel}: the update changed the outputs, which is the one thing it exists to "
+            + (
+                f"avoid - code cell(s) {lost} lost theirs. "
+                if lost
+                else f"avoid - {len(before_counts)} code cells before, {len(after_counts)} now. "
+            )
+            + "The file has been left as jupytext wrote it; restore it with `git checkout`."
         )
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
     stamp = dict(stamp)
     stamp["source_py_blob"] = git_blob(py)
     stamp["notes"] = (
