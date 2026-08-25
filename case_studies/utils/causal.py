@@ -1139,6 +1139,16 @@ def _treatment_persistence_steps(setup: dict[str, Any], treatment: str) -> int |
     column name. Returns None when the register declares no window for this
     treatment, which the caller records rather than papers over.
     """
+    # An explicit declaration in the causal block wins. The feature register below can only
+    # answer for a column whose family is suffix-keyed, and eight of the nine treatments are
+    # not: cme's `carry_pct` has no `carry` family, etfs' `skip_recent_6_1` sits under a family
+    # that is a bare int, us_firm and us_equities_panel declare no windows at all. Contorting
+    # the register to reach them would have meant renaming keys the feature code reads by name.
+    # Declared next to `treatment` and `confounders`, which is where a reader looks for what
+    # the treatment is, and where the derivation can be written down beside it.
+    declared = (setup.get("causal") or {}).get("treatment_window")
+    if declared is not None:
+        return max(1, int(declared))
     windows = (setup.get("features") or {}).get("windows") or {}
     for family, suffixes in windows.items():
         prefix = f"{family}_"
@@ -1375,17 +1385,20 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         # without protecting any registered number.
         if tier is not ExecutionTier.PREVIEW:
             raise ValueError(
-                f"{study.case_study}: features.windows declares no construction window for "
-                f"treatment {treatment!r}, so the placebo block would span only the label "
-                f"buffer ({buffer_steps} bars). Declare the treatment's window in "
-                "setup.yaml under `features.windows`; a canonical refutation will not be "
-                "registered against a block that cannot be shown to span the treatment."
+                f"{study.case_study}: no construction window is declared for treatment "
+                f"{treatment!r}, so the placebo block would span only the label buffer "
+                f"({buffer_steps} bars). Set `causal.treatment_window` in setup.yaml to the "
+                "number of bars the treatment's own construction spans, read off the code "
+                "that builds the column rather than its name. A canonical refutation will "
+                "not be registered against a block that cannot be shown to span the "
+                "treatment. One bar is a valid answer for a column built from quantities "
+                "carrying the row's own timestamp, and is how it is said."
             )
         warnings.warn(
-            f"{study.case_study}: features.windows declares no construction window for "
-            f"treatment {treatment!r}, so the placebo block spans only the label buffer "
-            f"({buffer_steps} bars). If the treatment is a rolling statistic, declare its "
-            "window so the block can span it.",
+            f"{study.case_study}: no construction window is declared for treatment "
+            f"{treatment!r}, so the placebo block spans only the label buffer "
+            f"({buffer_steps} bars). If the treatment is a rolling statistic, set "
+            "`causal.treatment_window` in setup.yaml so the block can span it.",
             UserWarning,
             stacklevel=2,
         )

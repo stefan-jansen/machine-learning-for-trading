@@ -25,6 +25,7 @@ import pytest
 
 from case_studies.research.causal import CausalResult
 from case_studies.utils.registry.registration import (
+    current_causal_identities,
     declare_causal_supersedes,
     register_causal_run,
 )
@@ -470,3 +471,44 @@ def test_a_conflicting_declaration_is_refused_on_the_register_path_too(tmp_path)
     with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
         stored = dict(db.execute("SELECT causal_hash, supersedes_hash FROM causal_runs"))
     assert stored == {"causal_first": None, "causal_second": "causal_first"}
+
+
+def test_a_committed_declaration_runs_against_a_readers_empty_registry(tmp_path) -> None:
+    """A notebook that names its predecessor must still run for someone who has neither.
+
+    `run_log/` is gitignored, so a reader clones the repo, runs `11_causal_dml`, and meets
+    an empty registry. The committed `SUPERSEDES_CAUSAL` names a hash that only ever
+    existed on the machine which produced the chain. Refusing that made the declaration -
+    which is how the registry stays resolvable here - a crash for every reader.
+
+    Nothing is retired and nothing needs to be: one identity goes in, one is current.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_second", supersedes="causal_only_on_the_authors_machine")
+
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    try:
+        assert current_causal_identities(db, label=LABEL, tier="canonical") == ["causal_second"]
+    finally:
+        db.close()
+
+
+def test_a_vacuous_declaration_writes_no_edge(tmp_path) -> None:
+    """`supersedes_hash` is a foreign key, so an edge to a row that is not there is not storable.
+
+    The declaration resolving to nothing therefore has to write NULL rather than the hash
+    the notebook named. Storing it would fail the constraint, which is the second reason a
+    committed SUPERSEDES_CAUSAL used to be unrunnable for a reader - and the one that
+    survives however the validation above is written.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_second", supersedes="causal_only_on_the_authors_machine")
+
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    try:
+        stored = db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = 'causal_second'"
+        ).fetchone()
+    finally:
+        db.close()
+    assert stored == (None,)

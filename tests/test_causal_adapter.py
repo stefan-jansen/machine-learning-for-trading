@@ -589,7 +589,7 @@ def test_an_undeclared_treatment_window_warns_rather_than_passing_silently(
         tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
     )
 
-    with pytest.warns(UserWarning, match="declares no construction window"):
+    with pytest.warns(UserWarning, match="no construction window is declared"):
         refutation = _resolved_refutation(study, label)
 
     assert refutation["treatment_window_steps"] is None
@@ -607,7 +607,7 @@ def test_a_canonical_run_refuses_an_undeclared_treatment_window(tmp_path, monkey
         tmp_path, monkeypatch, label_buffer="8H", treatment_window=None
     )
 
-    with pytest.raises(ValueError, match="declares no construction window"):
+    with pytest.raises(ValueError, match="no construction window is declared"):
         study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
 
 
