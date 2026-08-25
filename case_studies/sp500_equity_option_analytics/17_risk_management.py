@@ -403,7 +403,14 @@ def paired_overlay_metrics(row: dict) -> dict:
         seed=42,
     )
     if not paired:
-        raise RuntimeError(f"Paired uncertainty failed for {row['risk_name']}")
+        # Two unrelated reasons return an empty mapping; the count separates them.
+        overlap = aligned.height
+        raise RuntimeError(
+            f"Paired uncertainty failed for {row['risk_name']}: the aligned pair holds "
+            f"{overlap} observations, of which the first non-zero return leaves "
+            f"{len(aligned['challenger_ret'])}. It needs at least four, and the challenger "
+            "and baseline series must be the same length after alignment."
+        )
     return {
         "backtest_hash": row["backtest_hash"],
         "sharpe_diff": paired["sharpe_diff"],
