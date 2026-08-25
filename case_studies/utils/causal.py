@@ -652,6 +652,36 @@ def _placebo_moved_mask(original: np.ndarray, permuted: np.ndarray) -> np.ndarra
     return moved
 
 
+# Below this many successful placebo draws the permutation test is not computed at all:
+# the plus-one correction floors the empirical p at 1/(n+1), so under ten draws no data
+# could produce a pass and a number would be reported that no test earned. When it is not
+# computed, `refutation` stays empty and `refutation_p` is registered NULL - a missing
+# measurement, which is what it is.
+MIN_PLACEBO_DRAWS = 10
+
+
+def placebo_request_is_on_the_boundary(n_placebo: int) -> bool:
+    """Would one failed draw take the whole refutation with it?
+
+    This is not enforced at run time, and the attempt to do so is worth recording. Nine
+    tests in tests/test_causal_adapter.py request two to six draws on purpose, to
+    exercise the block-span and permutation-feasibility logic without paying for a
+    refutation they never read; refusing every small request turned all nine red for a
+    property they are not about. The boundary is a property of a *declared reduction* -
+    a config that says how a real run should be made cheap - not of every call.
+
+    Zero means "do not refute", which is a different statement from "refute with too
+    few draws to say anything".
+    """
+    return 0 < n_placebo < MIN_PLACEBO_DRAWS + PLACEBO_REQUEST_MARGIN
+
+
+# Enough that one draw failing does not take the whole test with it. Small on purpose:
+# a placebo draw is a full nuisance refit, so this is the least that makes the boundary
+# unreachable by a single failure rather than a comfortable cushion.
+PLACEBO_REQUEST_MARGIN = 5
+
+
 def _assert_placebo_permutation_possible(
     unchanged_draws: int, n_draws: int, block_size: int, short_segment_fraction: float = 0.0
 ) -> None:
@@ -952,7 +982,7 @@ def run_dml_analysis(
         )
 
         refutation = {}
-        if len(placebo_effects) >= 10:
+        if len(placebo_effects) >= MIN_PLACEBO_DRAWS:
             placebo_arr = np.array(placebo_effects)
             p_mean = np.mean(placebo_arr)
             p_std = np.std(placebo_arr)

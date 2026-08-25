@@ -10,6 +10,8 @@ the observed effect published `p = 0.000`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -128,3 +130,59 @@ class TestUnderpoweredRefutation:
     def test_a_caller_without_the_draw_count_keeps_the_two_way_answer(self) -> None:
         assert classify_refutation(0.01) == "Passes"
         assert classify_refutation(0.9) == "Fails"
+
+
+# ---------------------------------------------------------------------------
+# The margin between what a run requests and what the test needs.
+# ---------------------------------------------------------------------------
+
+
+def test_the_boundary_is_where_one_failed_draw_costs_the_whole_test() -> None:
+    from case_studies.utils.causal import (
+        MIN_PLACEBO_DRAWS,
+        PLACEBO_REQUEST_MARGIN,
+        placebo_request_is_on_the_boundary,
+    )
+
+    assert placebo_request_is_on_the_boundary(MIN_PLACEBO_DRAWS)
+    assert not placebo_request_is_on_the_boundary(0)
+    assert not placebo_request_is_on_the_boundary(MIN_PLACEBO_DRAWS + PLACEBO_REQUEST_MARGIN)
+    assert not placebo_request_is_on_the_boundary(100)
+
+
+def test_every_declared_test_reduction_can_produce_a_refutation() -> None:
+    """The reduction file is the environment this defect was reachable in.
+
+    Pinning the constant alone would leave `tests/overrides.yaml` free to drift back
+    onto the boundary, which is exactly how it got there.
+    """
+    import yaml
+
+    from case_studies.utils.causal import (
+        MIN_PLACEBO_DRAWS,
+        PLACEBO_REQUEST_MARGIN,
+        placebo_request_is_on_the_boundary,
+    )
+
+    overrides = yaml.safe_load((Path(__file__).resolve().parent / "overrides.yaml").read_text())
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "n_placebo" in node:
+                yield int(node["n_placebo"])
+            for value in node.values():
+                yield from walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from walk(value)
+
+    declared = sorted(set(walk(overrides)))
+    assert declared, "no n_placebo reduction is declared, so this test measures nothing"
+    on_the_boundary = [value for value in declared if placebo_request_is_on_the_boundary(value)]
+    assert not on_the_boundary, (
+        f"these declared reductions request {on_the_boundary} placebo draws, and the "
+        f"permutation test needs {MIN_PLACEBO_DRAWS} successful ones. One failed draw "
+        "then produces no refutation at all, silently - and a notebook reading the "
+        f"p-value with a default publishes a number no test computed. Ask for at least "
+        f"{MIN_PLACEBO_DRAWS + PLACEBO_REQUEST_MARGIN}, or 0 to declare no refutation."
+    )
