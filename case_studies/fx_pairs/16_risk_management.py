@@ -49,6 +49,7 @@ from case_studies.research import (
     plan_backtests,
     research_name,
     run_backtests,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -120,6 +121,14 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     & pl.col("complete")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if TOP_N_PREDICTIONS is not None:
@@ -355,7 +364,11 @@ if not include_preview:
     print(f"Frozen expected risk population: {risk_population.hash}")
 
 # %% [markdown]
-# ## Execute the frozen risk grid
+# ## Execute the frozen risk grid, and validate what was frozen
+#
+# The population is validated in the cell that fills it: the expected set was written down before
+# the first member ran, and `require_complete` is what turns that declaration into a published
+# result.
 
 # %% tags=["results"]
 risk_results: list[BacktestResult] = []
@@ -391,18 +404,25 @@ for job in risk_jobs:
         }
     )
 
-pl.DataFrame(risk_rows).sort("label", "risk_name")
-
-# %% [markdown]
-# ## Validate the frozen risk population
-
-# %% tags=["results"]
 if not include_preview:
     if risk_population is None:
         raise RuntimeError("the canonical risk population was not frozen before execution")
     risk_population.require_complete()
     print(f"Official risk population: {risk_population.hash}")
 
+pl.DataFrame(risk_rows).sort("label", "risk_name")
+
+# %% [markdown]
+# ## Freeze the set the holdout will choose from
+#
+# Everything this case study has backtested on validation goes in: the equal-weight baselines, the
+# allocation variants, and the risk overlays. The comparison contract names the fields every member
+# must agree on, so a candidate fitted against different labels, features or folds cannot silently
+# join a set the holdout will pick from. Only identities are printed here; what the selection is
+# worth is `17_strategy_analysis`'s question.
+
+# %%
+if not include_preview:
     holdout_candidates = CandidateSet.create(
         study,
         name=research_name(CASE_STUDY_ID, "holdout-candidates", scope=POPULATION_NAME),

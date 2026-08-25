@@ -52,6 +52,7 @@ from case_studies.research import (
     research_name,
     run_backtests,
     strategy_warmup_periods,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -82,7 +83,7 @@ POPULATION_NAME = ""
 # candidate sets provide the only performance ranking used here. The selected unit is a model
 # configuration. After a configuration advances, all of its complete checkpoints advance.
 
-# %% tags=["results"]
+# %%
 set_global_seeds(SEED)
 universe_symbols = yaml.safe_load(
     (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
@@ -124,6 +125,14 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     & pl.col("complete")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if catalog.is_empty():
@@ -348,7 +357,11 @@ if not include_preview:
     print(f"Frozen expected allocation population: {allocation_population.hash}")
 
 # %% [markdown]
-# ## Execute the frozen allocation grid
+# ## Execute the frozen allocation grid, then validate what was frozen
+#
+# The population is validated in the cell that fills it, because the two are one act: the expected
+# set was written down before the first member ran, and `require_complete` is what turns that
+# declaration into a published result.
 
 # %% tags=["results"]
 allocation_results = []
@@ -453,10 +466,6 @@ for result in allocation_results:
             )
         )
 
-# %% [markdown]
-# ## Validate the frozen allocation population
-
-# %% tags=["results"]
 if not include_preview:
     if allocation_population is None:
         raise RuntimeError("the canonical allocation population was not frozen before execution")
