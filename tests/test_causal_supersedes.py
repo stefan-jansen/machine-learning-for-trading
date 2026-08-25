@@ -512,3 +512,32 @@ def test_a_vacuous_declaration_writes_no_edge(tmp_path) -> None:
     finally:
         db.close()
     assert stored == (None,)
+
+
+def test_the_repair_path_also_skips_an_absent_predecessor(tmp_path) -> None:
+    """`declare_causal_supersedes` is the second caller, and it must agree with the first.
+
+    A reader's second run reaches it: the first run stored NULL because the predecessor was
+    not in their registry, the fit is then served from cache, and this is the path that tries
+    to fill the edge in. Writing the declared hash anyway raises IntegrityError on the foreign
+    key - the failure moves from the friendly refusal to a database error.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_second", supersedes="causal_only_on_the_authors_machine")
+
+    declare_causal_supersedes(
+        "test_case",
+        "causal_second",
+        supersedes_hash="causal_only_on_the_authors_machine",
+        label=LABEL,
+        case_dir=case_dir,
+    )
+
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    try:
+        assert db.execute(
+            "SELECT supersedes_hash FROM causal_runs WHERE causal_hash = 'causal_second'"
+        ).fetchone() == (None,)
+        assert current_causal_identities(db, label=LABEL, tier="canonical") == ["causal_second"]
+    finally:
+        db.close()

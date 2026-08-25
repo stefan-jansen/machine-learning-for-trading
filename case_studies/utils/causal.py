@@ -1168,6 +1168,34 @@ def _treatment_persistence_steps(setup: dict[str, Any], treatment: str) -> int |
     return None
 
 
+def treatment_block_size(setup: dict[str, Any], treatment: str, *, buffer_steps: int) -> int:
+    """The placebo block for a notebook that calls `run_dml_analysis` directly.
+
+    Two scales create the serial dependence a block permutation has to preserve, and the
+    block spans the longer: the overlapping labels span the label horizon, and the
+    treatment's own construction window spans itself. `resolve_causal_request` has done
+    this since the window became declarable; six notebooks bypass it and call
+    `run_dml_analysis` themselves, and four of them took `BLOCK_SIZE = EMBARGO_PERIODS` -
+    the horizon alone. For etfs that meant permuting a six-month momentum column in blocks
+    of 21 sessions, which is close enough to an independent shuffle that the p-value it
+    produced does not mean what it reads as.
+
+    Raises rather than defaulting, for the same reason the resolver refuses: a block that
+    cannot be shown to span the treatment produces a refutation that is weaker than it
+    looks, and nothing downstream can tell the two apart.
+    """
+    window = _treatment_persistence_steps(setup, treatment)
+    if window is None:
+        raise ValueError(
+            f"no construction window is declared for treatment {treatment!r}, so the placebo "
+            f"block would span only the label buffer ({buffer_steps} bars). Set "
+            "`causal.treatment_window` in setup.yaml to the number of bars the treatment's "
+            "own construction spans, read off the code that builds the column rather than "
+            "its name."
+        )
+    return max(buffer_steps, window)
+
+
 def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], seed: int):
     configured = dict(config.get("params") or {})
     supplied = dict(overrides.get("nuisance_params") or {})
@@ -1697,6 +1725,22 @@ def register_causal_run(
         n_folds=n_folds,
         causal_params=causal_params,
     )
+    # NOTE: a row registered through this wrapper is invisible to every reader, and that
+    # cannot be fixed here. `current_causal_identities` skips any row whose spec does not
+    # carry the current identity version, and that set is what both `CausalResult.one` and
+    # the two-identities check are computed from. Stamping the version on this spec does not
+    # work either: `project_training_identity` refuses version 3 without an
+    # `ml4t.resolved-spec/v1` payload, which only `resolve_causal_request` produces.
+    #
+    # Measured 2026-08-25 across the fleet, and the split is exactly by which path wrote the
+    # row: crypto 2/2 visible, cme 6/6, fx 3/3, sp500_options 1/1 - all through the resolver -
+    # against us_firm 0/3 and etfs 0/1, both through here. Those two case studies ran their
+    # causal stage, registered a result, and resolve to nothing.
+    #
+    # So the fix is the conversion four case studies have already had: route the notebook
+    # through `resolve_causal_request` / `run_resolved_causal_request` instead of building a
+    # spec here. etfs/12_causal_dml and us_firm_characteristics/09_causal_dml are what is
+    # left, and this wrapper goes when they are done.
     causal_hash = training_hash_from_spec(spec)
 
     # Preserve NULLs for unknown p-values rather than silently coercing them

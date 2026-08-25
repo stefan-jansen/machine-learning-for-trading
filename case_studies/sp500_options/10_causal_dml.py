@@ -71,6 +71,7 @@ from case_studies.utils.causal import (
     format_dml_summary,
     register_causal_run,
     run_dml_analysis,
+    treatment_block_size,
 )
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -187,7 +188,12 @@ merged_clean = (
 
 EMBARGO_PERIODS = embargo_from_buffer(mds.label_buffer)
 
-BLOCK_SIZE = EMBARGO_PERIODS
+# The placebo block spans the longer of two scales: the overlapping labels span the label
+# horizon, and the treatment's own construction window spans itself. This was the horizon
+# alone, which permuted a rolling column in blocks shorter than the window that makes it
+# autocorrelated - close enough to an independent shuffle that the p-value did not mean what
+# it read as. The window is declared in setup.yaml as `causal.treatment_window`.
+BLOCK_SIZE = treatment_block_size(setup, TREATMENT_COL, buffer_steps=EMBARGO_PERIODS)
 
 # Temporal subset if too large
 if len(merged_clean) > MAX_SAMPLES:

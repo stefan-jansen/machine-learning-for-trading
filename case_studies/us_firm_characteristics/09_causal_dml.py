@@ -51,6 +51,7 @@ from case_studies.utils.causal import (
     format_dml_summary,
     register_causal_run,
     run_dml_analysis,
+    treatment_block_size,
 )
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
@@ -142,7 +143,12 @@ analysis = eligible.filter(pl.col(date_col).is_in(selected_dates)).sort(date_col
 if analysis.is_empty() or analysis[date_col].max() >= development_cutoff:
     raise ValueError("Development sample is empty or crosses the sealed holdout boundary")
 
-block_size = embargo_periods
+# The placebo block spans the longer of two scales: the overlapping labels span the label
+# horizon, and the treatment's own construction window spans itself. This was the horizon
+# alone, so `r12_2` - a cumulative return reaching twelve months back - was permuted in
+# blocks of one month, which is close enough to an independent shuffle that the p-value did
+# not mean what it read as. The window is declared in setup.yaml as `causal.treatment_window`.
+block_size = treatment_block_size(setup, treatment_col, buffer_steps=embargo_periods)
 schema_bytes = "|".join(f"{name}:{dtype}" for name, dtype in analysis.schema.items()).encode()
 row_hash_bytes = analysis.hash_rows(seed=0).to_numpy().tobytes()
 input_digest = hashlib.sha256(schema_bytes + row_hash_bytes).hexdigest()

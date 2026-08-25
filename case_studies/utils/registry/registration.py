@@ -1749,7 +1749,12 @@ def declare_causal_supersedes(
                     f"it cannot also supersede {supersedes_hash}"
                 )
             return
-        _enforce_causal_supersedes(
+        # Honour what the enforcer returns, exactly as register_causal_run does. It returns
+        # None when the named predecessor is absent from this registry, and the column is a
+        # foreign key onto causal_hash - so writing the declared value anyway raises
+        # IntegrityError. A reader hits this on their second run: the first stored NULL, the
+        # fit is served from cache, and this repair path is what tries to fill the edge in.
+        effective = _enforce_causal_supersedes(
             db,
             causal_hash=causal_hash,
             label=label,
@@ -1757,9 +1762,13 @@ def declare_causal_supersedes(
             supersedes_hash=supersedes_hash,
             is_repair=True,
         )
+        if effective is None:
+            # Nothing to record, and nothing wrong: one identity is current, which is the
+            # state this function exists to reach.
+            return
         db.execute(
             "UPDATE causal_runs SET supersedes_hash = ? WHERE causal_hash = ?",
-            (supersedes_hash, causal_hash),
+            (effective, causal_hash),
         )
         db.commit()
     finally:
