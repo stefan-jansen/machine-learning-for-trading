@@ -50,6 +50,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import OfficialPopulation, open_study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -102,6 +103,15 @@ print(
     f"top configs: {TOP_N}; checkpoints/config: {CHECKPOINTS_PER_CONFIG}"
 )
 
+_study = open_study(CASE_STUDY_ID, execution_tier="canonical")
+with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
+    _population_names = [
+        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
+    ]
+CURRENT_MEMBERS: set[str] = set()
+for _name in sorted(_population_names):
+    CURRENT_MEMBERS.update(OfficialPopulation.one(_study, name=_name).members)
+
 # %% [markdown]
 # ## 1. Advance the leading baselines
 #
@@ -111,14 +121,28 @@ print(
 # allocation round.
 
 # %%
-top_preds = resolve_best_predictions(
+top_candidates = resolve_best_predictions(
     CASE_STUDY_ID,
     ALLOCATION_LABEL,
     split="validation",
     stage="signal",
-    top_n=TOP_N,
+    top_n=9999,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
 )
+current_candidates = top_candidates.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+advancing_configs = (
+    current_candidates.group_by("family", "config_name")
+    .agg(pl.col("sharpe").max().alias("best_sharpe"))
+    .sort("best_sharpe", descending=True)
+    .head(TOP_N)
+    .select("family", "config_name")
+)
+top_preds = current_candidates.join(
+    advancing_configs,
+    on=["family", "config_name"],
+    how="inner",
+    nulls_equal=True,
+).sort("sharpe", descending=True)
 if len(top_preds) != TOP_N:
     raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
 
@@ -126,9 +150,9 @@ selected_hashes = top_preds["prediction_hash"].to_list()
 top_preds.select("source", "prediction_hash", "sharpe")
 
 # %% [markdown]
-# The primary-label funnel advances NLinear, SDF, CAE, IPCA, LSTM, PatchTST,
-# and four regularized linear configurations. These are the inputs to the
-# allocation comparison, not conclusions from it.
+# The table above is authoritative: each row is one current configuration's
+# best full-coverage checkpoint. These are inputs to the allocation comparison,
+# not conclusions from it.
 
 # %%
 prices = load_backtest_prices_for(
@@ -317,12 +341,16 @@ baseline_sharpe = top_preds.filter(pl.col("prediction_hash") == winner.predictio
 allocation_delta = winner.metrics["sharpe"] - baseline_sharpe
 
 print(
-    f"Winner: {winner.source}; allocator={winner_allocator}; top_k={winner_top_k}; "
-    f"Sharpe={winner.metrics['sharpe']:.3f} "
-    f"[{winner.metrics['sharpe_ci95_lo']:.3f}, {winner.metrics['sharpe_ci95_hi']:.3f}]"
+    f"Selected allocation: {winner.source}; allocator={winner_allocator}; "
+    f"top_k={winner_top_k}; validation Sharpe={winner.metrics['sharpe']:.3f}"
 )
 print(f"Equal-weight baseline={baseline_sharpe:.3f}; allocation delta={allocation_delta:+.3f}")
 top_rows.select("source", "prediction_hash", "sharpe", "cagr", "max_drawdown")
+
+# %% [markdown]
+# The point estimate is conditional on selecting this row from the full allocation sweep. An
+# ordinary interval for this one return path would omit that search, so it is not reported as
+# uncertainty about the selected allocation.
 
 # %% [markdown]
 # The curve below asks whether the allocation result depends on how many names are

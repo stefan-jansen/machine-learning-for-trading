@@ -395,8 +395,14 @@ print(repr(explorer))
 # at all, and by how much - not the identity of the row at the top.
 
 # %%
-all_baselines = explorer.best(stage="signal", top_n=9999)
-search_context = explorer.search_context(stage="signal")
+all_baselines = explorer.best(stage="signal", top_n=9999).filter(
+    pl.col("prediction_hash").is_in(CURRENT_MEMBERS)
+)
+search_context = {
+    "total": len(all_baselines),
+    "median_sharpe": all_baselines["sharpe"].median(),
+    "pct_positive": 100 * all_baselines.filter(pl.col("sharpe") > 0).height / len(all_baselines),
+}
 top = all_baselines.head(10)
 
 top_k = [
@@ -435,12 +441,17 @@ top.select(
 # target rather than against the strongest number in the sweep.
 
 # %%
-primary_advancing = resolve_best_predictions(
+primary_candidates = resolve_best_predictions(
     CASE_STUDY_ID,
     BACKTEST_LABEL,
     split=SPLIT,
-    top_n=10,
+    top_n=9999,
     stage="signal",
+)
+primary_advancing = (
+    primary_candidates.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+    .sort("sharpe", descending=True)
+    .head(10)
 )
 primary_advancing.select(
     "family",
@@ -461,7 +472,17 @@ primary_advancing.select(
 # coefficient from the registry.
 
 # %%
-families = explorer.compare_families(stage="signal")
+families = (
+    all_baselines.group_by("family")
+    .agg(
+        n=pl.len(),
+        sharpe_median=pl.col("sharpe").median(),
+        sharpe_max=pl.col("sharpe").max(),
+        sharpe_q75=pl.col("sharpe").quantile(0.75),
+        pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+    )
+    .sort("sharpe_median", descending=True)
+)
 ic_sharpe_rho = all_baselines.select(
     pl.corr("ic_mean_daily", "sharpe", method="spearman").alias("rho")
 ).item()
@@ -552,7 +573,11 @@ fig.show()
 # than letting three empty columns print as though the adjustment had been made.
 
 # %%
-family_leaders = selection_adjusted_leader_table(CASE_STUDY_ID, stage="signal")
+family_leaders = selection_adjusted_leader_table(
+    CASE_STUDY_ID,
+    stage="signal",
+    prediction_hashes=CURRENT_MEMBERS,
+)
 _adjustment_cols = ["dsr_pvalue", "k_variants", "pbo"]
 _absent = [c for c in _adjustment_cols if family_leaders[c].null_count() == family_leaders.height]
 if _absent:
