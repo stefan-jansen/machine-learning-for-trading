@@ -110,7 +110,9 @@ with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
     ]
 CURRENT_MEMBERS: set[str] = set()
 for _name in sorted(_population_names):
-    CURRENT_MEMBERS.update(OfficialPopulation.one(_study, name=_name).members)
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
 
 # %% [markdown]
 # ## 1. Advance the leading baselines
@@ -121,28 +123,15 @@ for _name in sorted(_population_names):
 # allocation round.
 
 # %%
-top_candidates = resolve_best_predictions(
+top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
     ALLOCATION_LABEL,
     split="validation",
     stage="signal",
-    top_n=9999,
+    top_n=TOP_N,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
+    prediction_hashes=CURRENT_MEMBERS,
 )
-current_candidates = top_candidates.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
-advancing_configs = (
-    current_candidates.group_by("family", "config_name")
-    .agg(pl.col("sharpe").max().alias("best_sharpe"))
-    .sort("best_sharpe", descending=True)
-    .head(TOP_N)
-    .select("family", "config_name")
-)
-top_preds = current_candidates.join(
-    advancing_configs,
-    on=["family", "config_name"],
-    how="inner",
-    nulls_equal=True,
-).sort("sharpe", descending=True)
 if len(top_preds) != TOP_N:
     raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
 

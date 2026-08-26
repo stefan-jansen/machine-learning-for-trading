@@ -190,7 +190,9 @@ with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
     ]
 CURRENT_MEMBERS: set[str] = set()
 for _name in sorted(_population_names):
-    CURRENT_MEMBERS.update(OfficialPopulation.one(_study, name=_name).members)
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
 print(
     f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
 )

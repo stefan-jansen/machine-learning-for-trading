@@ -217,7 +217,9 @@ with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
     ]
 CURRENT_MEMBERS: set[str] = set()
 for _name in sorted(_population_names):
-    CURRENT_MEMBERS.update(OfficialPopulation.one(_study, name=_name).members)
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
 print(
     f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
 )
@@ -441,17 +443,13 @@ top.select(
 # target rather than against the strongest number in the sweep.
 
 # %%
-primary_candidates = resolve_best_predictions(
+primary_advancing = resolve_best_predictions(
     CASE_STUDY_ID,
     BACKTEST_LABEL,
     split=SPLIT,
-    top_n=9999,
+    top_n=10,
     stage="signal",
-)
-primary_advancing = (
-    primary_candidates.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
-    .sort("sharpe", descending=True)
-    .head(10)
+    prediction_hashes=CURRENT_MEMBERS,
 )
 primary_advancing.select(
     "family",
