@@ -38,6 +38,7 @@ from case_studies.cme_futures.research_workflow import (
     load_futures_price_path,
     official_prediction_catalog,
     open_study,
+    preview_prediction_candidates,
     run_official_backtest_requests,
     strategy_request_frame,
 )
@@ -104,28 +105,7 @@ market_contract
 if EXECUTION_TIER == "canonical":
     predictions = official_prediction_catalog(study, MODEL_POPULATION_NAMES)
 else:
-    # The cap is per label, not over the whole frame. Taking one head across a
-    # label-sorted frame spends the entire budget on the first label whenever
-    # PREVIEW_LABELS names more than one, and the later labels then contribute no
-    # requests at all - a per-label skip that `is_empty()` cannot see, because the
-    # frame is not empty. Each declared label must produce rows or this raises.
-    predictions = (
-        study.predictions.table(include_preview=True)
-        .filter(
-            (pl.col("execution_tier") == "preview")
-            & (pl.col("split") == "validation")
-            & pl.col("complete")
-            & pl.col("label").is_in(list(labels))
-        )
-        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
-        .group_by("label", maintain_order=True)
-        .head(PREVIEW_MAX_PREDICTIONS)
-    )
-    starved = [label for label in labels if predictions.filter(pl.col("label") == label).is_empty()]
-    if starved:
-        raise RuntimeError(
-            f"preview execution found no complete validation predictions for {starved}"
-        )
+    predictions = preview_prediction_candidates(study, labels=labels, limit=PREVIEW_MAX_PREDICTIONS)
 request_rows = []
 for label in labels:
     label_catalog = predictions.filter(pl.col("label") == label)

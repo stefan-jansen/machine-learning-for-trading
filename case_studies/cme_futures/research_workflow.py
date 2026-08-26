@@ -704,6 +704,53 @@ def strategy_request_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
     )
 
 
+def preview_prediction_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview validation predictions to backtest, capped per label.
+
+    The cap is per label and not over the whole frame. A single head across a label-sorted
+    frame spends the budget on whichever label sorts first, so a later label is left with
+    fewer rows than it was allotted - or with none at all when the first label alone fills
+    the budget.
+
+    Only the second of those is caught downstream: a label reduced to zero is refused by the
+    emptiness check below, while a label reduced merely *below* its budget is not, and that
+    one is invisible. Both are the silent narrowing the sweep contracts exist to prevent, so
+    the cap is applied per group rather than repaired afterwards.
+
+    This lives here rather than inline in `13_backtest` so the notebook and its test call the
+    same code. A test that rebuilds the expression asserts Polars' semantics and keeps passing
+    when the notebook regresses.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview prediction selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview prediction selection requires a positive limit")
+    candidates = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .group_by("label", maintain_order=True)
+        .head(limit)
+    )
+    starved = [label for label in labels if candidates.filter(pl.col("label") == label).is_empty()]
+    if starved:
+        raise RuntimeError(
+            f"preview execution found no complete validation predictions for {starved}"
+        )
+    return candidates
+
+
 def run_official_backtest_requests(
     study: Study,
     requests: pl.DataFrame,

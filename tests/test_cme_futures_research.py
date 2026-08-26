@@ -1422,31 +1422,46 @@ def test_a_preview_run_is_refused_an_official_population(
         run_official_backtest_requests(study, requests, population_name="cme_futures-preview-v1")
 
 
-def test_the_preview_prediction_cap_is_per_label_not_global() -> None:
-    """Two labels must each get up to the cap, not share one budget.
+def test_the_preview_prediction_cap_is_per_label_not_global(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each declared label gets up to the cap, through the code the notebook actually calls.
 
-    13_backtest sorts its preview candidates by label and then caps them. Taking one head
-    across that frame spends the whole budget on the first label whenever PREVIEW_LABELS
-    names more than one, and the later labels contribute no requests at all - a per-label
-    skip that an `is_empty()` guard cannot see, because the frame is not empty.
+    The previous version of this test rebuilt the expression inside the test and compared a
+    global head against a grouped one, which asserts Polars' semantics: it would have kept
+    passing if `13_backtest` regressed to a single `.head(...)`. It now calls
+    `preview_prediction_candidates`, which is what the notebook calls.
 
-    This asserts the frame shape rather than running the notebook: today's override declares
-    a single label, so the notebook itself cannot distinguish the two forms, and the
-    committed .ipynb comes from a canonical run that never reaches this branch.
+    The fixture is built for the case the helper's own emptiness check does NOT catch. A
+    label starved to zero raises there, so it needs no assertion here. A label reduced merely
+    BELOW its budget raises nothing and is the quiet one: with `fwd_ret_21d` holding one
+    prediction and `fwd_ret_5d` three, and a cap of two, the frame sorts `fwd_ret_21d` first
+    (`"2" < "5"`) so a global head of two returns one row for each - neither label empty, and
+    `fwd_ret_5d` silently short of the two it was allotted. The counts are what pin it.
     """
-    frame = pl.DataFrame(
-        {
-            "label": ["fwd_ret_21d"] * 5 + ["fwd_ret_5d"] * 5,
-            "prediction_hash": [f"h{i:02d}" for i in range(10)],
-        }
-    ).sort("label", "prediction_hash")
-    cap = 3
+    study = _study(tmp_path)
+    study.activate("preview")
+    for label, alphas in (("fwd_ret_21d", (1.0,)), ("fwd_ret_5d", (4.0, 5.0, 6.0))):
+        for alpha in alphas:
+            _labelled_prediction(study, label=label, alpha=alpha, execution_tier="preview")
 
-    globally_capped = frame.head(cap)
-    assert set(globally_capped.get_column("label")) == {"fwd_ret_21d"}, (
-        "the fixture must be one a global head starves, or this test asserts nothing"
+    selected = research_workflow.preview_prediction_candidates(
+        study, labels=("fwd_ret_21d", "fwd_ret_5d"), limit=2
     )
 
-    per_label = frame.group_by("label", maintain_order=True).head(cap)
-    counts = dict(per_label.group_by("label").len().iter_rows())
-    assert counts == {"fwd_ret_21d": cap, "fwd_ret_5d": cap}
+    counts = dict(selected.group_by("label").len().iter_rows())
+    assert counts == {"fwd_ret_21d": 1, "fwd_ret_5d": 2}
+
+
+def test_preview_prediction_selection_refuses_a_label_it_found_nothing_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declared label with no preview predictions is named, not silently dropped."""
+    study = _study(tmp_path)
+    study.activate("preview")
+    _labelled_prediction(study, label="fwd_ret_21d", alpha=1.0, execution_tier="preview")
+
+    with pytest.raises(RuntimeError, match="fwd_ret_5d"):
+        research_workflow.preview_prediction_candidates(
+            study, labels=("fwd_ret_21d", "fwd_ret_5d"), limit=2
+        )
