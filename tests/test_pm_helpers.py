@@ -1109,6 +1109,43 @@ def test_injected_parameters_drops_preview_reductions_on_a_canonical_run() -> No
     assert declared["PREVIEW_REDUCTIONS"] == {"max_samples": 5000}
 
 
+def test_injected_parameters_strips_every_preview_prefixed_name_on_a_canonical_run() -> None:
+    """The strip is a prefix rule, not a list of names that has to be maintained.
+
+    `tests/generate_intermediates.py` passes `overrides["parameters"]` verbatim with
+    `research_preview=False`, so a preview-only name left in reaches a notebook whose
+    EXECUTION_TIER is still "canonical" - and the notebooks that refuse one raise on their
+    first cell. The strip named `PREVIEW_REDUCTIONS` alone while `tests/overrides.yaml` had
+    grown to fourteen `PREVIEW_` names, so thirteen were passing through.
+
+    The invented name is the point: it is the only assertion here that a named list cannot
+    satisfy, so a regression to one fails rather than passing on the four real names.
+
+    This does not claim no preview-only parameter can reach a canonical run. `MAX_SYMBOLS`
+    is preview-only for `us_equities_panel` 16-19 and carries no prefix, and the test below
+    pins that it survives because elsewhere it is a legitimate canonical parameter. That gap
+    is named in `injected_parameters`' docstring.
+    """
+    overrides = {
+        "PREVIEW_REDUCTIONS": {"max_folds": 1},
+        "PREVIEW_LABELS": ["fwd_ret_21d"],
+        "PREVIEW_MAX_PREDICTIONS": 4,
+        "PREVIEW_MAX_BASELINE_ROWS": 2,
+        "PREVIEW_SOMETHING_NOT_INVENTED_YET": 7,
+    }
+    declined = (
+        injected_parameters(
+            Path("case_studies/cme_futures/13_backtest.py"),
+            overrides,
+            None,
+            research_preview=False,
+        )
+        or {}
+    )
+    leaked = sorted(key for key in declined if key.startswith("PREVIEW_"))
+    assert not leaked, f"canonical injection carries preview-only parameters: {leaked}"
+
+
 def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:
     parameters = {"MAX_SYMBOLS": 5, "TOP_K": 2}
     assert (

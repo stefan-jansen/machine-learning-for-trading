@@ -1023,8 +1023,18 @@ def injected_parameters(
     refuses one: ``cme_futures`` 13 through 17 raise "canonical execution cannot declare
     preview reductions", which is what makes the gap reachable, and they sit above
     ``generate_intermediates.py``'s default ``--through-stage 8``. A higher stage bound, or
-    the same guard added to an earlier notebook, reaches it. The prefix rule closes the class
-    rather than the instance.
+    the same guard added to an earlier notebook, reaches it.
+
+    **The prefix narrows the gap; it does not close it.** Preview-only-ness is a property of
+    the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
+    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it
+    (``16_backtest.py:99``) while ``tests/overrides.yaml`` declares it for all four - so a
+    canonical run of those still fails on its first cell. It cannot be added to the strip
+    either: elsewhere it is a legitimate canonical parameter, which
+    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. Deciding this
+    properly means reading which names a notebook's own canonical branch refuses, or marking
+    the entry in the override file; both are design changes that belong with whoever owns the
+    preview contract. What is here covers every ``PREVIEW_``-prefixed name and nothing else.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)

@@ -1420,3 +1420,33 @@ def test_a_preview_run_is_refused_an_official_population(
 
     with pytest.raises(ValueError, match="cannot create an official population"):
         run_official_backtest_requests(study, requests, population_name="cme_futures-preview-v1")
+
+
+def test_the_preview_prediction_cap_is_per_label_not_global() -> None:
+    """Two labels must each get up to the cap, not share one budget.
+
+    13_backtest sorts its preview candidates by label and then caps them. Taking one head
+    across that frame spends the whole budget on the first label whenever PREVIEW_LABELS
+    names more than one, and the later labels contribute no requests at all - a per-label
+    skip that an `is_empty()` guard cannot see, because the frame is not empty.
+
+    This asserts the frame shape rather than running the notebook: today's override declares
+    a single label, so the notebook itself cannot distinguish the two forms, and the
+    committed .ipynb comes from a canonical run that never reaches this branch.
+    """
+    frame = pl.DataFrame(
+        {
+            "label": ["fwd_ret_21d"] * 5 + ["fwd_ret_5d"] * 5,
+            "prediction_hash": [f"h{i:02d}" for i in range(10)],
+        }
+    ).sort("label", "prediction_hash")
+    cap = 3
+
+    globally_capped = frame.head(cap)
+    assert set(globally_capped.get_column("label")) == {"fwd_ret_21d"}, (
+        "the fixture must be one a global head starves, or this test asserts nothing"
+    )
+
+    per_label = frame.group_by("label", maintain_order=True).head(cap)
+    counts = dict(per_label.group_by("label").len().iter_rows())
+    assert counts == {"fwd_ret_21d": cap, "fwd_ret_5d": cap}
