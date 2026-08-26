@@ -67,9 +67,9 @@ WORKSPACE: str | None = None
 # analysis because another row happened to finish.
 
 # %%
-study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
 if EXECUTION_TIER == "preview" and WORKSPACE is None:
     raise ValueError("preview execution requires WORKSPACE")
+study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
 universe = product_universe_table()
 universe
 

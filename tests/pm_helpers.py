@@ -1003,16 +1003,34 @@ def injected_parameters(
 ) -> dict | None:
     """Return what Papermill should inject, given the tier this run declares.
 
-    ``PREVIEW_REDUCTIONS`` only means anything under the preview tier, and the request
-    builders reject it outright on a canonical one. An override file declares it once and
-    both paths read that file: ``tests/generate_intermediates.py`` passes the same entry
-    with ``research_preview=False``, so leaving it in fails at request construction
-    instead of reducing anything.
+    A ``PREVIEW_*`` parameter only means anything under the preview tier, and the notebooks
+    reject one outright on a canonical run. An override file declares it once and both paths
+    read that file: ``tests/generate_intermediates.py`` passes the same entry with
+    ``research_preview=False``, so leaving it in fails at request construction instead of
+    reducing anything.
+
+    Every ``PREVIEW_``-prefixed key is stripped rather than a named list of them. The list
+    form named ``PREVIEW_REDUCTIONS`` alone while ``tests/overrides.yaml`` had grown to
+    fourteen distinct ``PREVIEW_`` names, so thirteen were reaching the canonical path
+    already - ``PREVIEW_LABELS``, ``PREVIEW_MAX_ALLOCATORS``, ``PREVIEW_MAX_BASELINE_ROWS``,
+    ``PREVIEW_MAX_COST_VALUES``, ``PREVIEW_MAX_DIAGNOSTICS``, ``PREVIEW_MAX_PREDICTIONS``,
+    ``PREVIEW_MAX_RISK_CONTROLS``, ``PREVIEW_MAX_SAMPLES``, ``PREVIEW_MAX_SOURCE_ROWS``,
+    ``PREVIEW_N_EPOCHS``, ``PREVIEW_N_FACTORS``, ``PREVIEW_N_FOLDS`` and
+    ``PREVIEW_N_PLACEBO``. A named list is stale as soon as anyone adds a parameter without
+    editing it, and nobody had for thirteen of them.
+
+    It was latent rather than live because a leaked parameter only matters to a notebook that
+    refuses one: ``cme_futures`` 13 through 17 raise "canonical execution cannot declare
+    preview reductions", which is what makes the gap reachable, and they sit above
+    ``generate_intermediates.py``'s default ``--through-stage 8``. A higher stage bound, or
+    the same guard added to an earlier notebook, reaches it. The prefix rule closes the class
+    rather than the instance.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
     resolved = dict(parameters or {})
-    resolved.pop("PREVIEW_REDUCTIONS", None)
+    for name in [key for key in resolved if key.startswith("PREVIEW_")]:
+        resolved.pop(name)
     # Declining the preview tier must NOT decline the isolated workspace. They are two
     # decisions and this flag used to collapse them: false left WORKSPACE at the
     # notebook's declared "", `open_study` took the `workspace=None` branch
