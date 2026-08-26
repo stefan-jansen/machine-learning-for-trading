@@ -384,11 +384,24 @@ catalog.select(
 )
 
 # %% [markdown]
-# ### One decomposition, three targets
+# ### Three decompositions, three targets
 #
-# The returns decomposed, the folds and the factor count are identical across these rows. What
-# changes is only which forward return the factor-implied forecast is scored against, which makes
-# this the cleanest comparison in the notebook: the model does not know what it is being scored on.
+# **These rows are not one decomposition scored three ways, and the section heading used to say
+# they were.** `prepare_panel_data` fills the return matrix from `label_col`
+# (`latent_factors/cv.py`), so the panel PCA decomposes *is* that member's own label: a five-day
+# forward return for one row, a ten-day return for the next, a risk-adjusted five-day return for
+# the third. Three different matrices, three different decompositions.
+#
+# They are not on a common sample either: the `scored_dates` column below differs across the rows,
+# because a ten-day forward window runs out earlier than a five-day one and takes its last
+# decision dates with it. Section 1 already says each label is a different set of rows; this
+# heading contradicted it.
+#
+# So the folds and the factor count are shared and nothing else is. Read the rows as three
+# label-specific decompositions, and read a difference between them as the labels differing rather
+# than as one model meeting three targets. Making it the controlled comparison the old heading
+# claimed would mean fitting once on a common realized-return panel and scoring that single
+# forecast against all three, which is a different notebook.
 #
 # `ic_t` is the t-statistic across those fold means, not a Newey-West statistic on the daily
 # series - the registry keeps the HAC-corrected version separately as `ic_t_hac`, and that is the
