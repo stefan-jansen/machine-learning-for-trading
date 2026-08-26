@@ -14,25 +14,23 @@
 # ---
 
 # %% [markdown]
-# # ETFs — Strategy Analysis
+# # ETFs - Strategy Analysis
 #
-# This notebook converts the locked May 2026 backtest registry for the ETF
-# case study into a per-case-study strategy assessment. Every metric is
-# reported with its block-bootstrap 95% confidence interval, every
-# comparison goes through `backtest_paired_metrics`, and the holdout
-# closure uses paired rather than point-difference reasoning. Cross-case
-# study comparison is reserved for Chapter 20.
+# This notebook reads the ETF case study's whole registered pipeline - every backtest from the
+# signal sweep through the risk overlay - and turns it into one strategy assessment. Every metric
+# carries a block-bootstrap confidence interval, every comparison between two strategies goes
+# through a paired bootstrap rather than a difference of point estimates, and the holdout closure
+# is read the same way. Comparison across case studies is Chapter 20's subject.
 #
 # **Learning objectives**
 #
-# - Read uncertainty-aware backtest metrics (Sharpe ± CI, PSR, DSR) from
-#   the registry rather than transcribing point estimates.
-# - Trace a rank-1 lineage through the four pipeline stages
-#   (signal → allocation → cost → risk) with paired-bootstrap stage
+# - Read uncertainty-aware backtest metrics - Sharpe with its interval, PSR, DSR - from the
+#   registry rather than transcribing point estimates.
+# - Trace one strategy configuration through the four pipeline stages
+#   (signal to allocation → cost → risk) with paired-bootstrap stage
 #   transitions.
-# - Use the equal-weight ETF universe benchmark — sliced into validation
-#   and holdout periods — for both the equity-curve overlay and the
-#   holdout strategy-vs-benchmark paired test.
+# - Use the equal-weight ETF universe benchmark, sliced into validation and holdout periods, for
+#   both the equity-curve overlay and the holdout strategy-versus-benchmark paired test.
 # - Layer 1 + Layer 2 benchmark-aware diagnostics: PortfolioAnalysis
 #   alpha/beta/IR against the equal-weight universe, plus an FF5+MOM
 #   factor attribution with placebo-portfolio control. The cross-asset
@@ -46,12 +44,21 @@
 # **Prerequisites**: case-study pipeline through `17_risk_management`;
 # the locked registry (`case_studies/etfs/run_log/registry.db`).
 #
-# **Scope**: registry-read only — no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py`.
+# **Scope**: no training and no re-backtesting. It does write two derived tables,
+# `cohort_metrics` and `backtest_paired_metrics`, and that is a deliberate change from the
+# read-only scope this notebook used to declare.
+#
+# Both tables are derived from backtests that already exist - selection-bias statistics over the
+# cohorts, and paired-bootstrap comparisons between registered return series. Nothing is refitted
+# and no backtest is added. They were previously produced by a chapter-20 notebook looping over
+# every case study, which made a case study's own strategy analysis unreadable until a later
+# chapter had been run, and left both tables empty for any reader working the case study in order.
+# A stage that cannot be read without running a chapter that comes after it is not a stage. So the
+# notebook that has every stage in front of it produces them, and re-running it recomputes only
+# what is missing.
 
 # %%
-"""ETFs — Strategy Analysis."""
+"""ETFs - Strategy Analysis."""
 
 import json
 import sqlite3
@@ -75,6 +82,7 @@ from ml4t.diagnostic.integration import (
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     compute_rolling_exposures,
@@ -85,6 +93,7 @@ from case_studies.utils.factor_attribution import (
     run_factor_regression,
     run_placebo_benchmark,
 )
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
@@ -100,7 +109,7 @@ from case_studies.utils.strategy_analysis import (
     plot_concentration_curve,
     plot_equity_drawdown,
     plot_sharpe_waterfall,
-    select_holdout_self_backtest,
+    resolve_holdout_self_backtest,
     write_strategy_assessment,
 )
 from utils.paths import get_case_study_dir, get_output_dir
@@ -122,37 +131,94 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
 
+# Both derived tables fill in two waves - stage transitions once allocation, cost and risk have
+# run, holdout kinds only once the holdout has been evaluated - so the predicate is whether every
+# kind this notebook reads is present, not whether anything is.
+PAIRED_KINDS = (
+    "signal_leader",
+    "allocation_leader",
+    "cost_sensitivity_leader",
+    "val_rank1_self",
+    "equal_weight_holdout_side_artifact",
+)
+COHORT_TYPES = ("family", "stagelabel", "label")
+
+
+def _derived_table_state() -> tuple[set[str], set[str]]:
+    """Which paired kinds and cohort granularities the registry already holds."""
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as db:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        kinds = (
+            {
+                r[0]
+                for r in db.execute("SELECT DISTINCT benchmark_kind FROM backtest_paired_metrics")
+            }
+            if "backtest_paired_metrics" in tables
+            else set()
+        )
+        cohorts = (
+            {r[0] for r in db.execute("SELECT DISTINCT cohort_type FROM cohort_metrics")}
+            if "cohort_metrics" in tables
+            else set()
+        )
+    return kinds, cohorts
+
+
+have_kinds, have_cohorts = _derived_table_state()
+missing_kinds = sorted(set(PAIRED_KINDS) - have_kinds)
+missing_cohorts = sorted(set(COHORT_TYPES) - have_cohorts)
+if missing_cohorts:
+    counts = compute_and_register(CASE_STUDY)
+    print(f"cohort_metrics: computed {sum(counts.values())} rows across {sorted(counts)}")
+else:
+    print(f"cohort_metrics: {len(have_cohorts)} granularities already present, nothing recomputed")
+if missing_kinds:
+    rows = populate_paired_metrics(CASE_STUDY)
+    written = sum(1 for r in rows if "skip" not in r)
+    print(f"backtest_paired_metrics: wrote {written} pairs (missing {', '.join(missing_kinds)})")
+else:
+    print("backtest_paired_metrics: every kind this notebook reads is present, nothing recomputed")
+
+have_kinds, have_cohorts = _derived_table_state()
+STILL_MISSING_KINDS = sorted(set(PAIRED_KINDS) - have_kinds)
+if STILL_MISSING_KINDS:
+    # Named rather than left to surface as an empty frame eight cells later. The holdout kinds
+    # are absent until the holdout has been evaluated, which is a stage that has not run rather
+    # than a failure of this one.
+    print(f"  still unavailable: {', '.join(STILL_MISSING_KINDS)}")
+
 
 def _fmt_ci(point: float | None, lo: float | None, hi: float | None, fmt: str = ".3f") -> str:
     """Compact `point [lo, hi]` formatter with NULL-safety."""
     if point is None:
-        return "—"
+        return "-"
     p = format(point, fmt)
     if lo is None or hi is None:
-        return f"{p} [—, —]"
+        return f"{p} [-, -]"
     return f"{p} [{format(lo, fmt)}, {format(hi, fmt)}]"
 
 
 def _fmt(val: float | None, fmt: str = ".4f") -> str:
-    return "—" if val is None else format(val, fmt)
+    return "-" if val is None else format(val, fmt)
 
 
 # %% [markdown]
-# ## §1 Handoff from model analysis
+# ## §1 What the strategy phase inherits
 #
-# The strategy phase inherits a single rank-1 model from
-# `13_model_analysis.py` §8. That model's daily-pooled IC and HAC-adjusted
-# 95% CI define the upstream prior on backtest stability. Unlike the
-# IC-vs-Sharpe disconnect that defines several other case studies, the
-# ETF rank-1 carries a prediction-side IC whose HAC CI excludes zero on
-# the positive side — both the predictions and the strategy that trades
-# on them clear the credibility bar at the validation window.
+# The strategy phase does not choose a model. It receives one: **the configuration with the
+# highest validation backtest Sharpe** across the holdout-eligible stages, where a configuration
+# is the whole package - model, label, feature set, backtest settings and any risk overlay - and
+# the checkpoint is part of it. Everything below describes that one configuration rather than
+# comparing candidates. Note which metric selected it: not the information coefficient, which
+# orders nothing here, and not a chapter's headline figure. [`13_model_analysis`](13_model_analysis.ipynb)
+# is where the population was described; the choosing happened in the backtest stages.
+#
+# The prediction-side information coefficient printed below is the upstream prior on everything
+# that follows. If the ranking the strategy trades on is not credibly different from zero, a
+# strategy Sharpe that looks good is a fact about the portfolio construction and the window rather
+# than about the signal - and the interval on the IC is what says which case this is.
 
 # %%
-# Rank-1 selection pools validation backtests across the holdout-eligible
-# stages (signal / allocation / risk_overlay) and dedupes by prediction_hash,
-# keeping the highest-Sharpe strategy_spec per trained model. Mirrors
-# `20_strategy_synthesis/holdout.py::HOLDOUT_SELECTION_STAGES`.
 _HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
 top_signal = (
     pl.concat(
@@ -189,29 +255,33 @@ print(f"  n_days = {int(ic_ndays)}, pct_positive = {ic_pct:.1%}")
 print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 
 # %% [markdown]
-# Daily-pooled IC at the rank-1 prediction set is 0.052 with a HAC-adjusted
-# CI of [0.009, 0.095] (HAC t = 2.37, p = 0.018); pct_positive sits at
-# 56.4%, modestly above coin flip. The IC CI excludes zero on the positive
-# side — the rank-correlation edge is statistically resolved, even though
-# the magnitude (0.05) is small in absolute terms. This sets the prior
-# that the strategy Sharpe in §3 should be CI-credible too; if it were
-# not, a wide rank-1 IC CI would already explain it.
+# **Read the interval, not the point.** A daily-pooled IC is an average of many daily rank
+# correlations on an overlapping label, so consecutive days are dependent and the HAC correction is
+# what makes its interval mean anything. Whether that interval clears zero is the question; the
+# magnitude is small on this panel either way, because the instruments are themselves diversified
+# and there is little idiosyncratic variation left to rank.
 #
-# **Kill conditions** are not hard-coded into `setup.yaml`. The strategy-analysis notebook
-# evaluates two universal gates in §9: (i) the Sharpe CI lower bound ≥ 0
-# at the signal stage, and (ii) the holdout strategy-vs-equal-weight
-# paired CI does not exclude zero on the negative side. Both are
-# reported as pass / partial / fail without verdict labels.
+# **What follows from each answer.** An interval clearing zero sets the expectation that the
+# strategy Sharpe in §3 should also be credible, and makes it worth asking what went wrong if it is
+# not. An interval spanning zero says the opposite: whatever §3 reports has no upstream support,
+# and a good Sharpe there needs explaining rather than celebrating.
+#
+# **Kill conditions are not declared in `setup.yaml`.** §9 evaluates two universal gates: the
+# validation Sharpe interval's lower bound against zero, and the holdout strategy-versus-equal-
+# weight paired interval against zero on the negative side. Both are reported as pass, partial or
+# fail, and neither is a judgement on the strategy.
 
 # %% [markdown]
-# ## §2 Search context, family comparison, and lineage waterfall
+# ## §2 Where the leader sits in the search that produced it
 #
-# The signal stage of the locked sweep produced 330 validation
-# backtests across five model families on the 21-day forward-return
-# label. The rank-1 row emerges as one realization of that search; what
-# matters next is its context — where the rank-1 sits in the
-# family-level distribution and how its performance evolves through the
-# pipeline stages.
+# A leader is the maximum of a search, and the maximum of a search is not the same quantity as the
+# performance of a strategy chosen in advance. The table below puts it back in context: how many
+# backtests the signal stage produced, where their Sharpe ratios fell, and how far above the middle
+# of that distribution the leader sits.
+#
+# The wider that distribution and the more configurations in it, the more of the leader's margin is
+# attributable to having looked. §9's selection-adjusted statistics price that directly; this
+# section is where the shape it prices becomes visible.
 
 # %%
 ctx = explorer.search_context("signal")
@@ -230,8 +300,6 @@ print("Signal-stage search context:")
 print(search_table)
 
 # %%
-# Family comparison reads sharpe_ci95 from backtest_metrics directly so
-# the forest plot can render proper error bars rather than median-only points.
 with sqlite3.connect(str(_db)) as _con:
     _famdf = pl.DataFrame(
         _con.execute(
@@ -295,29 +363,30 @@ ax.axvline(0, color="#9E9E9E", linewidth=0.8, linestyle="--")
 ax.set_yticks(y)
 ax.set_yticklabels(fams)
 ax.set_xlabel("Validation Sharpe")
-ax.set_title("Family-level Signal Sharpe — IQR + max")
+ax.set_title("Signal-stage Sharpe by family: interquartile range and maximum")
 ax.invert_yaxis()
 ax.legend(loc="lower right", frameon=False)
 fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# Family medians cluster between 0.43 (linear) and 0.63
-# (deep_learning), with all five families producing 100% positive
-# Sharpe at the signal stage. The maximum-by-family points show the
-# deep_learning signal max (0.89, the rank-1's own signal stage) is a
-# close second to latent_factors (max 0.92); linear (0.77), tabular_dl
-# (0.75), and gbm (0.74) trail by roughly a tenth. The deep_learning
-# lineage does not carry the single highest signal-stage Sharpe — it
-# takes rank-1 only after the full allocation, cost, and risk-overlay
-# pipeline lifts it to 1.33. That tight family-level dispersion at the
-# maximum is consistent with multiple credible signal-stage candidates;
-# the §6 holdout closure, not the signal-stage ranking, is what
-# separates search from skill out of sample.
+# **The median and the maximum answer different questions, which is why both are drawn.** A
+# family's median says what a configuration drawn from it typically does; its maximum says what its
+# strongest one did, and the strongest is what a search returns. A family whose maximum stands far above
+# its own median is a family whose leader is mostly a draw from a wide distribution.
+#
+# **Where the families sit relative to each other matters less than how much they overlap.** Read
+# the interquartile bars: where they cover each other, the ordering between those families is not
+# something the signal stage decided, and the selected configuration's family may hold that
+# position because of the stages that came after rather than because of the signal.
+#
+# **The lineage waterfall below is where that is settled.** It tracks one prediction through
+# signal, allocation, cost and risk, so a leader that arrives in the lead late - lifted by portfolio
+# construction rather than by its ranking - is visible as a rising line rather than as a high
+# starting point. Neither shape is better; they are different claims about where the performance
+# came from.
 
 # %%
-# Lineage with CI bars. champion_lineage gives stage hashes; we re-pull
-# Sharpe CIs from backtest_metrics for each stage to render error bars.
 lineage = explorer.champion_lineage(TOP_PHASH)
 ci_lo: dict[str, float] = {}
 ci_hi: dict[str, float] = {}
@@ -338,10 +407,7 @@ fig = plot_sharpe_waterfall(lineage, ci_lo=ci_lo, ci_hi=ci_hi)
 fig.show()
 
 # %%
-# Stage-transition deltas via load_paired_metrics — never recompute paired
-# metrics inline. ETFs is one of the few CSs whose rank-1 prediction has
-# all four pipeline stages registered against it, so each transition has
-# a populated paired row.
+# Read through load_paired_metrics; never recompute a paired metric inline.
 transitions = [
     ("allocation", "signal_leader"),
     ("cost_sensitivity", "allocation_leader"),
@@ -372,33 +438,23 @@ for stage_name, kind in transitions:
     print()
 
 # %% [markdown]
-# Three pipeline transitions are populated for the rank-1 lineage:
+# **Each transition is a paired test, not a subtraction.** The pipeline adds one thing at a time -
+# a weighting scheme, then a cost model, then a risk rule - and the question at each step is
+# whether the Sharpe moved by more than the noise. Subtracting one stage's Sharpe from the next
+# gives a number with no interval, which cannot answer that. The paired bootstrap resamples both
+# return series together and gives the difference its own interval.
 #
-# - **signal → allocation**: risk-parity allocation lifts Sharpe from
-#   0.89 (equal-weight top-20) to 1.03 (diff +0.145, CI [−0.097,
-#   +0.422], p=0.27). The CI straddles zero but `prob_challenger_wins`
-#   of 0.886 indicates that risk-parity weighting outperforms equal
-#   weighting under most bootstrap draws — directional evidence even
-#   though the two-sided test does not reject.
-# - **allocation → cost_sensitivity**: re-running the rank-1 allocator
-#   at the cost-stage's 0-bps reference lifts Sharpe from 1.03 to 1.08
-#   (diff +0.046, CI [+0.037, +0.059], p < 0.001). The CI is tight and
-#   excludes zero — this transition reflects the cost regime drop from
-#   the signal/allocation 10-bps baseline to the cost-stage's 0-bps
-#   reference, not a methodological change in sizing.
-# - **cost_sensitivity → risk_overlay**: an MAE-calibrated trailing
-#   stop (`trailing_mae_p25_h20_4p3pct`) raises Sharpe from 1.08 to
-#   1.33 (diff +0.254, CI [−0.272, +0.704], p=0.31). The point
-#   estimate is positive but the CI straddles zero, so the overlay's
-#   contribution is not statistically resolved at the validation-window
-#   sample.
+# **`prob_challenger_wins` and the interval say different things.** The interval asks whether the
+# difference is resolved at the conventional level; the probability asks in what fraction of
+# bootstrap draws the later stage came out ahead. A step can be directionally consistent across
+# most draws and still have an interval spanning zero, and reporting only the interval would throw
+# that away while reporting only the probability would overstate it.
 #
-# The waterfall reads as cumulatively positive, with the
-# allocation→cost-sensitivity transition the only step whose CI
-# excludes zero. The rank-1 lineage carries through the pipeline, but
-# the signal→allocation and cost→risk-overlay choices each sit inside
-# the bootstrap uncertainty band of the prior stage — useful context
-# for the deployment decision in §9.
+# **A transition whose interval spans zero is a choice the validation window did not settle.** It
+# is still in the lineage - the pipeline applied it - but the reason it is there is the point
+# estimate, and §9's deployment reading has to carry that. A step whose interval excludes zero by a
+# wide margin usually turns out to be mechanical rather than a discovery: a cost regime changing
+# between stages moves every strategy the same way.
 
 # %%
 conc_df = explorer.concentration_curve(TOP_PHASH)
@@ -409,25 +465,30 @@ if not conc_df.is_empty():
     print("Allocation: best Sharpe by top_k:")
     print(best_per_k.select("top_k", "allocator", "sharpe", "max_drawdown"))
 else:
-    print("No concentration data — allocation stage absent for this prediction.")
+    print("No concentration data - allocation stage absent for this prediction.")
 
 # %% [markdown]
-# The concentration curve scans top_k across 5–30 ETFs. With a
-# 100-ETF universe spanning equities, bonds, commodities, and currencies,
-# concentration trades off cross-sectional signal strength against
-# diversification across asset classes. The locked allocation rank-1
-# uses top_k=20 (a fifth of the universe) — large enough to retain
-# multi-asset-class exposure, small enough to keep the cross-section
-# tradable.
-
-# %% [markdown]
-# ## §3 Headline performance with uncertainty
+# **Concentration is the portfolio decision the ranking does not make.** Holding fewer funds uses
+# more of the signal's confidence and less of the universe's diversification; holding more does the
+# reverse. On a cross-asset universe that trade has a second edge, because the funds are drawn from
+# equities, bonds, commodities and currencies, and a tight selection can end up inside one of those
+# rather than across them.
 #
-# The rank-1 specification is the validation-window backtest associated
-# with the highest signal-stage Sharpe. Every metric is reported with
-# its block-bootstrap 95% CI from `backtest_metrics`; the equity overlay
-# shows the cumulative trajectory against the equal-weight ETF universe
-# benchmark on the validation window.
+# The curve is read for where it flattens rather than for its maximum. A maximum picked off this
+# scan is a selection over the same validation window everything else was selected on, and the
+# concentration the lineage actually uses is the one the allocation stage registered.
+
+# %% [markdown]
+# ## §3 What the strategy earned, with its uncertainty
+#
+# One strategy, one validation window, every figure with the interval the block bootstrap gives it.
+# The block bootstrap rather than an independent one because daily strategy returns are serially
+# dependent, and resampling them independently would produce an interval far tighter than the data
+# support.
+#
+# The equity overlay puts the strategy against the equal-weight ETF universe over the same dates.
+# That benchmark is the honest comparator for this case study: it holds the same instruments with
+# no model at all, so the gap between the two curves is what the ranking bought.
 
 # %%
 full = load_backtest_metrics(CASE_STUDY, backtest_hash=TOP_HASH).row(0, named=True)
@@ -448,13 +509,13 @@ spec_block = {
     "bootstrap_block_length": int(full["bootstrap_block_length"]),
     "bootstrap_n": int(full["bootstrap_n"]),
 }
-print("Rank-1 specification (signal stage, validation window):")
+print("The selected configuration specification (signal stage, validation window):")
 for k, v in spec_block.items():
     print(f"  {k}: {v}")
 
 # Audit: bootstrap_block_length resolves from the label horizon (21 trading
 # days for fwd_ret_21d). Rebalance cadence in setup.yaml is monthly
-# month-end (~21 bars) — the two encode the same autocorrelation scale.
+# month-end (~21 bars) - the two encode the same autocorrelation scale.
 _block = int(full["bootstrap_block_length"])
 print(
     f"  audit: bootstrap_block_length={_block} days "
@@ -473,10 +534,8 @@ def _hrow(metric: str, point: str, lo: str, hi: str, status: str) -> dict:
     return {"metric": metric, "point": point, "ci95_lo": lo, "ci95_hi": hi, "status": status}
 
 
-# Selection-adjusted columns (DSR, expected_max_sharpe, PBO) are pulled
-# from cohort_metrics via load_backtest_metrics' LEFT JOIN; PSR remains
-# from backtest_metrics. CIs are not stored per-row for the
-# selection-bias metrics; surface as "n/a" in the CI columns.
+# The selection-adjusted columns join in from cohort_metrics and carry no per-row interval, so
+# their CI cells read as unavailable rather than as a computed bound.
 headline = pl.DataFrame(
     [
         _hrow(
@@ -517,34 +576,34 @@ headline = pl.DataFrame(
         {
             "metric": "PSR p-value (H0: SR≤0)",
             "point": _fmt(full["psr_pvalue"]),
-            "ci95_lo": "—",
-            "ci95_hi": "—",
+            "ci95_lo": "-",
+            "ci95_hi": "-",
             "status": "n/a",
         },
         {
             "metric": "DSR (selection-adjusted)",
             "point": _fmt(full["dsr"]),
-            "ci95_lo": "—",
-            "ci95_hi": "—",
+            "ci95_lo": "-",
+            "ci95_hi": "-",
             "status": "n/a",
         },
         {
             "metric": "Expected max Sharpe",
             "point": _fmt(full["expected_max_sharpe"]),
-            "ci95_lo": "—",
-            "ci95_hi": "—",
+            "ci95_lo": "-",
+            "ci95_hi": "-",
             "status": "n/a",
         },
         {
             "metric": "PBO",
             "point": _fmt(full["pbo"]),
-            "ci95_lo": "—",
-            "ci95_hi": "—",
+            "ci95_lo": "-",
+            "ci95_hi": "-",
             "status": "n/a",
         },
     ]
 )
-print("Rank-1 headline metrics with 95% CIs:")
+print("The selected configuration headline metrics with 95% CIs:")
 print(headline)
 
 # %%
@@ -588,13 +647,13 @@ if risk_sharpe is not None:
         color="#E53935",
         linestyle=":",
         linewidth=1.0,
-        label=f"Risk-overlay rank-1 Sharpe ({risk_sharpe:.2f})",
+        label=f"Risk-overlay leading Sharpe ({risk_sharpe:.2f})",
     )
 ax.set_yticks(y)
 ax.set_yticklabels([m[0] for m in forest_metrics])
 ax.invert_yaxis()
 ax.set_xlabel("Value")
-ax.set_title("Rank-1 Headline Metrics with 95% CIs")
+ax.set_title("The selected configuration Headline Metrics with 95% CIs")
 ax.legend(loc="lower right", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
@@ -623,7 +682,13 @@ print(
 cum_strat = np.cumprod(1 + aligned["strategy"].to_numpy()) - 1
 cum_bench = np.cumprod(1 + aligned["benchmark"].to_numpy()) - 1
 fig, ax = plt.subplots(figsize=(10, 4.2))
-ax.plot(aligned["ts"], cum_strat, color="#1565C0", linewidth=1.2, label="Rank-1 strategy")
+ax.plot(
+    aligned["ts"],
+    cum_strat,
+    color="#1565C0",
+    linewidth=1.2,
+    label="The selected configuration strategy",
+)
 ax.plot(aligned["ts"], cum_bench, color="#43A047", linewidth=1.2, label="EW universe")
 ax.axhline(0, color="#9E9E9E", linewidth=0.6, linestyle="--")
 ax.set_ylabel("Cumulative return")
@@ -633,29 +698,23 @@ fig.tight_layout()
 fig.show()
 
 # %% [markdown]
-# Rank-1 Sharpe of 1.33 has a 95% CI of [0.71, 1.97] — the lower bound
-# stays well above zero, so the validation-window Sharpe is not
-# consistent with no edge under block-bootstrap resampling. PSR p-value
-# of 0.0002 reinforces this: under H₀ Sharpe ≤ 0 we reject at the 0.1%
-# level. Sortino, annualized return, and Calmar all show CIs that
-# exclude zero on the positive side — the headline metric stack is
-# uniformly credible at the validation window. Max drawdown CI of
-# [−19.5%, −7.4%] is concentrated on the negative side as expected
-# for a directional metric — the CI excludes zero on the negative
-# direction (drawdown is unambiguously a real loss, the question is
-# magnitude). The validation-window EW universe carried Sharpe 0.62
-# over the same window, so the rank-1 strategy outperforms a null
-# allocation; the equity-overlay shows the gap accumulates with
-# moderate consistency through the period.
+# **The lower bound of the Sharpe interval is what the first gate reads**, and it answers a
+# narrower question than the point estimate: not how well the strategy did, but whether this window
+# is consistent with it having no edge at all. A point estimate cannot answer that; an interval can.
 #
-# Selection-adjusted cohort metrics (DSR, expected_max_sharpe, PBO) are
-# not populated for this rank-1 lineage in the registry, so the
-# headline table above reports them as n/a; the parametric PSR (p =
-# 0.0002, rejecting H₀ Sharpe ≤ 0) is the available in-sample guard
-# against a lucky draw. Selection robustness therefore rests on the §6
-# holdout closure rather than a within-validation deflation: the
-# decisive question is whether the rank-1's validation edge survives
-# the out-of-sample window, which the holdout test answers directly.
+# **The probabilistic Sharpe ratio is a second, parametric answer to the same question.** It
+# corrects for the skew and kurtosis a Sharpe ratio assumes away. Where the two disagree, the
+# bootstrap interval is the one that made fewer assumptions.
+#
+# **The drawdown interval is not a test.** A drawdown is negative by construction, so an interval
+# excluding zero says nothing. What it bounds is the magnitude, and the width is what to size
+# against rather than the point.
+#
+# **The selection-adjusted statistics are what price the search**, and they read as unavailable
+# rather than as favourable when `cohort_metrics` holds no row for this lineage. A deflated Sharpe
+# absent from a table is not a deflation of zero. Where they are absent the in-sample guard is the
+# probabilistic Sharpe alone and the decisive evidence moves to §6 - a weaker position, and worth
+# saying so.
 
 # %% [markdown]
 # ## §4 Risk and drawdown analysis
@@ -727,28 +786,31 @@ else:
     )
 
 # %% [markdown]
-# Validation-window max drawdown is −11.1%, with a CI95 of
-# [−17.1%, −6.4%] — the bootstrap resampling is consistent with
-# moderately deeper drawdowns under alternative draws but the upper
-# bound stays inside single-digit-percent territory. Tail-risk stats
-# (kurtosis ≈ 9.9, modest positive skew) reflect the trailing-MAE
-# overlay's behavior: the overlay clips left-tail outliers harder
-# than the right-tail, leaving the cross-asset composition (bonds and
-# commodities as partial hedges to the equity component) to absorb
-# the typical-range moves. The rolling Sharpe / beta plot locates the
-# strategy's regime-dependence — moments where it tracks vs. departs
-# from the equal-weight ETF universe.
+# **Depth and duration are different risks and only one is in the Sharpe.** A strategy can recover
+# quickly from a deep fall or sit underwater for years after a shallow one, and the second is what
+# ends a mandate. The panel reports both.
+#
+# **Kurtosis decides whether the interval above can be trusted.** Heavy tails mean the observed
+# Sharpe rests on fewer effective observations than the sample size suggests, and a risk overlay
+# clipping the left tail harder than the right shows up here as skew moving with the overlay rather
+# than with the signal.
+#
+# **Rolling Sharpe and rolling beta locate when the strategy stopped tracking its universe.** A
+# cross-asset strategy that is long equities most of the time has a beta near one and no
+# diversifying behaviour to show for itself. Where beta falls is where the model rotated into bonds
+# or commodities, and whether that helped is in the rolling Sharpe over the same dates.
 
 # %% [markdown]
-# ## §5 Friction budget & cost sensitivity
+# ## §5 How much friction the strategy tolerates
 #
-# ETFs are among the most liquid instruments traded — bid-ask spreads
-# on liquid funds (SPY, QQQ, IWM, sector ETFs) are sub-1 bp; less
-# liquid sector / international / commodity ETFs are 2–5 bps. The
-# cost_sensitivity stage of the locked sweep walked a per-leg cost
-# grid; the curve below shows how Sharpe responds to friction. The
-# realistic-spread overlay marks the most-liquid ETF band (≤ 2 bps)
-# and the typical-ETF band (2–5 bps).
+# ETFs are among the most liquid instruments in this book: the spread on the largest funds is a
+# fraction of a basis point, while sector, international and commodity funds cost several. The cost
+# stage walked a per-leg grid over the selected configuration; the curve below is how its Sharpe
+# responds, with bands marking the most-liquid end of the universe and the typical one.
+#
+# The reading that matters is the distance between the declared cost and where the curve crosses
+# zero, not the Sharpe at any single level. [`16_costs`](16_costs.ipynb) computes that crossing
+# directly and reports it as a bound when the grid does not reach it.
 
 # %%
 with sqlite3.connect(str(_db)) as _con:
@@ -844,10 +906,10 @@ ax.axhline(0, color="#9E9E9E", linewidth=0.8, linestyle="--")
 # - Most-liquid ETF spread (SPY/QQQ/IWM): 0.2-1 bps round-trip
 # - Typical ETF spread: 2-5 bps round-trip
 ax.axvspan(0.2, 1.0, color="#43A047", alpha=0.10, label="most-liquid ETF (0.2–1 bps)")
-ax.axvspan(2.0, 5.0, color="#FB8C00", alpha=0.10, label="typical ETF (2–5 bps)")
+ax.axvspan(2.0, 5.0, color="#FB8C00", alpha=0.10, label="typical ETF (2 to 5 bps)")
 ax.set_xlabel("Per-leg cost (bps)")
 ax.set_ylabel("Sharpe (validation)")
-ax.set_title("Cost sensitivity — etfs (validation, signal+allocation+cost stage)")
+ax.set_title("Cost sensitivity - etfs (validation, signal+allocation+cost stage)")
 ax.legend(loc="best", fontsize=8, frameon=False)
 fig.tight_layout()
 fig.show()
@@ -870,72 +932,76 @@ for k, v in cost_config.items():
 print("See Chapter 18 for the transaction-cost framework.")
 
 # %% [markdown]
-# Sharpe degrades roughly monotonically with cost, but the across-config
-# dispersion at every cost level is wider than the cost-induced effect.
-# The best-config Sharpe holds positive across the entire grid; the
-# median Sharpe stays positive through realistic ETF friction. The
-# binding constraint for ETFs is signal stability across regimes
-# (§6 holdout closure), not cost friction. Chapter 18 develops the
-# transaction-cost framework.
+# **Read the dispersion across configurations against the slope of the cost curve.** Where the
+# spread between configurations at one cost level is wider than the effect of moving several
+# levels, friction is not what decides this strategy's fate and the choice of configuration is.
+# That is the ordinary situation for a monthly strategy, and it is a statement about the cadence
+# rather than about the model. [`16_costs`](16_costs.ipynb) computes the crossing directly.
 
 # %% [markdown]
-# ## §6 Holdout closure with paired bootstrap
+# ## §6 The holdout, opened once
 #
-# Two paired tests anchor the holdout read: (i) the holdout rank-1 versus the
-# validation rank-1 ("did Sharpe hold?"), and (ii) the holdout rank-1
-# versus the holdout-window equal-weight benchmark ("did the strategy
-# beat random in the holdout?"). Numbers come from
-# `backtest_paired_metrics` — never from val_sharpe minus holdout_sharpe
-# arithmetic.
+# Everything above is measured on the window the strategy was selected on. This section is the only
+# out-of-sample evidence in the case study, and the holdout may be spent once: it is read here, and
+# nothing that follows may be used to choose anything.
+#
+# Two paired tests. The first asks whether the edge held between the window that selected the
+# strategy and the window that did not. The second asks whether it beat the equal-weight universe
+# *inside* the holdout - the same instruments, the same dates, no model. Both come from
+# `backtest_paired_metrics`, never from subtracting one Sharpe from another.
+
+# %% [markdown]
+# The anchor is the holdout backtest that replays the selected configuration's **strategy**, not the
+# highest-Sharpe holdout backtest sharing its training hash. Matching on the strategy keeps the
+# anchor on the lineage that was actually selected, even where an experimental side-channel
+# allocator shares the holdout prediction set and posts a higher holdout Sharpe. The
+# `val_rank1_self` pair is written against the canonical lineage's holdout hash, so it is findable
+# only under that match.
+#
+# When no such backtest exists the section reports which state the registry is in and computes
+# nothing further. The ordinary case is that the holdout has not been evaluated yet, which a
+# reader working the case study in order meets before it has, and that is a stage that has not
+# run rather than a failure of this one.
 
 # %%
-# Identify the holdout backtest matching val rank-1's strategy spec.
-# Picking max-Sharpe over all holdout backtests on the same training_hash
-# silently displaces the canonical lineage when an experimental
-# side-channel allocator (conformal_weighted) outperforms the baseline.
-HO_HASH = select_holdout_self_backtest(CASE_STUDY, TOP_HASH)
-if HO_HASH is None:
-    raise RuntimeError(
-        f"No holdout backtest matches val rank-1 ({TOP_HASH}) strategy spec "
-        f"for {CASE_STUDY}; the val_rank1_self §6 anchor cannot be resolved."
-    )
+holdout_replay = resolve_holdout_self_backtest(CASE_STUDY, TOP_HASH)
+HOLDOUT_AVAILABLE = holdout_replay.found
+HO_HASH = holdout_replay.backtest_hash
 
 print(f"Validation rank-1 hash: {TOP_HASH}")
-print(f"Holdout rank-1 hash:    {HO_HASH}")
+if HOLDOUT_AVAILABLE:
+    print(f"Holdout rank-1 hash:    {HO_HASH}")
+else:
+    print(f"Holdout closure unavailable: {holdout_replay.reason}")
 
-ho_full = load_backtest_metrics(CASE_STUDY, backtest_hash=HO_HASH).row(0, named=True)
 val_full = full
+ho_full = (
+    load_backtest_metrics(CASE_STUDY, backtest_hash=HO_HASH).row(0, named=True)
+    if HOLDOUT_AVAILABLE
+    else None
+)
+
+# %% [markdown]
+# A missing paired row is reported as missing rather than filled with NaN. A NaN decay propagates
+# into the table below, into the section-9 gate, and into the assessment artifact, where it prints
+# as a dash that a reader cannot distinguish from a computed zero - and the gate would then be
+# evaluated on a comparison that was never made. Nothing here is computed from a substitute.
 
 # %%
-val_ho_pair = load_paired_metrics(
-    CASE_STUDY,
-    challenger_hash=HO_HASH,
-    benchmark_kind="val_rank1_self",
-)
-if val_ho_pair.is_empty():
-    print(
-        "[WARN] Missing val_rank1_self pair for etfs — populator "
-        "skipped (holdout has no trades or insufficient overlap with val "
-        "lineage). Continuing with NaN val→holdout decay."
+vh = None
+if HOLDOUT_AVAILABLE:
+    val_ho_pair = load_paired_metrics(
+        CASE_STUDY, challenger_hash=HO_HASH, benchmark_kind="val_rank1_self"
     )
-    vh = {
-        "sharpe_diff": float("nan"),
-        "sharpe_diff_ci95_lo": float("nan"),
-        "sharpe_diff_ci95_hi": float("nan"),
-        "ret_diff": float("nan"),
-        "ret_diff_ci95_lo": float("nan"),
-        "ret_diff_ci95_hi": float("nan"),
-        "max_dd_diff": float("nan"),
-        "max_dd_diff_ci95_lo": float("nan"),
-        "max_dd_diff_ci95_hi": float("nan"),
-        "p_value": float("nan"),
-        "prob_challenger_wins": float("nan"),
-        "info_ratio": float("nan"),
-        "info_ratio_ci95_lo": float("nan"),
-        "info_ratio_ci95_hi": float("nan"),
-    }
-else:
-    vh = val_ho_pair.row(0, named=True)
+    if val_ho_pair.is_empty():
+        print(
+            "The holdout replay is registered but carries no val_rank1_self pair, so the "
+            "validation-to-holdout decay cannot be computed. The populator writes that pair "
+            "only when both series overlap enough to bootstrap."
+        )
+    else:
+        vh = val_ho_pair.row(0, named=True)
+VAL_HO_DECAY_AVAILABLE = vh is not None
 
 
 def _diff_row(
@@ -949,148 +1015,131 @@ def _diff_row(
 ) -> dict:
     return {
         "metric": label,
-        "validation": _fmt(v, ".4f") if v is not None else "—",
-        "holdout": _fmt(h, ".4f") if h is not None else "—",
-        "diff (h-v)": _fmt(diff, ".4f") if diff is not None else "—",
-        "diff CI95": (f"[{_fmt(lo, '.4f')}, {_fmt(hi, '.4f')}]" if lo is not None else "—"),
-        "p-value": _fmt(p, ".4f") if p is not None else "—",
+        "validation": _fmt(v, ".4f") if v is not None else "-",
+        "holdout": _fmt(h, ".4f") if h is not None else "-",
+        "diff (h-v)": _fmt(diff, ".4f") if diff is not None else "-",
+        "diff CI95": (f"[{_fmt(lo, '.4f')}, {_fmt(hi, '.4f')}]" if lo is not None else "-"),
+        "p-value": _fmt(p, ".4f") if p is not None else "-",
     }
 
 
-val_ho_table = pl.DataFrame(
-    [
-        _diff_row(
-            "Sharpe",
-            val_full["sharpe"],
-            ho_full["sharpe"],
-            vh["sharpe_diff"],
-            vh["sharpe_diff_ci95_lo"],
-            vh["sharpe_diff_ci95_hi"],
-            vh["p_value"],
-        ),
-        _diff_row(
-            "Annualized return",
-            val_full["cagr"],
-            ho_full["cagr"],
-            vh["ret_diff"],
-            vh["ret_diff_ci95_lo"],
-            vh["ret_diff_ci95_hi"],
-            None,
-        ),
-        _diff_row(
-            "Max drawdown",
-            val_full["max_drawdown"],
-            ho_full["max_drawdown"],
-            vh["max_dd_diff"],
-            vh["max_dd_diff_ci95_lo"],
-            vh["max_dd_diff_ci95_hi"],
-            None,
-        ),
-        _diff_row(
-            "Information ratio",
-            None,
-            None,
-            vh["info_ratio"],
-            vh["info_ratio_ci95_lo"],
-            vh["info_ratio_ci95_hi"],
-            None,
-        ),
-    ]
-)
-print("val → holdout paired-bootstrap decay (rank-1 self):")
-print(val_ho_table)
-print(f"prob_challenger_wins: {vh['prob_challenger_wins']:.3f}")
-print(f"CI status (Sharpe diff): {ci_status(vh['sharpe_diff_ci95_lo'], vh['sharpe_diff_ci95_hi'])}")
-print()
-print(
-    "Note: validation and holdout windows are disjoint by design (ETFs "
-    "holdout 2024-01 → 2025-12 vs validation 2014-01 → 2023-12). The "
-    "populator pairs the bootstrapped Sharpe series by row index after a "
-    "min-length truncation. The CI is interpreted as bootstrap-resampled "
-    "Sharpe difference under index-paired draws, not calendar-overlap."
-)
+if not VAL_HO_DECAY_AVAILABLE:
+    print("No validation-to-holdout decay to report.")
+else:
+    val_ho_table = pl.DataFrame(
+        [
+            _diff_row(
+                "Sharpe",
+                val_full["sharpe"],
+                ho_full["sharpe"],
+                vh["sharpe_diff"],
+                vh["sharpe_diff_ci95_lo"],
+                vh["sharpe_diff_ci95_hi"],
+                vh["p_value"],
+            ),
+            _diff_row(
+                "Annualized return",
+                val_full["cagr"],
+                ho_full["cagr"],
+                vh["ret_diff"],
+                vh["ret_diff_ci95_lo"],
+                vh["ret_diff_ci95_hi"],
+                None,
+            ),
+            _diff_row(
+                "Max drawdown",
+                val_full["max_drawdown"],
+                ho_full["max_drawdown"],
+                vh["max_dd_diff"],
+                vh["max_dd_diff_ci95_lo"],
+                vh["max_dd_diff_ci95_hi"],
+                None,
+            ),
+            _diff_row(
+                "Information ratio",
+                None,
+                None,
+                vh["info_ratio"],
+                vh["info_ratio_ci95_lo"],
+                vh["info_ratio_ci95_hi"],
+                None,
+            ),
+        ]
+    )
+    print("validation to holdout paired-bootstrap decay (rank-1 self):")
+    print(val_ho_table)
+    print(f"prob_challenger_wins: {vh['prob_challenger_wins']:.3f}")
+    print(
+        "CI status (Sharpe diff): "
+        f"{ci_status(vh['sharpe_diff_ci95_lo'], vh['sharpe_diff_ci95_hi'])}"
+    )
+    print()
+    print(
+        "The validation and holdout windows are disjoint by design, so the populator pairs the "
+        "bootstrapped Sharpe series by row index after truncating to the shorter one. Read the "
+        "interval as a bootstrap-resampled Sharpe difference under index-paired draws, not as a "
+        "comparison over overlapping calendar time."
+    )
 
 # %%
-ho_vs_ew = load_paired_metrics(
-    CASE_STUDY,
-    challenger_hash=HO_HASH,
-    benchmark_kind="equal_weight_holdout_side_artifact",
-)
-if ho_vs_ew.is_empty():
-    # Populator skipped this pair because the holdout backtest had zero
-    # trades (or all-zero returns), so the paired bootstrap on
-    # `strategy − EW_holdout` is undefined. Surface a placeholder so the
-    # rest of the section renders with clear "no trades" context.
-    print(
-        "[WARN] Missing equal_weight_holdout_side_artifact pair for "
-        "etfs — holdout has no trades or all-zero returns; "
-        "paired bootstrap not computable. Continuing with NaN diffs."
+he = None
+if HOLDOUT_AVAILABLE:
+    ho_vs_ew = load_paired_metrics(
+        CASE_STUDY,
+        challenger_hash=HO_HASH,
+        benchmark_kind="equal_weight_holdout_side_artifact",
     )
-    he = {
-        "sharpe_diff": float("nan"),
-        "sharpe_diff_ci95_lo": float("nan"),
-        "sharpe_diff_ci95_hi": float("nan"),
-        "ret_diff": float("nan"),
-        "ret_diff_ci95_lo": float("nan"),
-        "ret_diff_ci95_hi": float("nan"),
-        "max_dd_diff": float("nan"),
-        "max_dd_diff_ci95_lo": float("nan"),
-        "max_dd_diff_ci95_hi": float("nan"),
-        "p_value": float("nan"),
-        "prob_challenger_wins": float("nan"),
-        "info_ratio": float("nan"),
-        "info_ratio_ci95_lo": float("nan"),
-        "info_ratio_ci95_hi": float("nan"),
-    }
-else:
-    he = ho_vs_ew.row(0, named=True)
+    if ho_vs_ew.is_empty():
+        print(
+            "The holdout replay is registered but carries no pair against the holdout-window "
+            "equal-weight universe. The populator writes that pair only when the holdout "
+            "backtest traded; a holdout with no trades has no return series to bootstrap."
+        )
+    else:
+        he = ho_vs_ew.row(0, named=True)
+HO_VS_EW_AVAILABLE = he is not None
 
-ew_ho = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="holdout")
-print("Holdout strategy vs holdout EW universe:")
-print(f"  strategy Sharpe:  {ho_full['sharpe']:.3f}")
-print(f"  EW Sharpe:        {ew_ho['sharpe']:.3f}")
-print(
-    "  diff Sharpe: "
-    f"{_fmt_ci(he['sharpe_diff'], he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}"
-)
-print(f"  p_value:                {he['p_value']:.4f}")
-print(f"  prob_challenger_wins:   {he['prob_challenger_wins']:.3f}")
-print(
-    f"  info_ratio (strategy vs EW): "
-    f"{_fmt_ci(he['info_ratio'], he['info_ratio_ci95_lo'], he['info_ratio_ci95_hi'])}"
-)
-print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
+if not HO_VS_EW_AVAILABLE:
+    print("No holdout strategy-versus-benchmark comparison to report.")
+else:
+    ew_ho = load_benchmark_metrics(CASE_STUDY, PRIMARY_LABEL, period="holdout")
+    print("Holdout strategy against the holdout-window equal-weight universe:")
+    print(f"  strategy Sharpe:  {ho_full['sharpe']:.3f}")
+    print(f"  EW Sharpe:        {ew_ho['sharpe']:.3f}")
+    print(
+        "  diff Sharpe: "
+        f"{_fmt_ci(he['sharpe_diff'], he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}"
+    )
+    print(f"  p_value:                {he['p_value']:.4f}")
+    print(f"  prob_challenger_wins:   {he['prob_challenger_wins']:.3f}")
+    print(
+        "  info_ratio (strategy vs EW): "
+        f"{_fmt_ci(he['info_ratio'], he['info_ratio_ci95_lo'], he['info_ratio_ci95_hi'])}"
+    )
+    print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])}")
 
 # %% [markdown]
-# **Decay reading (val_rank1_self pair):** holdout Sharpe of 0.46 sits
-# well below the validation Sharpe of 1.33 — a point-estimate drop of
-# −0.86 (sharpe_diff −0.873 under the bootstrap-paired draw, with diff
-# CI [−2.433, +0.835], p = 0.31). The CI straddles zero by a wide
-# margin, so the decay is not statistically resolved either way: the
-# holdout window (481 trading days, just under two years) is too short
-# relative to the bootstrap resampling spread to reject zero decay. But
-# the point estimate is large — the Sharpe more than halves — and the
-# holdout prediction IC is negative (−0.032 [−0.085, +0.021], t_HAC
-# −1.18), so the honest reading is that the rank-1's edge does not
-# carry into the out-of-sample window at the point-estimate level,
-# even though the small holdout cannot rule out zero decay statistically.
+# **Two paired tests, and they answer different questions.** The first asks whether the strategy's
+# edge held between the window it was selected on and the window it was not: a large negative
+# difference says the selection did not generalize. The second asks whether it beat the naive
+# alternative *within* the holdout: the equal-weight universe, over the same dates, with no model
+# at all. A strategy can lose the first and win the second, or the reverse, and each is worth
+# knowing on its own.
 #
-# **Strategy vs EW benchmark on holdout:** holdout EW Sharpe is 1.36 —
-# unusually high for the equal-weight ETF universe, driven by the
-# 2024–2025 broad-equity rally where most equity ETFs (which dominate
-# the universe weight) ran together. The rank-1 strategy's holdout
-# Sharpe of 0.46 sits well below that, with paired diff Sharpe −0.960
-# [−2.069, −0.023], p = 0.06. The CI excludes zero on the negative
-# side — in the holdout window the strategy underperforms the
-# equal-weight universe by a margin the bootstrap resolves as adverse,
-# and the §9 kill-condition gate on this pair fails. The reading: in a
-# year where most equity ETFs rallied together, the model's cross-asset
-# rotation toward bonds, commodities, or sector concentrations gave
-# back relative performance to the static equity-weighted benchmark.
-# This is the kind of regime where a long-only multi-asset strategy
-# underperforms a hot equity-weighted comparator; whether that
-# underperformance is regime-specific or persistent needs a multi-year
-# holdout, and Ch20's cross-CS regime layer carries the broader question.
+# **Both come from `backtest_paired_metrics` rather than from subtracting one Sharpe from
+# another.** A difference of point estimates has no interval, so it cannot say whether the gap is
+# larger than the noise. The paired bootstrap resamples the two return series together and gives
+# the difference its own confidence interval, which is the quantity the section-9 gate reads.
+#
+# **The windows do not overlap in calendar time**, so the pairing is by row index after truncating
+# to the shorter series. That is a statement about resampled draws rather than about the same days,
+# and an interval read as though the two series were contemporaneous would be read as something
+# stronger than it is.
+#
+# **The holdout is short.** Whatever the point estimates, an interval computed over a window this
+# size is wide, and a decay that is not statistically resolved is the expected outcome rather than
+# a surprising one. What the point estimate says and what the interval excludes are two separate
+# readings, and the honest report gives both.
 
 # %% [markdown]
 # ## §7 Benchmark-aware diagnostics
@@ -1100,7 +1149,7 @@ print(f"  CI status: {ci_status(he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_
 # Layer 2 adds an FF5+MOM factor attribution with placebo-portfolio
 # control. ETFs span equities, bonds, commodities, and currencies, so
 # FF5+MOM (designed for individual US equities) captures only the
-# equity component — expect a modest R² rather than a strategy-defining
+# equity component - expect a modest R² rather than a strategy-defining
 # decomposition. The placebo benchmark separates universe-driven from
 # selection-driven factor exposure.
 
@@ -1138,7 +1187,7 @@ print(f"  β        = {beta:.3f}, β t-stat = {beta_t:.3f}")
 print(f"  CI status (α): {'excludes_zero_strong' if alpha_p < 0.05 else 'straddles_zero'}")
 
 # %% [markdown]
-# **Layer 2 — FF5+MOM factor attribution (HAC, 5 lags):**
+# **Layer 2 - FF5+MOM factor attribution (HAC, 5 lags):**
 
 # %%
 strat_returns_pd = pd.Series(
@@ -1258,14 +1307,14 @@ fig_attr.show()
 
 # %% [markdown]
 # Layer-1 placebo-regression alpha and Layer-2 FF5+MOM attribution
-# tell consistent stories. The cross-asset universe limits R² — bond,
+# tell consistent stories. The cross-asset universe limits R² - bond,
 # commodity, and currency ETFs contribute returns largely orthogonal
-# to equity factors — so the residual Sharpe is a meaningful fraction
+# to equity factors - so the residual Sharpe is a meaningful fraction
 # of the headline Sharpe, but the absolute alpha CI is wide enough
 # that "selection adds value over factor replication" cannot be
 # strongly resolved on the validation window alone. The placebo
 # benchmark confirms that random ETF portfolios show similarly modest
-# factor R² — the strategy's factor profile is partially
+# factor R² - the strategy's factor profile is partially
 # universe-driven rather than wholly selection-driven. AQR cross-asset
 # factors (TSMOM, value-everywhere, term-structure carry) would
 # provide a more complete attribution; that is a Ch20 cross-asset
@@ -1274,27 +1323,30 @@ fig_attr.show()
 # %% [markdown]
 # ## §8 Strategy tear sheet
 #
-# The diagnostic library renders the rank-1 lineage's full tear sheet
+# The diagnostic library renders the selected configuration's full tear sheet
 # directly from the on-disk artifacts; we wire the validation-window
 # equal-weight ETF universe in as the benchmark series. The tear sheet
-# HTML is written under `OUTPUT_DIR` and is gitignored — readers
+# HTML is written under `OUTPUT_DIR` and is gitignored - readers
 # regenerate it locally.
 
 # %%
 backtest_dir = CASE_DIR / "run_log" / "backtest" / TOP_HASH
-ho_dir = CASE_DIR / "run_log" / "backtest" / HO_HASH
+ho_dir = (CASE_DIR / "run_log" / "backtest" / HO_HASH) if HOLDOUT_AVAILABLE else None
 print(f"Validation backtest_dir: {backtest_dir}")
 print(f"  trades.parquet present: {(backtest_dir / 'trades.parquet').exists()}")
-print(f"Holdout backtest_dir:    {ho_dir}")
-print(f"  trades.parquet present: {(ho_dir / 'trades.parquet').exists()}")
+if ho_dir is None:
+    print("Holdout backtest_dir:    none, the holdout replay is not registered")
+else:
+    print(f"Holdout backtest_dir:    {ho_dir}")
+    print(f"  trades.parquet present: {(ho_dir / 'trades.parquet').exists()}")
 
 # generate_tearsheet_from_run_artifacts wants a 1-D benchmark series,
 # not a multi-column DataFrame.
 bench_series = aligned["benchmark"].to_numpy()
 
 meta = BacktestReportMetadata(
-    title="ETFs — Rank-1 Lineage",
-    strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} — {PRIMARY_LABEL}",
+    title="ETFs - The selected configuration Lineage",
+    strategy_name=f"{RANK1_FAMILY}/{RANK1_CONFIG} - {PRIMARY_LABEL}",
     universe=f"{setup['universe'].get('size', 100)} ETFs across categories",
     benchmark_name="ETF equal-weight universe (validation window)",
     evaluation_window=f"{aligned['ts'].min()} to {aligned['ts'].max()}",
@@ -1318,7 +1370,7 @@ print(f"HTML size: {len(html):,} bytes")
 # ## §9 Pre-Ch20 judgment & handoff
 #
 # This section is the explicit hand-off point to Chapter 20. Numbers
-# below stay strictly inside the ETF case study — cross-case-study
+# below stay strictly inside the ETF case study - cross-case-study
 # comparison is Ch20's lane.
 
 # %%
@@ -1349,12 +1401,26 @@ _gate1_phrase = {
 gate1_evidence = (
     f"Sharpe CI lower bound = {_fmt(val_full['sharpe_ci95_lo'], '.3f')} ({_gate1_phrase})"
 )
-gate2_ci_status = ci_status(he["sharpe_diff_ci95_lo"], he["sharpe_diff_ci95_hi"])
-gate2_status = gate2_holdout_diff_not_excludes_zero_negatively(gate2_ci_status, he["sharpe_diff"])
+# The gate reads the holdout comparison, so without one there is no gate to evaluate. Reporting
+# it as "not evaluated" is the answer; computing it from an absent difference would publish a
+# pass or a fail that rests on nothing, which is worse than reporting neither.
+if HO_VS_EW_AVAILABLE:
+    gate2_ci_status = ci_status(he["sharpe_diff_ci95_lo"], he["sharpe_diff_ci95_hi"])
+    gate2_status = gate2_holdout_diff_not_excludes_zero_negatively(
+        gate2_ci_status, he["sharpe_diff"]
+    )
+else:
+    # `no_data` is the existing status for a gate with nothing to read, and
+    # `gate_passes` already maps it to null in the assessment artifact. Inventing a
+    # fourth state would put a string through `fmt_gate` that it has no label for.
+    gate2_ci_status = None
+    gate2_status = "no_data"
 gate2_evidence = (
-    f"Holdout strategy vs EW diff-Sharpe = "
+    "Holdout strategy vs EW diff-Sharpe = "
     f"{_fmt_ci(he['sharpe_diff'], he['sharpe_diff_ci95_lo'], he['sharpe_diff_ci95_hi'])} "
     f"({gate2_ci_status})"
+    if HO_VS_EW_AVAILABLE
+    else "the holdout has not been evaluated, so this gate has no comparison to read"
 )
 
 print("Kill-condition gates:")
@@ -1364,32 +1430,39 @@ print(f"  [{fmt_gate(gate2_status)}] Holdout strategy CI does not exclude zero n
 print(f"      {gate2_evidence}")
 
 # %% [markdown]
-# **What this analysis does not say.** The validation window covers
-# 2014–2023 (a decade dominated by US equity outperformance and a
-# falling-rate regime); the 2024–2025 holdout is a single
-# regime-different stretch where the equal-weight ETF universe ran
-# unusually hot (Sharpe 1.36) on broad equity strength. The wide val→ho
-# decay CI reflects that small-sample regime — a multi-year holdout
-# would resolve whether the rank-1's holdout underperformance vs EW is
-# regime-specific or persistent — but the point estimates (Sharpe
-# halving to 0.46, negative holdout IC, EW-relative CI excluding zero)
-# all point the same adverse direction, so this is a case where the
-# out-of-sample read does not confirm the validation edge. Selection-
-# adjusted cohort metrics (DSR, PBO, expected_max_sharpe) are not
-# populated for this lineage in the registry, so the in-sample guard
-# rests on the parametric PSR alone; the holdout closure above is the
-# decisive test. Capacity assumptions (the rank-1 trades 20 ETFs of the
-# 100-ETF universe at monthly frequency) are not stress-tested at
-# scale — production sizing would need to model market impact on
-# less-liquid bond and commodity ETFs.
+# **What this analysis does not say.**
+#
+# **The validation window is one regime and the holdout is another.** A decade of US equity
+# strength under falling rates is not a sample of market conditions; it is one condition observed
+# for a long time. A holdout of a year or two in a different regime cannot separate a strategy that
+# stopped working from a strategy that works in conditions the holdout did not contain, and the
+# width of the decay interval is that ambiguity made visible rather than a defect in the test.
+#
+# **The point estimates and the intervals can point in different directions, and both are true.**
+# A decay whose interval spans zero is not resolved; a decay whose point estimate is large is
+# still the most likely value. Reporting only the interval reads as reassurance and reporting only the
+# point reads as a conclusion. §6 prints both for that reason.
+#
+# **Where the selection-adjusted statistics are absent, the in-sample guard is weaker than it
+# looks.** The probabilistic Sharpe corrects for the shape of one return distribution; it does not
+# correct for how many configurations were tried before this one was chosen. Only the deflated
+# Sharpe and the probability of backtest overfitting do that, and where `cohort_metrics` holds no
+# row for this lineage neither is available.
+#
+# **Capacity is not modelled anywhere in this case study.** The strategy holds a fifth of the
+# universe at monthly frequency at the declared initial cash, and nothing here charges market
+# impact. Production sizing on the less liquid bond and commodity funds would face costs no curve
+# in §5 contains.
 
 # %% [markdown]
-# **Forward pointer to Ch20.** This case study contributes the
-# long-only / cross-asset-equity-anchored / monthly-cadence datapoint
-# to Ch20 nb01's rank-1-Sharpe + holdout-decay aggregation; the §6
-# strategy-vs-holdout-EW pair (sharpe_diff −0.960 [−2.069, −0.023],
-# excludes zero on the negative side) feeds Ch20 nb05's "did the
-# strategy beat its universe in the holdout window?" cross-CS panel.
+# **What this case study contributes to the cross-case-study view.** It is the long-only,
+# cross-asset, monthly-cadence datapoint: a universe whose members are themselves diversified
+# portfolios, rebalanced twelve times a year rather than daily. Chapter 20 reads two things from
+# the assessment artifact written below - the selected configuration's Sharpe with its interval,
+# and the
+# holdout closure - and the second is recorded as absent rather than as null fields when the
+# holdout has not been evaluated, so a cross-case-study panel cannot average a stage that has not
+# run into one that has.
 
 # %%
 search_ctx = ctx
@@ -1403,7 +1476,7 @@ assessment = {
         "label": PRIMARY_LABEL,
         "prediction_hash": TOP_PHASH,
         "validation_backtest_hash": TOP_HASH,
-        "holdout_backtest_hash": HO_HASH,
+        "holdout_backtest_hash": HO_HASH,  # None until the holdout has been evaluated
     },
     "headline_performance": {
         "sharpe": {
@@ -1453,13 +1526,18 @@ assessment = {
     "benchmark_relative": {
         "benchmark_name": "equal_weight_universe",
         "benchmark_validation_sharpe": ew_val["sharpe"],
-        "benchmark_holdout_sharpe": ew_ho["sharpe"],
+        "benchmark_holdout_sharpe": ew_ho["sharpe"] if HO_VS_EW_AVAILABLE else None,
         "alpha_annualized_placebo": float(alpha_daily * PERIODS_PER_YEAR),
         "alpha_t_hac": float(alpha_t),
         "beta_to_ew": float(beta),
         "factor_attribution": format_attribution_summary(_reg, _boot),
     },
-    "holdout_decay": {
+    # The artifact records the holdout closure only when there is one. A block of nulls under
+    # this key would be read downstream as a measured absence of decay rather than as a stage
+    # that has not run, and Chapter 20 aggregates across case studies on exactly these fields.
+    "holdout_decay": None
+    if not VAL_HO_DECAY_AVAILABLE
+    else {
         "val_hash": TOP_HASH,
         "holdout_hash": HO_HASH,
         "sharpe_diff": vh["sharpe_diff"],
@@ -1468,7 +1546,9 @@ assessment = {
         "sharpe_diff_p_value": vh["p_value"],
         "info_ratio": vh["info_ratio"],
         "decay_classification": ci_status(vh["sharpe_diff_ci95_lo"], vh["sharpe_diff_ci95_hi"]),
-        "vs_ew_holdout": {
+        "vs_ew_holdout": None
+        if not HO_VS_EW_AVAILABLE
+        else {
             "sharpe_diff": he["sharpe_diff"],
             "sharpe_diff_ci95_lo": he["sharpe_diff_ci95_lo"],
             "sharpe_diff_ci95_hi": he["sharpe_diff_ci95_hi"],
@@ -1488,8 +1568,8 @@ assessment = {
     },
     "ch20_handoff": {
         "contributes_to": [
-            "Ch20 nb01 — cross-CS rank-1 Sharpe and holdout-decay aggregation",
-            "Ch20 nb05 — strategy-vs-universe holdout panel (long-only multi-asset datapoint)",
+            "Ch20 nb01 - cross-CS leading Sharpe and holdout-decay aggregation",
+            "Ch20 nb05 - strategy-vs-universe holdout panel (long-only multi-asset datapoint)",
         ],
         "asset_class_label": "etfs_cross_asset",
         "rebalance_cadence": setup["decision"]["cadence"],
