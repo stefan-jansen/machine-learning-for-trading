@@ -454,11 +454,25 @@ def joint_returns(
     c, b = c[finite], b[finite]
     if c.size == 0:
         return c, b
-    live = (c != 0.0) | (b != 0.0) if challenger_overlays_baseline else (c != 0.0) & (b != 0.0)
-    traded = np.flatnonzero(live)
-    if traded.size == 0:
-        return c[:0], b[:0]
-    start = int(traded[0])
+    first_c = np.flatnonzero(c != 0.0)
+    first_b = np.flatnonzero(b != 0.0)
+    if challenger_overlays_baseline:
+        # Either side having traded starts the sample, so the first index where anything is
+        # non-zero: the earlier of the two firsts, or nothing if neither ever traded.
+        starts = [int(x[0]) for x in (first_c, first_b) if x.size]
+        if not starts:
+            return c[:0], b[:0]
+        start = min(starts)
+    else:
+        # Both sides having *begun* starts the sample, which is the later of the two first
+        # traded sessions - NOT the first session on which both are simultaneously non-zero.
+        # Those differ whenever the later starter's own first session carries an exactly zero
+        # return on the other side, which a fully-cash or non-rebalanced session produces: the
+        # simultaneous form slides the start forward and discards live observations from both
+        # series. Measured as a defect in this function on 2026-08-26.
+        if not first_c.size or not first_b.size:
+            return c[:0], b[:0]
+        start = max(int(first_c[0]), int(first_b[0]))
     return c[start:], b[start:]
 
 

@@ -2,14 +2,22 @@
 
 ``compute_paired_uncertainty`` needs to be told whether a leading flat run on the challenger
 is a warmup before its first signal or a position the challenger chose to hold, because the
-two are indistinguishable in the returns and the trim differs. ``paired_metrics`` produces
-both shapes: the equal-weight benchmark pairs are independent series, and the stage
-transitions - allocation over signal, cost over allocation, risk overlay over cost - run the
-challenger on top of its own baseline.
+two are indistinguishable in the returns and the trim differs.
 
-Getting that wrong is a wiring defect rather than a maths one: the numbers are computed
-correctly under the wrong rule, and the row registers without complaint. These tests pin the
-wiring at the layer where the choice is made.
+**Every pair `paired_metrics` produces takes the default, independent-series shape**, including
+the three stage transitions. That is not because a stage transition cannot be an overlay
+relationship - it is because neither thing the overlay rule needs is established here.
+``champion_lineage`` takes the best-Sharpe backtest at each stage independently, sharing only a
+prediction hash, so adjacent entries are not demonstrably parent and child; and a challenger at
+these stages can carry a genuine warmup, as ``conformal_weighted`` does by keeping only
+timestamps with prior-only calibration. ``17_risk_management`` and ``18_strategy_analysis`` do
+use the overlay shape, because there the overlay is paired with its own no-overlay carrier by
+construction rather than by a highest-Sharpe query.
+
+Getting this wrong is a wiring defect rather than a maths one: the numbers are computed
+correctly under the wrong rule and the row registers without complaint. The first tests pin the
+behaviour at ``_populate_pair``; the last drives ``populate_paired_metrics`` itself, because a
+test that passes the flag in by hand cannot see what the producer chooses.
 """
 
 from __future__ import annotations
@@ -124,3 +132,57 @@ def test_the_two_shapes_do_not_agree_on_the_difference(captured: list[dict]) -> 
 
     assert all("skip" not in row for row in rows)
     assert rows[0]["sharpe_diff"] != rows[1]["sharpe_diff"]
+
+
+def test_the_producer_gives_every_stage_transition_the_default_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `populate_paired_metrics` chooses, not what a caller passes it by hand.
+
+    The three stage transitions carried `challenger_overlays_baseline=True` for one commit, on a
+    premise `champion_lineage` does not support. Reverting it changed no test, because every
+    test at the time handed the flag to `_populate_pair` directly - so the wiring the revert was
+    about had no coverage in either direction. This drives the producer and reads the flag off
+    the call.
+    """
+    seen: list[tuple[str, bool]] = []
+
+    def spy(*args, **kwargs):
+        seen.append((args[3], kwargs.get("challenger_overlays_baseline", False)))
+        return {"kind": args[3]}
+
+    monkeypatch.setattr(paired_metrics, "_populate_pair", spy)
+    monkeypatch.setattr(paired_metrics, "_aligned_returns", lambda cs, h: _returns([0.001] * 60))
+    monkeypatch.setattr(paired_metrics, "_val_rank1_full_spec", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_holdout_lineage_for", lambda *a, **k: None)
+    monkeypatch.setattr(paired_metrics, "_benchmark_returns_from_artifact", lambda *a, **k: None)
+
+    class _Explorer:
+        def best(self, **kwargs):
+            return pl.DataFrame(
+                {
+                    "backtest_hash": ["bt_leader"],
+                    "prediction_hash": ["pred_leader"],
+                    "label": ["fwd_ret_5d"],
+                    "sharpe": [1.0],
+                }
+            )
+
+        def champion_lineage(self, prediction_hash):
+            return {
+                stage: {"backtest_hash": f"bt_{stage}"}
+                for stage in ("signal", "allocation", "cost_sensitivity", "risk_overlay")
+            }
+
+    paired_metrics.populate_paired_metrics("unit_cs", _Explorer(), verbose=False)
+
+    transitions = {
+        kind: overlay
+        for kind, overlay in seen
+        if kind in {"signal_leader", "allocation_leader", "cost_sensitivity_leader"}
+    }
+    assert transitions == {
+        "signal_leader": False,
+        "allocation_leader": False,
+        "cost_sensitivity_leader": False,
+    }

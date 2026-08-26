@@ -343,9 +343,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per label and checkpoint. `ic_mean` is the **information coefficient**: on each validation
-# date, rank the stocks by the model's prediction, rank them by the return they went on to earn,
-# correlate the two rankings, and average that daily correlation over the validation period.
+# One row per label and checkpoint. The **information coefficient** is the rank correlation, on one
+# validation date, between the stocks ordered by the model's prediction and the stocks ordered by
+# the return they went on to earn.
+#
+# `ic_mean` aggregates that **over folds, not over days**: each fold's own mean IC is computed and
+# those are averaged with equal weight (`latent_factors/cv.py`, and the convention is stated in
+# `registry/metrics.py`). With folds of unequal length the fold mean and the pooled daily mean are
+# different numbers, and this column is the first.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # are comparable with each other. `auc_scored_against` says what the AUC column was scored against:
@@ -412,8 +417,9 @@ catalog.select(
 # epoch with its highest validation IC. Two columns are there to stop that number being read as
 # more than it is. `epochs_above_zero` counts how many of the ten checkpoints put the IC on the
 # positive side at all, which separates a model that is consistently weak from one that crossed zero
-# once. `ic_t` is a Newey-West HAC statistic on the daily IC series, and it is a diagnostic and not
-# a selection rule - the series is short, overlapping multi-day returns make successive days
+# once. `ic_t` is the t-statistic across those fold means rather than a
+# Newey-West statistic on the daily series - the registry keeps that separately as `ic_t_hac`, and
+# it is the inferential one. Either way `ic_t` is a diagnostic and not a selection rule - the series is short, overlapping multi-day returns make successive days
 # dependent, and the folds have been read many times over by the time a case study reaches this
 # notebook.
 #

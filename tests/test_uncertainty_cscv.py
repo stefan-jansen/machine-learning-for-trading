@@ -333,3 +333,42 @@ def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() 
         assert ours_c.size == theirs_c.size
         np.testing.assert_allclose(ours_c, theirs_c)
         np.testing.assert_allclose(ours_b, theirs_b)
+
+
+def test_the_default_trim_starts_where_both_began_not_where_both_are_simultaneously_live() -> None:
+    """A zero on the earlier starter's books must not push the sample start forward.
+
+    The rule is that the pair begins once both series have begun trading, which is the later of
+    their two first traded sessions. Starting instead at the first session on which both are
+    *simultaneously* non-zero is a different rule, and it differs exactly when the later
+    starter's opening session happens to carry a zero return on the other side - a fully-cash or
+    non-rebalanced day, which is ordinary. It then discards live paired observations from both
+    series, and it does so silently.
+    """
+    from case_studies.utils.uncertainty import joint_returns
+
+    #                     b trades from 0 ......... b flat on the day c opens
+    baseline = np.array([0.01, -0.02, 0.015, 0.0, 0.02, -0.01, 0.03])
+    challenger = np.array([0.0, 0.0, 0.0, 0.011, 0.018, -0.009, 0.021])
+
+    c, b = joint_returns(challenger, baseline)
+
+    # Both have begun by index 3 - the challenger's first traded session - so the pair is 4 long.
+    # The simultaneous rule would start at index 4 and lose that session from both sides.
+    assert c.size == b.size == 4
+    np.testing.assert_allclose(c, challenger[3:])
+    np.testing.assert_allclose(b, baseline[3:])
+
+
+def test_the_overlay_trim_starts_at_the_earlier_of_the_two_first_sessions() -> None:
+    """The overlay rule is the mirror: the sample opens as soon as anything held a position."""
+    from case_studies.utils.uncertainty import joint_returns
+
+    baseline = np.array([0.0, 0.0, 0.01, 0.02, 0.0, 0.03])
+    challenger = np.array([0.0, 0.012, 0.0, 0.0, 0.0, 0.02])
+
+    c, b = joint_returns(challenger, baseline, challenger_overlays_baseline=True)
+
+    assert c.size == b.size == 5
+    np.testing.assert_allclose(c, challenger[1:])
+    np.testing.assert_allclose(b, baseline[1:])

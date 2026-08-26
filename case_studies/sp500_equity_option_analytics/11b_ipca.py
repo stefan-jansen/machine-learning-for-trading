@@ -331,9 +331,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per label. `ic_mean` is the **information coefficient**: on each validation date, rank the
-# stocks by the model's prediction, rank them by the return they went on to earn, correlate the two
-# rankings, and average that daily correlation over the validation period.
+# One row per label. The **information coefficient** is the rank correlation, on one validation
+# date, between the stocks ordered by the model's prediction and the stocks ordered by the return
+# they went on to earn.
+#
+# `ic_mean` aggregates that **over folds, not over days**: each fold's own mean IC is computed and
+# those are averaged with equal weight (`latent_factors/cv.py`, and
+# `registry/metrics.py` states the convention). With folds of unequal length the fold mean and the
+# pooled daily mean are different numbers, and this column is the first.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # are comparable with each other. `auc_scored_against` says what the AUC column was scored against:
@@ -401,10 +406,11 @@ catalog.select(
 # enters the fit. So a gap between these rows says the map itself came out different, not just that
 # the same forecast was scored three ways.
 #
-# `ic_t` is a Newey-West HAC statistic on the daily IC series. It is a diagnostic and not a
-# selection rule - the series is short, overlapping multi-day returns make successive days
-# dependent, and the folds have been read many times over by the time a case study reaches this
-# notebook.
+# `ic_t` is the t-statistic across those fold means, not a Newey-West statistic on the daily
+# series - the registry keeps the HAC-corrected version separately as `ic_t_hac`, and that is the
+# inferential one. Either way it is a diagnostic and not a selection rule: the series is short,
+# overlapping multi-day returns make successive days dependent, and the folds have been read many
+# times over by the time a case study reaches this notebook.
 
 # %% tags=["results"]
 by_label = catalog.select(
@@ -413,6 +419,13 @@ by_label = catalog.select(
     ic_mean=pl.col("ic_mean"),
     ic_t=pl.col("ic_t"),
     scored_dates=pl.col("ic_n_days"),
+    # `ic_n_days` counts the days behind `ic_mean_daily`, the pooled daily statistic - not the
+    # folds behind `ic_mean`, which is what the rows are ordered by. So this column is a
+    # comparability guarantee about one statistic attached to a ranking on another. It is kept
+    # because unequal day counts are still the thing that makes two rows incomparable, and
+    # flagged because the two are not the same measurement: `registry/metrics.py:203` averages
+    # folds for `ic_mean`, and `:234-250` computes the daily family together. Reading the
+    # ordering on `ic_mean_daily` would need `PredictionCatalog` to carry it.
     full_coverage=pl.col("ic_n_days") == pl.col("ic_n_days").max(),
 ).sort("ic_mean", descending=True)
 by_label

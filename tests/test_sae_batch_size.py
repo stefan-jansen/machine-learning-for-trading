@@ -59,7 +59,11 @@ def test_the_declared_batch_size_reaches_the_model(monkeypatch: pytest.MonkeyPat
     rng = np.random.default_rng(0)
     chars = rng.normal(size=(4, 6, 3)).astype(np.float32)
     rets = rng.normal(size=(4, 6)).astype(np.float32)
-    library_bridge.run_sae_fold_with_library(chars, rets, chars, rets, batch_size=4096)
+
+    # Through `run_sae_fold`, the runner the adapter calls - not through the bridge directly.
+    # The regression this file exists for is the runner failing to forward the value, one hop
+    # above the bridge, so a test that starts at the bridge cannot see it.
+    sae.run_sae_fold(chars, rets, chars, rets, 5, batch_size=4096)
 
     assert seen["batch_size"] == 4096
 
