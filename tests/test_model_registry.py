@@ -183,7 +183,28 @@ def _expected_entry_point(case_study: str, stage: str) -> str:
     return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
 
 
-_STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
+# The letter is captured for `_stage_sort_key` below. Existing callers read `group(0)` for the
+# prefix length and `group(1)` for the number; neither moves.
+_STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def _stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order a stage's lettered siblings before the bare notebook that aggregates them.
+
+    Plain filename order puts `11_latent_factors.py` ahead of `11a_pca.py`, because `_` sorts
+    below `a`. That is backwards wherever the bare notebook is a read-only view over what its
+    lettered siblings register: it runs first, finds nothing, and raises - for
+    `sp500_equity_option_analytics` with "no latent-factor validation rows are registered; run
+    the five sibling notebooks first".
+
+    The same key is in `tests/test_case_studies.py`, where it was added for the pipeline
+    collection; `_collect_model_notebooks` kept a plain `sorted(...)` and so kept the failure.
+    """
+    match = _STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
 
 
 def _quick_parameters(
@@ -262,7 +283,7 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
         cs_dir = PROD_CS_DIR / cs
         if not cs_dir.exists():
             continue
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py"), key=_stage_sort_key):
             if notebook.name.startswith("_"):
                 continue
             match = _STAGE_RE.match(notebook.name)

@@ -107,11 +107,13 @@ study = open_study(
 # %% [markdown]
 # ## 1. Which labels, and what the configuration says
 #
-# Every label whose training menu declares `latent_factors:` is fitted, and three do: `fwd_ret_5d`,
-# the stock's total return over the five trading days after the decision date; `fwd_ret_10d`, the
-# same over ten; and `fwd_ret_risk_adj_5d`, the five-day return divided by a measure of its own
-# dispersion. The two `fwd_dir_*` classification labels declare linear and gradient boosting only,
-# so they are absent here rather than dropped.
+# Every label whose training menu declares `latent_factors:` is fitted, and the cell below reads
+# which those are rather than this sentence asserting a count that would go stale the moment a
+# sixth label declared the family. What the names mean is the part prose has to supply:
+# `fwd_ret_5d` is the stock's total return over the five trading days after the decision date,
+# `fwd_ret_10d` the same over ten, and `fwd_ret_risk_adj_5d` the five-day return divided by a
+# measure of its own dispersion. A `fwd_dir_*` classification label declaring only linear and
+# gradient boosting is absent here rather than dropped.
 
 # %%
 declared_labels(study, "latent_factors")
