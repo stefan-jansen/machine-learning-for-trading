@@ -903,9 +903,8 @@ def sync_prose(nb_path: Path) -> str:
 
     before_counts = _output_counts(nb)
 
-    jupytext = REPO_ROOT / ".venv" / "bin" / "jupytext"
     result = subprocess.run(
-        [str(jupytext) if jupytext.exists() else "jupytext", "--to", "ipynb", "--update", str(py)],
+        [sys.executable, "-m", "jupytext", "--to", "ipynb", "--update", str(py)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
