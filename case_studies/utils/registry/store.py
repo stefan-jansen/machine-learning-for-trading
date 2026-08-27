@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS training_runs (
 CREATE INDEX IF NOT EXISTS idx_training_family_label ON training_runs(family, label);
 CREATE INDEX IF NOT EXISTS idx_training_config_name ON training_runs(config_name);
 
+CREATE TABLE IF NOT EXISTS training_identity_migrations (
+    target_training_hash TEXT PRIMARY KEY REFERENCES training_runs(training_hash),
+    source_training_hash TEXT NOT NULL,
+    target_spec_json     TEXT NOT NULL,
+    prediction_map_json TEXT NOT NULL,
+    proof_json          TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_migration_source
+    ON training_identity_migrations(source_training_hash);
+
 CREATE TABLE IF NOT EXISTS prediction_sets (
     prediction_hash     TEXT PRIMARY KEY,
     training_hash       TEXT NOT NULL REFERENCES training_runs(training_hash),
