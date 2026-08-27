@@ -1014,21 +1014,24 @@ def run_darts_cv(
     if register and save_dir is None:
         raise ValueError("register=True requires save_dir for Darts prediction artifacts.")
 
-    from case_studies.utils.deep_learning import _register_dl_config
+    from case_studies.utils.deep_learning import _register_dl_config, sequence_identity_params
 
     def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
-        params = dict(identity_params or {})
-        if input_data_spec is not None:
-            params.update(
-                darts_training_identity(
-                    cfg,
-                    label_col,
-                    case_study=case_study,
-                    input_data_spec=input_data_spec,
-                    max_train_sequences=max_train_sequences,
-                )
-            )
-        return params or None
+        # The same function `run_dl_cv` computes its lookup hash with. These two used to
+        # be separate transcriptions of one rule, which held only while the rule did not
+        # change: `run_dl_cv` decides whether a Darts config is already complete, and
+        # `run_darts_cv` decides what it registers under. Any field in one and not the
+        # other means the lookup can never find the registration, so every invocation
+        # refits from scratch and writes to a hash nobody queries.
+        return sequence_identity_params(
+            cfg,
+            identity_params=identity_params,
+            input_data_spec=input_data_spec,
+            label_col=label_col,
+            case_study=case_study,
+            max_train_sequences=max_train_sequences,
+            device=device,
+        )
 
     label_horizon = _parse_label_horizon(label_col)
     from utils.cv_splits import make_walk_forward_config

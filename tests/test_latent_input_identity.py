@@ -43,6 +43,37 @@ def test_feature_content_enters_latent_training_hash(tmp_path: Path, monkeypatch
     assert training_hash_from_spec(first_spec) != training_hash_from_spec(second_spec)
 
 
+def test_setup_content_does_not_duplicate_resolved_latent_training_spec(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    case_dir = tmp_path / "etfs"
+    (case_dir / "features").mkdir(parents=True)
+    (case_dir / "labels").mkdir()
+    (case_dir / "config").mkdir()
+    (case_dir / "features" / "financial.parquet").write_bytes(b"financial")
+    (case_dir / "labels" / "fwd_ret_21d.parquet").write_bytes(b"labels")
+    setup_path = case_dir / "config" / "setup.yaml"
+    setup_path.write_text("causal:\n  treatment: first\n")
+
+    monkeypatch.setattr(case_study, "get_case_study_dir", lambda _case_study_id: case_dir)
+    monkeypatch.setattr(case_study, "load_feature_spec", lambda *_args: None)
+    monkeypatch.setattr(case_study, "load_label_spec", lambda *_args: None)
+    monkeypatch.setattr(
+        case_study,
+        "resolve_storage_path",
+        lambda _case_study_id, _spec, fallback: case_dir / fallback,
+    )
+
+    first = case_study.training_input_identity("etfs", "fwd_ret_21d")
+    setup_path.write_text("causal:\n  treatment: unrelated-change\n")
+    second = case_study.training_input_identity("etfs", "fwd_ret_21d")
+
+    assert first == second
+    assert first["version"] == "v2"
+    assert {item["role"] for item in first["files"]} == {"financial", "label"}
+
+
 def test_continuous_evaluation_label_enters_classification_identity(
     tmp_path: Path,
     monkeypatch,
@@ -82,7 +113,6 @@ def test_continuous_evaluation_label_enters_classification_identity(
         "evaluation_label",
         "financial",
         "label",
-        "setup",
     }
     assert first["input_digest"] != second["input_digest"]
 

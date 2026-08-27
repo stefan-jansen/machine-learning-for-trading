@@ -123,6 +123,30 @@ def test_backtest_readers_exclude_partial_coverage(tmp_path) -> None:
     assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["full_a"])[
         "prediction_hash"
     ].to_list() == ["full_a"]
+    assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["partial"])[
+        "prediction_hash"
+    ].to_list() == ["partial"]
+    assert explorer.best(
+        top_n=10,
+        label="fwd_ret_5d",
+        prediction_hashes=["partial", "full_a"],
+    )["prediction_hash"].to_list() == ["full_a"]
+    assert (
+        explorer.compare_allocators(
+            stages=("signal",),
+            label="fwd_ret_5d",
+            prediction_hashes=["partial"],
+        )["n"].item()
+        == 1
+    )
+    assert (
+        explorer.compare_allocators(
+            stages=("signal",),
+            label="fwd_ret_5d",
+            prediction_hashes=["partial", "full_a"],
+        )["n"].item()
+        == 1
+    )
 
 
 def test_downstream_resolution_excludes_partial_coverage(tmp_path) -> None:
@@ -150,6 +174,191 @@ def test_downstream_resolution_excludes_partial_coverage(tmp_path) -> None:
         case_dir=case_dir,
     )
     assert backtests["prediction_hash"].to_list() == ["tabular", "full_a", "full_b"]
+
+
+def test_prediction_population_is_filtered_before_checkpoint_ranking(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        for prediction_hash, sharpe, n_days in [
+            ("retired", 5.0, 5),
+            ("current", 0.75, 4),
+        ]:
+            training_hash = f"train_{prediction_hash}"
+            db.execute(
+                "INSERT INTO training_runs VALUES (?, 'gbm', 'shared', 'fwd_ret_5d')",
+                (training_hash,),
+            )
+            db.execute(
+                "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
+                (prediction_hash, training_hash),
+            )
+            db.execute(
+                "INSERT INTO prediction_metrics VALUES (?, 0.1, 0.1, 0.0, 0.2, ?)",
+                (prediction_hash, n_days),
+            )
+            db.execute(
+                "INSERT INTO backtest_runs VALUES (?, ?, '{}', 'signal')",
+                (f"bt_{prediction_hash}", prediction_hash),
+            )
+            db.execute(
+                "INSERT INTO backtest_metrics VALUES (?, ?, 0.1, -0.1, 0.2, 0.1, 1)",
+                (f"bt_{prediction_hash}", sharpe),
+            )
+
+    selected = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        prediction_hashes={"current"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["current"]
+
+
+def test_backtest_population_is_filtered_before_run_ranking(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        prediction_hashes={"full_b"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["full_b"]
+
+
+def test_backtest_population_sets_the_raw_coverage_bar(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
+
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
+
+
+def test_canonical_backtest_population_is_filtered_before_run_ranking(
+    tmp_path, monkeypatch
+) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"full_b"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["full_b"]
+
+
+def test_canonical_backtest_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
+
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
+
+
+def test_canonical_prediction_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
 
 
 def test_cohort_members_and_leader_exclude_partial_coverage(tmp_path) -> None:

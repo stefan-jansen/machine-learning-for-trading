@@ -209,7 +209,7 @@ def _tiny_case_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, splits: li
     monkeypatch.setattr(
         cv_window,
         "temporal_artifact_fold_boundaries",
-        lambda case_study, primary_label, _artifact_path: cv_window.modeling_fold_boundaries(
+        lambda case_study, primary_label, _artifact_path: cv_window._derive_modeling_splits(
             case_study, primary_label
         ),
     )
@@ -257,7 +257,7 @@ def test_loading_a_variant_whose_validation_opens_after_the_fit_is_allowed(
     # artifact would pass this file vacuously.
     assert mds.temporal_by_fold is not None
     assert mds.splits == variant_splits
-    assert mds.temporal_artifact_splits == cv_window.modeling_fold_boundaries("cs", "primary")
+    assert mds.temporal_artifact_splits == primary_splits
     requested = [
         {
             key: value.isoformat() if hasattr(value, "isoformat") else value

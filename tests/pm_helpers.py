@@ -69,6 +69,7 @@ overrides.yaml schema (per-notebook, all optional):
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,18 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 OVERRIDES_PATH = REPO_ROOT / "tests" / "overrides.yaml"
+
+STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order lettered producer notebooks before the bare aggregate for a stage number."""
+    match = STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
+
 
 # Thread-pool caps for the papermill kernel.
 #
