@@ -71,6 +71,7 @@
 """S&P 500 Equity + Option Analytics: Model-Based Features."""
 
 import warnings
+from datetime import date
 
 warnings.filterwarnings("ignore")
 
@@ -83,7 +84,7 @@ from ml4t.diagnostic.evaluation.stats import benjamini_hochberg_fdr
 from ml4t.diagnostic.metrics import compute_ic_hac_stats, cross_sectional_ic_series
 
 from case_studies.utils.artifact_digest import read_digest, value_digest, write_artifact
-from case_studies.utils.cv_window import modeling_fold_boundaries
+from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from utils.artifact_specs import load_setup_config, resolve_label_horizon
 from utils.cv_splits import load_evaluation_config
@@ -140,8 +141,8 @@ canonical_splits = modeling_fold_boundaries(CASE_STUDY_ID, PRIMARY_LABEL)
 if not canonical_splits:
     raise RuntimeError(f"Canonical {PRIMARY_LABEL} modeling folds are unavailable")
 evaluation_config = load_evaluation_config(CASE_STUDY_ID)
-HOLDOUT_START = str(evaluation_config["holdout_start"])[:10]
-HOLDOUT_END = str(evaluation_config["holdout_end"])[:10]
+HOLDOUT_START = fold_boundary_date(evaluation_config["holdout_start"])
+HOLDOUT_END = fold_boundary_date(evaluation_config["holdout_end"])
 
 print(
     f"{len(canonical_splits)} walk-forward folds come from the {PRIMARY_LABEL} label file, "
@@ -210,10 +211,10 @@ print(f"Everything from {HOLDOUT_START} to {HOLDOUT_END} is the holdout.")
 splits = [
     {
         "fold": s["fold"],
-        "fit_start": str(s["train_start"]),
-        "fit_end": str(s["train_end"]),
-        "infer_start": str(s["val_start"]),
-        "infer_end": str(s["val_end"]),
+        "fit_start": fold_boundary_date(s["train_start"]),
+        "fit_end": fold_boundary_date(s["train_end"]),
+        "infer_start": fold_boundary_date(s["val_start"]),
+        "infer_end": fold_boundary_date(s["val_end"]),
         "is_holdout": False,
     }
     for s in canonical_splits
@@ -226,8 +227,8 @@ _train_years = int(_train_size[:-1])
 splits.append(
     {
         "fold": len(splits),
-        "fit_start": f"{int(HOLDOUT_START[:4]) - _train_years}-01-01",
-        "fit_end": f"{int(HOLDOUT_START[:4]) - 1}-12-31",
+        "fit_start": date(HOLDOUT_START.year - _train_years, 1, 1),
+        "fit_end": date(HOLDOUT_START.year - 1, 12, 31),
         "infer_start": HOLDOUT_START,
         "infer_end": HOLDOUT_END,
         "is_holdout": True,
@@ -257,7 +258,7 @@ for label in LABEL_VARIANTS:
         f"{label} resolves {len(label_splits or [])} folds against {len(development_splits)} here"
     )
     for row, own in zip(development_splits, label_splits, strict=True):
-        assert row["fit_end"] < str(own["val_start"]), (
+        assert row["fit_end"] < fold_boundary_date(own["val_start"]), (
             f"fold {row['fold']}'s estimation window reaches into {label}'s validation span"
         )
 print(
@@ -293,7 +294,7 @@ for row_index, row in enumerate(CHRONOLOGICAL):
                 showlegend=row_index == 0,
             )
         )
-fig.add_vline(x=HOLDOUT_START, line_dash="dash", line_color=ml4t_palette(3)[2])
+fig.add_vline(x=HOLDOUT_START.isoformat(), line_dash="dash", line_color=ml4t_palette(3)[2])
 fig.update_layout(
     title="No parameter comes from the right of its own estimation bar",
     xaxis_title=f"Estimation and inference spans per fold; the dashed rule marks {HOLDOUT_START}",
@@ -678,7 +679,8 @@ print(
 # %%
 ordered_folds = sorted(splits, key=lambda row: row["fit_start"])
 axis_labels = [
-    f"fold {row['fold']}<br>{row['fit_start'][:7]} to {row['fit_end'][:7]}" for row in ordered_folds
+    f"fold {row['fold']}<br>{row['fit_start']:%Y-%m} to {row['fit_end']:%Y-%m}"
+    for row in ordered_folds
 ]
 # Each line carries its own dash pattern and marker as well as its colour, so the four stay
 # separable in a monochrome print and for a reader who cannot distinguish two of them.
@@ -791,8 +793,8 @@ inference_only = pl.concat(
     [
         garch.filter(
             (pl.col("fold") == row["fold"])
-            & (pl.col("timestamp") >= pl.lit(row["infer_start"]).str.to_date())
-            & (pl.col("timestamp") <= pl.lit(row["infer_end"]).str.to_date())
+            & (pl.col("timestamp") >= pl.lit(row["infer_start"], dtype=pl.Date))
+            & (pl.col("timestamp") <= pl.lit(row["infer_end"], dtype=pl.Date))
         )
         for row in splits
         if not row["is_holdout"]
@@ -824,7 +826,9 @@ for column, name, colour in (
     )
 for row in splits:
     if not row["is_holdout"]:
-        fig.add_vline(x=row["infer_start"], line_dash="dot", line_color=ml4t_palette(3)[2])
+        fig.add_vline(
+            x=row["infer_start"].isoformat(), line_dash="dot", line_color=ml4t_palette(3)[2]
+        )
 fig.update_layout(
     title="The forecast turns within days of a shock where the average takes weeks",
     xaxis_title="Median across securities, inference spans only; dotted rules mark fold starts",
@@ -979,7 +983,7 @@ scored = (
     .join(label.select([*PANEL_KEY, "forward_return"]), on=PANEL_KEY, how="inner")
     .sort(PANEL_KEY)
 )
-assert scored.filter(pl.col("timestamp") >= pl.lit(HOLDOUT_START).str.to_date()).is_empty(), (
+assert scored.filter(pl.col("timestamp") >= pl.lit(HOLDOUT_START, dtype=pl.Date)).is_empty(), (
     "the validation scoring frame reaches into the holdout"
 )
 assert set(scored["fold"].unique()) <= set(DEVELOPMENT_FOLDS), "a holdout fold reached section F"
@@ -987,7 +991,19 @@ print(f"{scored.height:,} scored rows over {scored['timestamp'].n_unique():,} de
 
 
 # %%
-MIN_CROSS_SECTION = 10
+# Two floors, and they count different things. `MIN_CROSS_SECTION` is a number of securities on
+# one date, below which a rank correlation is noise rather than a measurement. `MIN_IC_DATES` is
+# a number of dates, below which the HAC standard error over those correlations means nothing.
+# One constant used to serve both, which read as deliberate and was not: the second comparison
+# was measuring a series length against a universe size.
+#
+# The cross-section floor is clamped to the universe this run actually loaded. At full width
+# `MAX_SYMBOLS` is None and the clamp does nothing, so production is unchanged; under a reduced
+# run it is what keeps this section measuring something. A fixed floor of ten against a five-name
+# reduction does not shrink the section, it empties it - every date falls short, every feature
+# reports no IC, and the run stays green over a measurement it never made.
+MIN_CROSS_SECTION = min(10, scored["symbol"].n_unique())
+MIN_IC_DATES = 10
 
 
 def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
@@ -1012,10 +1028,11 @@ def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
 ic_rows = []
 for column in FEATURE_COLS:
     series = ic_series(scored, column)
-    if len(series) <= MIN_CROSS_SECTION:
+    if len(series) <= MIN_IC_DATES:
         print(
             f"{column}: only {len(series)} dates carry a cross-section of at least "
-            f"{MIN_CROSS_SECTION} securities, so no IC is reported for it"
+            f"{MIN_CROSS_SECTION} securities, and {MIN_IC_DATES} are needed for a standard "
+            "error, so no IC is reported for it"
         )
         continue
     stats = compute_ic_hac_stats(series, label_horizon=LABEL_HORIZON)
@@ -1124,7 +1141,7 @@ paired = (
 )
 # `compute_ic_hac_stats` reads row order as time order and a join does not promise one.
 assert paired["timestamp"].is_sorted(), "the paired series is not in date order"
-COMPARABLE = paired.height > MIN_CROSS_SECTION
+COMPARABLE = paired.height > MIN_IC_DATES
 print(f"{paired_rows.height:,} rows carry both variants, over {paired.height:,} dates")
 if COMPARABLE:
     memory_stats = compute_ic_hac_stats(memory_series, label_horizon=LABEL_HORIZON)

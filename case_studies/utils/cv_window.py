@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -46,6 +46,35 @@ def _to_date(x) -> date:
     if isinstance(x, datetime):
         return x.date()
     return datetime.fromisoformat(str(x)[:19]).date()
+
+
+def fold_boundary_date(boundary: Any) -> date:
+    """One fold boundary as the calendar date a daily span is written in.
+
+    :func:`generate_cv_splits` indexes the label timeline with a pandas ``DatetimeIndex``, so
+    every boundary it returns - and therefore every boundary :func:`modeling_fold_boundaries`
+    passes through - is a ``Timestamp`` whatever dtype the label parquet stored. ``str()`` on one
+    reads ``2020-01-06 00:00:00``, which no date parser accepts, so a consumer that carries the
+    boundary as text and rebuilds a filter from it gets an error instead of rows. Converting once,
+    here, is what keeps a span comparable to the date column it filters.
+
+    A boundary with a clock reading is refused rather than truncated. Every fold in this
+    repository is generated on a daily session calendar, so a time of day means the generator
+    emits something the spans downstream cannot represent, and dropping it would move the span
+    without saying so.
+    """
+    if isinstance(boundary, datetime):
+        clock = boundary.time()
+    elif isinstance(boundary, date):
+        clock = time.min
+    else:
+        clock = datetime.fromisoformat(str(boundary)[:19]).time()
+    if clock != time.min:
+        raise ValueError(
+            f"fold boundary {boundary!r} carries a time of day; the spans that read it are "
+            "daily, so truncating it would move the fold"
+        )
+    return _to_date(boundary)
 
 
 @lru_cache(maxsize=32)
