@@ -305,25 +305,13 @@ causal:
   treatment_window: 252
   confounders: [vol_gk_21d, vol_gk_63d, zscore_21d]
   method: walk_forward_dml
-  # Sessions the treatment's own construction spans, read off the code that builds the
-  # column rather than its name. `momentum_features` in 03_financial_features computes
-  # mom_skip_recent as close.shift(21) / close.shift(252) - 1. Three quantities, and they
-  # are not the same number: the return is measured over the 231 sessions from t-252 to
-  # t-21, consecutive values of it overlap in 230 of those 231, and the maximum lookback -
-  # the oldest price any single value reads - is 252.
+  # Two things the register above cannot supply, and this is why the number is written here
+  # rather than derived. `features.windows.momentum` is a list of bar counts, not a
+  # suffix-keyed mapping, and `mom_skip_recent` is not built from any single element of it.
   #
-  # 252 is declared because it is the largest of the three, so a block of that length spans
-  # the 231-session dependence whichever way the arithmetic is read. That is the reason to
-  # prefer it, rather than it being right by accident.
-  #
-  # It is declared because the placebo block has to span it. A block permutation exists to
-  # keep the treatment's serial dependence while breaking its alignment with the outcome,
-  # and a block shorter than the construction window breaks the dependence too - which
-  # narrows the placebo distribution and makes the p-value read stronger than the evidence
-  # is. Sized from the label buffer alone this case study would permute a 252-session
-  # momentum column in blocks of 1, 5 and 21.
-  #
-  # The register above cannot answer for this column: `features.windows.momentum` is a list
-  # of bar counts, not a suffix-keyed mapping, and `mom_skip_recent` is not built from any
-  # single element of it. Hence the explicit number here.
-  treatment_window: 252
+  # And the block has to span this window, which is the reason it is declared at all. A block
+  # permutation keeps the treatment's serial dependence while breaking its alignment with the
+  # outcome; a block shorter than the construction window breaks the dependence too, which
+  # narrows the placebo distribution and makes the p-value read stronger than the evidence is.
+  # Sized from the label buffer alone this case study permuted a 252-session momentum column
+  # in blocks of 1, 5 and 21.

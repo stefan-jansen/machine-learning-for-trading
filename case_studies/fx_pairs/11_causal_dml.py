@@ -59,7 +59,17 @@ FORCE_RETRAIN = False
 # is the production path. WORKSPACE is the other half: a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str | None = None
-SUPERSEDES_CAUSAL: str = ""
+# The three identities this run retires, one per label. Sizing the placebo block by the
+# treatment window rather than the label buffer moves `refutation.block_size`, which is part
+# of the causal identity, so every label resolves to a new hash and the registry refuses a
+# second current identity per label without being told which one it replaces. These are the
+# blocks-of-1/5/21 fits from 2026-08-21, whose p-values this run supersedes rather than
+# corrects: they measured a placebo that had already destroyed the dependence it was meant
+# to preserve. A reader on a clean clone registers a first identity and needs none of this,
+# which `supersedes_for` handles by returning None for a label it is not given.
+SUPERSEDES_CAUSAL: str = (
+    '{"fwd_ret_1d": "6e17a9b4644c", "fwd_ret_5d": "e9623aa44d9a", "fwd_ret_21d": "f53540351b6b"}'
+)
 
 # %% [markdown]
 # ## Resolve the estimand and analysis population
@@ -131,15 +141,16 @@ for horizon, values in computations.items():
 # Overlapping labels tie rows together across the outcome horizon. The treatment ties them together
 # across its own construction: `mom_skip_recent` is the return from `t-252` to `t-21`, so one value
 # covers 231 sessions and consecutive values overlap in 230 of them. `causal.treatment_window` in
-# `setup.yaml` declares 252, the maximum lookback, which is the larger of the two and therefore
-# spans the dependence either way.
+# `setup.yaml` declares 252, the oldest price any single value reads, which is the larger of the
+# three quantities in that expression and therefore spans the 231-session dependence whichever way
+# the arithmetic is read. The block takes the longer of that window and the label buffer.
 #
-# The table below prints the block the run actually used beside that declared window, and on this
-# registry they do not agree. `resolve_causal_request` sizes the block from the label buffer alone,
-# so the block is 1, 5 and 21 sessions for the three labels against a treatment whose dependence
-# runs 231. A block that short is close to an independent shuffle: it destroys the dependence the
-# permutation exists to preserve, which narrows the placebo distribution and makes `refutation_p`
-# read stronger than the evidence is. Read the two columns together rather than the p-value alone.
+# The table below prints the block the run used beside both scales it has to span, so the choice
+# can be checked rather than taken on trust. Until public #623 the block was sized from the label
+# buffer alone - 1, 5 and 21 sessions against a treatment whose dependence runs 231 - which is
+# close enough to an independent shuffle that it destroyed the dependence the permutation exists
+# to preserve, narrowing the placebo distribution and making `refutation_p` read stronger than the
+# evidence was.
 
 # %%
 pl.DataFrame(
@@ -148,9 +159,24 @@ pl.DataFrame(
         "cross_fitting_folds": [c["cv"]["n_folds"] for c in computations.values()],
         "embargo_periods": [c["cv"]["embargo_periods"] for c in computations.values()],
         "fold_unit": [c["cv"]["fold_unit"] for c in computations.values()],
-        "treatment_window": [setup["causal"]["treatment_window"] for _ in computations],
+        # The two scales the block has to span, and which of them decided it. Read from the
+        # resolved specification rather than from setup.yaml, so the table shows what the run
+        # used rather than what the file asks for. `label_horizon_steps` is the outcome
+        # horizon and is what the HAC bandwidth is sized by; `label_buffer_steps` is the CV
+        # gap and is declared deliberately longer. They are different quantities and the
+        # block is sized by neither on its own.
+        "label_buffer_steps": [
+            c["refutation"]["label_buffer_steps"] for c in computations.values()
+        ],
+        "label_horizon_steps": [
+            c["refutation"]["label_horizon_steps"] for c in computations.values()
+        ],
+        "treatment_window_steps": [
+            c["refutation"]["treatment_window_steps"] for c in computations.values()
+        ],
         "placebo_method": [c["refutation"]["method"] for c in computations.values()],
         "placebo_block_size": [c["refutation"]["block_size"] for c in computations.values()],
+        "block_size_basis": [c["refutation"]["block_size_basis"] for c in computations.values()],
         "analysis_rows": [c["analysis_population"]["n_rows"] for c in computations.values()],
         "analysis_timestamps": [
             c["analysis_population"]["n_timestamps"] for c in computations.values()
