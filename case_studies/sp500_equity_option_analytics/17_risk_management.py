@@ -59,7 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
-from case_studies.research import OfficialPopulation, open_study
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -140,18 +140,8 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 
 # %%
 _study = open_study(CASE_STUDY_ID, execution_tier="canonical")
-with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
-    _population_names = [
-        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
-    ]
-CURRENT_MEMBERS: set[str] = set()
-for _name in sorted(_population_names):
-    _population = OfficialPopulation.one(_study, name=_name)
-    _population.require_complete()
-    CURRENT_MEMBERS.update(_population.members)
-print(
-    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
-)
+CURRENT_MEMBERS = current_prediction_members(_study)
+print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}

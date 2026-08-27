@@ -77,7 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
-from case_studies.research import OfficialPopulation, open_study
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -179,23 +179,18 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # configuration enter the ranking as separate candidates, with near-identical scores, and the
 # published leaders are then fewer distinct strategies than they appear to be.
 #
-# `OfficialPopulation.one` resolves the generation in force for a name: the one snapshot in the
-# chain that nothing supersedes, refusing rather than guessing if the chain has forked.
+# `current_prediction_members` is that filter, and it takes two steps because neither is enough
+# alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
+# generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
+# has forked - and then subtracts the members those names have retired. The subtraction is needed
+# because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
+# and stays in force under its own name forever, so the union alone hands a retired generation back
+# through the frozen name that still lists it.
 
 # %%
 _study = open_study(CASE_STUDY, execution_tier="canonical")
-with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
-    _population_names = [
-        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
-    ]
-CURRENT_MEMBERS: set[str] = set()
-for _name in sorted(_population_names):
-    _population = OfficialPopulation.one(_study, name=_name)
-    _population.require_complete()
-    CURRENT_MEMBERS.update(_population.members)
-print(
-    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
-)
+CURRENT_MEMBERS = current_prediction_members(_study)
+print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)

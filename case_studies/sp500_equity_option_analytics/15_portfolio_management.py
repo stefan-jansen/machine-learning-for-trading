@@ -50,7 +50,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import OfficialPopulation, open_study
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -104,15 +104,7 @@ print(
 )
 
 _study = open_study(CASE_STUDY_ID, execution_tier="canonical")
-with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
-    _population_names = [
-        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
-    ]
-CURRENT_MEMBERS: set[str] = set()
-for _name in sorted(_population_names):
-    _population = OfficialPopulation.one(_study, name=_name)
-    _population.require_complete()
-    CURRENT_MEMBERS.update(_population.members)
+CURRENT_MEMBERS = current_prediction_members(_study)
 
 # %% [markdown]
 # ## 1. Advance the leading baselines

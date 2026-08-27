@@ -61,7 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
-from case_studies.research import OfficialPopulation, open_study
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -138,18 +138,8 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 
 # %%
 _study = open_study(CASE_STUDY, execution_tier="canonical")
-with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
-    _population_names = [
-        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
-    ]
-CURRENT_MEMBERS: set[str] = set()
-for _name in sorted(_population_names):
-    _population = OfficialPopulation.one(_study, name=_name)
-    _population.require_complete()
-    CURRENT_MEMBERS.update(_population.members)
-print(
-    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
-)
+CURRENT_MEMBERS = current_prediction_members(_study)
+print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 top_predictions = resolve_best_predictions(
