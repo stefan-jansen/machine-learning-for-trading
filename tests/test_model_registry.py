@@ -256,8 +256,8 @@ def test_registering_stage_maps_to_its_actual_entry_point(
 def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
     """Discover all model notebooks (stage >= 06) across case studies.
 
-    Returns (case_study, stage_stem, notebook_path) tuples sorted by
-    case study order then filename within each case study.
+    Returns (case_study, stage_stem, notebook_path) tuples in case-study and stage order,
+    with lettered producers before the bare aggregate for the same stage number.
     """
     tests = []
     for cs in CASE_STUDIES:
