@@ -99,6 +99,7 @@ def full_coverage_prediction_sql(
     prediction_set_alias: str = "p",
     training_run_alias: str = "t",
     prediction_metric_alias: str = "pm",
+    population_subquery: str | None = None,
 ) -> str:
     """SQL clause retaining the maximum-coverage rows for each family and label.
 
@@ -106,12 +107,18 @@ def full_coverage_prediction_sql(
     its peers even when no fold-level IC is NULL. Comparing or selecting those
     rows against full-coverage checkpoints changes the evaluation sample. The
     eligible surface therefore keeps rows whose ``ic_n_days`` equals the maximum
-    for the same ``(split, family, label)``.
+    for the same ``(split, family, label)``. When ``population_subquery`` is
+    supplied, that maximum is computed within the explicitly locked prediction
+    population rather than across retired identities.
 
     The surrounding query must join ``prediction_sets``, ``training_runs``, and
     ``prediction_metrics`` under the supplied aliases. The returned fragment
-    begins with ``" AND "`` and takes no bound parameters.
+    begins with ``" AND "``. Any bound parameters required by
+    ``population_subquery`` belong to the surrounding query.
     """
+    population_clause = ""
+    if population_subquery is not None:
+        population_clause = f" AND p_full.prediction_hash IN ({population_subquery})"
     return f"""
         AND {prediction_metric_alias}.ic_n_days IS NOT NULL
         AND {prediction_metric_alias}.ic_n_days = (
@@ -124,6 +131,7 @@ def full_coverage_prediction_sql(
             WHERE p_full.split = {prediction_set_alias}.split
               AND t_full.family = {training_run_alias}.family
               AND t_full.label = {training_run_alias}.label
+              {population_clause}
         )
     """
 
