@@ -959,6 +959,7 @@ jobs:
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
             tests/test_sequence_dataset.py \
+            tests/test_sequence_identity_roundtrip.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_runtime.py \
