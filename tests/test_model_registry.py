@@ -161,25 +161,15 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
-# Notebooks whose expected entry point is the MODEL name rather than their own stem.
+# Notebooks whose recorded entry point is the MODEL name rather than their own stem, which is
+# what the pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote.
 #
-# Three of the four entries describe what the notebook still writes: `etfs/10_dl_tsmixer`,
-# `sp500_options/09a_lstm` and `sp500_options/09b_patchtst` all call
-# `run_dl_cv(..., notebook=f"dl_{MODEL}")`, and `deep_learning.py:1658` passes that straight
-# through as `entry_point=notebook`, so the expectation matches the value written.
-#
-# The `cme_futures/09_dl_lstm` entry expects a value nothing writes. That notebook has been
-# migrated onto `open_study`, reaching it through
-# `case_studies/cme_futures/research_workflow.py:82`, which forwards no `entry_point`, so
-# `results.py` records `study.entry_point` and its rows carry NULL. Tracked as
-# ml4t/agent-workspace#930, which belongs to that case study rather than to this file.
-#
-# `sp500_equity_option_analytics` has no entry here: all ten of its registering notebooks pass
-# their own stem. That is the value which answers the question the column exists for - which
-# notebook produced this row - where `dl_lstm` names a model that more than one case study
-# fits. The fleet currently has both conventions in circulation: on 2026-08-25 the only two
-# non-NULL `entry_point` values in all nine registries were `09_dl_lstm` and `dl_tsmixer`, one
-# a stem and one a model name.
+# `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
+# their stem, which is the value that answers the question the column exists for - which
+# notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
+# studies can fit the same one. The remaining four entries are other case studies' to settle,
+# and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
+# the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
 _DL_FAMILY_ENTRY_POINTS = {
     ("cme_futures", "09_dl_lstm"): "dl_lstm",
     ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
@@ -193,7 +183,28 @@ def _expected_entry_point(case_study: str, stage: str) -> str:
     return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
 
 
-_STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
+# The letter is captured for `_stage_sort_key` below. Existing callers read `group(0)` for the
+# prefix length and `group(1)` for the number; neither moves.
+_STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def _stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order a stage's lettered siblings before the bare notebook that aggregates them.
+
+    Plain filename order puts `11_latent_factors.py` ahead of `11a_pca.py`, because `_` sorts
+    below `a`. That is backwards wherever the bare notebook is a read-only view over what its
+    lettered siblings register: it runs first, finds nothing, and raises - for
+    `sp500_equity_option_analytics` with "no latent-factor validation rows are registered; run
+    the five sibling notebooks first".
+
+    The same key is in `tests/test_case_studies.py`, where it was added for the pipeline
+    collection; `_collect_model_notebooks` kept a plain `sorted(...)` and so kept the failure.
+    """
+    match = _STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
 
 
 def _quick_parameters(
@@ -272,7 +283,7 @@ def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
         cs_dir = PROD_CS_DIR / cs
         if not cs_dir.exists():
             continue
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py"), key=_stage_sort_key):
             if notebook.name.startswith("_"):
                 continue
             match = _STAGE_RE.match(notebook.name)
@@ -297,6 +308,16 @@ def test_collection_includes_us_firm_linear_stage() -> None:
         case_study == "us_firm_characteristics" and stage == "05_linear"
         for case_study, stage, _ in MODEL_TESTS
     )
+
+
+def test_lettered_producers_sort_before_the_stage_aggregate() -> None:
+    paths = [Path(name) for name in ("11_latent_factors.py", "11b_ipca.py", "11a_pca.py")]
+
+    assert [path.name for path in sorted(paths, key=_stage_sort_key)] == [
+        "11a_pca.py",
+        "11b_ipca.py",
+        "11_latent_factors.py",
+    ]
 
 
 # ---------------------------------------------------------------------------
