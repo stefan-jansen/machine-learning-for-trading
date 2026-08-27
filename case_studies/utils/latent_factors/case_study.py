@@ -353,7 +353,6 @@ def training_input_identity(
             load_label_spec(case_study_id, label),
             f"labels/{label}.parquet",
         ),
-        "setup": case_dir / "config" / "setup.yaml",
     }
     temporal_path = resolve_storage_path(
         case_study_id,
@@ -380,7 +379,7 @@ def training_input_identity(
     aggregate = sha256(
         "\n".join(f"{item['role']}={item['sha256']}" for item in files).encode()
     ).hexdigest()
-    return {"version": "v1", "files": files, "input_digest": f"sha256:{aggregate}"}
+    return {"version": "v2", "files": files, "input_digest": f"sha256:{aggregate}"}
 
 
 def _sha256_file(path: Path) -> str:
