@@ -61,6 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -125,6 +126,21 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # carry a few decision dates from before it that inflate their raw count without
 # covering any more of the modeling window.
 
+# %% [markdown]
+# **The advancing configurations are drawn from the populations in force, not from every generation
+# the registry holds.** A population is immutable and refitting one publishes a snapshot that
+# supersedes the old, with both left readable; nothing in the read path filters on that
+# (`case_studies/utils/registry/queries.py` contains no occurrence of `supersed`). Unfiltered, a
+# retired generation competes for a slot against its own replacement, and the funnel below reports
+# fewer distinct strategies than it appears to. The set is passed into the query rather than
+# applied to its output because it also scopes the full-coverage bar the ranking is measured
+# against.
+
+# %%
+_study = open_study(CASE_STUDY, execution_tier="canonical")
+CURRENT_MEMBERS = current_prediction_members(_study)
+print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 top_predictions = resolve_best_predictions(
     CASE_STUDY,
@@ -134,6 +150,7 @@ top_predictions = resolve_best_predictions(
     top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
     checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY),
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 )
 selected_prediction_hashes = top_predictions["prediction_hash"].to_list()
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY)}
@@ -144,6 +161,7 @@ baseline_pool = resolve_best_backtest_runs(
     stage="signal",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 allocation_pool = resolve_best_backtest_runs(
     CASE_STUDY,
@@ -152,6 +170,7 @@ allocation_pool = resolve_best_backtest_runs(
     stage="allocation",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -625,12 +644,15 @@ aligned = (
     .join(leader_returns.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
     .sort("timestamp")
 )
-nonzero = aligned.with_row_index().filter(
-    (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("challenger_ret").abs() > 1e-15)
-)
-if nonzero.is_empty():
+if aligned.is_empty():
     raise RuntimeError("The overlay and its baseline are flat across the canonical window")
-aligned = aligned.slice(nonzero["index"].min())
+# `challenger_overlays_baseline` says what a flat session on the challenger means, and here
+# the challenger is a risk overlay running on top of this exact carrier. Both are live from
+# the carrier's first traded session, so a session the overlay sits out is a position it
+# chose to hold and belongs in the comparison - it is the effect being measured. The default
+# is for two independent series, where the challenger's leading zeros are a warmup before its
+# first signal, and applying it here would delete the overlay's largest effect and pull
+# `sharpe_diff` toward zero in the direction the overlay is under test.
 paired_risk = compute_paired_uncertainty(
     aligned["challenger_ret"],
     aligned["baseline_ret"],
@@ -639,6 +661,7 @@ paired_risk = compute_paired_uncertainty(
     label=LABEL,
     n_boot=2000,
     seed=SEED,
+    challenger_overlays_baseline=True,
 )
 
 # %% [markdown]
