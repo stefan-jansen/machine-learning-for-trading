@@ -55,6 +55,7 @@ def require_fold_scoped_temporal_holdout_coverage(
     requested_fold: dict[str, Any],
     temporal_by_fold: Any,
     *,
+    source_timeline: Any,
     date_col: str = "timestamp",
     fold_col: str = "fold",
 ) -> None:
@@ -84,8 +85,15 @@ def require_fold_scoped_temporal_holdout_coverage(
     val_start, val_end = boundary("val_start"), boundary("val_end")
     if not dates.is_between(train_start, train_end, closed="both").any():
         raise ValueError("fold-scoped temporal holdout has no requested training rows")
+    if isinstance(source_timeline, pl.Series):
+        source_dates = source_timeline.cast(dtype, strict=False)
+    else:
+        source_dates = pl.Series(source_timeline).cast(dtype, strict=False)
+    expected = source_dates.filter(source_dates.is_between(val_start, val_end, closed="both"))
+    if expected.is_empty():
+        raise ValueError("source data has no observations in the holdout evaluation window")
     evaluation = dates.filter(dates.is_between(val_start, val_end, closed="both"))
-    if evaluation.is_empty() or evaluation.max() < val_end:
+    if evaluation.is_empty() or evaluation.max() < expected.max():
         raise ValueError("fold-scoped temporal holdout does not cover the evaluation endpoint")
 
 

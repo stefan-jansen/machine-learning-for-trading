@@ -300,11 +300,32 @@ def test_holdout_temporal_fold_requires_training_rows_and_the_evaluation_endpoin
         }
     )
 
-    require_fold_scoped_temporal_holdout_coverage(split, artifact)
+    source = pl.Series(
+        "timestamp",
+        [date(2019, 1, 2), date(2021, 1, 4), date(2021, 12, 30)],
+    )
+    require_fold_scoped_temporal_holdout_coverage(
+        split,
+        artifact,
+        source_timeline=source,
+    )
+
+    non_trading_end = {**split, "val_end": "2022-01-01T00:00:00"}
+    require_fold_scoped_temporal_holdout_coverage(
+        non_trading_end,
+        artifact,
+        source_timeline=source,
+    )
 
     with pytest.raises(ValueError, match="evaluation endpoint"):
-        require_fold_scoped_temporal_holdout_coverage(split, artifact.head(2))
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            artifact.head(2),
+            source_timeline=source,
+        )
     with pytest.raises(ValueError, match="no holdout fold"):
         require_fold_scoped_temporal_holdout_coverage(
-            split, artifact.with_columns(pl.lit(1).alias("fold"))
+            split,
+            artifact.with_columns(pl.lit(1).alias("fold")),
+            source_timeline=source,
         )

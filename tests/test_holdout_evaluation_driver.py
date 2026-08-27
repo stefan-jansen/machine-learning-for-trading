@@ -119,10 +119,23 @@ def test_a_spec_carrying_fold_derivations_requires_an_adapter_hook(
 
     spec = {"family": "linear", "computation": {"expected_prediction_keys": {}}}
     with pytest.raises(NotImplementedError, match="cannot re-key"):
-        prepare_locked_holdout_spec(study, spec)
+        prepare_locked_holdout_spec(
+            study,
+            spec,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+        )
 
     clean = {"family": "linear", "computation": {"cv": {}}}
-    assert prepare_locked_holdout_spec(study, clean) == clean
+    assert (
+        prepare_locked_holdout_spec(
+            study,
+            clean,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+        )
+        == clean
+    )
 
 
 def test_adapter_may_change_only_fold_derived_fields(
@@ -131,7 +144,7 @@ def test_adapter_may_change_only_fold_derived_fields(
     study, _, _ = _locked_study(tmp_path, monkeypatch)
     from case_studies.research import models
 
-    def prepare(_study, spec):
+    def prepare(_study, spec, **_checkpoint):
         spec["computation"]["expected_prediction_keys"] = {
             "digest": "holdout",
             "n_rows": 2,
@@ -151,10 +164,15 @@ def test_adapter_may_change_only_fold_derived_fields(
             "expected_prediction_keys": {"digest": "validation", "n_rows": 4, "n_folds": 2},
         },
     }
-    prepared = prepare_locked_holdout_spec(study, spec)
+    prepared = prepare_locked_holdout_spec(
+        study,
+        spec,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+    )
     assert prepared["computation"]["expected_prediction_keys"]["digest"] == "holdout"
 
-    def remove_manifest(_study, value):
+    def remove_manifest(_study, value, **_checkpoint):
         value["computation"].pop("expected_prediction_keys")
         return value
 
@@ -164,9 +182,14 @@ def test_adapter_may_change_only_fold_derived_fields(
         lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": remove_manifest}),
     )
     with pytest.raises(ValueError, match="removed required holdout fold derivations"):
-        prepare_locked_holdout_spec(study, spec)
+        prepare_locked_holdout_spec(
+            study,
+            spec,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+        )
 
-    def change_model(_study, value):
+    def change_model(_study, value, **_checkpoint):
         value["config_name"] = "different"
         return value
 
@@ -176,4 +199,9 @@ def test_adapter_may_change_only_fold_derived_fields(
         lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": change_model}),
     )
     with pytest.raises(ValueError, match="outside the holdout fold derivations"):
-        prepare_locked_holdout_spec(study, spec)
+        prepare_locked_holdout_spec(
+            study,
+            spec,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+        )

@@ -11,13 +11,20 @@ from case_studies.utils.latent_factors.adapter import (
     _LATENT_MODELS,
     _prepare_expected_keys,
     _resolved_macro_digest,
+    reconstruct_locked_request,
 )
 
 if TYPE_CHECKING:
     from case_studies.research.workspace import Study
 
 
-def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str, Any]:
+def prepare_locked_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+) -> dict[str, Any]:
     """Resolve latent-factor eligibility against the locked holdout fold."""
     from case_studies.research.contracts import ExecutionTier
     from case_studies.research.models import locked_holdout_split
@@ -43,6 +50,7 @@ def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str,
         require_fold_scoped_temporal_holdout_coverage(
             split,
             case.temporal_by_fold,
+            source_timeline=case.dataset.get_column(case.date_col),
             date_col=case.date_col,
         )
     case.splits = [split]
@@ -55,4 +63,10 @@ def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str,
     macro = computation.get("macro_context")
     if model_name == "sdf" and isinstance(macro, dict):
         macro["resolved_fold_digest"] = _resolved_macro_digest(case)
+    reconstruct_locked_request(
+        study,
+        prepared,
+        checkpoint_kind=checkpoint_kind,
+        checkpoint_value=checkpoint_value,
+    )
     return prepared
