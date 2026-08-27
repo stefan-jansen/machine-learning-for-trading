@@ -727,9 +727,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
 
-    # Additive, and it costs no recompute: _causal_source_identity hashes
-    # case_studies/utils/causal.py and nothing else, so a column outside the spec
-    # moves no causal_hash and invalidates no registered row.
+    # Additive, and it costs no recompute: the column is outside the causal computation
+    # specification, so it moves no causal hash and invalidates no registered row.
     if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
         db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
 
