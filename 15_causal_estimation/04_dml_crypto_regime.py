@@ -90,7 +90,11 @@ from plotly.subplots import make_subplots
 from sklearn.ensemble import GradientBoostingRegressor
 
 import utils.style  # noqa: F401  # registers + activates the ml4t Plotly template
-from case_studies.utils.causal import block_permute, manual_dml_timeseries
+from case_studies.utils.causal import (
+    block_permute,
+    empirical_permutation_p,
+    manual_dml_timeseries,
+)
 from utils.modeling import load_modeling_dataset
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
@@ -501,10 +505,14 @@ for block_size in BLOCK_SIZES:
         p_mean = float(np.mean(placebo_effects_block))
         p_std = float(np.std(placebo_effects_block))
         z = (dml_effect - p_mean) / p_std if p_std > 0 else np.inf
-        block_fdr = float(np.mean(np.abs(placebo_effects_block) >= abs(dml_effect)))
-        passes = abs(z) > 2 and block_fdr < 0.05
+        # The plus-one-corrected permutation p-value, not a false discovery rate.
+        # The pass criterion below asks for p < 0.05, so with fewer than 19 placebo
+        # draws the floor of 1 / (n + 1) is already above it and no configuration
+        # can pass - which is the honest answer at that resolution.
+        block_p = empirical_permutation_p(np.asarray(placebo_effects_block), dml_effect)
+        passes = abs(z) > 2 and block_p < 0.05
     else:
-        p_mean = p_std = z = block_fdr = float("nan")
+        p_mean = p_std = z = block_p = float("nan")
         passes = False
 
     block_sweep_rows.append(
@@ -514,7 +522,7 @@ for block_size in BLOCK_SIZES:
             "placebo_mean": p_mean,
             "placebo_std": p_std,
             "z_score": z,
-            "fdr": block_fdr,
+            "permutation_p": block_p,
             "passes": passes,
         }
     )
@@ -528,11 +536,11 @@ headline = block_sweep_df.loc[BLOCK_SIZE_HEADLINE]
 placebo_mean = headline["placebo_mean"]
 placebo_std = headline["placebo_std"]
 z_score = headline["z_score"]
-fdr = headline["fdr"]
+permutation_p = headline["permutation_p"]
 
 print(
     f"\nHeadline block size: {BLOCK_SIZE_HEADLINE} bars (7d). "
-    f"z={z_score:.2f}, FDR={fdr:.1%}, "
+    f"z={z_score:.2f}, permutation p={permutation_p:.4f}, "
     f"verdict: {'PASS' if headline['passes'] else 'CAUTION'}"
 )
 print(
@@ -703,7 +711,11 @@ summary_df
 
 # %%
 # Refutation and regime difference
-refutation_str = f"z={z_score:.2f}, FDR={fdr:.1%}" if z_score is not None else "insufficient data"
+refutation_str = (
+    f"z={z_score:.2f}, permutation p={permutation_p:.4f}"
+    if z_score is not None
+    else "insufficient data"
+)
 print(f"Regime difference: {effect_diff:.4f} (t={t_diff:.2f})")
 print(f"Block permutation refutation: {refutation_str}")
 

@@ -219,7 +219,7 @@ def declared_contracts(plan: ModelPlan) -> pl.DataFrame:
     """Project a frozen plan to one visible row per declared checkpoint."""
     rows = []
     for member, spec in zip(plan.members, plan_specs(plan), strict=True):
-        computation = spec.get("computation", spec)
+        computation = spec["computation"]
         task = computation.get("task") or {}
         rows.append(
             {

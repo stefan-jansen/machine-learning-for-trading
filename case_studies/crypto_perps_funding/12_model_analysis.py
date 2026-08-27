@@ -165,18 +165,134 @@ causal_summary = pl.DataFrame(
 causal_summary
 
 # %% tags=["results"]
-# refutation_p is nullable by contract (utils/causal.py:1111), so it is reported as absent
+# refutation_p is nullable by contract (`case_studies/utils/causal.py`), so it is reported as absent
 # rather than formatted. A run whose refutation did not produce an empirical p-value is a
 # weaker result, and saying so is more useful than omitting the sentence or failing to render.
+#
+# `refutation_n_successful` is the denominator the p-value was actually computed over, and it
+# is not the requested count: `empirical_permutation_p` drops placebos whose second stage
+# returned NaN. It arrived with a migration, so a row written before the column existed
+# carries None, and `CausalResult.open` then publishes no `refutation_class` at all rather
+# than classifying on the p-value alone. This run is one of those rows.
 _refutation = causal.metrics["refutation_p"]
-_refutation_text = (
-    f"The temporal refutation p-value is **{_refutation:.3f}**."
-    if _refutation is not None
-    else "No temporal refutation p-value was registered for this estimate."
-)
+_n_successful = causal.metrics["refutation_n_successful"]
+_refutation_class = causal.metrics["refutation_class"]
+_n_placebo = causal.spec["computation"]["refutation"]["n_placebo"]
+_floor = 1.0 / (_n_placebo + 1)
+if _refutation is None:
+    _refutation_text = "No temporal refutation p-value was registered for this estimate."
+elif _refutation <= _floor:
+    # The floor pins the denominator even when the column is absent. The p-value is
+    # (1 + exceedances) / (1 + successful) with at least one in the numerator, and
+    # successful <= requested, so p <= 1/(requested + 1) is only reachable when every
+    # requested placebo succeeded and none was as extreme as the observed effect. So this
+    # branch may state the count and the exceedances without reading either back.
+    #
+    # What the floor does NOT establish is that the underlying permutation tail probability
+    # is at most 1/(n+1). That is a property of all permutations; this is a sample of n of
+    # them, and zero exceedances in a sample bounds the sample, not the population.
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, the smallest value "
+        f"{_n_placebo} permutations can produce: every placebo fit succeeded and none was "
+        f"as extreme as the observed effect. This is the Monte Carlo estimate sitting at "
+        f"its resolution floor of 1/{_n_placebo + 1}, not a bound on the permutation tail "
+        f"probability itself - resolving that finer needs more permutations, not a smaller "
+        f"reported number."
+    )
+    # Being at the floor is not the same as being able to reject from there. Below 20
+    # draws the floor itself sits above 5 %, so the run is simultaneously as extreme as
+    # its permutation count allows and unable to reject at all - the verdict has to be
+    # said out loud rather than left to the reassuring half of the sentence.
+    if _refutation_class == "Underpowered":
+        _refutation_text += (
+            f" Even so, the registered verdict is **Underpowered**: with {_n_placebo} "
+            "permutations the floor is above 5 %, so no outcome of this test could have "
+            "rejected."
+        )
+elif _n_successful is None:
+    # Off the floor the denominator matters and is not recoverable, so the count is not
+    # asserted and no pass/fail verdict is published - the registry withholds one for
+    # exactly this reason.
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, a Monte Carlo estimate "
+        f"over at most the {_n_placebo} requested permutations. How many of them actually "
+        "produced a second-stage fit is not registered for this run, so the effective "
+        "sample behind the estimate - and with it whether the draws could have rejected at "
+        "all - cannot be read back, and no pass/fail verdict is published."
+    )
+else:
+    _refutation_text = (
+        f"The temporal refutation p-value is **{_refutation:.3f}**, a Monte Carlo estimate "
+        f"over the **{_n_successful}** of {_n_placebo} requested permutations whose second "
+        f"stage produced a fit, and no finer than that sample supports. The registered "
+        f"verdict is **{_refutation_class}**"
+        + (
+            " - too few successful draws to reject at 5 % whatever the data showed. "
+            if _refutation_class == "Underpowered"
+            else ". "
+        )
+    )
+
+_effect = causal.metrics["dml_effect"]
+_se = causal.metrics["dml_se_hac"]
+_t = _effect / _se if _se else float("nan")
+# The block and the bandwidth are sized by different rules and the reader is being asked to
+# weigh a ratio built from the second. The bandwidth is not statsmodels': it requires an
+# explicit `maxlags` for both `HAC` and `hac-groupsum` and supplies no default. The
+# cube-root-of-decision-times rule is this repository's own fallback, applied in
+# `manual_dml_timeseries` in `case_studies/utils/causal.py` because no `hac_maxlags` is
+# passed, and then raised to `horizon - 1` (`run_dml_analysis` only warns and forwards).
+# The realized bandwidth is not registered - `causal_runs` stores neither `hac_maxlags` nor
+# `n_periods` - so the notebook states the rule rather than a number it cannot read back.
+#
+# The two window quantities decide the wording, not `block_size_basis`. The basis string
+# cannot carry it: `block_size = max(horizon_steps, treatment_window_steps or 1)` and the
+# basis is resolved by equality, so `label_horizon` covers both an undeclared window and a
+# declared one shorter than the horizon, while `treatment_window` includes the case where the
+# two are equal and the bandwidth already covers the block to within a lag. Only
+# `treatment_window_steps > label_horizon_steps` is the situation the caveat describes.
+_refutation_spec = causal.spec["computation"]["refutation"]
+_block = _refutation_spec["block_size"]
+_window_steps = _refutation_spec["treatment_window_steps"]
+_horizon_steps = _refutation_spec["label_horizon_steps"]
+_n_timestamps = causal.spec["computation"]["analysis_population"]["n_timestamps"]
+if _window_steps is not None and _window_steps > _horizon_steps:
+    _bandwidth_text = (
+        f"One caveat on the ratio: the placebo block spans **{_block}** bars of treatment "
+        "persistence, and the standard error behind this ratio is not sized by the same "
+        "quantity. Its HAC bandwidth is `max(label horizon - 1, cube root of the "
+        f"decision-time count)`, whose horizon term is {_horizon_steps - 1} on this run. "
+        "Neither term refers to the treatment, so whether the bandwidth happens to reach "
+        "across the block is incidental, and its realized value is not registered. "
+        "`causal_runs` stores no `hac_maxlags`, and the count the cube root is taken over is "
+        "not the one in the spec: the bandwidth counts decision times that survive "
+        "cross-fitting, while the registered "
+        f"`analysis_population.n_timestamps` of {_n_timestamps} counts the whole analysis "
+        "frame, including the first walk-forward block, which yields no out-of-fold "
+        "residuals. Nor does "
+        "the mismatch settle which way the standard error would move under a bandwidth that "
+        "did span the block: a HAC estimate is not monotonic in its bandwidth, because the "
+        "autocovariances a longer one admits can carry either sign, and the treatment's "
+        "construction window is an argument for the block rather than a derivation of the "
+        "right bandwidth. Read the ratio as provisional until the estimate is recomputed "
+        "across a range of defensible bandwidths. "
+    )
+else:
+    _bandwidth_text = (
+        f"The placebo block spans **{_block}** bars, sized by the label horizon, which is at "
+        "least as long as any construction window declared for the treatment"
+        + (" - none is declared here. " if _window_steps is None else f" ({_window_steps}). ")
+        + "So the block does not exceed the label horizon, and the standard error's "
+        "bandwidth covers it to within a lag rather than falling short of it. "
+    )
 Markdown(
-    f"The registered DML estimate is **{causal.metrics['dml_effect']:+.4g}** with "
-    f"a HAC standard error of **{causal.metrics['dml_se_hac']:.4g}**. {_refutation_text} "
+    f"The registered DML estimate is **{_effect:+.4g}** with "
+    f"a HAC standard error of **{_se:.4g}**, a ratio of **{_t:.2f}**. {_refutation_text} "
+    "Read the two together: the placebo test asks whether the estimation procedure "
+    "manufactures this effect out of permuted treatment, and the standard error asks "
+    "whether the effect is separable from zero at all. Surviving the first while failing "
+    "the second is not evidence of a causal effect. "
+    f"{_bandwidth_text}"
     "This result describes the declared causal estimand and does not rank predictive models "
     "or trading strategies."
 )
