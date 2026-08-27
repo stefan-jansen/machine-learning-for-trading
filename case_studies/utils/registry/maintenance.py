@@ -170,13 +170,16 @@ def _validate_fitted_state(source: Any, spec: dict[str, Any]) -> None:
     if not isinstance(folds, list) or not folds:
         raise ValueError("source training spec does not declare any folds")
     fold_ids = tuple(int(fold["fold"]) for fold in folds)
-    checkpoints = tuple(int(item["value"]) for item in schedule)
     config_name = spec.get("config_name")
     if not isinstance(config_name, str) or not config_name:
         raise ValueError("source training spec has no fitted-state config name")
     model_root = source.root / "run_log" / "training" / source.hash / "models"
     family = str(spec["family"])
     if family == "deep_learning":
+        try:
+            checkpoints = tuple(int(item["value"]) for item in schedule)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("deep-learning fitted state requires numeric checkpoints") from exc
         architecture = str(model.get("class"))
         if model.get("implementation") == "darts":
             from case_studies.utils.darts_forecasting import validate_darts_checkpoint_population

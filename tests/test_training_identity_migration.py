@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import joblib
 import pytest
 from torch import nn
 
@@ -90,6 +92,30 @@ def _complete_source(study, spec: dict):
         training,
         checkpoint_kind="epoch",
         checkpoint_value=5,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+        metrics={"ic_mean": 0.1},
+    )
+    assert training.complete and prediction.complete
+    return training, prediction
+
+
+def _complete_linear_source(study, spec: dict):
+    training = study.results.register_training(spec)
+    model_dir = training.root / "run_log" / "training" / training.hash / "models"
+    model_dir.mkdir(parents=True)
+    artifact = model_dir / "fold_0.joblib"
+    joblib.dump({"coefficient": [0.5]}, artifact)
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (model_dir / "manifest.json").write_text(
+        json.dumps({"files": {artifact.name: digest}}, indent=2, sort_keys=True) + "\n"
+    )
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
         split="validation",
         predictions=frame,
         expected_keys=frame.select("symbol", "timestamp", "fold_id"),
@@ -232,6 +258,29 @@ def test_version_2_result_remains_readable_after_migration_to_version_3(tmp_path
     assert Result.open(study, source.hash).complete
     assert Result.open(study, migration.target_training_hash).identity_version == 3
     assert Result.open(study, migration.target_training_hash).complete
+
+
+def test_linear_final_checkpoint_migrates_through_its_manifest(tmp_path) -> None:
+    study = _study(tmp_path)
+    source_spec = {
+        **_source_spec(),
+        "family": "linear",
+        "config_name": "ridge",
+        "computation": {
+            **copy.deepcopy(_source_spec()["computation"]),
+            "checkpoint_schedule": [{"kind": "final", "value": None}],
+            "model": {"class": "Ridge", "params": {"alpha": 1.0}},
+            "source_identity": {"linear.py": "b" * 64},
+        },
+    }
+    source, source_prediction = _complete_linear_source(study, source_spec)
+    target_spec = copy.deepcopy(source_spec)
+    target_spec["computation"]["source_identity"] = {"linear_runner": 1}
+
+    migration = migrate_equivalent_training_identity(study, source.hash, target_spec)
+
+    assert Result.open(study, migration.target_training_hash).complete
+    assert Result.open(study, migration.prediction_map[source_prediction.hash]).complete
 
 
 def test_released_result_migration_reconciles_dynamic_metric_columns(tmp_path) -> None:
