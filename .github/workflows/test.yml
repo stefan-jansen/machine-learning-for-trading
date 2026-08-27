@@ -892,7 +892,8 @@ jobs:
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
   # the reader's Docker image, which is where the environment already exists" -
   # correctly, but that job was never built, so the exclusion moved them from
-  # gated to unrun. Measured 2026-08-24 in the full environment: 392 tests, 3m21s.
+  # gated to unrun. The 26 files present on 2026-08-24 measured 392 tests, 3m21s in the full
+  # environment.
   #
   # torch alone does not reach them. Importing them pulls 110 distributions:
   # ml4t-models brings shap, numba/llvmlite and xarray, and four files
