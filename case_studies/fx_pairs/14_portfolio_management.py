@@ -171,7 +171,7 @@ def _preview_baselines(rows: pl.DataFrame) -> list[BacktestResult]:
     registered = study.backtests.table(include_preview=True).filter(
         (pl.col("stage") == "signal")
         & (pl.col("execution_tier") == "preview")
-        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
         & (pl.col("identity_status") == "current")
         & pl.col("complete")
     )

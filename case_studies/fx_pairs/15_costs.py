@@ -183,7 +183,7 @@ def _preview_leader(rows: pl.DataFrame, registered_allocations: pl.DataFrame) ->
     disagreement.
     """
     registered = registered_allocations.filter(
-        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
     )
     if registered.is_empty():
         raise RuntimeError(
@@ -209,7 +209,9 @@ if include_preview:
     # a reduction the run was told to make as a missing upstream.
     registered_allocations = _registered_preview_allocations()
     covered = catalog.filter(
-        pl.col("prediction_hash").is_in(registered_allocations.get_column("prediction_hash"))
+        pl.col("prediction_hash").is_in(
+            registered_allocations.get_column("prediction_hash").implode()
+        )
     )
     if covered.is_empty():
         raise RuntimeError(
