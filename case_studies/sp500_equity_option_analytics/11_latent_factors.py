@@ -73,6 +73,7 @@ from case_studies.research import (
     PredictionCatalog,
     configured_model_menu,
     open_study,
+    superseded_members,
 )
 from utils.paths import REPO_ROOT
 from utils.style import COLORS, show_plotly_with_alt
@@ -147,7 +148,16 @@ pl.DataFrame(
 #
 # `OfficialPopulation.one` resolves the snapshot in force for a name: the one member of the
 # chain that nothing supersedes, refusing rather than guessing if the chain has forked. The five
-# populations' members are what this notebook reports on.
+# populations' members are what this notebook reports on, minus anything those names have since
+# retired - a narrowed or preview run freezes its own snapshot and stays in force under its own
+# name forever, so the union of tips alone hands a retired generation back.
+#
+# **Filtering the catalog to the members is not the same as checking the members are there.** A
+# population is created before its members finish fitting, so an interrupted run leaves a member
+# absent from the catalog rather than incomplete in it, and `all_complete` below is computed over
+# the rows that did arrive - it passes. Both directions are asserted: `require_complete` says
+# every member resolves to a finished prediction set, and the difference below says the catalog
+# names no member the populations do not.
 
 # %% tags=["results"]
 catalog = (
@@ -163,7 +173,16 @@ if catalog.is_empty():
 current_members: set[str] = set()
 for model_name in sorted(declared_models):
     population = OfficialPopulation.one(study, name=f"{CASE_STUDY_ID}-{model_name}-validation-v1")
+    population.require_complete()
     current_members.update(population.members)
+current_members -= superseded_members(study, member_kind="prediction")
+absent = sorted(current_members - set(catalog["prediction_hash"].to_list()))
+if absent:
+    raise RuntimeError(
+        f"{len(absent)} member(s) of the populations in force are not in the catalog: "
+        f"{', '.join(absent[:5])}. A population is published before its members finish "
+        "fitting, so an interrupted run leaves the summary below short without saying so."
+    )
 retired = catalog.height - catalog.filter(pl.col("prediction_hash").is_in(current_members)).height
 catalog = catalog.filter(pl.col("prediction_hash").is_in(current_members))
 print(

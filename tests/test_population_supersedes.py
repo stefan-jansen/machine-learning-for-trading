@@ -339,6 +339,26 @@ class TestTheSetASelectingStageConsumes:
 
         assert current_prediction_members(study, verify_members=False) == frozenset(MEMBERS_ONE)
 
+    def test_a_workspace_reads_the_released_registry_s_names(self, tmp_path: Path) -> None:
+        """Reading names from `study.root` alone publishes a set the catalog then overlays.
+
+        `Study.open` never copies the released `run_log` into a workspace, and the workspace
+        gets its own `official_populations` created schema-complete and empty. Names read from
+        one root and retirements computed across both is a mismatch in the direction that
+        loses live members: the reader below would resolve nothing at all.
+        """
+        release_root = _seed_release(tmp_path)
+        published = Study.open("etfs", release_root=release_root, workspace=tmp_path / "author")
+        first = _publish(published, MEMBERS_ONE)
+        _publish(published, MEMBERS_TWO, supersedes=first.hash)
+        released_db = published.release_case_root / "run_log" / "registry.db"
+        released_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(published.root / "run_log" / "registry.db", released_db)
+
+        reader = Study.open("etfs", release_root=release_root, workspace=tmp_path / "reader")
+        assert reader.root != reader.release_case_root
+        assert current_prediction_members(reader, verify_members=False) == frozenset(MEMBERS_TWO)
+
     def test_a_registry_with_no_populations_yields_an_empty_set(self, tmp_path: Path) -> None:
         study = Study.open(
             "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
