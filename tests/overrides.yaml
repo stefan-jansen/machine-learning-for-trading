@@ -2000,8 +2000,34 @@ case_studies/sp500_options/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/sp500_options/06_linear:
+  # The reductions these budgets were measured against, restored. #446 removed
+  # NUM_BOOST_ROUND and #560 removed MAX_FOLDS and MAX_SYMBOLS from both entries, in each case
+  # because the notebook could no longer receive that parameter - and left the timeouts, which
+  # had been priced for a two-fold, five-symbol run, applied to the full config set. The
+  # entries have been running the whole sweep on a fraction's budget since 2026-08-20, which
+  # passes on a quiet machine and fails under load. Restoring the reduction is the fix rather
+  # than raising the number: a preview that runs the full sweep is not a preview.
+  #
+  # `folds: [0, 1]` is the whole walk-forward set, because evaluation.n_splits is 2 here - it
+  # matches the MAX_FOLDS: 2 it replaces exactly, and is stated rather than dropped so the
+  # entry says which folds it runs. max_symbols is the reduction that actually bites.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/sp500_options/07_gbm:
+  # Same restoration as 06_linear above, plus the iteration cap. NUM_BOOST_ROUND: 5 has no
+  # direct equivalent: `max_iterations` now decides the checkpoint schedule with
+  # `checkpoint_interval`, whose default is 50, so capping iterations at 5 alone would publish
+  # a run with no checkpoints at all. 20 and 10 give two, which is what
+  # nasdaq100_microstructure/07_gbm declares.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0, 1]
+      max_iterations: 20
+      max_symbols: 5
   timeout: 180
 case_studies/sp500_options/08_tabular_dl:
   # DEVICE and POPULATION_NAME travel together. The device is inside the training
