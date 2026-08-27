@@ -243,7 +243,8 @@ CREATE TABLE IF NOT EXISTS candidate_sets (
     member_kind              TEXT NOT NULL,
     comparison_contract_json TEXT NOT NULL,
     created_at               TEXT NOT NULL,
-    git_commit               TEXT
+    git_commit               TEXT,
+    supersedes_hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_set_members (
@@ -732,6 +733,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # moves no causal_hash and invalidates no registered row.
     if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
         db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
+
+    # The candidate-set equivalent of the line above. A candidate set is derived from a
+    # registry that moves, so re-running the stage that freezes it produces a second set
+    # under the same name; without a declared predecessor the name resolves to two live
+    # identities and every reader of it raises.
+    if "candidate_sets" in tables and not _table_has_column(
+        db, "candidate_sets", "supersedes_hash"
+    ):
+        db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:

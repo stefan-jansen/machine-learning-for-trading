@@ -54,6 +54,8 @@
 # %%
 """Run the declared risk-overlay grid on the surviving crypto perpetuals configuration."""
 
+import json
+
 import plotly.graph_objects as go
 import polars as pl
 
@@ -323,20 +325,47 @@ keyed = results.with_columns(
 # One row per label and control. `sharpe_change` and `drawdown_change` are against that label's
 # no-overlay result, which is the only comparison the stage supports: the overlay row and the
 # baseline row differ in the `risk` field and in nothing else.
+#
+# That last clause has to be enforced, not assumed. Joining an overlay to its baseline on the
+# label alone would pair them whenever they merely share a label, and the registry keeps every
+# generation ever run - so an overlay measured against a superseded baseline would be reported
+# as a difference against the current one, and the number would look ordinary. The join key
+# below is the whole specification with the control removed, which is a statement of exactly
+# what the paired difference claims. `chapter` and `preset_path` come out with it: the first
+# changes because the overlay is a later chapter's run, the second names a directory on the
+# machine that ran it, and neither is part of what a strategy is.
+
+
+# %%
+def baseline_key(spec_json: str) -> str:
+    """The specification an overlay shares with the result it is measured against."""
+    spec = json.loads(spec_json)
+    spec.pop("chapter", None)
+    metadata = spec.get("backtest_config", {}).get("metadata", {})
+    metadata.pop("chapter", None)
+    metadata.pop("preset_path", None)
+    spec.get("strategy", {}).pop("risk", None)
+    return json.dumps(spec, sort_keys=True)
+
 
 # %% tags=["results"]
+keyed = keyed.with_columns(
+    pl.col("spec_json").map_elements(baseline_key, return_dtype=pl.String).alias("baseline_key")
+)
 no_overlay = keyed.filter(
     pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
 ).select(
-    "label",
+    "baseline_key",
     pl.col("sharpe").alias("baseline_sharpe"),
     pl.col("max_drawdown").alias("baseline_drawdown"),
     pl.col("num_trades").alias("baseline_trades"),
     pl.col("traded_folds").alias("baseline_traded_folds"),
 )
+if no_overlay.get_column("baseline_key").n_unique() != no_overlay.height:
+    raise RuntimeError("two selected baselines share one specification")
 overlay = (
     keyed.filter(pl.col("stage") == "risk_overlay")
-    .join(no_overlay, on="label", how="inner")
+    .join(no_overlay, on="baseline_key", how="inner")
     .with_columns(
         (pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_change"),
         (pl.col("max_drawdown") - pl.col("baseline_drawdown")).alias("drawdown_change"),
