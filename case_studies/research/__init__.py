@@ -42,7 +42,12 @@ from .model_planning import (
     require_declared_menu_coverage,
 )
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
-from .population import OfficialPopulation, research_name
+from .population import (
+    OfficialPopulation,
+    population_supersedes,
+    research_name,
+    superseded_members,
+)
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
@@ -101,11 +106,13 @@ __all__ = [
     "expected_prediction_hashes",
     "planned_model_plan",
     "primary_label",
+    "population_supersedes",
     "research_name",
     "resolved_model_plan",
     "run_backtests",
     "run_locked_holdout",
     "run_model_population",
+    "superseded_members",
     "run_models",
     "run_official_model_subset",
     "run_official_models",
