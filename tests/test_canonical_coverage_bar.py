@@ -62,6 +62,18 @@ def test_the_bar_is_the_family_best_across_every_prediction(case_dir: Path) -> N
     )
 
 
+def test_the_bar_is_scoped_to_an_explicit_population(case_dir: Path) -> None:
+    bar = queries._canonical_family_coverage_bar(
+        "fixture",
+        "fwd_ret_5d",
+        "validation",
+        case_dir,
+        prediction_hashes={"short"},
+    )
+
+    assert bar == {"gbm": 480}
+
+
 def test_a_prediction_that_cannot_be_evaluated_does_not_set_the_bar(
     case_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

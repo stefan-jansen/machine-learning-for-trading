@@ -40,6 +40,10 @@ class ResearchLock:
             raise ValueError("research lock object differs from its immutable registry record")
         return reopened
 
+    def candidate_set(self) -> CandidateSet:
+        """Open the immutable candidate set recorded by this lock."""
+        return CandidateSet.open(self.study, str(self.record["candidate_set_hash"]))
+
 
 def _canonical_fold_value(value: Any) -> str:
     return json.dumps(canonical_value(value), sort_keys=True, separators=(",", ":"))

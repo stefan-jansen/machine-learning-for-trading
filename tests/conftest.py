@@ -376,6 +376,25 @@ def seeded_output_dir(tmp_path_factory):
 
     seed_results(output_dir, CASE_STUDY_IDS)
 
+    # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
+    # Mark that existing fixture root explicitly so Study.open does not confuse it with an
+    # unrelated directory and so preview outputs remain under this test worker's output root.
+    crypto_root = output_dir / "crypto_perps_funding"
+    (crypto_root / ".study.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case_study": "crypto_perps_funding",
+                "baseline_source_commit": "test-fixture",
+                "baseline_manifest_sha256": "test-fixture",
+                "fixture": True,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
     # Symlink AQR factor data so AQRFactorProvider finds it at ~/ml4t/data/aqr_factors
     aqr_src = data_path.parent / "data" / "factors" / "aqr" if data_path else None
     if aqr_src is None:

@@ -1128,6 +1128,46 @@ def _observed_cadence(frame, timestamp: str) -> pd.Timedelta:
     return pd.Timedelta(cadence)
 
 
+def _treatment_persistence_steps(setup: dict[str, Any], treatment: str) -> int | None:
+    """Bars the treatment's own construction window spans, from `features.windows`.
+
+    A 14-day z-score is autocorrelated over its whole window whatever the label
+    horizon is, so a placebo that permutes in blocks shorter than that window
+    destroys the dependence the permutation exists to preserve. `setup.yaml`
+    already declares every window once, keyed by the suffix the emitted column
+    carries, so the number is read from there rather than parsed out of the
+    column name. Returns None when the register declares no window for this
+    treatment, which the caller records rather than papers over.
+    """
+    # An explicit declaration in the causal block wins. The feature register below can only
+    # answer for a column whose family is suffix-keyed, and eight of the nine treatments are
+    # not: cme's `carry_pct` has no `carry` family, etfs' `skip_recent_6_1` sits under a family
+    # that is a bare int, us_firm and us_equities_panel declare no windows at all. Contorting
+    # the register to reach them would have meant renaming keys the feature code reads by name.
+    # Declared next to `treatment` and `confounders`, which is where a reader looks for what
+    # the treatment is, and where the derivation can be written down beside it.
+    declared = (setup.get("causal") or {}).get("treatment_window")
+    if declared is not None:
+        return max(1, int(declared))
+    windows = (setup.get("features") or {}).get("windows") or {}
+    for family, suffixes in windows.items():
+        prefix = f"{family}_"
+        if not treatment.startswith(prefix):
+            continue
+        # Only the suffix-keyed mapping says which window *this* column carries.
+        # The register also holds bare ints and lists of bar counts for families
+        # whose columns are named some other way (etfs `skip_recent: 21`, and
+        # `momentum: [5, 10, 21, ...]`), and guessing which element a treatment
+        # was built from would put a wrong block size behind a right-looking
+        # number. Those return None, and the caller warns.
+        if not isinstance(suffixes, dict):
+            continue
+        declared = suffixes.get(treatment[len(prefix) :])
+        if declared is not None:
+            return max(1, int(declared))
+    return None
+
+
 def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], seed: int):
     configured = dict(config.get("params") or {})
     supplied = dict(overrides.get("nuisance_params") or {})
@@ -1325,6 +1365,43 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
     except ValueError:
         embargo = embargo_from_buffer(mds.label_buffer)
+    # Two separate scales create the serial dependence the placebo has to preserve, and the
+    # block spans the longer of them: the overlapping labels span the label horizon, and the
+    # treatment's own construction window spans itself. Sizing by the horizon alone permutes
+    # a 126-session momentum column in blocks of 21, which is close enough to an independent
+    # shuffle that the p-value it produces does not mean what it reads as.
+    treatment_window_steps = _treatment_persistence_steps(setup, treatment)
+    if treatment_window_steps is None:
+        # A canonical run refuses rather than warns. A warning still leaves a registered
+        # result whose refutation is weaker than it reads, and nothing downstream can tell
+        # it from one whose block was sized correctly.
+        #
+        # Preview keeps the warning. That tier exists to run reduced and be thrown away, so
+        # failing it would block CI on every case study that has not declared a window yet
+        # without protecting any registered number.
+        if tier is not ExecutionTier.PREVIEW:
+            raise ValueError(
+                f"{study.case_study}: no construction window is declared for treatment "
+                f"{treatment!r}, so the placebo block would span only the label buffer "
+                f"({buffer_steps} bars). Set `causal.treatment_window` in setup.yaml to the "
+                "number of bars the treatment's own construction spans, read off the code "
+                "that builds the column rather than its name. A canonical refutation will "
+                "not be registered against a block that cannot be shown to span the "
+                "treatment. One bar is a valid answer for a column built from quantities "
+                "carrying the row's own timestamp, and is how it is said."
+            )
+        warnings.warn(
+            f"{study.case_study}: no construction window is declared for treatment "
+            f"{treatment!r}, so the placebo block spans only the label buffer "
+            f"({buffer_steps} bars). If the treatment is a rolling statistic, set "
+            "`causal.treatment_window` in setup.yaml so the block can span it.",
+            UserWarning,
+            stacklevel=2,
+        )
+    block_size = max(buffer_steps, treatment_window_steps or 1)
+    block_size_basis = (
+        "treatment_window" if block_size == treatment_window_steps else "label_buffer"
+    )
     nuisance_params = _resolve_nuisance_params(config, request["overrides"], seed)
     key_frame = analysis.select(mds.entity_cols[0], mds.date_col)
     if key_frame.n_unique([mds.entity_cols[0], mds.date_col]) != key_frame.height:
@@ -1360,7 +1437,18 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         "refutation": {
             "method": "within_symbol_contiguous_block_permutation",
             "n_placebo": n_placebo,
-            "block_size": buffer_steps,
+            "block_size": block_size,
+            "block_size_basis": block_size_basis,
+            "label_buffer_steps": buffer_steps,
+            # The quantity the second-stage HAC bandwidth is sized by, restored here after the
+            # treatment-window work dropped it. It was emitted through e71730e4 and replaced by
+            # label_buffer_steps in e5604dff - not renamed, replaced: these are two different
+            # quantities, and the buffer is the CV gap, which is declared deliberately longer
+            # than the outcome it seals. Both are recorded now because a notebook comparing a
+            # block size against a bandwidth needs to name which scale it means. They coincide
+            # at 1 on crypto_perps_funding, which is why the substitution looked harmless.
+            "label_horizon_steps": outcome_horizon_steps,
+            "treatment_window_steps": treatment_window_steps,
             "seed": seed,
             "temporal_gap_policy": "reset",
             "observation_cadence": str(cadence),
@@ -1397,16 +1485,20 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         n_folds=n_folds,
         embargo=embargo,
         n_placebo=n_placebo,
-        # The block takes the buffer and the bandwidth takes the outcome horizon.
-        # The block holds fixed the dependence the fold structure already keeps
-        # clear, which the buffer measures; the bandwidth corrects for outcomes
-        # that overlap, and how far one outcome reaches is the horizon. The two
-        # are equal wherever a case study declares them equal, which is most of
-        # them here, so the split changes no result until one of them declares a
-        # horizon shorter than its buffer. Newey-West is not monotonic in the
-        # bandwidth, so a bandwidth taken from the wrong quantity is not a known
-        # direction of error.
-        block_size=buffer_steps,
+        # The block takes the longer of the buffer and the treatment's construction
+        # window; the bandwidth takes the outcome horizon. The block holds fixed the
+        # dependence the permutation must preserve, and there are two sources of it:
+        # the fold structure keeps the overlapping labels clear, which the buffer
+        # measures, and the treatment's own rolling window carries dependence of its
+        # own for as long as it spans. The bandwidth corrects for outcomes that
+        # overlap, and how far one outcome reaches is the horizon. Newey-West is not
+        # monotonic in the bandwidth, so a bandwidth taken from the wrong quantity is
+        # not a known direction of error.
+        #
+        # This is the same number the spec registers above. They are derived once and
+        # passed to both, because a spec that records a block the analysis did not use
+        # is worse than either value alone.
+        block_size=block_size,
         seed=seed,
         horizon=outcome_horizon_steps,
         expected_step=cadence,
@@ -1603,6 +1695,22 @@ def register_causal_run(
     if development_end is not None:
         causal_params["development_end"] = development_end
 
+    # NOTE: this spec carries no `identity_version`, and `current_causal_identities` skips
+    # every row that lacks one. A run registered through this wrapper therefore lands in
+    # `causal_runs` and resolves to nothing - the label's current identity set comes back
+    # empty, and the notebook that reads it shows no result rather than an error.
+    #
+    # It cannot be fixed by stamping version 3 here: `project_training_identity` refuses a
+    # version-3 identity whose payload is not `ml4t.resolved-spec/v1`, which only
+    # `resolve_causal_request` produces. The fix is per notebook, converting it to the
+    # resolver, and `tests/test_causal_rows_are_resolvable.py` names the ones still to go.
+    #
+    # Measured across the nine registries on 2026-08-25: crypto 2/2 rows visible, cme 6/6
+    # and fx 3/3, all resolver-written; us_firm 0/3 and etfs 0/1, both wrapper-written.
+    # sp500_options' single row IS visible, but it was written before that notebook moved
+    # to this wrapper, so the row describes a path the notebook no longer takes and its
+    # next run registers an invisible one. Five notebooks call this; do not delete it when
+    # the first two convert.
     spec = build_training_spec(
         "causal_dml",
         "dml",

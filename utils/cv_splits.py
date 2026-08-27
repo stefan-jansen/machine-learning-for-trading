@@ -79,7 +79,7 @@ def _normalize_duration(s: str) -> str:
     return s
 
 
-def _normalize_label_buffer(s: str) -> str:
+def normalize_label_buffer(s: str) -> str:
     """Normalize label buffer for pd.Timedelta compatibility.
 
     Strips ISO prefix, normalizes units, and converts month-based
@@ -199,7 +199,7 @@ def make_walk_forward_config(
     calendar_id = _map_calendar_id(eval_config.get("calendar"))
 
     # For D-unit buffers with a calendar, pass as int (trading days)
-    normalized_horizon: int | str = _normalize_label_buffer(label_horizon)
+    normalized_horizon: int | str = normalize_label_buffer(label_horizon)
     if calendar_id is not None and isinstance(normalized_horizon, str):
         d_match = re.match(r"^(\d+)D$", normalized_horizon)
         if d_match:
@@ -297,8 +297,8 @@ def generate_cv_splits(
         return precomputed
 
     # Normalize label buffer (strip ISO prefix, convert M → days)
-    label_buffer = _normalize_label_buffer(label_buffer)
-    outcome_horizon = _normalize_label_buffer(outcome_horizon or label_buffer)
+    label_buffer = normalize_label_buffer(label_buffer)
+    outcome_horizon = normalize_label_buffer(outcome_horizon or label_buffer)
 
     # Load evaluation config
     if cv_config is not None:

@@ -48,10 +48,9 @@ import warnings
 
 import matplotlib.pyplot as plt
 import polars as pl
-import torch
 import yaml
 
-from case_studies.utils.deep_learning import run_dl_cv
+from case_studies.utils.deep_learning import resolve_dl_device, run_dl_cv
 from utils.modeling import append_holdout_fold_if_needed, load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -72,6 +71,11 @@ warnings.filterwarnings("ignore")
 # `MAX_FOLDS` and `FOLD_IDS` restrict which walk-forward folds run. They exist
 # for previews; a run that uses them covers less of the history than the fold
 # plan declares, and the fold set is part of what the run is registered under.
+#
+# `DEVICE` is the backend to train on, `gpu` or `cpu`. Left empty it takes the one
+# the case study declares in `config/setup.yaml` under `modeling.dl.device`, which
+# is what a production run uses; setting it is how a run on other hardware is asked
+# for, and the device it resolves to is registered with the run either way.
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "nasdaq100_microstructure"
@@ -87,6 +91,7 @@ MAX_FOLDS = 0
 FOLD_IDS = []
 FORCE_RETRAIN = False  # Set True to retrain configs that already have complete hashes
 PREDICTION_SPLIT = "validation"
+DEVICE = ""  # empty: take modeling.dl.device from setup.yaml
 
 # %%
 set_global_seeds(SEED)
@@ -96,21 +101,16 @@ setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
 if not PRIMARY_LABEL:
     PRIMARY_LABEL = setup["labels"]["primary"]
 
-# The configured device is part of what the run is registered under, so an
-# unavailable accelerator stops the run rather than quietly retraining on CPU
-# and registering the result as though it were the requested one.
-DEVICE = setup.get("modeling", {}).get("dl", {}).get("device", "gpu")
-if DEVICE == "gpu" and not torch.cuda.is_available():
-    raise RuntimeError(
-        f"{CASE_STUDY_ID}/config/setup.yaml requests modeling.dl.device=gpu and no "
-        f"CUDA device is visible. Make the GPU available, or set the device to cpu "
-        f"in setup.yaml so the change is recorded with the run."
-    )
-device_str = "cuda" if DEVICE == "gpu" else "cpu"
+# The device is part of what the run is registered under, so an unavailable accelerator
+# stops the run rather than quietly retraining on CPU and registering the result as
+# though it were the requested one. `DEVICE` names the backend for this run and the
+# case study declares the production one; either way it is recorded, so a CPU run is
+# registered as a CPU run.
+device_str = resolve_dl_device((setup.get("modeling") or {}).get("dl"), DEVICE)
 
 print(f"Case study: {CASE_STUDY_ID} | architecture: {MODEL}")
 print(f"Label: {PRIMARY_LABEL} (from config/setup.yaml)")
-print(f"Device: {device_str} (configured {DEVICE})")
+print(f"Device: {device_str} (from {'DEVICE' if DEVICE else 'setup.yaml'})")
 print(f"Window: {LOOKBACK} one-minute observations | training epochs: {N_EPOCHS}")
 
 # %% [markdown]
