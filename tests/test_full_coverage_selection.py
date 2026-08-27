@@ -219,7 +219,12 @@ def test_canonical_backtest_population_is_filtered_before_run_ranking(
     _build_registry(case_dir)
     monkeypatch.setattr(
         "case_studies.utils.registry.queries.canonical_coverage_days",
-        lambda case_study, label, split, prediction_hash, case_dir: 4,
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
     )
 
     selected = resolve_best_backtest_runs(
@@ -230,10 +235,37 @@ def test_canonical_backtest_population_is_filtered_before_run_ranking(
         top_n=1,
         case_dir=case_dir,
         coverage_window="canonical",
-        prediction_hashes={"full_b"},
+        prediction_hashes={"partial"},
     )
 
-    assert selected["prediction_hash"].to_list() == ["full_b"]
+    assert selected["prediction_hash"].to_list() == ["partial"]
+
+
+def test_canonical_prediction_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    monkeypatch.setattr(
+        "case_studies.utils.registry.queries.canonical_coverage_days",
+        lambda case_study, label, split, prediction_hash, case_dir: {
+            "partial": 2,
+            "full_a": 4,
+            "full_b": 4,
+            "tabular": 2,
+        }[prediction_hash],
+    )
+
+    selected = resolve_best_predictions(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=1,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial"},
+    )
+
+    assert selected["prediction_hash"].to_list() == ["partial"]
 
 
 def test_cohort_members_and_leader_exclude_partial_coverage(tmp_path) -> None:

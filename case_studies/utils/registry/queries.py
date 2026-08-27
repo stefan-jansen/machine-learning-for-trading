@@ -788,15 +788,17 @@ def _canonical_family_coverage_bar(
     case_dir: Path,
     prediction_hashes: set[str] | None = None,
 ) -> dict[str, int]:
-    """Max in-window coverage per family, over EVERY prediction set for the label.
+    """Max in-window coverage per family over the eligible prediction population.
 
     The eligibility bar has to be the family's best coverage, not the best among the
     rows that happen to carry a backtest at the stage being resolved. Taking the max
     after a stage filter lowers the bar whenever the family's full-coverage prediction
     was never backtested at that stage, and a partial-coverage prediction then
     qualifies - which is exactly what ``full_coverage_prediction_sql`` prevents on the
-    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all of
-    ``(split, family, label)`` with no stage restriction.
+    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all eligible members
+    of ``(split, family, label)`` with no stage restriction. An explicit immutable
+    population is a deliberate eligibility boundary, so retired identities outside
+    it do not set the comparison bar.
 
     Requires a ``prediction_metrics`` row, matching the raw path's implicit
     requirement (``full_coverage_prediction_sql`` joins ``pm``): a prediction set
@@ -1076,23 +1078,12 @@ def resolve_best_predictions(
         population_clause = (
             "AND p.prediction_hash IN (SELECT prediction_hash FROM population_members)"
         )
-        coverage_clause = """
-            AND pm.ic_n_days IS NOT NULL
-            AND pm.ic_n_days = (
-                SELECT MAX(pm_full.ic_n_days)
-                FROM prediction_sets p_full
-                JOIN training_runs t_full
-                  ON p_full.training_hash = t_full.training_hash
-                JOIN prediction_metrics pm_full
-                  ON p_full.prediction_hash = pm_full.prediction_hash
-                WHERE p_full.split = p.split
-                  AND t_full.family = t.family
-                  AND t_full.label = t.label
-                  AND p_full.prediction_hash IN (
-                      SELECT prediction_hash FROM population_members
-                  )
-            )
-        """
+        coverage_clause = full_coverage_prediction_sql(
+            "p",
+            "t",
+            "pm",
+            population_subquery="SELECT prediction_hash FROM population_members",
+        )
         params.append(json.dumps(sorted(prediction_hashes)))
     params.extend([label, *stage_params, *exclude_params])
     if split:
@@ -1384,23 +1375,12 @@ def resolve_best_backtest_runs(
         population_clause = (
             "AND p.prediction_hash IN (SELECT prediction_hash FROM population_members)"
         )
-        coverage_clause = """
-            AND pm.ic_n_days IS NOT NULL
-            AND pm.ic_n_days = (
-                SELECT MAX(pm_full.ic_n_days)
-                FROM prediction_sets p_full
-                JOIN training_runs t_full
-                  ON p_full.training_hash = t_full.training_hash
-                JOIN prediction_metrics pm_full
-                  ON p_full.prediction_hash = pm_full.prediction_hash
-                WHERE p_full.split = p.split
-                  AND t_full.family = t.family
-                  AND t_full.label = t.label
-                  AND p_full.prediction_hash IN (
-                      SELECT prediction_hash FROM population_members
-                  )
-            )
-        """
+        coverage_clause = full_coverage_prediction_sql(
+            "p",
+            "t",
+            "pm",
+            population_subquery="SELECT prediction_hash FROM population_members",
+        )
         params.append(json.dumps(sorted(prediction_hashes)))
     params.extend([label, *exclude_params, *stage_params, *split_params, str(top_n)])
 
