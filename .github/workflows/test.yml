@@ -950,6 +950,7 @@ jobs:
             tests/test_insight_chapter.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
             tests/test_registry_metrics.py \
