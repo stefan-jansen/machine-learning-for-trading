@@ -9,9 +9,12 @@ back rather than producing a second one.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
+import polars as pl
 import pytest
 
 from case_studies.research.holdout import evaluate_holdout
@@ -21,6 +24,19 @@ from tests.test_locked_holdout_execution import _install_fixture_adapter, _locke
 # The fixture study's own observation grid. build_holdout_cv is pinned below, so the timeline is
 # only carried through the driver here; its own derivation is covered separately.
 TIMELINE = pd.bdate_range("2023-12-01", "2024-02-01")
+
+
+@pytest.fixture(autouse=True)
+def _modeling_dataset_without_temporal_features(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = SimpleNamespace(
+        temporal_by_fold=None,
+        temporal_keys=[],
+        temporal_feature_names=[],
+    )
+    monkeypatch.setattr(
+        "utils.modeling.load_modeling_dataset",
+        lambda *args, **kwargs: dataset,
+    )
 
 
 def _pin_derivation_to_the_fixture(monkeypatch: pytest.MonkeyPatch, lock) -> None:
@@ -136,6 +152,75 @@ def test_a_spec_carrying_fold_derivations_requires_an_adapter_hook(
         )
         == clean
     )
+
+
+def test_non_latent_temporal_coverage_is_checked_before_adapter_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    study, _, _ = _locked_study(tmp_path, monkeypatch)
+    source = pl.DataFrame(
+        {"timestamp": pl.date_range(date(2024, 1, 1), date(2024, 1, 21), eager=True)}
+    )
+    temporal = source.filter(pl.col("timestamp") != date(2024, 1, 15)).with_columns(
+        pl.lit(2).alias("fold"), pl.lit(1.0).alias("temporal_feature")
+    )
+    modeling_dataset = SimpleNamespace(
+        dataset=source,
+        date_col="timestamp",
+        temporal_by_fold=temporal,
+        temporal_keys=["timestamp"],
+        temporal_feature_names=["temporal_feature"],
+    )
+    monkeypatch.setattr(
+        "utils.modeling.load_modeling_dataset",
+        lambda *args, **kwargs: modeling_dataset,
+    )
+    monkeypatch.setattr(
+        "case_studies.utils.cv_window.canonical_window",
+        lambda *args, **kwargs: (date(2024, 1, 11), date(2024, 1, 21)),
+    )
+    prepared = False
+
+    def prepare(*args, **kwargs):
+        nonlocal prepared
+        prepared = True
+        return args[1]
+
+    from case_studies.research import models
+
+    monkeypatch.setattr(
+        models,
+        "get_adapter",
+        lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": prepare}),
+    )
+    spec = {
+        "family": "linear",
+        "label": "fwd_ret_21d",
+        "computation": {
+            "cv": {
+                "split": "holdout",
+                "folds": [
+                    {
+                        "fold": 2,
+                        "train_start": "2024-01-01",
+                        "train_end": "2024-01-10",
+                        "val_start": "2024-01-11",
+                        "val_end": "2024-01-21",
+                    }
+                ],
+            },
+            "expected_prediction_keys": {"digest": "validation", "n_rows": 1, "n_folds": 2},
+        },
+    }
+
+    with pytest.raises(ValueError, match="temporal date coverage"):
+        prepare_locked_holdout_spec(
+            study,
+            spec,
+            checkpoint_kind="final",
+            checkpoint_value=None,
+        )
+    assert prepared is False
 
 
 def test_adapter_may_change_only_fold_derived_fields(

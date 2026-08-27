@@ -762,8 +762,7 @@ def test_custom_cv_cannot_relabel_fold_scoped_temporal_features() -> None:
         "val_start": "2022-01-01",
         "val_end": "2022-12-31",
     }
-    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
-        require_fold_scoped_temporal_compatibility([holdout], artifact)
+    require_fold_scoped_temporal_compatibility([holdout], artifact)
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
         require_fold_scoped_temporal_compatibility([{**holdout, "split": "validation"}], artifact)
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):

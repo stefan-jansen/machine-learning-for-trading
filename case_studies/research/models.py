@@ -124,6 +124,7 @@ def prepare_locked_holdout_spec(
     computation = spec.get("computation")
     if not isinstance(computation, dict):
         raise ValueError("holdout spec has no resolved computation block")
+    _validate_standard_model_holdout_temporal_coverage(study, spec)
     present = _fold_derived_fields(computation)
     module = _family_module(str(spec.get("family", "")))
     preparer = getattr(module, "prepare_locked_holdout_spec", None)
@@ -154,6 +155,35 @@ def prepare_locked_holdout_spec(
     if _without_fold_derived_fields(prepared) != _without_fold_derived_fields(spec):
         raise ValueError("model adapter changed fields outside the holdout fold derivations")
     return prepared
+
+
+def _validate_standard_model_holdout_temporal_coverage(
+    study: Study,
+    spec: dict[str, Any],
+) -> None:
+    """Validate appended temporal folds without changing fitted-family source identity."""
+    family = str(spec.get("family", ""))
+    if family not in {"linear", "gbm", "tabular_dl", "deep_learning"}:
+        return
+
+    from utils.modeling import load_modeling_dataset
+
+    from .cv import require_fold_scoped_temporal_holdout_coverage
+
+    dataset = load_modeling_dataset(study.case_study, str(spec.get("label", "")), max_symbols=0)
+    if (
+        dataset.temporal_by_fold is None
+        or not dataset.temporal_keys
+        or not dataset.temporal_feature_names
+    ):
+        return
+    split = locked_holdout_split(spec, dataset.dataset, dataset.date_col, study.case_study)
+    require_fold_scoped_temporal_holdout_coverage(
+        split,
+        dataset.temporal_by_fold,
+        source_timeline=dataset.dataset.get_column(dataset.date_col),
+        date_col=dataset.date_col,
+    )
 
 
 def _fold_derived_fields(computation: dict[str, Any]) -> list[str]:
