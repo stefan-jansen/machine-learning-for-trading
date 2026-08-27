@@ -2067,6 +2067,10 @@ case_studies/sp500_options/10_causal_dml:
   # mapping: omitting max_samples would silently resolve the full population, which is an
   # uncapped run wearing the preview tier. `case_studies/utils/causal.py` names the four.
   parameters:
+    # The notebook's canonical default names the identity the production run retires. A preview
+    # writes to its own registry, which holds no such identity, so retiring it there would fail
+    # on a hash that was never registered rather than on anything about this run.
+    SUPERSEDES_CAUSAL: ''
     PREVIEW_REDUCTIONS:
       max_samples: 5000
       max_symbols: 5
