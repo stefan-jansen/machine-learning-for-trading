@@ -71,6 +71,10 @@ from case_studies.research import (
     resolved_model_plan,
     run_model_population,
 )
+from case_studies.sp500_options.research_workflow import (
+    declared_dl_device,
+    published_dl_device,
+)
 from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
@@ -130,22 +134,23 @@ configs.drop("model_class")
 # The device is checked in the same cell. A network trained on a GPU and the same network trained
 # on a CPU accumulate their sums in different orders and reach different weights, so the device is
 # part of what the fitted model is and is recorded inside the computation's identity rather than
-# beside it. `PUBLISHED_DEVICE` is the device this population was fitted on, and pinning it is what
-# keeps the identity the same wherever the notebook runs. On a machine with no NVIDIA card the run
-# therefore stops at the next cell rather than quietly training something else: set `DEVICE="cpu"`
-# and pass a `POPULATION_NAME` to fit the same grid there, under its own name.
+# beside it. The device this population was fitted on is declared once, in `modeling.dl.device` in
+# `config/setup.yaml`, and read from there by all four deep-learning notebooks rather than retyped
+# in each. On a machine with no NVIDIA card the run therefore stops at the next cell rather than
+# quietly training something else: set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same
+# grid there, under its own name.
 
 # %%
-PUBLISHED_DEVICE = "cuda"
-device = DEVICE or PUBLISHED_DEVICE
-print(f"training device: {device}")
+published_device = published_dl_device()
+device = declared_dl_device(DEVICE)
+print(f"training device: {device} (declared: {published_device})")
 
 if (
-    narrows_declared_catalog(study, "tabular_dl", configs) or device != PUBLISHED_DEVICE
+    narrows_declared_catalog(study, "tabular_dl", configs) or device != published_device
 ) and not POPULATION_NAME:
     raise ValueError(
         f"this run declares {configs.height} label-configuration pairs on device {device!r}, "
-        f"which is not the complete declared catalog on {PUBLISHED_DEVICE!r}, so it cannot "
+        f"which is not the complete declared catalog on {published_device!r}, so it cannot "
         f"publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 

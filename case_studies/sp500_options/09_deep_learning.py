@@ -30,8 +30,10 @@ import polars as pl
 
 from case_studies.sp500_options.research_workflow import (
     ALL_LABELS,
+    declared_dl_device,
     model_request_catalog,
     open_study,
+    published_dl_device,
     resolve_model_requests,
     resolved_model_plan,
     run_official_model_subset,
@@ -53,25 +55,25 @@ POPULATION_NAME: str = ""
 #
 # A network trained on a GPU and the same network trained on a CPU accumulate their sums in a
 # different order and reach different weights, so the device is part of what the fitted model is
-# and sits inside the training identity rather than beside it. `PUBLISHED_DEVICE` is the device
-# this population was fitted on, and pinning it is what makes the notebook fit the same thing
-# wherever it runs. On a machine with no NVIDIA card the run stops here rather than quietly
-# training something else: set `DEVICE="cpu"` and pass a `POPULATION_NAME` to fit the same
-# requests there, under a name of their own. `08_tabular_dl` pins its device the same way.
+# and sits inside the training identity rather than beside it. The device this population was
+# fitted on is declared once, in `modeling.dl.device` in `config/setup.yaml`, and read from there
+# by all four deep-learning notebooks rather than retyped in each. On a machine with no NVIDIA
+# card the run stops here rather than quietly training something else: set `DEVICE="cpu"` and pass
+# a `POPULATION_NAME` to fit the same requests there, under a name of their own.
 
 # %%
-PUBLISHED_DEVICE = "cuda"
 CANONICAL_POPULATION_NAME = "sp500-options-sequence-validation-v1"
 
-device = DEVICE or PUBLISHED_DEVICE
+published_device = published_dl_device()
+device = declared_dl_device(DEVICE)
 population_name = POPULATION_NAME or CANONICAL_POPULATION_NAME
-if device != PUBLISHED_DEVICE and population_name == CANONICAL_POPULATION_NAME:
+if device != published_device and population_name == CANONICAL_POPULATION_NAME:
     raise ValueError(
-        f"this run fits on {device!r}, not the published {PUBLISHED_DEVICE!r}, so its "
+        f"this run fits on {device!r}, not the published {published_device!r}, so its "
         f"identities are not the ones {CANONICAL_POPULATION_NAME!r} holds; pass "
         f"POPULATION_NAME to give them a population of their own"
     )
-print(f"training device: {device}")
+print(f"training device: {device} (declared: {published_device})")
 
 # %% [markdown]
 # ## Complete sequence request population

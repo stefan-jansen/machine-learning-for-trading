@@ -370,6 +370,16 @@ modeling:
     # faster and lose split points; the reader running this on a CPU gets what the
     # documentation describes.
     max_bin: 255
+  dl:
+    # The device every deep-learning fit in this case study is registered under, read by
+    # `research_workflow.declared_dl_device`. It is not a runtime convenience: the device
+    # enters the training identity through `sequence_identity_params`, so one configuration
+    # fitted on a GPU and the same configuration fitted on a CPU are two different runs
+    # rather than one run on two machines. `cuda` is what the published `tabular_dl` and
+    # sequence populations were fitted on. A reader with no NVIDIA card passes DEVICE="cpu"
+    # together with a POPULATION_NAME, which records the change with the run instead of
+    # substituting a different fit under the published population's name.
+    device: cuda
 
 causal:
   treatment: vrp_21d

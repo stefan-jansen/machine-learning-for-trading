@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+import yaml
 
 from case_studies.research import (
     BacktestResult,
@@ -42,6 +43,7 @@ from case_studies.utils.backtest_runner import (
     apply_universe_filter,
     normalize_prediction_columns,
 )
+from case_studies.utils.deep_learning import resolve_dl_device
 from case_studies.utils.registry import prediction_hash_from_parts
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
@@ -56,6 +58,46 @@ class OptionBacktestExecution:
     results: tuple[BacktestResult, ...]
     catalog_rows: pl.DataFrame
     population: OfficialPopulation | None
+
+
+def _dl_config() -> dict[str, Any]:
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
+    )
+    return (setup.get("modeling") or {}).get("dl") or {}
+
+
+def published_dl_device() -> str:
+    """The device the published deep-learning populations were fitted on.
+
+    Read from `modeling.dl.device` without checking whether that device is present, because
+    this answers what the population holds rather than what this machine can run. The two
+    differ exactly when a reader on a CPU refits, which is the case the population-name guard
+    in 08, 09, 09a and 09b exists to catch.
+    """
+    declared = _dl_config().get("device")
+    if not declared:
+        raise ValueError(
+            f"case_studies/{CASE_STUDY}/config/setup.yaml declares no modeling.dl.device, "
+            "so there is no published device for the fitted populations to be checked against"
+        )
+    device = str(declared).lower()
+    return "cuda" if device == "gpu" else device
+
+
+def declared_dl_device(requested: str | None = None) -> str:
+    """The device this run fits on, resolved through the shared sequence contract.
+
+    Reads `modeling.dl.device` rather than letting each notebook carry its own constant: 08,
+    09, 09a and 09b fit into one identity space, and four transcriptions of one device are
+    four chances for them to disagree. `requested` is the notebook's DEVICE parameter, empty
+    meaning "use what the case study declared".
+
+    `resolve_dl_device` refuses an undeclared device and refuses a GPU that is not present
+    rather than falling back to CPU: the device is inside the training identity, so a silent
+    fallback registers a fit under an identity it does not have.
+    """
+    return resolve_dl_device(_dl_config(), requested)
 
 
 def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
