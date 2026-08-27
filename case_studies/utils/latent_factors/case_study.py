@@ -341,7 +341,6 @@ def training_input_identity(
     eval_label: str | None = None,
 ) -> dict[str, Any]:
     """Return portable content identity for every materialized modeling input."""
-    case_dir = get_case_study_dir(case_study_id)
     inputs = {
         "financial": resolve_storage_path(
             case_study_id,
