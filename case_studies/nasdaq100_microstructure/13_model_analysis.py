@@ -57,7 +57,9 @@
 # %%
 """Compare every declared model family on one registered, complete population."""
 
+import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -115,10 +117,35 @@ REGIME_WINDOW = 252
 # this notebook, while every superseded snapshot stays readable by hash.
 LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
 GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
+# Which registry to compare against. Canonical with no workspace is the production path and
+# regenerates the case study's artifacts in place; preview reads the same inputs and is pointed
+# at an isolated root. This notebook produces no results either way - it is a comparison - so
+# the tier decides only which registry it reads, not what it computes.
+EXECUTION_TIER = "canonical"
+WORKSPACE = "experiments"
+
+# %% [markdown]
+# The two parameters above are what lets this notebook run outside a maintainer checkout.
+# `open_study` on the canonical tier with no workspace takes `Study.regenerate`, which requires
+# the case study's `features`, `labels` and `run_log` to be symlinks into shared artifacts, and
+# refuses with a `PermissionError` where they are real directories - a clean clone, and every CI
+# runner. Declaring both names is also the signal `tests/pm_helpers.py` looks for: it injects
+# `EXECUTION_TIER="preview"` and `WORKSPACE=$ML4T_OUTPUT_DIR` only into notebooks that declare
+# the pair, so a run against the fixture reads the fixture's registry and writes nothing back.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
-study = open_study(CASE_STUDY, entry_point="13_model_analysis")
+if EXECUTION_TIER == "canonical":
+    study = open_study(CASE_STUDY, entry_point="13_model_analysis")
+elif EXECUTION_TIER == "preview":
+    study = open_study(
+        CASE_STUDY,
+        execution_tier=EXECUTION_TIER,
+        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
+        entry_point="13_model_analysis",
+    )
+else:
+    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
