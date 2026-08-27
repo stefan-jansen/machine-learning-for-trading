@@ -754,6 +754,20 @@ def test_custom_cv_cannot_relabel_fold_scoped_temporal_features() -> None:
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
         require_fold_scoped_temporal_compatibility(changed, artifact)
 
+    holdout = {
+        "fold": 2,
+        "split": "holdout",
+        "train_start": "2020-01-01",
+        "train_end": "2021-12-15",
+        "val_start": "2022-01-01",
+        "val_end": "2022-12-31",
+    }
+    require_fold_scoped_temporal_compatibility([holdout], artifact)
+    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
+        require_fold_scoped_temporal_compatibility([{**holdout, "split": "validation"}], artifact)
+    with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
+        require_fold_scoped_temporal_compatibility([{**holdout, "fold": 3}], artifact)
+
 
 def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
     tmp_path: Path,
