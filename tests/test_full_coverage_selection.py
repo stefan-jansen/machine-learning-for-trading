@@ -126,11 +126,24 @@ def test_backtest_readers_exclude_partial_coverage(tmp_path) -> None:
     assert explorer.best(top_n=10, label="fwd_ret_5d", prediction_hashes=["partial"])[
         "prediction_hash"
     ].to_list() == ["partial"]
+    assert explorer.best(
+        top_n=10,
+        label="fwd_ret_5d",
+        prediction_hashes=["partial", "full_a"],
+    )["prediction_hash"].to_list() == ["full_a"]
     assert (
         explorer.compare_allocators(
             stages=("signal",),
             label="fwd_ret_5d",
             prediction_hashes=["partial"],
+        )["n"].item()
+        == 1
+    )
+    assert (
+        explorer.compare_allocators(
+            stages=("signal",),
+            label="fwd_ret_5d",
+            prediction_hashes=["partial", "full_a"],
         )["n"].item()
         == 1
     )
@@ -239,6 +252,18 @@ def test_backtest_population_sets_the_raw_coverage_bar(tmp_path) -> None:
 
     assert selected["prediction_hash"].to_list() == ["partial"]
 
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
+
 
 def test_canonical_backtest_population_is_filtered_before_run_ranking(
     tmp_path, monkeypatch
@@ -294,6 +319,19 @@ def test_canonical_backtest_population_sets_the_coverage_bar(tmp_path, monkeypat
     )
 
     assert selected["prediction_hash"].to_list() == ["partial"]
+
+    selected_with_peer = resolve_best_backtest_runs(
+        "test",
+        "fwd_ret_5d",
+        split="validation",
+        stage="signal",
+        top_n=10,
+        case_dir=case_dir,
+        coverage_window="canonical",
+        prediction_hashes={"partial", "full_a"},
+    )
+
+    assert selected_with_peer["prediction_hash"].to_list() == ["full_a"]
 
 
 def test_canonical_prediction_population_sets_the_coverage_bar(tmp_path, monkeypatch) -> None:
