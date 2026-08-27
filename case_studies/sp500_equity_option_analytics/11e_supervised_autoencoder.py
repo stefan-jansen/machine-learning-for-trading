@@ -24,12 +24,19 @@
 # [`11c_conditional_autoencoder`](11c_conditional_autoencoder.ipynb) can reconstruct the
 # cross-section better and better without its IC following.
 #
-# **The supervised autoencoder is the same architecture as the conditional autoencoder with the
-# forward return added to the loss.** The bottleneck still has to describe the cross-section, and it
-# now also has to predict. That single change is what this notebook is for, and reading it against
-# [`11c`](11c_conditional_autoencoder.ipynb) is the whole point of publishing both: the two share the
-# characteristics, the folds, the labels, the factor count and the epoch schedule, and differ in what
-# the loss asks for.
+# **The supervised autoencoder adds the forward return to the autoencoder's loss.** The bottleneck
+# still has to describe the cross-section, and it now also has to predict. That is the idea the
+# notebook is for.
+#
+# It is not, however, a controlled comparison against
+# [`11c`](11c_conditional_autoencoder.ipynb), and the presets are worth reading before the results
+# are. The two share the characteristics, the folds, the labels and the epoch schedule, and they
+# differ in three things besides the loss: the bottleneck is 96 factors here against IPCA-scale 5
+# there, the encoder is `(896, 448, 448, 256)` against `(32,)`, and the learning rate is 1e-4
+# against 1e-3. A gap between their rows in
+# [`13_model_analysis`](13_model_analysis.ipynb) is therefore not attributable to supervision
+# alone. The training log's `sae (K=5)` is misleading on the same point: `run_sae_fold` discards
+# `n_factors` outright, and `bottleneck_dim` is what sets the width.
 #
 # **It is the model in this family most able to overfit, for the same reason it is the one most able
 # to fit.** A reconstruction objective is a constraint - it forces the bottleneck to explain
@@ -104,11 +111,13 @@ study = open_study(
 # %% [markdown]
 # ## 1. Which labels, and what the configuration says
 #
-# Every label whose training menu declares `latent_factors:` is fitted, and three do: `fwd_ret_5d`,
-# the stock's total return over the five trading days after the decision date; `fwd_ret_10d`, the
-# same over ten; and `fwd_ret_risk_adj_5d`, the five-day return divided by a measure of its own
-# dispersion. The two `fwd_dir_*` classification labels declare linear and gradient boosting only,
-# so they are absent here rather than dropped.
+# Every label whose training menu declares `latent_factors:` is fitted, and the cell below reads
+# which those are rather than this sentence asserting a count that would go stale the moment a
+# sixth label declared the family. What the names mean is the part prose has to supply:
+# `fwd_ret_5d` is the stock's total return over the five trading days after the decision date,
+# `fwd_ret_10d` the same over ten, and `fwd_ret_risk_adj_5d` the five-day return divided by a
+# measure of its own dispersion. A `fwd_dir_*` classification label declaring only linear and
+# gradient boosting is absent here rather than dropped.
 #
 # The label matters more here than anywhere else in this family. For the other four models the label
 # decides only what the predictions are scored against; the fit itself is identical across the three
@@ -120,15 +129,14 @@ declared_labels(study, "latent_factors")
 
 # %% [markdown]
 # `case_studies/config/sae/sae.yaml` declares `n_factors: 5`, `n_epochs: 50` and
-# `checkpoint_interval: 5` - the same three values, with the same meanings, as
-# `case_studies/config/cae/cae.yaml`. That is not a coincidence to be tidied away: the two presets
-# agree so that the pair of notebooks differs in the objective and in nothing else. A reader who
-# changes one for their own run should change both, or lose the comparison.
+# `checkpoint_interval: 5`. The CAE and SAE presets are not otherwise controlled: their bottleneck
+# widths, hidden layers, learning rates, and losses differ, as Section 5 shows explicitly.
 #
 # The case study may override any of these under `modeling.latent_factors.model_kwargs` in
-# `config/setup.yaml`, which wins where it is given; this one declares entries for `ipca` and `sdf`
-# only, so the supervised autoencoder's values are the preset's. A reduced run may then override
-# them again through `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview identity.
+# `config/setup.yaml`, which wins where it is given; this one declares entries for `ipca`, `sdf`,
+# and `sae`. The SAE override fixes the production batch size at 10,000 rows, and that value enters
+# the training identity with the other model arguments. A reduced run may then override the values
+# again through `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview identity.
 
 # %%
 configs = load_model_configs(
@@ -194,9 +202,9 @@ print(f"training device: {DEVICE or 'the family declaration in config/setup.yaml
 #   [`05_evaluation`](05_evaluation.ipynb) established.
 # - **`validation_start` and `validation_end` bracket the development sample**, with none of the
 #   held-out 2021 tail visible.
-# - **`checkpoints` is 10**, matching [`11c`](11c_conditional_autoencoder.ipynb) exactly. If it does
-#   not, the two presets have drifted and the comparison this notebook exists for is no longer
-#   controlled.
+# - **`checkpoints` is 10**, matching [`11c`](11c_conditional_autoencoder.ipynb) exactly, so the two
+#   are read at the same points on their schedules. That is one axis held level, not a controlled
+#   comparison: section 5 lists the three the presets do not hold.
 
 # %%
 requests = model_requests(
@@ -316,9 +324,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per label and checkpoint. `ic_mean` is the **information coefficient**: on each validation
-# date, rank the stocks by the model's prediction, rank them by the return they went on to earn,
-# correlate the two rankings, and average that daily correlation over the validation period.
+# One row per label and checkpoint. The **information coefficient** is the rank correlation, on one
+# validation date, between the stocks ordered by the model's prediction and the stocks ordered by
+# the return they went on to earn.
+#
+# `ic_mean` aggregates that **over folds, not over days**: each fold's own mean IC is computed and
+# those are averaged with equal weight (`latent_factors/cv.py`, and the convention is stated in
+# `registry/metrics.py`). With folds of unequal length the fold mean and the pooled daily mean are
+# different numbers, and this column is the first.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # are comparable with each other. `auc_scored_against` says what the AUC column was scored against:
@@ -382,8 +395,9 @@ catalog.select(
 # Ten checkpoints per label is too many rows to read as a table, so this reduces each label to the
 # epoch with its highest validation IC. `epochs_above_zero` counts how many of the ten put the IC on
 # the positive side at all, which separates a model that is consistently weak from one that crossed
-# zero once. `ic_t` is a Newey-West HAC statistic on the daily IC series, and it is a diagnostic and
-# not a selection rule - the series is short, overlapping multi-day returns make successive days
+# zero once. `ic_t` is the t-statistic across those fold means rather than a
+# Newey-West statistic on the daily series - the registry keeps that separately as `ic_t_hac`, and
+# it is the inferential one. Either way `ic_t` is a diagnostic and not a selection rule - the series is short, overlapping multi-day returns make successive days
 # dependent, and the folds have been read many times over by the time a case study reaches this
 # notebook.
 #
@@ -461,11 +475,24 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 5. What to notice
 #
-# **This notebook and [`11c`](11c_conditional_autoencoder.ipynb) are a controlled pair, and the
-# control is the point.** Same characteristics, same folds, same labels, same factor count, same
-# epoch schedule, same device. One term in the loss differs. Any gap between their rows in
-# [`13_model_analysis`](13_model_analysis.ipynb) is attributable to supervision and to nothing else,
-# which is not true of any other two notebooks in this family.
+# **This notebook and [`11c`](11c_conditional_autoencoder.ipynb) are not a controlled pair, and the
+# presets say so.** They share the characteristics, the folds, the labels, the epoch schedule and
+# the device, and the panel they fit is the same down to its raggedness - both report
+# `ragged train=493/475, max_N=503`. They differ in four things, not one:
+#
+# | | `11c` cae | `11e` sae |
+# |---|---|---|
+# | bottleneck / factors | 5 | 96 |
+# | hidden units | `(32,)` | `(896, 448, 448, 256)` |
+# | learning rate | 1e-3 | 1e-4 |
+# | loss | reconstruction | reconstruction + forward return |
+#
+# So a gap between their rows in [`13_model_analysis`](13_model_analysis.ipynb) is not
+# attributable to supervision. Reading it that way would credit a loss term for what a
+# nineteen-fold wider bottleneck and a four-layer encoder may well have done on their own. Making
+# the pair controlled means matching the three architectural values, which is a change to the
+# presets and to both populations' identities rather than a change to this prose - so it is stated
+# here rather than assumed away.
 #
 # **Supervising a factor model is a weaker constraint, not more information.** Both models see the
 # same characteristics; neither sees anything the other does not. What changes is what the

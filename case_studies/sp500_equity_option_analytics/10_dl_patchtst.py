@@ -250,10 +250,10 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per epoch checkpoint. `ic_mean` is the **information coefficient**: on each validation
-# date, rank the stocks by the model's prediction, rank them by the return they went on to earn,
-# correlate the two rankings, and average that daily correlation over the validation period. Zero is
-# no relationship.
+# One row per epoch checkpoint. `ic_mean` is the **information coefficient**: within each fold,
+# rank the stocks by the model's prediction on each validation date, correlate that ranking with the
+# realized-return ranking, and average over dates; `ic_mean` then gives each fold's mean equal
+# weight. Zero is no relationship.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation. A network that has
 # settled into predicting nearly the same value for every stock on a date gives that date no spread
