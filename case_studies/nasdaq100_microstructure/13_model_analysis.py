@@ -419,6 +419,8 @@ else:
 
 # %%
 SAMPLE_EVERY_N = 4  # keep every 4th decision time
+# The registered artifact's names, and the names the analysis helpers read.
+_RAW_TO_ANALYSIS = {"fold": "fold_id", "prediction": "y_score", "actual": "y_true"}
 representative_preds = []
 
 # The representative rows came from the catalog, so each already carries the identity of the
@@ -431,6 +433,16 @@ for row in best_per_family.filter(pl.col("family") != "causal_dml").iter_rows(na
     family, config = row["family"], row["config_name"]
     prediction = Result.open(study, row["prediction_hash"])
     df = prediction.load()
+    # `Result.load` returns the registered artifact, whose columns are `fold`, `prediction` and
+    # `actual`. Every helper this notebook feeds the frame to - `fold_performance_matrix`,
+    # `select_best_checkpoint`, `cross_sectional_ic` - reads `fold_id`, `y_score` and `y_true`,
+    # which is the vocabulary `case_studies/utils/backtest_loaders.py` normalises raw prediction
+    # artifacts into (:278). This notebook used to reach the same rows through a loader that had
+    # already done that rename; going through the study resolves the identity properly but hands
+    # back the raw names, so do the rename here rather than teaching each call site a second
+    # vocabulary. Conditional because a family that already registered normalised names must not
+    # be renamed twice.
+    df = df.rename({old: new for old, new in _RAW_TO_ANALYSIS.items() if old in df.columns})
     # Keep every Nth decision time, preserving the whole cross-section at each one it keeps. This
     # reduces only what the correlation and bucket displays below read; every registered score is
     # computed on the full grid and is unaffected.
