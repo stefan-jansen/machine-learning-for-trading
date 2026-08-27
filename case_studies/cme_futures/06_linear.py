@@ -78,6 +78,7 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.cme_futures.research_workflow import supersedes_declaration
 from case_studies.research import (
     declared_labels,
     load_model_configs,
@@ -293,13 +294,25 @@ plan.select(
 # exactly those two cases and in a preview, where a population is discarded with its workspace and
 # has no lineage to extend.
 #
-# What it does not do is second-guess a disagreement. Where a generation exists, the declared hash
-# is passed through even when it is not the one on record, because that refusal is the registry's
-# to make and its message names the hash required.
+# What it does not do is second-guess a disagreement. A hash naming neither the generation in force
+# nor the one that generation superseded describes no state this registry is in, so it is withheld
+# and `OfficialPopulation.create` refuses the changed population with a message naming the snapshot
+# it requires. The refusal is the registry's to make; withholding is how it is left to it.
+#
+# **The tier is decided here rather than inside the helper.** `population_supersedes` reads
+# `study.root`, and a preview in a maintainer worktree does not get its own root: `open_study`
+# links the generated directories in place and redirects only the writes, so the lookup finds the
+# canonical generation and hands back a real hash. `run_model_population` then refuses a preview
+# carrying one, and the preview dies before it fits anything. Withholding the declaration outside
+# the tier that can use it is what keeps that path runnable.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-linear-validation-v1"
-supersedes = population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION)
+supersedes = population_supersedes(
+    study,
+    name=population_name,
+    declared=supersedes_declaration(EXECUTION_TIER, SUPERSEDES_POPULATION),
+)
 execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )

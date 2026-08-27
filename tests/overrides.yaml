@@ -1204,11 +1204,12 @@ case_studies/cme_futures/06_linear:
     # budget rather than failing, which is the reason to fix it now: it is mispriced in exactly
     # the same way and only the margin differs, so it fails on the first contended run instead
     # of reproducibly. Linear takes no iteration or checkpoint axis, so folds and max_symbols
-    # are the whole reduction - which is what #560 removed.
+    # are the whole reduction - which is what #560 removed. The 120s budget is left as it was,
+    # for the same reason as 07_gbm below: the reduction is what it was calibrated against.
     PREVIEW_REDUCTIONS:
       folds: [0, 1]
       max_symbols: 5
-  timeout: 300
+  timeout: 120
 case_studies/cme_futures/07_gbm:
   parameters:
     # Restored after #560. That PR moved this notebook onto the shared model boundary, where
@@ -1224,12 +1225,17 @@ case_studies/cme_futures/07_gbm:
     # dimension this notebook is about, and one a coarser cut would remove rather than reduce.
     # No train_sample_frac: 30 products over a daily panel is already small, and thinning rows
     # would leave folds too short to fit rather than merely quick.
+    #
+    # The timeout below is left at the number #560 inherited. Restoring the reduction restores
+    # what 180s was measured against, so changing it too would replace a calibrated number with
+    # a guess. Measured 2026-08-27: 129s for this notebook and 06_linear together, reductions
+    # applied, at load average 10.1 on 24 cores. Without them the fit alone ran 388s.
     PREVIEW_REDUCTIONS:
       checkpoint_interval: 10
       folds: [0, 1]
       max_iterations: 20
       max_symbols: 5
-  timeout: 300
+  timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.

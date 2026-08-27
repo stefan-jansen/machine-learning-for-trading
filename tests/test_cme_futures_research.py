@@ -25,6 +25,7 @@ from case_studies.cme_futures.research_workflow import (
     resolved_model_plan,
     run_official_backtest_requests,
     strategy_request_frame,
+    supersedes_declaration,
 )
 from case_studies.research import (
     DecisionArtifact,
@@ -32,6 +33,7 @@ from case_studies.research import (
     ResolvedModelRequest,
     StateTransitionPolicy,
     Study,
+    open_study,
     population_supersedes,
 )
 from case_studies.utils.registry.store import _open_registry
@@ -1225,37 +1227,74 @@ def test_a_narrowed_run_under_its_own_population_name_drops_the_builtin_hash(tmp
 
 
 def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
-    """A preview population is discarded with its workspace and has no lineage to extend.
+    """A preview must not offer the declared hash, and the reason is not that it cannot see it.
 
-    `population_supersedes` takes no tier, and does not need one: it reads the registry the
-    run is actually writing to. A preview opens its own workspace, so the name has no
-    generation there and the hash is withheld, by the same path a clean clone takes.
+    This is the shape that matters, and the obvious test misses it. `open_study` gives a preview
+    its own root only when the case study's generated directories are real. In a maintainer
+    worktree they are symlinks to shared artifacts, which `create_experiment` cannot copy, so
+    `open_study` reads them in place - `root` stays the canonical case directory and only the
+    *writes* are redirected to the workspace. `population_supersedes` reads `study.root`, so in
+    that layout a preview resolves the canonical generation and gets back a real hash.
+    `run_model_population` refuses a preview carrying one, so the run dies before its first fit,
+    and it dies only for the maintainer - the CI checkout has no symlinks and reads clean.
 
-    Stating it as a preview workspace *over a released registry that does hold the
-    generation* is what makes the test able to fail. A preview study is not isolated - it
-    overlays the release, and several sibling functions here read both roots on purpose. If
-    this lookup were widened the same way, a preview would find the canonical tip, offer the
-    hash, and `run_model_population` would refuse the run before it reached a fit. Two
-    unrelated studies would not catch that, because the preview would find nothing either
-    way.
+    So the notebooks withhold the declaration outside the canonical tier rather than relying on
+    the lookup to fail. This builds the symlinked layout rather than describing it: pointing a
+    preview at a hand-made isolated root would pass whether or not the notebooks did that, which
+    is exactly how the first version of this test was vacuous.
     """
-    released = _study(tmp_path)
+    released = _study(tmp_path / "released")
     name = "cme_futures-linear-validation-v1"
     first = _population(released, name, _prediction(released))
-    assert population_supersedes(released, name=name, declared=first.hash) == first.hash
 
-    release_root = tmp_path / "release_tree"
-    (release_root / "case_studies").mkdir(parents=True)
-    (release_root / "case_studies" / "cme_futures").symlink_to(
-        released.root, target_is_directory=True
+    release_root = tmp_path / "worktree"
+    case_dir = release_root / "case_studies" / "cme_futures"
+    case_dir.mkdir(parents=True)
+    (release_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
     )
-    preview_root = tmp_path / "preview" / "cme_futures"
-    preview_root.mkdir(parents=True)
-    _open_registry(preview_root).close()
-    preview = dataclasses.replace(released, root=preview_root, release_root=release_root)
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "cme_futures" / "config", target_is_directory=True
+    )
+    for generated in ("features", "labels", "run_log"):
+        target = released.root / generated
+        target.mkdir(exist_ok=True)
+        (case_dir / generated).symlink_to(target, target_is_directory=True)
 
-    assert preview.release_case_root.resolve() == released.root.resolve()
-    assert population_supersedes(preview, name=name, declared=first.hash) is None
+    preview = open_study(
+        "cme_futures",
+        execution_tier="preview",
+        workspace=tmp_path / "preview-workspace",
+        release_root=release_root,
+    )
+    # The premise. If open_study ever gives a symlinked preview its own root, this test stops
+    # describing the situation the notebooks guard against and must be revisited rather than
+    # deleted.
+    assert preview.root == case_dir
+    assert (preview.root / "run_log").is_symlink()
+
+    # What the helper does on its own: it finds the canonical generation and offers the hash.
+    assert population_supersedes(preview, name=name, declared=first.hash) == first.hash
+
+    # What the notebooks pass. Both call `supersedes_declaration` with their own tier, so the
+    # composition below is the expression they evaluate, not a restatement of it.
+    assert supersedes_declaration("preview", first.hash) is None
+    assert (
+        population_supersedes(
+            preview, name=name, declared=supersedes_declaration("preview", first.hash)
+        )
+        is None
+    )
+
+    # And the canonical tier still reaches the registry, so this cannot be satisfied by a
+    # declaration that is withheld everywhere.
+    assert supersedes_declaration("canonical", first.hash) == first.hash
+    assert (
+        population_supersedes(
+            released, name=name, declared=supersedes_declaration("canonical", first.hash)
+        )
+        == first.hash
+    )
 
 
 def test_sdf_checkpoints_chosen_on_validation_never_reach_the_selection_pool() -> None:

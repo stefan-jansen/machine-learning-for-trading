@@ -91,13 +91,35 @@ def test_a_retired_generation_and_the_live_catalog_do_not_overlap() -> None:
     the count a backtest would sweep is the sum. Asserting the disjointness rather than
     the totals is what says the retired set is a clean second generation and not an
     arbitrary subset.
+
+    The disjointness has to be stated against the generations in force, not against the
+    catalog. `len(registered - retired) == len(registered) - len(retired)` follows from
+    `retired <= registered` by counting alone: it holds for any subset whatsoever and
+    cannot fail, so it asserted nothing. What is worth checking is that nothing this name
+    still publishes is also something it retired - which `cme_futures` shows is not a
+    given, since a population left in force by a rename can list retired identities.
     """
     study = _study("sp500_equity_option_analytics")
     retired = superseded_members(study, member_kind="prediction")
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         registered = {row[0] for row in db.execute("SELECT prediction_hash FROM prediction_sets")}
+        rows = db.execute(
+            "SELECT population_hash, supersedes_hash FROM official_populations "
+            "WHERE member_kind = 'prediction'"
+        ).fetchall()
+        members: dict[str, set[str]] = {}
+        for population_hash, member_hash in db.execute(
+            "SELECT population_hash, member_hash FROM official_population_members"
+        ):
+            members.setdefault(population_hash, set()).add(member_hash)
+
+    assert retired
     assert retired <= registered
-    assert len(registered - retired) == len(registered) - len(retired)
+    superseded = {row[1] for row in rows if row[1] is not None}
+    in_force = {row[0] for row in rows if row[0] not in superseded}
+    live = set().union(*(members.get(h, set()) for h in in_force))
+    assert live
+    assert not (live & retired)
 
 
 def test_an_edge_outlives_the_rows_it_retired() -> None:

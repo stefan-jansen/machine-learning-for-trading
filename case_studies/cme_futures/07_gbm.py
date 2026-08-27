@@ -83,6 +83,7 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.cme_futures.research_workflow import supersedes_declaration
 from case_studies.research import (
     declared_labels,
     load_model_configs,
@@ -277,12 +278,24 @@ plan.select(
 # of their own. `OfficialPopulation.create` refuses a first version that supersedes anything, so
 # without this the default would break both.
 #
-# Where a generation does exist the declared hash is passed through even if it disagrees with the
-# one on record. That refusal belongs to the registry, and its message names the hash required.
+# Where a generation exists and the declaration names neither it nor the one it superseded, the
+# hash is withheld and `OfficialPopulation.create` refuses the changed population, naming the
+# snapshot it requires. The refusal belongs to the registry; withholding is how it is left to it.
+#
+# **The preview case is decided here, not inside the helper.** `population_supersedes` reads
+# `study.root`, and a preview in a maintainer worktree does not get its own root - `open_study`
+# reads the symlinked generated directories in place and redirects only the writes. The lookup
+# therefore finds the canonical generation and returns a real hash, which `run_model_population`
+# refuses for a preview, killing the run before the first fit. Withholding the declaration outside
+# the tier that can act on it is what keeps the preview runnable.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
-supersedes = population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION)
+supersedes = population_supersedes(
+    study,
+    name=population_name,
+    declared=supersedes_declaration(EXECUTION_TIER, SUPERSEDES_POPULATION),
+)
 execution, population = run_model_population(
     study,
     resolved,

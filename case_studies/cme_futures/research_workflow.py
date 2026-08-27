@@ -704,6 +704,30 @@ def strategy_request_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
     )
 
 
+def supersedes_declaration(execution_tier: str, declared: str) -> str | None:
+    """What `06_linear` and `07_gbm` may offer as their population's `supersedes`.
+
+    `population_supersedes` answers a registry question - does the name's current generation
+    match this declaration - and answers it by reading `study.root`. That is the right question
+    and the wrong root for a preview in a maintainer worktree. `open_study` gives a preview its
+    own root only when the case study's generated directories are real; where they are symlinks
+    to shared artifacts, which `create_experiment` cannot copy, it reads them in place and
+    redirects only the writes. `root` stays the canonical case directory, the lookup finds the
+    canonical generation, and the helper correctly returns a hash that this run must not use:
+    `run_model_population` refuses a preview carrying one, so the preview fails before its first
+    fit. It fails only for the maintainer, because a CI checkout has no symlinks.
+
+    The tier is therefore decided before the registry is consulted, not after. A preview
+    population is discarded with its workspace and has no lineage to extend, so there is no tier
+    other than canonical in which the declaration means anything.
+
+    This lives here rather than inline in each notebook so that both pass the same expression and
+    a test can exercise it. It deliberately does not wrap `population_supersedes`: what that
+    function decides is the registry's business and is tested against real registries.
+    """
+    return declared if execution_tier == "canonical" else None
+
+
 def preview_prediction_candidates(
     study: Study,
     *,
