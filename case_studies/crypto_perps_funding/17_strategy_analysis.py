@@ -225,7 +225,14 @@ if not cohort:
 #
 # When the intersection is clean, the ranking on it can still differ from the registered one by a
 # place, because each registered Sharpe was computed on that result's own series and these are
-# computed on the common one. That is a real difference and is reported rather than suppressed.
+# computed on the common one. That is a real difference, and it stops this notebook rather than
+# being reported alongside the result.
+#
+# The reason is that `compute_cohort_metrics` computes its Sharpe, its Rademacher bound and all
+# three deflated Sharpes for whichever member leads the common period, while the interval and
+# the PSR below are computed for the registered selection. When those are the same result the
+# table reads as one strategy, which is what it claims to be. When they are not, the same table
+# would carry two strategies' numbers under one heading, and nothing in it would say so.
 
 # %%
 aligned_periods = int(cohort["n_periods"]) if "n_periods" in cohort else None
@@ -241,10 +248,11 @@ print(
     f"{aligned_periods if aligned_periods is not None else shortest}"
 )
 if cohort["leader_hash"] != selected.hash:
-    print(
-        "on the common period the highest Sharpe is "
-        f"{cohort['leader_hash']}, not the registered selection {selected.hash}; "
-        "the difference is the period each was originally measured over"
+    raise RuntimeError(
+        f"on the common period the highest Sharpe is {cohort['leader_hash']}, not the "
+        f"registered selection {selected.hash}. The cohort statistics below describe the "
+        "common-period leader and the interval describes the selection, so publishing them "
+        "together would report two strategies as one. Re-select on the aligned period."
     )
 
 # %% [markdown]
