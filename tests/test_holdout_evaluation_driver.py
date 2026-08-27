@@ -9,6 +9,7 @@ back rather than producing a second one.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -158,6 +159,14 @@ def test_non_latent_temporal_coverage_is_checked_before_adapter_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     study, _, _ = _locked_study(tmp_path, monkeypatch)
+    from case_studies.research import Study
+
+    other = Study.open(
+        "etfs",
+        workspace=tmp_path / "other-workspace",
+        release_root=study.release_root,
+    )
+    other.activate("preview")
     source = pl.DataFrame(
         {"timestamp": pl.date_range(date(2024, 1, 1), date(2024, 1, 21), eager=True)}
     )
@@ -171,10 +180,12 @@ def test_non_latent_temporal_coverage_is_checked_before_adapter_preparation(
         temporal_keys=["timestamp"],
         temporal_feature_names=["temporal_feature"],
     )
-    monkeypatch.setattr(
-        "utils.modeling.load_modeling_dataset",
-        lambda *args, **kwargs: modeling_dataset,
-    )
+
+    def load_modeling_dataset(*args, **kwargs):
+        assert Path(os.environ["ML4T_OUTPUT_DIR"]).resolve() == study.output_root
+        return modeling_dataset
+
+    monkeypatch.setattr("utils.modeling.load_modeling_dataset", load_modeling_dataset)
     monkeypatch.setattr(
         "case_studies.utils.cv_window.canonical_window",
         lambda *args, **kwargs: (date(2024, 1, 11), date(2024, 1, 21)),

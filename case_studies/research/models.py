@@ -166,6 +166,9 @@ def _validate_standard_model_holdout_temporal_coverage(
     if family not in {"linear", "gbm", "tabular_dl", "deep_learning"}:
         return
 
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+
     from utils.modeling import load_modeling_dataset
 
     from .cv import require_fold_scoped_temporal_holdout_coverage
