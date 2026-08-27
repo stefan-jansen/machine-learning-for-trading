@@ -2085,6 +2085,13 @@ case_studies/sp500_options/11_model_analysis:
   # named immutable snapshot and never from registry presence. It becomes runnable when the
   # fixture ships a registry holding canonical populations under these four names; the one it
   # ships today predates the research boundary and has no `official_populations` table.
+  # Left as a plain skip rather than an `awaiting_rebuild` condition, and the difference is
+  # which registry the condition would be measured against. `awaiting_rebuild` reads the
+  # maintainer's artifact registry, which does hold all four of these populations - 06, 07, 08
+  # and 09 published them. What is missing is in the *fixture* registry this job runs against,
+  # and no condition expressed over the maintainer's registry can say that. Declaring one would
+  # turn test_awaiting_rebuild red on every machine that has run the models, while still
+  # skipping in CI, which is the opposite of what the mechanism is for.
   skip: true
   skip_reason: "Resolves four named official populations, and a preview run cannot create one (research/population.py::_refuse_preview_activation). Runnable when the fixture registry ships canonical populations under those names."
 case_studies/sp500_options/12_backtest:
@@ -2094,23 +2101,28 @@ case_studies/sp500_options/12_backtest:
   # model run, because a backtest population is defined by the prediction sets it names
   # and never by registry presence. The fixture has no preview model run to name, so
   # there is nothing for this notebook to resolve until one exists.
-  skip: true
-  skip_reason: "Needs the exact PREVIEW_PREDICTION_HASHES of a preview model run. Seeding one needs a released source prediction under run_log/predictions/, and the rebuilt registry holds none yet; this entry becomes runnable when it does."
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: signal}
+    issue: 499
 case_studies/sp500_options/13_portfolio_management:
-  skip: true
-  skip_reason: "Depends on 12_backtest signal-stage results - see that entry's skip_reason."
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: signal}
+    issue: 500
 case_studies/sp500_options/14_costs:
   # An empty entry between two skipped siblings, which read as deliberate and did nothing. A
   # preview run needs WORKSPACE plus the exact PREVIEW_BASELINE_HASHES of preview backtests, and
   # those are 12_backtest's output - the same dependency 13 and 15 declare, one stage further on.
-  skip: true
-  skip_reason: "Depends on 12_backtest signal-stage results - see that entry's skip_reason."
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: signal}
+    issue: 501
 case_studies/sp500_options/15_risk_management:
-  skip: true
-  skip_reason: "Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry."
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: allocation}
+    issue: 502
 case_studies/sp500_options/16_strategy_analysis:
-  skip: true
-  skip_reason: 'Depends on 13_portfolio_management allocation-stage results - see 12_backtest entry.'
+  awaiting_rebuild:
+    needs: {of: sp500_options, backtest_stage: allocation}
+    issue: 503
 case_studies/sp500_options/90_ic_diagnostic:
   # MAX_SYMBOLS was 5 while the notebook screens every cross-section at MIN_SYMBOLS_PER_DATE = 10,
   # so the cap guaranteed that no date could ever qualify - a reduction that made the run

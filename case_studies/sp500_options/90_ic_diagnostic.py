@@ -31,10 +31,11 @@
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_series
+from ml4t.diagnostic.metrics import compute_ic_uncertainty
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 
+from case_studies.sp500_options._ic_diagnostics import daily_ic
 from case_studies.utils.artifact_digest import value_digest
 from utils.modeling import generate_cv_splits, prepare_cv_folds
 from utils.paths import get_case_study_dir
@@ -244,15 +245,13 @@ def fit_ablation(features: list[str]) -> pl.DataFrame:
 
 def summarize_ablation(features: list[str]) -> dict:
     predictions = fit_ablation(features)
-    daily = cross_sectional_ic_series(
-        predictions,
+    daily = daily_ic(
         predictions,
         pred_col="y_score",
         ret_col="y_true",
-        date_col="timestamp",
-        entity_col="symbol",
-        min_obs=MIN_SYMBOLS_PER_DATE,
-    ).drop_nulls("ic")
+        min_symbols_per_date=MIN_SYMBOLS_PER_DATE,
+        described_as=f"the {len(features)}-feature Ridge ablation",
+    )
     uncertainty = compute_ic_uncertainty(daily.select("ic"), horizon=10, n_boot=1000)
     return {
         "feature_count": len(features),
@@ -325,24 +324,13 @@ def mean_daily_ic(frame: pl.DataFrame, feature: str, target: str) -> float:
         pl.col(feature).alias("y_score"),
         pl.col(target).alias("y_true"),
     ).drop_nulls()
-    daily = cross_sectional_ic_series(
-        panel,
+    daily = daily_ic(
         panel,
         pred_col="y_score",
         ret_col="y_true",
-        date_col="timestamp",
-        entity_col="symbol",
-        min_obs=MIN_SYMBOLS_PER_DATE,
-    ).drop_nulls("ic")
-    if not daily.height:
-        # An empty series averages to null, and reporting that as a type error described the
-        # symptom rather than the cause: what happened is that no date carried
-        # MIN_SYMBOLS_PER_DATE names, so there was never an IC to average.
-        raise RuntimeError(
-            f"no date in the validation panel carries {MIN_SYMBOLS_PER_DATE} names, so "
-            f"{feature!r} has no daily IC series against {target!r} to average; the panel spans "
-            f"{frame['symbol'].n_unique()} names in total"
-        )
+        min_symbols_per_date=MIN_SYMBOLS_PER_DATE,
+        described_as=f"{feature!r} against {target!r}",
+    )
     mean_ic = daily.select(pl.col("ic").mean()).item()
     return float(mean_ic)
 

@@ -31,8 +31,8 @@ def test_every_declaration_is_well_formed():
         needs = declaration.get("needs")
         assert isinstance(needs, dict), f"{key}: awaiting_rebuild.needs must be a mapping"
         assert needs.get("of"), f"{key}: awaiting_rebuild.needs.of must name a case study"
-        assert needs.keys() & {"family", "backtest_stage", "registry"}, (
-            f"{key}: needs must name a family, a backtest_stage, or registry"
+        assert needs.keys() & {"family", "backtest_stage", "populations", "registry"}, (
+            f"{key}: needs must name a family, a backtest_stage, populations, or registry"
         )
         assert declaration.get("issue"), (
             f"{key}: awaiting_rebuild.issue must name the issue tracking the missing input, "
