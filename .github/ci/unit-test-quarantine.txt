@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 27 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 30 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -52,15 +52,23 @@ tests/test_gbm_runtime.py
 tests/test_insight_chapter.py
 tests/test_latent_factors_no_leak.py
 tests/test_latent_input_identity.py
+# Imports `_install_fixture_adapter` and `_locked_study` from
+# test_locked_holdout_execution, so it inherits that module's torch dependency
+# transitively rather than importing torch itself. Same boundary, same reason.
+tests/test_holdout_evaluation_driver.py
 tests/test_locked_holdout_execution.py
 tests/test_model_analysis_selection.py
 tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
 tests/test_research_models.py
+tests/test_sae_batch_size.py
 tests/test_sdf_checkpoint_numbering.py
 tests/test_sdf_macro_context.py
 tests/test_sequence_dataset.py
+# case_studies/utils/deep_learning.py imports torch at module scope (:42), and
+# this module imports sequence_identity_params from it.
+tests/test_sequence_identity_roundtrip.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_runtime.py
