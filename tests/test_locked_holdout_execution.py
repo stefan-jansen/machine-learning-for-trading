@@ -14,12 +14,15 @@ import polars as pl
 import pytest
 
 from case_studies.research import (
+    BacktestResult,
     CandidateSet,
     DecisionArtifact,
     LabelDefinition,
     ModelRun,
+    PredictionResult,
     ResearchLock,
     ResolvedModelRequest,
+    Result,
     StateTransitionPolicy,
     Study,
     registered_adapters,
@@ -124,6 +127,27 @@ def _locked_study(
         holdout_training_spec=holdout_spec,
     )
     return study, lock, holdout_prices
+
+
+def test_lock_reopens_its_candidate_set_when_the_name_has_two_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    study, lock, _ = _locked_study(tmp_path, monkeypatch)
+    locked = lock.candidate_set()
+    selected = Result.open(study, locked.members[0])
+    assert isinstance(selected, BacktestResult)
+    prediction = Result.open(study, selected.registry_record()["prediction_hash"])
+    assert isinstance(prediction, PredictionResult)
+    replacement = study.strategy(
+        prediction=prediction,
+        signal={"method": "equal_weight_top_k", "top_k": 2},
+        execution_mode="vectorized",
+    ).run(prices=_prices())
+    CandidateSet.create(study, "locked-selection", [replacement])
+
+    with pytest.raises(ValueError, match="resolved to 2 identities"):
+        CandidateSet.one(study, name="locked-selection")
+    assert lock.candidate_set().hash == locked.hash
 
 
 def _install_fixture_adapter(

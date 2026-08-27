@@ -788,15 +788,17 @@ def _canonical_family_coverage_bar(
     case_dir: Path,
     prediction_hashes: set[str] | None = None,
 ) -> dict[str, int]:
-    """Max in-window coverage per family, over EVERY prediction set for the label.
+    """Max in-window coverage per family over the eligible prediction population.
 
     The eligibility bar has to be the family's best coverage, not the best among the
     rows that happen to carry a backtest at the stage being resolved. Taking the max
     after a stage filter lowers the bar whenever the family's full-coverage prediction
     was never backtested at that stage, and a partial-coverage prediction then
     qualifies - which is exactly what ``full_coverage_prediction_sql`` prevents on the
-    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all of
-    ``(split, family, label)`` with no stage restriction.
+    raw path, where the ``MAX(ic_n_days)`` subquery ranges over all eligible members
+    of ``(split, family, label)`` with no stage restriction. An explicit immutable
+    population is a deliberate eligibility boundary, so retired identities outside
+    it do not set the comparison bar.
 
     Requires a ``prediction_metrics`` row, matching the raw path's implicit
     requirement (``full_coverage_prediction_sql`` joins ``pm``): a prediction set
@@ -1076,23 +1078,12 @@ def resolve_best_predictions(
         population_clause = (
             "AND p.prediction_hash IN (SELECT prediction_hash FROM population_members)"
         )
-        coverage_clause = """
-            AND pm.ic_n_days IS NOT NULL
-            AND pm.ic_n_days = (
-                SELECT MAX(pm_full.ic_n_days)
-                FROM prediction_sets p_full
-                JOIN training_runs t_full
-                  ON p_full.training_hash = t_full.training_hash
-                JOIN prediction_metrics pm_full
-                  ON p_full.prediction_hash = pm_full.prediction_hash
-                WHERE p_full.split = p.split
-                  AND t_full.family = t.family
-                  AND t_full.label = t.label
-                  AND p_full.prediction_hash IN (
-                      SELECT prediction_hash FROM population_members
-                  )
-            )
-        """
+        coverage_clause = full_coverage_prediction_sql(
+            "p",
+            "t",
+            "pm",
+            population_subquery="SELECT prediction_hash FROM population_members",
+        )
         params.append(json.dumps(sorted(prediction_hashes)))
     params.extend([label, *stage_params, *exclude_params])
     if split:
@@ -1187,6 +1178,7 @@ def _resolve_best_backtest_runs_canonical(
     chapter: str | None,
     top_n: int,
     case_dir: Path | None,
+    prediction_hashes: set[str] | None,
 ):
     """``resolve_best_backtest_runs(coverage_window="canonical")``.
 
@@ -1241,12 +1233,22 @@ def _resolve_best_backtest_runs_canonical(
     df = _query_table(case_dir, query, tuple([label] + exclude_params + stage_params + [split]))
     if df.is_empty():
         return df
+    if prediction_hashes is not None:
+        df = df.filter(pl.col("prediction_hash").is_in(prediction_hashes))
+        if df.is_empty():
+            return df
 
     in_window = {
         h: canonical_coverage_days(case_study, label, split, h, case_dir)
         for h in df["prediction_hash"].unique().to_list()
     }
-    bar = _canonical_family_coverage_bar(case_study, label, split, case_dir)
+    bar = _canonical_family_coverage_bar(
+        case_study,
+        label,
+        split,
+        case_dir,
+        prediction_hashes=prediction_hashes,
+    )
     df = df.with_columns(
         pl.col("prediction_hash").replace_strict(in_window, default=None).alias("_in_window_days"),
         pl.col("family").replace_strict(bar, default=None).alias("_family_bar"),
@@ -1279,6 +1281,7 @@ def resolve_best_backtest_runs(
     top_n: int = 3,
     case_dir: Path | None = None,
     coverage_window: str = "raw",
+    prediction_hashes: set[str] | None = None,
 ):
     """Return top-N backtest runs at a given stage, ranked by Sharpe.
 
@@ -1310,6 +1313,9 @@ def resolve_best_backtest_runs(
     coverage_window : str
         See ``resolve_best_predictions``. "raw" (default) is unchanged behavior;
         "canonical" requires an explicit ``split``.
+    prediction_hashes : set[str], optional
+        Restrict eligibility to these prediction identities before coverage filtering and
+        ranking.
 
     Returns
     -------
@@ -1327,6 +1333,7 @@ def resolve_best_backtest_runs(
             chapter=chapter,
             top_n=top_n,
             case_dir=case_dir,
+            prediction_hashes=prediction_hashes,
         )
 
     if case_dir is None:
@@ -1350,6 +1357,9 @@ def resolve_best_backtest_runs(
     stage_clause, stage_params = _stage_filter_clause(stage)
     exclude_clause, exclude_params = excluded_family_sql(case_study, "t.family")
     degenerate_clause = degenerate_prediction_sql("p.prediction_hash")
+    population_cte = ""
+    population_clause = ""
+    coverage_clause = full_coverage_prediction_sql("p", "t", "pm")
 
     split_clause = ""
     split_params: list[str] = []
@@ -1357,7 +1367,25 @@ def resolve_best_backtest_runs(
         split_clause = "AND p.split = ?"
         split_params = [split]
 
+    params: list[str] = []
+    if prediction_hashes is not None:
+        population_cte = (
+            "WITH population_members(prediction_hash) AS (SELECT value FROM json_each(?))"
+        )
+        population_clause = (
+            "AND p.prediction_hash IN (SELECT prediction_hash FROM population_members)"
+        )
+        coverage_clause = full_coverage_prediction_sql(
+            "p",
+            "t",
+            "pm",
+            population_subquery="SELECT prediction_hash FROM population_members",
+        )
+        params.append(json.dumps(sorted(prediction_hashes)))
+    params.extend([label, *exclude_params, *stage_params, *split_params, str(top_n)])
+
     query = f"""
+        {population_cte}
         SELECT
             b.backtest_hash,
             b.prediction_hash,
@@ -1374,15 +1402,16 @@ def resolve_best_backtest_runs(
           {exclude_clause}
           {stage_clause}
           {degenerate_clause}
-          {full_coverage_prediction_sql("p", "t", "pm")}
+          {coverage_clause}
           {split_clause}
+          {population_clause}
         ORDER BY bm.sharpe DESC
         LIMIT ?
     """
     df = _query_table(
         case_dir,
         query,
-        tuple([label] + exclude_params + stage_params + split_params + [str(top_n)]),
+        tuple(params),
     )
     if df.is_empty():
         return df

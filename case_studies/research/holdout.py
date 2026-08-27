@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import importlib
 import inspect
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pandas as pd
 import polars as pl
 
 from .decisions import DecisionArtifact, StateTransitionPolicy
 from .lifecycle import ResearchLock
 from .results import BacktestResult, PredictionResult
+
+_FOLD_FIELDS = ("fold", "train_start", "train_end", "val_start", "val_end")
 
 
 def _source_digest(function: Any) -> str:
@@ -342,3 +346,357 @@ def prepare_locked_strategy_replay(lock: ResearchLock) -> LockedStrategyReplay:
         "min_trade_value": rebalance.get("min_trade_value"),
     }
     return LockedStrategyReplay(lock, request, _prepare_decision_replay(lock))
+
+
+def _validation_folds(validation_spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    computation = validation_spec.get("computation")
+    if not isinstance(computation, dict):
+        raise ValueError("holdout CV derivation requires a current resolved training specification")
+    cv = computation.get("cv")
+    if not isinstance(cv, dict):
+        raise ValueError("selected training specification has no resolved CV interval")
+    folds = cv.get("folds")
+    if not isinstance(folds, list) or not folds:
+        raise ValueError("selected training specification has no resolved validation folds")
+    missing = {name for fold in folds for name in _FOLD_FIELDS if name not in fold}
+    if missing:
+        raise ValueError(f"validation folds are missing boundaries: {sorted(missing)}")
+    return [dict(fold) for fold in folds]
+
+
+def build_holdout_cv(
+    validation_spec: Mapping[str, Any],
+    *,
+    case_study: str,
+    timeline: Sequence[Any],
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Derive the one holdout CV interval that retrains the selected validation configuration.
+
+    The holdout window is not a choice. It is ``evaluation.holdout_start`` and
+    ``evaluation.holdout_end`` from the case study's own ``setup.yaml``, read here through
+    :func:`case_studies.utils.cv_window.canonical_window` so this derivation and the window a
+    backtest is sliced to cannot disagree. ``lifecycle.lock`` re-checks the same window before
+    it will accept the spec, and :func:`case_studies.research.models.locked_holdout_split`
+    checks it a third time at execution.
+
+    The training interval is the whole history available before that window, which is
+    ``min(train_start)`` across the validation folds and never one fold's own start: the fold
+    list runs newest first, so ``folds[0]["train_start"]`` is the *latest* start in the set and
+    would hand the retrain the shortest window it could have had rather than the longest.
+    :func:`utils.cv_splits.earliest_train_start` is that read, and this calls it rather than
+    repeating it.
+
+    Training ends one label buffer before the holdout opens, using the same buffer the
+    validation folds were built with. That gap is what stops the last training label's outcome
+    window from reaching into the holdout, which would train the holdout model on the period it
+    is meant to be judged against. The buffer is required rather than defaulted: a case study
+    that declares none has no basis for a gap, and a zero gap here is a leak rather than a
+    conservative choice.
+    """
+    from case_studies.utils.artifact_digest import value_digest
+    from case_studies.utils.causal import embargo_from_buffer, observation_step
+    from case_studies.utils.cv_window import canonical_window
+    from utils.artifact_specs import (
+        load_setup_config,
+        resolve_label_buffer,
+        resolve_label_horizon,
+    )
+    from utils.cv_splits import earliest_train_start, normalize_label_buffer
+
+    resolved_label = str(label if label is not None else validation_spec.get("label") or "")
+    if not resolved_label:
+        raise ValueError("holdout CV derivation requires the label the selection was made on")
+
+    window = canonical_window(case_study, resolved_label, split="holdout")
+    if window is None:
+        raise ValueError(
+            f"{case_study} declares no holdout window for {resolved_label!r}; "
+            "evaluation.holdout_start and evaluation.holdout_end must both be set in "
+            "config/setup.yaml before a holdout can be locked"
+        )
+    holdout_start, holdout_end = window
+
+    folds = _validation_folds(validation_spec)
+    validation_cv = dict(validation_spec["computation"]["cv"])
+    train_start = earliest_train_start(folds)
+
+    # Both resolvers fall back to setup.yaml's own labels block, and return None without it
+    # for every case study whose label carries no separate spec artifact - which is all nine
+    # for their primary label. Passing the setup is what makes the buffer resolvable at all.
+    setup = load_setup_config(case_study)
+    buffer = resolve_label_buffer(case_study, resolved_label, setup)
+    if not buffer:
+        raise ValueError(
+            f"{case_study} declares no label buffer for {resolved_label!r}, so the gap sealing "
+            "holdout training from the holdout window cannot be derived"
+        )
+    holdout_open = pd.Timestamp(holdout_start)
+    observations = sorted({pd.Timestamp(str(value)) for value in timeline})
+    if len(observations) < 2:
+        raise ValueError("holdout CV derivation needs at least two observations to measure cadence")
+
+    # Counted in OBSERVATIONS and stepped back along the panel's own dates, never subtracted as
+    # calendar time. `utils/cv_splits.py` already carries this bug's epitaph: "21D" as a
+    # pd.Timedelta is ~15 trading days, not 21, so a calendar subtraction leaves the last training
+    # label resolving inside the holdout - short, silent, and in the direction that looks fine.
+    # `generate_cv_splits` converts D-buffers to trading days for exactly this reason, and the
+    # causal resolver counts observations for the same one. This is the third construction of the
+    # same seal and it must agree with the other two.
+    # Measured against the panel's OWN cadence, not a per-unit default. Without observed_step
+    # embargo_from_buffer assumes a daily grid, which reads "1M" as 21 observations - correct on a
+    # daily panel and 21x too long on us_firm_characteristics' monthly one, where a month IS one
+    # observation. AGENTS.md records the mirror of this: "24H as one period on an eight-hour panel".
+    cadence = observation_step(pd.DataFrame({"timestamp": observations}))
+    # A month has no fixed length, so it cannot be divided by an observation step and
+    # embargo_from_buffer refuses. Its other branch takes periods_per_year, which is COUNTED here
+    # off the same timeline rather than assumed: falling through to the per-unit defaults is what
+    # turns "1M" into 21 observations on a monthly panel where a month is one.
+    span_years = (observations[-1] - observations[0]).days / 365.25
+    periods_per_year = max(1, round(len(observations) / span_years)) if span_years > 0 else 1
+    try:
+        buffer_steps = embargo_from_buffer(buffer, observed_step=cadence)
+    except ValueError:
+        buffer_steps = embargo_from_buffer(buffer, periods_per_year=periods_per_year)
+    if buffer_steps < 1:
+        raise ValueError(f"label buffer {buffer!r} leaves no gap before the holdout window")
+
+    # A declared zero horizon - us_firm_characteristics dates each row by the month the return was
+    # earned, so "0D" - means the outcome is already realised at the observation and there is
+    # nothing for the buffer to cover. embargo_from_buffer divides by the value, so it must not be
+    # asked about zero rather than being asked and having its answer discarded.
+    horizon = resolve_label_horizon(case_study, resolved_label, setup)
+    if horizon and pd.Timedelta(normalize_label_buffer(horizon)) > pd.Timedelta(0):
+        try:
+            horizon_steps = embargo_from_buffer(horizon, observed_step=cadence)
+        except ValueError:
+            horizon_steps = embargo_from_buffer(horizon, periods_per_year=periods_per_year)
+        if buffer_steps < horizon_steps:
+            raise ValueError(
+                f"label buffer {buffer!r} is {buffer_steps} observations, shorter than the "
+                f"outcome horizon {horizon!r} at {horizon_steps}, so the last training label "
+                "resolves inside the holdout window"
+            )
+
+    pre_holdout = [value for value in observations if value < holdout_open]
+    if len(pre_holdout) <= buffer_steps:
+        raise ValueError(
+            f"{case_study} has {len(pre_holdout)} observations before the holdout opens, which "
+            f"cannot absorb a {buffer_steps}-observation buffer"
+        )
+    # The buffer is the number of observations that must NOT be trained on, so the last retained
+    # one sits one step beyond it. `pre_holdout[-buffer_steps]` is the first excluded observation.
+    train_end = pre_holdout[-(buffer_steps + 1)]
+    if train_end <= train_start:
+        raise ValueError(
+            f"{case_study} holdout training interval is empty: history starts "
+            f"{train_start.date()} and the buffered boundary is {train_end.date()}"
+        )
+
+    fold = {
+        "fold": max(int(entry["fold"]) for entry in folds) + 1,
+        "train_start": train_start.isoformat(),
+        "train_end": train_end.isoformat(),
+        "val_start": pd.Timestamp(holdout_start).isoformat(),
+        "val_end": pd.Timestamp(holdout_end).isoformat(),
+    }
+    identity = value_digest(pl.DataFrame([fold]))
+    if identity == validation_cv.get("identity"):
+        raise ValueError("derived holdout CV is identical to the selected validation CV")
+    return {
+        "folds": [fold],
+        "identity": identity,
+        "split": "holdout",
+        "request": {
+            "source": "case_study_holdout",
+            "label_buffer": str(buffer),
+            "label_buffer_steps": buffer_steps,
+            "observation_cadence": str(cadence),
+            "periods_per_year": periods_per_year,
+            "holdout_window": [str(holdout_start), str(holdout_end)],
+        },
+    }
+
+
+@dataclass(frozen=True)
+class HoldoutOutcome:
+    """One case study's holdout evaluation, and whether this call is what produced it."""
+
+    lock: ResearchLock
+    evaluated_now: bool
+
+    @property
+    def lineage(self) -> dict[str, str]:
+        return self.lock.study.lifecycle.holdout_lineage(self.lock.hash)
+
+
+def evaluate_holdout(
+    study: Any,
+    *,
+    candidate_set_name: str,
+    timeline: Sequence[Any],
+    case_study: str | None = None,
+    selection_evidence: Mapping[str, Any] | None = None,
+) -> HoldoutOutcome:
+    """Lock one selected configuration and evaluate it on the holdout, at most once ever.
+
+    This is the whole sequence, in one place, because every case study needs the identical one
+    and nine notebooks assembling it from five primitives is how nine versions of it appear.
+    Each primitive it calls already exists and is already tested; what did not exist was anything
+    that called them.
+
+    The holdout is used once. That is not a convention this enforces by asking callers to check
+    first - re-running a notebook is normal and must not be able to spend the holdout a second
+    time. So an already-evaluated lifecycle returns its recorded lineage and executes nothing,
+    and ``evaluated_now`` is how a caller tells the two apart. A notebook re-run therefore reads
+    back exactly the numbers it published before, which is also what makes the page reproducible.
+
+    Selection is not a parameter either. ``lifecycle.lock`` refuses any selection that is not the
+    candidate set's highest validation backtest Sharpe, so passing the rank-1 member is the only
+    thing that can be passed - this reads it from the set rather than accepting it, which removes
+    the one place a caller could have disagreed with the documented rule.
+    """
+    from .comparison import CandidateSet
+    from .execution import run_locked_holdout
+    from .lifecycle import LifecycleState
+
+    lifecycle = study.lifecycle
+    state = lifecycle.state
+    if state == LifecycleState.HOLDOUT_EVALUATED.value:
+        # Returning the recorded lineage is what makes a notebook re-run safe, but returning it
+        # WITHOUT looking at the arguments would make this function answer a question it was not
+        # asked: a caller naming a different candidate set, or one that no longer resolves, would
+        # silently receive the old holdout as though it had been confirmed against the new
+        # selection. So the selection is re-derived and checked against what the lock recorded.
+        existing = _sole_lock(study)
+        _confirm_recorded_selection(study, existing, candidate_set_name)
+        return HoldoutOutcome(existing, evaluated_now=False)
+
+    candidates = CandidateSet.one(study, name=candidate_set_name)
+    selected = candidates.best_validation_sharpe()
+    selected_record = selected.registry_record()
+    prediction = study.results.open(selected_record["prediction_hash"])
+    training = study.results.open(prediction.registry_record()["training_hash"])
+
+    validation_spec = training.spec()
+    holdout_spec = deepcopy(validation_spec)
+    holdout_spec["computation"]["cv"] = build_holdout_cv(
+        validation_spec,
+        case_study=str(case_study if case_study is not None else study.case_study),
+        timeline=timeline,
+    )
+    _refuse_incomplete_holdout_spec(holdout_spec)
+
+    # selection_evidence is hashed into the lock identity, so anything put here that is already
+    # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
+    # caller that words it differently. The candidate set is already in the record under
+    # candidate_set_hash; the metric is the only thing this adds, and it is the documented rule.
+    evidence = {"metric": "validation_backtest_sharpe", **dict(selection_evidence or {})}
+    lock = lifecycle.lock(
+        candidate_set_hash=candidates.hash,
+        selected_backtest_hash=selected.hash,
+        selection_evidence=evidence,
+        holdout_training_spec=holdout_spec,
+    )
+    if lock.reopen().state == LifecycleState.HOLDOUT_EVALUATED.value:
+        # The lock already existed and had been spent. lifecycle.lock returns the existing lock
+        # rather than raising when the request is identical, so this is reached by a re-run whose
+        # selection has not changed - and it must not re-execute.
+        return HoldoutOutcome(lock.reopen(), evaluated_now=False)
+
+    execution = run_locked_holdout(lock)
+    return HoldoutOutcome(execution.lock, evaluated_now=True)
+
+
+def _sole_lock(study: Any) -> ResearchLock:
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(study.root / "run_log" / "registry.db")) as db:
+        rows = db.execute("SELECT lock_hash FROM research_locks").fetchall()
+    if len(rows) != 1:
+        raise ValueError(f"lifecycle holds {len(rows)} research locks, not one")
+    return study.lifecycle.open(rows[0][0])
+
+
+# Fields the resolver derives PER FOLD, from the data, during a run. They describe the VALIDATION
+# fold set, and `validate_locked_model_run` requires them re-keyed to the HOLDOUT fold:
+# `validate_locked_expected_keys` raises "no eligibility manifest" when
+# `expected_prediction_keys` is absent, and "eligibility mismatch" when it describes a different
+# frame. So neither carrying them forward nor dropping them is correct - both produce a lock that
+# fails at execution, one silently wrong and one loudly.
+#
+# WHAT THE FIX IS, so this is a specified task and not a vague blocker.
+#
+# `case_studies/utils/linear.py:675` computes the manifest at RECONSTRUCTION time with
+# `_expected_keys_from_dataset(mds.dataset, [split], ...)`, where `split` comes from
+# `locked_holdout_split(spec, ...)`, and then checks it against what the spec recorded. So the
+# computation exists; it just runs after the lock, against a value the lock was supposed to carry.
+#
+# Building the spec correctly means running that same computation BEFORE locking: open the dataset,
+# build the holdout split from the derived CV, compute the eligible keys, and record the digest,
+# row count and fold count. It is family-specific - `_expected_keys_from_dataset` lives in
+# `linear.py` and each family has its own - so it wants a per-family hook resolved through
+# `_family_module`, exactly as `reconstruct_locked_request` and `validate_locked_run` already are.
+#
+# Note also that `CVSpec` is NOT the vehicle. It carries `holdout_start`/`holdout_end`, but
+# `resolve()` passes them to `generate_cv_splits` as boundaries to seal VALIDATION against; it
+# selects validation folds and cannot emit a holdout fold. Nothing in the resolver produces a
+# holdout training fold today, which is why this had to be derived here in the first place.
+#
+# Until that hook exists, refusing is the only honest option: a lock is the one artifact in the
+# pipeline that cannot be revised, so producing one that is known to fail at execution is worse
+# than producing none.
+_FOLD_DERIVED_FIELDS = (
+    ("computation", "expected_prediction_keys"),
+    ("model", "effective_params_by_fold"),
+    ("macro_context", "resolved_fold_digest"),
+)
+
+
+def _refuse_incomplete_holdout_spec(spec: dict[str, Any]) -> None:
+    computation = spec.get("computation")
+    if not isinstance(computation, dict):
+        raise ValueError("holdout spec has no resolved computation block")
+    present: list[str] = []
+    if "expected_prediction_keys" in computation:
+        present.append("computation.expected_prediction_keys")
+    model = computation.get("model")
+    if isinstance(model, dict) and "effective_params_by_fold" in model:
+        present.append("computation.model.effective_params_by_fold")
+    task = computation.get("task")
+    if isinstance(task, dict):
+        imbalance = task.get("imbalance")
+        if isinstance(imbalance, dict) and "effective_class_weights_by_fold" in imbalance:
+            present.append("computation.task.imbalance.effective_class_weights_by_fold")
+    macro = computation.get("macro_context")
+    if isinstance(macro, dict) and "resolved_fold_digest" in macro:
+        present.append("computation.macro_context.resolved_fold_digest")
+    if present:
+        raise NotImplementedError(
+            "the selected training spec carries fold-derived fields that describe its VALIDATION "
+            f"folds and must be re-keyed to the holdout fold before a lock is taken: {present}. "
+            "validate_locked_expected_keys refuses a spec without an eligibility manifest and "
+            "refuses one describing a different frame, so a lock taken now would fail at "
+            "execution. Recomputing them needs the holdout window's eligible key frame, which the "
+            "family resolver builds during a run and which is not threaded through this path yet."
+        )
+
+
+def _confirm_recorded_selection(study: Any, lock: ResearchLock, candidate_set_name: str) -> None:
+    """Check the spent holdout answers the selection the caller is asking about."""
+    from .comparison import CandidateSet
+
+    candidates = CandidateSet.one(study, name=candidate_set_name)
+    if candidates.hash != lock.record["candidate_set_hash"]:
+        raise ValueError(
+            f"holdout was evaluated against candidate set {lock.record['candidate_set_hash']!r}, "
+            f"not {candidate_set_name!r} ({candidates.hash!r}); the holdout is used once and "
+            "cannot be re-spent against a different selection"
+        )
+    selected = candidates.best_validation_sharpe()
+    if selected.hash != lock.record["validation_backtest_hash"]:
+        raise ValueError(
+            f"candidate set {candidate_set_name!r} now ranks {selected.hash!r} first, but the "
+            f"holdout was evaluated on {lock.record['validation_backtest_hash']!r}"
+        )

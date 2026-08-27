@@ -238,7 +238,7 @@ def test_a_fold_boundary_survives_the_trip_into_a_polars_date_filter(
     of rows: that is what stopped ``sp500_equity_option_analytics/04_model_based_features``.
     ``fold_boundary_date`` is the one conversion, so the span stays a calendar date the whole way.
     """
-    from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
+    from case_studies.utils.cv_window import modeling_fold_boundaries
 
     cs = "test_cs_fold_boundary_into_polars"
     label = "fwd_ret_5d"
@@ -249,8 +249,8 @@ def test_a_fold_boundary_survives_the_trip_into_a_polars_date_filter(
     folds = modeling_fold_boundaries(cs, label)
     assert folds is not None
     fold = folds[0]
-    start = fold_boundary_date(fold["val_start"])
-    end = fold_boundary_date(fold["val_end"])
+    start = fold["val_start"]
+    end = fold["val_end"]
     assert isinstance(start, date) and not isinstance(start, datetime)
 
     sessions = pl.DataFrame(
@@ -268,9 +268,8 @@ def test_a_fold_boundary_survives_the_trip_into_a_polars_date_filter(
 def test_fold_boundary_date_refuses_a_boundary_carrying_a_time_of_day() -> None:
     """Dropping a time of day would silently move the span, so the conversion refuses instead.
 
-    Every fold this repository generates runs on a daily session calendar, so a boundary with a
-    clock reading means the generator now emits something the daily spans downstream cannot
-    represent. Truncating it would widen or narrow a fold without saying so.
+    The feature producers that use this conversion write daily spans. Intraday artifacts retain
+    their timestamps through ``temporal_artifact_fold_boundaries`` instead.
     """
     import pandas as pd
 
@@ -282,6 +281,8 @@ def test_fold_boundary_date_refuses_a_boundary_carrying_a_time_of_day() -> None:
 
     with pytest.raises(ValueError, match="time of day"):
         fold_boundary_date(pd.Timestamp("2020-01-06 09:30:00"))
+    with pytest.raises(ValueError, match="time of day"):
+        fold_boundary_date("2020-01-06 00:00:00.500000")
 
 
 def test_a_fold_end_is_comparable_to_the_holdout_start_the_configuration_states(
@@ -296,7 +297,7 @@ def test_a_fold_end_is_comparable_to_the_holdout_start_the_configuration_states(
     ``sp500_equity_option_analytics/05_evaluation``. Both sides have to be calendar dates for the
     seal to mean anything.
     """
-    from case_studies.utils.cv_window import fold_boundary_date, modeling_fold_boundaries
+    from case_studies.utils.cv_window import modeling_fold_boundaries
 
     cs = "test_cs_fold_end_against_holdout"
     label = "fwd_ret_5d"
@@ -309,6 +310,6 @@ def test_a_fold_end_is_comparable_to_the_holdout_start_the_configuration_states(
 
     folds = modeling_fold_boundaries(cs, label)
     assert folds is not None
-    latest_end = max(fold_boundary_date(f["val_end"]) for f in folds)
+    latest_end = max(f["val_end"] for f in folds)
 
     assert latest_end < holdout_start

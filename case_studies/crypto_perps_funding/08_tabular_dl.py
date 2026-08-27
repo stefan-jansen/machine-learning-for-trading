@@ -75,7 +75,7 @@ plan = plan_model_catalog(
 )
 # Task semantics and imbalance treatment are resolved inputs, so read them from the frozen
 # specification rather than restating the configuration file here.
-resolved_tasks = [spec.get("computation", spec)["task"] for spec in plan_specs(plan)]
+resolved_tasks = [spec["computation"]["task"] for spec in plan_specs(plan)]
 resolved_contracts = declared_contracts(plan).with_columns(
     pl.Series("metrics", [task.get("metrics", []) for task in resolved_tasks]),
     pl.Series("imbalance", [task.get("imbalance") for task in resolved_tasks]),

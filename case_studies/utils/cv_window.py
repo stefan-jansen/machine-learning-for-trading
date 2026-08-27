@@ -58,17 +58,17 @@ def fold_boundary_date(boundary: Any) -> date:
     boundary as text and rebuilds a filter from it gets an error instead of rows. Converting once,
     here, is what keeps a span comparable to the date column it filters.
 
-    A boundary with a clock reading is refused rather than truncated. Every fold in this
-    repository is generated on a daily session calendar, so a time of day means the generator
-    emits something the spans downstream cannot represent, and dropping it would move the span
-    without saying so.
+    A boundary with a clock reading is refused rather than truncated. The case studies that call
+    :func:`modeling_fold_boundaries` use daily calendars, so their spans cannot represent a time
+    of day. Intraday artifacts use :func:`temporal_artifact_fold_boundaries`, which preserves the
+    producer's boundary resolution.
     """
     if isinstance(boundary, datetime):
         clock = boundary.time()
     elif isinstance(boundary, date):
         clock = time.min
     else:
-        clock = datetime.fromisoformat(str(boundary)[:19]).time()
+        clock = datetime.fromisoformat(str(boundary)).time()
     if clock != time.min:
         raise ValueError(
             f"fold boundary {boundary!r} carries a time of day; the spans that read it are "
@@ -194,10 +194,10 @@ def modeling_fold_boundaries(case_study: str, label: str) -> list[dict] | None:
     return [
         {
             "fold": int(split["fold"]),
-            "train_start": split["train_start"],
-            "train_end": split["train_end"],
-            "val_start": split["val_start"],
-            "val_end": split["val_end"],
+            "train_start": fold_boundary_date(split["train_start"]),
+            "train_end": fold_boundary_date(split["train_end"]),
+            "val_start": fold_boundary_date(split["val_start"]),
+            "val_end": fold_boundary_date(split["val_end"]),
         }
         for split in splits
     ]
