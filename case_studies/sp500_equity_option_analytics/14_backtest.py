@@ -397,9 +397,7 @@ print(repr(explorer))
 # at all, and by how much - not the identity of the row at the top.
 
 # %%
-all_baselines = explorer.best(stage="signal", top_n=9999).filter(
-    pl.col("prediction_hash").is_in(CURRENT_MEMBERS)
-)
+all_baselines = explorer.best(stage="signal", top_n=9999, prediction_hashes=sorted(CURRENT_MEMBERS))
 search_context = {
     "total": len(all_baselines),
     "median_sharpe": all_baselines["sharpe"].median(),

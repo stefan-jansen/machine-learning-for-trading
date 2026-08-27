@@ -134,11 +134,21 @@ for _name in sorted(_population_names):
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, COST_LABEL, split="validation", stage="signal", top_n=9999
-).filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+    CASE_STUDY_ID,
+    COST_LABEL,
+    split="validation",
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
+)
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, COST_LABEL, split="validation", stage="allocation", top_n=9999
-).filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+    CASE_STUDY_ID,
+    COST_LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
+)
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
 )

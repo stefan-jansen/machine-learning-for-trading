@@ -59,6 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
+from case_studies.research import OfficialPopulation, open_study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -126,13 +127,49 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # allocators using validation Sharpe and maximum prediction coverage.
 # Historical rows from removed allocators cannot enter the corrected risk stage.
 
+# %% [markdown]
+# **The carrier is whichever strategy row ranks highest, so the pool it is drawn from decides what
+# is being overlaid.** A population is immutable and the registry keeps every generation of it, so
+# a pool built straight from `backtest_runs` counts retired members beside current ones - nothing
+# in the read path filters on supersession (`case_studies/utils/registry/queries.py` contains no
+# occurrence of `supersed`). A retired generation that outranks its own replacement would carry the
+# risk comparison, and the notebook would report an overlay on a strategy the case study no longer
+# publishes. `prediction_hashes` is passed rather than applied afterwards because it also scopes
+# the full-coverage bar the query ranks against: a retired row with a longer in-window count would
+# otherwise set a bar its live replacement cannot meet.
+
+# %%
+_study = open_study(CASE_STUDY_ID, execution_tier="canonical")
+with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
+    _population_names = [
+        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
+    ]
+CURRENT_MEMBERS: set[str] = set()
+for _name in sorted(_population_names):
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
+print(
+    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
+)
+
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"

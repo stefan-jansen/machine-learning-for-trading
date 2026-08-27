@@ -61,6 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
+from case_studies.research import OfficialPopulation, open_study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -125,6 +126,31 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # carry a few decision dates from before it that inflate their raw count without
 # covering any more of the modeling window.
 
+# %% [markdown]
+# **The advancing configurations are drawn from the populations in force, not from every generation
+# the registry holds.** A population is immutable and refitting one publishes a snapshot that
+# supersedes the old, with both left readable; nothing in the read path filters on that
+# (`case_studies/utils/registry/queries.py` contains no occurrence of `supersed`). Unfiltered, a
+# retired generation competes for a slot against its own replacement, and the funnel below reports
+# fewer distinct strategies than it appears to. The set is passed into the query rather than
+# applied to its output because it also scopes the full-coverage bar the ranking is measured
+# against.
+
+# %%
+_study = open_study(CASE_STUDY, execution_tier="canonical")
+with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
+    _population_names = [
+        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
+    ]
+CURRENT_MEMBERS: set[str] = set()
+for _name in sorted(_population_names):
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
+print(
+    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
+)
+
 # %%
 top_predictions = resolve_best_predictions(
     CASE_STUDY,
@@ -134,6 +160,7 @@ top_predictions = resolve_best_predictions(
     top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
     checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY),
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 )
 selected_prediction_hashes = top_predictions["prediction_hash"].to_list()
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY)}
@@ -144,6 +171,7 @@ baseline_pool = resolve_best_backtest_runs(
     stage="signal",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 allocation_pool = resolve_best_backtest_runs(
     CASE_STUDY,
@@ -152,6 +180,7 @@ allocation_pool = resolve_best_backtest_runs(
     stage="allocation",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
