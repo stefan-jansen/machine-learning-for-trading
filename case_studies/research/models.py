@@ -77,6 +77,7 @@ def reconstruct_locked_model_request(
         raise ValueError("locked holdout reconstruction requires a canonical training spec")
     if spec.get("identity_version") != IDENTITY_VERSION:
         raise ValueError("locked holdout reconstruction requires the current identity version")
+    _validate_standard_model_holdout_temporal_coverage(study, spec)
     module = _family_module(family)
     reconstructor = getattr(module, "reconstruct_locked_request", None)
     if not callable(reconstructor):
@@ -124,7 +125,6 @@ def prepare_locked_holdout_spec(
     computation = spec.get("computation")
     if not isinstance(computation, dict):
         raise ValueError("holdout spec has no resolved computation block")
-    _validate_standard_model_holdout_temporal_coverage(study, spec)
     present = _fold_derived_fields(computation)
     module = _family_module(str(spec.get("family", "")))
     preparer = getattr(module, "prepare_locked_holdout_spec", None)
@@ -134,8 +134,10 @@ def prepare_locked_holdout_spec(
                 "the selected training spec carries fold-derived fields that describe its "
                 f"validation folds and its model adapter cannot re-key them: {present}"
             )
+        _validate_standard_model_holdout_temporal_coverage(study, spec)
         return deepcopy(spec)
 
+    _validate_standard_model_holdout_temporal_coverage(study, spec)
     prepared = preparer(
         study,
         deepcopy(spec),
@@ -163,8 +165,19 @@ def _validate_standard_model_holdout_temporal_coverage(
 ) -> None:
     """Validate appended temporal folds without changing fitted-family source identity."""
     family = str(spec.get("family", ""))
-    if family not in {"linear", "gbm", "tabular_dl", "deep_learning"}:
+    computation = spec.get("computation")
+    input_data_spec = computation.get("input_data_spec") if isinstance(computation, dict) else None
+    artifacts = computation.get("feature_artifacts") if isinstance(computation, dict) else None
+    if not isinstance(artifacts, dict) and isinstance(input_data_spec, dict):
+        artifacts = input_data_spec.get("artifacts")
+    if not isinstance(artifacts, dict) or "model_based" not in artifacts:
         return
+    if family == "latent_factors":
+        return
+    if family not in {"linear", "gbm", "tabular_dl", "deep_learning"}:
+        raise NotImplementedError(
+            f"{family!r} has no fold-scoped temporal holdout coverage adapter"
+        )
 
     study.require_writable()
     study.activate(ExecutionTier.CANONICAL)

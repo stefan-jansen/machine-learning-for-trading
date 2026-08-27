@@ -27,19 +27,6 @@ from tests.test_locked_holdout_execution import _install_fixture_adapter, _locke
 TIMELINE = pd.bdate_range("2023-12-01", "2024-02-01")
 
 
-@pytest.fixture(autouse=True)
-def _modeling_dataset_without_temporal_features(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = SimpleNamespace(
-        temporal_by_fold=None,
-        temporal_keys=[],
-        temporal_feature_names=[],
-    )
-    monkeypatch.setattr(
-        "utils.modeling.load_modeling_dataset",
-        lambda *args, **kwargs: dataset,
-    )
-
-
 def _pin_derivation_to_the_fixture(monkeypatch: pytest.MonkeyPatch, lock) -> None:
     """Supply the interval the fixture study was locked under.
 
@@ -221,6 +208,7 @@ def test_non_latent_temporal_coverage_is_checked_before_adapter_preparation(
                 ],
             },
             "expected_prediction_keys": {"digest": "validation", "n_rows": 1, "n_folds": 2},
+            "feature_artifacts": {"model_based": {"sha256": "fixture"}},
         },
     }
 
@@ -232,6 +220,17 @@ def test_non_latent_temporal_coverage_is_checked_before_adapter_preparation(
             checkpoint_value=None,
         )
     assert prepared is False
+
+    modeling_dataset.temporal_by_fold = source.with_columns(
+        pl.lit(2).alias("fold"), pl.lit(1.0).alias("temporal_feature")
+    )
+    prepare_locked_holdout_spec(
+        study,
+        spec,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+    )
+    assert prepared is True
 
 
 def test_adapter_may_change_only_fold_derived_fields(
