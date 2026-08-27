@@ -197,6 +197,16 @@ def test_every_registered_model_family_owns_locked_reconstruction() -> None:
         assert callable(getattr(module, "validate_locked_run", None)), binding.name
 
 
+def test_locked_strategy_projection_drops_runtime_only_input_identity() -> None:
+    from case_studies.research.lifecycle import _locked_strategy_projection
+
+    locked = {"version": 2, "strategy": {"signal": {"method": "equal_weight_top_k"}}}
+    replayed = deepcopy(locked)
+    replayed["input_identity"] = {"prices": "holdout-price-digest"}
+
+    assert _locked_strategy_projection(replayed) == _locked_strategy_projection(locked)
+
+
 def test_latent_holdout_retry_preserves_conflicting_fold_diagnostics(tmp_path: Path) -> None:
     from case_studies.utils.latent_factors import adapter
 
