@@ -135,6 +135,15 @@ population_summary
 #   set reaches one, and the session before it otherwise. The prediction is scored on this date.
 # - **Entry date** - the next session's close, where the straddle is actually sold. Nothing
 #   trades at the price that produced the signal.
+#
+# The fill is a close rather than the next open because this chain has no open. The AlgoSeek
+# option data is one end-of-session quote per contract per day - `LastBidPrice`, `LastAskPrice`,
+# `LastMidPrice` - and carries no open, high or low, so a next-open fill is not a convention this
+# case study declined to adopt but a price that does not exist in its data. Worth stating plainly,
+# because a one-session delay to the next close is also the more conservative choice and reads
+# like one: a reader who assumes it was chosen for conservatism would also assume it could be
+# relaxed, and here it cannot be. `execution_delay: next_session_close` in `config/setup.yaml`
+# records the same fact for the engine, which resolves it to the `next_bar` execution mode.
 # - **Expiration** - where the position is closed, in cash, at the intrinsic value of the two
 #   legs. There is no exit trade and therefore no exit-side option spread.
 #
