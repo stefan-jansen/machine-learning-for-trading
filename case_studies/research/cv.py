@@ -46,6 +46,44 @@ def require_fold_scoped_temporal_compatibility(
         )
 
 
+def require_fold_scoped_temporal_holdout_coverage(
+    requested_fold: dict[str, Any],
+    temporal_by_fold: Any,
+    *,
+    date_col: str = "timestamp",
+    fold_col: str = "fold",
+) -> None:
+    """Require an existing temporal fold to cover holdout training and evaluation."""
+    import polars as pl
+
+    columns = [fold_col, date_col]
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        frame = temporal_by_fold.select(columns).collect()
+    elif isinstance(temporal_by_fold, pl.DataFrame):
+        frame = temporal_by_fold.select(columns)
+    else:
+        frame = pl.from_pandas(temporal_by_fold.loc[:, columns])
+    fold_id = int(requested_fold["fold"])
+    dates = frame.filter(pl.col(fold_col) == fold_id).get_column(date_col)
+    if dates.is_empty():
+        raise ValueError(f"fold-scoped temporal artifact has no holdout fold {fold_id}")
+    dtype = dates.dtype
+
+    def boundary(name: str) -> Any:
+        value = requested_fold[name]
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        return pl.Series([value]).cast(dtype, strict=False).item()
+
+    train_start, train_end = boundary("train_start"), boundary("train_end")
+    val_start, val_end = boundary("val_start"), boundary("val_end")
+    if not dates.is_between(train_start, train_end, closed="both").any():
+        raise ValueError("fold-scoped temporal holdout has no requested training rows")
+    evaluation = dates.filter(dates.is_between(val_start, val_end, closed="both"))
+    if evaluation.is_empty() or evaluation.max() < val_end:
+        raise ValueError("fold-scoped temporal holdout does not cover the evaluation endpoint")
+
+
 @dataclass(frozen=True)
 class EligibilityManifest:
     entity_schema: dict[str, Any]

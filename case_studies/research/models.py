@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import TYPE_CHECKING, Any
@@ -112,6 +113,76 @@ def validate_locked_model_run(
     return digest
 
 
+def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str, Any]:
+    """Re-key fold-derived model fields after the holdout CV has been resolved."""
+    computation = spec.get("computation")
+    if not isinstance(computation, dict):
+        raise ValueError("holdout spec has no resolved computation block")
+    present = _fold_derived_fields(computation)
+    module = _family_module(str(spec.get("family", "")))
+    preparer = getattr(module, "prepare_locked_holdout_spec", None)
+    if not callable(preparer):
+        if present:
+            raise NotImplementedError(
+                "the selected training spec carries fold-derived fields that describe its "
+                f"validation folds and its model adapter cannot re-key them: {present}"
+            )
+        return deepcopy(spec)
+
+    prepared = preparer(study, deepcopy(spec))
+    if not isinstance(prepared, dict):
+        raise TypeError("model adapter returned no prepared holdout specification")
+    prepared_computation = prepared.get("computation")
+    if not isinstance(prepared_computation, dict):
+        raise ValueError("model adapter removed the resolved computation block")
+    missing = set(present) - set(_fold_derived_fields(prepared_computation))
+    if missing:
+        raise ValueError(
+            f"model adapter removed required holdout fold derivations: {sorted(missing)}"
+        )
+    if _without_fold_derived_fields(prepared) != _without_fold_derived_fields(spec):
+        raise ValueError("model adapter changed fields outside the holdout fold derivations")
+    return prepared
+
+
+def _fold_derived_fields(computation: dict[str, Any]) -> list[str]:
+    present: list[str] = []
+    if "expected_prediction_keys" in computation:
+        present.append("computation.expected_prediction_keys")
+    model = computation.get("model")
+    if isinstance(model, dict) and "effective_params_by_fold" in model:
+        present.append("computation.model.effective_params_by_fold")
+    task = computation.get("task")
+    if isinstance(task, dict):
+        imbalance = task.get("imbalance")
+        if isinstance(imbalance, dict) and "effective_class_weights_by_fold" in imbalance:
+            present.append("computation.task.imbalance.effective_class_weights_by_fold")
+    macro = computation.get("macro_context")
+    if isinstance(macro, dict) and "resolved_fold_digest" in macro:
+        present.append("computation.macro_context.resolved_fold_digest")
+    return present
+
+
+def _without_fold_derived_fields(spec: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    computation = projected.get("computation")
+    if not isinstance(computation, dict):
+        return projected
+    computation.pop("expected_prediction_keys", None)
+    model = computation.get("model")
+    if isinstance(model, dict):
+        model.pop("effective_params_by_fold", None)
+    task = computation.get("task")
+    if isinstance(task, dict):
+        imbalance = task.get("imbalance")
+        if isinstance(imbalance, dict):
+            imbalance.pop("effective_class_weights_by_fold", None)
+    macro = computation.get("macro_context")
+    if isinstance(macro, dict):
+        macro.pop("resolved_fold_digest", None)
+    return projected
+
+
 def locked_holdout_split(
     spec: dict[str, Any], dataset: pl.DataFrame, date_col: str, case_study: str
 ) -> dict[str, Any]:
@@ -149,7 +220,7 @@ def locked_holdout_split(
     fold["fold"] = int(fold["fold"])
     dtype = dataset.schema[date_col]
     boundaries = {
-        name: pl.DataFrame({date_col: [fold[name]]})
+        name: pl.DataFrame({date_col: [_parse_boundary(fold[name])]})
         .with_columns(pl.col(date_col).cast(dtype, strict=False))
         .item()
         for name in ("train_start", "train_end", "val_start", "val_end")
@@ -202,6 +273,15 @@ def locked_holdout_split(
             for name, value in boundaries.items()
         },
     }
+
+
+def _parse_boundary(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return date.fromisoformat(value)
 
 
 def validate_locked_expected_keys(spec: dict[str, Any], expected: pl.DataFrame) -> None:
