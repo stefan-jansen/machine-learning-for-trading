@@ -14,739 +14,484 @@
 # ---
 
 # %% [markdown]
-# # Position Risk: Crypto Perpetual Futures
+# # Crypto perpetuals: fourteen ways to leave a position early
 #
-# Do position-level stops or time exits improve the frozen risk-parity carrier after correcting its
-# long-short book and settling official funding? This notebook quarantines five historical rules
-# calibrated on validation, replaces them with pre-validation thresholds, and compares the eligible
-# read-only surface with the no-overlay allocation baseline.
+# The two stages before this one decided which contracts to hold and how much of each. Neither
+# decided when to stop holding one. Every position so far ran until the entry rule stopped
+# selecting it, which on an 8-hourly rebalance is at most one funding interval but can be many.
+# This notebook adds one rule at a time that closes a position before the entry rule would.
 #
-# **Learning objectives**
+# Three kinds are declared in `config/setup.yaml`. A **stop loss** exits when the position is down
+# by a fixed fraction of its entry price. A **trailing stop** exits when it is down by a fixed
+# fraction of the highest price it has seen, so the exit level rises with the position and never
+# falls. A **time exit** closes after a fixed number of bars whatever the price has done.
 #
-# - Distinguish position-level rules from portfolio-level regime controls
-# - Compare Sharpe and drawdown on the same funding-inclusive equity definition
-# - Distinguish fixed rules from thresholds that require ex-ante calibration
-# - Interpret an overlay winner as validation evidence, not holdout rescue
+# **What an overlay can and cannot do.** It never adds a position, so it cannot improve a ranking.
+# All it can do is cut the left tail of positions the ranking already chose, and it pays for that
+# in two ways: an exit is a trade, so it costs commission and slippage, and a position closed
+# early stops earning - or paying - funding. On perpetual futures the second is not a rounding
+# error, because funding is the reason a carry strategy holds anything at all.
 #
-# **Book reference**: Chapter 19, Risk Management
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: [`14_portfolio_management`](14_portfolio_management.ipynb),
-# [`15_costs`](15_costs.ipynb), and the frozen `run_log/registry.db`
+# - Tell a position-level control from a portfolio-level one, and say which of them a
+#   single-strategy book can even express.
+# - Run an overlay so that it differs from its own no-overlay result in one field, and read the
+#   paired difference.
+# - Say why a threshold calibrated on the split it is then selected on is not eligible, even when
+#   the calibration looks like a property of the data rather than of the returns.
+# - Recognise the two distinct costs an early exit pays on a funding-bearing instrument.
+#
+# **Book reference**: Chapter 19 (Risk Management).
+#
+# **Prerequisites**: [`14_portfolio_management`](14_portfolio_management.ipynb) has frozen a
+# candidate set per label.
+#
+# **What it writes**: one `stage='risk_overlay'` backtest per label and declared control, and one
+# candidate set per label spanning all three stages, which
+# [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects the final configuration from.
 
 # %%
-"""Read-only position-risk replay with official funding settlement."""
+"""Run the declared risk-overlay grid on the surviving crypto perpetuals configuration."""
 
-import hashlib
-import json
-import sqlite3
-import warnings
-from collections import defaultdict
-from copy import deepcopy
-from datetime import UTC, datetime, timedelta
-
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.funding_data import load_funding_rates
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    load_backtest_prices,
-    load_backtest_prices_for,
-    warmup_periods_for,
+from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
+from case_studies.research import CandidateSet, Result, open_study, run_backtests
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.sweep_config import (
+    get_portfolio_risk_controls,
+    get_position_risk_controls,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec
-from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.cv_window import canonical_window
-from case_studies.utils.registry import read_predictions
-from case_studies.utils.sweep_config import calibrate_trailing_stops
-from utils.paths import get_case_study_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY = "crypto_perps_funding"
-LABEL = "fwd_ret_24h"
-SEED = 42
-BAR_HOURS = 8
-MAX_SYMBOLS = 0
-EXPECTED_REGISTERED_RISK_CELLS = 19
-EXPECTED_REPLAY_RISK_CELLS = 20
-MAX_RISK_VARIANTS = 0
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+POPULATION_SUFFIX = "v2"
+SUPERSEDES: dict[str, str] = {}
 
 # %%
-set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
-REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
-config = get_backtest_config(CASE_STUDY)
-print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
+study = open_study(
+    "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
+labels = list(LABELS) if LABELS else list(ALL_LABELS)
 
 # %% [markdown]
-# ## Freeze the allocation carrier and risk grid
+# ## 1. What the overlay is applied to
 #
-# The allocation cohort fixes the GBM prediction and risk-parity allocator before overlay analysis.
-# The registry contributes 19 historical specifications. Five `trailing_mae_*` thresholds were fit
-# on validation and are audit-only; their replacements use prices strictly before validation.
+# The funnel gives this stage the top one, per `backtest.sweep.top_n_predictions.risk_overlay`.
+# One is narrow on purpose: an overlay is a second search over the same validation folds, and
+# fourteen controls applied to ten configurations would be a hundred and forty readings of one
+# year of data. The question is whether a control improves the configuration the case study
+# already arrived at, not which control looks best somewhere in the grid.
+#
+# The set read here is the same one [`15_costs`](15_costs.ipynb) read, and this notebook is not
+# downstream of that one - cost sensitivity selects nothing, so both stages hang off the
+# allocation result independently.
+
+# %%
+chosen_by_label = {}
+for label in labels:
+    candidates = CandidateSet.one(study, name=f"crypto-signal-allocation-{label}")
+    chosen_by_label[label] = candidates.best_validation_sharpe()
+
+# %% [markdown]
+# One row per label: the configuration each overlay is measured against, and the no-overlay
+# numbers the paired difference is taken from.
+
+# %% tags=["results"]
+backtests = study.backtests.table()
+baseline = backtests.filter(
+    pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
+).select(
+    "label",
+    "stage",
+    "family",
+    "config_name",
+    pl.col("allocation_method").fill_null("equal_weight").alias("allocator"),
+    "sharpe",
+    "max_drawdown",
+    "num_trades",
+    "backtest_hash",
+)
+if baseline.height != len(chosen_by_label):
+    raise RuntimeError("a selected result is absent from the backtest catalog")
+baseline.drop("backtest_hash").sort("label")
+
+# %% [markdown]
+# ## 2. The declared controls
+#
+# Fourteen position-level rules: four stop losses, seven trailing stops and three time exits. A
+# **position-level** control reads one position's own price path and decides about that position.
+# A **portfolio-level** control reads the whole book - its drawdown, its realized volatility, a
+# regime estimate - and scales or halts everything at once. `config/setup.yaml` declares no
+# portfolio-level controls for this case study, and the cell below reports that rather than
+# assuming it: a single long-short book of nineteen contracts rebalanced every eight hours has no
+# regime state distinct from the positions themselves, so a portfolio control here would be a
+# second copy of the position controls with a slower trigger.
+#
+# ### Why no calibrated threshold is in the grid
+#
+# A tempting fifteenth kind is a threshold read off the data - the tenth percentile of maximum
+# adverse excursion, say, so the stop sits where prices actually turn. It is not here, and the
+# reason is worth being precise about, because the calibration looks innocent.
+#
+# The thresholds would be fitted on the validation prices, and the overlay is then selected on
+# validation Sharpe. That makes the threshold part of the search rather than an input to it, and
+# the resulting Sharpe is not a measurement of the control - it is a measurement of how well the
+# control was fitted to the same year it is scored on. The declared grid is fixed in
+# `config/setup.yaml` precisely so the width of the search is a stated property of the case study
+# rather than something a notebook can widen while running.
+
+# %%
+position_controls = get_position_risk_controls("crypto_perps_funding")
+portfolio_controls = get_portfolio_risk_controls("crypto_perps_funding")
+if not position_controls:
+    raise RuntimeError("crypto_perps_funding declares no backtest.sweep.risk_controls.position")
+print(
+    f"{len(position_controls)} position-level controls, "
+    f"{len(portfolio_controls)} portfolio-level controls"
+)
+pl.DataFrame(
+    [
+        {
+            "control": control["name"],
+            "type": control["type"],
+            "reads": "price against entry"
+            if control["type"] == "stop_loss"
+            else "price against running best"
+            if control["type"] == "trailing_stop"
+            else "bars held",
+            "setting": control.get("threshold", control.get("bars")),
+        }
+        for control in position_controls
+    ]
+)
+
+# %% [markdown]
+# ## 3. Running the grid
+#
+# For each label, the chosen configuration's own strategy is read back from its registered
+# specification and re-run once per control, with the `risk` field added and nothing else
+# changed. The prices carry the same warmup the allocator was given at the allocation stage, so a
+# moment-based allocator weights from the same history it did there.
+#
+# The control is nested under `position_rules`, which is the key the engine reads. A control
+# passed as the flat mapping `setup.yaml` declares would install no rule and run the unprotected
+# book, and it would do so without failing: the mapping still lands in `strategy.risk`, so the
+# specification hashes differently and registers as a distinct result under the control's name.
 
 
 # %%
-def _allocation_carrier(registry_path) -> dict:
-    """Load the frozen allocation leader for the selected label."""
-    query = """
-        SELECT b.prediction_hash, b.backtest_hash, b.spec_json,
-               m.sharpe, m.max_drawdown
-        FROM cohort_metrics c
-        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
-        JOIN backtest_metrics m USING (backtest_hash)
-        WHERE c.cohort_type = 'stagelabel'
-          AND c.stage = 'allocation' AND c.label = ?
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        row = connection.execute(query, (LABEL,)).fetchone()
-    if row is None:
-        raise RuntimeError("No frozen allocation leader for the selected label")
-    prediction_hash, backtest_hash, spec_json, sharpe, max_drawdown = row
+def as_risk_spec(control: dict) -> dict:
+    """The declared control in the shape the engine reads it."""
+    setting = (
+        {"bars": control["bars"]}
+        if control["type"] == "time_exit"
+        else {"threshold": control["threshold"]}
+    )
     return {
-        "prediction_hash": prediction_hash,
-        "backtest_hash": backtest_hash,
-        "spec": json.loads(spec_json),
-        "stored_sharpe": sharpe,
-        "stored_max_drawdown": max_drawdown,
+        "name": control["name"],
+        "position_rules": [{"type": control["type"], **setting}],
     }
 
 
 # %%
-def _validate_carrier(carrier: dict, expected_strategy: dict) -> None:
-    """Reject any substitute for the frozen signed allocation carrier."""
-    if (
-        carrier["prediction_hash"] != "fb85a7d19ce1"
-        or carrier["backtest_hash"] != "7d0eb0c542fa"
-        or carrier["spec"]["strategy"] != expected_strategy
-    ):
-        raise RuntimeError("The frozen allocation carrier changed; review the risk narrative")
-
-
-# %%
-def _risk_cells(registry_path, prediction_hash: str, expected_strategy: dict) -> list[dict]:
-    """Return one registered row per semantic position-risk rule."""
-    query = """
-        SELECT b.backtest_hash, b.spec_json, m.sharpe, m.max_drawdown
-        FROM backtest_runs b JOIN backtest_metrics m USING (backtest_hash)
-        WHERE b.stage = 'risk_overlay' AND b.prediction_hash = ?
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        rows = connection.execute(query, (prediction_hash,)).fetchall()
-    cells = {}
-    for backtest_hash, spec_json, sharpe, max_drawdown in rows:
-        row_strategy = json.loads(spec_json)["strategy"]
-        risk = row_strategy.pop("risk")
-        if row_strategy != expected_strategy:
-            raise RuntimeError(f"Risk row {backtest_hash} does not use the frozen carrier")
-        key = json.dumps(risk, sort_keys=True)
-        if key in cells:
-            raise RuntimeError(f"Duplicate registered risk rule: {risk['name']}")
-        cells[key] = {
-            "backtest_hash": backtest_hash,
-            "risk": risk,
-            "stored_sharpe": sharpe,
-            "stored_max_drawdown": max_drawdown,
-        }
-    return [cells[key] for key in sorted(cells)]
-
-
-# %%
-def _validate_risk_cells(cells: list[dict], expected_cells: int, reduced_grid: bool) -> None:
-    """Reject incomplete, duplicated, or shifted production risk grids."""
-    if len(cells) != expected_cells:
-        raise RuntimeError(f"Expected {expected_cells} semantic risk rules, found {len(cells)}")
-    if reduced_grid:
-        return
-    risk_keys = sorted(
-        json.dumps(cell["risk"], sort_keys=True, separators=(",", ":")) for cell in cells
+for label in labels:
+    chosen = chosen_by_label[label]
+    strategy = chosen.spec()["strategy"]
+    allocation = strategy.get("allocation")
+    warmup = strategy_warmup_periods({"allocation": allocation} if allocation else {})
+    prices = load_backtest_prices_for(
+        "crypto_perps_funding", label, split="validation", warmup_periods=warmup
     )
-    risk_digest = hashlib.sha256("|".join(risk_keys).encode()).hexdigest()
-    if risk_digest != "a69cfd6fb31958dc6976c77f2fbf7b2276c61c2f27a3585deaa60dcfc6ef1358":
-        raise RuntimeError("The registered risk rules differ from the frozen 19-cell surface")
-
-
-# %%
-carrier = _allocation_carrier(REGISTRY_PATH)
-strategy = carrier["spec"]["strategy"]
-signal = strategy["signal"]
-allocation = strategy["allocation"]
-expected_strategy = {
-    "signal": {"long_short": True, "method": "equal_weight_top_k", "top_k": 5},
-    "allocation": {
-        "long_short": True,
-        "method": "risk_parity",
-        "top_k": 5,
-        "vol_window": 240,
-    },
-    "rebalance": {
-        "cadence": "8_hour_funding_aligned",
-        "min_trade_value": 100.0,
-        "min_weight_change": 0.005,
-        "mode": "engine",
-    },
-}
-_validate_carrier(carrier, expected_strategy)
-registered_risk_cells = _risk_cells(REGISTRY_PATH, carrier["prediction_hash"], strategy)
-using_reduced_grid = MAX_RISK_VARIANTS > 0
-using_fallback_grid = using_reduced_grid and not registered_risk_cells
-if not using_fallback_grid:
-    _validate_risk_cells(
-        registered_risk_cells,
-        EXPECTED_REGISTERED_RISK_CELLS,
-        reduced_grid=False,
+    predictions = study.predictions.table().filter(
+        pl.col("prediction_hash") == chosen.spec()["backtest_config"]["metadata"]["prediction_hash"]
     )
-print(
-    f"Carrier: prediction={carrier['prediction_hash']} allocation={allocation['method']} "
-    f"requested_top_k={allocation['top_k']}; registered risk rules={len(registered_risk_cells)}"
-)
-
-# %% [markdown]
-# Production requires the exact historical registry surface before it separates fixed rules from
-# invalid same-window calibration. Isolated execution can inject three canonical fixed rules.
-
-# %%
-if using_fallback_grid:
-    fallback_risks = [
-        {"name": "time_exit_20", "position_rules": [{"bars": 20, "type": "time_exit"}]},
-        {
-            "name": "trailing_10pct",
-            "position_rules": [{"threshold": 0.10, "type": "trailing_stop"}],
-        },
-        {
-            "name": "stop_loss_10pct",
-            "position_rules": [{"threshold": 0.10, "type": "stop_loss"}],
-        },
-    ][:MAX_RISK_VARIANTS]
-    risk_cells = [
-        {
-            "backtest_hash": "",
-            "risk": risk,
-            "stored_sharpe": float("nan"),
-            "stored_max_drawdown": float("nan"),
-            "registered_reference": False,
-        }
-        for risk in fallback_risks
-    ]
-else:
-    fixed_registered = [
-        {**cell, "registered_reference": True}
-        for cell in registered_risk_cells
-        if not cell["risk"]["name"].startswith("trailing_mae_")
-    ]
-    historical_mae = [
-        cell for cell in registered_risk_cells if cell["risk"]["name"].startswith("trailing_mae_")
-    ]
-    if len(fixed_registered) != 14 or len(historical_mae) != 5:
-        raise RuntimeError("Expected 14 fixed and five validation-calibrated historical rules")
-    risk_cells = fixed_registered[:MAX_RISK_VARIANTS] if using_reduced_grid else fixed_registered
-
-# %% [markdown]
-# ## Align the frozen artifact and official settlements
-#
-# Predictions and prices advance together from the legacy bar-open clock to the completed 8-hour
-# bar. The corrected selector caps each long and short side at half the available cross-section.
-
-# %%
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="'Y' is deprecated", category=FutureWarning)
-    validation_window = canonical_window(CASE_STUDY, LABEL, split="validation")
-if validation_window is None:
-    raise RuntimeError("No canonical validation window")
-validation_start, validation_end = validation_window
-
-# %% [markdown]
-# ## Calibrate learned thresholds before validation
-#
-# The historical `trailing_mae_*` rows are not eligible: their thresholds were calibrated on the
-# validation prices later used to compare rules. Replacement thresholds use the complete price
-# prefix ending before the first validation date. Fixed stop-loss, trailing-stop, and time-exit
-# rules remain exact registered references.
-
-
-# %%
-def _prevalidation_mae_cells(validation_start) -> tuple[list[dict], pl.DataFrame]:
-    """Calibrate MAE thresholds on prices strictly before validation."""
-    calibration_end = validation_start - timedelta(days=1)
-    calibration_prices = load_backtest_prices(
-        CASE_STUDY,
-        max_symbols=MAX_SYMBOLS,
-        end_date=calibration_end.isoformat(),
-    )
-    if calibration_prices.is_empty():
-        raise RuntimeError("No pre-validation prices available for MAE calibration")
-    if calibration_prices["timestamp"].max().date() >= validation_start:
-        raise RuntimeError("MAE calibration admitted validation prices")
-    controls = calibrate_trailing_stops(calibration_prices)
-    controls_digest = hashlib.sha256(
-        json.dumps(controls, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    if controls_digest != "34219016a0c1f3d669f0295a40cf97f051850eb4c22394c7cda38fa4ab9ab80e":
-        raise RuntimeError("Pre-validation MAE calibration surface changed")
-    cells = [
-        {
-            "backtest_hash": "",
-            "risk": {
-                "name": control["name"],
-                "position_rules": [{"threshold": control["threshold"], "type": control["type"]}],
-            },
-            "stored_sharpe": float("nan"),
-            "stored_max_drawdown": float("nan"),
-            "registered_reference": False,
-            "calibration": control["calibration"],
-        }
-        for control in controls
-    ]
-    return cells, calibration_prices
-
-
-# %%
-if not using_reduced_grid:
-    calibrated_cells, calibration_prices = _prevalidation_mae_cells(validation_start)
-    risk_cells += calibrated_cells
-    print(
-        f"Quarantined {len(historical_mae)} validation-calibrated registry rows; "
-        f"fit {len(calibrated_cells)} replacements on "
-        f"{calibration_prices['timestamp'].min()} to {calibration_prices['timestamp'].max()}"
-    )
-    print(
-        pl.DataFrame(
-            [
-                {
-                    "historical_rule": cell["risk"]["name"],
-                    "historical_threshold": cell["risk"]["position_rules"][0]["threshold"],
-                    "eligible": False,
-                }
-                for cell in historical_mae
-            ]
+    if predictions.height != 1:
+        raise RuntimeError(f"{label}: the selected prediction set is not uniquely resolvable")
+    for control in position_controls:
+        execution = run_backtests(
+            study,
+            predictions=predictions,
+            signal=strategy["signal"],
+            allocation=allocation,
+            risk=as_risk_spec(control),
+            prices=prices,
+            chapter="ch19",
+            population_name=f"crypto-risk-{label}-{control['name']}-{POPULATION_SUFFIX}",
         )
-    )
-if using_reduced_grid:
-    # EXPECTED_REPLAY_RISK_CELLS is the full production count (14 fixed rules plus one
-    # recalibrated MAE replacement). MAX_RISK_VARIANTS truncates risk_cells before this
-    # point specifically to skip that recalibration, so the reduced count is never 20 by
-    # design - only a sanity check applies here, not the production identity pin.
-    if not risk_cells:
-        raise RuntimeError("Reduced risk grid produced no eligible rules")
-elif len(risk_cells) != EXPECTED_REPLAY_RISK_CELLS:
-    raise RuntimeError(
-        f"Expected {EXPECTED_REPLAY_RISK_CELLS} eligible risk rules, found {len(risk_cells)}"
-    )
-print(f"Eligible risk rules replayed: {len(risk_cells)}")
+        print(
+            f"{label} / {control['name']}: {len(execution.results)} backtests registered\n"
+            f"  this execution: {execution.n_computed} computed, "
+            f"{execution.n_reused} served from the registry"
+        )
+
+# %% [markdown]
+# ## 4. What came out
+#
+# Read back from the registry, with the control recovered from each registered specification.
+# `traded_folds` is derived the same way [`14_portfolio_management`](14_portfolio_management.ipynb)
+# derives it, from the registered return series rather than from the control's name, because a
+# control that closes everything and never re-enters would otherwise look like a comparable
+# result with a better Sharpe.
+
 
 # %%
-frozen_predictions = read_predictions(
-    CASE_STUDY, carrier["prediction_hash"], case_dir=FROZEN_CASE_DIR
+def fold_windows(prediction_hash: str) -> pl.DataFrame:
+    """First and last decision date of each validation fold, in date order."""
+    return (
+        Result.open(study, prediction_hash)
+        .load()
+        .group_by("fold")
+        .agg(
+            fold_start=pl.col("timestamp").min().dt.date(),
+            fold_end=pl.col("timestamp").max().dt.date(),
+        )
+        .sort("fold_start")
+    )
+
+
+# %%
+def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
+    """Which validation folds one registered result actually held a position in."""
+    returns = pl.read_parquet(
+        study.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
+    )
+    column = next(name for name in returns.columns if name != "timestamp")
+    active = returns.filter(pl.col(column) != 0).select(pl.col("timestamp").dt.date().alias("day"))
+    if active.is_empty():
+        return ()
+    return tuple(
+        int(row["fold"])
+        for row in windows.iter_rows(named=True)
+        if active.filter(pl.col("day").is_between(row["fold_start"], row["fold_end"])).height
+    )
+
+
+# %%
+windows_by_label = {
+    label: fold_windows(chosen.spec()["backtest_config"]["metadata"]["prediction_hash"])
+    for label, chosen in chosen_by_label.items()
+}
+results = study.backtests.table().filter(
+    (pl.col("split") == "validation")
+    & pl.col("label").is_in(labels)
+    & pl.col("stage").is_in(["signal", "allocation", "risk_overlay"])
 )
-raw_prices = load_backtest_prices_for(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    max_symbols=MAX_SYMBOLS,
-    warmup_periods=warmup_periods_for(CASE_STUDY),
+# A risk_overlay row whose specification carries no position rule was run without the control it
+# is registered under. The engine reads `strategy.risk.position_rules` and installs nothing when
+# it is absent, while the control's name still lands in `strategy.risk` and hashes the result as
+# distinct - so such a row reports the unprotected book under an overlay's name. The generation
+# this notebook replaces registered fifty-six of them.
+overlay_without_rule = results.filter(
+    (pl.col("stage") == "risk_overlay")
+    & pl.col("spec_json").str.json_path_match("$.strategy.risk.position_rules[0].type").is_null()
 )
-legacy_targets = (
-    raw_prices.sort("symbol", "timestamp")
+if overlay_without_rule.height:
+    print(
+        f"excluding {overlay_without_rule.height} risk_overlay rows that registered no position "
+        "rule: they measure the unprotected book"
+    )
+    results = results.filter(
+        ~pl.col("backtest_hash").is_in(overlay_without_rule.get_column("backtest_hash").implode())
+    )
+if results.filter(~pl.col("complete")).height:
+    raise RuntimeError("the backtest catalog contains incomplete members")
+keyed = results.with_columns(
+    pl.col("spec_json").str.json_path_match("$.strategy.risk.name").alias("control"),
+    pl.col("spec_json")
+    .str.json_path_match("$.strategy.risk.position_rules[0].type")
+    .alias("control_type"),
+    pl.Series(
+        "traded_folds",
+        [
+            "+".join(
+                str(fold)
+                for fold in traded_folds(row["backtest_hash"], windows_by_label[row["label"]])
+            )
+            for row in results.iter_rows(named=True)
+        ],
+    ),
+)
+
+# %% [markdown]
+# One row per label and control. `sharpe_change` and `drawdown_change` are against that label's
+# no-overlay result, which is the only comparison the stage supports: the overlay row and the
+# baseline row differ in the `risk` field and in nothing else.
+
+# %% tags=["results"]
+no_overlay = keyed.filter(
+    pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
+).select(
+    "label",
+    pl.col("sharpe").alias("baseline_sharpe"),
+    pl.col("max_drawdown").alias("baseline_drawdown"),
+    pl.col("num_trades").alias("baseline_trades"),
+    pl.col("traded_folds").alias("baseline_traded_folds"),
+)
+overlay = (
+    keyed.filter(pl.col("stage") == "risk_overlay")
+    .join(no_overlay, on="label", how="inner")
     .with_columns(
-        pl.col("close").shift(-3).over("symbol").alias("end_close"),
-        pl.col("timestamp").shift(-3).over("symbol").alias("end_timestamp"),
-    )
-    .filter(pl.col("end_timestamp") == pl.col("timestamp") + pl.duration(hours=24))
-    .select(
-        pl.col("timestamp").dt.replace_time_zone("UTC"),
-        "symbol",
-        (pl.col("end_close") / pl.col("close") - 1).alias("current_raw_target"),
+        (pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_change"),
+        (pl.col("max_drawdown") - pl.col("baseline_drawdown")).alias("drawdown_change"),
+        (pl.col("num_trades") - pl.col("baseline_trades")).alias("extra_trades"),
     )
 )
-alignment = frozen_predictions.join(legacy_targets, on=["timestamp", "symbol"], how="inner")
-target_correlation = alignment.select(pl.corr("y_true", "current_raw_target")).item()
-if target_correlation < 0.99:
-    raise ValueError("Frozen prediction timestamps do not match the legacy raw-price clock")
-print(f"Frozen target/current raw-price correlation: {target_correlation:.6f}")
-
-# %%
-predictions = frozen_predictions.with_columns(
-    pl.col("timestamp") + pl.duration(hours=BAR_HOURS)
-).filter(pl.col("timestamp").dt.date() <= validation_end)
-prices = raw_prices.with_columns(pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).filter(
-    pl.col("timestamp").dt.date() <= validation_end
-)
-funding = (
-    load_funding_rates(symbols=prices["symbol"].unique().to_list())
-    .with_columns(pl.col("timestamp").cast(prices.schema["timestamp"]))
-    .filter(
-        (pl.col("timestamp") >= prices["timestamp"].min())
-        & (pl.col("timestamp") <= prices["timestamp"].max())
-    )
-)
-panel_sizes = predictions.group_by("timestamp").len().rename({"len": "n_assets"})
-capped_timestamps = panel_sizes.filter(pl.col("n_assets") < 2 * allocation["top_k"]).height
+comparable = overlay.filter(pl.col("traded_folds") == pl.col("baseline_traded_folds"))
 print(
-    f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"settlements: {funding.height:,}; dynamically capped timestamps: {capped_timestamps}"
+    f"{comparable.height} of {overlay.height} overlay results traded the same folds as their "
+    "baseline and are comparable to it"
+)
+if comparable.filter(pl.col("control_type").is_null()).height:
+    raise RuntimeError(
+        "an overlay result registered no control type: the rule never reached the engine"
+    )
+inert = comparable.filter(
+    (pl.col("sharpe_change") == 0.0)
+    & (pl.col("drawdown_change") == 0.0)
+    & (pl.col("extra_trades") == 0.0)
+)
+if inert.height == comparable.height:
+    raise RuntimeError(
+        "every control left the book identical in Sharpe, drawdown and trade count. The tightest "
+        "declared stop is 3% and the shortest time exit is 10 bars, against a baseline that draws "
+        "down tens of percent, so a control that binds on nothing is not a result about risk "
+        "management - it is a control the engine never installed."
+    )
+print(f"{inert.height} of {comparable.height} controls left the book untouched")
+comparable.select(
+    "label",
+    "control",
+    "control_type",
+    "sharpe",
+    "sharpe_change",
+    "max_drawdown",
+    "drawdown_change",
+    "extra_trades",
+).sort("label", "sharpe_change", descending=[False, True])
+
+# %% [markdown]
+# The two axes an overlay trades against each other. A control that helps sits up and to the
+# right: less drawdown and no worse Sharpe. The cluster's position relative to the origin is the
+# reading, not any single point in it - fourteen controls on one year of validation will produce
+# a best one whether or not any of them works.
+
+# %%
+fig = go.Figure()
+palette = {
+    "stop_loss": COLORS["blue"],
+    "trailing_stop": COLORS["amber"],
+    "time_exit": COLORS["copper"],
+}
+for control_type in sorted(set(comparable.get_column("control_type"))):
+    panel = comparable.filter(pl.col("control_type") == control_type)
+    fig.add_trace(
+        go.Scatter(
+            x=panel.get_column("drawdown_change").to_list(),
+            y=panel.get_column("sharpe_change").to_list(),
+            mode="markers",
+            name=control_type,
+            text=panel.get_column("control").to_list(),
+            marker={"size": 9, "color": palette.get(control_type, COLORS["slate"]), "opacity": 0.7},
+        )
+    )
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig.add_vline(x=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig.update_layout(
+    title={
+        "text": "What each overlay changed, against its own no-overlay result"
+        "<br><sup>One point per label and control; the origin is no overlay</sup>",
+        "x": 0.02,
+        "xanchor": "left",
+    },
+    xaxis_title="Change in maximum drawdown",
+    yaxis_title="Change in annualized validation Sharpe",
+    height=520,
+    width=1000,
+)
+show_plotly_with_alt(
+    fig,
+    "Scatter plot of the change in annualized validation Sharpe against the change in maximum "
+    "drawdown, one point per label and declared risk control coloured by control type, with dashed lines through the "
+    "origin marking the no-overlay result. Points spread on both sides of the horizontal line, "
+    "so the controls do not separate from no overlay on Sharpe.",
 )
 
 # %% [markdown]
-# ## Funding and equity oracle
+# ## 5. The set the final choice is made from
 #
-# Funding is settled on the position carried into each event, before same-time fills. Off-grid
-# settlements use the last observed mark. Removing cumulative funding from the reconstructed ledger
-# must reproduce engine equity within floating-point noise.
-
-
-# %%
-def _as_utc(value: datetime) -> datetime:
-    """Normalize engine timestamps to timezone-aware UTC."""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-# %%
-def _replay_inputs(result):
-    """Index fills, settlements, prices, and engine equity by UTC timestamp."""
-    engine = result.engine_result
-    if engine is None:
-        raise RuntimeError("Funding replay requires an uncached engine result")
-    fills = defaultdict(list)
-    for fill in engine.fills:
-        fills[_as_utc(fill.timestamp)].append(fill)
-    rates = defaultdict(dict)
-    for row in funding.iter_rows(named=True):
-        rates[_as_utc(row["timestamp"])][row["symbol"]] = float(row["funding_rate"])
-    marks = defaultdict(dict)
-    for row in prices.select("timestamp", "symbol", "close").iter_rows(named=True):
-        marks[_as_utc(row["timestamp"])][row["symbol"]] = float(row["close"])
-    equity = {_as_utc(ts): float(value) for ts, value in engine.equity_curve}
-    return fills, rates, marks, equity
-
-
-# %%
-def _replay_equity(result):
-    """Return funding-adjusted equity and ledger diagnostics."""
-    fills, rates, marks, engine_equity = _replay_inputs(result)
-    cash = float(config.initial_cash)
-    positions = defaultdict(float)
-    funding_pnl = 0.0
-    settlements = 0
-    adjusted = []
-    reconstructed = []
-    last_marks = {}
-    for timestamp in sorted(set(engine_equity) | set(rates)):
-        last_marks.update(marks[timestamp])
-        for symbol, rate in rates.get(timestamp, {}).items():
-            settlements += 1
-            if positions.get(symbol, 0.0) != 0 and symbol in last_marks:
-                event_cash = -(positions[symbol] * last_marks[symbol]) * rate
-                cash += event_cash
-                funding_pnl += event_cash
-        for fill in fills.get(timestamp, []):
-            quantity = float(fill.quantity) if fill.side.value == "buy" else -float(fill.quantity)
-            cash -= quantity * float(fill.price) + float(fill.commission)
-            last_marks.setdefault(fill.asset, float(fill.price))
-            positions[fill.asset] += quantity
-            if abs(positions[fill.asset]) < 1e-12:
-                del positions[fill.asset]
-        if timestamp in engine_equity:
-            marked = sum(quantity * last_marks[symbol] for symbol, quantity in positions.items())
-            adjusted.append((timestamp, cash + marked))
-            reconstructed.append((timestamp, cash - funding_pnl + marked))
-    error = max(abs(value - engine_equity[ts]) for ts, value in reconstructed)
-    return adjusted, funding_pnl, settlements, error
-
-
-# %%
-def _daily_metrics(equity_curve: list[tuple[datetime, float]]) -> tuple[float, float]:
-    """Compute validation Sharpe and maximum drawdown from daily equity."""
-    daily = (
-        pl.DataFrame(equity_curve, schema=["timestamp", "equity"], orient="row")
-        .with_columns(pl.col("timestamp").dt.date().alias("date"))
-        .group_by("date")
-        .agg(pl.col("equity").sort_by("timestamp").last())
-        .sort("date")
-        .with_columns(pl.col("equity").pct_change().alias("return"))
-        .filter((pl.col("date") >= validation_start) & (pl.col("date") <= validation_end))
-    )
-    values = daily["equity"].to_numpy()
-    returns = daily["return"].drop_nulls().to_numpy()
-    sharpe = float(returns.mean() / returns.std(ddof=1) * np.sqrt(365))
-    drawdown = values / np.maximum.accumulate(values) - 1
-    return sharpe, float(drawdown.min())
-
-
-# %% [markdown]
-# ## Replay the baseline and 20 eligible position rules
+# One candidate set per label spanning all three stages: the equal-weight baseline, the allocation
+# results and the overlay results. [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one
+# configuration from it, so no overlay is eligible only by being an overlay - a label where no
+# control improved anything selects the configuration it already had.
 #
-# Allocation weights are computed once. Fourteen fixed rules retain their exact registered
-# dictionaries; six MAE rules use pre-validation calibration. Every run uses `register=False`.
+# The same admission rule as the previous stage applies, for the same reason: a result that did
+# not trade every validation fold is measured on a different period and cannot be ranked against
+# one that did. Here the rule catches a different failure than it did at the allocation stage - a
+# stop tight enough to close everything early sits out the rest of the span, and its Sharpe over
+# what it did trade would otherwise compete for the final selection.
+#
+# `SUPERSEDES` names the generation of each set this run replaces, which the freeze refuses to do
+# implicitly. `17_strategy_analysis` resolves these four sets by name, so two live generations of
+# one name would leave it unable to say which comparison a result came from. It defaults to empty,
+# because a first run has nothing to replace and a set whose members are unchanged returns the
+# existing one without consulting it. Pass it only for a re-run that admits different members;
+# the error raised then names the predecessor hash to supply.
 
 # %%
-base_spec = build_backtest_spec(
-    CASE_STUDY,
-    config,
-    prices=prices,
-    prediction_hash=carrier["prediction_hash"],
-    initial_cash=config.initial_cash,
-    chapter="ch19",
-    signal=signal,
-    allocation=allocation,
-)
-if base_spec["strategy"] != expected_strategy:
-    raise RuntimeError("The reconstructed runtime strategy differs from the frozen carrier")
-weights = precompute_weights(
-    predictions,
-    base_spec,
-    prices,
-    label=LABEL,
-    case_study=CASE_STUDY,
-    prediction_hash=carrier["prediction_hash"],
-).sort("timestamp", "symbol")
-
-
-# %%
-def _run_cell(risk: dict | None) -> dict:
-    """Run one position-risk cell and add official funding."""
-    spec = deepcopy(base_spec)
-    if risk is not None:
-        spec["strategy"]["risk"] = risk
-    result = run_backtest(
-        CASE_STUDY,
-        carrier["prediction_hash"],
-        spec,
-        prices=prices,
-        predictions=predictions,
-        label=LABEL,
-        register=False,
-        precomputed_weights=weights,
-        initial_cash=config.initial_cash,
-        calendar=config.calendar,
-    )
-    curve, funding_pnl, settlements, error = _replay_equity(result)
-    total_sharpe, total_max_drawdown = _daily_metrics(curve)
-    return {
-        "price_only_sharpe": float(result.metrics["sharpe"]),
-        "price_only_max_drawdown": float(result.metrics["max_drawdown"]),
-        "with_funding_sharpe": total_sharpe,
-        "with_funding_max_drawdown": total_max_drawdown,
-        "funding_pnl": funding_pnl,
-        "settlements": settlements,
-        "reconstruction_error": error,
-    }
-
-
-# %%
-baseline_result = _run_cell(None)
-rows = [
-    {
-        "risk_name": "no_overlay",
-        "risk_type": "baseline",
-        "stored_sharpe": carrier["stored_sharpe"],
-        "stored_max_drawdown": carrier["stored_max_drawdown"],
-        "registered_reference": True,
-        **baseline_result,
-    }
-]
-for index, cell in enumerate(risk_cells, start=1):
-    risk = cell["risk"]
-    rule = risk["position_rules"][0]
-    result = _run_cell(risk)
-    rows.append(
-        {
-            "risk_name": risk["name"],
-            "risk_type": rule["type"],
-            "stored_sharpe": cell["stored_sharpe"],
-            "stored_max_drawdown": cell["stored_max_drawdown"],
-            "registered_reference": cell["registered_reference"],
-            **result,
-        }
+for label in labels:
+    label_rows = keyed.filter(pl.col("label") == label)
+    full = "+".join(str(fold) for fold in windows_by_label[label].get_column("fold").to_list())
+    admitted = label_rows.filter(pl.col("traded_folds") == full)
+    excluded = label_rows.height - admitted.height
+    members = study.backtests.freeze(
+        results.filter(
+            pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
+        ),
+        name=f"crypto-final-validation-{label}",
+        supersedes=SUPERSEDES.get(label),
     )
     print(
-        f"[{index:02d}/{len(risk_cells)}] {risk['name']}: "
-        f"price={result['price_only_sharpe']:+.3f}, funding={result['with_funding_sharpe']:+.3f}"
+        f"{members.name}: {len(members.members)} members traded folds {full}; "
+        f"{excluded} excluded for trading fewer"
     )
 
-
-# %%
-def _validate_replay(frame: pl.DataFrame, expected_settlements: int) -> None:
-    """Reject incomplete or non-finite risk-replay results."""
-    for metric in (
-        "price_only_sharpe",
-        "price_only_max_drawdown",
-        "with_funding_sharpe",
-        "with_funding_max_drawdown",
-        "funding_pnl",
-    ):
-        if not frame[metric].is_finite().all():
-            raise RuntimeError(f"Non-finite risk replay metric: {metric}")
-    registered = frame.filter("registered_reference")
-    for metric in ("stored_sharpe", "stored_max_drawdown"):
-        if not registered[metric].is_finite().all():
-            raise RuntimeError(f"Non-finite registered risk metric: {metric}")
-    if frame.filter(pl.col("settlements") != expected_settlements).height:
-        raise RuntimeError("At least one risk replay missed an official settlement")
-    reconstruction_errors = frame["reconstruction_error"]
-    if not reconstruction_errors.is_finite().all() or reconstruction_errors.max() > 1e-6:
-        raise RuntimeError("Funding ledger does not reconstruct engine equity")
-
-
-# %%
-replay = pl.DataFrame(rows).sort("with_funding_sharpe", descending=True)
-_validate_replay(replay, funding.height)
-print(f"Every replay processed all {funding.height:,} official settlement rows")
-print(
-    replay.select(
-        "risk_name",
-        "risk_type",
-        "stored_sharpe",
-        "price_only_sharpe",
-        "with_funding_sharpe",
-        "with_funding_max_drawdown",
-    ).head(10)
-)
-
 # %% [markdown]
-# ## Time exits preserve the strongest risk-adjusted result
+# ## 6. What to notice
 #
-# The paired view separates the long-short repair from funding settlement. The no-overlay baseline
-# remains visible, so an overlay is promoted only if it improves on the same corrected return
-# definition.
-
-# %%
-ordered = replay.sort("with_funding_sharpe")
-fig = go.Figure()
-labels = [name.replace("_", " ") for name in ordered["risk_name"]]
-for index, row in enumerate(ordered.iter_rows(named=True)):
-    fig.add_trace(
-        go.Scatter(
-            x=[row["price_only_sharpe"], row["with_funding_sharpe"]],
-            y=[labels[index], labels[index]],
-            mode="lines",
-            line={"color": COLORS["neutral"], "width": 1},
-            hoverinfo="skip",
-            showlegend=False,
-        )
-    )
-
-# %%
-fig.add_trace(
-    go.Scatter(
-        x=ordered["price_only_sharpe"],
-        y=labels,
-        mode="markers",
-        marker={"size": 8, "color": COLORS["slate"]},
-        name="Price P&L",
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=ordered["with_funding_sharpe"],
-        y=labels,
-        mode="markers",
-        marker={"size": 9, "color": COLORS["amber"]},
-        name="Including funding",
-    )
-)
-fig.add_vline(x=0, line_color=COLORS["neutral"], line_width=1)
-fig.update_layout(
-    title={
-        "text": "Position rules do not improve on the allocation baseline"
-        "<br><sup>Frozen carrier; fixed plus pre-validation-calibrated rules</sup>",
-        "x": 0.02,
-        "xanchor": "left",
-    },
-    xaxis_title="Annualized validation Sharpe",
-    yaxis_title="Position rule",
-    height=760,
-    margin={"l": 205},
-    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-)
-fig.show()
-
-# %% [markdown]
-# No overlay remains the validation leader after correction. It reaches +2.741 price-only and
-# +2.849 including funding, compared with +2.689 and +2.797 for the 20-bar time exit. The time exit
-# gives up about 0.052 Sharpe while funding-inclusive maximum drawdown is nearly unchanged at 21.6%
-# versus 21.4%. The position rules do not improve this historical carrier.
-
-# %% [markdown]
-# ## Drawdown is a trade-off, not a second ranking target
+# **An overlay is a second search, and the funnel narrows before it for that reason.** Fourteen
+# controls against one configuration is fourteen readings of the same validation year. Had the
+# stage run against the ten configurations the allocation stage started from, the highest Sharpe
+# in the grid would be the maximum of a hundred and forty draws, and the distance between that
+# maximum and the truth grows with the count whether or not any control helps.
 #
-# A rule that reduces drawdown by destroying the return source is not an improvement. The frontier
-# below uses the same funding-inclusive daily equity for both axes. Labels identify the baseline and
-# representative 20-bar time exit; the other rules remain available through hover.
-
-# %%
-color_map = {
-    "baseline": COLORS["neutral"],
-    "time_exit": COLORS["amber"],
-    "trailing_stop": COLORS["blue"],
-    "stop_loss": COLORS["slate"],
-}
-
-# %%
-fig = go.Figure()
-for risk_type in replay["risk_type"].unique().sort().to_list():
-    subset = replay.filter(pl.col("risk_type") == risk_type)
-    text = [
-        row["risk_name"].replace("_", " ")
-        if row["risk_name"] in {"no_overlay", "time_exit_20"}
-        else ""
-        for row in subset.iter_rows(named=True)
-    ]
-    positions = [
-        "bottom center" if row["risk_name"] == "no_overlay" else "top center"
-        for row in subset.iter_rows(named=True)
-    ]
-    fig.add_trace(
-        go.Scatter(
-            x=-subset["with_funding_max_drawdown"],
-            y=subset["with_funding_sharpe"],
-            mode="markers+text",
-            text=text,
-            textposition=positions,
-            marker={"size": 10, "color": color_map[risk_type]},
-            name=risk_type.replace("_", " "),
-            customdata=subset["risk_name"],
-            hovertemplate=("%{customdata}<br>drawdown=%{x:.1%}<br>Sharpe=%{y:.2f}<extra></extra>"),
-        )
-    )
-fig.update_layout(
-    title={
-        "text": "Tighter stops reduce drawdown only by surrendering too much Sharpe"
-        "<br><sup>Funding-inclusive validation equity; lower drawdown is left</sup>",
-        "x": 0.02,
-        "xanchor": "left",
-    },
-    xaxis_title="Maximum drawdown magnitude",
-    xaxis_tickformat=".0%",
-    yaxis_title="Annualized validation Sharpe",
-    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-)
-fig.show()
-
-# %% [markdown]
-# ## Publication boundary
+# **A stop pays twice on a funding-bearing instrument.** The exit is a trade, so it pays
+# commission and slippage at the declared schedule. The position it closes then stops settling
+# funding, and on perpetual futures that cash flow is a large part of what the strategy is there
+# to collect. A control that improves the price path and gives up the carry has not necessarily
+# improved anything.
 #
-# This replay is a corrected accounting view of frozen v3.0 history, not a current v3.1 carrier.
-# The current registry now contains a separate 24-hour backtest and cohort surface that selects its
-# own carrier and risk rule. The final strategy notebook reports that current result without merging
-# it with this historical replay.
-
-# %% [markdown]
-# ## Key takeaways
+# **Drawdown and Sharpe do not move together.** A control can cut the worst peak-to-trough decline
+# and still lower the Sharpe, because it removes the recovery along with the decline. The chart
+# above puts the two on separate axes rather than resolving them into one number, since which one
+# matters is a question about the mandate rather than about the data.
 #
-# 1. The registered risk stage remains frozen v3.0 history; five validation-calibrated MAE rows are
-#    quarantined and all current replays use `register=False`.
-# 2. Position-level rules operate on trade paths. They do not detect a change in the signal's
-#    economic regime.
-# 3. Six MAE thresholds are learned only from the complete pre-validation price prefix; fixed rules
-#    retain their exact registered definitions.
-# 4. The corrected comparison uses one return definition for Sharpe and drawdown, including every
-#    official funding settlement.
-# 5. Requested top-5 is capped dynamically on 186 early timestamps, so the risk comparison is not
-#    contaminated by one-sided books.
-# 6. Current v3.1 selects its risk overlay on a separate lineage, so this historical replay cannot
-#    substitute for the current carrier.
-# 7. The final strategy notebook must synthesize only corrected results or clearly label frozen
-#    registry values as historical.
+# **A calibrated threshold is a fitted parameter.** Reading a stop level off the same prices the
+# overlay is then scored on makes the level part of the search. The declared grid exists so the
+# search width is fixed in the configuration rather than chosen while the notebook runs, and that
+# is the property this stage would lose first if a threshold were fitted here.
+#
+# **Known limitations.** Every control is applied uniformly to all nineteen contracts, so nothing
+# here says whether a stop that scales with a contract's own volatility would do better - that is
+# another parameter, and fitting it is the previous point. Portfolio-level controls are declared
+# nowhere for this case study, so the whole regime-control family is untested here. And every
+# number is measured on the validation folds at the declared cost schedule.
+#
+# **Next**: [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one configuration from
+# the set this notebook froze and reports what it did.
