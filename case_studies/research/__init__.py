@@ -53,6 +53,7 @@ from .population import (
     population_supersedes,
     research_name,
     superseded_members,
+    superseded_members_at,
 )
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy, strategy_warmup_periods
@@ -121,6 +122,7 @@ __all__ = [
     "run_locked_holdout",
     "run_model_population",
     "superseded_members",
+    "superseded_members_at",
     "run_models",
     "run_official_model_subset",
     "run_official_models",

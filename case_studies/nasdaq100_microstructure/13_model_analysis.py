@@ -63,7 +63,12 @@ import numpy as np
 import polars as pl
 import yaml
 
-from case_studies.research import OfficialPopulation, Result, open_study
+from case_studies.research import (
+    OfficialPopulation,
+    Result,
+    open_study,
+    superseded_members,
+)
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
     fold_performance_matrix,
@@ -205,8 +210,19 @@ if excluded_families(CASE_STUDY):
 # interval, the t statistic - which the catalog's metric projection does not expose. Reading
 # admissibility off one and detail off the other keeps both, where swapping wholesale to the
 # catalog would have narrowed the columns and silently emptied the interval on every forest tile.
+# `complete` is about the row; supersession is about the name that published it. A refit
+# leaves the retired generation complete and current - the schema version it was written under
+# has not moved - so a comparison selecting on the catalog alone puts two generations of the
+# same name in one table, and the family representative below can be drawn from either. The
+# table would not look wrong; it would just be answering two questions at once.
+#
+# `superseded_members` takes the study because this notebook already opened one, and it unions
+# the release and workspace roots the way the catalog overlays them. The sibling call in
+# `14_backtest` uses `superseded_members_at` instead, because that notebook deliberately holds
+# a resolved directory and no study.
 _catalog = study.predictions.table()
-_admissible = pl.col("complete")
+_retired = superseded_members(study)
+_admissible = pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
 _ok = _catalog.filter(_admissible).select("prediction_hash")
 _rejected = _catalog.filter(~_admissible)
 

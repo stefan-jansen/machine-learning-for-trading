@@ -13,6 +13,7 @@ fleet measured on 2026-08-25, each chosen for a shape the others do not test:
 | `sp500_equity_option_analytics` | 123 | A doubled catalog, visible directly: 915 prediction rows = 792 live + 123 retired, zero overlap. |
 | `crypto_perps_funding` | 400 | The edge outlives the rows. Its refit deleted generation A's `prediction_sets` rows and only the `official_population_members` record survives, so a form reading supersession out of `prediction_sets` returns empty here and correct on the other three. |
 | `cme_futures` | 656 | A live population lists retired members. Four dead names left by two renames are in force under their own names and hold 178 identities that `linear` and `gbm` have refit past, so the global reading - retired by someone, listed by nobody in force - un-retires all 178 and the per-name reading does not. |
+| `nasdaq100_microstructure` | 150 | A superseded generation that retires nothing. Its `linear-validation-v1` refit grew 16 members to 61 and re-listed all 16, so those 16 are superseded and still published; only `gbm-validation-v1` retires (150 of 150). A form comparing whole generations rather than members returns 166 - isolated to one edge here, where `etfs` shows the same defect only as a total. Added 2026-08-27. |
 
 `crypto_perps_funding` is why this file exists rather than a single spot check: three of the
 others would let a wrong implementation look right, and its reading clean is not evidence the
@@ -41,7 +42,7 @@ from pathlib import Path
 
 import pytest
 
-from case_studies.research.population import superseded_members
+from case_studies.research.population import superseded_members, superseded_members_at
 
 ARTIFACTS = Path.home() / "ml4t" / "artifacts" / "case_studies"
 
@@ -52,6 +53,8 @@ RETIRED_PREDICTIONS = {
     "sp500_equity_option_analytics": 123,
     "crypto_perps_funding": 400,
     "cme_futures": 656,
+    # Added 2026-08-27.
+    "nasdaq100_microstructure": 150,
 }
 
 
@@ -183,3 +186,72 @@ def test_a_dead_name_still_in_force_does_not_un_retire_what_it_lists() -> None:
         name not in ("cme_futures-linear-validation-v1", "cme_futures-gbm-validation-v1")
         for name in holders
     ), "a name is listing identities it also retired, which no reading of the lineage allows"
+
+
+def test_a_superseded_generation_whose_members_are_all_re_listed_retires_none() -> None:
+    """The case that separates member-wise comparison from whole-generation comparison.
+
+    `nasdaq100_microstructure` carries two supersedes edges. `gbm-validation-v1` replaced 150
+    members with a disjoint 500 and retires all 150. `linear-validation-v1` grew 16 members to
+    61 and kept every one of the 16, so its superseded generation retires nothing at all - the
+    name moved past that *snapshot*, not past those identities.
+
+    A form that retires a superseded generation wholesale returns 166 here. Measured
+    2026-08-27, `etfs` also moves under that form and the other three do not, so this is the
+    second of two registries that separate them - and the only one where the difference is a
+    single edge with a stated cause, rather than a total across four generations.
+    """
+    study = _study("nasdaq100_microstructure")
+    retired = superseded_members(study, member_kind="prediction")
+    assert len(retired) == 150
+
+    with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        generations = db.execute(
+            "SELECT population_hash, name, supersedes_hash FROM official_populations "
+            "WHERE member_kind = 'prediction'"
+        ).fetchall()
+        members = {
+            population_hash: {
+                row[0]
+                for row in db.execute(
+                    "SELECT member_hash FROM official_population_members WHERE population_hash = ?",
+                    (population_hash,),
+                )
+            }
+            for population_hash, _, _ in generations
+        }
+
+    superseded = {row[2] for row in generations if row[2] is not None}
+    assert len(superseded) == 2, "both names must have refit for this case to be the one described"
+    wholesale = set().union(*(members[population_hash] for population_hash in superseded))
+    assert len(wholesale) == 166
+    assert retired < wholesale, (
+        "retiring superseded generations wholesale would retire 16 identities that "
+        "linear-validation-v1 still publishes"
+    )
+
+
+def test_superseded_members_at_answers_for_the_root_it_is_given() -> None:
+    """The root-based form a notebook uses when it holds a directory and no study.
+
+    `14_backtest` reads its catalog through `prediction_rows_at(CASE_DIR)` precisely so that
+    no `Study.open` runs and no `activate()` re-points the notebook mid-run. Asking the
+    lineage question through a study there would answer for whichever registry the activation
+    selected, so the retired set and the catalog it filters could describe different
+    registries. Same reduction, same answer, one named root.
+    """
+    study = _study("nasdaq100_microstructure")
+    assert superseded_members_at(study.root, member_kind="prediction") == superseded_members(
+        study, member_kind="prediction"
+    )
+
+
+def test_superseded_members_at_is_empty_for_a_root_holding_no_registry(tmp_path: Path) -> None:
+    """A reader's clean clone has no registry, and that is not an error.
+
+    The distinction that matters is between "no generation was ever written" and "the query
+    could not read". The first is answered with nothing; the second must raise, because a
+    swallowed failure here is indistinguishable from a clean filter and would silently admit
+    every retired row.
+    """
+    assert superseded_members_at(tmp_path, member_kind="prediction") == frozenset()

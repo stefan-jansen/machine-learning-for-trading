@@ -459,6 +459,20 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
             rows.append(row)
         for population_hash, member_hashes in root_members.items():
             members.setdefault(population_hash, set()).update(member_hashes)
+    return _retired(rows, members)
+
+
+def _retired(
+    rows: list[tuple[str, str, str | None]], members: dict[str, set[str]]
+) -> frozenset[str]:
+    """Reduce one or more registries' lineage to the members their publishers have moved past.
+
+    Split out from :func:`superseded_members` so the root-based caller reaches the same
+    reduction rather than a second copy of it. The per-name, member-wise comparison below is
+    the part that is easy to restate wrongly - the module docstring above says why the global
+    form and the whole-generation form both look equivalent and are not - so there is exactly
+    one implementation of it.
+    """
     if not any(row[2] is not None for row in rows):
         return frozenset()
 
@@ -481,3 +495,24 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
         for population_hash in superseded:
             retired |= members.get(population_hash, set()) - in_force
     return frozenset(retired)
+
+
+def superseded_members_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str]:
+    """:func:`superseded_members` for a case directory the caller has already resolved.
+
+    A downstream notebook that read its rows through ``prediction_rows_at`` has deliberately
+    not opened a ``Study``: every ``Study.open`` branch ends in ``activate()``, which re-points
+    the rest of the notebook at whichever registry the activation selected. Asking the lineage
+    question through a ``Study`` here would reintroduce exactly that, and would answer for a
+    different registry than the rows being filtered - so the retired set and the catalog would
+    disagree by construction and the join would be meaningless.
+
+    One root, because the caller named it. :func:`superseded_members` unions the release and
+    workspace roots because a ``Study`` legitimately overlays both and a hash superseded in
+    either is superseded; a caller who resolved a single directory is asking about that
+    directory's registry, which is the same one ``prediction_rows_at`` reads.
+    """
+    rows, members = _lineage(Path(case_dir), member_kind)
+    return _retired(rows, members)

@@ -20,6 +20,7 @@ from case_studies.research import (
     OfficialPopulation,
     population_supersedes,
     superseded_members,
+    superseded_members_at,
 )
 from case_studies.research import population as population_module
 from case_studies.research.workspace import Study
@@ -405,3 +406,48 @@ class TestWhenTheRegistryReadItselfFails:
         monkeypatch.setattr(population_module.sqlite3, "connect", record)
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
         assert opened and all(timeout == 120.0 for timeout in opened)
+
+
+class TestTheRootBasedForm:
+    """`superseded_members_at`, which answers for a directory instead of a study.
+
+    `14_backtest` reads its catalog with `prediction_rows_at(CASE_DIR)` so that no
+    `Study.open` runs: every branch of it ends in `activate()`, which re-points the rest of
+    the notebook - including where `run_backtest(register=True)` writes - at whichever root
+    the activation chose. A lineage question asked through a study there would answer for a
+    different registry than the catalog being filtered, and the join between them would be
+    meaningless rather than wrong in a visible way.
+    """
+
+    def test_it_retires_what_the_study_form_retires(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == superseded_members(study)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+
+    def test_it_is_member_wise_too(self, study: Study) -> None:
+        # The same distinction the study form is held to: a refit that moves one of two
+        # identities retires one, not the predecessor entire.
+        kept, moved = MEMBERS_ONE
+        first = _publish(study, (kept, moved))
+        _publish(study, (kept, "eeee55556666"), supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset({moved})
+
+    def test_it_retires_nothing_before_a_refit(self, study: Study) -> None:
+        _publish(study, MEMBERS_ONE)
+        assert superseded_members_at(study.root) == frozenset()
+
+    def test_a_directory_with_no_registry_retires_nothing(self, tmp_path: Path) -> None:
+        assert superseded_members_at(tmp_path / "absent") == frozenset()
+
+    def test_it_reads_the_root_it_is_given_and_not_another(self, study: Study) -> None:
+        """The property the notebook depends on, stated as the difference between two roots.
+
+        Passing the released root must not report the workspace's lineage. If it did, the
+        filter would answer for a registry other than the one `prediction_rows_at` read, which
+        is the whole reason this form exists rather than a study.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+        assert superseded_members_at(study.release_case_root) == frozenset()
