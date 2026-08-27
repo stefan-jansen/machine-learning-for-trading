@@ -177,10 +177,11 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 # %% [markdown]
 # ### The two derived tables this notebook reads
 #
-# `populate_paired_metrics` is passed this notebook's own `PERIODS_PER_YEAR` rather than
-# left to its default. It now defaults to the case study's declaration, so omitting it
-# would also be correct here, but a monthly case study passing nothing is the shape that
-# was wrong before and it is worth being explicit at the one call site that exercised it.
+# `populate_paired_metrics` is passed this notebook's own `PERIODS_PER_YEAR`. Its default
+# reads the case study's declaration and resolves to the same 12, so the argument states at
+# the call site what the function would otherwise resolve on its own. A monthly case study
+# annualizing at the square root of 252 is the defect this call site carried, and the
+# explicit value is what makes the cadence visible where the call is read.
 #
 # `cohort_metrics` holds the selection-bias statistics §3 deflates by, and
 # `backtest_paired_metrics` holds the bootstrapped comparisons §6 closes the
@@ -817,6 +818,14 @@ headline = pl.DataFrame(headline_rows)
 print("Selected strategy, headline metrics with confidence intervals:")
 print(headline)
 
+# %% [markdown]
+# Each bar below runs from the point estimate to each end of its interval, so an interval
+# that does not bracket its own point would be a bar of negative length. The check before
+# the figure names the metric and the gap it found, rather than leaving matplotlib to
+# refuse the array without saying which metric is at fault. It caught a Sortino ratio
+# sitting above its own upper bound, because the stored ratio and the bootstrap around it
+# were computed from two different downside deviations.
+
 # %%
 ew_val = load_benchmark_metrics(CASE_STUDY, RANK1_LABEL, period="validation")
 forest_metrics = [
@@ -824,6 +833,17 @@ forest_metrics = [
     ("Sortino", full["sortino"], full["sortino_ci95_lo"], full["sortino_ci95_hi"]),
     ("Calmar", full["calmar"], full["calmar_ci95_lo"], full["calmar_ci95_hi"]),
 ]
+
+inverted = [
+    f"{name}: {point:.4f} outside [{lo:.4f}, {hi:.4f}]"
+    for name, point, lo, hi in forest_metrics
+    if not (lo <= point <= hi)
+]
+if inverted:
+    raise RuntimeError(
+        "a confidence interval does not contain the estimate it brackets, so these are "
+        f"not the same quantity measured two ways: {'; '.join(inverted)}"
+    )
 
 fig, ax = plt.subplots(figsize=(8, 4))
 y = np.arange(len(forest_metrics))
