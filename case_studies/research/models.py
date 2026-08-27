@@ -113,7 +113,13 @@ def validate_locked_model_run(
     return digest
 
 
-def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str, Any]:
+def prepare_locked_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    checkpoint_kind: str,
+    checkpoint_value: int | None,
+) -> dict[str, Any]:
     """Re-key fold-derived model fields after the holdout CV has been resolved."""
     computation = spec.get("computation")
     if not isinstance(computation, dict):
@@ -129,7 +135,12 @@ def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str,
             )
         return deepcopy(spec)
 
-    prepared = preparer(study, deepcopy(spec))
+    prepared = preparer(
+        study,
+        deepcopy(spec),
+        checkpoint_kind=checkpoint_kind,
+        checkpoint_value=checkpoint_value,
+    )
     if not isinstance(prepared, dict):
         raise TypeError("model adapter returned no prepared holdout specification")
     prepared_computation = prepared.get("computation")

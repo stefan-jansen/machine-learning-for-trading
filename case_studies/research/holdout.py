@@ -586,7 +586,13 @@ def evaluate_holdout(
         case_study=str(case_study if case_study is not None else study.case_study),
         timeline=timeline,
     )
-    holdout_spec = prepare_locked_holdout_spec(study, holdout_spec)
+    prediction_record = prediction.registry_record()
+    holdout_spec = prepare_locked_holdout_spec(
+        study,
+        holdout_spec,
+        checkpoint_kind=prediction_record["checkpoint_kind"],
+        checkpoint_value=prediction_record["checkpoint_value"],
+    )
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already
     # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
