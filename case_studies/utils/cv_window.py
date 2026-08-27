@@ -68,7 +68,7 @@ def fold_boundary_date(boundary: Any) -> date:
     elif isinstance(boundary, date):
         clock = time.min
     else:
-        clock = datetime.fromisoformat(str(boundary)[:19]).time()
+        clock = datetime.fromisoformat(str(boundary)).time()
     if clock != time.min:
         raise ValueError(
             f"fold boundary {boundary!r} carries a time of day; the spans that read it are "
@@ -194,10 +194,10 @@ def modeling_fold_boundaries(case_study: str, label: str) -> list[dict] | None:
     return [
         {
             "fold": int(split["fold"]),
-            "train_start": split["train_start"],
-            "train_end": split["train_end"],
-            "val_start": split["val_start"],
-            "val_end": split["val_end"],
+            "train_start": fold_boundary_date(split["train_start"]),
+            "train_end": fold_boundary_date(split["train_end"]),
+            "val_start": fold_boundary_date(split["val_start"]),
+            "val_end": fold_boundary_date(split["val_end"]),
         }
         for split in splits
     ]
