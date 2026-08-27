@@ -886,7 +886,7 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 27 test files that need the modelling environment.
+  # The 28 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -957,6 +957,7 @@ jobs:
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \
             tests/test_research_models.py \
+            tests/test_sae_batch_size.py \
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
             tests/test_sequence_dataset.py \

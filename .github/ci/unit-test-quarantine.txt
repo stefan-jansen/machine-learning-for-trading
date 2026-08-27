@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 27 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 28 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -62,6 +62,7 @@ tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
 tests/test_research_models.py
+tests/test_sae_batch_size.py
 tests/test_sdf_checkpoint_numbering.py
 tests/test_sdf_macro_context.py
 tests/test_sequence_dataset.py
