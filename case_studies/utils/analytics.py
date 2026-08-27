@@ -24,7 +24,7 @@ from case_studies.utils.notebook_contracts import (
     degenerate_prediction_sql,
     full_coverage_prediction_sql,
 )
-from utils.paths import REPO_ROOT
+from utils.paths import REPO_ROOT, get_case_study_dir
 
 CASE_STUDY_META = {
     "etfs": {"display_name": "ETFs", "chapter_track": "Ch6 to Ch21"},
@@ -686,3 +686,26 @@ def load_carrier_cost_curves(case_studies: list[str] | None = None) -> pl.DataFr
 # cross-module interface and is now public. The aliases keep those callers working until
 # each notebook is re-executed with the public name, and go when the last one moves.
 _registry_path = registry_path
+
+
+def triage_ledger_path(case_study: str) -> Path:
+    """Where a case study's stage-05 triage ledger actually is.
+
+    ``05_evaluation`` writes it through ``get_case_study_dir``, which honours
+    ``ML4T_OUTPUT_DIR``. A reader that builds the same path from ``REPO_ROOT`` instead resolves
+    somewhere else whenever that variable is set, which is every CI job: the fixture seeds
+    ``/tmp/ml4t-test-output/<cs>/evaluation/triage_ledger.parquet`` and the reader looks under the
+    checkout, finds nothing, and reports the ledger missing. ``ch18-20`` failed that way while all
+    nine ledgers were present in ``ml4t/third-edition-test-data``.
+
+    One function so the writer's path and the reader's path cannot drift again.
+    """
+    return get_case_study_dir(case_study, create=False) / "evaluation" / "triage_ledger.parquet"
+
+
+def load_triage_ledger(case_study: str) -> pl.DataFrame | None:
+    """Read one case study's triage ledger, or None when that stage has not run."""
+    path = triage_ledger_path(case_study)
+    if not path.exists():
+        return None
+    return pl.read_parquet(path).with_columns(case_study=pl.lit(case_study))
