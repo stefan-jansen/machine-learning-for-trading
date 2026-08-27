@@ -14,9 +14,11 @@ parameter that is accepted and dropped on the floor looks identical from the cal
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from case_studies.utils.latent_factors import sae
 from case_studies.utils.latent_factors.library_bridge import SAEConfig
@@ -64,3 +66,12 @@ def test_the_declared_batch_size_reaches_the_model(monkeypatch: pytest.MonkeyPat
     sae.run_sae_fold(chars, rets, chars, rets, 5, batch_size=4096)
 
     assert seen["batch_size"] == 4096
+
+
+def test_this_case_study_declares_the_batch_size_it_fits_under() -> None:
+    """The value is configuration, so it is hashed into the training identity with the rest."""
+    setup = yaml.safe_load(
+        Path("case_studies/sp500_equity_option_analytics/config/setup.yaml").read_text()
+    )
+    declared = setup["modeling"]["latent_factors"]["model_kwargs"]["sae"]["batch_size"]
+    assert isinstance(declared, int) and declared > 0

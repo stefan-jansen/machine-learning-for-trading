@@ -68,6 +68,7 @@
 # %%
 """Compare model families for the S&P 500 equity and option case study."""
 
+import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
@@ -76,6 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
+from case_studies.research import OfficialPopulation, open_study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -168,9 +170,40 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # limited fold count is a significant constraint: all fold-level
 # conclusions carry a caveat about small-sample stability.
 
+# %% [markdown]
+# **A population is immutable and the registry keeps every generation, so a candidate set built
+# straight from it counts retired members beside current ones.** Refitting a configuration under a
+# corrected estimator publishes a new snapshot that supersedes the old one; both stay readable, and
+# nothing in the registry read path filters on that - `case_studies/utils/registry/queries.py`
+# contains no occurrence of `supersed`. Without the filter both generations of a refitted
+# configuration enter the ranking as separate candidates, with near-identical scores, and the
+# published leaders are then fewer distinct strategies than they appear to be.
+#
+# `OfficialPopulation.one` resolves the generation in force for a name: the one snapshot in the
+# chain that nothing supersedes, refusing rather than guessing if the chain has forked.
+
+# %%
+_study = open_study(CASE_STUDY, execution_tier="canonical")
+with sqlite3.connect(_study.root / "run_log" / "registry.db") as _db:
+    _population_names = [
+        row[0] for row in _db.execute("SELECT DISTINCT name FROM official_populations")
+    ]
+CURRENT_MEMBERS: set[str] = set()
+for _name in sorted(_population_names):
+    _population = OfficialPopulation.one(_study, name=_name)
+    _population.require_complete()
+    CURRENT_MEMBERS.update(_population.members)
+print(
+    f"{len(CURRENT_MEMBERS):,} prediction sets across {len(_population_names)} populations in force"
+)
+
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)
-raw_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+raw_metrics = (
+    load_all_metrics(CASE_STUDY, label=None)
+    .filter(pl.col("label").is_not_null())
+    .filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+)
 all_labels_metrics = (
     raw_metrics.with_columns(
         pl.col("ic_n_days").max().over(["family", "label"]).alias("_family_label_days")
@@ -214,7 +247,7 @@ if missing:
         f"\nWARNING: {n_present}/{len(EXPECTED_METRIC_FAMILIES)} predictive/structural "
         f"families present. Missing: {', '.join(sorted(missing))}"
     )
-    print("  Recommendations below may change when missing families are added.")
+    print("  Diagnostic summaries below may change when missing families are added.")
 else:
     print("\nFull predictive/structural coverage: all 5 metric families present.")
 
@@ -696,16 +729,12 @@ if corr_matrix.size > 0 and len(corr_labels) >= 2:
 # Pairwise rank correlations are computed within each decision time and then
 # averaged over time, matching the cross-sectional ranking task.
 # The families are not redundant, but GBM and linear share a moderately
-# similar ranking. Because no family clears credibility
-# on `fwd_ret_5d`, the practical reading is not "ensemble of strong
-# diverse signals" but "ensemble of orthogonal weak signals" - useful
-# for label-routed allocation in §6 (different families have CI-
-# credible point estimates on different labels) more than for a
-# uniform §3 average. The structural-vs-supervised split in this
-# feature set - equity volatility, option implied surfaces,
-# momentum, and term-structure inputs - is consistent with different
-# extraction mechanisms (autoencoder factor rotation vs direct
-# feature-to-return mapping) producing genuinely different rankings.
+# similar ranking. Low correlation between estimates whose intervals cover zero does not establish
+# a useful ensemble, and alternate-label results do not define another traded sleeve. The
+# structural-vs-supervised split in this feature set - equity volatility, option implied surfaces,
+# momentum, and term-structure inputs - is consistent with different extraction mechanisms
+# producing different rankings. The backtest evaluates the current primary-label checkpoints rather
+# than selecting an ensemble here.
 
 # %% [markdown]
 # ### How Much Does Additional Model Complexity Help?
@@ -749,22 +778,19 @@ if cp_families:
 # terms; the informative patterns are about *shape* rather than
 # magnitude:
 #
-# - **Latent factors**: oscillatory IC across checkpoints
-#   on this broad panel; checkpoint selection is fragile and
-#   the late-epoch ceiling is close to the early-epoch best.
+# - **Latent factors**: oscillatory IC across checkpoints on this broad panel; the checkpoint with
+#   the highest IC is unstable, and the late-epoch ceiling is close to the early-epoch best.
 # - **Tabular DL (TabM)**: the schedule is read off the curve rather than named here. The
 #   checkpoint each configuration reaches its highest IC at moves when the declared schedule
 #   moves - `08_tabular_dl` publishes the presets' full epoch budget at the declared interval -
 #   so an epoch quoted in this prose would describe a grid the notebooks no longer run.
 #
-# The current GBM and Ch13 rows retain only one selected checkpoint per
-# configuration, so this notebook does not manufacture learning curves by
-# joining checkpoints from separate configs or executions. Their training
-# notebooks carry the exact-run checkpoint evidence.
+# The current GBM and Ch13 rows retain only one checkpoint per configuration, so this notebook does
+# not manufacture learning curves by joining checkpoints from separate configs or executions. Their
+# training notebooks carry the exact-run checkpoint evidence.
 #
-# The takeaway is that none of the families converts late-checkpoint
-# capacity into a CI-credible point estimate on `fwd_ret_5d`; early
-# stopping is appropriate for the deep families on this case study.
+# None of the families converts late-checkpoint capacity into a CI-credible point estimate on
+# `fwd_ret_5d`. This is an optimization diagnostic, not a checkpoint-selection rule.
 
 # %% [markdown]
 # ### Which Features Drive the Forecasts?
@@ -1081,15 +1107,33 @@ if regime_df.height > 0:
 # vol-normalized horizons (Section 6: PCA on both labels).
 
 # %%
-# Load latent factor diagnostics
+# Load latent-factor diagnostics for the primary-label runs in the current populations.
 lf_models = ["pca", "ipca", "cae", "sdf", "sae"]
-lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
-lf_extras = {m: e for m, e in lf_extras.items() if e is not None}
-
-# Print IC summary from registry
 lf_metrics = all_labels_metrics.filter(
     pl.col("family") == "latent_factors", pl.col("label") == PRIMARY_LABEL
 )
+lf_extras = {}
+for model_name in lf_models:
+    training_hashes = (
+        lf_metrics.filter(pl.col("config_name") == model_name)
+        .select("training_hash")
+        .unique()
+        .get_column("training_hash")
+        .to_list()
+    )
+    if len(training_hashes) != 1:
+        raise RuntimeError(
+            f"Expected one current {PRIMARY_LABEL} training identity for {model_name}, "
+            f"found {len(training_hashes)}"
+        )
+    extras = load_fold_extras(CASE_STUDY, training_hashes[0])
+    if extras is None:
+        raise RuntimeError(
+            f"Missing fold diagnostics for {model_name} training run {training_hashes[0]}"
+        )
+    lf_extras[model_name] = extras
+
+# Print IC summary from registry
 if lf_metrics.height > 0:
     lf_best = (
         lf_metrics.group_by("config_name")
@@ -1387,12 +1431,10 @@ if conformal_df.height > 0:
 # these intervals is used to size anything.
 
 # %% [markdown]
-# ## 8. Pre-Backtest Judgment and Handoff
+# ## 8. Pre-Backtest Diagnostic Summary
 #
-# We synthesize the evidence into explicit recommendations. Not every
-# model that was trained deserves a backtest - advancing fragile models
-# wastes compute and risks false confidence from overfitting the
-# backtest configuration.
+# This section summarizes the validation diagnostics without deciding which configurations advance.
+# The backtest receives every current checkpoint and selects on validation backtest Sharpe.
 
 # %% [markdown]
 # Fold summaries complement the daily-pooled selection statistic without
@@ -1419,8 +1461,8 @@ def fold_stability(
 
 
 # %% [markdown]
-# Recommendations combine the daily IC sign, two-fold stability, and realized
-# bucket spread. They remain validation diagnostics rather than holdout claims.
+# The summary combines daily IC, two-fold stability, and realized bucket spread. These are
+# validation diagnostics; none advances or excludes a configuration.
 
 # %%
 synthesis_rows = []
@@ -1439,12 +1481,6 @@ for row in best_per_family.iter_rows(named=True):
                 b.filter(pl.col("bucket") == N_BUCKETS)["mean_return"][0]
                 - b.filter(pl.col("bucket") == 1)["mean_return"][0]
             )
-    if median_ic > 0 and pct_pos > 0.6 and spread > 0:
-        recommendation = "Backtest"
-    elif ic_mean > 0:
-        recommendation = "Backtest (marginal)"
-    else:
-        recommendation = "Exclude"
     synthesis_rows.append(
         {
             "family": family,
@@ -1455,7 +1491,6 @@ for row in best_per_family.iter_rows(named=True):
             "pct_positive": round(pct_pos, 2),
             "worst_fold": round(worst, 4),
             "spread_bps": round(spread * 10000, 0),
-            "recommendation": recommendation,
         }
     )
 
@@ -1483,32 +1518,23 @@ credible.select(
 )
 
 # %% [markdown]
-# ### Recommendations
+# ### Diagnostic reading
 #
-# **Read the table above before the prose below.** What advances to a backtest is decided by
-# which pairs exclude zero, not by which point estimate is highest, and the composition of that
-# set is what these recommendations turn on.
+# **Read the table above before the prose below.** An interval excluding zero is stronger evidence
+# that a model ranks one label than a positive point estimate whose interval covers zero. It still
+# does not decide what enters the backtest: `14_backtest` evaluates every current checkpoint for
+# the configured trading label and selects on validation backtest Sharpe.
 #
-# The reading is in three tiers.
-#
-# **Pairs whose interval excludes zero** are the candidates with evidence behind them. Where the
-# primary label produces none and an alternate label produces some, the conclusion is that the
-# sleeve should be **label-routed** - run on the label where the evidence is, rather than on the
-# primary label because that is the one the case study is named after. That option exists here
-# only because every family was fitted against every declared label rather than the traded one.
-#
-# **Pairs with a positive point estimate whose interval covers zero** are not evidence, and are
-# not disqualified either. If they advance, they advance on what a backtest measures - money
-# after costs and turnover - rather than on rank correlation. A family trained on the primary
-# label alone reads the same way: its absence from the alternate labels is a gap in coverage
-# rather than a result about the family, and training it there is how to close it.
+# **Alternate-label results diagnose target sensitivity.** They show whether a family can rank a
+# different outcome, but no downstream notebook currently trades those labels. A family absent
+# from one is a coverage gap rather than evidence for or against that family.
 #
 # **The causal estimate is a separate framing and does not compete in this ranking.** It is a
 # conditional treatment effect for one declared treatment, not a cross-sectional ranking signal.
 #
-# **The calibration result in §7 constrains every tier.** Where intervals under-cover out of
-# time, no candidate should have its interval used for position sizing without the
-# online-updating correction, whatever its IC.
+# **The calibration result in §7 constrains how the intervals are read.** Where intervals
+# under-cover out of time, they should not be used for position sizing without the online-updating
+# correction, whatever their IC.
 #
 # ### Forecast Representation
 #
@@ -1577,9 +1603,8 @@ credible.select(
 #    them is not a result. The table in §8 counts which label-and-family pairs have an interval
 #    excluding zero, and that count is the finding.
 #
-# 2. **Evidence can live on a label other than the traded one.** Because every family was fitted
-#    against every declared label, a sleeve can be routed to the target its own evidence
-#    supports. That option exists only because nothing selected a single label upstream.
+# 2. **Alternate labels diagnose target sensitivity rather than define another traded sleeve.**
+#    The downstream backtest currently trades the configured primary label only.
 #
 # 3. **The causal estimate answers a different question and is not a ranking signal.** It is a
 #    conditional effect of one declared treatment, its panel-robust inference and its
@@ -1587,8 +1612,7 @@ credible.select(
 #
 # 4. **Prediction diversity is worth having only if the signals are worth averaging.** Low
 #    pairwise rank correlation across families whose intervals cover zero is diversity among
-#    weak signals; label-routed allocation is the better input to Chapter 20 than an ensemble
-#    of them.
+#    weak signals, not evidence for an ensemble.
 #
 # 5. **Nothing here selects anything.** IC measures whether a ranking is correct, not whether a
 #    strategy trading it makes money after costs and turnover.

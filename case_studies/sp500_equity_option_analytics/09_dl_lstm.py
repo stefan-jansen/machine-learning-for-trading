@@ -296,10 +296,10 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 #
 # One row per label, configuration and epoch checkpoint, read back from the registry and joined to
 # the declared parameters so the architecture stays visible beside its result. `ic_mean` is the
-# **information coefficient**: on each validation date, rank the stocks by the model's prediction,
-# rank them by the return they went on to earn, correlate the two rankings, and average that daily
-# correlation over the validation period. It measures whether the model orders the cross-section
-# correctly, on a scale where zero is no relationship.
+# **information coefficient**: within each fold, rank the stocks by the model's prediction on each
+# validation date, correlate that ranking with the realized-return ranking, and average over dates;
+# `ic_mean` then gives each fold's mean equal weight. It measures whether the model orders the
+# cross-section correctly, on a scale where zero is no relationship.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # below are comparable with each other. A network that has settled into predicting nearly the same
@@ -366,9 +366,10 @@ catalog.select(
 # ### Memory against no memory, on each label
 #
 # One row per label and architecture. The comparison the table invites is down the pair for a single
-# label: the two read the same windows over the same folds and differ only in whether state is
-# carried along the window. Grouping on label and configuration name puts one configuration in each
-# row by construction, so the spread a row reports is a spread over epochs rather than over a grid.
+# label. NLinear is a direct linear map over the lookback; the LSTMs add gated recurrence, two
+# recurrent layers, nonlinearities, and 64 or 128 hidden units. Grouping on label and configuration
+# name puts one configuration in each row by construction, so the spread a row reports is a spread
+# over epochs rather than over a grid.
 #
 # `auc_mean_daily` is present where the label declares a direction sibling. A regression row has no
 # classes of its own and is scored as a ranking signal against that sibling's values -
