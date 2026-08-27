@@ -217,10 +217,19 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# There are two ways to hand a grid of configurations to the runner, and this notebook takes the
+# first. **Resolving each request before submitting it** fixes that configuration's folds, so the
+# runner executes the requests one at a time and each prepares its own folds. **Submitting
+# unresolved requests** instead lets the family's batch runner walk folds on the outside and
+# configurations on the inside, preparing each fold once for the whole grid.
+#
+# Resolving first is what makes the plan table above a description of the run rather than of an
+# intention: `feature_count`, `eligible_rows` and the fold boundaries printed there are the
+# values the fits will use, available to check before any of them starts. The batch path plans
+# against placeholder folds and cannot show them. What it buys instead is preparing each fold
+# once rather than once per configuration, which is worth having when a single prepared fold set
+# is large enough that holding it repeatedly is the constraint. On a panel of nineteen
+# perpetuals it is not.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -590,7 +599,7 @@ objective_summary
 # %% [markdown]
 # ### What each label reached, and what its tails look like
 #
-# Two frames the section below reads from. The first is the best and worst result each label
+# Two frames the section below reads from. The first is the highest and lowest result each label
 # reached at the final iteration, which is where the linear notebook's size-against-direction
 # finding gets checked against a different model class.
 #
@@ -603,7 +612,7 @@ objective_summary
 #
 # Each label's rows are cut at its own `validation_end`, the development boundary its fits were
 # resolved against. The artifact on disk runs to the end of the data, and measuring across all of
-# it would put a statistic computed partly on sealed holdout outcomes into a validation-stage
+# it would put a statistic computed partly on holdout outcomes into a validation-stage
 # notebook.
 
 # %% tags=["results"]

@@ -30,13 +30,13 @@ from utils.cv_splits import (
     _assert_newest_first,
     _map_calendar_id,
     _normalize_duration,
-    _normalize_label_buffer,
     earliest_train_start,
     generate_cv_splits,
     load_evaluation_config,
     make_walk_forward_config,
     make_wf_config,
     most_recent_split,
+    normalize_label_buffer,
 )
 from utils.modeling import validate_temporal_fold_coverage, validate_temporal_split_geometry
 
@@ -82,7 +82,7 @@ def test_normalize_duration(raw, normalized) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Pure: _normalize_label_buffer (inherits normalization + M → days)
+# Pure: normalize_label_buffer (inherits normalization + M → days)
 # -----------------------------------------------------------------------------
 
 
@@ -97,7 +97,7 @@ def test_normalize_duration(raw, normalized) -> None:
     ],
 )
 def test_normalize_label_buffer(raw, normalized) -> None:
-    assert _normalize_label_buffer(raw) == normalized
+    assert normalize_label_buffer(raw) == normalized
 
 
 # -----------------------------------------------------------------------------

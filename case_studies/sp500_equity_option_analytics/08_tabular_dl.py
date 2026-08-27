@@ -113,7 +113,10 @@ DEVICE: str = ""
 
 # %%
 study = open_study(
-    "sp500_equity_option_analytics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+    "sp500_equity_option_analytics",
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="08_tabular_dl",
 )
 
 # %% [markdown]

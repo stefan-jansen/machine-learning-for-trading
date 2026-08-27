@@ -807,6 +807,155 @@ def check_all(
     return stale, testmode, contradicted, unverified, alt_only, hollow
 
 
+def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
+    """*comparable* with the pure-markdown cells dropped.
+
+    A markdown cell is a comment block in the ``.py``. Adding, deleting, merging or
+    retagging one cannot change what any code cell computes: each code cell carries its
+    own ``# %%`` marker, so removing a markdown cell between two of them does not join
+    them, and markdown produces no outputs of its own to be invalidated.
+
+    `_comparable` keeps a non-code cell's body when that body is not all comments,
+    because then the marker does not describe the content and dropping the body would
+    hide executable text. Those entries are three-tuples and are kept here for the same
+    reason - only the two-tuple form, which is provably nothing but prose, is dropped.
+    """
+    if comparable is None:
+        return None
+    return [cell for cell in comparable if cell[1] == "code" or len(cell) != 2]
+
+
+def _output_counts(nb: dict) -> list[int]:
+    """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
+    return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+
+
+def sync_prose(nb_path: Path) -> str:
+    """Fold a prose-only ``.py`` edit into an executed notebook, without re-running it.
+
+    A stamp records the ``.py`` blob that was executed, so any edit to the ``.py`` reads
+    as stale. For a prose edit that is the wrong answer, and it is the reason correcting a
+    notebook to a written standard has been treated as unaffordable: consolidating four
+    paragraphs into one is a markdown change that cannot move a single number, and pricing
+    it at a re-run of `us_equities_panel` prices it at 52 hours.
+
+    Editing the *text* of a markdown cell in place was already forgiven, by
+    `alt_text_only_drift`. What was not is changing the *shape* of the prose - deleting a
+    cell, merging two, adding one - and that is exactly what bringing a notebook under the
+    three-tagged-cells rule requires. So the gate was stricter than the physics.
+
+    This is not a way past the gate; it makes the gate's claim true again. The claim is
+    "this .ipynb was produced by this .py", and after a prose edit that is still true of
+    every cell that computes anything. So:
+
+    * every code cell must match the stamped source exactly - same marker, same tags, same
+      AST, same display suppression, same order. Anything else and this refuses, and the
+      notebook needs the re-run it always needed.
+    * ``jupytext --update`` writes the new prose into the existing ``.ipynb`` and keeps the
+      outputs, rather than rebuilding the file and losing them.
+    * the stamp keeps its original ``executed_at`` and ``executor``, because that is when
+      the notebook really was executed and by what. Only the blob moves, and a note records
+      that the move was prose.
+    """
+    py = paired_py(nb_path)
+    rel = nb_path.relative_to(REPO_ROOT)
+    if py is None:
+        raise SystemExit(f"no paired .py for {rel}")
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = nb.get("metadata", {}).get(STAMP_KEY)
+    if not stamp:
+        raise SystemExit(
+            f"{rel} carries no provenance stamp, so there is no executed state to preserve. Run it."
+        )
+    stamped_blob = stamp["source_py_blob"]
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        raise SystemExit(
+            f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
+            "so the code cells cannot be compared. Re-run it."
+        )
+    before = code_cells_only(_comparable(old.stdout))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8")))
+    if before is None or after is None:
+        raise SystemExit(f"{rel}: could not parse one of the two sources - refusing")
+    if before == after:
+        pass
+    else:
+        # Name the first difference. "something changed" sends an author back to a full
+        # diff of a two-thousand-line file to find out whether it was theirs.
+        where = next(
+            (i for i, (a, b) in enumerate(zip(before, after)) if a != b),
+            min(len(before), len(after)),
+        )
+        detail = f"code cell {where + 1} differs"
+        if len(before) != len(after):
+            detail = f"{len(before)} code cells in the executed source, {len(after)} now"
+        raise SystemExit(
+            f"{rel}: {detail}, so this is not a prose-only edit and the outputs on disk are "
+            "not the ones this source produces. Re-run the notebook."
+        )
+
+    before_counts = _output_counts(nb)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jupytext", "--to", "ipynb", "--update", str(py)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named jupytext" in result.stderr:
+            raise SystemExit(
+                f"{rel}: jupytext is not installed in {sys.executable}. Run this command through "
+                "the repository environment with `uv run python`."
+            )
+        raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
+
+    # Per cell, not "the notebook still has some outputs". `was_executed` is True as soon as
+    # ONE code cell carries an output, so it cannot see an update that kept the first cell's
+    # and dropped the rest - which is the failure mode that matters, because the notebook
+    # would then be re-stamped as a complete execution while most of it renders blank.
+    after_counts = _output_counts(json.loads(nb_path.read_text(encoding="utf-8")))
+    if after_counts != before_counts:
+        lost = [i + 1 for i, (b, a) in enumerate(zip(before_counts, after_counts)) if a < b]
+        raise SystemExit(
+            f"{rel}: the update changed the outputs, which is the one thing it exists to "
+            + (
+                f"avoid - code cell(s) {lost} lost theirs. "
+                if lost
+                else f"avoid - {len(before_counts)} code cells before, {len(after_counts)} now. "
+            )
+            + "The file has been left as jupytext wrote it; restore it with `git checkout`."
+        )
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    stamp = dict(stamp)
+    stamp["source_py_blob"] = git_blob(py)
+    stamp["notes"] = (
+        f"prose synced from the .py at {datetime.now(UTC).isoformat()} without re-executing; "
+        f"every code cell is identical to blob {stamped_blob[:12]}"
+    )
+    nb.setdefault("metadata", {})[STAMP_KEY] = stamp
+    nb_path.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    return stamp["source_py_blob"]
+
+
+def _cmd_sync_prose(args: argparse.Namespace) -> int:
+    for name in args.notebooks:
+        path = Path(name).resolve()
+        if path.suffix == ".py":
+            path = path.with_suffix(".ipynb")
+        blob = sync_prose(path)
+        print(f"prose synced {path.relative_to(REPO_ROOT)}: source_py_blob={blob[:12]}")
+    return 0
+
+
 def _cmd_stamp(args: argparse.Namespace) -> int:
     if args.production:
         parameters: dict[str, object] = {}
@@ -964,6 +1113,19 @@ def main() -> int:
     )
     lp.add_argument("notebooks", nargs="+")
     lp.set_defaults(func=_cmd_clear)
+
+    yp = sub.add_parser(
+        "sync-prose",
+        help="fold a prose-only .py edit into the executed .ipynb, keeping its outputs",
+        description=(
+            "For a change that touches only markdown - rewording, merging, deleting or "
+            "adding a markdown cell. Refuses if any code cell moved, so it cannot be used "
+            "to commit an untested change; the notebook is not re-executed and the stamp "
+            "keeps the time and executor of the run that produced the outputs."
+        ),
+    )
+    yp.add_argument("notebooks", nargs="+", help=".ipynb or .py paths")
+    yp.set_defaults(func=_cmd_sync_prose)
 
     args = ap.parse_args()
     return args.func(args)

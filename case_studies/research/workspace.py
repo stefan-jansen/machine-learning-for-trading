@@ -84,15 +84,24 @@ def _resolved_directory_symlink(path: Path) -> Path | None:
 
 
 def _ensure_input_link(preview_case: Path, source: Path) -> None:
+    """Point `<preview>/<name>` at the active study's input directory.
+
+    The link belongs to whichever study is currently active, so a link left by a previous
+    study is repointed rather than refused. This used to raise, which made a second study
+    previewing into one workspace fail on activation - and refusing was never the safer
+    half: leaving the stale link would have had the preview read the previous study's
+    labels under the current study's name. `_ensure_config_link` below reached the same
+    conclusion for `config`, and the two disagreeing was the defect.
+    """
     resolved = source.resolve(strict=True)
     if not resolved.is_dir():
         raise ValueError(f"preview input is not a directory: {source}")
     link = preview_case / source.name
-    if link.is_symlink():
-        if link.resolve(strict=True) != resolved:
-            raise ValueError(f"preview input link targets the wrong directory: {link}")
+    if _resolved_directory_symlink(link) == resolved:
         return
-    if link.exists():
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
         raise ValueError(f"preview input path must be a directory symlink: {link}")
     link.symlink_to(resolved, target_is_directory=True)
 

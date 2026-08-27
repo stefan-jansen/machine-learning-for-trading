@@ -447,5 +447,15 @@ modeling:
 
 causal:
   treatment: r12_2
+  # Bars the treatment's own construction window spans, which is what the placebo block has
+  # to cover: permuting r12_2 in blocks shorter than this destroys the serial
+  # dependence the refutation exists to preserve, and the resulting p-value reads like a
+  # refutation without being one. Declared here rather than inferred, because guessing which
+  # element of a window list a column was built from puts a wrong number behind a right-looking
+  # one. Derived from the construction, not chosen:
+  #
+  # cumulative return from twelve months back to two months back, on a monthly panel
+  # (03_financial_features). Twelve rows, because a row here is a month.
+  treatment_window: 12
   confounders: [Beta, IdioVol, LME, Variance]
   method: walk_forward_dml

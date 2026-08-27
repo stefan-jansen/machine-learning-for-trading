@@ -485,7 +485,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2" ml4t-backtest ml4t-data ml4t-engineer databento
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -820,7 +820,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2"
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
       # when the data is absent, so a checkout that silently produced an empty
@@ -886,13 +886,14 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 29 test files that need the modelling environment.
+  # The 32 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
   # the reader's Docker image, which is where the environment already exists" -
   # correctly, but that job was never built, so the exclusion moved them from
-  # gated to unrun. Measured 2026-08-24 in the full environment: 392 tests, 3m21s.
+  # gated to unrun. The 26 files present on 2026-08-24 measured 392 tests, 3m21s in the full
+  # environment.
   #
   # torch alone does not reach them. Importing them pulls 110 distributions:
   # ml4t-models brings shap, numba/llvmlite and xarray, and four files
@@ -909,7 +910,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
-    # Measured runtime is 3m21s. --timeout=900 bounds a hung test but not a hung
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 32.
+    # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
     timeout-minutes: 30
@@ -951,15 +953,18 @@ jobs:
             tests/test_latent_factors_identity.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
             tests/test_registry_metrics.py \
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \
             tests/test_research_models.py \
+            tests/test_sae_batch_size.py \
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
             tests/test_sequence_dataset.py \
+            tests/test_sequence_identity_roundtrip.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_identity.py \

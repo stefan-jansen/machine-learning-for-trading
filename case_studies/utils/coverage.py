@@ -246,8 +246,8 @@ def _sealed(case_study: str, label: str, axis: pl.Series) -> pl.Series:
     from utils.artifact_specs import resolve_label_horizon, resolve_market_semantics
     from utils.cv_splits import (
         _map_calendar_id,
-        _normalize_label_buffer,
         _purge_holdout_touching_validation,
+        normalize_label_buffer,
     )
 
     holdout = _holdout_window(case_study)
@@ -268,7 +268,7 @@ def _sealed(case_study: str, label: str, axis: pl.Series) -> pl.Series:
         np.arange(len(stamps)),
         stamps,
         holdout_start=str(holdout[0]),
-        outcome_horizon=_normalize_label_buffer(str(horizon)),
+        outcome_horizon=normalize_label_buffer(str(horizon)),
         calendar_id=calendar,
     )
     return axis.gather(kept.tolist())
