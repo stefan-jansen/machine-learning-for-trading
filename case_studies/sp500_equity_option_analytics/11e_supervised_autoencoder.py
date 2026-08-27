@@ -95,7 +95,10 @@ MODEL_NAME = "sae"
 
 # %%
 study = open_study(
-    "sp500_equity_option_analytics", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+    "sp500_equity_option_analytics",
+    execution_tier=EXECUTION_TIER,
+    workspace=WORKSPACE or None,
+    entry_point="11e_supervised_autoencoder",
 )
 
 # %% [markdown]
