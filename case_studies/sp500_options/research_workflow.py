@@ -43,7 +43,6 @@ from case_studies.utils.backtest_runner import (
     apply_universe_filter,
     normalize_prediction_columns,
 )
-from case_studies.utils.deep_learning import resolve_dl_device
 from case_studies.utils.registry import prediction_hash_from_parts
 from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
@@ -97,6 +96,12 @@ def declared_dl_device(requested: str | None = None) -> str:
     rather than falling back to CPU: the device is inside the training identity, so a silent
     fallback registers a fit under an identity it does not have.
     """
+    # Imported here rather than at module scope: `case_studies.utils.deep_learning` imports
+    # torch, and this module is imported by the torch-free `test-unit` job, which excludes
+    # torch deliberately so a required per-commit gate does not cost gigabytes. Only the
+    # deep-learning notebooks call this, and they have torch.
+    from case_studies.utils.deep_learning import resolve_dl_device
+
     return resolve_dl_device(_dl_config(), requested)
 
 

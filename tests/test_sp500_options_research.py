@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1410,3 +1411,36 @@ def test_an_unaccounted_lifecycle_refuses_before_any_conformal_width_is_written(
     # than the branch simply never being reached.
     with pytest.raises(_WidthsWritten):
         strategy.run(option_lifecycle=lifecycle, option_lifecycle_source=lifecycle_source)
+
+
+def test_the_research_workflow_imports_without_torch() -> None:
+    """The `test-unit` job installs no torch, and this module imports the workflow.
+
+    `case_studies/utils/deep_learning.py` imports torch at module scope, so a module-scope
+    import of anything from it puts torch on the critical path of a required per-commit gate
+    that excludes torch deliberately - 25 test files sit behind it and installing it would
+    cost gigabytes on every commit. The failure is a collection error naming this file, which
+    says nothing about which import added the edge, so the property is pinned here where the
+    edge would be introduced.
+    """
+    import builtins
+    import importlib
+
+    real_import = builtins.__import__
+
+    def without_torch(name, *args, **kwargs):
+        if name == "torch" or name.startswith("torch."):
+            raise ModuleNotFoundError("No module named 'torch'")
+        return real_import(name, *args, **kwargs)
+
+    module = "case_studies.sp500_options.research_workflow"
+    saved = {key: value for key, value in sys.modules.items() if key.startswith("torch")}
+    for key in saved:
+        del sys.modules[key]
+    del sys.modules[module]
+    builtins.__import__ = without_torch
+    try:
+        importlib.import_module(module)
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.update(saved)
