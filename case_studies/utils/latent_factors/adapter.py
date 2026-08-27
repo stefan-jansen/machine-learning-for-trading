@@ -18,7 +18,10 @@ import numpy as np
 import polars as pl
 import torch
 
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
@@ -588,7 +591,12 @@ def reconstruct_locked_request(
             )
     split = locked_holdout_split(spec, case.dataset, case.date_col, study.case_study)
     if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], case.temporal_artifact_splits)
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            case.temporal_by_fold,
+            source_timeline=case.dataset.get_column(case.date_col),
+            date_col=case.date_col,
+        )
     case.splits = [split]
     expected = _prepare_expected_keys(case, model_name)
     validate_locked_expected_keys(spec, expected)

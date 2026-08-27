@@ -3,9 +3,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from case_studies.research.cv import (
-    require_fold_scoped_temporal_holdout_coverage,
-)
 from case_studies.utils.artifact_digest import value_digest
 from case_studies.utils.latent_factors.adapter import (
     _LATENT_MODELS,
@@ -46,13 +43,6 @@ def prepare_locked_holdout_spec(
         use_macro=model_name == "sdf",
     )
     split = locked_holdout_split(prepared, case.dataset, case.date_col, study.case_study)
-    if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
-        require_fold_scoped_temporal_holdout_coverage(
-            split,
-            case.temporal_by_fold,
-            source_timeline=case.dataset.get_column(case.date_col),
-            date_col=case.date_col,
-        )
     case.splits = [split]
     expected = _prepare_expected_keys(case, model_name)
     computation["expected_prediction_keys"] = {

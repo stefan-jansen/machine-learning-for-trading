@@ -296,7 +296,7 @@ def test_holdout_temporal_fold_requires_training_rows_and_the_evaluation_endpoin
     artifact = pl.DataFrame(
         {
             "fold": [2, 2, 2],
-            "timestamp": [date(2019, 1, 2), date(2021, 1, 4), date(2021, 12, 31)],
+            "timestamp": [date(2019, 1, 2), date(2021, 1, 4), date(2021, 12, 30)],
         }
     )
 
@@ -317,7 +317,7 @@ def test_holdout_temporal_fold_requires_training_rows_and_the_evaluation_endpoin
         source_timeline=source,
     )
 
-    with pytest.raises(ValueError, match="evaluation endpoint"):
+    with pytest.raises(ValueError, match="temporal date coverage"):
         require_fold_scoped_temporal_holdout_coverage(
             split,
             artifact.head(2),
@@ -327,5 +327,63 @@ def test_holdout_temporal_fold_requires_training_rows_and_the_evaluation_endpoin
         require_fold_scoped_temporal_holdout_coverage(
             split,
             artifact.with_columns(pl.lit(1).alias("fold")),
+            source_timeline=source,
+        )
+
+    with pytest.raises(ValueError, match="no requested training rows"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            artifact.tail(2),
+            source_timeline=source,
+        )
+
+    with pytest.raises(ValueError, match="no observations in the holdout evaluation window"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            artifact,
+            source_timeline=source.head(1),
+        )
+
+
+def test_holdout_temporal_fold_rejects_sparse_interior_coverage() -> None:
+    source = pl.Series("timestamp", pl.date_range(date(2021, 1, 1), date(2021, 1, 20), eager=True))
+    split = {
+        "fold": 2,
+        "train_start": "2021-01-01T00:00:00",
+        "train_end": "2021-01-10T00:00:00",
+        "val_start": "2021-01-11T00:00:00",
+        "val_end": "2021-01-20T00:00:00",
+    }
+    artifact = pl.DataFrame(
+        {
+            "fold": [2] * 18,
+            "timestamp": source.filter(~source.is_in([date(2021, 1, 5), date(2021, 1, 15)])),
+        }
+    )
+
+    with pytest.raises(ValueError, match="temporal date coverage"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            artifact,
+            source_timeline=source,
+        )
+
+
+def test_holdout_temporal_fold_requires_the_exact_evaluation_endpoint() -> None:
+    source = pl.Series("timestamp", pl.date_range(date(2021, 1, 1), date(2021, 1, 21), eager=True))
+    split = {
+        "fold": 2,
+        "train_start": "2021-01-01T00:00:00",
+        "train_end": "2021-01-01T00:00:00",
+        "val_start": "2021-01-02T00:00:00",
+        "val_end": "2021-01-21T00:00:00",
+    }
+    artifact_dates = source.filter(source != date(2021, 1, 21))
+    artifact = pl.DataFrame({"fold": [2] * artifact_dates.len(), "timestamp": artifact_dates})
+
+    with pytest.raises(ValueError, match="evaluation endpoint"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            artifact,
             source_timeline=source,
         )

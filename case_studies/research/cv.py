@@ -35,13 +35,10 @@ def require_fold_scoped_temporal_compatibility(
 
     source = {int(split["fold"]): normalize(split) for split in artifact_folds}
     incompatible = []
-    next_fold = max(source, default=-1) + 1
     for split in requested_folds:
         normalized = normalize(split)
         recorded = source.get(int(split["fold"]))
         if recorded == normalized:
-            continue
-        if recorded is None and split.get("split") == "holdout" and int(split["fold"]) == next_fold:
             continue
         incompatible.append(normalized)
     if incompatible:
@@ -61,6 +58,8 @@ def require_fold_scoped_temporal_holdout_coverage(
 ) -> None:
     """Require an existing temporal fold to cover holdout training and evaluation."""
     import polars as pl
+
+    from utils.modeling import validate_temporal_fold_coverage
 
     columns = [fold_col, date_col]
     if isinstance(temporal_by_fold, pl.LazyFrame):
@@ -92,8 +91,18 @@ def require_fold_scoped_temporal_holdout_coverage(
     expected = source_dates.filter(source_dates.is_between(val_start, val_end, closed="both"))
     if expected.is_empty():
         raise ValueError("source data has no observations in the holdout evaluation window")
+
+    source_frame = pl.DataFrame({date_col: source_dates})
+    temporal_frame = frame.rename({fold_col: "fold"}) if fold_col != "fold" else frame
+    validate_temporal_fold_coverage(
+        source_frame,
+        temporal_frame,
+        [requested_fold],
+        date_col=date_col,
+    )
+
     evaluation = dates.filter(dates.is_between(val_start, val_end, closed="both"))
-    if evaluation.is_empty() or evaluation.max() < expected.max():
+    if evaluation.is_empty() or not evaluation.eq(expected.max()).any():
         raise ValueError("fold-scoped temporal holdout does not cover the evaluation endpoint")
 
 

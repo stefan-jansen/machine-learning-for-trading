@@ -5,6 +5,7 @@ import json
 import os
 import weakref
 from copy import deepcopy
+from datetime import date as dt_date
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -2726,6 +2727,49 @@ def _latent_study(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(latent_adapter, "_source_identity", lambda: {"fixture": "v1"})
     return study
+
+
+def test_latent_holdout_preparation_rekeys_and_reconstructs_the_selected_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from case_studies.utils.latent_factors.holdout import prepare_locked_holdout_spec
+
+    study = _latent_study(tmp_path, monkeypatch)
+    resolved = study.model(
+        family="latent_factors",
+        label="fwd_ret_1d",
+        config_name="pca",
+        overrides={"device": "cpu", "n_factors": 1},
+    ).resolve()
+    prepared_input = deepcopy(resolved.spec)
+    validation_manifest = deepcopy(prepared_input["computation"]["expected_prediction_keys"])
+    prepared_input["computation"]["cv"] = {
+        "split": "holdout",
+        "folds": [
+            {
+                "fold": 2,
+                "train_start": "2024-01-01",
+                "train_end": "2024-01-13",
+                "val_start": "2024-01-14",
+                "val_end": "2024-01-16",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "case_studies.utils.cv_window.canonical_window",
+        lambda *args, **kwargs: (dt_date(2024, 1, 14), dt_date(2024, 1, 16)),
+    )
+    checkpoint = prepared_input["computation"]["checkpoint_schedule"][0]
+
+    prepared = prepare_locked_holdout_spec(
+        study,
+        prepared_input,
+        checkpoint_kind=checkpoint["kind"],
+        checkpoint_value=checkpoint["value"],
+    )
+
+    assert prepared["computation"]["expected_prediction_keys"] != validation_manifest
+    assert prepared["computation"]["expected_prediction_keys"]["n_folds"] == 1
 
 
 def test_latent_runner_persists_and_reconstructs_fitted_state(tmp_path, monkeypatch) -> None:
