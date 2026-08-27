@@ -58,10 +58,10 @@ def fold_boundary_date(boundary: Any) -> date:
     boundary as text and rebuilds a filter from it gets an error instead of rows. Converting once,
     here, is what keeps a span comparable to the date column it filters.
 
-    A boundary with a clock reading is refused rather than truncated. Every fold in this
-    repository is generated on a daily session calendar, so a time of day means the generator
-    emits something the spans downstream cannot represent, and dropping it would move the span
-    without saying so.
+    A boundary with a clock reading is refused rather than truncated. The case studies that call
+    :func:`modeling_fold_boundaries` use daily calendars, so their spans cannot represent a time
+    of day. Intraday artifacts use :func:`temporal_artifact_fold_boundaries`, which preserves the
+    producer's boundary resolution.
     """
     if isinstance(boundary, datetime):
         clock = boundary.time()

@@ -268,9 +268,8 @@ def test_a_fold_boundary_survives_the_trip_into_a_polars_date_filter(
 def test_fold_boundary_date_refuses_a_boundary_carrying_a_time_of_day() -> None:
     """Dropping a time of day would silently move the span, so the conversion refuses instead.
 
-    Every fold this repository generates runs on a daily session calendar, so a boundary with a
-    clock reading means the generator now emits something the daily spans downstream cannot
-    represent. Truncating it would widen or narrow a fold without saying so.
+    The feature producers that use this conversion write daily spans. Intraday artifacts retain
+    their timestamps through ``temporal_artifact_fold_boundaries`` instead.
     """
     import pandas as pd
 
