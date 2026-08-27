@@ -128,6 +128,88 @@ def _insert_record(db: sqlite3.Connection, table: str, record: dict[str, Any]) -
     )
 
 
+def _reconcile_table_schema(
+    source_db: sqlite3.Connection,
+    target_db: sqlite3.Connection,
+    table: str,
+) -> None:
+    source_columns = source_db.execute(f'PRAGMA table_info("{table}")').fetchall()
+    target_names = {row[1] for row in target_db.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    for column in source_columns:
+        name = str(column[1])
+        if name in target_names:
+            continue
+        declared_type = str(column[2] or "TEXT")
+        target_db.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {declared_type}')
+
+
+def _validate_manifest_files(model_root: Path, manifest: Path) -> None:
+    try:
+        files = json.loads(manifest.read_text()).get("files")
+    except (OSError, json.JSONDecodeError, AttributeError) as exc:
+        raise ValueError(f"invalid fitted-state manifest: {manifest}") from exc
+    if not isinstance(files, dict) or not files:
+        raise ValueError(f"empty fitted-state manifest: {manifest}")
+    for relative, expected_digest in files.items():
+        artifact = model_root / relative
+        if (
+            not artifact.is_file()
+            or hashlib.sha256(artifact.read_bytes()).hexdigest() != expected_digest
+        ):
+            raise ValueError(f"fitted-state manifest mismatch: {artifact}")
+
+
+def _validate_fitted_state(source: Any, spec: dict[str, Any]) -> None:
+    computation = spec.get("computation", spec)
+    model = computation.get("model")
+    cv = computation.get("cv")
+    schedule = computation.get("checkpoint_schedule")
+    if not isinstance(model, dict) or not isinstance(cv, dict) or not isinstance(schedule, list):
+        raise ValueError("source training spec does not declare its fitted-state population")
+    folds = cv.get("folds")
+    if not isinstance(folds, list) or not folds:
+        raise ValueError("source training spec does not declare any folds")
+    fold_ids = tuple(int(fold["fold"]) for fold in folds)
+    checkpoints = tuple(int(item["value"]) for item in schedule)
+    config_name = spec.get("config_name")
+    if not isinstance(config_name, str) or not config_name:
+        raise ValueError("source training spec has no fitted-state config name")
+    model_root = source.root / "run_log" / "training" / source.hash / "models"
+    family = str(spec["family"])
+    if family == "deep_learning":
+        architecture = str(model.get("class"))
+        if model.get("implementation") == "darts":
+            from case_studies.utils.darts_forecasting import validate_darts_checkpoint_population
+
+            validate_darts_checkpoint_population(
+                model_root,
+                config_name=config_name,
+                fold_ids=fold_ids,
+                checkpoints=checkpoints,
+                architecture=architecture,
+            )
+        else:
+            from case_studies.utils.deep_model_state import validate_deep_checkpoint_population
+
+            validate_deep_checkpoint_population(
+                model_root,
+                config_name=config_name,
+                fold_ids=fold_ids,
+                checkpoints=checkpoints,
+                architecture=architecture,
+            )
+        return
+    if family == "tabular_dl":
+        manifests = tuple(
+            model_root / config_name / f"fold_{fold_id:02d}" / "manifest.json"
+            for fold_id in fold_ids
+        )
+    else:
+        manifests = (model_root / "manifest.json",)
+    for manifest in manifests:
+        _validate_manifest_files(model_root, manifest)
+
+
 def _clone_prediction_records(
     source_db: sqlite3.Connection,
     target_db: sqlite3.Connection,
@@ -231,6 +313,8 @@ def migrate_equivalent_training_identity(
     if not isinstance(source, TrainingResult) or not source.complete:
         raise ValueError(f"source {source_training_hash} is not a complete training result")
     source_spec = source.spec()
+    if source_spec.get("config_name") != target_spec.get("config_name"):
+        raise ValueError("training artifact config_name differs between source and target")
     source_identity = _normalized_training_identity(source_spec)
     target_identity = _normalized_training_identity(target_spec)
     for path in migrated_fields:
@@ -250,10 +334,9 @@ def migrate_equivalent_training_identity(
     if existing is not None:
         return existing
 
+    _validate_fitted_state(source, source_spec)
     source_training_dir = _training_dir(source.root, source_training_hash)
     source_manifest = _artifact_manifest(source_training_dir)
-    if not any(path.startswith("models/") for path in source_manifest):
-        raise ValueError(f"source {source_training_hash} has no persisted fitted state")
     with closing(sqlite3.connect(source.root / "run_log" / "registry.db")) as source_db:
         source_db.row_factory = sqlite3.Row
         training_record = _row(source_db, "training_runs", "training_hash", source_training_hash)
@@ -339,6 +422,14 @@ def migrate_equivalent_training_identity(
 
             with closing(_open_registry(target_root)) as target_db:
                 target_db.execute("BEGIN IMMEDIATE")
+                for table in (
+                    "training_runs",
+                    "prediction_sets",
+                    "prediction_coverage",
+                    "prediction_metrics",
+                    "fold_metrics",
+                ):
+                    _reconcile_table_schema(source_db, target_db, table)
                 if (
                     _row(target_db, "training_runs", "training_hash", target_training_hash)
                     is not None
