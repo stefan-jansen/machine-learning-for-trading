@@ -41,7 +41,7 @@
 import polars as pl
 import yaml
 
-from case_studies.research import ExecutionTier, open_study, supersedes_for
+from case_studies.research import ExecutionTier, causal_supersedes, open_study
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
@@ -65,8 +65,13 @@ WORKSPACE: str | None = None
 # second current identity per label without being told which one it replaces. These are the
 # blocks-of-1/5/21 fits from 2026-08-21, whose p-values this run supersedes rather than
 # corrects: they measured a placebo that had already destroyed the dependence it was meant
-# to preserve. A reader on a clean clone registers a first identity and needs none of this,
-# which `supersedes_for` handles by returning None for a label it is not given.
+# to preserve.
+#
+# A reader's clone holds no causal rows at all, so `causal_supersedes` withholds these
+# against a registry that does not have them and the reader registers a first identity.
+# That resolution has to happen against the registry rather than by leaving the default
+# empty: `run-production-notebook.sh` executes with no parameter overrides, so a value
+# supplied only at run time could never be stamped.
 SUPERSEDES_CAUSAL: str = (
     '{"fwd_ret_1d": "6e17a9b4644c", "fwd_ret_5d": "e9623aa44d9a", "fwd_ret_21d": "f53540351b6b"}'
 )
@@ -111,7 +116,9 @@ requests = {
         execution_tier=tier,
         preview_reductions=reductions,
         overrides={},
-        supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=list(labels)),
+        supersedes=causal_supersedes(
+            study, SUPERSEDES_CAUSAL, label, labels=list(labels), execution_tier=tier.value
+        ),
     )
     for label in labels
 }
