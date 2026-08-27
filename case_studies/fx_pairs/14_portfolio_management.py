@@ -49,6 +49,7 @@ from case_studies.research import (
     Result,
     open_study,
     plan_backtests,
+    population_supersedes,
     research_name,
     run_backtests,
     strategy_warmup_periods,
@@ -75,6 +76,7 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
+SUPERSEDES_ALLOCATION_BACKTESTS: str = ""
 
 # %% [markdown]
 # ## Resolve the equal-weight inputs
@@ -130,6 +132,10 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
 # replaced in the registry, complete and current, so this filter alone would carry a retired
 # prediction set into the sweep. `superseded_members` reads the lineage instead - see
 # `13_backtest`, which drops the same set before it freezes the baseline population.
+# `SUPERSEDES_ALLOCATION_BACKTESTS` names the snapshot this run replaces under the name it publishes,
+# offered through `population_supersedes` on the same rule. It is empty until that name has a
+# first generation; after that, an upstream refit changes this population's member list and
+# the registry refuses the write without it. `13_backtest` states the reasoning once.
 retired = superseded_members(study, member_kind="prediction")
 if retired:
     catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
@@ -348,11 +354,15 @@ if len(planned_hashes) != len(set(planned_hashes)):
 
 allocation_population = None
 if not include_preview:
+    allocations_name = research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME)
     allocation_population = OfficialPopulation.create(
         study,
-        name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
+        name=allocations_name,
         member_kind="backtest",
         members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=allocations_name, declared=SUPERSEDES_ALLOCATION_BACKTESTS
+        ),
     )
     print(f"Frozen expected allocation population: {allocation_population.hash}")
 
@@ -367,9 +377,14 @@ if not include_preview:
 # A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
 # unless the two are counted apart. `run_backtests` serves an identity that is already registered
 # and complete instead of running it again, which is what makes a re-run affordable and what makes
-# a bare member count say nothing about whether this run did any work. Read the registered set
-# once, before the first member, so every result can be attributed to one or the other.
-registered_before = set(study.backtests.table().get_column("backtest_hash"))
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
 allocation_results = []
 for job in jobs:
     execution = run_backtests(
@@ -382,6 +397,7 @@ for job in jobs:
     if len(execution.results) != job["expected"]:
         raise RuntimeError("an allocation member disappeared during execution")
     allocation_results.extend(execution.results)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
 
 expected_count = sum(job["expected"] for job in jobs)
 if len(allocation_results) != expected_count:
@@ -396,7 +412,7 @@ if any(
 ):
     raise RuntimeError("the allocation population is incomplete or misclassified")
 
-served = sum(1 for result in allocation_results if result.hash in registered_before)
+served = run_status.count("reused")
 print(
     f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
     f"{len(allocation_results)} in the population"
