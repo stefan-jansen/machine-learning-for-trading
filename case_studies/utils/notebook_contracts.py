@@ -327,3 +327,41 @@ def declared_population_members(
                 raise RuntimeError(msg) from error
             notes.append(f"no current official population for {family} ({name}): {error}")
     return members, notes
+
+
+_STRATEGY_ANALYSIS_TABLES = ("backtest_runs", "cohort_metrics", "backtest_paired_metrics")
+
+
+def strategy_input_counts(case_dir: Path) -> dict[str, int]:
+    """Row counts for the three tables a strategy-analysis notebook reads.
+
+    ``backtest_runs`` is what the backtesting stages register. ``cohort_metrics`` and
+    ``backtest_paired_metrics`` are *derived* from those runs, and until recently only
+    ``cme_futures/17`` derived them inside its own case study - everywhere else they existed
+    solely because ``20_strategy_synthesis/01_aggregate_synthesis.py`` had been run, which makes
+    a case study depend upward on the chapter that aggregates it.
+
+    The distinction the caller needs is between "no runs to analyse" and "runs exist but nothing
+    has derived from them". The first is a refusal: every figure and gate downstream is computed
+    from backtest runs, so with none registered the notebook does not produce a weaker answer,
+    it produces an empty one that reads like a finished analysis. The second is work to do, and
+    both producers are already case-study-scoped functions.
+
+    A missing registry or a missing table counts as zero, which is the ordinary state of a clean
+    clone, and is reported rather than raised so the caller decides what it means.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return dict.fromkeys(_STRATEGY_ANALYSIS_TABLES, 0)
+    counts: dict[str, int] = {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in _STRATEGY_ANALYSIS_TABLES:
+            counts[table] = (
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if table in present else 0
+            )
+    return counts

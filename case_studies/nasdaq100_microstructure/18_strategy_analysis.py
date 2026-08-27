@@ -48,9 +48,12 @@
 # **Prerequisites**: case-study pipeline through `14_backtest`; the
 # locked registry (`case_studies/nasdaq100_microstructure/run_log/registry.db`).
 #
-# **Scope**: registry-read only — no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py`.
+# **Scope**: no training and no re-backtesting. The notebook reads what
+# `14_backtest` through `17_risk_management` registered, and derives
+# `cohort_metrics` and `backtest_paired_metrics` from those runs itself when
+# they are absent, so the case study no longer depends on a chapter-20
+# notebook having been run first. On an already-populated registry it writes
+# nothing.
 
 # %%
 """NASDAQ-100 Microstructure — Strategy Analysis."""
@@ -77,6 +80,7 @@ from ml4t.diagnostic.integration import (
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     compute_rolling_exposures,
@@ -86,7 +90,8 @@ from case_studies.utils.factor_attribution import (
     plot_rolling_exposures,
     run_factor_regression,
 )
-from case_studies.utils.notebook_contracts import excluded_families
+from case_studies.utils.notebook_contracts import excluded_families, strategy_input_counts
+from case_studies.utils.paired_metrics import populate_paired_metrics
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
@@ -121,6 +126,53 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
 
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
+
+# %% [markdown]
+# ### Produce the derived tables this notebook reads
+#
+# `cohort_metrics` and `backtest_paired_metrics` are read below - the first for the deflated
+# Sharpe and PBO columns, the second to find the validation counterpart of a holdout run. Until
+# now nothing in this case study wrote either. The header of this notebook said so outright:
+# they "were populated by `20_strategy_synthesis/01_aggregate_synthesis.py`", a chapter-20
+# notebook. A case study that depends upward into the chapter that aggregates it cannot be run
+# from its own pipeline, and its numbers exist only after something outside it happens to run.
+#
+# Both producers already exist as case-study-scoped functions, extracted from those very Ch20
+# loops - `populate_paired_metrics` says so in its own docstring - and `cme_futures/17` is the
+# notebook that uses them. This adopts the same pattern.
+#
+# Population is idempotent (keyed upserts, reproducing stored values exactly), but it still
+# rewrites the registry, so it runs only when a table is absent or empty. On an already-populated
+# registry this notebook stays a pure reader and touches nothing.
+
+# %%
+_db = CASE_DIR / "run_log" / "registry.db"
+_counts_before = strategy_input_counts(CASE_DIR)
+_n_backtests = _counts_before["backtest_runs"]
+_n_cohorts = _counts_before["cohort_metrics"]
+_n_pairs = _counts_before["backtest_paired_metrics"]
+
+if _n_backtests == 0:
+    # Refuse rather than report. Every figure and gate below is computed from backtest runs, so
+    # with none registered this notebook does not produce a weaker answer - it produces an empty
+    # one that reads like a finished analysis. `14_backtest` is what fills this.
+    raise RuntimeError(
+        f"{CASE_STUDY} has no registered backtest runs, so there is nothing to analyse. "
+        "Run 14_backtest through 17_risk_management first; this notebook reads what they "
+        "register and computes no backtests of its own."
+    )
+
+if _n_cohorts == 0 or _n_pairs == 0:
+    _counts = compute_and_register(CASE_STUDY)
+    _pairs = populate_paired_metrics(CASE_STUDY, explorer)
+    _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
+    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
+    print(f"populated: cohort_metrics {_n_cohorts} rows, backtest_paired_metrics {_n_pairs} pairs")
+else:
+    print(
+        f"already populated: cohort_metrics {_n_cohorts} rows, "
+        f"backtest_paired_metrics {_n_pairs} pairs"
+    )
 
 
 def _fmt_ci(point: float | None, lo: float | None, hi: float | None, fmt: str = ".3f") -> str:
