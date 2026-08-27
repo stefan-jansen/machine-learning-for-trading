@@ -201,6 +201,8 @@ class BacktestExplorer:
         """
         filter_sql = ""
         filter_params: list[str] = []
+        coverage_params: list[str] = []
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
         if label:
             filter_sql += " AND t.label = ?"
             filter_params.append(label)
@@ -208,6 +210,13 @@ class BacktestExplorer:
             placeholders = ", ".join("?" for _ in prediction_hashes)
             filter_sql += f" AND p.prediction_hash IN ({placeholders})"
             filter_params.extend(prediction_hashes)
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            coverage_params.append(json.dumps(list(prediction_hashes)))
 
         df = self._query(
             f"""
@@ -237,7 +246,7 @@ class BacktestExplorer:
             WHERE b.stage = ?
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               {filter_sql}
@@ -247,6 +256,7 @@ class BacktestExplorer:
             (
                 stage,
                 *excluded_family_sql(self.case_study, "t.family")[1],
+                *coverage_params,
                 *filter_params,
                 top_n,
             ),
@@ -404,6 +414,16 @@ class BacktestExplorer:
         if not stages:
             return pl.DataFrame()
         placeholders = ", ".join("?" for _ in stages)
+        coverage_params: tuple[str, ...] = ()
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
+        if prediction_hashes:
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            coverage_params = (json.dumps(list(prediction_hashes)),)
         sql = f"""
             SELECT
                 b.spec_json,
@@ -419,11 +439,15 @@ class BacktestExplorer:
             WHERE b.stage IN ({placeholders})
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
         """
-        params: tuple = (*stages, *excluded_family_sql(self.case_study, "t.family")[1])
+        params: tuple = (
+            *stages,
+            *excluded_family_sql(self.case_study, "t.family")[1],
+            *coverage_params,
+        )
         if prediction_hash:
             sql += " AND b.prediction_hash LIKE ?"
             params = (*params, prediction_hash + "%")
