@@ -78,8 +78,11 @@ class TestWhatIsDeclared:
         ]
 
     def test_the_declaration_does_not_come_from_the_predictions(self) -> None:
-        # The point of building it from the dataset: a model that answered for one of
-        # the two names it was asked about is measured as short, not as complete.
+        # The point of building it from the dataset: a model that answered for one of the
+        # two names it was asked about is measured as short, not as complete. Being short
+        # is not by itself a rejection - the sequence and latent-factor runners narrow the
+        # window by design - but it has to be visible, and a declaration copied off the
+        # predictions would report every fit as covering everything it produced.
         mds = _panel(
             [
                 ("AAA", date(2016, 1, 29), 0.02),
@@ -157,3 +160,53 @@ class TestHowItIsCompared:
         expected = _holdout_expected_keys(mds, SPLIT)
         predictions = self._predictions([date(2016, 1, 29)], pl.Date)
         assert _align_expected_timestamps(expected, predictions) is expected
+
+
+class TestWhatTheWindowCanSettle:
+    """The window is the widest set any family could answer for, not an exact expectation.
+
+    `_train_linear` and `_train_gbm` predict it exactly. The sequence, latent-factor and
+    tabular runners answer for less: a gap-free lookback drops each entity's first rows,
+    an evaluation label can be missing where the training label is not, and the latent
+    path can require an entity to persist. So `n_missing` is not evidence about the model,
+    while a key outside the window, a key predicted twice and a non-finite score are.
+    """
+
+    def test_a_key_outside_the_window_is_not_excused_by_the_narrowing(self) -> None:
+        mds = _panel([("AAA", date(2016, 1, 29), 0.02), ("BBB", date(2016, 1, 29), 0.03)])
+        expected = _holdout_expected_keys(mds, SPLIT)
+        predictions = pl.DataFrame(
+            {
+                "symbol": ["AAA", "CCC"],
+                "timestamp": [date(2016, 1, 29)] * 2,
+                "fold_id": [0, 0],
+                "y_score": [0.11, 0.12],
+            }
+        )
+        coverage = evaluate_prediction_coverage(expected, predictions)
+        # One name short AND one name that was never eligible. The second is the defect.
+        assert coverage.n_missing == 1
+        assert coverage.n_extra == 1
+
+    def test_a_family_that_narrows_the_window_is_short_and_nothing_else(self) -> None:
+        mds = _panel(
+            [
+                ("AAA", date(2016, 1, 29), 0.02),
+                ("AAA", date(2016, 2, 29), 0.03),
+                ("BBB", date(2016, 2, 29), 0.04),
+            ]
+        )
+        expected = _holdout_expected_keys(mds, SPLIT)
+        # A lookback runner drops each entity's first period.
+        predictions = pl.DataFrame(
+            {
+                "symbol": ["AAA", "BBB"],
+                "timestamp": [date(2016, 2, 29)] * 2,
+                "fold_id": [0, 0],
+                "y_score": [0.11, 0.12],
+            }
+        )
+        coverage = evaluate_prediction_coverage(expected, predictions)
+        assert coverage.n_missing == 1
+        assert (coverage.n_extra, coverage.n_duplicates, coverage.n_null) == (0, 0, 0)
+        assert coverage.n_non_finite == 0

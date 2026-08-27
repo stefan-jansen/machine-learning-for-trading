@@ -819,12 +819,15 @@ print("Selected strategy, headline metrics with confidence intervals:")
 print(headline)
 
 # %% [markdown]
-# Each bar below runs from the point estimate to each end of its interval, so an interval
-# that does not bracket its own point would be a bar of negative length. The check before
-# the figure names the metric and the gap it found, rather than leaving matplotlib to
-# refuse the array without saying which metric is at fault. It caught a Sortino ratio
-# sitting above its own upper bound, because the stored ratio and the bootstrap around it
-# were computed from two different downside deviations.
+# Each interval below is drawn from its own lower bound to its own upper bound, with the
+# point estimate marked on it, rather than as an error bar measured outwards from the
+# point. The two look identical whenever the interval brackets its estimate and differ
+# only when it does not - and drawing it this way means that case renders and is visible
+# instead of raising. A percentile bootstrap is not guaranteed to contain the full-sample
+# estimate on a skewed series, so an estimate outside its interval is worth reporting and
+# is not on its own proof of a defect. It was proof of one here: the stored Sortino ratio
+# and the bootstrap around it were computed from two different downside deviations, and
+# the printed line below says which metrics sit outside their own bounds.
 
 # %%
 ew_val = load_benchmark_metrics(CASE_STUDY, RANK1_LABEL, period="validation")
@@ -835,38 +838,36 @@ forest_metrics = [
 ]
 
 inverted = [
-    f"{name}: {point:.4f} outside [{lo:.4f}, {hi:.4f}]"
+    f"{name} ({point:.4f} against [{lo:.4f}, {hi:.4f}])"
     for name, point, lo, hi in forest_metrics
     if not (lo <= point <= hi)
 ]
-if inverted:
-    raise RuntimeError(
-        "a confidence interval does not contain the estimate it brackets, so these are "
-        f"not the same quantity measured two ways: {'; '.join(inverted)}"
-    )
+print(
+    "Every estimate lies inside its own interval."
+    if not inverted
+    else "Outside its own interval, so the estimate and the interval may not be the same "
+    f"quantity measured two ways: {'; '.join(inverted)}"
+)
 
 fig, ax = plt.subplots(figsize=(8, 4))
 y = np.arange(len(forest_metrics))
 points = np.array([m[1] for m in forest_metrics])
 los = np.array([m[2] for m in forest_metrics])
 his = np.array([m[3] for m in forest_metrics])
-ax.errorbar(
-    points,
-    y,
-    xerr=[points - los, his - points],
-    fmt="o",
-    color=COLORS["blue"],
-    ecolor=COLORS["slate"],
-    elinewidth=2.0,
-    capsize=4,
-    markersize=7,
-)
+ax.hlines(y, los, his, color=COLORS["slate"], linewidth=2.0)
+ax.scatter(points, y, color=COLORS["blue"], s=49, zorder=3)
 ax.axvline(0, color=COLORS["neutral"], linestyle="--", linewidth=0.8)
 ax.set_yticks(y)
 ax.set_yticklabels([m[0] for m in forest_metrics])
 ax.invert_yaxis()
 ax.set_xlabel("Risk-adjusted ratio")
-add_message_title(ax, "Risk-adjusted metrics remain above zero after uncertainty adjustment")
+_above_zero = sum(1 for _, _, lo, _ in forest_metrics if lo > 0)
+add_message_title(
+    ax,
+    f"{_above_zero} of {len(forest_metrics)} risk-adjusted metrics hold a lower bound above zero"
+    if _above_zero < len(forest_metrics)
+    else "Every risk-adjusted metric holds a lower bound above zero",
+)
 fig.show()
 
 # %%

@@ -418,11 +418,18 @@ def _holdout_expected_keys(mds, holdout_split: dict) -> pl.DataFrame:
     themselves would make coverage complete by construction and record a fact about
     nothing.
 
-    The expectation is every row inside the holdout window whose label is finite,
-    which is the same population each trainer here selects on: the family runners mask
-    the window by date and then drop rows with a null label. A candidate that covers
-    fewer keys than this is a candidate whose predictions are incomplete, and the
-    caller rejects it rather than registering a short holdout.
+    This is the widest set any family could answer for: every row inside the holdout
+    window whose label is finite. `_train_linear` and `_train_gbm` predict exactly this
+    set - they mask the window by date and drop the null labels. The sequence, latent
+    factor and tabular runners answer for less of it by design: a gap-free lookback
+    drops the first rows of each entity, an evaluation label may be missing where the
+    training label is not, and the latent path can require an entity to persist across
+    the window.
+
+    So the caller adjudicates against this frame only what the frame can settle. A key
+    outside the window, a key predicted twice, and a null or non-finite score are wrong
+    whatever the family. Predicting fewer keys than the window holds is not, and is
+    reported rather than charged to the candidate.
     """
     date_col = mds.date_col
     label_col = mds.label_col
@@ -1261,15 +1268,23 @@ def generate_holdout(
             gc.collect()
             continue
 
-        # Coverage is candidate evidence and belongs here rather than inside
-        # `register_prediction_set`: a model that predicted only part of the holdout
-        # window is a rejected candidate, and reaching registration with it would end
-        # the run instead of falling back. Registering below can then treat any failure
-        # of its own as the infrastructure error it is.
+        # Coverage is adjudicated here rather than inside `register_prediction_set`,
+        # because a candidate whose predictions are malformed is a candidate to fall back
+        # from, and reaching registration with one would end the run instead. Registering
+        # below can then treat any failure of its own as the infrastructure error it is.
+        #
+        # Only what the window can settle is charged to the candidate. Predicting fewer
+        # keys than the window holds is what the sequence, latent-factor and tabular
+        # runners do by design, and rejecting them for it would demote the selection for
+        # a reason that is not about the model - the defect this whole path was fixed for,
+        # arriving from the other side.
         expected_keys = _align_expected_timestamps(expected_keys, predictions)
         coverage = evaluate_prediction_coverage(expected_keys, predictions)
-        if not coverage.complete:
-            _log(f"    REJECT: holdout coverage is partial: {coverage.as_dict()}")
+        malformed = (
+            coverage.n_extra or coverage.n_duplicates or coverage.n_null or coverage.n_non_finite
+        )
+        if malformed:
+            _log(f"    REJECT: holdout predictions are malformed: {coverage.as_dict()}")
             fallback_attempts.append(
                 {
                     "ordinal": ordinal,
@@ -1278,17 +1293,26 @@ def generate_holdout(
                     "label": label,
                     "val_sharpe": candidate["val_sharpe"],
                     "reason": (
-                        f"partial_coverage: {coverage.n_missing} missing, "
-                        f"{coverage.n_extra} extra, {coverage.n_duplicates} duplicate "
-                        f"of {coverage.n_expected} expected keys; "
-                        f"{coverage.n_null} null and {coverage.n_non_finite} "
-                        "non-finite scores"
+                        f"malformed_predictions: {coverage.n_extra} keys outside the "
+                        f"holdout window, {coverage.n_duplicates} predicted twice, "
+                        f"{coverage.n_null} null and {coverage.n_non_finite} non-finite "
+                        f"scores, against {coverage.n_expected} eligible keys"
                     ),
                 }
             )
             del predictions
             gc.collect()
             continue
+
+        if coverage.n_missing:
+            # Registered with `allow_partial`, so the row records what was eligible and
+            # what came back rather than a declaration copied off the predictions, which
+            # would be complete by construction and describe nothing.
+            _log(
+                f"    {coverage.n_missing:,} of {coverage.n_expected:,} eligible keys are "
+                f"not predicted, which is this family's own eligibility narrowing the "
+                f"window rather than a gap in the fit"
+            )
 
         # Backtest gate: even with non-degenerate predictions, the engine may
         # produce an empty result (e.g., monthly + classification empty port_ret).
@@ -1323,6 +1347,7 @@ def generate_holdout(
                 split="holdout",
                 predictions=predictions,
                 expected_keys=expected_keys,
+                allow_partial=True,
                 task_type=mds.task_type,
                 class_values=mds.class_values or None,
             )
@@ -1462,6 +1487,7 @@ def generate_holdout(
             split="holdout",
             predictions=predictions,
             expected_keys=expected_keys,
+            allow_partial=True,
             metrics=metrics_payload,
             task_type=mds.task_type,
             class_values=mds.class_values or None,

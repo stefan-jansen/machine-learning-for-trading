@@ -967,6 +967,7 @@ jobs:
             tests/test_sequence_identity_roundtrip.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
+            tests/test_holdout_expected_keys.py \
             tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
