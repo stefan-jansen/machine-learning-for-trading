@@ -1518,8 +1518,22 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
+  # Restores the reduction #560 removed. It dropped MAX_FOLDS: 2 / MAX_SYMBOLS: 5 when the
+  # stage moved onto the shared boundary and left the timeout priced for them, so since
+  # 2026-08-20 this has run all 8 folds over all 20 pairs on a budget measured against 2 and 5.
+  # Same two axes, in the keys the shared runner accepts (`_PREVIEW_FIELDS`, linear.py:69).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/fx_pairs/07_gbm:
+  # Same story as 06_linear above: #560 removed MAX_FOLDS: 2 / MAX_SYMBOLS: 5 and left the
+  # 180s budget behind. Keys are `_GBM_PREVIEW_FIELDS` (gbm.py:76).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
