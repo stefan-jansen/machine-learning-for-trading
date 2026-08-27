@@ -34,11 +34,16 @@ def require_fold_scoped_temporal_compatibility(
         }
 
     source = {int(split["fold"]): normalize(split) for split in artifact_folds}
-    incompatible = [
-        normalize(split)
-        for split in requested_folds
-        if source.get(int(split["fold"])) != normalize(split)
-    ]
+    incompatible = []
+    next_fold = max(source, default=-1) + 1
+    for split in requested_folds:
+        normalized = normalize(split)
+        recorded = source.get(int(split["fold"]))
+        if recorded == normalized:
+            continue
+        if recorded is None and split.get("split") == "holdout" and int(split["fold"]) == next_fold:
+            continue
+        incompatible.append(normalized)
     if incompatible:
         raise ValueError(
             "custom CV is incompatible with fold-scoped temporal features; "

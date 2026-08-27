@@ -266,6 +266,7 @@ def locked_holdout_split(
     # coercing. The preset CV path never hits this because it passes ISO strings.
     return {
         "fold": fold["fold"],
+        "split": "holdout",
         **{
             name: datetime.combine(value, time.min)
             if isinstance(value, date) and not isinstance(value, datetime)

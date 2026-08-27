@@ -14,7 +14,6 @@ import torch  # noqa: F401
 
 from case_studies.utils.latent_factors.adapter import (
     LatentFactorContext,
-    prepare_locked_holdout_spec,
     reconstruct_locked_request,
     resolve_model_request,
     run_resolved_request,
@@ -22,6 +21,7 @@ from case_studies.utils.latent_factors.adapter import (
 )
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.cv import load_fold_extras, run_latent_factor_cv
+from case_studies.utils.latent_factors.holdout import prepare_locked_holdout_spec
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.panel import (
     compute_managed_portfolios,
