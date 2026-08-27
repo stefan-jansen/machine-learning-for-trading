@@ -8,8 +8,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CVSpec, LabelDefinition, Study
+from case_studies.research import CVSpec, LabelDefinition, Study, open_study
 from case_studies.research.contracts import ExecutionTier
+from case_studies.research.model_planning import ModelPlan, PlannedModel
 from case_studies.utils import linear
 from case_studies.utils.registry.store import _open_registry
 from utils import modeling
@@ -71,6 +72,268 @@ def _seed_release(tmp_path: Path, *, marker: str = "release") -> Path:
     shared.mkdir(parents=True)
     (shared / "ridge.yaml").write_text("family: linear\nparams: {}\n")
     return release
+
+
+def test_crypto_preview_then_canonical_workspace_isolates_symlinked_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from case_studies.crypto_perps_funding import research_workflow
+
+    release = tmp_path / "release"
+    case_root = release / "case_studies" / "crypto_perps_funding"
+    artifacts = tmp_path / "artifacts"
+    for name in ("features", "labels", "run_log"):
+        source = artifacts / name
+        source.mkdir(parents=True)
+        case_root.mkdir(parents=True, exist_ok=True)
+        (case_root / name).symlink_to(source, target_is_directory=True)
+    (artifacts / "features" / "input.bin").write_bytes(b"release")
+    (artifacts / "run_log" / "registry.db").write_bytes(b"released-run-log")
+    (case_root / "config").mkdir()
+    (case_root / "config" / "setup.yaml").write_text("evaluation: {}\n")
+    (release / "case_studies" / "config").mkdir()
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", release)
+
+    workspace = tmp_path / "workspace"
+    preview_study = research_workflow.open_study(execution_tier="preview", workspace=workspace)
+    preview_root = preview_study.activate("preview")
+    assert preview_root == workspace / ".preview" / "crypto_perps_funding"
+    assert preview_root.joinpath("features").resolve() == workspace.joinpath(
+        "crypto_perps_funding", "features"
+    )
+    study = research_workflow.open_study(execution_tier="canonical", workspace=workspace)
+
+    assert study.root == workspace / "crypto_perps_funding"
+    assert study.root.joinpath("features").is_dir()
+    assert not study.root.joinpath("features").is_symlink()
+    study.root.joinpath("features", "input.bin").write_bytes(b"workspace")
+    assert artifacts.joinpath("features", "input.bin").read_bytes() == b"release"
+    assert study.root.joinpath("labels").is_dir()
+    assert not study.root.joinpath("labels").is_symlink()
+    assert study.root.joinpath("run_log").is_dir()
+    assert not study.root.joinpath("run_log").is_symlink()
+    assert study.root.joinpath("config", "setup.yaml").read_text() == "evaluation: {}\n"
+    assert not study.root.joinpath("config").is_symlink()
+    assert study.output_root.joinpath("config").is_dir()
+    assert not study.output_root.joinpath("config").is_symlink()
+    study.root.joinpath("config", "setup.yaml").write_text("evaluation: changed\n")
+    assert case_root.joinpath("config", "setup.yaml").read_text() == "evaluation: {}\n"
+    study.output_root.joinpath("config", "probe.yaml").write_text("workspace: true\n")
+    assert not release.joinpath("case_studies", "config", "probe.yaml").exists()
+    # The workspace starts an empty run log rather than inheriting the released one,
+    # so a preview cannot read released results as if it had produced them.
+    assert study.root.joinpath("run_log", "registry.db").read_bytes() != b"released-run-log"
+    assert artifacts.joinpath("run_log", "registry.db").read_bytes() == b"released-run-log"
+    assert study.manifest["baseline_source_commit"]
+    assert study.manifest["baseline_manifest_sha256"]
+
+
+def _planned(
+    family: str,
+    label: str,
+    config_name: str,
+    training_hash: str,
+    prediction_hash: str,
+) -> PlannedModel:
+    return PlannedModel(
+        family=family,
+        label=label,
+        config_name=config_name,
+        training_hash=training_hash,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        prediction_hash=prediction_hash,
+        spec_json="{}",
+    )
+
+
+def test_crypto_model_population_is_frozen_before_the_first_fit(tmp_path, monkeypatch) -> None:
+    from case_studies.crypto_perps_funding import research_workflow
+
+    root = tmp_path / "crypto_perps_funding"
+    root.mkdir()
+    _open_registry(root).close()
+    study = Study(
+        case_study="crypto_perps_funding",
+        root=root,
+        release_root=tmp_path,
+        output_root=tmp_path,
+        read_only=False,
+        manifest={},
+    )
+
+    class _FailingPlan(ModelPlan):
+        def run(self):
+            # The registry must already carry the complete declared population at the moment
+            # the first fit is attempted, so a failed member cannot silently disappear.
+            with sqlite3.connect(root / "run_log" / "registry.db") as db:
+                row = db.execute(
+                    "SELECT p.name, p.member_kind, m.member_hash "
+                    "FROM official_populations AS p "
+                    "JOIN official_population_members AS m USING (population_hash)"
+                ).fetchone()
+            assert row == (
+                "crypto-linear-validation-predictions-v1",
+                "prediction",
+                "prediction-1",
+            )
+            raise RuntimeError("first fit failed")
+
+    plan = _FailingPlan(
+        study,
+        (object(),),
+        (_planned("linear", "fwd_ret_8h", "ols", "training-1", "prediction-1"),),
+        ExecutionTier.CANONICAL,
+        (),
+    )
+    monkeypatch.setattr(research_workflow, "plan_models", lambda *args, **kwargs: plan)
+
+    with pytest.raises(RuntimeError, match="first fit failed"):
+        research_workflow.run_model_catalog(
+            study,
+            pl.DataFrame({"family": ["linear"], "label": ["fwd_ret_8h"], "config_name": ["ols"]}),
+            execution_tier="canonical",
+            population_name="crypto-linear-validation-predictions-v1",
+        )
+
+    population = research_workflow.OfficialPopulation.one(
+        study, name="crypto-linear-validation-predictions-v1"
+    )
+    assert population.members == ("prediction-1",)
+    with pytest.raises(ValueError, match="prediction-1:missing"):
+        population.require_complete()
+
+
+def test_crypto_official_population_declares_gpu_and_imbalance_treatment(
+    tmp_path, monkeypatch
+) -> None:
+    """A silent CPU fallback would change the training identity of every GPU family."""
+    from case_studies.crypto_perps_funding import research_workflow
+
+    study = Study(
+        case_study="crypto_perps_funding",
+        root=tmp_path / "crypto_perps_funding",
+        release_root=tmp_path,
+        output_root=tmp_path,
+        read_only=False,
+        manifest={},
+    )
+    monkeypatch.setattr(
+        research_workflow,
+        "load_configs",
+        lambda case_study, label, family: [
+            {
+                "config_name": {
+                    "linear": "ols",
+                    "gbm": "default_mse",
+                    "tabular_dl": "tabm_s",
+                    "deep_learning": "lstm_h64",
+                }[family]
+            }
+        ],
+    )
+
+    requests = research_workflow.official_model_requests(study)
+    overrides = {request.family: request.overrides for request in requests}
+    labels = {}
+    for request in requests:
+        labels.setdefault(request.family, set()).add(request.label)
+
+    assert overrides["tabular_dl"]["device"] == "cuda"
+    assert overrides["deep_learning"]["device"] == "cuda"
+    # Unbalanced intraday direction is the point of the TabM path; losing this silently
+    # trains on the majority class and still registers a complete-looking result.
+    assert overrides["tabular_dl"]["class_weight"] == "balanced"
+    # A CPU-only family must not carry a device override at all, or its identity moves too.
+    assert overrides["linear"] == {}
+    assert overrides["gbm"] == {}
+    # Sequence families are declared for the regression labels only.
+    assert labels["deep_learning"] == set(research_workflow.REGRESSION_LABELS)
+    assert labels["linear"] == set(research_workflow.ALL_LABELS)
+    assert all(request.execution_tier is ExecutionTier.CANONICAL for request in requests)
+
+
+def test_crypto_official_population_equals_the_union_of_the_model_notebooks(tmp_path) -> None:
+    """Nothing may be declared that no notebook produces, or produced that nothing declares."""
+    from case_studies.crypto_perps_funding import research_workflow as rw
+
+    study = Study(
+        case_study="crypto_perps_funding",
+        root=tmp_path / "crypto_perps_funding",
+        release_root=tmp_path,
+        output_root=tmp_path,
+        read_only=False,
+        manifest={},
+    )
+
+    # Restated independently of research_workflow: one entry per model notebook, matching the
+    # catalog each one builds. If a notebook's slice moves, this disagrees with the official
+    # population rather than letting the population quietly cover something nothing produces.
+    notebook_slices = [
+        ("linear", rw.ALL_LABELS, None),
+        ("gbm", rw.ALL_LABELS, None),
+        ("tabular_dl", rw.ALL_LABELS, "tabm"),
+        ("deep_learning", rw.REGRESSION_LABELS, ("nlinear", "lstm")),
+        ("deep_learning", rw.REGRESSION_LABELS, "tcn"),
+    ]
+    from_notebooks = {
+        (family, row["label"], row["config_name"])
+        for family, labels, prefix in notebook_slices
+        for row in rw.model_request_catalog(family, labels=labels, config_prefix=prefix).iter_rows(
+            named=True
+        )
+    }
+    official = {
+        (request.family, request.label, request.config_name)
+        for request in rw.official_model_requests(study)
+    }
+
+    assert official == from_notebooks
+
+    # And the union must exhaust the published menu apart from the members the sequence
+    # runner cannot execute, which must be non-empty here or the rule is untested.
+    assert rw.declared_menu() - official == rw.unsupported_requests()
+    assert rw.unsupported_requests()
+    # nlinear has published results in the released registry, so it must be covered, not excluded.
+    assert ("deep_learning", "fwd_ret_8h", "nlinear") in official
+
+
+def test_crypto_complete_model_population_is_frozen_before_family_execution(
+    tmp_path, monkeypatch
+) -> None:
+    from case_studies.crypto_perps_funding import research_workflow
+
+    root = tmp_path / "crypto_perps_funding"
+    root.mkdir()
+    _open_registry(root).close()
+    study = Study(
+        case_study="crypto_perps_funding",
+        root=root,
+        release_root=tmp_path,
+        output_root=tmp_path,
+        read_only=False,
+        manifest={},
+    )
+    requests = (object(), object())
+    plan = ModelPlan(
+        study,
+        requests,
+        (
+            _planned("linear", "fwd_ret_8h", "ols", "training-1", "prediction-1"),
+            _planned("gbm", "fwd_dir_8h", "lgbm", "training-2", "prediction-2"),
+        ),
+        ExecutionTier.CANONICAL,
+        (),
+    )
+    monkeypatch.setattr(research_workflow, "official_model_requests", lambda study: requests)
+    monkeypatch.setattr(research_workflow, "plan_models", lambda *args, **kwargs: plan)
+
+    population = research_workflow.freeze_official_model_population(study)
+
+    assert population.name == research_workflow.OFFICIAL_POPULATION
+    assert population.members == ("prediction-1", "prediction-2")
+    with pytest.raises(ValueError, match="prediction-1:missing, prediction-2:missing"):
+        population.require_complete()
 
 
 def _seed_regeneration_release(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
@@ -490,3 +753,93 @@ def test_custom_cv_cannot_relabel_fold_scoped_temporal_features() -> None:
     changed = [{**artifact[1], "train_end": "2021-05-31"}]
     with pytest.raises(ValueError, match="incompatible with fold-scoped temporal features"):
         require_fold_scoped_temporal_compatibility(changed, artifact)
+
+
+def test_preview_records_the_entry_point_when_generated_dirs_are_not_symlinks(
+    tmp_path: Path,
+) -> None:
+    """A clean clone has regular generated directories, and its runs must still say who wrote them.
+
+    The symlink branch of `open_study` is a maintainer-worktree convenience; the branch taken
+    everywhere else must carry `entry_point` just the same, or the registry row loses the only
+    column that names the notebook.
+    """
+    release = _seed_release(tmp_path)
+    generated = release / "case_studies" / "etfs"
+    assert not any((generated / name).is_symlink() for name in ("features", "labels", "run_log")), (
+        "fixture must exercise the regular-directory branch"
+    )
+
+    study = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=tmp_path / "ws",
+        release_root=release,
+        entry_point="06_linear",
+    )
+    training = study.results.register_training(
+        {
+            "identity_version": 2,
+            "execution_tier": "preview",
+            "family": "linear",
+            "label": "fwd_ret_21d",
+            "config_name": "ridge",
+            "seed": 42,
+            "preview_reductions": {"folds": [0]},
+        },
+        execution_tier="preview",
+    )
+
+    with sqlite3.connect(training.root / "run_log" / "registry.db") as db:
+        recorded = db.execute(
+            "SELECT entry_point FROM training_runs WHERE training_hash = ?", (training.hash,)
+        ).fetchone()
+    assert recorded == ("06_linear",)
+
+
+def test_a_second_study_previewing_into_one_workspace_repoints_the_input_links(
+    tmp_path: Path,
+) -> None:
+    """Two studies, one workspace, in sequence: the second must not inherit the first's inputs.
+
+    `activate` links `labels` and `features` into `<workspace>/.preview/<case>/` so a preview
+    reads real inputs while writing only to the workspace. The link belongs to whichever study
+    is active. When a second study with different input directories activates into the same
+    workspace, the link has to follow it: leaving it is worse than any error, because the
+    preview would then read the previous study's labels under the current study's name.
+
+    This is the case that shipped. `_ensure_input_link` refused a link resolving elsewhere while
+    `_ensure_config_link`, ten lines below, repaired exactly that situation for `config`. Two
+    functions handling one situation two ways, and the refusal is the wrong half.
+
+    It never surfaced in CI, which is the part worth keeping: a plain clone has regular
+    generated directories, so every study routes through the same branch and resolves the same
+    inputs. Only a maintainer worktree, whose `labels`/`features`/`run_log` are symlinks into
+    shared data, reaches the branch where two studies disagree - and there the failure is
+    ordered, so a notebook passes alone and fails after its predecessor in the same session.
+    """
+    first_release, _ = _seed_regeneration_release(tmp_path / "first")
+    second_release, _ = _seed_regeneration_release(tmp_path / "second")
+    workspace = tmp_path / "workspace"
+
+    first = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=workspace,
+        release_root=first_release,
+    )
+    first_labels = (first.root / "labels").resolve(strict=True)
+
+    second = open_study(
+        "etfs",
+        execution_tier=ExecutionTier.PREVIEW,
+        workspace=workspace,
+        release_root=second_release,
+    )
+    second_labels = (second.root / "labels").resolve(strict=True)
+
+    assert first_labels != second_labels, "fixture must give the two studies different inputs"
+
+    link = workspace / ".preview" / "etfs" / "labels"
+    assert link.is_symlink()
+    assert link.resolve(strict=True) == second_labels

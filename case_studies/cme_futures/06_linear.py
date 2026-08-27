@@ -83,10 +83,10 @@ from case_studies.research import (
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
-    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -289,7 +289,7 @@ plan.select(
 # version of its population; and a run narrowed under a `POPULATION_NAME` of the caller's choosing,
 # which the worked example below does, is the first version of that name whatever the built-in
 # default says. In both, a hash passed here is refused by `OfficialPopulation.create` as a first
-# version that cannot supersede anything, before any fit happens. `supersedes_for_run` drops it in
+# version that cannot supersede anything, before any fit happens. `population_supersedes` drops it in
 # exactly those two cases and in a preview, where a population is discarded with its workspace and
 # has no lineage to extend.
 #
@@ -299,12 +299,7 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-linear-validation-v1"
-supersedes = supersedes_for_run(
-    study,
-    population_name=population_name,
-    declared=SUPERSEDES_POPULATION,
-    execution_tier=EXECUTION_TIER,
-)
+supersedes = population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION)
 execution, population = run_model_population(
     study, resolved, population_name=population_name, supersedes=supersedes
 )

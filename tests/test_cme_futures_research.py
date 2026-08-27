@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -31,7 +32,7 @@ from case_studies.research import (
     ResolvedModelRequest,
     StateTransitionPolicy,
     Study,
-    supersedes_for_run,
+    population_supersedes,
 )
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
@@ -1106,9 +1107,7 @@ def test_declared_supersedes_is_dropped_where_the_population_does_not_exist(tmp_
     declared = "8337482ecb59"
     name = "cme_futures-linear-validation-v1"
 
-    resolved = supersedes_for_run(
-        study, population_name=name, declared=declared, execution_tier="canonical"
-    )
+    resolved = population_supersedes(study, name=name, declared=declared)
     assert resolved is None
 
     # The resolution is what makes the reader's run possible: the declared value is
@@ -1125,9 +1124,7 @@ def test_declared_supersedes_is_passed_through_once_a_generation_exists(tmp_path
     name = "cme_futures-linear-validation-v1"
     first = _population(study, name, _prediction(study))
 
-    resolved = supersedes_for_run(
-        study, population_name=name, declared=first.hash, execution_tier="canonical"
-    )
+    resolved = population_supersedes(study, name=name, declared=first.hash)
     assert resolved == first.hash
 
     second = _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
@@ -1156,9 +1153,7 @@ def test_a_reader_can_run_the_same_notebook_twice_on_a_clean_clone(tmp_path: Pat
         study,
         name,
         members,
-        supersedes=supersedes_for_run(
-            study, population_name=name, declared=declared, execution_tier="canonical"
-        ),
+        supersedes=population_supersedes(study, name=name, declared=declared),
     )
     assert first.supersedes is None
 
@@ -1168,9 +1163,7 @@ def test_a_reader_can_run_the_same_notebook_twice_on_a_clean_clone(tmp_path: Pat
         study,
         name,
         members,
-        supersedes=supersedes_for_run(
-            study, population_name=name, declared=declared, execution_tier="canonical"
-        ),
+        supersedes=population_supersedes(study, name=name, declared=declared),
     )
     assert second.hash == first.hash
     assert OfficialPopulation.one(study, name=name).hash == first.hash
@@ -1189,9 +1182,7 @@ def test_a_disagreeing_supersedes_is_left_for_the_registry_to_refuse(tmp_path: P
     first = _population(study, name, _prediction(study))
     stale = "0" * 12
 
-    resolved = supersedes_for_run(
-        study, population_name=name, declared=stale, execution_tier="canonical"
-    )
+    resolved = population_supersedes(study, name=name, declared=stale)
     assert resolved is None
     with pytest.raises(ValueError, match=f"must explicitly supersedes {first.hash}"):
         _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
@@ -1209,9 +1200,7 @@ def test_an_author_declaring_the_generation_in_force_publishes_the_next_one(tmp_
     name = "cme_futures-gbm-validation-v1"
     first = _population(study, name, _prediction(study))
 
-    resolved = supersedes_for_run(
-        study, population_name=name, declared=first.hash, execution_tier="canonical"
-    )
+    resolved = population_supersedes(study, name=name, declared=first.hash)
     assert resolved == first.hash
 
     second = _population(study, name, _current_prediction(study, alpha=2.0), supersedes=resolved)
@@ -1220,12 +1209,7 @@ def test_an_author_declaring_the_generation_in_force_publishes_the_next_one(tmp_
 
     # And the run that reproduces that tip declares the same hash, now matched by the
     # other condition, so the committed notebook keeps resolving to the published record.
-    assert (
-        supersedes_for_run(
-            study, population_name=name, declared=first.hash, execution_tier="canonical"
-        )
-        == first.hash
-    )
+    assert population_supersedes(study, name=name, declared=first.hash) == first.hash
 
 
 def test_a_narrowed_run_under_its_own_population_name_drops_the_builtin_hash(tmp_path: Path):
@@ -1237,28 +1221,41 @@ def test_a_narrowed_run_under_its_own_population_name_drops_the_builtin_hash(tmp
     study = _study(tmp_path)
     _population(study, "cme_futures-linear-validation-v1", _prediction(study))
 
-    assert (
-        supersedes_for_run(
-            study,
-            population_name="my-linear-v1",
-            declared="8337482ecb59",
-            execution_tier="canonical",
-        )
-        is None
-    )
+    assert population_supersedes(study, name="my-linear-v1", declared="8337482ecb59") is None
 
 
 def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
-    """A preview population is discarded with its workspace and has no lineage to extend."""
-    study = _study(tmp_path)
+    """A preview population is discarded with its workspace and has no lineage to extend.
+
+    `population_supersedes` takes no tier, and does not need one: it reads the registry the
+    run is actually writing to. A preview opens its own workspace, so the name has no
+    generation there and the hash is withheld, by the same path a clean clone takes.
+
+    Stating it as a preview workspace *over a released registry that does hold the
+    generation* is what makes the test able to fail. A preview study is not isolated - it
+    overlays the release, and several sibling functions here read both roots on purpose. If
+    this lookup were widened the same way, a preview would find the canonical tip, offer the
+    hash, and `run_model_population` would refuse the run before it reached a fit. Two
+    unrelated studies would not catch that, because the preview would find nothing either
+    way.
+    """
+    released = _study(tmp_path)
     name = "cme_futures-linear-validation-v1"
-    first = _population(study, name, _prediction(study))
-    assert (
-        supersedes_for_run(
-            study, population_name=name, declared=first.hash, execution_tier="preview"
-        )
-        is None
+    first = _population(released, name, _prediction(released))
+    assert population_supersedes(released, name=name, declared=first.hash) == first.hash
+
+    release_root = tmp_path / "release_tree"
+    (release_root / "case_studies").mkdir(parents=True)
+    (release_root / "case_studies" / "cme_futures").symlink_to(
+        released.root, target_is_directory=True
     )
+    preview_root = tmp_path / "preview" / "cme_futures"
+    preview_root.mkdir(parents=True)
+    _open_registry(preview_root).close()
+    preview = dataclasses.replace(released, root=preview_root, release_root=release_root)
+
+    assert preview.release_case_root.resolve() == released.root.resolve()
+    assert population_supersedes(preview, name=name, declared=first.hash) is None
 
 
 def test_sdf_checkpoints_chosen_on_validation_never_reach_the_selection_pool() -> None:

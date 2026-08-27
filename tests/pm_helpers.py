@@ -69,6 +69,7 @@ overrides.yaml schema (per-notebook, all optional):
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,18 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 OVERRIDES_PATH = REPO_ROOT / "tests" / "overrides.yaml"
+
+STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order lettered producer notebooks before the bare aggregate for a stage number."""
+    match = STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
+
 
 # Thread-pool caps for the papermill kernel.
 #
@@ -954,6 +967,32 @@ def research_preview_parameters(
     if "PREVIEW_REDUCTIONS" in declared:
         resolved = _collect_preview_reductions(resolved)
     return resolved
+
+
+def resolved_registry_path(
+    py_path: Path,
+    output_dir: Path,
+    case_study: str,
+    *,
+    research_preview: bool,
+) -> Path:
+    """The registry the run this harness is about to launch will actually write to.
+
+    The tier decides the directory, and the tier is decided here rather than by the
+    caller: :func:`research_preview_parameters` binds ``EXECUTION_TIER="preview"`` for a
+    migrated Study notebook, and ``Study.activate`` then relocates the output root to
+    ``<workspace>/.preview``. A caller that names the canonical path itself snapshots and
+    queries a database the run never opens, so every registry assertion reads an absent
+    file as "the notebook registered nothing" - a failure that reads as a broken notebook
+    and is a wrong path. Resolving it through the same call that binds the tier is what
+    keeps the two from drifting apart again.
+    """
+    root = output_dir
+    if research_preview:
+        resolved = research_preview_parameters(py_path, None, output_dir)
+        if resolved.get("EXECUTION_TIER") == "preview":
+            root = output_dir / ".preview"
+    return root / case_study / "run_log" / "registry.db"
 
 
 # The override names `_collect_preview_reductions` folds into PREVIEW_REDUCTIONS, mapped to the

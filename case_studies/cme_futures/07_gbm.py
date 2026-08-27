@@ -88,10 +88,10 @@ from case_studies.research import (
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
-    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -267,7 +267,7 @@ plan.select(
 # new one.
 #
 # **A default that is a real hash rather than empty cannot be passed unconditionally**, and
-# `supersedes_for_run` is where the three cases that must drop it are decided. A preview population
+# `population_supersedes` is where the three cases that must drop it are decided. A preview population
 # is discarded with its workspace, so it has no lineage to extend and `run_model_population`
 # refuses one that carries a hash - passing it would fail every preview of this notebook before it
 # reached a fit, which is how the reduced-scale preview that gates the production run would go red
@@ -282,12 +282,7 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
-supersedes = supersedes_for_run(
-    study,
-    population_name=population_name,
-    declared=SUPERSEDES_POPULATION,
-    execution_tier=EXECUTION_TIER,
-)
+supersedes = population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION)
 execution, population = run_model_population(
     study,
     resolved,
@@ -295,7 +290,9 @@ execution, population = run_model_population(
     supersedes=supersedes,
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]

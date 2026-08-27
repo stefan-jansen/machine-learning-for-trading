@@ -84,15 +84,24 @@ def _resolved_directory_symlink(path: Path) -> Path | None:
 
 
 def _ensure_input_link(preview_case: Path, source: Path) -> None:
+    """Point `<preview>/<name>` at the active study's input directory.
+
+    The link belongs to whichever study is currently active, so a link left by a previous
+    study is repointed rather than refused. This used to raise, which made a second study
+    previewing into one workspace fail on activation - and refusing was never the safer
+    half: leaving the stale link would have had the preview read the previous study's
+    labels under the current study's name. `_ensure_config_link` below reached the same
+    conclusion for `config`, and the two disagreeing was the defect.
+    """
     resolved = source.resolve(strict=True)
     if not resolved.is_dir():
         raise ValueError(f"preview input is not a directory: {source}")
     link = preview_case / source.name
-    if link.is_symlink():
-        if link.resolve(strict=True) != resolved:
-            raise ValueError(f"preview input link targets the wrong directory: {link}")
+    if _resolved_directory_symlink(link) == resolved:
         return
-    if link.exists():
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
         raise ValueError(f"preview input path must be a directory symlink: {link}")
     link.symlink_to(resolved, target_is_directory=True)
 
@@ -128,6 +137,11 @@ class Study:
     output_root: Path | None
     read_only: bool
     manifest: dict
+    # The notebook that opened this study, recorded on every training run it registers so the
+    # registry can answer "which notebook wrote this". Stated by the caller rather than inferred:
+    # under papermill the executing file is a temp .ipynb and `__file__` may be absent entirely,
+    # so a frame walk is wrong exactly where it would be needed.
+    entry_point: str | None = None
 
     @classmethod
     def open(
@@ -136,6 +150,7 @@ class Study:
         workspace: str | Path | None = None,
         *,
         release_root: str | Path = REPO_ROOT,
+        entry_point: str | None = None,
     ) -> Study:
         release_root = Path(release_root).expanduser().resolve()
         release_case_dir = release_root / "case_studies" / case_study
@@ -155,6 +170,7 @@ class Study:
                     "baseline_source_commit": _source_commit(release_root),
                     "baseline_manifest_sha256": _release_manifest_digest(release_case_dir),
                 },
+                entry_point=entry_point,
             )
             study.activate()
             return study
@@ -208,6 +224,7 @@ class Study:
             output_root=output_root,
             read_only=False,
             manifest=manifest,
+            entry_point=entry_point,
         )
         from case_studies.utils.registry.store import _open_registry
 
@@ -221,6 +238,7 @@ class Study:
         case_study: str,
         *,
         release_root: str | Path = REPO_ROOT,
+        entry_point: str | None = None,
     ) -> Study:
         """Open the canonical generated-artifact links for maintainer regeneration."""
         release_root = Path(release_root).expanduser().resolve()
@@ -239,6 +257,7 @@ class Study:
             release_root=release_root,
             output_root=case_dir.parent,
             read_only=False,
+            entry_point=entry_point,
             manifest={
                 "schema_version": 1,
                 "case_study": case_study,
@@ -358,6 +377,7 @@ def open_study(
     execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
     workspace: str | Path | None = None,
     release_root: str | Path = REPO_ROOT,
+    entry_point: str | None = None,
 ) -> Study:
     """Open the study a notebook should execute against for its tier.
 
@@ -371,8 +391,13 @@ def open_study(
     release_root = Path(release_root).expanduser().resolve()
     if tier is ExecutionTier.CANONICAL:
         if workspace is None:
-            return Study.regenerate(case_study, release_root=release_root)
-        return Study.open(case_study, workspace=workspace, release_root=release_root)
+            return Study.regenerate(case_study, release_root=release_root, entry_point=entry_point)
+        return Study.open(
+            case_study,
+            workspace=workspace,
+            release_root=release_root,
+            entry_point=entry_point,
+        )
 
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
@@ -380,7 +405,12 @@ def open_study(
     case_dir = release_root / "case_studies" / case_study
     generated = tuple(case_dir / name for name in ("features", "labels", "run_log"))
     if not all(path.is_symlink() for path in generated):
-        return Study.open(case_study, workspace=workspace, release_root=release_root)
+        return Study.open(
+            case_study,
+            workspace=workspace,
+            release_root=release_root,
+            entry_point=entry_point,
+        )
 
     # A maintainer worktree links its generated directories to shared data, which
     # `create_experiment` cannot copy. Read those inputs in place and redirect every write.
@@ -394,6 +424,7 @@ def open_study(
         release_root=release_root,
         output_root=workspace,
         read_only=False,
+        entry_point=entry_point,
         manifest={
             "schema_version": 1,
             "case_study": case_study,
