@@ -14,736 +14,565 @@
 # ---
 
 # %% [markdown]
-# # Allocator Selection: Crypto Perpetual Futures
+# # Crypto perpetuals: six ways to size a position the ranking already chose
 #
-# Does portfolio weighting improve the selected funding-aligned carrier, and does the answer survive
-# explicit funding settlement? This notebook reads the frozen allocation sweep, identifies its
-# validation leader, and replays every semantic allocation cell without registration. The replay
-# preserves predictions, entry rules, and orders while adding official Binance funding cash flows.
+# [`13_backtest`](13_backtest.ipynb) gave every position the same weight. That was the point
+# there - equal weight adds no information, so a difference between two baselines is a difference
+# between two rankings. This notebook keeps the rankings and the entry rules exactly where they
+# were and changes one thing: how much capital each admitted position gets.
 #
-# **Learning objectives**
+# Six alternatives are declared in `config/setup.yaml`, and they read three different kinds of
+# input. One reads the model's own score, so a contract the model is more confident about gets
+# more capital. Four read the history of returns - each contract's own volatility, or the
+# covariance between contracts - so that the positions contribute comparable amounts of risk
+# rather than comparable amounts of money. One reads how uncertain the model's prediction has
+# been on that contract in the past.
 #
-# - Interpret the allocation stage as a validation-only comparison over baseline survivors
-# - Distinguish stored price P&L from perpetual-futures total return
-# - Reconstruct each registered allocator specification without changing the registry
-# - Test whether funding settlement changes the allocator winner
+# **This stage is narrow on purpose.** It runs on the survivors of the baseline rather than on
+# everything, because a sizing method applied to a ranking that lost money equally-weighted is
+# not a question anyone needs answered, and because every configuration added to a search makes
+# the highest result in it easier to reach by luck. The funnel that decides which baselines advance
+# is described below and is not a choice this notebook makes.
 #
-# **Book reference**: Chapter 17, Portfolio Construction
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: [`13_backtest`](13_backtest.ipynb) and a completed allocation sweep in
-# `run_log/registry.db`
+# - Take the top model configurations from a completed baseline stage, counting distinct
+#   configurations rather than distinct prediction sets, and say why the two differ.
+# - Say what each declared allocator reads, and which of them need a history of returns before
+#   they can weight anything.
+# - Run a sizing variant so that it differs from its own baseline in one field, and read the
+#   paired difference rather than comparing two leaders.
+# - Recognise when an allocator has traded a different set of dates from the one it is being
+#   compared against, and why that makes the comparison an unpaired one.
+#
+# **Book reference**: Chapter 17 (Portfolio Construction).
+#
+# **Prerequisites**: [`13_backtest`](13_backtest.ipynb) has registered a complete
+# `stage='signal'` baseline for every declared prediction set.
+#
+# **What it writes**: one `stage='allocation'` backtest per surviving prediction set, entry rule
+# and allocator, and one candidate set per label holding the baseline and the allocation results
+# together. [`15_costs`](15_costs.ipynb) and [`16_risk_management`](16_risk_management.ipynb)
+# read those.
 
 # %%
-"""Read-only allocator analysis with official funding settlement."""
+"""Run the declared allocator grid on the surviving crypto perpetuals baselines."""
 
-import json
-import sqlite3
-import warnings
-from collections import defaultdict
-from datetime import UTC, datetime
-
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.funding_data import load_funding_rates
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    load_backtest_prices_for,
-    warmup_periods_for,
+from case_studies.crypto_perps_funding.research_workflow import ALL_LABELS
+from case_studies.research import Result, open_study, run_backtests
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.backtest_loaders import load_backtest_prices_for
+from case_studies.utils.registry.queries import resolve_best_predictions
+from case_studies.utils.sweep_config import (
+    get_allocator_lookback,
+    get_allocators,
+    get_entry_schemes_for,
+    get_top_n_predictions,
 )
-from case_studies.utils.backtest_presets import build_backtest_spec
-from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.conformal import compute_conformal_widths
-from case_studies.utils.cv_window import canonical_window
-from case_studies.utils.registry import read_predictions
-from utils.paths import get_case_study_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.artifact_specs import load_setup_config
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY = "crypto_perps_funding"
-SEED = 42
-BAR_HOURS = 8
-MAX_SYMBOLS = 0
-TOP_N_PREDICTIONS = None
-CONFORMAL_ALPHA = 0.20
-EXPECTED_ALLOCATORS = (
-    "conformal_weighted",
-    "equal_weight",
-    "hrp",
-    "inverse_vol",
-    "mvo_ledoit_wolf",
-    "risk_parity",
-    "score_weighted",
-)
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+POPULATION_SUFFIX = "v1"
+SUPERSEDES: dict[str, str] = {}
 
 # %%
-set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
-REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
-config = get_backtest_config(CASE_STUDY)
-
-print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
-print(f"Round-trip trading cost: {config.commission_bps + config.slippage_bps:.1f} bps")
+study = open_study(
+    "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
+setup = load_setup_config("crypto_perps_funding")
+labels = list(LABELS) if LABELS else list(ALL_LABELS)
+n_assets = int(setup["universe"]["n_assets"])
 
 # %% [markdown]
-# ## Freeze the validation leaders
+# ## 1. Which baselines advance
 #
-# The allocation sweep receives model configurations selected at the equal-weight baseline. It never
-# sees the sealed holdout. The frozen cohort table below includes selection-aware DSR over every
-# registered allocation variant for each label.
-
+# The selection funnel is sequential: each stage runs on the survivors of the one before it, and
+# the survivors are chosen on **validation backtest Sharpe** - never on information coefficient,
+# which measures whether a model ranks contracts correctly and says nothing about what a strategy
+# trading that ranking earns after costs and funding.
+#
+# `config/setup.yaml` sets the width of each stage under `backtest.sweep.top_n_predictions`. The
+# baseline ran on everything; allocation runs on the top ten. **Ten what** is the part worth being
+# precise about: ten distinct `(family, config_name)` pairs, not ten prediction sets. A boosted
+# model contributes one prediction set per checkpoint, so counting prediction sets would let a
+# single configuration occupy the whole shortlist with ten readings of itself and crowd out every
+# other model in the case study. `checkpoints_per_config` then says how many checkpoints each
+# advancing configuration brings with it, and it is one - the checkpoint that scored best at the
+# baseline, since the checkpoint is part of the configuration rather than a knob to be re-tuned
+# here.
+#
+# `resolve_best_predictions` is the one implementation of that rule, shared by every case study.
 
 # %%
-def _allocation_leaders(registry_path) -> pl.DataFrame:
-    """Return one frozen allocation-stage leader per label."""
-    query = """
-        SELECT c.label, t.family, t.config_name, p.checkpoint_value,
-               b.prediction_hash, b.backtest_hash, b.spec_json,
-               c.k_variants, c.dsr_er_pvalue, c.computed_at,
-               m.sharpe, m.sharpe_ci95_lo, m.sharpe_ci95_hi,
-               m.cagr, m.max_drawdown
-        FROM cohort_metrics c
-        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
-        JOIN backtest_metrics m USING (backtest_hash)
-        JOIN prediction_sets p USING (prediction_hash)
-        JOIN training_runs t USING (training_hash)
-        WHERE c.cohort_type = 'stagelabel' AND c.stage = 'allocation'
-        ORDER BY c.label
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        return pl.read_database(query, connection)
-
-
-# %%
-leaders = _allocation_leaders(REGISTRY_PATH)
-if leaders.height != 4:
-    raise RuntimeError(f"Expected four label-level allocation leaders, found {leaders.height}")
-
-leader_allocations = [json.loads(value)["strategy"]["allocation"] for value in leaders["spec_json"]]
-leaders = leaders.with_columns(
-    pl.Series("allocator", [value["method"] for value in leader_allocations]),
-    pl.Series("top_k", [value.get("top_k") for value in leader_allocations], dtype=pl.Int64),
-    (pl.col("family") + pl.lit("/") + pl.col("config_name")).alias("source"),
-)
-print(
-    leaders.select(
-        "label",
-        "source",
-        "allocator",
-        "top_k",
-        "k_variants",
-        "sharpe",
-        "sharpe_ci95_lo",
-        "sharpe_ci95_hi",
-        "dsr_er_pvalue",
-    )
-)
-
-# %% [markdown]
-# ## Only the 24-hour return lineage survives allocation selection
-#
-# Three label-specific confidence intervals cross or remain below zero. The 24-hour return lineage
-# is the sole positive allocation-stage leader, and it is the carrier examined below.
-
-# %%
-label_names = {
-    "fwd_dir_8h": "8-hour direction",
-    "fwd_dir_8h_3c": "3-class direction",
-    "fwd_ret_8h": "8-hour return",
-    "fwd_ret_24h": "24-hour return",
-}
-fig = go.Figure(
-    go.Scatter(
-        x=leaders["sharpe"],
-        y=[label_names[value] for value in leaders["label"]],
-        mode="markers+text",
-        text=[f"{value:+.2f}" for value in leaders["sharpe"]],
-        textposition="top center",
-        marker={"size": 11, "color": COLORS["amber"]},
-        error_x={
-            "type": "data",
-            "symmetric": False,
-            "array": (leaders["sharpe_ci95_hi"] - leaders["sharpe"]).to_list(),
-            "arrayminus": (leaders["sharpe"] - leaders["sharpe_ci95_lo"]).to_list(),
-        },
-    )
-)
-fig.add_vline(x=0, line_color=COLORS["neutral"], line_width=1)
-fig.update_layout(
-    title={
-        "text": "Only the 24-hour return allocation leader clears zero"
-        "<br><sup>Validation Sharpe with block-bootstrap 95% intervals</sup>",
-        "x": 0.02,
-        "xanchor": "left",
-    },
-    xaxis_title="Annualized validation Sharpe",
-    yaxis_title="Prediction label",
-    showlegend=False,
-    margin={"l": 140},
-)
-fig.show()
-
-# %% [markdown]
-# ## Reconstruct the selected allocation grid
-#
-# The winning cohort row fixes the model, checkpoint, and prediction hash before allocator analysis.
-# Several specifications carry more than one registered row - reruns of the same specification, and
-# reparameterizations of a declared allocator that the strategy spec records but the design does not
-# distinguish - so the query collapses them to one semantic `(allocator, top_k, lookback)` cell and
-# reads the best stored Sharpe in it. No result is ranked on the holdout.
-#
-# How many physical rows that is, is not a property of the design: a rerun adds one without changing
-# the grid, and this carrier has two rows for most of its cells for exactly that reason. What the
-# design fixes is the set of semantic cells, and the assertion two cells down requires exactly that
-# set in both directions, so a stray allocator or concentration fails closed while a rerun does not.
-#
-# The collapse reads the best stored Sharpe in a cell, which is safe for a rerun of one specification
-# and not safe for a different one. Rows have been written against this carrier after the cohort
-# metrics below were computed, and they are not among the `k_variants` trials those metrics correct
-# for ([#63](https://github.com/ml4t/agent-workspace/issues/63)), so a later reparameterization that
-# happened to score well could take a cell away from the specification that was actually trialled.
-# A row registered after the cohort is therefore admitted only when the cohort already trialled its
-# exact specification - which is what a rerun is, and what a reparameterization is not.
-#
-# `created_at` is the evidence for "already trialled", and it is not immutable: re-registering an
-# identical specification rewrites the row and resets it. That direction fails safe - the cell loses
-# its pre-cohort evidence, the row is excluded, and the grid assertion below reports a missing cell
-# rather than admitting anything. Persisting the cohort's member hashes when it is computed would
-# remove the dependence entirely, and is the durable fix (#63).
-
-
-# %%
-carrier = leaders.sort("sharpe", descending=True).row(0, named=True)
-if carrier["label"] != "fwd_ret_24h":
-    raise RuntimeError("The frozen allocation winner changed; review the 24-hour carrier narrative")
-CARRIER_LABEL = carrier["label"]
-CARRIER_PREDICTION = carrier["prediction_hash"]
-if CARRIER_PREDICTION != "fb85a7d19ce1":
-    raise RuntimeError("The frozen v3.0 carrier identity changed")
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="'Y' is deprecated", category=FutureWarning)
-    validation_window = canonical_window(CASE_STUDY, CARRIER_LABEL, split="validation")
-if validation_window is None:
-    raise RuntimeError("No canonical validation window for the selected carrier")
-validation_start, validation_end = validation_window
-
-print(
-    f"Carrier: {carrier['source']} checkpoint={carrier['checkpoint_value']} "
-    f"prediction={CARRIER_PREDICTION}"
-)
-print(f"Validation window: {validation_start} through {validation_end}")
-
-
-# %%
-def _spec_identity(spec_json: str) -> str:
-    """The stored specification, less what does not define it.
-
-    Provenance keys are dropped: the registry writes `_runtime_backtest_config` as a repr
-    carrying absolute paths. Null values are dropped with them, because the serializer has
-    gained explicitly-null keys over time - `margin_pct_schedule` appeared between the
-    2026-05 sweep and its 2026-06 reruns - and an absent key and a null one say the same
-    thing. Everything else is compared, so a changed commission, slippage, execution or
-    feed setting reads as a different specification rather than as a rerun.
-    """
-
-    def prune(value):
-        if isinstance(value, dict):
-            return {
-                key: prune(item)
-                for key, item in sorted(value.items())
-                if item is not None and not key.startswith("_")
-            }
-        return value
-
-    return json.dumps(prune(json.loads(spec_json)), sort_keys=True)
-
-
-def _allocation_cells(registry_path, prediction_hash: str, frozen_as_of: str) -> list[dict]:
-    """Return one stored specification per semantic allocation cell of the frozen trial set."""
-    query = """
-        SELECT b.backtest_hash, b.created_at, b.spec_json, m.sharpe
-        FROM backtest_runs b JOIN backtest_metrics m USING (backtest_hash)
-        WHERE b.stage = 'allocation' AND b.prediction_hash = ?
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        rows = connection.execute(query, (prediction_hash,)).fetchall()
-    frozen_specs = {
-        _spec_identity(spec_json)
-        for _, created_at, spec_json, _ in rows
-        if created_at <= frozen_as_of
-    }
-    admitted = [
-        row for row in rows if row[1] <= frozen_as_of or _spec_identity(row[2]) in frozen_specs
-    ]
-    if len(admitted) < len(rows):
-        print(
-            f"Excluded {len(rows) - len(admitted)} allocation row(s) registered after the frozen "
-            f"cohort under a specification it never trialled"
+top_n = get_top_n_predictions("crypto_perps_funding", "allocation")
+# `vertical_relaxed`, because `checkpoint_value` is Null-typed for a label whose survivors
+# are all final-checkpoint models and Int64 for one that advanced a boosted model on a
+# numbered checkpoint. Both are the same column meaning the same thing; a strict concat
+# refuses the pair, and it refuses it only when more than one label is in play.
+survivors = pl.concat(
+    [
+        resolve_best_predictions(
+            "crypto_perps_funding",
+            label,
+            split="validation",
+            stage="signal",
+            top_n=top_n,
+            checkpoints_per_config=1,
+            case_dir=study.root,
         )
-    cells = {}
-    for backtest_hash, _, spec_json, stored_sharpe in admitted:
-        strategy = json.loads(spec_json)["strategy"]
-        signal = strategy["signal"]
-        allocation = strategy["allocation"]
-        key = (
-            allocation["method"],
-            allocation.get("top_k"),
-            allocation.get("vol_window"),
-            allocation.get("lookback"),
-            signal["method"],
-            signal.get("top_k"),
-        )
-        if key not in cells or stored_sharpe > cells[key]["stored_sharpe"]:
-            cells[key] = {
-                "backtest_hash": backtest_hash,
-                "signal": signal,
-                "allocation": allocation,
-                "stored_sharpe": stored_sharpe,
-            }
-    return [cells[key] for key in sorted(cells)]
+        for label in labels
+    ],
+    how="vertical_relaxed",
+)
+if survivors.is_empty():
+    raise RuntimeError("no baseline survivors: run 13_backtest before this notebook")
 
+# %% [markdown]
+# One row per advancing configuration. `sharpe` is the baseline it advanced on, and it is shown
+# so the shortlist can be read against the population it came from rather than in isolation.
 
-# %%
-cells = _allocation_cells(REGISTRY_PATH, CARRIER_PREDICTION, carrier["computed_at"])
-allocator_names = sorted({cell["allocation"]["method"] for cell in cells})
-top_k_values = sorted({cell["allocation"].get("top_k") for cell in cells})
-observed_grid = {(cell["allocation"]["method"], cell["allocation"].get("top_k")) for cell in cells}
-expected_grid = {(allocator, top_k) for allocator in set(EXPECTED_ALLOCATORS) for top_k in {5, 10}}
-if len(cells) != len(expected_grid) or observed_grid != expected_grid:
-    raise RuntimeError(
-        f"The registered allocation grid is not the declared one: expected {len(expected_grid)} "
-        f"cells {sorted(expected_grid)}, found {len(cells)} cells {sorted(observed_grid)}"
-    )
-print(
-    f"Semantic allocation grid: {len(cells)} cells across {len(allocator_names)} allocators "
-    f"and {len(top_k_values)} concentrations"
+# %% tags=["results"]
+catalog = study.predictions.table().filter(
+    pl.col("prediction_hash").is_in(survivors.get_column("prediction_hash").implode())
+)
+if catalog.height != survivors.height:
+    raise RuntimeError("a surviving prediction is absent from the prediction catalog")
+if catalog.filter(~pl.col("complete")).height:
+    raise RuntimeError("a surviving prediction set is incomplete")
+
+survivors.select("label", "family", "config_name", "checkpoint_value", "sharpe").sort(
+    "label", "sharpe", descending=[False, True]
 )
 
 # %% [markdown]
-# ## Put the frozen artifact on its availability clock
+# ## 2. What each allocator reads
 #
-# The v3.0 prediction artifact stores the legacy bar-open timestamp. Its target is first checked
-# against current raw prices. Predictions and prices are then advanced together by one completed
-# 8-hour bar, preserving the economic pair while moving execution to the declared funding timestamp.
-
-# %%
-frozen_predictions = read_predictions(CASE_STUDY, CARRIER_PREDICTION, case_dir=FROZEN_CASE_DIR)
-raw_prices = load_backtest_prices_for(
-    CASE_STUDY,
-    CARRIER_LABEL,
-    split="validation",
-    max_symbols=MAX_SYMBOLS,
-    warmup_periods=warmup_periods_for(CASE_STUDY),
-)
-legacy_targets = (
-    raw_prices.sort("symbol", "timestamp")
-    .with_columns(
-        pl.col("close").shift(-3).over("symbol").alias("end_close"),
-        pl.col("timestamp").shift(-3).over("symbol").alias("end_timestamp"),
-    )
-    .filter(pl.col("end_timestamp") == pl.col("timestamp") + pl.duration(hours=24))
-    .select(
-        pl.col("timestamp").dt.replace_time_zone("UTC"),
-        "symbol",
-        (pl.col("end_close") / pl.col("close") - 1).alias("current_raw_target"),
-    )
-)
-alignment = frozen_predictions.join(legacy_targets, on=["timestamp", "symbol"], how="inner")
-target_correlation = alignment.select(pl.corr("y_true", "current_raw_target")).item()
-if target_correlation < 0.99:
-    raise ValueError("Frozen prediction timestamps do not match the legacy raw-price clock")
-print(f"Frozen target/current raw-price correlation: {target_correlation:.6f}")
-
-# %%
-predictions = frozen_predictions.with_columns(
-    pl.col("timestamp") + pl.duration(hours=BAR_HOURS)
-).filter(pl.col("timestamp").dt.date() <= validation_end)
-prices = raw_prices.with_columns(pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).filter(
-    pl.col("timestamp").dt.date() <= validation_end
-)
-funding = (
-    load_funding_rates(symbols=prices["symbol"].unique().to_list())
-    .with_columns(pl.col("timestamp").cast(prices.schema["timestamp"]))
-    .filter(
-        (pl.col("timestamp") >= prices["timestamp"].min())
-        & (pl.col("timestamp") <= prices["timestamp"].max())
-    )
-)
-print(
-    f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"official settlements: {funding.height:,}"
-)
-
-# %% [markdown]
-# ## Require point-in-time conformal calibration
+# All six take the same set of admitted positions from the entry rule and decide only the size of
+# each. They differ in what they consult to do it.
 #
-# Conformal sizing is valid only when each validation fold uses residuals from earlier validation
-# folds. The earliest fold has no such residuals and must be absent. The replay recomputes the
-# expected widths without writing and refuses any persisted artifact that differs.
+# - **`score_weighted`** is the only one that reads the prediction. Weight is proportional to the
+#   model's score, so the ordering the ranking produced becomes a spread of position sizes rather
+#   than a set of equal ones.
+# - **`inverse_vol`** weights each contract by the reciprocal of its own recent return
+#   volatility. A contract that moves twice as much gets half the capital, so each position
+#   contributes a comparable amount of risk. It looks at each contract on its own and ignores how
+#   they move together.
+# - **`risk_parity`** equalizes each position's contribution to the volatility of the whole
+#   portfolio, which requires the covariance between contracts rather than just the diagonal. On
+#   a set of perpetual futures that mostly rise and fall together, the difference from
+#   `inverse_vol` is the part correlation accounts for.
+# - **`hrp`**, hierarchical risk parity, groups the contracts by how correlated they are, splits
+#   capital between the groups, and then splits it again inside each. It never inverts the
+#   covariance matrix, which is what makes it usable when the estimate is noisy.
+# - **`mvo_ledoit_wolf`** does invert one: mean-variance optimization, on a covariance pulled part
+#   of the way towards a simpler structured estimate. That pull is the **shrinkage**, and it is
+#   there because a nineteen-by-nineteen covariance estimated from a few hundred observations
+#   contains enough noise that optimizing against it directly concentrates the book on whichever
+#   pair happens to look least correlated in the sample.
+# - **`conformal_weighted`** reads how wrong the model has been. For each contract it takes a
+#   quantile of the model's own past absolute errors on that contract and gives less capital
+#   where that quantile is larger. It is inverse-uncertainty sizing with a conformal quantile
+#   standing in for a volatility estimate, and nothing here consumes it as an interval: the
+#   weights are `1/width` normalized within each side at each timestamp, so any factor common
+#   to every contract cancels and only the spread across contracts reaches the portfolio.
+#
+# The four that read return history share one window, so that a difference between them is the
+# method rather than the amount of history each was given.
 
 # %%
-if "conformal_weighted" in EXPECTED_ALLOCATORS:
-    fold_order = (
-        frozen_predictions.group_by("fold_id")
-        .agg(pl.col("timestamp").min().alias("start"))
-        .sort("start")["fold_id"]
-        .to_list()
-    )
-    earliest_fold = fold_order[0]
-    conformal_path = (
-        FROZEN_CASE_DIR
-        / "run_log"
-        / "predictions"
-        / CARRIER_PREDICTION
-        / "conformal_widths.parquet"
-    )
-    if not conformal_path.exists():
-        raise FileNotFoundError(f"Missing precomputed conformal widths: {conformal_path}")
-    persisted_widths = (
-        pl.read_parquet(conformal_path)
-        .filter(pl.col("alpha") == CONFORMAL_ALPHA)
-        .filter(pl.col("fold_id") != earliest_fold)
-        .sort("timestamp", "symbol")
-    )
-    expected_widths = (
-        compute_conformal_widths(
-            CASE_STUDY,
-            CARRIER_PREDICTION,
-            alpha=CONFORMAL_ALPHA,
-            write=False,
-            case_dir=FROZEN_CASE_DIR,
-        )
-        .filter(pl.col("fold_id") != earliest_fold)
-        .sort("timestamp", "symbol")
-    )
-    if not persisted_widths.equals(expected_widths):
-        raise RuntimeError("Persisted conformal widths are not point-in-time safe")
-    width_folds = sorted(expected_widths["fold_id"].unique().to_list())
-    if earliest_fold in width_folds:
-        raise RuntimeError("The earliest validation fold cannot have conformal widths")
-    print(
-        f"PIT-safe conformal widths: {expected_widths.height:,} rows; "
-        f"calibrated folds={width_folds}; omitted earliest fold={earliest_fold}"
-    )
-else:
-    print("PIT-safe conformal validation: no conformal cell in the configured reduced surface")
-
-# %% [markdown]
-# A rank-based long-short request cannot admit more than half the available cross-section on either
-# side. The corrected replay caps each side at `floor(n_assets / 2)` at every timestamp. Frozen v3.0
-# values remain visible as history, including cells generated before this repair.
-
-# %%
-panel_sizes = predictions.group_by("timestamp").len().rename({"len": "n_assets"})
-correction_rows = []
-for top_k in top_k_values:
-    correction_rows.append(
+allocators = get_allocators("crypto_perps_funding")
+lookback = get_allocator_lookback("crypto_perps_funding")
+bar_hours = int(setup["features"]["bar_hours"])
+print(
+    f"Rolling window for the moment-based allocators: {lookback} bars of "
+    f"{bar_hours}-hourly prices, about {lookback * bar_hours / 24:.0f} days of history before "
+    "the first decision each can weight."
+)
+pl.DataFrame(
+    [
         {
-            "requested_top_k": top_k,
-            "capped_timestamps": panel_sizes.filter(pl.col("n_assets") < 2 * top_k).height,
+            "allocator": allocator["method"],
+            "reads": "prediction score"
+            if allocator["method"] == "score_weighted"
+            else "prediction error history"
+            if allocator["method"] == "conformal_weighted"
+            else "return history",
+            "warmup_bars": strategy_warmup_periods({"allocation": allocator}),
         }
-    )
-corrections = pl.DataFrame(correction_rows).sort("requested_top_k")
-print(
-    f"Corrected allocation cells: {len(cells)}; panel size range: "
-    f"{panel_sizes['n_assets'].min()} to {panel_sizes['n_assets'].max()}"
+        for allocator in allocators
+    ]
 )
-print(corrections)
 
 # %% [markdown]
-# ## Add funding to the carried position
+# ### What an allocator that calibrates costs, and what it does not
 #
-# Funding at time $t$ belongs to the position held into $t$. Orders filled at $t$ earn or pay the next
-# settlement. Temporary off-grid settlements use the last observable mark and carried position. The
-# accounting oracle reconstructs the engine's price-only equity from fills and marks before adding
-# funding as a separate cash component.
-
+# `conformal_weighted` needs residuals before it can size anything, and a residual is only usable
+# once the return it measures has been realized. So its width at a decision comes from every
+# error the model has already made on that contract up to the label horizon before that decision
+# - earlier folds and the current fold's own elapsed history alike. That costs a **warm-up**: the
+# first few decisions of the validation span have no width and the allocator holds nothing
+# through them. On this case study's 8-hourly grid the warm-up is three decisions.
+#
+# It used to cost a great deal more. Calibrating on whole earlier folds only meant the earliest
+# fold had no earlier fold, so the allocator sat out the entire first year - and that is worth
+# keeping in view even though it is fixed, because of how the resulting number looked. **A period
+# a strategy sits out still counts as a period it observed.** A day holding nothing books a
+# return of exactly zero, so a book flat for a year reports the same period count as one that
+# traded every day of it, and every summary built on that count agreed the two were comparable.
+# The strategy that sat out 2022 posted the highest Sharpe in the stage by not trading a losing
+# year.
+#
+# Section 4 therefore measures which folds each result actually **traded**, from its registered
+# return series, and pairs only within a matching set. That test is not about one allocator: any
+# result that covered part of the span for any reason is measured on a different sample from one
+# that covered all of it, and differencing the two attributes the sample to the sizing.
+#
+# ## 3. Running the grid
+#
+# The entry rules are the ones the baseline established as feasible on a nineteen-contract
+# universe, unchanged, because changing the sizing and the selection together would measure
+# neither. For every surviving prediction set, every feasible entry rule and every allocator,
+# `run_backtests` resolves a strategy that differs from its baseline in the `allocation` field
+# and in nothing else.
+#
+# Prices are loaded once per label and warmup. The moment-based allocators need the rolling
+# window of prices in front of their first decision and the other two do not, so there are two
+# price frames per label rather than one - and they are the frames the boundary would have
+# loaded for itself, so passing them in changes nothing but the number of reads.
 
 # %%
-def _as_utc(value: datetime) -> datetime:
-    """Normalize an engine timestamp to timezone-aware UTC."""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-# %%
-def _replay_inputs(result, price_frame: pl.DataFrame, funding_frame: pl.DataFrame):
-    """Index fills, settlements, prices, and engine equity by UTC timestamp."""
-    engine = result.engine_result
-    if engine is None:
-        raise RuntimeError("Funding replay requires an uncached engine result")
-
-    fills = defaultdict(list)
-    for fill in engine.fills:
-        fills[_as_utc(fill.timestamp)].append(fill)
-    rates = defaultdict(dict)
-    for row in funding_frame.iter_rows(named=True):
-        rates[_as_utc(row["timestamp"])][row["symbol"]] = float(row["funding_rate"])
-    marks = defaultdict(dict)
-    for row in price_frame.select("timestamp", "symbol", "close").iter_rows(named=True):
-        marks[_as_utc(row["timestamp"])][row["symbol"]] = float(row["close"])
-    equity = {_as_utc(ts): float(value) for ts, value in engine.equity_curve}
-    return fills, rates, marks, equity
-
-
-# %%
-def _settlement_cash(positions, last_marks, timestamp_rates) -> float:
-    """Calculate funding cash for the position carried into a settlement."""
-    return sum(
-        -(positions.get(symbol, 0.0) * last_marks[symbol]) * rate
-        for symbol, rate in timestamp_rates.items()
-        if positions.get(symbol, 0.0) != 0 and symbol in last_marks
+warmups = sorted({strategy_warmup_periods({"allocation": item}) for item in allocators})
+prices_by_key = {
+    (label, warmup): load_backtest_prices_for(
+        "crypto_perps_funding", label, split="validation", warmup_periods=warmup
     )
-
-
-# %%
-def _apply_fills(cash: float, positions, last_marks, timestamp_fills) -> float:
-    """Apply fills after funding at a shared timestamp."""
-    for fill in timestamp_fills:
-        quantity = float(fill.quantity) if fill.side.value == "buy" else -float(fill.quantity)
-        cash -= quantity * float(fill.price) + float(fill.commission)
-        last_marks.setdefault(fill.asset, float(fill.price))
-        positions[fill.asset] += quantity
-        if abs(positions[fill.asset]) < 1e-12:
-            del positions[fill.asset]
-    return cash
-
+    for label in labels
+    for warmup in warmups
+}
+schemes_by_label = {
+    label: get_entry_schemes_for("crypto_perps_funding", label, n_assets=n_assets, long_short=True)
+    for label in labels
+}
 
 # %%
-def _replay_equity(result, price_frame: pl.DataFrame, funding_frame: pl.DataFrame):
-    """Return funding-adjusted equity, cash flow, events, and reconstruction error."""
-    fills, rates, marks, engine_equity = _replay_inputs(result, price_frame, funding_frame)
-
-    cash = float(config.initial_cash)
-    positions = defaultdict(float)
-    cumulative_funding = 0.0
-    events = 0
-    settlements_processed = 0
-    adjusted = []
-    reconstructed = []
-    last_marks = {}
-    timeline = sorted(set(engine_equity) | set(rates))
-    for timestamp in timeline:
-        last_marks.update(marks[timestamp])
-        timestamp_rates = rates.get(timestamp, {})
-        settlements_processed += len(timestamp_rates)
-        event_cash = _settlement_cash(positions, last_marks, timestamp_rates)
-        if event_cash:
-            cash += event_cash
-            cumulative_funding += event_cash
-            events += 1
-        cash = _apply_fills(cash, positions, last_marks, fills.get(timestamp, []))
-        if timestamp in engine_equity:
-            marked = sum(quantity * last_marks[symbol] for symbol, quantity in positions.items())
-            adjusted.append((timestamp, cash + marked))
-            reconstructed.append((timestamp, cash - cumulative_funding + marked))
-
-    error = max(abs(value - engine_equity[ts]) for ts, value in reconstructed)
-    expected_settlements = sum(len(values) for values in rates.values())
-    if settlements_processed != expected_settlements:
-        raise RuntimeError("Funding replay did not consume every official settlement exactly once")
-    return adjusted, cumulative_funding, events, error, settlements_processed
-
-
-# %%
-def _daily_sharpe(equity_curve: list[tuple[datetime, float]]) -> float:
-    """Compute crypto-calendar Sharpe from end-of-day equity."""
-    daily = (
-        pl.DataFrame(equity_curve, schema=["timestamp", "equity"], orient="row")
-        .with_columns(pl.col("timestamp").dt.date().alias("date"))
-        .group_by("date")
-        .agg(pl.col("equity").sort_by("timestamp").last())
-        .sort("date")
-        .with_columns(pl.col("equity").pct_change().alias("return"))
-        .filter((pl.col("date") >= validation_start) & (pl.col("date") <= validation_end))
-    )
-    values = daily["return"].drop_nulls().to_numpy()
-    return float(values.mean() / values.std(ddof=1) * np.sqrt(365))
-
+for label in labels:
+    label_rows = catalog.filter(pl.col("label") == label)
+    for scheme in schemes_by_label[label]:
+        signal = {key: value for key, value in scheme.items() if key != "name"}
+        for allocator in allocators:
+            warmup = strategy_warmup_periods({"allocation": allocator})
+            execution = run_backtests(
+                study,
+                predictions=label_rows,
+                signal=signal,
+                allocation=allocator,
+                prices=prices_by_key[(label, warmup)],
+                chapter="ch17",
+                population_name=(
+                    f"crypto-allocation-{label}-{scheme['name']}-"
+                    f"{allocator['method']}-{POPULATION_SUFFIX}"
+                ),
+            )
+            print(
+                f"{label} / {scheme['name']} / {allocator['method']}: "
+                f"{len(execution.results)} backtests registered\n"
+                f"  this execution: {execution.n_computed} computed, "
+                f"{execution.n_reused} served from the registry"
+            )
 
 # %% [markdown]
-# Each replay passes the exact registered signal and allocation dictionaries to the engine with
-# `register=False`. Precomputed target weights are sorted by timestamp and symbol so cash-constrained
-# fills have a deterministic order. The stored and current price-only Sharpes differ slightly because
-# the current environment reruns floating-point allocation code; funding is evaluated against that
-# same current order stream.
+# ## 4. What came out
+#
+# Read back from the registry, one row per allocator. `traded_folds` lists the validation folds
+# each result actually held a position in, derived below from the registered return series rather
+# than assumed from the allocator's name. A fold's number identifies it and does not order it -
+# the walk-forward split numbers folds as it builds them - so the list is written oldest first.
+
+# %%
+results = study.backtests.table().filter(
+    (pl.col("split") == "validation")
+    & pl.col("label").is_in(labels)
+    & pl.col("stage").is_in(["signal", "allocation"])
+)
+if results.filter(~pl.col("complete")).height:
+    raise RuntimeError("the backtest catalog contains incomplete members")
+
+entry_rule = (
+    pl.col("signal_method")
+    + pl.when(pl.col("spec_json").str.json_path_match("$.strategy.signal.top_k").is_not_null())
+    .then(pl.lit("_top") + pl.col("spec_json").str.json_path_match("$.strategy.signal.top_k"))
+    .otherwise(pl.lit(""))
+).alias("entry_rule")
+keyed = results.with_columns(
+    entry_rule,
+    pl.col("allocation_method").fill_null("equal_weight").alias("allocator"),
+)
+
+# %% [markdown]
+# Each decision carries its fold in the prediction set, and the dates a result held a
+# position on are in the return series it registered - a day the strategy was flat contributes a
+# return of exactly zero. Intersecting the two says which folds each result traded, which is the
+# property that has to match before two results can be differenced. The windows are put in date
+# order here because the fold numbers are not in date order.
 
 
 # %%
-def _run_registered_allocation(cell: dict):
-    """Run one frozen allocation specification with deterministic target order."""
-    allocation = cell["allocation"]
-    spec = build_backtest_spec(
-        CASE_STUDY,
-        config,
-        prices=prices,
-        prediction_hash=CARRIER_PREDICTION,
-        initial_cash=config.initial_cash,
-        chapter="ch17",
-        signal=cell["signal"],
-        allocation=allocation,
-    )
-    weights = precompute_weights(
-        predictions,
-        spec,
-        prices,
-        label=CARRIER_LABEL,
-        case_study=CASE_STUDY,
-        prediction_hash=CARRIER_PREDICTION,
-        conformal_widths=(
-            expected_widths if allocation["method"] == "conformal_weighted" else None
-        ),
-    ).sort("timestamp", "symbol")
-    return run_backtest(
-        CASE_STUDY,
-        CARRIER_PREDICTION,
-        spec,
-        prices=prices,
-        predictions=predictions,
-        label=CARRIER_LABEL,
-        register=False,
-        precomputed_weights=weights,
-        initial_cash=config.initial_cash,
-        calendar=config.calendar,
+def fold_windows(label: str) -> pl.DataFrame:
+    """First and last decision date of each validation fold, for one label.
+
+    Every configuration for a label predicts the same keys, which 13_backtest established, so
+    one prediction set carries the fold calendar for all of them.
+    """
+    reference = catalog.filter(pl.col("label") == label).sort("prediction_hash")
+    return (
+        Result.open(study, reference.item(0, "prediction_hash"))
+        .load()
+        .group_by("fold")
+        .agg(
+            fold_start=pl.col("timestamp").min().dt.date(),
+            fold_end=pl.col("timestamp").max().dt.date(),
+        )
+        .sort("fold_start")
     )
 
 
 # %%
-def _replay_cell(cell: dict) -> dict:
-    """Add official funding settlement to one frozen allocation cell."""
-    allocation = cell["allocation"]
-    result = _run_registered_allocation(cell)
-    curve, funding_pnl, events, reconstruction_error, settlements_processed = _replay_equity(
-        result, prices, funding
+def traded_folds(backtest_hash: str, windows: pl.DataFrame) -> tuple[int, ...]:
+    """Which validation folds one registered result actually held a position in."""
+    returns = pl.read_parquet(
+        study.root / "run_log" / "backtest" / backtest_hash / "daily_returns.parquet"
     )
-    return {
-        "allocator": allocation["method"],
-        "top_k": allocation.get("top_k"),
-        "stored_sharpe": cell["stored_sharpe"],
-        "price_only_sharpe": float(result.metrics["sharpe"]),
-        "with_funding_sharpe": _daily_sharpe(curve),
-        "funding_pnl": funding_pnl,
-        "funding_events": events,
-        "settlements_processed": settlements_processed,
-        "reconstruction_error": reconstruction_error,
-    }
+    column = next(name for name in returns.columns if name != "timestamp")
+    active = returns.filter(pl.col(column) != 0).select(pl.col("timestamp").dt.date().alias("day"))
+    if active.is_empty():
+        return ()
+    return tuple(
+        int(row["fold"])
+        for row in windows.iter_rows(named=True)
+        if active.filter(pl.col("day").is_between(row["fold_start"], row["fold_end"])).height
+    )
 
 
 # %%
-replay_rows = []
-for index, cell in enumerate(cells, start=1):
-    row = _replay_cell(cell)
-    replay_rows.append(row)
-    print(
-        f"[{index:02d}/{len(cells)}] {row['allocator']} top_k={row['top_k']}: "
-        f"price={row['price_only_sharpe']:+.3f} funding_pnl=${row['funding_pnl']:+,.0f}"
-    )
-
-replay = pl.DataFrame(replay_rows).sort("with_funding_sharpe", descending=True)
-for metric in ("price_only_sharpe", "with_funding_sharpe", "funding_pnl"):
-    if not replay[metric].is_finite().all():
-        raise RuntimeError(f"Non-finite replay metric: {metric}")
-reconstruction_errors = replay["reconstruction_error"]
-if not reconstruction_errors.is_finite().all() or reconstruction_errors.max() > 1e-6:
-    raise RuntimeError("Fill-and-mark reconstruction does not match engine equity")
-if replay.filter(pl.col("settlements_processed") != funding.height).height:
-    raise RuntimeError("At least one replay missed an official funding row")
-print(f"Official settlement rows processed exactly once per replay: {funding.height:,}")
-print(
-    replay.select(
-        "allocator",
-        "top_k",
-        "stored_sharpe",
-        "price_only_sharpe",
-        "with_funding_sharpe",
-        "funding_pnl",
+windows_by_label = {label: fold_windows(label) for label in labels}
+keyed = keyed.with_columns(
+    pl.Series(
+        "traded_folds",
+        [
+            "+".join(
+                str(fold)
+                for fold in traded_folds(row["backtest_hash"], windows_by_label[row["label"]])
+            )
+            for row in keyed.iter_rows(named=True)
+        ],
     )
 )
-for row in replay.iter_rows(named=True):
-    print(
-        f"{row['allocator']} requested_top_k={row['top_k']}: "
-        f"price_only={row['price_only_sharpe']:+.6f}, "
-        f"with_funding={row['with_funding_sharpe']:+.6f}, "
-        f"funding_pnl=${row['funding_pnl']:+,.2f}"
+
+# %% tags=["results"]
+allocation_grid = (
+    keyed.filter(pl.col("stage") == "allocation")
+    .group_by("allocator")
+    .agg(
+        backtests=pl.len(),
+        labels=pl.col("label").n_unique(),
+        median_sharpe=pl.col("sharpe").median(),
+        above_zero=(pl.col("sharpe") > 0).sum(),
+        traded_folds=pl.col("traded_folds").unique().sort().str.join(", "),
+        median_turnover=pl.col("avg_turnover").median(),
     )
+    .sort("allocator")
+)
+allocation_grid
 
 # %% [markdown]
-# ## Funding preserves the risk-parity winner
+# ### The paired difference, one field at a time
 #
-# Risk parity with five positions remains the best allocation after official funding settlement.
-# Funding changes each corrected cell in this validation window, but not uniformly. The point-in-time
-# conformal cells no longer challenge the winner because the earliest validation fold is correctly
-# omitted from their calibration surface. The comparison supports the allocator choice while
-# correcting both the return definition and the conformal information set.
+# A leader-to-leader comparison across stages is not evidence that sizing helped: the allocation
+# leader and the baseline leader can be different models on different checkpoints, and the gap
+# between them then contains the search as well as the sizing. The join below pairs each
+# allocation result with the baseline built on the **same prediction set and the same entry
+# rule**, so the only field that differs is the allocator, and reports the difference.
+#
+# A pair is admitted only when both legs traded the same folds. That is what excludes the
+# conformal rows, and it would exclude anything else that sat out part of the span for any other
+# reason - the test is what the result did, not which allocator produced it.
+
+# %% tags=["results"]
+baseline = keyed.filter(pl.col("stage") == "signal").select(
+    "prediction_hash",
+    "entry_rule",
+    pl.col("sharpe").alias("baseline_sharpe"),
+    pl.col("traded_folds").alias("baseline_traded_folds"),
+)
+allocation = keyed.filter(pl.col("stage") == "allocation")
+paired = (
+    allocation.join(baseline, on=["prediction_hash", "entry_rule"], how="inner")
+    .filter(pl.col("traded_folds") == pl.col("baseline_traded_folds"))
+    .with_columns((pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_change"))
+)
+unpaired = (
+    allocation.join(baseline, on=["prediction_hash", "entry_rule"], how="inner")
+    .filter(pl.col("traded_folds") != pl.col("baseline_traded_folds"))
+    .group_by("allocator")
+    .agg(left_unpaired=pl.len(), traded_folds=pl.col("traded_folds").unique().sort().str.join(", "))
+    .sort("allocator")
+)
+print(f"{paired.height} paired comparisons")
+print(unpaired)
+
+paired.group_by("allocator").agg(
+    pairs=pl.len(),
+    median_change=pl.col("sharpe_change").median(),
+    improved=(pl.col("sharpe_change") > 0).sum(),
+    best_change=pl.col("sharpe_change").max(),
+    worst_change=pl.col("sharpe_change").min(),
+).sort("allocator")
+
+# %% [markdown]
+# One distribution per allocator, over every pair. The zero line is equal weight: a point above
+# it is a configuration that sizing improved, and the fraction of each distribution above the
+# line is the more informative reading than any single point in it.
 
 # %%
-ordered = replay.sort("with_funding_sharpe")
-labels = [
-    f"{row['allocator'].replace('_', ' ')} | requested {row['top_k']}"
-    for row in ordered.iter_rows(named=True)
-]
+order = sorted(set(paired.get_column("allocator")))
 fig = go.Figure()
-for index, row in enumerate(ordered.iter_rows(named=True)):
+for allocator in order:
+    panel = paired.filter(pl.col("allocator") == allocator)
     fig.add_trace(
-        go.Scatter(
-            x=[row["price_only_sharpe"], row["with_funding_sharpe"]],
-            y=[labels[index], labels[index]],
-            mode="lines",
-            line={"color": COLORS["neutral"], "width": 1},
-            hoverinfo="skip",
+        go.Box(
+            y=panel.get_column("sharpe_change").to_list(),
+            name=allocator,
+            marker_color=COLORS["blue"],
+            boxpoints="all",
+            jitter=0.4,
+            pointpos=0,
+            marker={"size": 3, "opacity": 0.5},
             showlegend=False,
         )
     )
-
-# %%
-fig.add_trace(
-    go.Scatter(
-        x=ordered["price_only_sharpe"],
-        y=labels,
-        mode="markers",
-        marker={"size": 9, "color": COLORS["slate"]},
-        name="Price P&L",
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=ordered["with_funding_sharpe"],
-        y=labels,
-        mode="markers",
-        marker={"size": 10, "color": COLORS["amber"]},
-        name="Including funding",
-    )
-)
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
     title={
-        "text": "Official funding preserves risk parity as the allocation winner"
-        "<br><sup>Frozen carrier, validation window; exact orders replayed without registration</sup>",
+        "text": "Change in validation Sharpe from the equal-weight baseline"
+        "<br><sup>One point per prediction set and entry rule; the pair differs only in the "
+        "allocator</sup>",
         "x": 0.02,
         "xanchor": "left",
     },
-    xaxis_title="Annualized validation Sharpe",
-    yaxis_title="Allocator and concentration",
-    margin={"l": 185},
-    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+    xaxis_title="Allocator",
+    yaxis_title="Sharpe minus its own equal-weight baseline",
+    height=520,
+    width=1000,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Box plots with every pair overlaid as a point, one box per allocator, of the change in "
+    "annualized validation Sharpe against the equal-weight baseline built on the same prediction "
+    "set and entry rule. A dashed horizontal line marks zero, meaning no change from equal "
+    "weight. Every allocator's distribution straddles that line, and the boxes overlap one "
+    "another, so no allocator separates from equal weight or from the others.",
+)
 
 # %% [markdown]
-# ## Key takeaways
+# ## 5. The candidate set each label hands on
 #
-# 1. The frozen allocation cohort selects the GBM 24-hour return carrier; the other label leaders do
-#    not clear zero after selection uncertainty.
-# 2. Risk parity with five requested positions leads both the frozen price-only sweep and the
-#    corrected funding-inclusive replay, although the two Sharpe values are not directly identical.
-# 3. Allocation is not merely cosmetic: weighting changes both directional P&L and the signed
-#    funding exposure carried into each settlement.
-# 4. Requested top-k is dynamically capped at half the available panel, repairing early top-5
-#    timestamps and every top-10 timestamp without dropping registered cells.
-# 5. Point-in-time conformal sizing omits the earliest validation fold and is not competitive on the
-#    remaining fold; future-fold calibration must never be used to fill that gap.
-# 6. The registry remains a frozen v3.0 price-P&L record. Funding-inclusive values here are
-#    historical diagnostics; the current v3.1 carrier is selected on a separate 24-hour surface.
-# 7. The next notebook measures cost sensitivity on the same frozen carrier without rewriting the
-#    registry.
+# The next two stages choose from the baseline and the allocation results **together**, which is
+# what the funnel prescribes: the question at the risk stage is whether an overlay helps the
+# highest-Sharpe configuration found so far, and equal weight is still eligible to be that
+# configuration. One set per label holds both stages.
+#
+# **A candidate set admits only results that traded every validation fold**, and that exclusion
+# is doing real work rather than tidying. Selection downstream is on validation Sharpe, and a
+# Sharpe earned over one fold is not a larger or smaller version of one earned over two - it is a
+# measurement of a different period. A strategy that sits out a fold the others traded is
+# therefore not a stronger candidate when that fold went badly; it is an incomparable one, and
+# admitting it lets the choice of configuration turn on which period each candidate happened to
+# be exposed to.
+#
+# For `conformal_weighted` this is structural rather than incidental: its intervals need an
+# earlier fold to calibrate on, so it can never trade the earliest one, and on a two-fold split
+# that is half the period. The results stay registered and visible in the grid above. What they
+# do not do is compete for a selection that would be reading exposure as skill.
+#
+# A set is identified by its members, so a re-run that admits the same results returns the set
+# that already exists. A re-run that admits different ones - because something upstream was
+# corrected, or because the admission rule changed - is a second generation, and it has to name
+# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_costs`,
+# `16_risk_management` and `17_strategy_analysis` all resolve this set by name, so two live
+# generations of one name would leave them unable to say which comparison a result came from.
+# The error raised on a changed set names the predecessor hash to pass.
+
+# %%
+for label in labels:
+    label_rows = keyed.filter(pl.col("label") == label)
+    # Every fold the label declares, in date order - not the most common value observed, which
+    # would define full exposure as whatever the majority of results happened to reach.
+    full = "+".join(str(fold) for fold in windows_by_label[label].get_column("fold").to_list())
+    admitted = label_rows.filter(pl.col("traded_folds") == full)
+    excluded = label_rows.height - admitted.height
+    members = study.backtests.freeze(
+        results.filter(
+            pl.col("backtest_hash").is_in(admitted.get_column("backtest_hash").implode())
+        ),
+        name=f"crypto-signal-allocation-{label}",
+        supersedes=SUPERSEDES.get(label),
+    )
+    print(
+        f"{members.name}: {len(members.members)} members traded folds {full}; "
+        f"{excluded} excluded for trading fewer"
+    )
+
+# %% [markdown]
+# ## 6. What to notice
+#
+# **A sizing rule can only redistribute what the ranking selected.** None of the six changes
+# which contracts are held; they change how much of each. So the ceiling on what this stage can
+# add is set by the entry rule, and a ranking that selects the wrong contracts cannot be sized
+# into a good strategy. That is the reason the funnel puts sizing after selection rather than
+# searching the two together.
+#
+# **The paired difference is the only honest reading of a stage increment.** Every allocation row
+# above has a baseline row built on the same prediction set, the same checkpoint, the same entry
+# rule, the same costs and the same funding, and the difference between those two numbers is the
+# allocator. The difference between this stage's highest Sharpe and the previous stage's highest
+# Sharpe is not: those are two different configurations, and most of the gap between them is the
+# search that produced them.
+#
+# **Two allocators that look similar are doing different amounts of estimation.** `inverse_vol`
+# needs one number per contract; `risk_parity`, `hrp` and `mvo_ledoit_wolf` need a whole
+# covariance matrix, estimated from the same window. The more parameters an allocator estimates
+# from a fixed history, the more of its weights are noise, and on nineteen contracts with a few
+# hundred observations that is not a small consideration. It is also why the shrinkage in
+# `mvo_ledoit_wolf` and the clustering in `hrp` exist at all - both are ways of asking the same
+# data for fewer numbers.
+#
+# **An unpaired row is reported, not quietly dropped.** A result that traded fewer folds than its
+# baseline is a real result and is registered like the others; what it is not is comparable to a
+# baseline that was holding positions while it was flat. Excluding such a row from the paired
+# frame while leaving it in the grid table is the distinction, and the frame printed beside the
+# count names which allocator it covers and which folds those rows actually traded. With every
+# allocator now calibrated on every fold, that frame is expected to be empty - which is what a
+# working guard looks like, not a reason to remove it.
+#
+# **The count of observations is not the count of exposure.** A flat day still registers a return
+# of zero, so period counts, and any check built on them, agree exactly between a result that
+# traded a fold and one that sat it out. This is the kind of difference that a comparison hides
+# rather than reports, and finding it needs the return series rather than the summary row.
+#
+# **Known limitations.** The rolling window is one length for every moment-based allocator, so
+# nothing here says whether a different amount of history would suit one of them better - that
+# would be another search axis, and adding it would widen the very search the funnel narrows.
+# Costs are the flat declared schedule, which sizing interacts with directly, since an allocator
+# that spreads capital more evenly turns over more of the book at each rebalance;
+# [`15_costs`](15_costs.ipynb) varies that assumption. And every number is measured on the
+# validation folds.
+#
+# **Next**: [`15_costs`](15_costs.ipynb) holds the surviving configuration fixed and varies what
+# it costs to trade, which is the one stage in the funnel that selects nothing.
