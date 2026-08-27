@@ -911,6 +911,11 @@ def sync_prose(nb_path: Path) -> str:
         check=False,
     )
     if result.returncode != 0:
+        if "No module named jupytext" in result.stderr:
+            raise SystemExit(
+                f"{rel}: jupytext is not installed in {sys.executable}. Run this command through "
+                "the repository environment with `uv run python`."
+            )
         raise SystemExit(f"{rel}: jupytext --update failed:\n{result.stderr}")
 
     # Per cell, not "the notebook still has some outputs". `was_executed` is True as soon as

@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,9 @@ def _write_pair(root: Path, py_source: str) -> tuple[Path, Path]:
     py.write_text(py_source, encoding="utf-8")
     subprocess.run(
         [
-            ".venv/bin/jupytext" if (REPO / ".venv/bin/jupytext").exists() else "jupytext",
+            sys.executable,
+            "-m",
+            "jupytext",
             "--to",
             "ipynb",
             "--output",
