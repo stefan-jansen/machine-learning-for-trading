@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,7 +19,10 @@ import numpy as np
 import polars as pl
 import torch
 
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
@@ -588,7 +592,11 @@ def reconstruct_locked_request(
             )
     split = locked_holdout_split(spec, case.dataset, case.date_col, study.case_study)
     if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], case.temporal_artifact_splits)
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            case.temporal_by_fold,
+            date_col=case.date_col,
+        )
     case.splits = [split]
     expected = _prepare_expected_keys(case, model_name)
     validate_locked_expected_keys(spec, expected)
@@ -682,6 +690,47 @@ def reconstruct_locked_request(
         published_checkpoints=(int(checkpoint_value),),
     )
     return ResolvedModelRequest(study, "latent_factors", spec, context)
+
+
+def prepare_locked_holdout_spec(study: Study, spec: dict[str, Any]) -> dict[str, Any]:
+    """Resolve latent-factor eligibility against the locked holdout fold."""
+    from case_studies.research.contracts import ExecutionTier
+    from case_studies.research.models import locked_holdout_split
+    from case_studies.utils.latent_factors.case_study import load_case_study_context
+
+    prepared = deepcopy(spec)
+    computation = prepared.get("computation")
+    model = computation.get("model") if isinstance(computation, dict) else None
+    model_name = str(model.get("class", "")) if isinstance(model, dict) else ""
+    if prepared.get("family") != "latent_factors" or model_name not in _LATENT_MODELS:
+        raise ValueError("holdout preparation requires a resolved latent-factor specification")
+    study.require_writable()
+    study.activate(ExecutionTier.CANONICAL)
+    label_ref = study.labels.get(prepared["label"], execution_tier=ExecutionTier.CANONICAL)
+    case = load_case_study_context(
+        study.case_study,
+        primary_label=label_ref.name,
+        max_symbols=0,
+        use_macro=model_name == "sdf",
+    )
+    split = locked_holdout_split(prepared, case.dataset, case.date_col, study.case_study)
+    if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            case.temporal_by_fold,
+            date_col=case.date_col,
+        )
+    case.splits = [split]
+    expected = _prepare_expected_keys(case, model_name)
+    computation["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected.get_column("fold").n_unique(),
+    }
+    macro = computation.get("macro_context")
+    if model_name == "sdf" and isinstance(macro, dict):
+        macro["resolved_fold_digest"] = _resolved_macro_digest(case)
+    return prepared
 
 
 def _manifest_files(model_dir: Path) -> dict[str, str]:

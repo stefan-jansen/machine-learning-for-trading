@@ -14,6 +14,7 @@ import torch  # noqa: F401
 
 from case_studies.utils.latent_factors.adapter import (
     LatentFactorContext,
+    prepare_locked_holdout_spec,
     reconstruct_locked_request,
     resolve_model_request,
     run_resolved_request,
@@ -40,6 +41,7 @@ __all__ = [
     "compute_managed_portfolios",
     "load_fold_extras",
     "prepare_panel_data",
+    "prepare_locked_holdout_spec",
     "prepare_ragged_panel_data",
     "rank_normalize_cross_section",
     "reconstruct_locked_request",

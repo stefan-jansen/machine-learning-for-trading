@@ -13,13 +13,17 @@ a derivation that read the fixture, which is the shape of test that passes on wr
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 from typing import Any
 
 import pandas as pd
+import polars as pl
 import pytest
 
+from case_studies.research.cv import require_fold_scoped_temporal_holdout_coverage
 from case_studies.research.holdout import build_holdout_cv
 from case_studies.research.lifecycle import _locked_training_spec
+from case_studies.research.models import locked_holdout_split
 from utils.artifact_specs import load_setup_config
 
 # Newest first, which is the order generate_cv_splits returns and the order the trap depends on:
@@ -249,3 +253,58 @@ def test_the_lock_refuses_a_holdout_interval_identical_to_the_validation_one() -
 
     with pytest.raises(ValueError, match="explicit, distinct CV interval"):
         _locked_training_spec(validation, unchanged)
+
+
+def test_locked_split_accepts_iso_datetimes_for_a_date_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "case_studies.utils.cv_window.canonical_window",
+        lambda *a, **k: (date(2021, 1, 1), date(2021, 12, 31)),
+    )
+    dataset = pl.DataFrame(
+        {"timestamp": [date(2017, 1, 5), date(2020, 12, 16), date(2021, 12, 31)]}
+    )
+    spec = _validation_spec("fwd_ret_5d")
+    spec["computation"]["cv"] = {
+        "split": "holdout",
+        "folds": [
+            {
+                "fold": 2,
+                "train_start": "2017-01-05T00:00:00",
+                "train_end": "2020-12-16T00:00:00",
+                "val_start": "2021-01-01T00:00:00",
+                "val_end": "2021-12-31T00:00:00",
+            }
+        ],
+    }
+
+    split = locked_holdout_split(spec, dataset, "timestamp", "fixture")
+
+    assert split["train_start"].date() == date(2017, 1, 5)
+    assert split["val_end"].date() == date(2021, 12, 31)
+
+
+def test_holdout_temporal_fold_requires_training_rows_and_the_evaluation_endpoint() -> None:
+    split = {
+        "fold": 2,
+        "train_start": "2017-01-05T00:00:00",
+        "train_end": "2020-12-16T00:00:00",
+        "val_start": "2021-01-01T00:00:00",
+        "val_end": "2021-12-31T00:00:00",
+    }
+    artifact = pl.DataFrame(
+        {
+            "fold": [2, 2, 2],
+            "timestamp": [date(2019, 1, 2), date(2021, 1, 4), date(2021, 12, 31)],
+        }
+    )
+
+    require_fold_scoped_temporal_holdout_coverage(split, artifact)
+
+    with pytest.raises(ValueError, match="evaluation endpoint"):
+        require_fold_scoped_temporal_holdout_coverage(split, artifact.head(2))
+    with pytest.raises(ValueError, match="no holdout fold"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact.with_columns(pl.lit(1).alias("fold"))
+        )

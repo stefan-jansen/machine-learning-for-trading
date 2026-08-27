@@ -559,6 +559,7 @@ def evaluate_holdout(
     from .comparison import CandidateSet
     from .execution import run_locked_holdout
     from .lifecycle import LifecycleState
+    from .models import prepare_locked_holdout_spec
 
     lifecycle = study.lifecycle
     state = lifecycle.state
@@ -585,7 +586,7 @@ def evaluate_holdout(
         case_study=str(case_study if case_study is not None else study.case_study),
         timeline=timeline,
     )
-    _refuse_incomplete_holdout_spec(holdout_spec)
+    holdout_spec = prepare_locked_holdout_spec(study, holdout_spec)
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already
     # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
@@ -617,70 +618,6 @@ def _sole_lock(study: Any) -> ResearchLock:
     if len(rows) != 1:
         raise ValueError(f"lifecycle holds {len(rows)} research locks, not one")
     return study.lifecycle.open(rows[0][0])
-
-
-# Fields the resolver derives PER FOLD, from the data, during a run. They describe the VALIDATION
-# fold set, and `validate_locked_model_run` requires them re-keyed to the HOLDOUT fold:
-# `validate_locked_expected_keys` raises "no eligibility manifest" when
-# `expected_prediction_keys` is absent, and "eligibility mismatch" when it describes a different
-# frame. So neither carrying them forward nor dropping them is correct - both produce a lock that
-# fails at execution, one silently wrong and one loudly.
-#
-# WHAT THE FIX IS, so this is a specified task and not a vague blocker.
-#
-# `case_studies/utils/linear.py:675` computes the manifest at RECONSTRUCTION time with
-# `_expected_keys_from_dataset(mds.dataset, [split], ...)`, where `split` comes from
-# `locked_holdout_split(spec, ...)`, and then checks it against what the spec recorded. So the
-# computation exists; it just runs after the lock, against a value the lock was supposed to carry.
-#
-# Building the spec correctly means running that same computation BEFORE locking: open the dataset,
-# build the holdout split from the derived CV, compute the eligible keys, and record the digest,
-# row count and fold count. It is family-specific - `_expected_keys_from_dataset` lives in
-# `linear.py` and each family has its own - so it wants a per-family hook resolved through
-# `_family_module`, exactly as `reconstruct_locked_request` and `validate_locked_run` already are.
-#
-# Note also that `CVSpec` is NOT the vehicle. It carries `holdout_start`/`holdout_end`, but
-# `resolve()` passes them to `generate_cv_splits` as boundaries to seal VALIDATION against; it
-# selects validation folds and cannot emit a holdout fold. Nothing in the resolver produces a
-# holdout training fold today, which is why this had to be derived here in the first place.
-#
-# Until that hook exists, refusing is the only honest option: a lock is the one artifact in the
-# pipeline that cannot be revised, so producing one that is known to fail at execution is worse
-# than producing none.
-_FOLD_DERIVED_FIELDS = (
-    ("computation", "expected_prediction_keys"),
-    ("model", "effective_params_by_fold"),
-    ("macro_context", "resolved_fold_digest"),
-)
-
-
-def _refuse_incomplete_holdout_spec(spec: dict[str, Any]) -> None:
-    computation = spec.get("computation")
-    if not isinstance(computation, dict):
-        raise ValueError("holdout spec has no resolved computation block")
-    present: list[str] = []
-    if "expected_prediction_keys" in computation:
-        present.append("computation.expected_prediction_keys")
-    model = computation.get("model")
-    if isinstance(model, dict) and "effective_params_by_fold" in model:
-        present.append("computation.model.effective_params_by_fold")
-    task = computation.get("task")
-    if isinstance(task, dict):
-        imbalance = task.get("imbalance")
-        if isinstance(imbalance, dict) and "effective_class_weights_by_fold" in imbalance:
-            present.append("computation.task.imbalance.effective_class_weights_by_fold")
-    macro = computation.get("macro_context")
-    if isinstance(macro, dict) and "resolved_fold_digest" in macro:
-        present.append("computation.macro_context.resolved_fold_digest")
-    if present:
-        raise NotImplementedError(
-            "the selected training spec carries fold-derived fields that describe its VALIDATION "
-            f"folds and must be re-keyed to the holdout fold before a lock is taken: {present}. "
-            "validate_locked_expected_keys refuses a spec without an eligibility manifest and "
-            "refuses one describing a different frame, so a lock taken now would fail at "
-            "execution. Recomputing them needs the holdout window's eligible key frame, which the "
-            "family resolver builds during a run and which is not threaded through this path yet."
-        )
 
 
 def _confirm_recorded_selection(study: Any, lock: ResearchLock, candidate_set_name: str) -> None:

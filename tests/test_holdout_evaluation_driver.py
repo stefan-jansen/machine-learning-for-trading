@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from case_studies.research.holdout import evaluate_holdout
+from case_studies.research.models import prepare_locked_holdout_spec
 from tests.test_locked_holdout_execution import _install_fixture_adapter, _locked_study
 
 # The fixture study's own observation grid. build_holdout_cv is pinned below, so the timeline is
@@ -100,36 +101,79 @@ def test_an_unknown_candidate_set_is_refused_by_name(
         evaluate_holdout(study, candidate_set_name="no-such-set", timeline=TIMELINE)
 
 
-def test_a_spec_carrying_validation_fold_derivations_refuses_to_lock(
+def test_a_spec_carrying_fold_derivations_requires_an_adapter_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A lock cannot be revised, so producing one known to fail at execution is worse than none.
-
-    ``expected_prediction_keys`` describes which rows the fit was eligible to predict on.
-    ``validate_locked_expected_keys`` refuses a locked spec that has none, and refuses one whose
-    manifest describes a different frame - so a holdout spec that inherits the validation folds'
-    manifest fails at execution, and one with the field stripped fails there too. Recomputing it
-    needs the holdout window's eligible keys, which the family resolver builds during a run.
-
-    Until that is threaded through, the driver must stop at the lock rather than take one.
-    """
+    """A lock cannot retain a validation eligibility manifest."""
     study, lock, prices = _locked_study(tmp_path, monkeypatch)
     _install_fixture_adapter(monkeypatch, prices)
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
-    from case_studies.research import holdout as module
+    from case_studies.research import models
 
     monkeypatch.setattr(
-        module,
-        "_sole_lock",
-        lambda _study: (_ for _ in ()).throw(AssertionError("must not reach the recorded lock")),
+        models,
+        "get_adapter",
+        lambda kind, name: object(),
     )
 
-    spec = {
-        "computation": {"expected_prediction_keys": {"digest": "abc", "n_rows": 1, "n_folds": 1}}
-    }
-    with pytest.raises(NotImplementedError, match="re-keyed to the holdout fold"):
-        module._refuse_incomplete_holdout_spec(spec)
+    spec = {"family": "linear", "computation": {"expected_prediction_keys": {}}}
+    with pytest.raises(NotImplementedError, match="cannot re-key"):
+        prepare_locked_holdout_spec(study, spec)
 
-    clean = {"computation": {"cv": {}}}
-    module._refuse_incomplete_holdout_spec(clean)
+    clean = {"family": "linear", "computation": {"cv": {}}}
+    assert prepare_locked_holdout_spec(study, clean) == clean
+
+
+def test_adapter_may_change_only_fold_derived_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    study, _, _ = _locked_study(tmp_path, monkeypatch)
+    from case_studies.research import models
+
+    def prepare(_study, spec):
+        spec["computation"]["expected_prediction_keys"] = {
+            "digest": "holdout",
+            "n_rows": 2,
+            "n_folds": 1,
+        }
+        return spec
+
+    monkeypatch.setattr(
+        models,
+        "get_adapter",
+        lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": prepare}),
+    )
+    spec = {
+        "family": "linear",
+        "computation": {
+            "cv": {"split": "holdout"},
+            "expected_prediction_keys": {"digest": "validation", "n_rows": 4, "n_folds": 2},
+        },
+    }
+    prepared = prepare_locked_holdout_spec(study, spec)
+    assert prepared["computation"]["expected_prediction_keys"]["digest"] == "holdout"
+
+    def remove_manifest(_study, value):
+        value["computation"].pop("expected_prediction_keys")
+        return value
+
+    monkeypatch.setattr(
+        models,
+        "get_adapter",
+        lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": remove_manifest}),
+    )
+    with pytest.raises(ValueError, match="removed required holdout fold derivations"):
+        prepare_locked_holdout_spec(study, spec)
+
+    def change_model(_study, value):
+        value["config_name"] = "different"
+        return value
+
+    monkeypatch.setattr(
+        models,
+        "get_adapter",
+        lambda kind, name: type("Adapter", (), {"prepare_locked_holdout_spec": change_model}),
+    )
+    with pytest.raises(ValueError, match="outside the holdout fold derivations"):
+        prepare_locked_holdout_spec(study, spec)
