@@ -910,7 +910,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
-    # Measured runtime is 3m21s. --timeout=900 bounds a hung test but not a hung
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 30.
+    # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
     timeout-minutes: 30
