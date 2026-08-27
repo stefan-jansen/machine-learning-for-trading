@@ -48,7 +48,6 @@ import polars as pl
 
 from case_studies.research import (
     BacktestResult,
-    CandidateSet,
     LifecycleState,
     OfficialPopulation,
     PredictionResult,
@@ -69,25 +68,23 @@ RESEARCH_LOCK_HASH = ""
 # %% [markdown]
 # ## Reopen the selection record and research lock
 #
-# The candidate set is resolved by its reader-facing name. The lock hash is the authorization token
-# produced by the one-shot holdout workflow and must be supplied by that workflow when this notebook
-# runs.
+# The lock hash is the authorization token produced by the one-shot holdout workflow and must be
+# supplied by that workflow when this notebook runs. The lock resolves the exact candidate-set
+# generation it recorded, so a later generation may reuse the reader-facing name without making
+# this analysis ambiguous.
 
 # %% tags=["results"]
 if not RESEARCH_LOCK_HASH:
     raise ValueError("RESEARCH_LOCK_HASH is required after the holdout transaction completes")
 
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-validation_set = CandidateSet.one(study, name=f"{CASE_STUDY_ID}:holdout-candidates")
 research_lock = study.lifecycle.open(RESEARCH_LOCK_HASH)
+validation_set = research_lock.candidate_set()
 
 if validation_set.member_kind != "backtest":
     raise ValueError("strategy selection requires a backtest candidate set")
 if research_lock.state != LifecycleState.HOLDOUT_EVALUATED.value:
     raise ValueError("strategy analysis requires one completed holdout evaluation")
-if research_lock.record["candidate_set_hash"] != validation_set.hash:
-    raise ValueError("the research lock names a different validation candidate set")
-
 selected_validation = validation_set.best_validation_sharpe()
 if not isinstance(selected_validation, BacktestResult) or not selected_validation.complete:
     raise ValueError("the selected validation backtest is incomplete")
