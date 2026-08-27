@@ -485,7 +485,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2" ml4t-backtest ml4t-data ml4t-engineer databento
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -820,7 +820,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2"
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
       # when the data is absent, so a checkout that silently produced an empty
