@@ -44,6 +44,7 @@ from .model_planning import (
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
+    current_prediction_members,
     population_supersedes,
     research_name,
     superseded_members,
@@ -112,6 +113,7 @@ __all__ = [
     "run_backtests",
     "run_locked_holdout",
     "run_model_population",
+    "current_prediction_members",
     "superseded_members",
     "run_models",
     "run_official_model_subset",

@@ -18,6 +18,7 @@ import pytest
 
 from case_studies.research import (
     OfficialPopulation,
+    current_prediction_members,
     population_supersedes,
     superseded_members,
 )
@@ -294,3 +295,52 @@ class TestWhatALaterGenerationRetires:
         shutil.copy(released_db, refitter.root / "run_log" / "registry.db")
         _publish(refitter, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
+
+
+class TestTheSetASelectingStageConsumes:
+    """`current_prediction_members` is the union of the tips minus what their names retired.
+
+    Six notebooks in `sp500_equity_option_analytics` built this set inline and each built the
+    union alone. On that registry the two forms agreed - measured 2026-08-27, 947 members in
+    the union and zero of them retired - so nothing published was wrong and no test could
+    have caught it from the data. The cases below are the ones where they diverge.
+    """
+
+    def test_a_frozen_snapshot_does_not_return_a_retired_generation_to_the_set(
+        self, study: Study
+    ) -> None:
+        """The union alone is the global form the helper's own docstring rejects.
+
+        `fx-preflight-baselines` is in force under its own name and lists the first
+        generation, so unioning the tips puts every retired member back. Retirement is a
+        statement by the name that published the member; another name's stale snapshot
+        does not answer it.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        OfficialPopulation.create(
+            study,
+            name="fx-preflight-baselines",
+            member_kind="prediction",
+            members=list(MEMBERS_ONE),
+        )
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+
+        assert current_prediction_members(study, verify_members=False) == frozenset(MEMBERS_TWO)
+
+    def test_a_backtest_population_contributes_no_prediction_identities(self, study: Study) -> None:
+        """`member_kind` is filtered rather than assumed: a backtest hash is not a prediction."""
+        _publish(study, MEMBERS_ONE)
+        OfficialPopulation.create(
+            study,
+            name="etfs-linear-validation-backtests-v1",
+            member_kind="backtest",
+            members=["eeee55556666", "ffff55556666"],
+        )
+
+        assert current_prediction_members(study, verify_members=False) == frozenset(MEMBERS_ONE)
+
+    def test_a_registry_with_no_populations_yields_an_empty_set(self, tmp_path: Path) -> None:
+        study = Study.open(
+            "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+        )
+        assert current_prediction_members(study, verify_members=False) == frozenset()

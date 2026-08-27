@@ -217,13 +217,15 @@ merged_clean = (
 # **Two scales qualify for the block size, and it has to cover both.** One is the outcome horizon.
 # The other is the treatment's own persistence: `ivrv_spread` subtracts a rolling realized
 # volatility from implied, so consecutive values share most of their input and stay dependent over
-# that rolling window whatever the label does. That window is the first entry of
-# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two here. The
-# block size below takes the larger, so the placebo keeps whichever dependence runs longer.
+# that rolling window whatever the label does. It is the longer of the two here. The block size
+# below takes the larger, so the placebo keeps whichever dependence runs longer.
 #
 # The treatment's persistence does not follow from `causal.treatment` alone - it follows from how
-# that column is built in the feature stage. The assignment below therefore names the treatment it
-# knows how to read and refuses any other, rather than applying a window that may not describe it.
+# that column is built in the feature stage, which no rule can read off the column name. So it is
+# declared: `causal.treatment_window` in `config/setup.yaml` states the number of bars, beside the
+# treatment it describes and beside the derivation that produced it. The assignment below refuses a
+# treatment with no declared window rather than substituting the buffer, which would size the block
+# by the wrong scale and leave a refutation that reads stronger than it is.
 #
 # The **Newey-West bandwidth** in the second stage has to cover the overlap between successive
 # outcomes, which is the outcome horizon and not the buffer. The buffer is a cross-validation
@@ -250,12 +252,15 @@ if OUTCOME_HORIZON > BUFFER_PERIODS:
         "holdout, so a longer outcome would still reach into it. Raise labels.buffer in "
         "setup.yaml, or correct labels.horizons."
     )
-if TREATMENT_COL != "ivrv_spread":
+declared_window = causal_cfg.get("treatment_window")
+if declared_window is None:
     raise ValueError(
-        f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
-        "The block size below follows how ivrv_spread is built in 03_financial_features.py."
+        f"No causal.treatment_window in {CASE_STUDY_ID}/setup.yaml, so the block size below "
+        f"cannot be shown to span the persistence of treatment '{TREATMENT_COL}'. Declare the "
+        "number of bars the treatment's own construction spans, read off the code that builds "
+        "the column."
     )
-TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
+TREATMENT_PERSISTENCE = max(1, int(declared_window))
 BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
 pre_holdout = np.sort(merged_clean.loc[merged_clean[date_col] < HOLDOUT_START, date_col].unique())

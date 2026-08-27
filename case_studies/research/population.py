@@ -420,3 +420,53 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
         for population_hash in superseded:
             retired |= members.get(population_hash, set()) - in_force
     return frozenset(retired)
+
+
+def current_prediction_members(study: Study, *, verify_members: bool = True) -> frozenset[str]:
+    """Every prediction identity the case study currently publishes, and no others.
+
+    Six notebooks in a case study need the same set, and building it in each of them got the
+    same subtlety wrong six times. Two steps are required and neither is sufficient alone.
+
+    The first is the union over names of what each name publishes now, through
+    :meth:`OfficialPopulation.one`, which resolves the one generation in a name's chain that
+    nothing supersedes and refuses rather than guessing if the chain has forked. Building the
+    set from ``official_population_members`` directly instead would sweep every generation.
+
+    The second is subtracting :func:`superseded_members`, and the union alone is not enough
+    because a name is not the only thing that lists an identity. A narrowed or preview run
+    freezes its own snapshot of whatever the catalog held that day, and that snapshot stays in
+    force under its own name forever - so a member its own publisher has since retired is
+    still listed by the frozen name, and the union puts it back. Retirement is a statement by
+    the name that published the member; another name's stale snapshot does not answer it.
+
+    ``member_kind`` is filtered rather than assumed: the column exists because a population
+    can hold something other than predictions, and a backtest population's members are not
+    prediction hashes.
+
+    ``verify_members`` controls :meth:`OfficialPopulation.require_complete`, which asks a
+    different question - whether each published member's artifact is on disk and complete -
+    and is separable from which identities are published. Every notebook wants it, so it is
+    on by default; a caller that only needs the set, on a clean clone whose ``run_log/`` is
+    gitignored, turns it off rather than getting an error about artifacts it never asked for.
+    """
+    import sqlite3
+
+    db_path = study.root / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return frozenset()
+    with sqlite3.connect(db_path) as db:
+        names = [
+            row[0]
+            for row in db.execute(
+                "SELECT DISTINCT name FROM official_populations WHERE member_kind = ?",
+                ("prediction",),
+            )
+        ]
+    current: set[str] = set()
+    for name in sorted(names):
+        population = OfficialPopulation.one(study, name=name)
+        if verify_members:
+            population.require_complete()
+        current.update(population.members)
+    return frozenset(current - superseded_members(study, member_kind="prediction"))

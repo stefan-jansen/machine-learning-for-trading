@@ -68,6 +68,7 @@
 # %%
 """Compare model families for the S&P 500 equity and option case study."""
 
+import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
@@ -76,6 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
+from case_studies.research import current_prediction_members, open_study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -168,9 +170,35 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # limited fold count is a significant constraint: all fold-level
 # conclusions carry a caveat about small-sample stability.
 
+# %% [markdown]
+# **A population is immutable and the registry keeps every generation, so a candidate set built
+# straight from it counts retired members beside current ones.** Refitting a configuration under a
+# corrected estimator publishes a new snapshot that supersedes the old one; both stay readable, and
+# nothing in the registry read path filters on that - `case_studies/utils/registry/queries.py`
+# contains no occurrence of `supersed`. Without the filter both generations of a refitted
+# configuration enter the ranking as separate candidates, with near-identical scores, and the
+# published leaders are then fewer distinct strategies than they appear to be.
+#
+# `current_prediction_members` is that filter, and it takes two steps because neither is enough
+# alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
+# generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
+# has forked - and then subtracts the members those names have retired. The subtraction is needed
+# because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
+# and stays in force under its own name forever, so the union alone hands a retired generation back
+# through the frozen name that still lists it.
+
+# %%
+_study = open_study(CASE_STUDY, execution_tier="canonical")
+CURRENT_MEMBERS = current_prediction_members(_study)
+print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)
-raw_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+raw_metrics = (
+    load_all_metrics(CASE_STUDY, label=None)
+    .filter(pl.col("label").is_not_null())
+    .filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+)
 all_labels_metrics = (
     raw_metrics.with_columns(
         pl.col("ic_n_days").max().over(["family", "label"]).alias("_family_label_days")
