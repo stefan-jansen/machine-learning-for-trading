@@ -63,6 +63,37 @@ def _refuse_preview_activation() -> None:
         )
 
 
+def _registry_roots(study: Study) -> list[Path]:
+    """The registries a read consults, released first.
+
+    ``Study.open`` never copies the released ``run_log`` into a workspace, and the prediction
+    catalog overlays the two, so a read that consults ``study.root`` alone answers for a
+    different set of rows than the one a notebook goes on to filter.
+    """
+    roots = [study.release_case_root]
+    if not study.read_only and study.root != study.release_case_root:
+        roots.append(study.root)
+    return roots
+
+
+def _rows(root: Path, query: str, params: tuple) -> list[tuple]:
+    """Run one query against a registry root, treating an absent table as no rows.
+
+    A clean clone has no ``official_populations`` at all - ``run_log/`` is gitignored. Any
+    other operational error is a real fault and is not swallowed.
+    """
+    db_path = root / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return []
+    with sqlite3.connect(db_path) as db:
+        try:
+            return db.execute(query, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return []
+
+
 @dataclass(frozen=True)
 class OfficialPopulation:
     study: Study
@@ -192,12 +223,20 @@ class OfficialPopulation:
         supersedes; two of those under a single name means the chain forked and no answer is
         defensible.
         """
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-            rows = db.execute(
+        seen: dict[str, str | None] = {}
+        for root in _registry_roots(study):
+            for population_hash, supersedes in _rows(
+                root,
                 "SELECT population_hash, supersedes_hash FROM official_populations "
                 "WHERE name = ? ORDER BY population_hash",
                 (name,),
-            ).fetchall()
+            ):
+                # Content-addressed, so the same hash seen in both roots is the same snapshot.
+                # Tip-ness is decided over the union rather than per root, for the reason
+                # `superseded_members` gives: a lagging root would otherwise veto every
+                # retirement it knows a name for, which is the state right after every release.
+                seen.setdefault(population_hash, supersedes)
+        rows = sorted(seen.items())
         superseded = {row[1] for row in rows if row[1] is not None}
         current = [row[0] for row in rows if row[0] not in superseded]
         if len(current) != 1:
@@ -209,12 +248,17 @@ class OfficialPopulation:
 
     @classmethod
     def open(cls, study: Study, population_hash: str) -> OfficialPopulation:
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
-            row = db.execute(
+        row = None
+        for root in _registry_roots(study):
+            found = _rows(
+                root,
                 "SELECT name, member_kind, snapshot_json, supersedes_hash "
                 "FROM official_populations WHERE population_hash = ?",
                 (population_hash,),
-            ).fetchone()
+            )
+            if found:
+                row = found[0]
+                break
         if row is None:
             raise KeyError(f"unknown official population {population_hash!r}")
         snapshot = json.loads(row[2])
@@ -385,9 +429,7 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
     """
     rows: list[tuple[str, str, str | None]] = []
     members: dict[str, set[str]] = {}
-    roots = [study.release_case_root]
-    if not study.read_only and study.root != study.release_case_root:
-        roots.append(study.root)
+    roots = _registry_roots(study)
     seen_populations: set[str] = set()
     for root in roots:
         root_rows, root_members = _lineage(root, member_kind)
@@ -449,22 +491,26 @@ def current_prediction_members(study: Study, *, verify_members: bool = True) -> 
     and is separable from which identities are published. Every notebook wants it, so it is
     on by default; a caller that only needs the set, on a clean clone whose ``run_log/`` is
     gitignored, turns it off rather than getting an error about artifacts it never asked for.
-    """
-    import sqlite3
 
-    db_path = study.root / "run_log" / "registry.db"
-    if not db_path.is_file():
-        return frozenset()
-    with sqlite3.connect(db_path) as db:
-        names = [
+    Both roots are read, in the order :func:`superseded_members` reads them, and for the same
+    reason: ``Study.open`` never copies the released ``run_log`` into a workspace, so a
+    workspace study whose names came from ``study.root`` alone would publish a set the
+    prediction catalog then overlays released rows into - subtracting retirements computed
+    across both roots from a union computed from one.
+    """
+    names = sorted(
+        {
             row[0]
-            for row in db.execute(
+            for root in _registry_roots(study)
+            for row in _rows(
+                root,
                 "SELECT DISTINCT name FROM official_populations WHERE member_kind = ?",
                 ("prediction",),
             )
-        ]
+        }
+    )
     current: set[str] = set()
-    for name in sorted(names):
+    for name in names:
         population = OfficialPopulation.one(study, name=name)
         if verify_members:
             population.require_complete()
