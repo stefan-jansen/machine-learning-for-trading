@@ -68,7 +68,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
-from case_studies.research import CausalResult, open_study
+from case_studies.research import CausalResult, open_study, split_retired_members
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -98,6 +98,7 @@ from case_studies.utils.notebook_render import (
     holdout_decay_table,
     selection_adjusted_leader_table,
 )
+from case_studies.utils.registry import load_prediction_index
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, show_plotly_with_alt, show_with_alt
 
@@ -111,6 +112,11 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
@@ -164,9 +170,47 @@ print(
 # The counts printed above come from `config/setup.yaml` and the artifacts, so they describe the
 # run rather than restating a number that was true when this was written.
 
+# %% [markdown]
+# **Which generation of each family is being described.** `prediction_metrics` is a catalog, and a
+# catalog carries no lineage: when a model notebook refits, it publishes a second generation under
+# the same population name and the generation it replaced stays behind, complete and current under
+# a schema version that has not moved. Reading the catalog alone therefore lists a family twice -
+# once as it is published and once as it was - and the representative chosen to stand for the
+# family in every comparison below can be the retired one.
+#
+# `split_retired_members` asks the population lineage instead, and the retired side is printed
+# rather than dropped silently, so the count is auditable against the registry.
+
+# %% [markdown]
+# **Present in the metrics is not the same as eligible for selection.** This section reads
+# `prediction_metrics`, which lists every prediction set that was scored.
+# [`14_backtest`](14_backtest.ipynb) sweeps `load_prediction_index`, which drops rows for reasons
+# a metrics table cannot show: a superseded identity generation, a fold whose predictions
+# collapsed to a constant, a missing artifact. A family that appears in the first and not the
+# second is reported here and never traded - so the comparison a reader takes from this notebook
+# would be over more families than the selection rule ever ran on. Both sets are printed below,
+# and the difference is named rather than left to be inferred from two lists.
+
 # %%
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 all_labels_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+
+_generations = split_retired_members(
+    open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+    all_labels_metrics,
+)
+all_labels_metrics = _generations.live
+print(f"Registered metric rows: {_generations.live.height + _generations.retired.height:,}")
+if _generations.retired.is_empty():
+    print("Retired by a later generation: none")
+else:
+    print(f"Retired by a later generation: {_generations.retired.height:,}")
+    print(
+        _generations.retired.group_by("family", "config_name")
+        .agg(n=pl.len())
+        .sort("n", descending=True)
+    )
+
 all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
 
 if all_metrics.height == 0:
@@ -185,17 +229,35 @@ for fam in families_present:
         f"  {fam:20s}  {configs:3d} configs  {checkpoints:3d} checkpoints  best IC={best_ic_text}"
     )
 
-# Coverage completeness check
-EXPECTED_FAMILIES = {"linear", "gbm", "tabular_dl", "deep_learning", "latent_factors", "causal_dml"}
+# Coverage completeness check. `causal_dml` is not in this set: it writes to `causal_runs` and
+# never to `prediction_metrics`, for the reason the Causal DML section below gives, so listing it
+# here would report a shortfall on every run that no amount of fitting could close.
+EXPECTED_FAMILIES = {"linear", "gbm", "tabular_dl", "deep_learning", "latent_factors"}
 missing = EXPECTED_FAMILIES - set(families_present)
+# Scored is not the same as eligible for selection. A family the candidate index cannot reach is
+# reported here and never traded.
+SELECTABLE_FAMILIES = set(
+    load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation")["family"]
+    .unique()
+    .to_list()
+)
+reported_only = sorted(set(families_present) - SELECTABLE_FAMILIES)
+
 if missing:
-    n_present = len(families_present)
     print(
-        f"\nCOVERAGE: {n_present}/6 model families present. Missing: {', '.join(sorted(missing))}"
+        f"\nSCORED: {len(families_present)}/{len(EXPECTED_FAMILIES)} forecasting families. "
+        f"Missing: {', '.join(sorted(missing))}"
     )
     print("  Recommendations below may change when missing families are added.")
 else:
-    print("\nFull coverage: all 6 model families present.")
+    print(f"\nAll {len(EXPECTED_FAMILIES)} forecasting families are scored below.")
+print(f"Selectable by the backtest stages: {', '.join(sorted(SELECTABLE_FAMILIES))}")
+if reported_only:
+    print(
+        f"SCORED BUT NOT SELECTABLE: {', '.join(reported_only)}. Registered, scored, and "
+        "unreachable from every backtest stage, so the traded comparison is over "
+        f"{len(SELECTABLE_FAMILIES)} families rather than {len(families_present)}."
+    )
 
 # %%
 # Best model per family
@@ -1098,7 +1160,7 @@ for model_name in ("cae", "sae"):
 # fail after half the block had already printed.
 
 # %% tags=["results"]
-causal_study = open_study(CASE_STUDY)
+causal_study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 try:
     causal = CausalResult.one(causal_study, label=PRIMARY_LABEL)
 except ValueError as error:
