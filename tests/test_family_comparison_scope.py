@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import polars as pl
+
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from tests.test_full_coverage_selection import _build_registry
 
@@ -103,3 +105,95 @@ def test_the_search_context_counts_only_the_population(tmp_path) -> None:
     assert explorer.search_context()["total"] == 3
     assert explorer.search_context(prediction_hashes=["full_a", "tabular"])["total"] == 2
     assert explorer.search_context(prediction_hashes=[]) == {}
+
+
+def _register_family_cohort(case_dir, prediction_hash: str, *, k_variants: int) -> None:
+    """Register a `cohort_metrics` row for the backtest on *prediction_hash*.
+
+    `k_variants` is written independently of the rows actually present, because that is the
+    situation under test: the correction was computed when the sweep was wider, and the table
+    keeps it long after a later sweep narrowed the population.
+    """
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        (leader_hash,) = db.execute(
+            "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
+            (prediction_hash,),
+        ).fetchone()
+        db.execute(
+            "INSERT INTO cohort_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "family",
+                "signal",
+                leader_hash,
+                k_variants,
+                1.5,
+                1.5,
+                0.9,
+                0.01,
+                0.9,
+                0.01,
+                0.9,
+                0.01,
+                0.4,
+                0.8,
+                0.02,
+                0.03,
+                0.25,
+            ),
+        )
+
+
+def _row(table, source: str) -> dict:
+    return table.filter(pl.col("source") == source).row(0, named=True)
+
+
+def test_a_cohort_matching_the_population_reports_its_correction(tmp_path) -> None:
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.executescript(_COHORT_METRICS)
+    # gbm holds two full-coverage variants unscoped, which is what this correction was
+    # computed over, so unscoped the stored cohort is the cohort being ranked.
+    _register_family_cohort(case_dir, "full_a", k_variants=2)
+
+    row = _row(BacktestExplorer("test", case_dir=case_dir).deflated_sharpe(top_n=10), "gbm/full_a")
+
+    assert row["is_best"] is True
+    assert row["deflated_sharpe"] == 0.9
+    assert row["pbo"] == 0.25
+    assert row["k_variants"] == 2
+    assert row["k_variants_scoped"] is None
+
+
+def test_a_correction_computed_over_a_wider_cohort_is_withheld_from_the_scoped_table(
+    tmp_path,
+) -> None:
+    """The defect this covers: scoping `best` and reading `cohort_metrics` unscoped.
+
+    A deflated Sharpe is a correction for how many variants were tried. Scoping removes
+    variants, so the stored correction was computed against strictly more trials than the
+    reader selected from, and reporting it here would describe a sweep that did not happen.
+    Reporting it is the visible half; the dangerous half is that a scoped leader which was
+    never the wider cohort's leader gets no row at all and so appears to need no correction.
+    Both counts survive so the reader can see which population the correction belonged to.
+    """
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        db.executescript(_COHORT_METRICS)
+    _register_family_cohort(case_dir, "full_a", k_variants=2)
+
+    scoped = BacktestExplorer("test", case_dir=case_dir).deflated_sharpe(
+        top_n=10, prediction_hashes=["full_a", "tabular"]
+    )
+    row = _row(scoped, "gbm/full_a")
+
+    assert row["is_best"] is True, "it is still the cohort's registered leader"
+    assert row["deflated_sharpe"] is None
+    assert row["dsr_pvalue"] is None
+    assert row["significant"] is None
+    assert row["pbo"] is None
+    assert row["reality_check_pvalue"] is None
+    assert row["k_variants"] == 2, "the count the stored correction was computed over"
+    assert row["k_variants_scoped"] == 1, "the count in hand: scoping left one gbm variant"
+    assert row["sharpe"] is not None, "the uncorrected Sharpe is unaffected by scoping"

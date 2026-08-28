@@ -180,7 +180,13 @@ def load_model_ic(
 
     Returns a DataFrame with columns:
         case_study, family, config_name, label, split,
-        checkpoint_value, ic_mean, ic_std
+        checkpoint_value, ic_mean, ic_std, ic_n_days
+
+    ``ic_n_days`` is returned so a caller placing two families side by side can
+    check the periods actually match rather than assume it. The coverage bar
+    below is taken within each ``(split, family, label)``, so families reaching
+    different maxima are each full-coverage by their own measure and compare
+    across different windows without anything saying so.
 
     A model family can hold prediction sets scored over different numbers of
     decision days, because a run that failed partway still registers rows for the
@@ -271,7 +277,8 @@ def load_model_ic(
                 -- kept only as a fallback for rows predating the daily backfill. Ranking on
                 -- the legacy column while quoting the daily interval mixes two statistics.
                 {ic_expr} AS ic_mean,
-                pm.ic_std
+                pm.ic_std,
+                pm.ic_n_days
             FROM training_runs t
             JOIN prediction_sets p ON t.training_hash = p.training_hash
             JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
@@ -399,7 +406,9 @@ def load_best_ic_per_family(
     a family's strongest score are using it correctly; a caller choosing what to
     trade or fit from this result is not.
 
-    Returns: case_study, display_name, family, config_name, label, ic_mean
+    Returns: case_study, display_name, family, config_name, label, ic_mean,
+    ic_n_days. The coverage bar is per family, so ``ic_n_days`` is what lets a
+    caller comparing families confirm they were scored over the same days.
     """
     all_ic = load_model_ic(families, split=split, case_studies=case_studies)
     if all_ic.is_empty():
@@ -423,7 +432,7 @@ def load_best_ic_per_family(
         )
         .group_by(["case_study", "family"])
         .first()
-        .select("case_study", "family", "config_name", "label", "ic_mean")
+        .select("case_study", "family", "config_name", "label", "ic_mean", "ic_n_days")
     )
 
     # Add display names

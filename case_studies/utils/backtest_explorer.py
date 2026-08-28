@@ -33,6 +33,10 @@ from case_studies.utils.notebook_contracts import (
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
 
+# `best` bounds its read with a SQL LIMIT, so counting a whole cohort means asking for
+# more rows than any cohort holds rather than for no limit at all.
+_UNBOUNDED_COHORT = 1_000_000
+
 # Canonical schema for BacktestExplorer.best() output. Used to construct
 # schema-stable empty DataFrames so downstream `.select("source", ...)`
 # surfaces "(no matching rows)" instead of a cryptic ColumnNotFoundError.
@@ -723,7 +727,18 @@ class BacktestExplorer:
 
         Selection-bias DSR / RAS / Reality Check / PBO come from the
         persisted ``cohort_metrics`` table (cohort_type='family',
-        leader_hash=backtest_hash). Backward-compatible columns
+        leader_hash=backtest_hash).
+
+        A deflated Sharpe is only meaningful against the trial count of the
+        selection actually performed, so when ``prediction_hashes`` scopes
+        the ranking these columns are reported only where the persisted
+        cohort *is* the scoped cohort. ``k_variants`` is the count the stored
+        correction was computed over and ``k_variants_scoped`` is the count
+        in hand; where they disagree the selection-bias columns are null and
+        both counts are kept, so a reader sees which population the missing
+        correction belonged to rather than a leader that appears to need
+        none. The counts are built by the same eligibility rule, since the
+        scoped cohort is measured with ``best`` itself. Backward-compatible columns
         ``deflated_sharpe``, ``expected_max_sharpe``, ``dsr_pvalue``,
         ``significant`` carry the **effective-rank (ER) DSR** — the
         library maintainer's recommended default. ``dsr_mp`` and
@@ -737,7 +752,7 @@ class BacktestExplorer:
             Columns: source, sharpe, psr_pvalue, deflated_sharpe,
             expected_max_sharpe, dsr_pvalue, significant, is_best,
             dsr_mp, dsr_mp_pvalue, dsr_raw, dsr_raw_pvalue, k_variants,
-            n_trials_effective_er, n_trials_effective_mp, ras_leader,
+            k_variants_scoped, n_trials_effective_er, n_trials_effective_mp, ras_leader,
             ras_pvalue, reality_check_pvalue, pbo, family, label.
         """
         from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio
@@ -745,6 +760,23 @@ class BacktestExplorer:
         top = self.best(stage=stage, top_n=top_n, prediction_hashes=prediction_hashes)
         if top.is_empty():
             return pl.DataFrame()
+
+        # The scoped cohort's size per (family, label), measured through `best` so that
+        # coverage, excluded families and the tradeless-backtest rule are applied exactly
+        # once. `top_n` bounds the rows displayed, not the cohort selected from, so this
+        # is a second unbounded read rather than a group-by over `top`.
+        scoped_k: dict[tuple[str, str], int] = {}
+        if prediction_hashes:
+            cohort = self.best(
+                stage=stage, top_n=_UNBOUNDED_COHORT, prediction_hashes=prediction_hashes
+            )
+            if not cohort.is_empty():
+                scoped_k = {
+                    (row["family"], row["label"]): row["n"]
+                    for row in cohort.group_by("family", "label")
+                    .agg(n=pl.len())
+                    .iter_rows(named=True)
+                }
 
         per_variant_psr: dict[str, float | None] = {}
         for row in top.iter_rows(named=True):
@@ -797,7 +829,12 @@ class BacktestExplorer:
             b_hash = r["backtest_hash"]
             cmr = cm_by_hash.get(b_hash)
             is_leader = cmr is not None
-            dsr_er_p = cmr["dsr_er_pvalue"] if is_leader else None
+            k_scoped = scoped_k.get((r["family"], r["label"])) if prediction_hashes else None
+            # Applies only where the stored cohort is the one that was ranked. Scoping can
+            # only remove variants, so a mismatch means the stored correction was computed
+            # over strictly more trials than the reader selected from.
+            applies = is_leader and (not prediction_hashes or cmr["k_variants"] == k_scoped)
+            dsr_er_p = cmr["dsr_er_pvalue"] if applies else None
             rows.append(
                 {
                     "source": r["source"],
@@ -805,32 +842,31 @@ class BacktestExplorer:
                     "label": r["label"],
                     "sharpe": _round(r["sharpe"]),
                     "psr_pvalue": _round(per_variant_psr.get(b_hash)),
-                    "deflated_sharpe": _round(cmr["dsr_er"]) if is_leader else None,
+                    "deflated_sharpe": _round(cmr["dsr_er"]) if applies else None,
                     "expected_max_sharpe": _round(cmr["expected_max_sharpe_er"])
-                    if is_leader
+                    if applies
                     else None,
                     "dsr_pvalue": _round(dsr_er_p),
-                    "significant": (dsr_er_p is not None and dsr_er_p < 0.05)
-                    if is_leader
-                    else None,
+                    "significant": (dsr_er_p is not None and dsr_er_p < 0.05) if applies else None,
                     "is_best": is_leader,
-                    "dsr_mp": _round(cmr["dsr_mp"]) if is_leader else None,
-                    "dsr_mp_pvalue": _round(cmr["dsr_mp_pvalue"]) if is_leader else None,
-                    "dsr_raw": _round(cmr["dsr_raw"]) if is_leader else None,
-                    "dsr_raw_pvalue": _round(cmr["dsr_raw_pvalue"]) if is_leader else None,
+                    "dsr_mp": _round(cmr["dsr_mp"]) if applies else None,
+                    "dsr_mp_pvalue": _round(cmr["dsr_mp_pvalue"]) if applies else None,
+                    "dsr_raw": _round(cmr["dsr_raw"]) if applies else None,
+                    "dsr_raw_pvalue": _round(cmr["dsr_raw_pvalue"]) if applies else None,
                     "k_variants": cmr["k_variants"] if is_leader else None,
+                    "k_variants_scoped": k_scoped,
                     "n_trials_effective_er": _round(cmr["n_trials_effective_er"], 1)
-                    if is_leader
+                    if applies
                     else None,
                     "n_trials_effective_mp": _round(cmr["n_trials_effective_mp"], 1)
-                    if is_leader
+                    if applies
                     else None,
-                    "ras_leader": _round(cmr["ras_leader"]) if is_leader else None,
-                    "ras_pvalue": _round(cmr["ras_pvalue"]) if is_leader else None,
+                    "ras_leader": _round(cmr["ras_leader"]) if applies else None,
+                    "ras_pvalue": _round(cmr["ras_pvalue"]) if applies else None,
                     "reality_check_pvalue": _round(cmr["reality_check_pvalue"])
-                    if is_leader
+                    if applies
                     else None,
-                    "pbo": _round(cmr["pbo"]) if is_leader else None,
+                    "pbo": _round(cmr["pbo"]) if applies else None,
                 }
             )
         return pl.DataFrame(rows).sort("sharpe", descending=True, nulls_last=True)
