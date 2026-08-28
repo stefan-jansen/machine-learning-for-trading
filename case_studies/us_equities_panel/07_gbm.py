@@ -133,12 +133,24 @@ declared_labels(study, "gbm")
 # Each name resolves to a preset in `case_studies/config/lgb/` holding the complete LightGBM
 # parameter set. The grid is a product of two axes:
 #
-# - **Five capacity profiles.** `default` uses the library's own leaf count; the rest fix it at 7,
-#   15, 31 and 63.
+# - **A capacity ladder** at 7, 15, 31 and 63 leaves, plus a `default` profile.
 # - **Three objectives**, as described above.
 #
-# Every configuration runs the same number of boosting iterations at the same learning rate, so
-# the grid isolates capacity and loss rather than confounding them with training length.
+# **`default` is not a fifth rung, and the grid does not isolate capacity.** The three `default_*`
+# presets declare only `objective` and `seed`, so everything else is whatever LightGBM supplies:
+# `num_leaves` 31 - which is the `leaves_31` rung, not a value outside the ladder - a
+# `learning_rate` of 0.1 against the 0.05 the twelve `leaves_*` presets declare, and none of the
+# `bagging_fraction` 0.8, `feature_fraction` 0.7, `lambda_l1` 0.5, `lambda_l2` 5.0 or
+# `min_child_samples` 50 that all four ladder profiles carry. So `default` and `leaves_31` are the
+# same capacity at double the learning rate with regularization off, and they differ on six
+# parameters rather than none.
+#
+# Read the gap between them as capacity and you will be reading the wrong axis: at 500 iterations
+# `default_mse` reaches an IC of 0.0243 and `leaves_31_mse` 0.0222, at identical leaf counts.
+#
+# What the grid does hold fixed is training length - every configuration declares
+# `max_iterations: 500` and `checkpoint_interval: 50` - so the checkpoint comparison below is
+# sound even where the capacity comparison is not.
 
 # %%
 configs = load_model_configs(
@@ -553,19 +565,25 @@ trees_effect
 # should separate more as trees are added, since each additional tree is fitted to the residuals
 # the previous ones left.
 #
-# The chart below drops the checkpoint dimension by taking each configuration's final state, so
-# every configuration is compared at the same amount of training. That is the comparison that does
-# not require choosing anything after the fact. The configurations are held in one order across
+# The chart below drops the checkpoint dimension by taking each configuration's own final state -
+# the comparison that does not require choosing anything after the fact. Every preset here
+# declares the same `max_iterations`, so that is also a comparison at equal training length, and
+# the line printed under the frame says so rather than assuming it. The configurations are held in one order across
 # the panels - their ranking on the primary label - so a panel that does not descend is a horizon
 # that orders the grid differently.
 
 # %%
+# Each configuration's own last checkpoint, not the label's. They are the same number while every
+# preset declares the same `max_iterations`, and taking the label-wide maximum would silently drop
+# a configuration with a shorter schedule instead of comparing it at the state it reached.
 final = (
-    catalog.filter(pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label"))
+    catalog.filter(
+        pl.col("checkpoint_value") == pl.col("checkpoint_value").max().over("label", "config_name")
+    )
     .filter("full_coverage")
     .sort(["label", "ic_mean"], descending=[False, True])
 )
-final_iteration = int(final.get_column("checkpoint_value").max())
+final_iterations = sorted(set(final.get_column("checkpoint_value").to_list()))
 config_order = (
     final.filter(pl.col("label") == order_label)
     .sort("ic_mean", descending=True)
@@ -655,7 +673,12 @@ agreement = (
     )
     .sort("label")
 )
-print(f"compared at {final_iteration} boosting iterations")
+if len(final_iterations) == 1:
+    print(f"compared at {final_iterations[0]} boosting iterations")
+else:
+    # Say so rather than printing one of them: the panel is then a comparison of final states at
+    # different training lengths, which is a weaker claim than the text above makes.
+    print(f"compared at each configuration's own final iteration, which differ: {final_iterations}")
 agreement
 
 # %% [markdown]
@@ -694,8 +717,11 @@ agreement
 #
 # **Known limitations.** The IC here is an average of per-date rank correlations with no
 # adjustment for the serial dependence that overlapping forward returns create, so it is a ranking
-# diagnostic rather than a test. The grid varies capacity and loss at a fixed learning rate and
-# fixed features, so it says nothing about interactions with either. Every number is measured on
+# diagnostic rather than a test. The grid varies capacity and loss at fixed features and fixed
+# training length, but not at a fixed learning rate - the `default` profile runs at 0.1 and the
+# four ladder profiles at 0.05 - so the `default` rows are not comparable with the rest on
+# capacity alone, and nothing here separates a learning-rate effect from a regularization one.
+# Every number is measured on
 # the validation folds, which have been read many times over by the time a case study reaches this
 # notebook.
 #
