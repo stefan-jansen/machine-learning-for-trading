@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,25 @@ def value_digest(df: pl.DataFrame, columns: Sequence[str] | None = None) -> str:
         {"columns": cols, "rows": hashlib.sha256(row_hashes).hexdigest()},
     )
     return compute_hash(content, length=DIGEST_LENGTH)
+
+
+def _json_ready(value: Any) -> Any:
+    """Render dates and times as ISO strings, recursively, leaving everything else alone.
+
+    Fold boundaries arrive as ``datetime.date`` or ``pandas.Timestamp`` because that is what
+    the producers hold them as, and ``json.dumps`` refuses both. Coercing here rather than
+    asking every caller to stringify keeps the sidecar's dates in one format, which is the
+    format ``temporal_artifact_fold_boundaries`` already parses.
+    """
+    if isinstance(value, Mapping):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "isoformat"):  # pandas.Timestamp and anything else date-like
+        return str(value.isoformat())
+    return value
 
 
 def digest_sidecar(
@@ -85,7 +105,7 @@ def digest_sidecar(
             raise ValueError(
                 f"sidecar metadata may not redefine the record's own fields: {reserved}"
             )
-        record.update(dict(metadata))
+        record.update(_json_ready(dict(metadata)))
     return record
 
 
@@ -106,9 +126,14 @@ def write_artifact(
     """
     path = Path(path)
     record = digest_sidecar(df, keys=keys, written_by=written_by, inputs=inputs, metadata=metadata)
+    # Rendered before the parquet is written, not after. A record that cannot be serialized
+    # would otherwise raise with the new parquet already on disk beside the previous run's
+    # sidecar - a file and a digest that describe different data, which is the one state
+    # this pair exists to make impossible.
+    serialized = json.dumps(record, indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     df.write_parquet(path)
-    sidecar_path(path).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    sidecar_path(path).write_text(serialized)
     return record
 
 
