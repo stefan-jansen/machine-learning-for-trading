@@ -114,3 +114,66 @@ class TestWhatItDoesNotChange:
         """
         with pytest.raises(ValueError, match="does not fit"):
             causal_supersedes(study, DECLARATION, "fwd_ret_1d", labels=["fwd_ret_1d", "other"])
+
+
+class TestWhenTheRegistryReadItselfFails:
+    """An operational error is not evidence that the registry holds nothing.
+
+    Answering every ``sqlite3.OperationalError`` with ``None`` reads a lock timeout, an I/O
+    error and a half-migrated schema as the clean clone. The notebook then withholds the
+    predecessor it does hold, pays for the DML fit and every placebo refit, and dies at
+    registration for naming none. Only the missing table means what the clean-clone branch
+    claims it means.
+    """
+
+    def _registry_without_the_causal_table(self, study: Study) -> None:
+        import sqlite3
+
+        db_path = study.root / "run_log" / "registry.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(db_path)
+        db.execute("CREATE TABLE IF NOT EXISTS unrelated (x INTEGER)")
+        db.commit()
+        db.close()
+
+    def test_a_missing_causal_table_is_still_the_clean_clone(self, study: Study) -> None:
+        self._registry_without_the_causal_table(study)
+        assert causal_supersedes(study, DECLARATION, "fwd_ret_1d", labels=FITTED) is None
+
+    def test_a_lock_timeout_propagates(self, study: Study, monkeypatch) -> None:
+        import sqlite3
+
+        from case_studies.research import causal as causal_module
+
+        self._registry_without_the_causal_table(study)
+
+        def locked(*args: object, **kwargs: object) -> set[str]:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(causal_module, "current_causal_identities", locked)
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            causal_supersedes(study, DECLARATION, "fwd_ret_1d", labels=FITTED)
+
+    def test_the_read_waits_as_long_as_every_other_reader_of_this_file(
+        self, study: Study, monkeypatch
+    ) -> None:
+        """120s on the driver and 60s server-side, the pair `_open_registry` sets.
+
+        A registry is written by notebooks, backfills and scripts at once, so SQLite's
+        five-second default is short enough that ordinary contention produced the very
+        error the branch above was swallowing.
+        """
+        import sqlite3
+
+        from case_studies.research import causal as causal_module
+
+        self._registry_without_the_causal_table(study)
+        seen: dict[str, object] = {}
+
+        def record(db: sqlite3.Connection, **kwargs: object) -> set[str]:
+            seen["busy_timeout"] = db.execute("PRAGMA busy_timeout").fetchone()[0]
+            return set()
+
+        monkeypatch.setattr(causal_module, "current_causal_identities", record)
+        causal_supersedes(study, DECLARATION, "fwd_ret_1d", labels=FITTED)
+        assert seen["busy_timeout"] == 60000
