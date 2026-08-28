@@ -900,8 +900,16 @@ def populate_paired_metrics(
     #
     # `17_risk_management` and `18_strategy_analysis` do use the overlay rule, because there the
     # overlay is paired with its own no-overlay carrier by construction rather than by a
-    # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with the
-    # Ch20 synthesis, which computes the same three transitions - see agent-workspace#928.
+    # highest-Sharpe query.
+    #
+    # `20_strategy_synthesis/01_aggregate_synthesis.py` computes these same three transitions
+    # into the same table, and its private `_joint_coerce` starts the sample at the first
+    # session where both series are simultaneously non-zero rather than at the later of their
+    # two first traded sessions. Those differ whenever the earlier starter is flat on the later
+    # starter's opening session, so a row written by both producers depends on which ran last.
+    # Ch20 is the one that is wrong - `joint_returns` documents why - and replacing the copy
+    # there is a notebook edit that obliges a full production re-execution across all nine
+    # registries, which a per-case-study worktree cannot do.
     lineage = explorer.champion_lineage(leader_phash)
     for prev_stage, this_stage, kind in [
         ("signal", "allocation", "signal_leader"),

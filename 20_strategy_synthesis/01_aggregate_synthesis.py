@@ -840,7 +840,6 @@ from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
-    joint_returns,
 )
 
 
@@ -858,6 +857,27 @@ def _min_paired_n(ppy: int) -> int:
     if ppy <= 52:  # weekly
         return 12
     return 21  # daily / 8h / intraday
+
+
+def _joint_coerce(c_arr, b_arr):
+    """Filter NaN/non-finite jointly across paired series and trim leading
+    rows where *either* is zero. Matches ``_coerce_returns`` semantics but
+    preserves index alignment so ``compute_paired_uncertainty``'s
+    equal-length precondition survives — the upstream helper trims leading
+    zeros independently per series, which can desynchronize a paired
+    bootstrap if one side has more leading inactive bars than the other.
+    """
+    c = np.asarray(c_arr, dtype=np.float64)
+    b = np.asarray(b_arr, dtype=np.float64)
+    finite = np.isfinite(c) & np.isfinite(b)
+    c, b = c[finite], b[finite]
+    if c.size == 0:
+        return c, b
+    nonzero = np.flatnonzero((c != 0.0) & (b != 0.0))
+    if nonzero.size == 0:
+        return c[:0], b[:0]
+    start = int(nonzero[0])
+    return c[start:], b[start:]
 
 
 # Distinguish skipped CSs from real failures so empty cross-dataset rollups
@@ -917,16 +937,10 @@ for cs, explorer in explorers.items():
             {"case_study": cs, "reason": f"insufficient_overlap:n={aligned.height}"}
         )
         continue
-    c_arr = aligned["ret"].to_numpy()
-    b_arr = aligned["ret_b"].to_numpy()
-    # Sized here, trimmed once inside `compute_paired_uncertainty`. The pair must not
-    # arrive pre-trimmed: the default rule starts at the later of the two first traded
-    # sessions, and applying it twice slides the start forward again whenever the earlier
-    # starter is exactly zero on that session.
-    n_coerced = joint_returns(c_arr, b_arr)[0].size
-    if n_coerced < min_n:
+    c_arr, b_arr = _joint_coerce(aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy())
+    if c_arr.size < min_n:
         paired_skips.append(
-            {"case_study": cs, "reason": f"insufficient_after_coerce:n={n_coerced}"}
+            {"case_study": cs, "reason": f"insufficient_after_coerce:n={c_arr.size}"}
         )
         continue
     paired = compute_paired_uncertainty(
@@ -1449,9 +1463,8 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        # Sized here, trimmed once inside `compute_paired_uncertainty`; see the leader pair
-        # above for why the pair must not arrive pre-trimmed.
-        n_overlap = joint_returns(c_arr, b_arr)[0].size
+        c_arr, b_arr = _joint_coerce(c_arr, b_arr)
+        n_overlap = c_arr.size
         if n_overlap < min_n:
             return {
                 "cs": cs,
@@ -1482,7 +1495,7 @@ def _populate_pair(
     # sizes); use min(n_c, n_b) so n_overlap reflects what the bootstrap
     # actually used, not the pre-coerce min from the populator. For the
     # paired path, paired has no n_c/n_b and n_overlap is already the
-    # post-`joint_returns` length.
+    # post-_joint_coerce length.
     n_actual = n_overlap
     n_c = paired.get("n_c")
     n_b = paired.get("n_b")
