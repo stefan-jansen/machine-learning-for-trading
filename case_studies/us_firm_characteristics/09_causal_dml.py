@@ -36,12 +36,22 @@
 # %%
 """Panel-aware causal DML that leaves the final holdout out of the analysis."""
 
+import warnings
+
 import matplotlib.pyplot as plt
 import polars as pl
 
 from case_studies.research import causal_supersedes, open_study, primary_label
 from utils.modeling import load_configs
 from utils.style import COLORS, add_message_title
+
+# `matplotlibrc` turns constrained layout on for every figure in this repo, and
+# `add_message_title` reserves the title pad through `tight_layout`, so the two together
+# warn on every figure. The warning is raised from the kernel's own scratch module, which
+# puts a `/tmp/ipykernel_<pid>/` path into the committed cell output; the sanitizer cannot
+# rewrite it and refuses to stamp the notebook. Filtered by message rather than by a bare
+# `filterwarnings("ignore")`, so a warning about the analysis still reaches the reader.
+warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "us_firm_characteristics"
@@ -315,10 +325,11 @@ pl.DataFrame(
 # - The permutation p-value cannot fall below its floor however extreme the estimate is, so a value
 #   at the floor is a bound and not a measurement. A block permutation disturbs the timing of the
 #   treatment; it does not disturb confounding.
-# - The block spans the treatment's own construction window, so what the placebo now holds fixed is
-#   the dependence a twelve-month momentum measure carries. That is what makes the p-value readable
-#   as a statement about timing. A block sized to the label buffer instead would leave the same
-#   p-value meaning something weaker, and nothing in the number itself would show the difference.
+# - The block spans the treatment's own construction window, so what the placebo holds fixed is the
+#   dependence a twelve-to-two-month momentum measure carries, and the p-value is readable as a
+#   statement about timing. That changes what the number means rather than guaranteeing the number
+#   moves: a permutation test can report the same value for a sound reason and an unsound one, and
+#   it is the block, not the p-value, that says which of the two is on offer.
 # - Read the refutation against the coefficient's own uncertainty rather than on its own. Where
 #   the estimate is not separable from zero by its Driscoll-Kraay standard error, a placebo test
 #   of that estimate could not have said much whichever way it came out.
