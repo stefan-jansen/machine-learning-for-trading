@@ -100,36 +100,77 @@ def test_an_unknown_candidate_set_is_refused_by_name(
         evaluate_holdout(study, candidate_set_name="no-such-set", timeline=TIMELINE)
 
 
-def test_a_spec_carrying_validation_fold_derivations_refuses_to_lock(
+def test_a_family_without_a_rekey_hook_refuses_to_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A lock cannot be revised, so producing one known to fail at execution is worse than none.
 
-    ``expected_prediction_keys`` describes which rows the fit was eligible to predict on.
-    ``validate_locked_expected_keys`` refuses a locked spec that has none, and refuses one whose
-    manifest describes a different frame - so a holdout spec that inherits the validation folds'
-    manifest fails at execution, and one with the field stripped fails there too. Recomputing it
-    needs the holdout window's eligible keys, which the family resolver builds during a run.
+    ``expected_prediction_keys`` describes which rows the fit was eligible to predict on, and
+    ``validate_locked_expected_keys`` refuses a locked spec whose manifest describes a different
+    frame. A holdout spec inheriting the validation folds' manifest therefore fails at execution,
+    and one with the field stripped fails there too - so the fields must be recomputed against the
+    holdout fold, by the rule that produced them, which is family-specific.
 
-    Until that is threaded through, the driver must stop at the lock rather than take one.
+    A family with no hook still refuses. What changed is that it refuses for itself and says what
+    implementing it means, rather than refusing on behalf of all five families at once.
     """
-    study, lock, prices = _locked_study(tmp_path, monkeypatch)
-    _install_fixture_adapter(monkeypatch, prices)
-    _pin_derivation_to_the_fixture(monkeypatch, lock)
-
     from case_studies.research import holdout as module
 
-    monkeypatch.setattr(
-        module,
-        "_sole_lock",
-        lambda _study: (_ for _ in ()).throw(AssertionError("must not reach the recorded lock")),
-    )
+    monkeypatch.setattr("case_studies.research.models._family_module", lambda _family: object())
+    spec = {"family": "linear", "computation": {"cv": {"folds": [{"fold": 9}]}}}
+    with pytest.raises(NotImplementedError, match="cannot yet re-key"):
+        module._rekey_holdout_spec(None, spec, {"computation": {}})
 
-    spec = {
-        "computation": {"expected_prediction_keys": {"digest": "abc", "n_rows": 1, "n_folds": 1}}
+
+def _holdout_shaped_spec(*, manifest_folds: int, param_folds: int) -> dict:
+    return {
+        "family": "linear",
+        "computation": {
+            "cv": {
+                "folds": [
+                    {
+                        "fold": 8,
+                        "train_start": "a",
+                        "train_end": "b",
+                        "val_start": "c",
+                        "val_end": "d",
+                    }
+                ]
+            },
+            "expected_prediction_keys": {"digest": "abc", "n_rows": 1, "n_folds": manifest_folds},
+            "model": {
+                "effective_params_by_fold": {str(i): {"alpha": 0.1} for i in range(param_folds)}
+                if param_folds != 1
+                else {"8": {"alpha": 0.1}}
+            },
+        },
     }
-    with pytest.raises(NotImplementedError, match="re-keyed to the holdout fold"):
-        module._refuse_incomplete_holdout_spec(spec)
 
-    clean = {"computation": {"cv": {}}}
-    module._refuse_incomplete_holdout_spec(clean)
+
+def test_a_hook_that_leaves_the_validation_folds_in_place_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-keyed shape is checked, not trusted.
+
+    A hook that returns without recomputing, or that recomputes against the wrong split, leaves
+    fields that look present and are wrong - and the lock is the one artifact in the pipeline that
+    cannot be revised. Both fields are checked, because a hook that re-keys the manifest and
+    forgets the parameters produces a lock that reconstructs a different model than the one
+    selection ranked, and the manifest check alone would pass it.
+    """
+    from case_studies.research import holdout as module
+
+    class _NoOpFamily:
+        @staticmethod
+        def rekey_holdout_spec(_study, _spec, *, validation_spec):  # noqa: ARG004
+            return None
+
+    monkeypatch.setattr("case_studies.research.models._family_module", lambda _family: _NoOpFamily)
+
+    with pytest.raises(ValueError, match="was not re-keyed to one fold"):
+        module._rekey_holdout_spec(None, _holdout_shaped_spec(manifest_folds=8, param_folds=8), {})
+
+    with pytest.raises(ValueError, match="still describe the validation folds"):
+        module._rekey_holdout_spec(None, _holdout_shaped_spec(manifest_folds=1, param_folds=8), {})
+
+    module._rekey_holdout_spec(None, _holdout_shaped_spec(manifest_folds=1, param_folds=1), {})

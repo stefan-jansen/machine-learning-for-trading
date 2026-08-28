@@ -1012,10 +1012,17 @@ def append_holdout_fold_if_needed(
 ) -> None:
     """Append a holdout fold to ``mds.splits`` when ``prediction_split=='holdout'``.
 
-    The holdout fold trains on everything available before ``holdout_start`` and
-    validates on ``[holdout_start, holdout_end]``. It becomes fold N+1, so downstream
-    code iterating ``mds.splits`` produces one holdout prediction set per
-    (training run, config) pair without any other change to the training loop.
+    The boundaries come from :func:`case_studies.research.holdout.build_holdout_cv`, which is
+    the one derivation of them. This function used to compute its own, and computed them
+    wrongly: it set ``train_end = val_start = holdout_start``, where ``build_holdout_cv`` stops
+    one label buffer short. Two things were wrong with that. The last training label's outcome
+    window reached into the holdout, which is the leak the buffer exists to prevent; and the
+    training mask in this module is inclusive at both ends, so the boundary session sat in the
+    training set *and* the evaluation set of the same fold - a holdout model fitted on a session
+    it is scored on, independent of any label horizon.
+
+    The fold becomes fold N+1, so downstream code iterating ``mds.splits`` produces one holdout
+    prediction set per (training run, config) pair without any other change to the training loop.
 
     "Everything available" is ``min(train_start)`` across the CV folds, not
     ``splits[0]["train_start"]``. ``generate_cv_splits`` steps backward from the holdout
@@ -1043,6 +1050,8 @@ def append_holdout_fold_if_needed(
             "at least one CV fold for this case study."
         )
         raise RuntimeError(msg)
+    from case_studies.research.holdout import build_holdout_cv
+
     path = get_case_study_dir(case_study_id) / "config" / "setup.yaml"
     with open(path) as f:
         setup = yaml.safe_load(f)
@@ -1072,10 +1081,18 @@ def append_holdout_fold_if_needed(
     )
     if already_covered:
         return
+    # The label is only read for the outcome-horizon check: `build_holdout_cv` takes the gap
+    # from the case study's widest declared buffer, because one fold serves every label.
+    derived = build_holdout_cv(
+        {"label": str(setup["labels"]["primary"]), "computation": {"cv": {"folds": mds.splits}}},
+        case_study=case_study_id,
+        timeline=mds.dataset.get_column(mds.date_col).unique().sort().to_list(),
+    )
+    fold = dict(derived["folds"][0])
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": earliest_train_start(mds.splits),
-        "train_end": ho_start_ts,
+        "train_start": pd.Timestamp(fold["train_start"]),
+        "train_end": pd.Timestamp(fold["train_end"]),
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,
     }
