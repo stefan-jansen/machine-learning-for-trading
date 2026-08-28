@@ -112,6 +112,7 @@ lean on but do not reprint.
 - **[Six Python libraries](https://ml4trading.io/libraries/)** carry the pipeline
   the notebooks are built on, one per stage of the workflow. They are listed
   below and each is documented and usable on its own.
+
 ---
 
 ## The ML4T Libraries
