@@ -170,12 +170,18 @@ def _open_value(value: Any) -> Any:
     return canonical_json({"value": value})[9:-1]
 
 
-def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -397,12 +403,20 @@ def _frame(
     return pl.DataFrame(normalized, schema=schema).select(columns)
 
 
-def _backtest_registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _backtest_registry_rows(
+    root: Path, origin: str, *, immutable: bool = False
+) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -648,12 +662,34 @@ def _resolve_authoritative_selection(
     return tuple(resolved)
 
 
+def prediction_rows_at(case_dir: str | Path) -> pl.DataFrame:
+    """The prediction catalog for a case-study directory the caller has already resolved.
+
+    A notebook that resolved its case directory through ``get_case_study_dir`` cannot open a
+    ``Study`` to ask which of its predictions are admissible. Every ``Study.open`` branch ends
+    in ``activate()``, which pops ``ML4T_OUTPUT_DIR`` on the read-only branch and rewrites it
+    otherwise, then clears the root-sensitive caches (``workspace.py:264-292``). Two things go
+    wrong at once: the catalog answers for whichever registry the activation selected rather
+    than the one the notebook read its predictions from, so a join between them drops every
+    row and reports a healthy population as inadmissible; and every later resolution in that
+    notebook follows the activated root, which for the canonical no-workspace path is the
+    published case study, so an isolated run registers its results into the real registry.
+
+    This reads the registry under ``case_dir`` and changes no process state.
+    """
+    return _frame(_registry_rows(Path(case_dir), "workspace")).sort("prediction_hash")
+
+
 class PredictionCatalog:
     def __init__(self, study: Study) -> None:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _registry_rows(self.study.release_case_root, "released")
+        released = _registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released).sort("prediction_hash")
         workspace = _registry_rows(self.study.root, "workspace")
@@ -725,7 +761,11 @@ class BacktestCatalog:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _backtest_registry_rows(self.study.release_case_root, "released")
+        released = _backtest_registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released, BACKTEST_RESERVED_COLUMNS).sort("backtest_hash")
         workspace = _backtest_registry_rows(self.study.root, "workspace")

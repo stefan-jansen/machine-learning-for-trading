@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 
 import polars as pl
@@ -74,6 +75,9 @@ def excluded_family_sql(
     return f" AND {family_column} NOT IN ({placeholders})", excluded
 
 
+_DEGENERATE_SUBQUERY = "SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL"
+
+
 def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash") -> str:
     """SQL clause excluding prediction sets with any constant-prediction fold.
 
@@ -89,10 +93,29 @@ def degenerate_prediction_sql(prediction_hash_column: str = "p.prediction_hash")
     WHERE clause; takes no bound parameters. Pass the column expression naming
     ``prediction_hash`` in the surrounding query (default ``p.prediction_hash``).
     """
-    return (
-        f" AND {prediction_hash_column} NOT IN "
-        "(SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL)"
-    )
+    return f" AND {prediction_hash_column} NOT IN ({_DEGENERATE_SUBQUERY})"
+
+
+def degenerate_prediction_hashes(case_dir: Path) -> set[str]:
+    """The prediction sets ``degenerate_prediction_sql`` excludes, as a set.
+
+    Same rule and same source, for a caller that has to reason about the exclusion rather than
+    apply it. A population is declared before anything is fitted and degeneracy is only visible
+    afterwards, so a cross-check between a declared population and a leaderboard has to allow
+    for the rows the leaderboard drops - otherwise it reports a correct exclusion as a missing
+    member. Returns an empty set when the registry or the table is absent.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fold_metrics'"
+        ).fetchone():
+            return set()
+        return {row[0] for row in db.execute(f"SELECT DISTINCT {_DEGENERATE_SUBQUERY[7:]}")}
 
 
 def full_coverage_prediction_sql(
@@ -251,3 +274,56 @@ def filter_active_model_rows(
         return df
 
     return df.filter(~pl.col(family_col).is_in(sorted(excluded)))
+
+
+def declared_population_members(
+    study,
+    case_dir: Path,
+    names: dict[str, str],
+    *,
+    produced: dict[str, int],
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Resolve each family's declared population, or report that none is declared.
+
+    Three states reach this, and `OfficialPopulation.one` reports two of them in the same
+    words, which is why the decision lives here rather than in an exception handler.
+
+    A registry that has published no population is not broken - a fixture, or a reader's clean
+    clone. It is answered with a note, and the comparison downstream rests on catalog
+    admissibility, which is a weaker claim than a declared population but a statable one. The
+    resolver is not asked at all: on a registry whose schema predates the mechanism it raises
+    ``sqlite3.OperationalError: no such table``, so tolerating that state means not entering it.
+
+    A registry that has published populations and cannot resolve this name has a broken
+    lineage. That refuses when the family has registered rows, because comparing them would
+    report a family no declaration covers; where the family produced nothing it is only a note,
+    since there is nothing yet to be undeclared.
+
+    Returns the resolved members per family and the notes to print.
+    """
+    from case_studies.research import OfficialPopulation, published_population_names_at
+
+    published = published_population_names_at(case_dir)
+    if not published:
+        return {}, [
+            f"{case_dir} publishes no official populations, so nothing is checked against a "
+            "declaration: every comparison rests on catalog admissibility alone."
+        ]
+
+    members: dict[str, set[str]] = {}
+    notes: list[str] = []
+    for family, name in names.items():
+        try:
+            members[family] = set(OfficialPopulation.one(study, name=name).members)
+        except (ValueError, FileNotFoundError) as error:
+            if produced.get(family):
+                msg = (
+                    f"{family} has {produced[family]} registered prediction sets but its "
+                    f"declared population {name} does not resolve ({error}). This registry "
+                    f"publishes {len(published)} population name(s), so the declaration is "
+                    "missing rather than unused. Comparing them would report a family no "
+                    "declaration covers. Republish the population, or name the one in force."
+                )
+                raise RuntimeError(msg) from error
+            notes.append(f"no current official population for {family} ({name}): {error}")
+    return members, notes
