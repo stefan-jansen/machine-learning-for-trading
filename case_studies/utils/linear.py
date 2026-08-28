@@ -615,6 +615,43 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def _require_holdout_temporal_features(mds, split: dict[str, Any]) -> None:
+    """Refuse to re-key onto a holdout fold the fold-scoped temporal artifact does not describe.
+
+    Stage 04 writes model-based features per validation fold, so the artifact carries the
+    validation fold ids and their boundaries and nothing else. A holdout fold is a different
+    interval, and `locked_holdout_split` takes its id from the spec's CV, defaulting to 0. Both
+    ways of getting this wrong are silent:
+
+    - a holdout id absent from the artifact joins no temporal rows, and the model fits on
+      all-null features rather than the ones it was selected with;
+    - a holdout id that collides with a validation id - id 0 is the default, and every case
+      study has a fold 0 - joins successfully against features fitted on that validation
+      fold's training window, which ends before the holdout interval begins. Nothing raises;
+      the holdout number is simply computed from the wrong feature vintage.
+
+    `reconstruct_locked_request` runs the same check, but it runs after the lock is written, and
+    a lock is not recoverable. Checking here means the refusal happens while the holdout is still
+    unspent.
+    """
+    if mds.temporal_by_fold is None or not mds.temporal_keys or not mds.temporal_feature_names:
+        return
+    try:
+        require_fold_scoped_temporal_compatibility([split], mds.temporal_artifact_splits)
+    except ValueError as exc:
+        available = sorted(int(fold["fold"]) for fold in mds.temporal_artifact_splits)
+        raise ValueError(
+            f"holdout fold {int(split['fold'])} "
+            f"({split['train_start']}..{split['train_end']} train, "
+            f"{split['val_start']}..{split['val_end']} evaluation) is not the geometry the "
+            f"fold-scoped temporal artifact was built for; it carries folds {available}. "
+            f"The {len(mds.temporal_feature_names)} model-based features would be joined from "
+            "the wrong fold or from none at all, so the holdout would not evaluate the "
+            "configuration selection ranked. Generate the model-based features for the holdout "
+            "fold in stage 04 before locking."
+        ) from exc
+
+
 def rekey_holdout_spec(
     study: Study,
     spec: dict[str, Any],
@@ -652,6 +689,7 @@ def rekey_holdout_spec(
     entity_col = mds.entity_cols[0]
 
     split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    _require_holdout_temporal_features(mds, split)
     expected = _expected_keys_from_dataset(
         mds.dataset,
         [split],
