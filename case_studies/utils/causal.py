@@ -1218,6 +1218,14 @@ def _declared_steps(declaration: str, cadence: pd.Timedelta, *, field: str) -> t
     substituting a nominal month, which would be wrong by however far that panel's month
     differs from the nominal one and would not show in the result.
 
+    **A zero-length declaration answers zero**, and is not floored to one. It says the span
+    is closed on the row's own timestamp - ``us_firm_characteristics`` declares
+    ``labels.horizons: 0D`` because the return is already realised there - and a floor turns
+    that statement into a one-observation overlap the case study never declared. The floor
+    belongs on a span that is nonzero but shorter than a bar, which does reach into the bar
+    it resolves inside. :func:`embargo_from_buffer` draws the same line for the same reason,
+    and the two must not disagree about one declaration.
+
     Returns the count and the string the resolved spec records. That string is
     ``str(pd.Timedelta(...))`` wherever the duration is fixed, which is what the spec has
     always carried, so a case study whose buffer is expressible as a Timedelta keeps the
@@ -1228,6 +1236,8 @@ def _declared_steps(declaration: str, cadence: pd.Timedelta, *, field: str) -> t
     month = _MONTH_DECLARATION.match(text)
     if month is None:
         span = pd.Timedelta(text)
+        if span == pd.Timedelta(0):
+            return 0, str(span)
         return max(1, int(np.ceil(span / cadence))), str(span)
     low, high = _MONTHLY_CADENCE
     if not low <= cadence <= high:
@@ -1237,7 +1247,7 @@ def _declared_steps(declaration: str, cadence: pd.Timedelta, *, field: str) -> t
             "observations only on a panel whose observations are months. Declare the span in "
             "days on a panel recorded in days."
         )
-    return max(1, int(month.group(1))), text
+    return int(month.group(1)), text
 
 
 def resolve_causal_request(study: Study, request: dict[str, Any]):
@@ -1346,6 +1356,19 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(pre_holdout, mds.date_col)
     buffer_steps, _ = _declared_steps(buffer_declaration, cadence, field="labels.buffer")
+    if buffer_steps < 1:
+        # The seal below steps back `buffer_steps` observations within each entity, so a
+        # zero buffer has no row to step back to and the per-entity cutoff silently
+        # becomes null - which reaches the caller as "empty pre-holdout analysis frame",
+        # naming neither the declaration nor the reason. No case study declares one; a
+        # panel whose labels really do need no gap should say so here rather than be
+        # discovered three failures downstream.
+        raise ValueError(
+            f"labels.buffer is declared as {buffer_declaration!r}, which spans no "
+            "observations, so there is no gap to seal a fold's training rows against its "
+            "validation labels. The DML resolver requires a buffer of at least one "
+            "observation."
+        )
     outcome_horizon_steps, outcome_horizon_label = _declared_steps(
         horizon_declaration, cadence, field="labels.horizons"
     )
@@ -1611,8 +1634,22 @@ def run_resolved_causal_request(
     except KeyError:
         cached = None
     if cached is not None:
-        if training_hash_from_spec(cached.spec) != causal_hash or not cached.complete:
-            raise ValueError(f"causal cache is incomplete or conflicts with {causal_hash}")
+        if training_hash_from_spec(cached.spec) != causal_hash:
+            raise ValueError(f"causal cache conflicts with {causal_hash}")
+        if not cached.complete:
+            # Serving it would make the first incomplete fit the last one: every later
+            # run reads this row and nothing recomputes what went missing. Saying which
+            # part is missing is what separates "delete this row and refit" from "the
+            # registry is corrupt", and the usual cause is a refutation whose placebo
+            # refits mostly failed.
+            raise ValueError(
+                f"causal row {causal_hash} is registered but incomplete - "
+                f"n_obs={cached.metrics.get('n_obs')}, "
+                f"effect={cached.metrics.get('dml_effect')}, "
+                f"refutation_p={cached.metrics.get('refutation_p')}, "
+                f"successful_placebos={cached.metrics.get('refutation_n_successful')}. "
+                "Delete the row and re-run; serving it would leave the gap permanent."
+            )
         if supersedes is not None:
             # The declaration has to land even when the fit does not re-run, because
             # that is the shape of the repair. A registry already holding two

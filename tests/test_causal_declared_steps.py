@@ -51,11 +51,28 @@ class TestAFixedDuration:
             ("21D", DAILY, 21),
             ("1D", DAILY, 1),
             ("8H", EIGHT_HOURLY, 1),
-            ("0D", DAILY, 1),
         ],
     )
     def test_the_count_is_the_span_over_the_cadence(self, declaration, cadence, steps) -> None:
         assert _declared_steps(declaration, cadence, field="labels.buffer")[0] == steps
+
+    @pytest.mark.parametrize("cadence", [DAILY, MONTHLY, EIGHT_HOURLY])
+    def test_a_zero_span_is_zero_observations_and_is_not_floored(self, cadence) -> None:
+        """`us_firm_characteristics` declares `labels.horizons: 0D` and means it.
+
+        The return is already realised on the timestamp its row carries, so no two labels
+        overlap. Flooring that to one observation records an overlap the case study never
+        declared, and `estimand.outcome_horizon` is hashed, so the false value is what the
+        identity carries. The floor belongs on a span that is nonzero but shorter than a
+        bar, which does reach into the bar it resolves inside; `embargo_from_buffer` draws
+        the line in the same place.
+        """
+        assert _declared_steps("0D", cadence, field="labels.horizons")[0] == 0
+
+    def test_a_span_shorter_than_a_bar_is_still_floored(self) -> None:
+        # The other side of that line, asserted next to it so neither can be changed
+        # without someone reading the case it is not.
+        assert _declared_steps("1min", DAILY, field="labels.horizons")[0] == 1
 
     def test_the_recorded_string_is_the_one_the_published_specs_carry(self) -> None:
         # `estimand.outcome_horizon` is hashed into the causal identity, so this string is

@@ -68,7 +68,7 @@ CONFIG_NAME = ""
 # replaces. Empty means the fit must leave exactly one current identity on its own.
 # Papermill passes parameters through as strings, which is why this is a str and not a
 # mapping.
-SUPERSEDES_CAUSAL: str = "6a6d184bab3a"
+SUPERSEDES_CAUSAL: str = "f4d06287382a"
 
 # %%
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -223,7 +223,23 @@ refutation_design.select(
 result = resolved.run()
 metrics = result.metrics
 if not result.complete:
-    raise ValueError(f"causal identity {result.hash} registered an incomplete result")
+    # A run whose placebo refits mostly failed registers a null p-value, and every number
+    # below would then be formatted from a null. The stop matters more than the
+    # formatting: the row is already in the registry, so the next run reads it from the
+    # cache and nothing recomputes the refutation that went missing.
+    raise ValueError(
+        f"causal identity {result.hash} registered an incomplete result - "
+        f"n_obs={metrics.get('n_obs')}, effect={metrics.get('dml_effect')}, "
+        f"refutation_p={metrics.get('refutation_p')}. Delete the row and re-run rather "
+        "than reading it."
+    )
+# The draw count is a separate question from completeness: it arrived with a migration,
+# so a row written before that column existed carries None there whatever its run did.
+# Completeness cannot require it without condemning those rows, which leaves the two
+# numbers derived from it - the p-value's floor and the verdict - to be reported as
+# unavailable here rather than computed from a null.
+draws = metrics.get("refutation_n_successful")
+placebo_p_floor = 1.0 / (draws + 1) if draws is not None else None
 print(f"Registered causal identity: {result.hash} ({result.execution_tier})")
 
 # %% [markdown]
@@ -291,7 +307,7 @@ add_message_title(
     subtitle=(
         f"effect +/-1.96 Driscoll-Kraay standard errors, [{lo:+.1f}, {hi:+.1f}] bps; "
         f"permutation p {metrics['refutation_p']:.3f} over "
-        f"{metrics['refutation_n_successful']} successful refits"
+        + (f"{draws} successful refits" if draws is not None else "an unrecorded draw count")
     ),
 )
 fig.tight_layout(rect=(0, 0, 1, 0.82))
@@ -317,7 +333,7 @@ pl.DataFrame(
         "p_hac": [metrics["p_value_hac"]],
         "confounding_bias_pct": [metrics["confounding_bias_pct"]],
         "placebo_p": [metrics["refutation_p"]],
-        "placebo_p_floor": [1.0 / (metrics["refutation_n_successful"] + 1)],
+        "placebo_p_floor": [placebo_p_floor],
         "placebo_block_months": [spec["computation"]["refutation"]["block_size"]],
         "refutation_class": [metrics["refutation_class"]],
     }

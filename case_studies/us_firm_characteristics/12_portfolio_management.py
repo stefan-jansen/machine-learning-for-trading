@@ -320,6 +320,11 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
 # sweep.
 
 # %%
+# One spelling for the baseline's row label, because the title below compares against it
+# and a second copy would let the two drift into disagreeing about which row it is.
+EQUAL_WEIGHT_LABEL = "equal_weight (ch16 baseline)"
+
+# %%
 alloc_runs = explorer.best(
     stage="allocation", top_n=9999, label=LABEL, prediction_hashes=ADVANCED_HASHES
 ).join(grid.filter(pl.col("stage") == "allocation").drop("stage"), on="backtest_hash", how="inner")
@@ -327,7 +332,7 @@ baseline_runs = (
     explorer.best(stage="signal", top_n=9999, label=LABEL, prediction_hashes=ADVANCED_HASHES)
     .join(grid.filter(pl.col("stage") == "signal").drop("stage"), on="backtest_hash", how="inner")
     .filter(pl.col("names_per_side").is_in(TOP_K_VALUES))
-    .with_columns(allocator=pl.lit("equal_weight (ch16 baseline)"))
+    .with_columns(allocator=pl.lit(EQUAL_WEIGHT_LABEL))
 )
 every_run = pl.concat([baseline_runs, alloc_runs], how="vertical_relaxed")
 
@@ -353,7 +358,7 @@ every_run = pl.concat([baseline_runs, alloc_runs], how="vertical_relaxed")
 # %% tags=["results"]
 insolvency = (
     every_run.group_by("allocator", "names_per_side")
-    .agg(runs=pl.len(), insolvent=(pl.col("max_drawdown") < -1.0).sum())
+    .agg(runs=pl.len(), insolvent=(pl.col("max_drawdown") <= -1.0).sum())
     .sort("names_per_side", "allocator")
 )
 with pl.Config(tbl_rows=insolvency.height):
@@ -373,71 +378,117 @@ with pl.Config(tbl_rows=insolvency.height):
 # difference between rows that is small next to the spread within any of them is not
 # evidence that one rule did better than another.
 #
-# Read the drawdown column with more care than the Sharpe column. It is an average over
-# paths that include the bankrupt ones counted above, and a bankrupt path's drawdown is
-# not on the same scale as a solvent one - it is a ratio to a negative trough, so it can
-# be arbitrarily large and it dominates whatever it is averaged with.
+# **Every statistic below is computed over the solvent runs only**, and the count of
+# insolvent runs is carried beside them rather than folded into them. Once equity has
+# compounded through zero, the later periods are arithmetic on a negative balance: the
+# sign of every gain and loss is inverted, so the return series is not a return series
+# and its mean, its standard deviation and their ratio are not the quantities their names
+# claim. The drawdown is the clearest case - a ratio to a negative trough, unbounded, and
+# it dominates whatever it is averaged with - but the Sharpe is no more meaningful, and
+# ranking allocators on it would be ranking them on arithmetic none of them performed.
+#
+# An earlier version of this cell averaged over every run and disclosed that it had. That
+# is not a smaller version of this fix: a note under a table does not make the number in
+# it mean anything, and a reader following the method rather than the caveat would
+# reproduce the ranking. Where a run cannot be measured, it is counted, not averaged.
+#
+# `insolvent` is therefore the column to read first. An allocator whose average is taken
+# over the few paths that survived is not being compared on the same footing as one whose
+# paths all survived, and the two counts are what say so.
 
 # %% tags=["results"]
+SOLVENT = pl.col("max_drawdown") > -1.0
 allocator_comparison = (
     every_run.group_by("allocator")
     .agg(
         n=pl.len(),
-        avg_sharpe=pl.col("sharpe").mean(),
-        best_sharpe=pl.col("sharpe").max(),
-        avg_max_dd=pl.col("max_drawdown").mean(),
+        insolvent=(~SOLVENT).sum(),
+        avg_sharpe=pl.col("sharpe").filter(SOLVENT).mean(),
+        best_sharpe=pl.col("sharpe").filter(SOLVENT).max(),
+        avg_max_dd=pl.col("max_drawdown").filter(SOLVENT).mean(),
     )
-    .sort("avg_sharpe", descending=True)
+    # An allocator whose runs all went insolvent has no average to rank, and polars would
+    # otherwise sort its null to the top and hand the comparison to the one row that
+    # measured nothing.
+    .sort("avg_sharpe", descending=True, nulls_last=True)
 )
 print(allocator_comparison)
-print("Note: the averages above include every run, insolvent ones among them.")
 
 # %%
 import matplotlib.pyplot as plt
 
-if not allocator_comparison.is_empty():
+# Only the allocators that have an average to draw. One whose runs all went insolvent
+# carries a null here, and a bar of no length is indistinguishable from a bar of zero.
+plottable = allocator_comparison.filter(pl.col("avg_sharpe").is_not_null())
+unplotted = allocator_comparison.height - plottable.height
+if unplotted:
+    print(f"{unplotted} allocator(s) had no solvent run and are absent from the chart")
+
+if not plottable.is_empty():
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.barh(
-        allocator_comparison["allocator"].to_list(),
-        allocator_comparison["avg_sharpe"].to_list(),
+        plottable["allocator"].to_list(),
+        plottable["avg_sharpe"].to_list(),
         color=COLORS["blue"],
     )
     # barh fills from the bottom, so without this the frame's descending order
     # arrives on the page ascending and the figure contradicts the table above it.
     ax.invert_yaxis()
     ax.set_xlabel("Sharpe, averaged over concentration and prediction")
+    # Derived from the frame rather than asserted, so the title cannot outlive the
+    # ordering it describes. The leader is the first row because the frame is sorted.
+    leader = plottable["allocator"][0]
     add_message_title(
         ax,
-        "Both sizing rules average below equal weighting across the grid",
+        (
+            f"{leader} averages highest across the grid"
+            if leader != EQUAL_WEIGHT_LABEL
+            else "Neither sizing rule averages above equal weighting across the grid"
+        ),
         subtitle=(
-            "Validation months, averaged over concentration and prediction, "
+            "Solvent validation runs only, averaged over concentration and prediction, "
             "net of the declared commission and slippage"
         ),
     )
     fig.tight_layout()
     show_with_alt(
         fig,
-        "Horizontal bar chart of average validation Sharpe for three ways of sizing "
-        "the selected names. The equal-weight Chapter 16 baseline is longest, with "
-        "conformal weighting and score weighting close behind each other and both "
-        "visibly shorter. All three sit between 1.7 and 1.9, so the gap between the "
-        "sizing rules is small next to their common level.",
+        "Horizontal bar chart of average validation Sharpe over the solvent runs, for "
+        "each way of sizing the selected names, longest bar at the top. The bars are "
+        "read against the table above it, which carries the same averages beside the "
+        "count of runs that went insolvent and are therefore not in them.",
     )
 
 # %% [markdown]
 # ### The upper tail of the allocation grid
 #
-# The ten highest allocation-stage Sharpes, with the concentration and allocator
-# behind each. Read it against the table above rather than on its own: this is the
-# tail of a grid, so the top row is the largest of eighty draws and is inflated by
-# that count. What is worth reading here is whether one allocator or one
-# concentration fills the tail, which would be a pattern, or whether the tail is
+# The ten highest allocation-stage Sharpes among the solvent runs, with the
+# concentration and allocator behind each. Read it against the table above rather than
+# on its own: this is the tail of a grid, so the top row is the largest of eighty draws
+# and is inflated by that count. What is worth reading here is whether one allocator or
+# one concentration fills the tail, which would be a pattern, or whether the tail is
 # mixed, which would say the grid found no reliable ordering.
+#
+# Insolvent runs are excluded here for the same reason they are excluded from the
+# averages, and the exclusion is a guard rather than a correction of this table. A path
+# that compounds through zero has its later gains and losses inverted, so its Sharpe is
+# arithmetic on a book that lost everything and can land anywhere, the top of the ranking
+# included. Whether any such row would have reached these ten depends on the run, and a
+# tail is where a single one would do the most damage, so the filter is applied whether
+# or not it removes anything. The grid is ranked first and filtered second, so ten rows
+# still appear wherever ten solvent runs exist.
 
 # %% tags=["results"]
-top10 = explorer.best(
-    stage="allocation", top_n=10, label=LABEL, prediction_hashes=ADVANCED_HASHES
-).join(grid.filter(pl.col("stage") == "allocation").drop("stage"), on="backtest_hash", how="left")
+top10 = (
+    explorer.best(stage="allocation", top_n=9999, label=LABEL, prediction_hashes=ADVANCED_HASHES)
+    .join(
+        grid.filter(pl.col("stage") == "allocation").drop("stage"),
+        on="backtest_hash",
+        how="left",
+    )
+    .filter(SOLVENT)
+    .head(10)
+)
 print(top10.select("source", "allocator", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 
 # %% [markdown]
