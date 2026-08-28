@@ -77,7 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import Study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -101,6 +101,7 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
+from case_studies.utils.notebook_contracts import declared_population_members
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE
@@ -115,9 +116,43 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
+# The populations 06 through 11e publish, keyed by the name each notebook builds from. Named
+# rather than hashed: a name resolves to the generation in force, so a refit that supersedes its
+# predecessor is picked up here without an edit, while every superseded snapshot stays readable
+# by hash. Five metric families are spread across nine of them - `deep_learning` over two
+# sequence notebooks, `latent_factors` over the five `11*` models - so the family each belongs
+# to is carried alongside, for the counts below.
+POPULATION_FAMILY = {
+    "linear": "linear",
+    "gbm": "gbm",
+    "tabular_dl": "tabular_dl",
+    "sequence": "deep_learning",
+    "patchtst": "deep_learning",
+    "pca": "latent_factors",
+    "ipca": "latent_factors",
+    "cae": "latent_factors",
+    "sdf": "latent_factors",
+    "sae": "latent_factors",
+}
+POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULATION_FAMILY}
+
+# %% [markdown]
+# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
+# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process and clears the caches keyed on it, so every later `get_case_study_dir`
+# answers for a different directory than the one resolved here. On the canonical tier with no
+# workspace that route is `Study.regenerate`, which refuses outright unless `features`, `labels`
+# and `run_log` are symlinks - true in a maintainer worktree, false in every clean clone and
+# every CI run. On the preview tier it repoints the notebook at `.preview/<case>`, whose registry
+# `activate()` creates empty, and the comparison below then reports on nothing while reporting
+# success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks is answered from it.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -179,26 +214,49 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # configuration enter the ranking as separate candidates, with near-identical scores, and the
 # published leaders are then fewer distinct strategies than they appear to be.
 #
-# `current_prediction_members` is that filter, and it takes two steps because neither is enough
-# alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
-# generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
-# has forked - and then subtracts the members those names have retired. The subtraction is needed
-# because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
-# and stays in force under its own name forever, so the union alone hands a retired generation back
-# through the frozen name that still lists it.
-
-# %%
-_study = open_study(CASE_STUDY, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
-print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+# The filter is what the nine names in `POPULATIONS` resolve to. `OfficialPopulation.one` returns
+# the one generation in a name's chain that nothing supersedes, and refuses rather than guessing
+# if the chain has forked, so a retired generation cannot arrive through the name that retired it.
+#
+# A registry that publishes no population at all is a different state, and it is not a broken one:
+# a fixture, or a clean clone whose cohorts have not run. `declared_population_members` separates
+# it from a declared name that will not resolve, which is a broken lineage and refuses when the
+# family has registered rows. Where nothing is declared, the comparison below runs on every
+# registered prediction set and says so - that is a weaker claim than a declared population, but a
+# statable one, and it is not the same as filtering everything away.
 
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)
-raw_metrics = (
-    load_all_metrics(CASE_STUDY, label=None)
-    .filter(pl.col("label").is_not_null())
-    .filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+raw_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+
+# %%
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = dict(
+    raw_metrics.group_by("family").len().iter_rows()  # (family, count)
 )
+_declared, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    POPULATIONS,
+    produced={
+        model: _family_produced.get(family, 0) for model, family in POPULATION_FAMILY.items()
+    },
+)
+for _note in _population_notes:
+    print(_note)
+
+if _declared:
+    CURRENT_MEMBERS = frozenset().union(*_declared.values())
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+    raw_metrics = raw_metrics.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+else:
+    CURRENT_MEMBERS = frozenset(raw_metrics.get_column("prediction_hash").unique().to_list())
+    print(
+        f"no populations declared here; comparing all {len(CURRENT_MEMBERS):,} registered "
+        "prediction sets"
+    )
 all_labels_metrics = (
     raw_metrics.with_columns(
         pl.col("ic_n_days").max().over(["family", "label"]).alias("_family_label_days")
