@@ -439,6 +439,23 @@ stability_df
 # rather than "how well will we generalize."
 
 # %% [markdown] tags=[]
+# A fold can end with nothing to select from. Every trial in it is pruned when no
+# validation date in that fold carries a defined IC - too few entities priced on
+# any one date, for instance - and Optuna then has no completed trial to report a
+# best parameter from. That is a fold the protocol could not evaluate, not a fold
+# that scored badly, so both runners record it as missing rather than dropping it:
+# the two protocols are compared fold by fold, and deleting a fold from one of
+# them would misalign the pair.
+
+
+# %% tags=[]
+def _selected_alpha(study) -> float:
+    """The alpha of the best completed trial, or NaN when the fold produced none."""
+    completed = study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+    return float(study.best_params["alpha"]) if completed else float("nan")
+
+
+# %% [markdown] tags=[]
 # ## 8. Single-Loop CV (BIASED)
 #
 # This approach performs HPO and evaluation on the same data splits.
@@ -527,7 +544,11 @@ def single_loop_cv(
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         # Evaluate with best params on SAME test set
-        best_alpha = study.best_params["alpha"]
+        best_alpha = _selected_alpha(study)
+        if np.isnan(best_alpha):
+            results["ic"].append(float("nan"))
+            results["best_alpha"].append(best_alpha)
+            continue
         model = Ridge(alpha=best_alpha, random_state=RANDOM_SEED)
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
@@ -681,7 +702,11 @@ def nested_cv(
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         # Outer evaluation with best params (UNBIASED)
-        best_alpha = study.best_params["alpha"]
+        best_alpha = _selected_alpha(study)
+        if np.isnan(best_alpha):
+            results["ic"].append(float("nan"))
+            results["best_alpha"].append(best_alpha)
+            continue
 
         # Scale outer fold for final evaluation
         outer_scaler = StandardScaler()
@@ -780,7 +805,16 @@ if not NEED_CV:
 # %% [markdown] tags=[]
 # ## 11. Results Analysis
 
+
 # %% tags=[]
+def _alpha_range(results: dict) -> str:
+    """The span of the alphas actually selected, or a note when none were."""
+    chosen = np.asarray(results["best_alpha"], dtype=float)
+    if not np.isfinite(chosen).any():
+        return "no fold selected one"
+    return f"[{np.nanmin(chosen):.2f}, {np.nanmax(chosen):.2f}]"
+
+
 single_mean_ic = np.nanmean(single_results["ic"])
 single_std_ic = np.nanstd(single_results["ic"])
 nested_mean_ic = np.nanmean(nested_results["ic"])
@@ -797,11 +831,7 @@ comparison_df = pl.DataFrame(
         "Method": ["Single-Loop (Biased)", "Nested (Unbiased)", "Inflation"],
         "Mean IC": [f"{single_mean_ic:.4f}", f"{nested_mean_ic:.4f}", f"{inflation_pct:+.1f}%"],
         "Std IC": [f"{single_std_ic:.4f}", f"{nested_std_ic:.4f}", ""],
-        "Alpha Range": [
-            f"[{min(single_results['best_alpha']):.2f}, {max(single_results['best_alpha']):.2f}]",
-            f"[{min(nested_results['best_alpha']):.2f}, {max(nested_results['best_alpha']):.2f}]",
-            "",
-        ],
+        "Alpha Range": [_alpha_range(single_results), _alpha_range(nested_results), ""],
     }
 )
 comparison_df
