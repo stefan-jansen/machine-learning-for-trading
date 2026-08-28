@@ -948,6 +948,70 @@ def test_a_lifecycle_gap_does_not_shape_the_decision_universe(tmp_path: Path) ->
     assert "'symbol': 'A'" in str(refusal.value)
 
 
+def _chain_with_a_terminated_contract(raw_dir: Path) -> None:
+    """A is quoted from entry until the session before expiry; B is quoted throughout.
+
+    That is the shape a corporate action leaves in this chain: the contract is adjusted onto a
+    strike the slice does not carry, so its quotes stop and never resume. The calendar still
+    holds the expiration session, because B is quoted on it.
+    """
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    ended = chain.filter(pl.col("date") < date(2024, 1, 10))
+    pl.concat([ended, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+
+
+def _two_names() -> tuple[pl.DataFrame, pl.DataFrame]:
+    predictions = pl.concat(
+        [_predictions(), _predictions().with_columns(symbol=pl.lit("B"), y_score=pl.lit(0.1))]
+    )
+    contract_returns = pl.concat(
+        [_contract_returns(), _contract_returns().with_columns(symbol=pl.lit("B"))]
+    )
+    return predictions, contract_returns
+
+
+def test_a_contract_ended_by_a_corporate_action_is_not_traded(tmp_path: Path) -> None:
+    """The position cannot be followed to expiry, so it is not opened - and B does not inherit it.
+
+    A outscores B and its contract stops being quoted before expiration. The chain holds only
+    the strikes that were at the money when the candidate was formed, never the adjusted strike
+    the position continues under, so the engine cannot account for what it would be holding.
+    Refusing the whole run is wrong: this is an ordinary corporate action, not a defect. Handing
+    A's slot to B is worse, because the decision date ranked A first and nothing about that
+    changed. The week simply holds no position.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    assert _select_cohorts(predictions, contract_returns, top_k=1).get_column(
+        "symbol"
+    ).to_list() == ["A"]
+
+    with pytest.raises(ValueError, match="ended by a corporate action") as refusal:
+        _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert "B" not in str(refusal.value)
+
+
+def test_a_dropped_corporate_action_reweights_the_names_actually_opened(tmp_path: Path) -> None:
+    """The cohort weights what was opened, not what was ranked.
+
+    Both names are selected at k=2 and A's contract ends early. B is the only position the week
+    actually carries, so it carries all of it. Leaving A in at half weight would report a
+    portfolio half invested in a contract the engine cannot price.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
+
+    assert cohorts.get_column("symbol").to_list() == ["B"]
+    assert cohorts.get_column("weight").to_list() == [1.0]
+
+
 def test_a_missing_entry_quote_does_not_shape_the_decision_universe() -> None:
     """The quote read on the session after the decision cannot decide what was rankable.
 

@@ -165,19 +165,56 @@ def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str,
     }
 
 
+def _read_absent_bid_as_zero(chain: pl.DataFrame) -> pl.DataFrame:
+    """Read a vendor null bid on a quoted contract as a bid of zero.
+
+    The chain carries AlgoSeek's end-of-session quote: ``LastBidPrice``, ``LastAskPrice`` and
+    ``LastMidPrice``. A null bid beside a positive ask is not a missing observation. It is the
+    session ending with an offer and no bid, which is what happens to an option nobody will pay
+    for, and the vendor writes no mid because it has no two-sided quote to take the midpoint of.
+
+    Treating that as missing data is not a neutral simplification for this strategy. The leg of
+    a short straddle loses its bid exactly when the underlying has moved far enough from the
+    strike to leave it worthless, which is the same move that makes the other leg expensive. A
+    screen that discards those sessions discards the decisions that lost money, and every
+    performance number computed afterwards is measured on the survivors. There are 9,140 such
+    rows in the 20.5 million the validation window holds, and they cluster in the last sessions
+    before expiry.
+
+    The bid is therefore zero and the mid is half the ask, which is the same midpoint convention
+    applied to the interval the quote actually spans. A session with no ask is left null: there
+    is no offer to take a midpoint of, and no assumption here can supply one.
+    """
+    return chain.with_columns(
+        bid=pl.when(pl.col("bid").is_null() & pl.col("ask").is_not_null())
+        .then(pl.lit(0.0))
+        .otherwise(pl.col("bid")),
+        mid_price=pl.when(
+            pl.col("mid_price").is_null() & pl.col("bid").is_null() & pl.col("ask").is_not_null()
+        )
+        .then(pl.col("ask") / 2.0)
+        .otherwise(pl.col("mid_price")),
+    )
+
+
 def _complete_lifecycle_contracts(
     contract_returns: pl.DataFrame,
     raw_options_dir: Path,
-) -> pl.DataFrame:
-    """Return the entry contracts with a complete, valid paired lifecycle through expiry.
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Split the entry contracts into those with a complete paired lifecycle and those without.
 
     Reads quotes from entry through expiration, so every input date is later than the decision
     it belongs to. Apply it to a selection to check that the engine can account for what was
     chosen; applying it to the candidate universe would decide the decision-time universe from
     data that does not exist yet.
+
+    The second frame carries the candidates the engine cannot account for, each with a
+    ``contract_terminated`` flag saying whether the contract stopped being quoted before its
+    expiration. The caller decides what to do with them; this function does not, because the
+    two cases want opposite answers and only the caller knows which selection it is holding.
     """
     if contract_returns.is_empty():
-        return contract_returns
+        return contract_returns, contract_returns
     candidate_keys = ["feature_date", "symbol", "strike", "expiration", "entry_date"]
     if contract_returns.n_unique(candidate_keys) != contract_returns.height:
         raise ValueError("candidate option contracts are not unique by decision and entry keys")
@@ -218,7 +255,7 @@ def _complete_lifecycle_contracts(
     if not raw_parts or not calendars:
         raise FileNotFoundError(f"No raw option data in {raw_options_dir}")
 
-    raw_lookup = pl.concat(raw_parts)
+    raw_lookup = _read_absent_bid_as_zero(pl.concat(raw_parts))
     calendar = pl.concat(calendars).unique().sort("date").with_row_index("_session")
     bounds = (
         candidates.join(
@@ -285,6 +322,7 @@ def _complete_lifecycle_contracts(
         .group_by("_candidate_id")
         .agg(
             pl.len().alias("_observed_dates"),
+            pl.col("date").max().alias("_last_paired_date"),
             (
                 (pl.col("date") == pl.col("entry_date"))
                 & ((pl.col("_raw_call_mid") - pl.col("entry_call_mid")).abs() <= 1e-10)
@@ -294,23 +332,60 @@ def _complete_lifecycle_contracts(
             .alias("_entry_matches"),
         )
     )
-    eligible_ids = (
+    judged = (
         bounds.join(observed_legs, on="_candidate_id", how="left")
         .join(observed_pairs, on="_candidate_id", how="left")
-        .filter(
-            pl.col("_expected_dates").is_not_null()
-            & (pl.col("_expected_dates") > 0)
-            & (pl.col("_observed_legs") == 2 * pl.col("_expected_dates"))
-            & (pl.col("_observed_dates") == pl.col("_expected_dates"))
-            & pl.col("_entry_matches").fill_null(False)
+        .with_columns(
+            _complete=(
+                pl.col("_expected_dates").is_not_null()
+                & (pl.col("_expected_dates") > 0)
+                & (pl.col("_observed_legs") == 2 * pl.col("_expected_dates"))
+                & (pl.col("_observed_dates") == pl.col("_expected_dates"))
+                & pl.col("_entry_matches").fill_null(False)
+            )
         )
-        .select("_candidate_id")
     )
-    return (
-        candidates.join(eligible_ids, on="_candidate_id", how="semi")
+    # A contract that is quoted every session from entry up to some date and never again is a
+    # contract that stopped existing: an acquisition, a spinoff, or a split, after which the
+    # position is carried under an adjusted strike this chain does not hold. Anything else -
+    # an interior session missing, an entry quote that does not match, one leg absent while the
+    # other is quoted - is a defect in the data rather than an event in the market, and the two
+    # must not be reported as the same thing.
+    terminated = (
+        pl.col("_observed_dates").is_not_null()
+        & (pl.col("_observed_dates") > 0)
+        & (pl.col("_last_paired_date") < pl.col("expiration"))
+        & (
+            pl.col("_observed_dates")
+            == pl.col("_expected_dates")
+            - (pl.col("_expiry_session") - pl.col("_last_session_index"))
+        )
+    )
+    judged = judged.join(
+        calendar.rename({"date": "_last_paired_date", "_session": "_last_session_index"}),
+        on="_last_paired_date",
+        how="left",
+    ).with_columns(_terminated=(~pl.col("_complete") & terminated).fill_null(False))
+    complete = (
+        candidates.join(
+            judged.filter(pl.col("_complete")).select("_candidate_id"),
+            on="_candidate_id",
+            how="semi",
+        )
         .drop("_candidate_id")
         .sort("feature_date", "symbol")
     )
+    unheld = (
+        candidates.join(
+            judged.filter(~pl.col("_complete")).select("_candidate_id", "_terminated"),
+            on="_candidate_id",
+            how="inner",
+        )
+        .drop("_candidate_id")
+        .rename({"_terminated": "contract_terminated"})
+        .sort("feature_date", "symbol")
+    )
+    return complete, unheld
 
 
 def _select_cohorts(
@@ -428,26 +503,41 @@ def _select_cohorts(
         # screen reads quotes from entry through expiration, so applying it to the candidate
         # universe would let a data gap that opens after the decision date decide what the model
         # was allowed to rank on that date.
-        complete = _complete_lifecycle_contracts(
+        complete, unheld = _complete_lifecycle_contracts(
             cohorts.rename({"timestamp": "feature_date"}), raw_options_dir
         )
-        if complete.height != cohorts.height:
-            gaps = (
-                cohorts.rename({"timestamp": "feature_date"})
-                .join(
-                    complete.select("feature_date", "symbol"),
-                    on=["feature_date", "symbol"],
-                    how="anti",
-                )
-                .select("feature_date", "symbol")
-                .head(5)
-                .to_dicts()
-            )
+        defective = unheld.filter(~pl.col("contract_terminated"))
+        if not defective.is_empty():
             raise ValueError(
-                f"{cohorts.height - complete.height} of {cohorts.height} selected option "
-                f"decisions have no complete paired lifecycle from entry through expiration "
-                f"(first: {gaps})"
+                f"{defective.height} of {cohorts.height} selected option decisions have no "
+                f"complete paired lifecycle from entry through expiration "
+                f"(first: {defective.select('feature_date', 'symbol').head(5).to_dicts()})"
             )
+        # A selected straddle whose contract stops being quoted before it expires was not
+        # rejected by the screen: it was ended by a corporate action, and the chain this case
+        # study reads holds only the strikes that were at the money when the candidate was
+        # formed, never the adjusted strike the position continues under. The position cannot
+        # be followed to expiration, so it is not opened.
+        #
+        # Dropping it here is not the look-ahead the screen exists to prevent. The ranking has
+        # already happened and is untouched: the decision was made on what the decision date
+        # knew, and the cohort simply holds one name fewer that week rather than promoting the
+        # runner-up into the slot. What is lost is 320 of the 133,133 candidates the validation
+        # window offers, on 222 of its 467 decision dates, and they are the names with a split,
+        # a spinoff or a merger over the holding period. A drop nobody counts is
+        # indistinguishable from data that never existed, so the count belongs in the
+        # strategy-analysis notebook's reporting of what the population actually traded.
+        if not unheld.is_empty():
+            cohorts = cohorts.join(
+                unheld.select(pl.col("feature_date").alias("timestamp"), "symbol"),
+                on=["timestamp", "symbol"],
+                how="anti",
+            )
+            if cohorts.is_empty():
+                raise ValueError(
+                    "every selected option decision was ended by a corporate action before "
+                    "expiration, which is a selection this engine cannot account for"
+                )
 
     if method == "score_weighted_top_k":
         cohorts = _score_proportional_weights(cohorts)
@@ -514,7 +604,7 @@ def _load_option_lifecycle(
         calendars.append(calendar)
     if not parts:
         raise FileNotFoundError(f"No raw option data in {raw_options_dir}")
-    raw_lookup = pl.concat(parts)
+    raw_lookup = _read_absent_bid_as_zero(pl.concat(parts))
     key_columns = ["date", "symbol", "strike", "expiration", "call_put"]
     if raw_lookup.n_unique(key_columns) != raw_lookup.height:
         raise ValueError("raw option lifecycle contains duplicate contract-leg dates")
