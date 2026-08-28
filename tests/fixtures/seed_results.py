@@ -869,12 +869,20 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
             .mod(2)
             .alias("fold")
         )
-    return panel.select(
+    columns = [
         _pl.col(entity).alias(entity_col),
         _pl.col("timestamp"),
         fold.alias("fold"),
         _pl.col("actual"),
-    )
+    ]
+    # A reference artifact of a classification label carries the continuous
+    # evaluation target beside the class one. Dropping it here would leave the
+    # seeded sets of that group to invent a replacement for a column the group
+    # already has, and two members of one group would then disagree about what the
+    # realized return was.
+    if "eval_actual" in panel.columns:
+        columns.append(_pl.col("eval_actual"))
+    return panel.select(columns)
 
 
 def _record_prediction_artifact_digests(cs_dir: Path) -> None:
@@ -1017,8 +1025,18 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
     entity_col = "symbol"
+    # Labels whose predictions carry a continuous evaluation target beside the class
+    # one. `labels.classification_eval_label` in setup.yaml is where production
+    # decides this: utils.modeling.load_modeling_dataset reads it for a
+    # classification label, and every writer then persists the column as
+    # `eval_actual` (registry/store.py). The mapping holds exactly - across all nine
+    # canonical registries, every artifact of a label named here carries the column
+    # and no other artifact does - so it is also what tells this function which
+    # synthetic artifacts need it.
+    eval_target_labels: set = set()
     if setup_path.exists():
         setup = yaml.safe_load(setup_path.read_text())
+        eval_target_labels = set((setup.get("labels") or {}).get("classification_eval_label") or {})
         universe = setup.get("universe", {})
         assets = universe.get("assets", [])
         if assets:
@@ -1122,6 +1140,12 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
                 "actual": target_rng.normal(0, 0.01, n).tolist(),
             }
         )
+        # This function drew `actual` itself and knows it is a continuous return, so
+        # a classification set on this panel can evaluate against it directly.
+        # Carried on every window rather than only the classification ones: it costs
+        # one column and keeps the panel a single object, so which labels need it is
+        # decided at write time.
+        frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
         templates[window] = (frame, n)
         return templates[window]
 
@@ -1190,7 +1214,27 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
-        template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
+        frame = template.with_columns(_pl.Series("prediction", scores))
+        if label in eval_target_labels and "eval_actual" not in frame.columns:
+            # The panel is a copied artifact that does not carry the column. Its
+            # `actual` cannot stand in: on a classification set that is the class
+            # label, and a rank correlation against it measures class separation
+            # rather than a ranking against returns - the substitution
+            # 07_case_study_insights refuses to make. Draw a continuous target
+            # instead, per (split, label)
+            # so every set of the group agrees on what the realized return was.
+            group_seed = int(hashlib.sha256(f"{split}/{label}".encode()).hexdigest()[:16], 16)
+            frame = frame.with_columns(
+                _pl.Series(
+                    "eval_actual",
+                    np.random.default_rng(group_seed).normal(0, 0.01, frame.height),
+                )
+            )
+        if label not in eval_target_labels and "eval_actual" in frame.columns:
+            # A regression set never carries it in production, and the panel it was
+            # seeded onto may be a classification artifact that does.
+            frame = frame.drop("eval_actual")
+        frame.write_parquet(str(pred_file))
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:

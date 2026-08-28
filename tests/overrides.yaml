@@ -402,10 +402,17 @@
 11_ml_pipeline/04_nested_cv_hpo:
   parameters:
     ALPHA_GRID_POINTS: 10
-    MAX_SYMBOLS: 10
+    # Not 10. This notebook's only metric is a cross-sectional IC, which
+    # utils.modeling.cross_sectional_ic_mean leaves undefined on a date priced by
+    # fewer than ten entities. On the first ten ETFs by symbol the expanding
+    # walk-forward folds carry 3, 9 and at most 10 names per date, so folds 1 and 2
+    # had no date with a defined IC at all and fold 3 had 33 of 200 - every number
+    # the run reported came from a substitute value, not a measurement. Twenty-five
+    # is the first width at which all three folds carry 200 of 200 defined dates.
+    MAX_SYMBOLS: 25
     N_SPLITS: 3
     N_TRIALS: 5
-  timeout: 360
+  timeout: 600
 11_ml_pipeline/05_shap_analysis:
   parameters:
     MAX_CV_FOLDS: 2
