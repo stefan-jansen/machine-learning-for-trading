@@ -1213,7 +1213,16 @@ for row in rank1.iter_rows(named=True):
         }
     )
 
-sign_df = pl.DataFrame(sign_rows).sort("mean_consistency", descending=True)
+sign_df = pl.DataFrame(
+    sign_rows,
+    schema={
+        "short_name": pl.Utf8,
+        "config_name": pl.Utf8,
+        "n_features": pl.Int64,
+        "mean_consistency": pl.Float64,
+        "pct_features_above_80": pl.Float64,
+    },
+).sort("mean_consistency", descending=True)
 print("Coefficient sign consistency for the highest-IC linear configuration (primary label):")
 sign_df
 
@@ -1241,17 +1250,27 @@ if sign_df.height > 0:
     fig.show()
 
 # %% tags=[]
-stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
-sign_leader = sign_df.row(0, named=True)
-display(
-    Markdown(
-        f"Mean fold-level sign consistency reaches 0.8 in **{stable_sign_count} of "
-        f"{sign_df.height}** selected fits. **{sign_leader['short_name']}** is highest at "
-        f"{sign_leader['mean_consistency']:.2f}. Sign stability and predictive ranking are "
-        "different diagnostics: a stable coefficient direction does not by itself establish "
-        "a nonzero out-of-sample IC."
+if sign_df.is_empty():
+    display(
+        Markdown(
+            "No selected linear fit has a stored coefficient artifact in this run log, so "
+            "sign consistency cannot be measured here. The diagnostic needs the per-fold "
+            "coefficients themselves, which the registry records separately from the "
+            "prediction sets."
+        )
     )
-)
+else:
+    stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
+    sign_leader = sign_df.row(0, named=True)
+    display(
+        Markdown(
+            f"Mean fold-level sign consistency reaches 0.8 in **{stable_sign_count} of "
+            f"{sign_df.height}** selected fits. **{sign_leader['short_name']}** is highest at "
+            f"{sign_leader['mean_consistency']:.2f}. Sign stability and predictive ranking are "
+            "different diagnostics: a stable coefficient direction does not by itself establish "
+            "a nonzero out-of-sample IC."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ### 6b. Lasso sparsity
@@ -1314,16 +1333,26 @@ print("Lasso sparsity per case study (at the highest-IC Lasso $\\alpha$):")
 sparsity_df
 
 # %% tags=[]
-sparsest = sparsity_df.row(0, named=True)
-display(
-    Markdown(
-        f"Complete highest-IC Lasso coefficient artifacts are available for "
-        f"**{sparsity_df.height}** case studies. **{sparsest['short_name']}** is sparsest: "
-        f"{sparsest['zero_fraction']:.1%} of coefficient-by-fold cells are zero, while "
-        f"{sparsest['pct_always_zero']:.1f}% of features are zero in every fold. This comparison "
-        "now uses one selected Lasso configuration per case study rather than pooling all alphas."
+if sparsity_df.is_empty():
+    display(
+        Markdown(
+            "No case study in this run log pairs a complete Lasso result on its primary label "
+            "with a stored coefficient artifact, so there is nothing to compare here. Sparsity "
+            "is read off the coefficients themselves, not off any metric the registry holds."
+        )
     )
-)
+else:
+    sparsest = sparsity_df.row(0, named=True)
+    display(
+        Markdown(
+            f"Complete highest-IC Lasso coefficient artifacts are available for "
+            f"**{sparsity_df.height}** case studies. **{sparsest['short_name']}** is sparsest: "
+            f"{sparsest['zero_fraction']:.1%} of coefficient-by-fold cells are zero, while "
+            f"{sparsest['pct_always_zero']:.1f}% of features are zero in every fold. This "
+            "comparison uses one selected Lasso configuration per case study rather than "
+            "pooling all alphas."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ### 6c. Top-N feature overlap across case studies
