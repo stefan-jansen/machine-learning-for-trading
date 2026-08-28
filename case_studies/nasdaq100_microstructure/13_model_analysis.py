@@ -319,12 +319,15 @@ for _family, _members in _population_members.items():
     )
     _dropped = _members & _degenerate
     _missing, _extra = _members - _degenerate - _have, _have - _members
-    # "Never produced" has to be decided from the registry, not from `_have`: that set is the
-    # admissible rows, so a cohort that ran and whose every member is incomplete, legacy or
-    # superseded reaches here empty too. Reading it as "not run yet" would skip the check below
-    # in exactly the case the check exists for, and drop the whole family from the comparison
-    # while reporting an absence rather than a rejection.
-    if not _members & _registered:
+    # Both halves of the sentence this prints have to be true before it is printed. "None of
+    # the declared members has been produced" is a question for the registry, not for `_have`:
+    # that set is the *admissible* rows, so a cohort that ran and whose every member is
+    # incomplete, legacy or superseded reaches here empty too, and reading it as "not run yet"
+    # would skip the check below in exactly the case the check exists for. "This family is
+    # absent from every comparison" is the other half, and it is a question for `_have`: a
+    # family can have no declared member registered and still contribute rows, which are
+    # undeclared by construction and are what `_extra` below exists to reject.
+    if not (_members & _registered) and not _have:
         print(
             f"{_family}: none of the {len(_members)} declared members has been produced yet - "
             "the cohort has not run, so this family is absent from every comparison below"
