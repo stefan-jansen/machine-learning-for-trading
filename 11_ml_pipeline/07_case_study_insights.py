@@ -73,7 +73,7 @@ from case_studies.utils.model_analysis import (
     load_predictions,
 )
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 # %% tags=["parameters"]
 FAMILY = "linear"
@@ -441,7 +441,11 @@ fig, ax = plot_cross_cs_forest(
     title="Most primary-label linear intervals overlap zero",
 )
 ax.set_xlabel("Mean daily IC (HAC 95 % CI)")
-fig.show()
+show_with_alt(
+    fig,
+    "Forest plot of mean daily information coefficient with HAC 95% intervals, one row "
+    "per case study on its primary label, against a vertical line at zero.",
+)
 
 # %% tags=[]
 significant = rank1.filter((pl.col("ic_ci_lo") > 0) | (pl.col("ic_ci_hi") < 0))
@@ -581,7 +585,10 @@ ax.set_title("Regularization shifts estimates less than their uncertainty")
 ax.legend(frameon=False, fontsize=8, loc="best")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Grouped bars of mean daily information coefficient by regularizer, one group per case study, with HAC 95% error bars and a horizontal line at zero.",
+)
 
 # %% tags=[]
 ridge_ols = reg_best.filter(pl.col("reg_family").is_in(["ridge", "ols"]))
@@ -664,7 +671,10 @@ ax.set_ylabel("Mean daily IC (HAC 95 % CI band)")
 ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
 ax.set_title("Ridge paths are mostly flat relative to uncertainty")
 ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
-fig.show()
+show_with_alt(
+    fig,
+    "Mean daily information coefficient against Ridge alpha on a log axis, one line per case study with a shaded HAC 95% band, against a horizontal line at zero.",
+)
 
 # %% [markdown] tags=[]
 # The confidence bands put the path curvature in context. An apparent optimum
@@ -696,7 +706,11 @@ fig, _ = plot_rolling_daily_ic(
     },
     title="ETF and FX rolling IC vary through their shared window",
 )
-fig.show()
+show_with_alt(
+    fig,
+    "Rolling 63-day information coefficient for the ETF and FX selected fits over their "
+    "shared window, against a horizontal line at zero.",
+)
 
 # %% [markdown] tags=[]
 # The rolling view tests whether a full-period average is broadly persistent or
@@ -741,7 +755,10 @@ ax.set_ylabel("Per-fold Spearman IC")
 ax.set_title("Selected linear fits vary widely across validation folds")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Box plots of per-fold Spearman information coefficient, one box per case study with the individual folds overlaid as points, against a horizontal line at zero.",
+)
 
 # %% tags=[]
 most_positive = fold_summary.sort("pct_positive", descending=True).row(0, named=True)
@@ -779,7 +796,10 @@ ax.set_xlabel("ICIR (|mean fold IC| / fold standard deviation)")
 ax.set_title("Fold stability differs sharply across the selected linear fits")
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of ICIR, the absolute mean fold information coefficient divided by its fold standard deviation, one bar per case study.",
+)
 
 # %% tags=[]
 icir_leader = icir.row(0, named=True)
@@ -909,7 +929,10 @@ if plot_horizon.height > 0:
     ax.axhline(0, color=COLORS["neutral"], linewidth=0.7, linestyle="--")
     ax.set_title("Linear ranking strength changes unevenly with horizon")
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
-    fig.show()
+    show_with_alt(
+        fig,
+        "Mean daily information coefficient against label horizon in trading days on a log axis, one line per case study with a shaded HAC 95% band, against a horizontal line at zero.",
+    )
 
 # %% tags=[]
 display(
@@ -1151,7 +1174,13 @@ ax.set_xlim(0.47, 0.53)
 
 if fig.get_layout_engine() is None:
     fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two panels sharing one row of case-study labels. Left: the classification score's "
+    "mean daily information coefficient against the continuous return, with HAC 95% error "
+    "bars and a line at zero. Right: the regression score's mean daily AUC against the "
+    "binary direction, with a line at one half.",
+)
 
 # %% tags=[]
 direction_a_clear = sym_df.filter((pl.col("cls_score_ic_lo") > 0) | (pl.col("cls_score_ic_hi") < 0))
@@ -1260,7 +1289,10 @@ if sign_df.height > 0:
     ax.set_title("Most selected linear fits preserve coefficient signs across folds")
     if fig.get_layout_engine() is None:
         fig.tight_layout()
-    fig.show()
+    show_with_alt(
+        fig,
+        "Horizontal bars of mean fold-level coefficient sign consistency, one per case study, against a dashed line at 0.8.",
+    )
 
 # %% tags=[]
 # Counted on both paths: the closing takeaways quote it, and an empty frame is a
@@ -1446,7 +1478,11 @@ if cs_names:
     ax.set_title(f"Top-{TOP_N} coefficient features overlap little across panels")
     colorbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.04)
     colorbar.set_label("Jaccard overlap")
-    fig.show()
+    show_with_alt(
+        fig,
+        f"Symmetric heatmap of the pairwise Jaccard overlap between each pair of case "
+        f"studies' top-{TOP_N} coefficient features, each cell labelled with its value.",
+    )
 
 # %% tags=[]
 off_diagonal = J[~np.eye(len(cs_names), dtype=bool)]
