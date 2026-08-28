@@ -142,6 +142,47 @@ class Study:
     # under papermill the executing file is a temp .ipynb and `__file__` may be absent entirely,
     # so a frame walk is wrong exactly where it would be needed.
     entry_point: str | None = None
+    # Set only by `Study.at`, where the released case directory is the one root the study was
+    # given and is not derivable from `release_root`: a fixture root, or any output directory
+    # that is not `<repo>/case_studies/<name>`.
+    release_case_dir: Path | None = None
+
+    @classmethod
+    def at(
+        cls,
+        case_dir: str | Path,
+        *,
+        case_study: str | None = None,
+        entry_point: str | None = None,
+    ) -> Study:
+        """A read-only study over one registry root, which never activates.
+
+        Every other way in ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide
+        and clears the root-sensitive caches. For a notebook that *produces* results that is the
+        point - it decides where writes land. For one that only reads, it silently moves every
+        subsequent path lookup to a different case directory than the one the notebook resolved,
+        and `open_study(execution_tier="preview")` moves it to `.preview/<case>`, whose registry
+        is created empty. An analysis notebook pointed there does not fail; it reports on nothing.
+
+        This form takes the directory the caller already resolved and answers for that registry
+        alone: `root` and `release_case_root` are both `case_dir`, so `OfficialPopulation.one`
+        and `Result.open` read it and nothing else.
+        """
+        case_dir = Path(case_dir).expanduser().resolve()
+        return cls(
+            case_study=case_study or case_dir.name,
+            root=case_dir,
+            release_root=REPO_ROOT,
+            output_root=None,
+            read_only=True,
+            manifest={
+                "schema_version": 1,
+                "case_study": case_study or case_dir.name,
+                "single_root": str(case_dir),
+            },
+            entry_point=entry_point,
+            release_case_dir=case_dir,
+        )
 
     @classmethod
     def open(
@@ -341,6 +382,8 @@ class Study:
 
     @property
     def release_case_root(self) -> Path:
+        if self.release_case_dir is not None:
+            return self.release_case_dir
         return self.release_root / "case_studies" / self.case_study
 
     @property

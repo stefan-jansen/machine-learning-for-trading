@@ -57,9 +57,7 @@
 # %%
 """Compare every declared model family on one registered, complete population."""
 
-import os
 import warnings
-from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -68,7 +66,7 @@ import yaml
 from case_studies.research import (
     OfficialPopulation,
     Result,
-    open_study,
+    Study,
     superseded_members,
 )
 from case_studies.utils.model_analysis import (
@@ -117,35 +115,26 @@ REGIME_WINDOW = 252
 # this notebook, while every superseded snapshot stays readable by hash.
 LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
 GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
-# Which registry to compare against. Canonical with no workspace is the production path and
-# regenerates the case study's artifacts in place; preview reads the same inputs and is pointed
-# at an isolated root. This notebook produces no results either way - it is a comparison - so
-# the tier decides only which registry it reads, not what it computes.
-EXECUTION_TIER = "canonical"
-WORKSPACE = "experiments"
 
 # %% [markdown]
-# The two parameters above are what lets this notebook run outside a maintainer checkout.
-# `open_study` on the canonical tier with no workspace takes `Study.regenerate`, which requires
-# the case study's `features`, `labels` and `run_log` to be symlinks into shared artifacts, and
-# refuses with a `PermissionError` where they are real directories - a clean clone, and every CI
-# runner. Declaring both names is also the signal `tests/pm_helpers.py` looks for: it injects
-# `EXECUTION_TIER="preview"` and `WORKSPACE=$ML4T_OUTPUT_DIR` only into notebooks that declare
-# the pair, so a run against the fixture reads the fixture's registry and writes nothing back.
+# This notebook reads; it registers nothing. That decides how it opens the registry, and the
+# distinction is not cosmetic. Every route through `open_study` ends in `Study.activate()`,
+# which rewrites `ML4T_OUTPUT_DIR` for the rest of the process and clears the caches keyed on
+# it, so every later `get_case_study_dir` answers for a different directory than the one
+# resolved here. On the canonical tier with no workspace that route is `Study.regenerate`,
+# which refuses outright unless `features`, `labels` and `run_log` are symlinks - true in a
+# maintainer worktree, false in every clean clone. On the preview tier it repoints the notebook
+# at `.preview/<case>`, whose registry `activate()` creates *empty*: measured here, the catalog
+# went from 30 registered prediction sets to 0 and the comparison below reported on nothing
+# while reporting success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks - the catalog, the lineage, the populations, the artifacts - is
+# answered from it.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
-if EXECUTION_TIER == "canonical":
-    study = open_study(CASE_STUDY, entry_point="13_model_analysis")
-elif EXECUTION_TIER == "preview":
-    study = open_study(
-        CASE_STUDY,
-        execution_tier=EXECUTION_TIER,
-        workspace=Path(os.environ.get("ML4T_OUTPUT_DIR") or WORKSPACE),
-        entry_point="13_model_analysis",
-    )
-else:
-    raise ValueError(f"Unsupported execution tier: {EXECUTION_TIER!r}")
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -243,20 +232,32 @@ if excluded_families(CASE_STUDY):
 # same name in one table, and the family representative below can be drawn from either. The
 # table would not look wrong; it would just be answering two questions at once.
 #
-# `superseded_members` takes the study because this notebook already opened one, and it unions
-# the release and workspace roots the way the catalog overlays them. The sibling call in
-# `14_backtest` uses `superseded_members_at` instead, because that notebook deliberately holds
-# a resolved directory and no study.
+# Both calls take the study, and on a `Study.at` handle that is the same thing as naming the
+# directory: `root` and `release_case_root` are both `CASE_DIR`, and `PredictionCatalog.table`
+# short-circuits on a read-only study to read that one registry. The sibling calls in
+# `14_backtest` are `prediction_rows_at` and `superseded_members_at`, which take the directory
+# directly, because that notebook registers backtests and so holds no study at all.
 _catalog = study.predictions.table()
 _retired = superseded_members(study)
 _admissible = pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
 _ok = _catalog.filter(_admissible).select("prediction_hash")
 _rejected = _catalog.filter(~_admissible)
 
+# `load_all_metrics` returns a bare frame with no columns when the registry holds no scored
+# rows, so every expression below it fails on a missing column instead of on the absence that
+# caused it. The distinction is worth one branch: "nothing has been fitted into this registry"
+# is a state a reader can act on, and `unable to find column "label"; valid columns: []` is not.
+_raw_metrics = load_all_metrics(CASE_STUDY, label=None)
+if _raw_metrics.is_empty():
+    msg = (
+        f"{CASE_DIR} holds no scored prediction sets, so there is nothing to compare. Its "
+        f"catalog lists {_catalog.height} registered prediction sets. Run the model notebooks "
+        "against this registry first."
+    )
+    raise RuntimeError(msg)
+
 all_labels_metrics = filter_active_model_rows(
-    load_all_metrics(CASE_STUDY, label=None)
-    .filter(pl.col("label").is_not_null())
-    .join(_ok, on="prediction_hash", how="inner"),
+    _raw_metrics.filter(pl.col("label").is_not_null()).join(_ok, on="prediction_hash", how="inner"),
     CASE_STUDY,
 )
 all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
