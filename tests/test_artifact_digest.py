@@ -8,7 +8,9 @@ failure modes are silent, so both are tested.
 from __future__ import annotations
 
 import json
+from datetime import date
 
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -136,6 +138,56 @@ def test_metadata_reaches_the_sidecar_and_the_reader_that_needs_it(
     # The record's own fields survive the merge rather than being displaced by it.
     assert record["digest"] == value_digest(frame)
     assert record["n_rows"] == frame.height
+
+
+def test_real_date_boundaries_reach_the_sidecar_as_iso_strings(
+    frame: pl.DataFrame, tmp_path
+) -> None:
+    """Producers hold fold boundaries as dates, and `json.dumps` refuses them.
+
+    Serializing after the parquet was written would leave the new file beside the previous
+    run's sidecar - a file and a digest describing different data.
+    """
+    geometry = [
+        {
+            "fold": 8,
+            "train_start": date(2011, 1, 5),
+            "train_end": pd.Timestamp("2023-11-29"),
+            "val_start": date(2024, 1, 1),
+            "val_end": date(2025, 12, 31),
+        }
+    ]
+    path = tmp_path / "features" / "model_based.parquet"
+    record = write_artifact(
+        frame,
+        path,
+        keys=["timestamp", "symbol"],
+        written_by="04_model_based_features",
+        metadata={"fold_geometry": geometry},
+    )
+
+    written = read_digest(path)["fold_geometry"][0]
+    assert written["train_start"] == "2011-01-05"
+    assert written["train_end"].startswith("2023-11-29")
+    assert written["val_end"] == "2025-12-31"
+    assert written["fold"] == 8
+    assert record["fold_geometry"][0]["train_start"] == "2011-01-05"
+
+
+def test_an_unserializable_record_leaves_no_parquet_without_its_sidecar(
+    frame: pl.DataFrame, tmp_path
+) -> None:
+    path = tmp_path / "features" / "model_based.parquet"
+    with pytest.raises(TypeError):
+        write_artifact(
+            frame,
+            path,
+            keys=["timestamp", "symbol"],
+            written_by="04_model_based_features",
+            metadata={"producer": object()},
+        )
+    assert not path.exists()
+    assert not sidecar_path(path).exists()
 
 
 def test_metadata_may_not_redefine_the_record_it_is_merged_into(frame: pl.DataFrame) -> None:
