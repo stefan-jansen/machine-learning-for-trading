@@ -518,8 +518,15 @@ def current_prediction_populations(
     Retirement is subtracted per name rather than left to the caller, for the reason given
     above: a frozen snapshot lists members its own publisher has since retired, so a per-name
     view that skipped the subtraction would hand them back one name at a time.
+
+    The tips are resolved before retirement is read, and the order is not arbitrary. A writer
+    publishing a successor between the two reads is the expected case - a registry is written
+    by notebooks and backfills that run at the same time - and reading retirement first pairs a
+    stale retirement set with fresh tips, which is the one combination that admits a member the
+    successor retired. The other order pairs fresh retirement with stale tips, which can only
+    exclude a member that is still published: a later run sees it again, and nothing downstream
+    freezes a generation its publisher has moved past.
     """
-    retired = superseded_members(study, member_kind="prediction")
     names = sorted(
         {
             row[0]
@@ -531,10 +538,11 @@ def current_prediction_populations(
             )
         }
     )
-    populations: dict[str, frozenset[str]] = {}
+    tips: dict[str, OfficialPopulation] = {}
     for name in names:
         population = OfficialPopulation.one(study, name=name)
         if verify_members:
             population.require_complete()
-        populations[name] = frozenset(population.members) - retired
-    return populations
+        tips[name] = population
+    retired = superseded_members(study, member_kind="prediction")
+    return {name: frozenset(tip.members) - retired for name, tip in tips.items()}
