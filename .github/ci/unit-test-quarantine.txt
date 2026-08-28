@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 30 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 32 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -38,12 +38,6 @@ tests/test_darts_temporal.py
 tests/test_deep_learning_adapter.py
 tests/test_deep_learning_state.py
 tests/test_deep_model_state.py
-# Carries a strict=True xfail, which is a tripwire: it is meant to turn into a
-# failure the moment the identity batch lands and the force_retrain fix works.
-# Behind this boundary nothing runs it, so the tripwire cannot fire and the fix
-# would land silently. It does need torch - case_studies/utils/deep_learning.py
-# imports it at module scope (:42) - so the entry is right and the cost is real.
-# Raised by fx_pairs on a push-gate review. Goes away with the torch decision.
 tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
@@ -58,6 +52,7 @@ tests/test_latent_input_identity.py
 tests/test_holdout_evaluation_driver.py
 tests/test_locked_holdout_execution.py
 tests/test_model_analysis_selection.py
+tests/test_model_source_identity_versions.py
 tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
@@ -72,6 +67,7 @@ tests/test_sequence_identity_roundtrip.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_runtime.py
+tests/test_training_identity_migration.py
 
 # ---------------------------------------------------------------------------
 # Executes notebooks through Papermill, against the reader's image and the

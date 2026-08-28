@@ -1785,12 +1785,22 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
-  skip: true
-  skip_reason: "The fixture registry predates the research interface: training_runs carries neither execution_tier nor identity_version, so catalog.py resolves every row to a legacy identity and no prediction set is complete. The declared-population cross-check then reports all 12 declared linear members absent against 0 admissible rows. Lifts when the test-data registry is regenerated on the current schema."
+  parameters:
+    # The fixture publishes its populations under a `-fixture-` prefix rather than the case
+    # study's own names, and it has to: `OfficialPopulation.create` matches on the member list,
+    # so a modelling notebook publishing its own newly-fitted hashes under a name the fixture
+    # had frozen is refused outright. The prefix is what lets the fixture's declarations and a
+    # notebook's own coexist, so the notebook is pointed at the fixture's names here instead.
+    #
+    # Inert until the fixture actually seeds populations: today every seeded registry holds an
+    # empty `official_populations`, so `declared_population_members` takes its "this registry
+    # declares none" branch and never resolves either name. Verified against that state rather
+    # than assumed. Landing it early is the safe order - the reverse, seeding before the names
+    # are here, makes the notebook refuse a family it cannot check.
+    LINEAR_POPULATION: nasdaq100_microstructure-fixture-linear-validation-v1
+    GBM_POPULATION: nasdaq100_microstructure-fixture-gbm-validation-v1
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
-  skip: true
-  skip_reason: "Same fixture registry limitation as 13_model_analysis: with no identity_version column, no prediction set is complete, and the admissibility guard refuses rather than sweep a population that cannot be official. Lifts when the test-data registry is regenerated on the current schema."
   parameters:
     # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
     # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.

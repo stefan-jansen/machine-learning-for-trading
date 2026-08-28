@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import TYPE_CHECKING
 from case_studies.utils.registry.specs import canonical_json, compute_hash
 from case_studies.utils.registry.store import _open_registry, _utc_now
 
+from .contracts import ExecutionTier
 from .results import Result
 
 if TYPE_CHECKING:
@@ -55,40 +57,45 @@ def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     return f"{scope}:{suffix}" if scope else f"{case_study_id}:{suffix}"
 
 
-def _preview_is_active(study: Study | None = None) -> bool:
-    """Whether a preview tier is active, from the one signal that survives the read path.
+def _preview_is_active(study: Study) -> bool:
+    """Whether this study is a preview, asked of the study rather than of the environment.
 
-    `Study.activate` stamps `ML4T_OUTPUT_DIR` with a `.preview` root, and that is the only
-    marker a caller downstream can rely on. **`study.root` is not one.** In a maintainer
-    worktree `features`, `labels` and `run_log` are symlinks into the shared artifact store,
-    which `create_experiment` cannot copy, so `open_study(execution_tier="preview")` takes the
-    read-in-place branch (`workspace.py`) and hands back a study whose `root` *is* the canonical
-    case directory, with only its writes redirected. A preview there reads canonical rows.
+    The tier is a property of how the study was opened, and `Study` holds it. Every earlier
+    version of this read `ML4T_OUTPUT_DIR` instead, which `Study.activate` stamps and never
+    clears, and that answers a different question: "is a preview active anywhere in this
+    process", not "is this study a preview". The two diverge whenever one process holds two
+    studies, and they diverged in both directions.
 
-    That is invisible in CI, where a checkout has no symlinks and the isolated branch runs
-    instead - so a check that passes on a runner and fails on a maintainer's machine is the
-    expected shape of this bug rather than a surprising one.
+    Reading the environment unscoped withheld the declared hash from a canonical study that
+    merely ran second, after any preview had been opened. The notebook then refits everything
+    and dies at registration for naming no predecessor - the expense the declaration exists to
+    prevent. Scoping the read to the study's own output root fixed that and opened the reverse:
+    a canonical study sharing that output root and activating later cleared the `.preview`
+    stamp, so the preview read as canonical and had its run refused.
 
-    The variable is process-global and `activate` never clears it, so "a preview is active"
-    and "*this* study is the preview" are different questions. Pass ``study`` to ask the
-    second. `activate` stamps ``study.output_root / ".preview"``, so a stamp whose parent is
-    some other study's output root says nothing about this one. Without the argument this
-    still answers the first question, which is what `_refuse_preview_activation` wants: a
-    population is written to whichever registry the active tier points at, so any active
-    preview is grounds to refuse the write.
+    Neither reading could reach the third case at all. `open_study` returns an isolated study
+    through `Study.open` when the case study's generated directories are not symlinks, which is
+    every CI checkout and every clean clone, and `Study.open` activated as canonical - so an
+    isolated preview was stamped canonical and `_refuse_preview_activation` never ran on the
+    one path CI exercises. No amount of scoping an environment read reaches that, because the
+    marker it would scope was never written.
+
+    The field is not the whole answer, because `activate` takes a tier per call: every model
+    adapter opens one study and activates whichever tier the run asked for, so a study opened
+    canonical can be writing as a preview right now. The field answers what the study was
+    opened for; the active output root answers what it is writing as. It is a preview if
+    either says so, and the root is compared against this study's own preview directory so a
+    second study's activation cannot answer for this one.
     """
-    import os
-    from pathlib import Path
-
-    active = os.environ.get("ML4T_OUTPUT_DIR")
-    if not active or Path(active).name != ".preview":
-        return False
-    if study is None or study.output_root is None:
+    if study.execution_tier is ExecutionTier.PREVIEW:
         return True
-    return Path(active).parent.resolve() == Path(study.output_root).resolve()
+    active = os.environ.get("ML4T_OUTPUT_DIR")
+    if not active or study.output_root is None:
+        return False
+    return Path(active).resolve() == (Path(study.output_root) / ".preview").resolve()
 
 
-def _refuse_preview_activation() -> None:
+def _refuse_preview_activation(study: Study) -> None:
     """A population is written to the canonical registry whatever tier is active.
 
     That is correct - a population is canonical by definition - but it means a preview run that
@@ -100,7 +107,7 @@ def _refuse_preview_activation() -> None:
 
     Callers guard this too. This is the guard that does not depend on remembering.
     """
-    if _preview_is_active():
+    if _preview_is_active(study):
         raise ValueError(
             "a preview run cannot create an official population: it would be written to the "
             "canonical registry"
@@ -127,7 +134,7 @@ class OfficialPopulation:
         supersedes: str | None = None,
     ) -> OfficialPopulation:
         study.require_writable()
-        _refuse_preview_activation()
+        _refuse_preview_activation(study)
         if member_kind not in {"training", "prediction", "backtest"}:
             raise ValueError("official population member_kind is not supported")
         normalized = tuple(dict.fromkeys(str(member) for member in members))
@@ -459,6 +466,20 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
             rows.append(row)
         for population_hash, member_hashes in root_members.items():
             members.setdefault(population_hash, set()).update(member_hashes)
+    return _retired(rows, members)
+
+
+def _retired(
+    rows: list[tuple[str, str, str | None]], members: dict[str, set[str]]
+) -> frozenset[str]:
+    """Reduce one or more registries' lineage to the members their publishers have moved past.
+
+    Split out from :func:`superseded_members` so the root-based caller reaches the same
+    reduction rather than a second copy of it. The per-name, member-wise comparison below is
+    the part that is easy to restate wrongly - the module docstring above says why the global
+    form and the whole-generation form both look equivalent and are not - so there is exactly
+    one implementation of it.
+    """
     if not any(row[2] is not None for row in rows):
         return frozenset()
 
@@ -481,3 +502,43 @@ def superseded_members(study: Study, *, member_kind: str = "prediction") -> froz
         for population_hash in superseded:
             retired |= members.get(population_hash, set()) - in_force
     return frozenset(retired)
+
+
+def published_population_names_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str]:
+    """Every population name this registry has ever published, in force or superseded.
+
+    The question a reader needs before it can interpret a name that will not resolve. An empty
+    answer means the registry does not declare populations at all - a fixture, or a registry
+    written before the mechanism existed - and a comparison there rests on catalog
+    admissibility, which is a weaker claim but a statable one. A non-empty answer means the
+    registry does declare them, and a name that resolves to nothing in *that* registry is a
+    broken lineage rather than an absent mechanism.
+
+    Answering both with "the name did not resolve" is what makes the two indistinguishable, and
+    they call for opposite responses: proceed and say so, or refuse.
+    """
+    rows, _ = _lineage(Path(case_dir), member_kind)
+    return frozenset(name for _, name, _ in rows)
+
+
+def superseded_members_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str]:
+    """:func:`superseded_members` for a case directory the caller has already resolved.
+
+    A downstream notebook that read its rows through ``prediction_rows_at`` has deliberately
+    not opened a ``Study``: every ``Study.open`` branch ends in ``activate()``, which re-points
+    the rest of the notebook at whichever registry the activation selected. Asking the lineage
+    question through a ``Study`` here would reintroduce exactly that, and would answer for a
+    different registry than the rows being filtered - so the retired set and the catalog would
+    disagree by construction and the join would be meaningless.
+
+    One root, because the caller named it. :func:`superseded_members` unions the release and
+    workspace roots because a ``Study`` legitimately overlays both and a hash superseded in
+    either is superseded; a caller who resolved a single directory is asking about that
+    directory's registry, which is the same one ``prediction_rows_at`` reads.
+    """
+    rows, members = _lineage(Path(case_dir), member_kind)
+    return _retired(rows, members)
