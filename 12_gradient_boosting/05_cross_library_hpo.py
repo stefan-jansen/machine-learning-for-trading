@@ -531,10 +531,14 @@ loss_comparison_df
 
 # %% [markdown]
 # A library appears below only when its study completed a trial under each loss,
-# which a short search need not do: the sampler can spend every trial on one of
-# the two. The comparison is between the best MSE configuration and the best MAE
-# configuration of the same library, both scored on the held-out 2000–2016 window,
-# so the bars differ in the loss and in nothing else.
+# which a short search need not do: the sampler can spend every trial on one of the
+# two. Each bar is the best configuration the search found *conditional on* that
+# loss, scored on the held-out 2000-2016 window. The two therefore differ in depth,
+# learning rate and regularization as well as in the loss, and the sampler did not
+# spend equal effort on each - the loss distribution printed further down says how
+# unequal. So the gap is the difference between the best the search reached under
+# each loss, which is the practical question, and not the isolated effect of the
+# loss function on an otherwise matched model.
 
 # %%
 if loss_comparison_df.is_empty():
@@ -694,7 +698,7 @@ ax.axvline(N_WARMUP_TRIALS, linestyle="--", color="gray", linewidth=0.8, label="
 ax.set_xlabel("Trial number")
 ax.set_ylabel("Best validation IC so far")
 ax.legend()
-ax.set_title("Every library keeps improving well past the TPE warm-up")
+ax.set_title("Best validation IC so far, by trial, against the TPE warm-up")
 plt.tight_layout()
 show_with_alt(
     fig,
@@ -702,7 +706,12 @@ show_with_alt(
     "line per library, with a dashed vertical line at the end of the TPE warm-up.",
 )
 earliest_late_best = min(best_trials.values())
-print(f"The earliest any library found its best configuration was trial {earliest_late_best}.")
+_late = sum(1 for t in best_trials.values() if t > N_WARMUP_TRIALS)
+print(
+    f"{_late} of {len(best_trials)} libraries found their best configuration after the "
+    f"{N_WARMUP_TRIALS}-trial warm-up; the earliest any of them found it was trial "
+    f"{earliest_late_best}."
+)
 
 # %%
 best_overall = results_df.row(0, named=True)
