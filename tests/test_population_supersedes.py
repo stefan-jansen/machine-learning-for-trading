@@ -24,8 +24,11 @@ from case_studies.research import (
     superseded_members_at,
 )
 from case_studies.research import population as population_module
-from case_studies.research.workspace import Study
+from case_studies.research.contracts import ExecutionTier
+from case_studies.research.workspace import Study, open_study
 from tests.test_research_workspace import _seed_release
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 MEMBERS_ONE = ("aaaa11112222", "bbbb11112222")
 MEMBERS_TWO = ("cccc33334444", "dddd33334444")
@@ -299,58 +302,146 @@ class TestWhatALaterGenerationRetires:
         assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
 
 
+def _symlinked_worktree(tmp_path: Path, published: Study) -> Path:
+    """A maintainer worktree's layout, built rather than described.
+
+    `features`, `labels` and `run_log` are symlinks into the shared artifact store, which
+    `create_experiment` cannot copy - so `open_study(execution_tier="preview")` takes the
+    read-in-place branch and hands back a study whose `root` *is* the canonical case
+    directory, with only its writes redirected. That is the layout where a preview reads
+    canonical rows, and pointing a preview at a hand-made isolated root would pass whether
+    or not the guard existed.
+    """
+    release_root = tmp_path / "worktree"
+    case_dir = release_root / "case_studies" / "etfs"
+    case_dir.mkdir(parents=True)
+    (release_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "etfs" / "config", target_is_directory=True
+    )
+    for generated in ("features", "labels", "run_log"):
+        target = published.root / generated
+        target.mkdir(exist_ok=True)
+        (case_dir / generated).symlink_to(target, target_is_directory=True)
+    return release_root
+
+
 class TestThePreviewTier:
     """A preview never creates an official population, so it never supersedes one.
 
-    This has to be decided from the tier rather than from what the registry holds, because in a
-    maintainer worktree the registry a preview reads *is* the canonical one. `features`,
-    `labels` and `run_log` are symlinks into the shared artifact store, which `create_experiment`
-    cannot copy, so `open_study(execution_tier="preview")` takes the read-in-place branch and
-    returns a study whose `root` is the canonical case directory with only its writes redirected.
-
-    Asking the registry first then returns a real generation, the hash is offered, and
-    `run_model_population` refuses the whole run - "preview populations cannot supersede a
-    snapshot" - before the first fit. A CI checkout has no symlinks and never takes that branch,
-    so this fails only on a maintainer's machine.
+    The tier is asked of the study, which holds it, rather than of `ML4T_OUTPUT_DIR`. These
+    tests therefore open real preview studies: a monkeypatched environment variable would be
+    asserting against a signal the code no longer reads, which is how the previous version of
+    two of these agreed with itself while describing nothing.
     """
 
-    def test_a_preview_is_never_offered_the_hash(
-        self, study: Study, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_preview_is_never_offered_the_hash(self, study: Study, tmp_path: Path) -> None:
+        """The maintainer branch, where the registry a preview reads is the canonical one.
+
+        The lookup cannot be what withholds the hash here - it succeeds. Only the tier can.
+        """
         first = _publish(study, MEMBERS_ONE)
         # Canonical resolves it, which is what makes the preview answer a decision rather than
         # an absence: the same registry, the same name, the same declaration.
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
-        # The value `Study.activate` writes, not merely some path ending in `.preview`: the
-        # guard asks whether the stamp belongs to *this* study, so a hand-made path that no
-        # activation would produce tests a signal the code never sees.
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.output_root / ".preview"))
-        assert population_supersedes(study, name=first.name, declared=first.hash) is None
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
+        )
+        # The premise. If `open_study` ever gives a symlinked preview its own root, this stops
+        # describing the situation being guarded against and must be revisited, not deleted.
+        assert (preview.root / "run_log").is_symlink()
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
 
-    def test_another_study_s_preview_does_not_withhold_from_this_one(
-        self, study: Study, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_an_isolated_preview_is_refused_too(self, tmp_path: Path) -> None:
+        """The CI branch, which no environment-based guard could ever reach.
+
+        When the generated directories are not symlinks - every CI checkout and every clean
+        clone - `open_study` returns an isolated study through `Study.open`, which activated
+        as canonical. So an isolated preview was *stamped canonical* and the refusal never ran
+        on the one path CI exercises. A test asserting the refusal passed on a maintainer's
+        machine and would have passed in CI only because CI never tried.
+        """
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "isolated",
+            release_root=_seed_release(tmp_path),
+        )
+        assert not (preview.root / "run_log").is_symlink()
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(preview, MEMBERS_ONE)
+
+    def test_a_canonical_study_opened_alongside_a_preview_still_resolves(
+        self, study: Study, tmp_path: Path
     ) -> None:
-        """`ML4T_OUTPUT_DIR` is process-global and `activate` never clears it.
+        """One process, two studies - the case the environment could never answer.
 
-        So "a preview is active somewhere in this process" and "this study is that preview"
-        are different questions, and answering the first withholds the hash from a canonical
-        study that merely ran second. A notebook runs one tier and never notices; any process
-        that opens both - a test module, a backfill over several case studies - gets a
-        canonical declaration silently withheld and the run dies at `create` for naming no
-        predecessor, after paying for every fit.
+        `ML4T_OUTPUT_DIR` is process-global and `activate` never clears it, so reading it
+        answered "is a preview active anywhere" and got this backwards in both directions:
+        unscoped it withheld from every canonical study that merely ran second, and scoped to
+        an output root it let a later canonical activation clear a live preview's stamp. The
+        study holds its own tier, so the order they are opened in stops mattering.
         """
         first = _publish(study, MEMBERS_ONE)
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path / "elsewhere" / ".preview"))
+        # The symlinked preview deliberately, not an isolated one. An isolated preview's
+        # registry is empty, so `None` comes back whether or not the tier was consulted - the
+        # assertion would hold against the very defect it is meant to catch. This preview reads
+        # the canonical registry, so the lookup would succeed and only the tier can withhold.
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
+        )
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+        # And after the canonical study activates, which is the order that broke the scoped
+        # environment read: its stamp replaced the preview's, so the preview read as canonical.
+        study.activate()
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+    def test_a_study_that_activates_preview_per_run_is_a_preview_while_it_does(
+        self, study: Study
+    ) -> None:
+        """The tier is per activation, not only per open, and both readings must hold.
+
+        `linear`, `gbm`, `tabular_dl`, `deep_learning`, `latent_factors` and `causal` all open
+        one study and then call `study.activate(tier)` with whichever tier the run asked for.
+        Those studies are opened canonical, so a guard reading only the field would say
+        canonical while the run writes into `.preview` - and the population would land in the
+        shared registry, which is the failure this guard exists for.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+        study.activate("preview")
+        assert study.execution_tier is ExecutionTier.CANONICAL
+        assert population_supersedes(study, name=first.name, declared=first.hash) is None
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(study, MEMBERS_TWO)
+
+        study.activate("canonical")
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
     def test_the_refusal_to_create_reads_the_same_signal(
-        self, study: Study, monkeypatch: pytest.MonkeyPatch
+        self, study: Study, tmp_path: Path
     ) -> None:
         """One derivation for both, so they cannot drift into disagreeing about the tier."""
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
+        )
         with pytest.raises(ValueError, match="preview run cannot create an official population"):
-            _publish(study, MEMBERS_TWO)
+            _publish(preview, MEMBERS_TWO)
 
 
 class TestWhenTheRegistryReadItselfFails:
