@@ -91,7 +91,7 @@ from case_studies.utils.factor_attribution import (
     run_factor_regression,
 )
 from case_studies.utils.notebook_contracts import excluded_families, strategy_input_counts
-from case_studies.utils.paired_metrics import populate_paired_metrics
+from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
@@ -109,6 +109,7 @@ from case_studies.utils.strategy_analysis import (
     plot_sharpe_waterfall,
     write_strategy_assessment,
 )
+from case_studies.utils.sweep_config import get_universe_filters_for
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -162,17 +163,34 @@ if _n_backtests == 0:
         "register and computes no backtests of its own."
     )
 
-if _n_cohorts == 0 or _n_pairs == 0:
-    _counts = compute_and_register(CASE_STUDY)
-    _pairs = populate_paired_metrics(CASE_STUDY, explorer)
+# Both producers need this case study's canonical selection, and passing neither is not a
+# smaller version of passing both - it is a different selection. `setup.yaml` says the
+# full-universe variant "is NOT a canonical rank-1 / cohort / DSR candidate" and lives only in
+# the 16_costs comparison, so a cohort computed without the filter mixes rows the case study
+# excludes by declaration into the leaders, trial counts, DSR and PBO. The filter is read from
+# `setup.yaml` rather than written here, so it cannot disagree with the sweep that produced the
+# runs. The rung pin is the matching statement for paired metrics: nasdaq's carrier is the
+# cost-feasible ensemble, fixed before the holdout was opened.
+_UNIVERSE_FILTER = get_universe_filters_for(CASE_STUDY)[0]
+_RUNG = rung_for(CASE_STUDY)
+
+# The two tables are filled independently. A single `if either is empty` guard recomputed both,
+# and `compute_and_register` writes with `replace_all=True` - so a registry with correct cohorts
+# and an empty paired table would have had its cohorts replaced as a side effect of populating
+# the pairs.
+if _n_cohorts == 0:
+    _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
     _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
-    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
-    print(f"populated: cohort_metrics {_n_cohorts} rows, backtest_paired_metrics {_n_pairs} pairs")
+    print(f"populated cohort_metrics: {_n_cohorts} rows")
 else:
-    print(
-        f"already populated: cohort_metrics {_n_cohorts} rows, "
-        f"backtest_paired_metrics {_n_pairs} pairs"
-    )
+    print(f"already populated: cohort_metrics {_n_cohorts} rows")
+
+if _n_pairs == 0:
+    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG)
+    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
+    print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
+else:
+    print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
 
 
 def _fmt_ci(point: float | None, lo: float | None, hi: float | None, fmt: str = ".3f") -> str:

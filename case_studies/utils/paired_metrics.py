@@ -92,6 +92,57 @@ def _joint_coerce(c_arr, b_arr):
     return c[start:], b[start:]
 
 
+# The two case studies whose canonical strategy is pinned to one rung of a cascade, mirroring
+# `20_strategy_synthesis/01_aggregate_synthesis.py::_CLUSTER_RUNG_RESTRICTIONS`. Held here as
+# well because a case study's own strategy-analysis notebook has to make the same selection
+# without importing a chapter, and `tests/test_rung_pins_match_chapter_20.py` fails if the two
+# definitions drift.
+#
+# sp500_options: rung-1 (mid-to-mid bps) and rung-2 (full-universe HTM) both carry
+# `universe_filter="full"`, so filtering on the universe alone leaves `ORDER BY sharpe DESC
+# LIMIT 1` free to pick whichever rung is higher in current data. The pin combines the universe
+# with `exit_at_max_days` so the rank-1 row is deterministic and HTM-coherent.
+#
+# nasdaq100_microstructure: the cost-feasible ensemble, chosen before the holdout was opened and
+# matched on those two design attributes, which any registry can satisfy.
+RUNG_PINS: dict[str, dict] = {
+    "sp500_options": {
+        "predicate": (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null(),
+        "universe_filter": "liquid",
+        "exit_at_max_days": None,
+    },
+    "nasdaq100_microstructure": {
+        "predicate": (pl.col("universe_filter") == "cost_feasible")
+        & (pl.col("family") == "ensemble"),
+        "universe_filter": "cost_feasible",
+        "exit_at_max_days": None,
+    },
+}
+
+
+def rung_for(cs: str) -> dict | None:
+    """The rung this case study is pinned to, or None where it is not pinned."""
+    return RUNG_PINS.get(cs)
+
+
+def _best_for_rung(
+    explorer: BacktestExplorer, stage: str, rung: dict | None, top_n: int = 2000
+) -> pl.DataFrame:
+    """``explorer.best`` for a stage, fetching enough rows that the pin survives.
+
+    ``best()`` reads ``universe_filter`` out of ``spec_json`` in Python, *after* the SQL
+    ``LIMIT top_n``, and ``_apply_rung_restriction`` runs after that. For nasdaq the pinned
+    cost-feasible carrier sits below the full-universe in-sample maxima, so a small ``top_n``
+    truncates it before the predicate is ever applied and the pin silently selects nothing -
+    or, worse, the best surviving row that was never the carrier.
+
+    Ch20 solves this with the same widening (`_best_pinned`); the extraction into this module
+    dropped it, which is why every pinned selection here has to go through this helper rather
+    than call ``explorer.best`` directly.
+    """
+    return explorer.best(stage=stage, top_n=1_000_000 if rung is not None else top_n)
+
+
 def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame:
     """Filter ``df`` to the case study's pinned rung, if one is configured.
 
@@ -307,7 +358,7 @@ def _val_rank1_full_spec(
     under the case study's label / rung restrictions.
     """
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_for_rung(explorer, s, rung) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -690,7 +741,7 @@ def populate_paired_metrics(
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     skip_pair1 = False
@@ -765,7 +816,7 @@ def populate_paired_metrics(
 
     # -- Pairs #2-6: holdout + stage transitions -----------------------------
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
