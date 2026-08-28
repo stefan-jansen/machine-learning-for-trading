@@ -74,6 +74,7 @@ from scipy.optimize import minimize
 from statsmodels.tsa.arima.model import ARIMA
 from threadpoolctl import threadpool_limits
 
+from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.cv_window import assert_variant_folds_are_out_of_sample
 from case_studies.utils.temporal import filtered_state_probs, sort_states_by_variance
@@ -378,31 +379,52 @@ if MAX_FOLDS:
 # `mds.splits` and produces no feature rows, so a stage that called it against this artifact
 # found no rows in the holdout window at any fold.
 #
-# The geometry is that helper's, so the two describe one fold: id `len(folds)`, training from
-# the earliest training start any validation fold uses through the boundary, validating across
-# the holdout. `min` over the folds, not `folds[0]`: these folds run newest first, so fold 0
-# carries the latest training start and indexing the list would silently discard six years.
-# No session falls on the boundary date itself, which the assertion below states rather than
-# assumes, so the inclusive `train_end` the helper defines admits no holdout-dated session to
-# the fit.
+# Its geometry is not written here. `build_holdout_cv` is what reconstructs a holdout fit
+# downstream, so it is asked for the boundaries rather than having them re-derived to match:
+# a second construction is a second thing to keep in step, and its own comment records that
+# this seal has already been built three times and must agree across all of them.
+#
+# The boundary that matters is `train_end`. It is not the date the holdout opens but one
+# label buffer before it, counted in observations along this panel's own dates. That gap is
+# what stops the last training label's outcome window from resolving inside the holdout, and
+# a fold trained through the boundary would leak the period it is meant to be judged against.
+# `append_holdout_fold_if_needed` sets `train_end` to the boundary itself, unbuffered, so it
+# is not the definition to copy.
 VALIDATION_FOLD_IDS = {f["fold"] for f in folds}
-HOLDOUT_FOLD_ID = len(folds)
+_derived_holdout_cv = build_holdout_cv(
+    {"label": PRIMARY_LABEL, "computation": {"cv": {"folds": folds}}},
+    case_study=CASE_STUDY_ID,
+    timeline=label_frame.select("timestamp").unique().sort("timestamp").to_series().to_list(),
+    label=PRIMARY_LABEL,
+)
+_derived_fold = _derived_holdout_cv["folds"][0]
 holdout_fold = {
-    "fold": HOLDOUT_FOLD_ID,
-    "train_start": min(f["train_start"] for f in folds),
-    "train_end": HOLDOUT_START,
-    "val_start": HOLDOUT_START,
-    "val_end": HOLDOUT_END,
+    "fold": int(_derived_fold["fold"]),
+    **{
+        name: pd.Timestamp(_derived_fold[name]).date()
+        for name in ("train_start", "train_end", "val_start", "val_end")
+    },
 }
+HOLDOUT_FOLD_ID = holdout_fold["fold"]
 holdout_fold["n_train"] = sum(
     holdout_fold["train_start"] <= d <= holdout_fold["train_end"] for d in all_dates
 )
 holdout_fold["n_val"] = sum(
     holdout_fold["val_start"] <= d <= holdout_fold["val_end"] for d in all_dates
 )
-assert not any(d == HOLDOUT_START for d in all_dates), (
-    "a session falls on the holdout boundary itself, so the inclusive train_end would "
-    "carry it into the holdout fit"
+assert holdout_fold["train_end"] < HOLDOUT_START, (
+    "the holdout fold trains through the boundary, so the last training label resolves "
+    "inside the window it is meant to be judged against"
+)
+assert (holdout_fold["val_start"], holdout_fold["val_end"]) == (HOLDOUT_START, HOLDOUT_END), (
+    "the derived holdout interval is not the one setup.yaml declares"
+)
+print(
+    f"Holdout fold {HOLDOUT_FOLD_ID}: trains {holdout_fold['train_start']} to "
+    f"{holdout_fold['train_end']}, a "
+    f"{_derived_holdout_cv['request']['label_buffer_steps']}-observation "
+    f"{_derived_holdout_cv['request']['label_buffer']} buffer before the holdout opens "
+    f"{HOLDOUT_START}"
 )
 folds.append(holdout_fold)
 
@@ -513,10 +535,12 @@ print(
 # recursion runs forward across the amber one.
 #
 # The validation bars all stop to the left of the rule. The last row is the holdout fold,
-# whose training bar ends on the rule and whose validation bar is the shaded region itself:
-# fitted only on sessions before the boundary, then run forward across the holdout. It is
-# written here because features are what a holdout fit needs, and
-# `append_holdout_fold_if_needed` (`utils/modeling.py`) supplies only the split definition.
+# whose validation bar is the shaded region itself and whose training bar stops short of
+# the rule by one label buffer, so the last label it trains on resolves before the holdout
+# opens rather than inside it. Those boundaries come from `build_holdout_cv`, the same
+# derivation that reconstructs the fit downstream. It is written here because features are
+# what a holdout fit needs, and `append_holdout_fold_if_needed` supplies only a split
+# definition - and an unbuffered one, which is why its geometry is not the one copied.
 #
 # The gap printed above separates each training bar from its validation bar. At one
 # session against a fifteen-year axis it is narrower than a pixel here, so it is a number
@@ -1738,6 +1762,23 @@ record = write_artifact(
     inputs={
         "load_fx_pairs:4h": value_digest(prices),
         f"labels:{PRIMARY_LABEL}": value_digest(label_frame),
+    },
+    # The fold set, stated rather than left to be inferred. A reader that finds no
+    # `fold_geometry` here regenerates the folds by calling `generate_cv_splits`, which
+    # returns the cross-validation folds alone - so the holdout fold would be in the parquet
+    # and invisible to every consumer of it. The frame says which fold ids exist and never
+    # says what their boundaries were.
+    metadata={
+        "fold_geometry": [
+            {
+                "fold": f["fold"],
+                "train_start": f["train_start"],
+                "train_end": f["train_end"],
+                "val_start": f["val_start"],
+                "val_end": f["val_end"],
+            }
+            for f in folds
+        ]
     },
 )
 print(f"Saved: {output_path.relative_to(CASE_DIR)}")
