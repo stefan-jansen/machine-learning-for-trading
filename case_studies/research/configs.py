@@ -20,7 +20,6 @@ import yaml
 
 from case_studies.utils.registry.specs import training_hash_from_spec
 from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
 
 from .contracts import ExecutionTier
 from .model_planning import ModelPlan
@@ -38,7 +37,7 @@ def _format_params(params: dict | None) -> str:
 
 
 def _setup_labels(study: Study) -> dict:
-    setup_path = get_case_study_dir(study.case_study) / "config" / "setup.yaml"
+    setup_path = study.root / "config" / "setup.yaml"
     return (yaml.safe_load(setup_path.read_text()) or {}).get("labels") or {}
 
 
@@ -84,7 +83,7 @@ def declared_labels(study: Study, family: str) -> tuple[str, ...]:
     ``supersedes``. A sweep label whose menu does not declare ``family`` is skipped rather than
     raising - not every label declares every family.
     """
-    menu_dir = get_case_study_dir(study.case_study) / "config" / "training"
+    menu_dir = study.root / "config" / "training"
     if not menu_dir.is_dir():
         raise FileNotFoundError(f"{study.case_study} has no training menus: {menu_dir}")
     in_sweep = set(sweep_labels(study))
@@ -136,7 +135,7 @@ def load_model_configs(
     rows: list[dict] = []
     declared: set[str] = set()
     for label in requested:
-        for config in load_configs(study.case_study, label, family):
+        for config in load_configs(study.case_study, label, family, case_dir=study.root):
             name = str(config["config_name"])
             declared.add(name)
             if selected is not None and name not in selected:

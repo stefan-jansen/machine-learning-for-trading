@@ -23,6 +23,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -32,6 +34,7 @@ sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 from sanitize_notebook_paths import (  # noqa: E402
     BINARY_MIME,
     _iter_notebooks,
+    iter_committed_notebooks,
     sanitize_notebook,
     sanitize_text,
 )
@@ -55,7 +58,7 @@ def test_no_machine_specific_paths_in_committed_notebooks() -> None:
     not the same as there being nothing to fix.
     """
     offenders: list[str] = []
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         raw = nb.read_text(encoding="utf-8")
         _, n, skipped = sanitize_notebook(raw)
         if n or skipped:
@@ -239,7 +242,7 @@ def test_the_sanitizer_leaves_an_image_payload_alone_when_it_encodes_tmp() -> No
 def test_no_committed_notebook_carries_an_image_that_stopped_decoding() -> None:
     """The damage the rule above caused is detectable, so it is checked for."""
     broken: list[str] = []
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         parsed = json.loads(nb.read_text(encoding="utf-8"))
         for index, cell in enumerate(parsed.get("cells", [])):
             for output in cell.get("outputs", []):
@@ -267,7 +270,7 @@ KNOWN_DESYNCED: frozenset[str] = frozenset()
 def _empty_tag_offenders() -> dict[str, int]:
     """{relative path: count} for notebooks whose paired .py lacks the empty tags."""
     out: dict[str, int] = {}
-    for nb in _iter_notebooks():
+    for nb in iter_committed_notebooks():
         if paired_py_has_fossil(nb):
             continue  # pair agrees; stripping one side is what would break it
         _, n = strip_text(nb.read_text(encoding="utf-8"))
@@ -331,7 +334,7 @@ def _unrenderable_plotly_offenders() -> dict[str, int]:
     that carries neither an `image/png` nor a `text/html` sibling to fall back on.
     """
     out: dict[str, int] = {}
-    for nb_path in _iter_notebooks():
+    for nb_path in iter_committed_notebooks():
         nb = json.loads(nb_path.read_text(encoding="utf-8"))
         count = 0
         for cell in nb.get("cells", []):
@@ -405,3 +408,52 @@ def test_a_gitignored_staging_notebook_is_out_of_scope(tmp_path, monkeypatch) ->
     found = {p.name for p in sut._iter_notebooks()}
 
     assert found == {"16_new_notebook.ipynb"}
+
+
+def test_an_untracked_notebook_is_not_committed_content() -> None:
+    """The four gates above say "committed", so an untracked file must not reach them.
+
+    They used to walk the working tree, which meant a scratch or preserved copy in one
+    worktree failed a gate that CI - checking out only what git tracks - could never fail on
+    the same file. The author then sees a failure nobody else can reproduce, on a file the
+    gate has no business reading. Measured 2026-08-25 on `cs6/cme_futures`, where leftovers
+    under `.workspace/preserved/` failed the empty-tag gate while `test-unit` was green on the
+    same commit.
+
+    The fixture is written with `indent=1`, which is nbformat's own layout and the only one
+    that reproduces the defect: every pattern in `strip_empty_cell_tags.PATTERNS` requires a
+    newline after the tag entry, so a one-line `json.dumps` carries the fossil in form and
+    counts zero, and a test built on it would pass whatever the gate's scope was.
+
+    The first assertion is what makes the rest mean something: it fails if the working-tree
+    scan stops seeing the file, and the third fails if the tracked-only restriction is
+    reverted. The fixing script keeps the wider view on purpose - an untracked notebook is
+    exactly the one a user wants sanitized before adding it.
+    """
+    scratch = REPO_ROOT / f".pytest-untracked-notebook-{os.getpid()}"
+    scratch.mkdir(exist_ok=True)
+    notebook = scratch / "untracked.ipynb"
+    notebook.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {"cell_type": "code", "metadata": {"tags": []}, "source": [], "outputs": []}
+                ],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            },
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    try:
+        relative = str(notebook.relative_to(REPO_ROOT))
+        assert strip_text(notebook.read_text(encoding="utf-8"))[1] == 1, (
+            "the fixture must actually carry the fossil, or the assertions below are vacuous"
+        )
+        assert notebook in _iter_notebooks(), "the fixing script must still see it"
+        assert notebook not in iter_committed_notebooks()
+        assert relative not in _empty_tag_offenders()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)

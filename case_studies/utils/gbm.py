@@ -1643,7 +1643,7 @@ def _load_gbm_request_config(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from utils.modeling import load_configs
 
-    configs = load_configs(study.case_study, label, family="gbm")
+    configs = load_configs(study.case_study, label, family="gbm", case_dir=study.root)
     matches = [config for config in configs if config["config_name"] == config_name]
     if len(matches) != 1:
         raise ValueError(f"unknown GBM config {config_name!r}")
