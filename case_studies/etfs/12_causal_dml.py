@@ -101,7 +101,10 @@ N_PLACEBO = 0
 # WORKSPACE is the other half: a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-SUPERSEDES_CAUSAL: str = ""
+# The identity this run retires: the estimate fitted with a placebo block sized by the label
+# buffer, before the block was sized by the treatment window. Empty on a clean clone, which has
+# nothing to retire; the registry names the hash in the error it raises when there is.
+SUPERSEDES_CAUSAL: str = "c4abd6b2f6ff"
 
 # %% [markdown]
 # ## 1. Declaring the request
@@ -187,7 +190,7 @@ print(f"Last admissible decision date: {estimand['holdout_endpoint_cutoff'][:10]
 print(f"Identity:    {resolved.identity}")
 
 # %%
-pl.DataFrame(
+_settled = pl.DataFrame(
     {
         "field": [
             "cross_fitting_folds",
@@ -196,6 +199,9 @@ pl.DataFrame(
             "observation_cadence",
             "placebo_method",
             "placebo_block_size",
+            "placebo_block_basis",
+            "label_buffer_steps",
+            "treatment_window_steps",
             "placebo_draws",
             "analysis_rows",
             "analysis_timestamps",
@@ -208,6 +214,9 @@ pl.DataFrame(
             computation["refutation"]["observation_cadence"],
             computation["refutation"]["method"],
             str(computation["refutation"]["block_size"]),
+            computation["refutation"]["block_size_basis"],
+            str(computation["refutation"]["label_buffer_steps"]),
+            str(computation["refutation"]["treatment_window_steps"]),
             str(computation["refutation"]["n_placebo"]),
             f"{computation['analysis_population']['n_rows']:,}",
             f"{computation['analysis_population']['n_timestamps']:,}",
@@ -215,19 +224,41 @@ pl.DataFrame(
         ],
     }
 )
+# Every row and every value in full. Polars elides the middle of a frame longer than ten rows -
+# which is where the block size and the scale that set it fall - and truncates a value wider than
+# the default, which is where the placebo method's name falls.
+with pl.Config(tbl_rows=_settled.height, fmt_str_lengths=60):
+    print(_settled)
 
 # %% [markdown]
-# ### What the block size does and does not cover
+# ### What the block size has to cover
 #
-# `placebo_block_size` above is the outcome horizon in observations. The 21-day forward return
-# overlaps: consecutive rows share twenty of their twenty-one days, and permuting in blocks that
-# long is what keeps that overlap intact under the null.
+# A block permutation preserves serial dependence for as long as its blocks span, and there are two
+# sources of that dependence here. The labels overlap: consecutive rows of a 21-day forward return
+# share twenty of their twenty-one days, which is what `label_buffer_steps` measures. The treatment
+# overlaps too, and by much more: `skip_recent_6_1` is `close.shift(21) / close.shift(126) - 1`, so
+# the oldest price it reads is 126 sessions back and two of its values a month apart are far from
+# independent.
 #
-# It is **not** the treatment's own construction window. `skip_recent_6_1` is built from roughly
-# 126 sessions of history, so two of its values a month apart are far from independent, and a block
-# shorter than that window breaks a serial dependence the permutation was meant to preserve. A null
-# built from blocks that are too short is too tight, which makes the empirical p-value read as more
-# refutation than it is. Section 4 reads the two diagnostics against each other with that in mind.
+# The block spans the longer of the two, and `placebo_block_basis` names which one bound it. That
+# field is not decoration: at the same block size the two bases mean different things about what
+# the null preserved, and a reader who has only the number cannot tell them apart.
+#
+# **A block long enough to span the treatment window cannot move every row.** A fund whose history
+# has a gap shorter than two blocks has nowhere to permute to, so those rows are held at their
+# observed values and contribute no variation to the null. That makes the placebo distribution
+# narrower than it would otherwise be in a direction that is *conservative* - the p-value is biased
+# toward 1, not toward 0 - and the run warns with the frozen share whenever it is nonzero. It is the
+# price of the longer block, and it is the right way round: a refutation that under-rejects is a
+# weaker claim, not a false one.
+#
+# **An earlier registered estimate for this label used the shorter of the two.** It permuted the
+# treatment in blocks of 21 observations against a construction window of 126, which is close to an
+# independent shuffle of a column whose values are anything but. That narrows the placebo
+# distribution, so its empirical p-value read as more refutation than the evidence supported. The
+# row is retired rather than corrected - the fit was valid for the block it declared, and the block
+# was the wrong one - and `SUPERSEDES_CAUSAL` above names it. Section 4 reads the current
+# diagnostics knowing the previous ones were measured against a null that was too tight.
 
 # %% [markdown]
 # ## 3. Estimating and registering
@@ -382,20 +413,19 @@ show_plotly_with_alt(
 # %% [markdown]
 # ## 5. What to notice
 #
-# **The two diagnostics do not have to agree, and when they disagree the wider one wins.** The
-# Driscoll-Kraay p-value and the block-permutation p-value are answers to the same question built
-# on different assumptions about what dependence the data carry. The covariance estimator corrects
-# for cross-sectional correlation on a date and serial correlation within a fund; the permutation
-# reproduces only what its blocks are long enough to hold. Section 2 established that the blocks
-# span the outcome horizon and not the treatment's six-month construction window, so the
-# permutation is holding less dependence than the covariance estimator corrects for. Its placebo
-# distribution is therefore too narrow and its p-value too small. **The conservative reading is the
-# one to report.**
+# **The two diagnostics answer the same question under different assumptions, and both now hold
+# the same dependence.** The Driscoll-Kraay standard error allows residuals to be correlated across
+# funds on a date and over time within a fund; the block permutation reproduces whatever its blocks
+# are long enough to span. Section 2's table names which scale bound the block, and it is the
+# treatment's construction window rather than the label horizon - the longer of the two. Where an
+# earlier estimate for this label used the shorter, its placebo distribution was too narrow and its
+# permutation p-value too small, so the two diagnostics were not comparable and the covariance
+# estimator was the only one worth quoting. They are comparable here.
 #
-# **A sign that flips under adjustment is evidence against a directional reading, not for one.**
-# When the naive and adjusted estimates sit on opposite sides of zero and both are small relative
-# to the standard error, what that says is that the data do not locate the effect - not that
-# orthogonalization revealed a hidden positive one.
+# **A small estimate relative to its standard error says the data do not locate the effect.** Read
+# the two raw effects in the table rather than the bias percentage: adjustment moves the estimate,
+# and how far it moved is informative, but neither the direction nor the size means anything while
+# the interval covers zero.
 #
 # **The causal row is not a model candidate and cannot become one.** It carries no prediction set,
 # it enters no population, and [`14_backtest`](14_backtest.ipynb) never sees it.
@@ -407,9 +437,9 @@ show_plotly_with_alt(
 # **Known limitations.** The three identifying assumptions above are untestable and the refutation
 # does not address them. The confounder set is declared rather than discovered, so an unobserved
 # driver of both momentum and returns would sit inside the estimate with nothing here to reveal it.
-# The macro confounders are finalized rather than point-in-time. And the placebo block is the
-# outcome horizon rather than the treatment's construction window, which is the specific reason the
-# permutation p-value above is not the number to quote.
+# The macro confounders are finalized rather than point-in-time. And the block permutation
+# preserves dependence at the scale its blocks span and no finer, so it is evidence about serial
+# structure rather than about whether the confounder set is complete.
 
 # %% [markdown]
 # **Next**: [`13_model_analysis`](13_model_analysis.ipynb) puts every family's published population
