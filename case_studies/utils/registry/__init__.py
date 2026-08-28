@@ -62,8 +62,10 @@ from .lineage import modeling_input_fingerprint
 # --- maintenance ---
 from .maintenance import (
     DuplicateBacktest,
+    TrainingIdentityMigration,
     deduplicate_semantic_backtests,
     find_semantic_backtest_duplicates,
+    migrate_equivalent_training_identity,
 )
 
 # --- metrics ---
@@ -190,8 +192,10 @@ __all__ = [
     "compute_cross_sectional_direction_auc",
     # maintenance
     "DuplicateBacktest",
+    "TrainingIdentityMigration",
     "find_semantic_backtest_duplicates",
     "deduplicate_semantic_backtests",
+    "migrate_equivalent_training_identity",
     # queries
     "load_training_runs",
     "load_prediction_sets",
