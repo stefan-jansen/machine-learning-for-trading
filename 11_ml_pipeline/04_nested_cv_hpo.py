@@ -67,7 +67,7 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 from utils.modeling import cross_sectional_ic_mean
-from utils.paths import get_case_study_dir, get_chapter_dir
+from utils.paths import display_path, get_case_study_dir, get_chapter_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, ml4t_diverging, show_with_alt
 
@@ -762,7 +762,7 @@ if NEED_CV:
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump({"single_results": single_results, "nested_results": nested_results}, CV_PATH)
-    print(f"Saved results to {CV_PATH}")
+    print(f"Saved results to {display_path(CV_PATH)}")
 
 # %% [markdown] tags=[]
 # ### Load Cached Results
