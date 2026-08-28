@@ -1293,12 +1293,11 @@ def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
     # And the canonical tier still reaches the registry, so this cannot be satisfied by a
     # declaration that is withheld everywhere.
     #
-    # `activate` first, because #637 reads the tier from `ML4T_OUTPUT_DIR`, which `activate`
-    # stamps process-globally rather than per study. Opening the preview above stamped it, and
-    # without this the canonical half inherits that stamp and is withheld too - so the test
-    # would report a canonical failure that no notebook can hit, since a notebook runs one tier
-    # per process. This makes the process tier match the study each half is describing.
-    released.activate()
+    # No `activate` call is needed to separate this from the preview above. #637 read the tier
+    # from `ML4T_OUTPUT_DIR` alone, which `activate` stamps process-globally, so opening the
+    # preview withheld the canonical half too and this test had to restamp between the two.
+    # #639 passes the study to `_preview_is_active` and compares the stamp's parent against
+    # that study's `output_root`, so the halves no longer collide.
     assert supersedes_declaration("canonical", first.hash) == first.hash
     assert (
         population_supersedes(
