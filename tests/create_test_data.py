@@ -447,7 +447,173 @@ def build_nasdaq100_minute_bars(source: Path, output: Path) -> list[Path]:
     return written
 
 
+# --- S&P 500 share bars and the option chains built on them -------------------
+#
+# Four artifacts that only make sense together: the share bars carry the security
+# identity every window in sp500_equity_option_analytics is bounded by, the daily
+# straddle panel names the contracts sp500_options trades, and the raw chain is
+# where those contracts' premiums are read from. Generating them separately is how
+# the fixture reached a state where the straddle panel offered 22 underlyings and
+# the raw chain could price 8 of them, so `ret_to_expiry` was null for the other
+# 14 and no date carried the ten names the stage-04 IC screen needs.
+#
+# The symbol set is the 23 the fixture already carried plus seven large caps with
+# complete coverage. Two floors set the size, and both are measured on the
+# cross-section of a single date rather than on the total:
+#
+#   sp500_options/04_model_based_features   MIN_SYMBOLS_PER_DATE = 10 names quoted
+#                                           on a date before it contributes an IC.
+#   sp500_equity_option_analytics/01        cross_sectional_persistence's
+#                                           min_entities = 20 securities shared by
+#                                           a pair of decision dates.
+#
+# Thirty underlyings leave 26 to 28 on the surface on every date in the sample, so
+# both clear with margin rather than by a name or two. The seven added are chosen
+# for full coverage, and none of the 23 is dropped, so nothing that names a ticker
+# changes.
+
+SP500_DIR = Path("equities") / "market" / "sp500"
+SP500_SYMBOLS = (
+    "AAL", "AAPL", "AMD", "AMZN", "BA", "BAC", "C", "CHK", "CMCSA", "CSCO",
+    "DIS", "F", "FB", "FCX", "FTR", "GE", "GOOG", "GOOGL", "INTC", "JPM",
+    "MSFT", "MU", "NFLX", "NVDA", "PFE", "T", "TSLA", "UNH", "WFC", "XOM",
+)  # fmt: skip
+# The floor 01_feasibility_analysis measures at, asserted here so a future
+# reduction cannot take the fixture back under it silently.
+SP500_MIN_SURFACE_SYMBOLS_PER_DATE = 20
+
+SP500_BARS = SP500_DIR / "daily_bars.parquet"
+SP500_SURFACE = SP500_DIR / "options_surface_daily.parquet"
+SP500_STRADDLES = SP500_DIR / "options_straddles_daily.parquet"
+SP500_RAW_CHAIN = SP500_DIR / "options_straddles_raw"
+
+# The key `_label_artifacts.py` looks a held contract up by, and the key the raw
+# chain is reduced on: a row survives when the daily panel selected its contract.
+_CONTRACT_KEYS = ["symbol", "strike", "expiration"]
+
+
+def build_sp500_options(source: Path, output: Path) -> list[Path]:
+    """Write the S&P 500 share bars, IV surface, straddle panel and raw chains.
+
+    Each is the production artifact filtered to ``SP500_SYMBOLS``, except the raw
+    chain, which is additionally reduced to the contracts the straddle panel
+    selects. That reduction is what keeps the chain affordable: production carries
+    every strike in the ATM band from first listing, and only the ones a straddle
+    is actually entered on are ever read back - by ``_label_artifacts`` for the
+    entry and exit premiums, by ``_straddle_moves`` for the premium path, and by
+    the hold-to-maturity backtest for the lifecycle. Everything else is weight.
+    """
+    out_dir = output / SP500_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    keep = list(SP500_SYMBOLS)
+    written: list[Path] = []
+
+    def _subset(rel: Path) -> pl.DataFrame:
+        path = source / rel
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{rel} not found under {source}. Build it with "
+                "data/equities/market/sp500/materialize_options.py."
+            )
+        return pl.scan_parquet(path).filter(pl.col("symbol").is_in(keep)).collect()
+
+    bars = _subset(SP500_BARS)
+    # sec_id identifies a price series, and every trailing window in the equity
+    # option analytics case study is bounded by it. A fixture that gives two
+    # tickers one sec_id pools two companies inside a window that is supposed to
+    # sit in one; the previous build gave AMZN, GOOG and GOOGL sec_id 0.
+    duplicated = bars.filter(pl.struct(["sec_id", "timestamp"]).is_duplicated())
+    if duplicated.height:
+        collisions = duplicated.group_by("sec_id").agg(pl.col("symbol").unique())
+        raise ValueError(f"sec_id does not identify a price series: {collisions}")
+    bars.write_parquet(output / SP500_BARS)
+    written.append(output / SP500_BARS)
+    print(
+        f"    daily_bars: {bars.height:,} rows, {bars['symbol'].n_unique()} symbols, "
+        f"{bars['sec_id'].n_unique()} securities"
+    )
+
+    surface = _subset(SP500_SURFACE)
+    per_date = (
+        surface.drop_nulls("iv_30_atm").group_by("date").agg(pl.col("symbol").n_unique().alias("n"))
+    )
+    if (thin := per_date.filter(pl.col("n") < SP500_MIN_SURFACE_SYMBOLS_PER_DATE)).height:
+        raise ValueError(
+            f"{thin.height} dates carry fewer than {SP500_MIN_SURFACE_SYMBOLS_PER_DATE} "
+            f"quoted surfaces, the floor 01_feasibility_analysis measures at "
+            f"(thinnest {thin['n'].min()})"
+        )
+    surface.write_parquet(output / SP500_SURFACE)
+    written.append(output / SP500_SURFACE)
+    print(
+        f"    options_surface_daily: {surface.height:,} rows, "
+        f"{per_date['n'].min()} to {per_date['n'].max()} symbols per date"
+    )
+
+    straddles = _subset(SP500_STRADDLES)
+    # Both legs of a straddle are one contract pair or it is not a straddle. The
+    # build this fixture was carrying predated the pairing fix and left 11% of its
+    # rows quoting a put at a different strike or expiration from its call.
+    unpaired = straddles.filter(
+        (pl.col("strike") != pl.col("put_strike"))
+        | (pl.col("expiration") != pl.col("put_expiration"))
+    )
+    if unpaired.height:
+        raise ValueError(
+            f"{unpaired.height} of {straddles.height} straddle rows pair legs at a "
+            "different strike or expiration"
+        )
+    straddles.write_parquet(output / SP500_STRADDLES)
+    written.append(output / SP500_STRADDLES)
+    print(
+        f"    options_straddles_daily: {straddles.height:,} rows, "
+        f"{straddles['symbol'].n_unique()} underlyings"
+    )
+
+    contracts = straddles.select(_CONTRACT_KEYS).unique()
+    chain = (
+        pl.scan_parquet(source / SP500_RAW_CHAIN / "year=*.parquet", hive_partitioning=False)
+        .join(contracts.lazy(), on=_CONTRACT_KEYS, how="semi")
+        .collect()
+        .sort("date", "symbol", "expiration", "call_put", "strike")
+    )
+    # An underlying the panel trades and the chain cannot price yields a null
+    # premium for every one of its rows, which is what the 22-versus-8 split did.
+    priced = set(chain["symbol"].unique().to_list())
+    if missing := sorted(set(straddles["symbol"].unique().to_list()) - priced):
+        raise ValueError(f"straddle panel names underlyings the raw chain cannot price: {missing}")
+
+    raw_dir = output / SP500_RAW_CHAIN
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    for (year,), part in chain.group_by(pl.col("date").dt.year(), maintain_order=True):
+        dst = raw_dir / f"year={year}.parquet"
+        part.write_parquet(dst)
+        written.append(dst)
+        print(
+            f"    options_straddles_raw year={year}: {len(part):,} rows "
+            f"({dst.stat().st_size / 1e6:.1f} MB)"
+        )
+    return written
+
+
 DATASETS: tuple[Dataset, ...] = (
+    Dataset(
+        name="sp500_options",
+        description=(
+            f"{len(SP500_SYMBOLS)} S&P 500 underlyings across the share bars, the "
+            "IV surface and the daily straddle panel, with the raw option chains "
+            "reduced to the contracts that panel selects"
+        ),
+        build=build_sp500_options,
+        # Named individually: options_eda/ sits in the same directory and is
+        # produced elsewhere, so --clean must not take it.
+        owns=(SP500_BARS, SP500_SURFACE, SP500_STRADDLES, SP500_RAW_CHAIN),
+        budget={
+            "symbols": list(SP500_SYMBOLS),
+            "raw_chain": "contracts entered by options_straddles_daily, full lifecycle",
+            "min_surface_symbols_per_date": SP500_MIN_SURFACE_SYMBOLS_PER_DATE,
+        },
+    ),
     Dataset(
         name="nasdaq100_minute_bars",
         description=(
