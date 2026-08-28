@@ -48,6 +48,28 @@ def value_digest(df: pl.DataFrame, columns: Sequence[str] | None = None) -> str:
     return compute_hash(content, length=DIGEST_LENGTH)
 
 
+def fold_digests(df: pl.DataFrame, *, fold_column: str = "fold") -> dict[str, str]:
+    """Return one content digest per fold id in *df*, keyed by the id as a string.
+
+    A fold-scoped artifact is written once per stage-04 run and read by every stage after
+    it, and the reader that matters is the one verifying a holdout lock: the lock pins the
+    artifact by whole-file sha256, so appending the holdout fold - which is the whole reason
+    stage 04 writes a holdout fold at all - changes the pin and the retrain is refused. What
+    the lock actually needs to know is narrower: that the folds it was selected under still
+    hold the values they held. One digest per fold answers that; the whole-file digest cannot.
+
+    Each fold's digest is :func:`value_digest` over that fold's rows, so it moves when and
+    only when a value in that fold moves, and is invariant to row order exactly as the
+    whole-frame digest is.
+    """
+    if fold_column not in df.columns:
+        raise KeyError(f"fold column {fold_column!r} not in frame: {sorted(df.columns)}")
+    return {
+        str(fold): value_digest(df.filter(pl.col(fold_column) == fold))
+        for fold in sorted(df.get_column(fold_column).unique().to_list())
+    }
+
+
 def _json_ready(value: Any) -> Any:
     """Render dates and times as ISO strings, recursively, leaving everything else alone.
 
@@ -74,6 +96,7 @@ def digest_sidecar(
     written_by: str,
     inputs: Mapping[str, str] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    fold_column: str | None = None,
 ) -> dict:
     """Build the sidecar record for *df* without writing it.
 
@@ -84,6 +107,11 @@ def digest_sidecar(
     an artifact carrying a fold that routine does not produce has that fold invisible to
     every consumer. The frame states which fold ids exist and never states what their
     boundaries were.
+
+    ``fold_column`` records a digest per fold beside the whole-frame one - see
+    :func:`fold_digests` for what reads it. It is opt-in rather than inferred from the
+    presence of a ``fold`` column: the record is what a lock is verified against, so which
+    artifacts make a fold-scoped claim is a producer's decision, not a schema coincidence.
 
     Reserved keys are refused rather than merged. A caller that could overwrite ``digest``
     or ``n_rows`` could make a sidecar describe a file it was not computed from.
@@ -99,6 +127,8 @@ def digest_sidecar(
         "written_by": written_by,
         "inputs": dict(inputs or {}),
     }
+    if fold_column is not None:
+        record["fold_digests"] = fold_digests(df, fold_column=fold_column)
     if metadata:
         reserved = sorted(set(metadata) & set(record))
         if reserved:
@@ -117,15 +147,23 @@ def write_artifact(
     written_by: str,
     inputs: Mapping[str, str] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    fold_column: str | None = None,
 ) -> dict:
     """Write *df* to *path* as parquet with its digest sidecar beside it.
 
     Returns the sidecar record, whose ``digest`` is what a downstream stage
-    passes back as one of its own ``inputs``. ``metadata`` is passed through to
-    :func:`digest_sidecar`.
+    passes back as one of its own ``inputs``. ``metadata`` and ``fold_column`` are
+    passed through to :func:`digest_sidecar`.
     """
     path = Path(path)
-    record = digest_sidecar(df, keys=keys, written_by=written_by, inputs=inputs, metadata=metadata)
+    record = digest_sidecar(
+        df,
+        keys=keys,
+        written_by=written_by,
+        inputs=inputs,
+        metadata=metadata,
+        fold_column=fold_column,
+    )
     # Rendered before the parquet is written, not after. A record that cannot be serialized
     # would otherwise raise with the new parquet already on disk beside the previous run's
     # sidecar - a file and a digest that describe different data, which is the one state
