@@ -49,8 +49,14 @@ class CandidateSet:
         member_kind = resolved[0].kind
         if any(member.execution_tier == "preview" for member in resolved):
             raise ValueError("preview results cannot enter a canonical candidate set")
-        if any(not member.complete for member in resolved):
-            raise ValueError("partial results cannot enter a candidate set")
+        partial = [
+            (member.hash, reason)
+            for member in resolved
+            if (reason := member.completeness()) is not None
+        ]
+        if partial:
+            detail = "; ".join(f"{member_hash}: {reason}" for member_hash, reason in partial)
+            raise ValueError(f"partial results cannot enter a candidate set - {detail}")
         if member_kind == "backtest" and any(
             (member.spec().get("decision_artifact") or {}).get("canonical") is False
             for member in resolved
