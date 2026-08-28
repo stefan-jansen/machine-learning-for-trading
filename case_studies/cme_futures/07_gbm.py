@@ -83,11 +83,13 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.cme_futures.research_workflow import supersedes_declaration
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
@@ -101,6 +103,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "9f26b89f9310"
 
 # %%
 study = open_study("cme_futures", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -225,10 +228,19 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set.
+# Each configuration prepares its own folds here, and that is a consequence of resolving the
+# requests above before running them. A resolved request goes straight to its own fit; only an
+# unresolved one reaches the family's batch runner, which walks folds on the outside and
+# configurations on the inside so that one prepared fold set serves every configuration.
+#
+# This notebook resolves first, and pays for it, because the plan table above is the point: a
+# resolved request knows its real feature count, eligible row count and fold boundaries, and can
+# show them before anything is fitted. Planning from unresolved requests computes the same
+# identities from placeholder folds, so the table would name configurations without being able to
+# say what each will actually read. On this panel the repeated preparation is affordable and the
+# visible plan is worth more. On a panel where it is not - `us_equities_panel` is the case the
+# runner was written for - pass the requests unresolved and let the batch runner hold one fold set
+# at a time.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -238,12 +250,62 @@ plan.select(
 # that run declares. A population is immutable once written, so a notebook that fitted one label
 # per run under a single name would publish the first label and be refused for the second, which
 # is what happened before this notebook fitted them together.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity - a changed estimator
+# parameter as much as a changed configuration menu - produces a different population under the
+# same name, and the registry refuses to write it without being told which snapshot it supersedes.
+# That lineage is the only record of which generation is which. It has advanced twice: first for
+# the refit onto LightGBM's CPU `max_bin` default, and now for the refit onto the corrected ARIMA
+# feature, since `04` walking each product over its own history moved `model_based.parquet`'s
+# digest and with it every training identity fitted on it. The value here is the generation this
+# run replaces, not the first one.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record. Carrying the value the published run used
+# is what lets this notebook re-run and resolve to the population it published rather than to a
+# new one.
+#
+# **A default that is a real hash rather than empty cannot be passed unconditionally**, and
+# `population_supersedes` is where the three cases that must drop it are decided. A preview population
+# is discarded with its workspace, so it has no lineage to extend and `run_model_population`
+# refuses one that carries a hash - passing it would fail every preview of this notebook before it
+# reached a fit, which is how the reduced-scale preview that gates the production run would go red
+# for a reason that has nothing to do with the model. The other two are runs where the population
+# does not exist yet: `run_log/` is not in the repository, so a reader running this from a fresh
+# checkout is writing a first version, and so is anyone narrowing a run under a `POPULATION_NAME`
+# of their own. `OfficialPopulation.create` refuses a first version that supersedes anything, so
+# without this the default would break both.
+#
+# Where a generation exists and the declaration names neither it nor the one it superseded, the
+# hash is withheld and `OfficialPopulation.create` refuses the changed population, naming the
+# snapshot it requires. The refusal belongs to the registry; withholding is how it is left to it.
+#
+# **The preview case is decided here, not inside the helper.** `population_supersedes` reads
+# `study.root`, and a preview in a maintainer worktree does not get its own root - `open_study`
+# reads the symlinked generated directories in place and redirects only the writes. The lookup
+# therefore finds the canonical generation and returns a real hash, which `run_model_population`
+# refuses for a preview, killing the run before the first fit. Withholding the declaration outside
+# the tier that can act on it is what keeps the preview runnable.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-gbm-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+supersedes = population_supersedes(
+    study,
+    name=population_name,
+    declared=supersedes_declaration(EXECUTION_TIER, SUPERSEDES_POPULATION),
+)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=supersedes,
+)
 
-print(f"{len(execution.runs)} configurations fitted")
+fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
+reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
+print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
@@ -607,6 +669,12 @@ objective_summary
 # of it would put a statistic computed partly on sealed outcomes into a validation-stage
 # notebook, so each label's rows are cut at its own `validation_end` - the same development
 # boundary its fits were resolved against, taken from the plan rather than re-derived.
+#
+# The artifact is asked for at the tier this notebook is running, rather than at the default.
+# `LabelCatalog.get` activates the tier it is given before resolving, and a preview activates a
+# workspace that carries `labels` as a link while its canonical root is empty - so a diagnostic
+# cell that takes the default reads a path only a canonical run has, and fails in preview after
+# the fits it is describing have already succeeded.
 
 # %% tags=["results"]
 # Each label has its own development boundary, because a longer forward window has to stop
@@ -624,7 +692,7 @@ tails = pl.DataFrame(
         }
         for label in panel_labels
         for measured in [
-            pl.read_parquet(study.labels.get(label).path)
+            pl.read_parquet(study.labels.get(label, execution_tier=EXECUTION_TIER).path)
             .filter(pl.col("timestamp") <= development_end[label])
             .drop_nulls(label)
         ]

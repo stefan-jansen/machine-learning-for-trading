@@ -18,12 +18,17 @@ import pytest
 
 from case_studies.research import (
     OfficialPopulation,
-    current_prediction_members,
     population_supersedes,
+    published_population_names_at,
     superseded_members,
+    superseded_members_at,
 )
-from case_studies.research.workspace import Study
+from case_studies.research import population as population_module
+from case_studies.research.contracts import ExecutionTier
+from case_studies.research.workspace import Study, open_study
 from tests.test_research_workspace import _seed_release
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 MEMBERS_ONE = ("aaaa11112222", "bbbb11112222")
 MEMBERS_TWO = ("cccc33334444", "dddd33334444")
@@ -297,70 +302,329 @@ class TestWhatALaterGenerationRetires:
         assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
 
 
-class TestTheSetASelectingStageConsumes:
-    """`current_prediction_members` is the union of the tips minus what their names retired.
+def _symlinked_worktree(tmp_path: Path, published: Study) -> Path:
+    """A maintainer worktree's layout, built rather than described.
 
-    Six notebooks in `sp500_equity_option_analytics` built this set inline and each built the
-    union alone. On that registry the two forms agreed - measured 2026-08-27, 947 members in
-    the union and zero of them retired - so nothing published was wrong and no test could
-    have caught it from the data. The cases below are the ones where they diverge.
+    `features`, `labels` and `run_log` are symlinks into the shared artifact store, which
+    `create_experiment` cannot copy - so `open_study(execution_tier="preview")` takes the
+    read-in-place branch and hands back a study whose `root` *is* the canonical case
+    directory, with only its writes redirected. That is the layout where a preview reads
+    canonical rows, and pointing a preview at a hand-made isolated root would pass whether
+    or not the guard existed.
+    """
+    release_root = tmp_path / "worktree"
+    case_dir = release_root / "case_studies" / "etfs"
+    case_dir.mkdir(parents=True)
+    (release_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "etfs" / "config", target_is_directory=True
+    )
+    for generated in ("features", "labels", "run_log"):
+        target = published.root / generated
+        target.mkdir(exist_ok=True)
+        (case_dir / generated).symlink_to(target, target_is_directory=True)
+    return release_root
+
+
+class TestThePreviewTier:
+    """A preview never creates an official population, so it never supersedes one.
+
+    The tier is asked of the study, which holds it, rather than of `ML4T_OUTPUT_DIR`. These
+    tests therefore open real preview studies: a monkeypatched environment variable would be
+    asserting against a signal the code no longer reads, which is how the previous version of
+    two of these agreed with itself while describing nothing.
     """
 
-    def test_a_frozen_snapshot_does_not_return_a_retired_generation_to_the_set(
-        self, study: Study
-    ) -> None:
-        """The union alone is the global form the helper's own docstring rejects.
+    def test_a_preview_is_never_offered_the_hash(self, study: Study, tmp_path: Path) -> None:
+        """The maintainer branch, where the registry a preview reads is the canonical one.
 
-        `fx-preflight-baselines` is in force under its own name and lists the first
-        generation, so unioning the tips puts every retired member back. Retirement is a
-        statement by the name that published the member; another name's stale snapshot
-        does not answer it.
+        The lookup cannot be what withholds the hash here - it succeeds. Only the tier can.
         """
         first = _publish(study, MEMBERS_ONE)
-        OfficialPopulation.create(
-            study,
-            name="fx-preflight-baselines",
-            member_kind="prediction",
-            members=list(MEMBERS_ONE),
+        # Canonical resolves it, which is what makes the preview answer a decision rather than
+        # an absence: the same registry, the same name, the same declaration.
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
         )
-        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        # The premise. If `open_study` ever gives a symlinked preview its own root, this stops
+        # describing the situation being guarded against and must be revisited, not deleted.
+        assert (preview.root / "run_log").is_symlink()
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
 
-        assert current_prediction_members(study, verify_members=False) == frozenset(MEMBERS_TWO)
+    def test_an_isolated_preview_is_refused_too(self, tmp_path: Path) -> None:
+        """The CI branch, which no environment-based guard could ever reach.
 
-    def test_a_backtest_population_contributes_no_prediction_identities(self, study: Study) -> None:
-        """`member_kind` is filtered rather than assumed: a backtest hash is not a prediction."""
-        _publish(study, MEMBERS_ONE)
-        OfficialPopulation.create(
-            study,
-            name="etfs-linear-validation-backtests-v1",
-            member_kind="backtest",
-            members=["eeee55556666", "ffff55556666"],
-        )
-
-        assert current_prediction_members(study, verify_members=False) == frozenset(MEMBERS_ONE)
-
-    def test_a_workspace_reads_the_released_registry_s_names(self, tmp_path: Path) -> None:
-        """Reading names from `study.root` alone publishes a set the catalog then overlays.
-
-        `Study.open` never copies the released `run_log` into a workspace, and the workspace
-        gets its own `official_populations` created schema-complete and empty. Names read from
-        one root and retirements computed across both is a mismatch in the direction that
-        loses live members: the reader below would resolve nothing at all.
+        When the generated directories are not symlinks - every CI checkout and every clean
+        clone - `open_study` returns an isolated study through `Study.open`, which activated
+        as canonical. So an isolated preview was *stamped canonical* and the refusal never ran
+        on the one path CI exercises. A test asserting the refusal passed on a maintainer's
+        machine and would have passed in CI only because CI never tried.
         """
-        release_root = _seed_release(tmp_path)
-        published = Study.open("etfs", release_root=release_root, workspace=tmp_path / "author")
-        first = _publish(published, MEMBERS_ONE)
-        _publish(published, MEMBERS_TWO, supersedes=first.hash)
-        released_db = published.release_case_root / "run_log" / "registry.db"
-        released_db.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(published.root / "run_log" / "registry.db", released_db)
-
-        reader = Study.open("etfs", release_root=release_root, workspace=tmp_path / "reader")
-        assert reader.root != reader.release_case_root
-        assert current_prediction_members(reader, verify_members=False) == frozenset(MEMBERS_TWO)
-
-    def test_a_registry_with_no_populations_yields_an_empty_set(self, tmp_path: Path) -> None:
-        study = Study.open(
-            "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "isolated",
+            release_root=_seed_release(tmp_path),
         )
-        assert current_prediction_members(study, verify_members=False) == frozenset()
+        assert not (preview.root / "run_log").is_symlink()
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(preview, MEMBERS_ONE)
+
+    def test_a_canonical_study_opened_alongside_a_preview_still_resolves(
+        self, study: Study, tmp_path: Path
+    ) -> None:
+        """One process, two studies - the case the environment could never answer.
+
+        `ML4T_OUTPUT_DIR` is process-global and `activate` never clears it, so reading it
+        answered "is a preview active anywhere" and got this backwards in both directions:
+        unscoped it withheld from every canonical study that merely ran second, and scoped to
+        an output root it let a later canonical activation clear a live preview's stamp. The
+        study holds its own tier, so the order they are opened in stops mattering.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        # The symlinked preview deliberately, not an isolated one. An isolated preview's
+        # registry is empty, so `None` comes back whether or not the tier was consulted - the
+        # assertion would hold against the very defect it is meant to catch. This preview reads
+        # the canonical registry, so the lookup would succeed and only the tier can withhold.
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
+        )
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+        # And after the canonical study activates, which is the order that broke the scoped
+        # environment read: its stamp replaced the preview's, so the preview read as canonical.
+        study.activate()
+        assert population_supersedes(preview, name=first.name, declared=first.hash) is None
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+    def test_a_study_that_activates_preview_per_run_is_a_preview_while_it_does(
+        self, study: Study
+    ) -> None:
+        """The tier is per activation, not only per open, and both readings must hold.
+
+        `linear`, `gbm`, `tabular_dl`, `deep_learning`, `latent_factors` and `causal` all open
+        one study and then call `study.activate(tier)` with whichever tier the run asked for.
+        Those studies are opened canonical, so a guard reading only the field would say
+        canonical while the run writes into `.preview` - and the population would land in the
+        shared registry, which is the failure this guard exists for.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+        study.activate("preview")
+        assert study.execution_tier is ExecutionTier.CANONICAL
+        assert population_supersedes(study, name=first.name, declared=first.hash) is None
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(study, MEMBERS_TWO)
+
+        study.activate("canonical")
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+    def test_the_refusal_to_create_reads_the_same_signal(
+        self, study: Study, tmp_path: Path
+    ) -> None:
+        """One derivation for both, so they cannot drift into disagreeing about the tier."""
+        preview = open_study(
+            "etfs",
+            execution_tier="preview",
+            workspace=tmp_path / "preview-workspace",
+            release_root=_symlinked_worktree(tmp_path, study),
+        )
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(preview, MEMBERS_TWO)
+
+
+class TestWhenTheRegistryReadItselfFails:
+    """ "No generation is published here" is one operational error, not every one.
+
+    The clean clone raises ``no such table: official_populations``. A lock timeout, an I/O
+    error and a half-migrated schema raise from the same call and mean nothing of the sort.
+    Answering all four with ``None`` withholds a predecessor the author does hold, and the
+    notebook then refits every configuration before ``create`` refuses the write for naming
+    none - the exact expense the declaration exists to avoid.
+    """
+
+    def test_a_missing_table_is_still_the_clean_clone(self, study: Study) -> None:
+        db_path = study.root / "run_log" / "registry.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(db_path)
+        db.execute("CREATE TABLE IF NOT EXISTS unrelated (x INTEGER)")
+        db.commit()
+        db.close()
+        assert (
+            population_supersedes(study, name="etfs-linear-validation-v1", declared="aaaa11112222")
+            is None
+        )
+
+    def test_a_lock_timeout_propagates(self, study: Study, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _publish(study, MEMBERS_ONE)
+
+        def locked(*args: object, **kwargs: object) -> OfficialPopulation:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(OfficialPopulation, "one", classmethod(locked))
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            population_supersedes(study, name=first.name, declared=first.hash)
+
+    def test_the_read_waits_as_long_as_every_other_reader_of_this_file(
+        self, study: Study, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """120s on the driver and 60s server-side, the pair ``_open_registry`` sets.
+
+        These reads open the registry directly rather than through ``_open_registry``, which
+        would run the schema DDL and create the very tables a clean clone is being asked
+        about - so the timeouts have to be set here or they fall back to SQLite's five
+        seconds, which ordinary contention with a concurrent writer exceeds. Checked on the
+        connection ``population_supersedes`` actually opens, not on the helper in isolation.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        opened: list[float | None] = []
+        real_connect = sqlite3.connect
+
+        def record(path, *args, **kwargs):
+            opened.append(kwargs.get("timeout"))
+            return real_connect(path, *args, **kwargs)
+
+        monkeypatch.setattr(population_module.sqlite3, "connect", record)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+        assert opened and all(timeout == 120.0 for timeout in opened)
+
+
+class TestTheRootBasedForm:
+    """`superseded_members_at`, which answers for a directory instead of a study.
+
+    `14_backtest` reads its catalog with `prediction_rows_at(CASE_DIR)` so that no
+    `Study.open` runs: every branch of it ends in `activate()`, which re-points the rest of
+    the notebook - including where `run_backtest(register=True)` writes - at whichever root
+    the activation chose. A lineage question asked through a study there would answer for a
+    different registry than the catalog being filtered, and the join between them would be
+    meaningless rather than wrong in a visible way.
+    """
+
+    def test_it_retires_what_the_study_form_retires(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == superseded_members(study)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+
+    def test_it_is_member_wise_too(self, study: Study) -> None:
+        # The same distinction the study form is held to: a refit that moves one of two
+        # identities retires one, not the predecessor entire.
+        kept, moved = MEMBERS_ONE
+        first = _publish(study, (kept, moved))
+        _publish(study, (kept, "eeee55556666"), supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset({moved})
+
+    def test_it_retires_nothing_before_a_refit(self, study: Study) -> None:
+        _publish(study, MEMBERS_ONE)
+        assert superseded_members_at(study.root) == frozenset()
+
+    def test_a_directory_with_no_registry_retires_nothing(self, tmp_path: Path) -> None:
+        assert superseded_members_at(tmp_path / "absent") == frozenset()
+
+    def test_it_reads_the_root_it_is_given_and_not_another(self, study: Study) -> None:
+        """The property the notebook depends on, stated as the difference between two roots.
+
+        Passing the released root must not report the workspace's lineage. If it did, the
+        filter would answer for a registry other than the one `prediction_rows_at` read, which
+        is the whole reason this form exists rather than a study.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+        assert superseded_members_at(study.release_case_root) == frozenset()
+
+
+class TestWhetherARegistryDeclaresPopulationsAtAll:
+    """The question that separates "not used here" from "broken here".
+
+    `OfficialPopulation.one` answers both with the same "0 current identities": a registry that
+    has never published a population, and one that publishes several but cannot resolve the
+    name asked for. `13_model_analysis` has to tell them apart, because the first is the
+    ordinary state of a fixture and the second means a family's rows would enter every
+    comparison with no declaration covering them.
+    """
+
+    def test_a_registry_with_no_populations_names_none(self, study: Study) -> None:
+        assert published_population_names_at(study.root) == frozenset()
+
+    def test_it_names_a_generation_that_is_still_in_force(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_it_names_a_forked_name_that_will_not_resolve(self, study: Study) -> None:
+        """The case the notebook must not read as "this registry declares no populations".
+
+        `create` refuses to write this state - a second generation under a name must name what
+        it supersedes - so it is built here at the storage layer, which is also how it would
+        arise: a hand-edited registry, or one written under an earlier schema. Two generations
+        with no edge between them leave the name with no single answer, and
+        `OfficialPopulation.one` refuses it in the same words a registry that has published
+        nothing produces. The registry plainly does declare populations, so the notebook must
+        refuse the comparison rather than fall back to catalog admissibility.
+        """
+        first = _publish(study, MEMBERS_ONE)
+
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(official_populations)")]
+            row = dict(
+                zip(
+                    columns,
+                    db.execute(
+                        "SELECT * FROM official_populations WHERE population_hash = ?",
+                        (first.hash,),
+                    ).fetchone(),
+                    strict=True,
+                )
+            )
+            row["population_hash"] = "f0rked0000000000"
+            db.execute(
+                f"INSERT INTO official_populations ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                [row[column] for column in columns],
+            )
+
+        with pytest.raises(ValueError, match="current identities"):
+            OfficialPopulation.one(study, name=first.name)
+
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_a_directory_with_no_registry_names_none(self, tmp_path: Path) -> None:
+        assert published_population_names_at(tmp_path / "absent") == frozenset()
+
+    def test_a_registry_predating_the_mechanism_must_not_be_asked_to_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """Why `13_model_analysis` branches on this answer instead of catching a failure.
+
+        A registry written before official populations existed has no `official_populations`
+        table, and `OfficialPopulation.one` raises `sqlite3.OperationalError` there rather than
+        the `ValueError` a resolvable-but-absent name produces. A reader's clean clone is that
+        registry. So the notebook has to decide *not to ask*, and this pins the pairing it
+        decides on: the helper answers, the resolver raises.
+
+        If `one` is ever made tolerant of the missing table, this fails and the branch it
+        justifies can be simplified - which is the point of asserting the resolver's behaviour
+        here rather than only the helper's.
+        """
+        case_dir = tmp_path / "etfs"
+        (case_dir / "run_log").mkdir(parents=True)
+        with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+            db.execute("CREATE TABLE unrelated (x INTEGER)")
+
+        assert published_population_names_at(case_dir) == frozenset()
+
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            OfficialPopulation.one(
+                Study.at(case_dir, case_study="etfs"), name="etfs-linear-validation-v1"
+            )

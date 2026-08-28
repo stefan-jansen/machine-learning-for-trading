@@ -843,3 +843,65 @@ def test_a_second_study_previewing_into_one_workspace_repoints_the_input_links(
     link = workspace / ".preview" / "etfs" / "labels"
     assert link.is_symlink()
     assert link.resolve(strict=True) == second_labels
+
+
+class TestTheSingleRootReadOnlyForm:
+    """`Study.at`, the form an analysis notebook uses because it must not activate.
+
+    A notebook that only reads has no writes to place, and every other way into a `Study` ends
+    in `activate()`: it rewrites `ML4T_OUTPUT_DIR` for the whole process and clears the caches
+    keyed on it, so every later `get_case_study_dir` answers for a different directory than the
+    one the notebook resolved. On the preview tier that directory is `.preview/<case>`, whose
+    registry `activate()` creates empty - which is why the failure this form prevents is not a
+    crash but a comparison that reports on nothing and calls it success.
+    """
+
+    def test_it_does_not_move_the_active_output_root(self, tmp_path: Path) -> None:
+        """The property the notebooks depend on, asserted in both directions."""
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+
+        os.environ["ML4T_OUTPUT_DIR"] = str(tmp_path / "chosen")
+        Study.at(case_dir, case_study="etfs")
+        assert os.environ["ML4T_OUTPUT_DIR"] == str(tmp_path / "chosen")
+
+        os.environ.pop("ML4T_OUTPUT_DIR", None)
+        Study.at(case_dir, case_study="etfs")
+        assert "ML4T_OUTPUT_DIR" not in os.environ
+
+    def test_both_roots_are_the_directory_it_was_given(self, tmp_path: Path) -> None:
+        """`OfficialPopulation.one` reads `root`; `Result.open` reads `release_case_root`.
+
+        They have to be the same directory, or the notebook resolves a population from one
+        registry and loads its members' artifacts from another.
+        """
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+
+        study = Study.at(case_dir, case_study="etfs")
+
+        assert study.root == case_dir.resolve()
+        assert study.release_case_root == case_dir.resolve()
+        assert study.read_only
+        assert study.output_root is None
+
+    def test_it_reads_the_root_it_is_given_and_not_the_repo_checkout(self, tmp_path: Path) -> None:
+        """`release_root` still answers for the repo, so provenance lookups keep working.
+
+        The directory a fixture or an output tree hands over is not `<repo>/case_studies/<name>`
+        and cannot be derived from `release_root`, which is the whole reason this form carries
+        the case directory explicitly rather than deriving it.
+        """
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+
+        study = Study.at(case_dir, case_study="etfs")
+
+        assert study.release_case_root != study.release_root / "case_studies" / "etfs"
+        assert study.release_case_root == case_dir.resolve()
+
+    def test_the_case_study_name_defaults_to_the_directory_name(self, tmp_path: Path) -> None:
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+
+        assert Study.at(case_dir).case_study == "etfs"

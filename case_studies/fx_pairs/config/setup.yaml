@@ -305,3 +305,13 @@ causal:
   treatment_window: 252
   confounders: [vol_gk_21d, vol_gk_63d, zscore_21d]
   method: walk_forward_dml
+  # Two things the register above cannot supply, and this is why the number is written here
+  # rather than derived. `features.windows.momentum` is a list of bar counts, not a
+  # suffix-keyed mapping, and `mom_skip_recent` is not built from any single element of it.
+  #
+  # And the block has to span this window, which is the reason it is declared at all. A block
+  # permutation keeps the treatment's serial dependence while breaking its alignment with the
+  # outcome; a block shorter than the construction window breaks the dependence too, which
+  # narrows the placebo distribution and makes the p-value read stronger than the evidence is.
+  # Sized from the label buffer alone this case study permuted a 252-session momentum column
+  # in blocks of 1, 5 and 21.

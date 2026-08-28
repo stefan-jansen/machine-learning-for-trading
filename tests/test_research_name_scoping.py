@@ -64,13 +64,23 @@ def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     while `13_backtest` published a scoped name.
     """
     pattern = re.compile(r"(OfficialPopulation|CandidateSet)\.(one|create)\(([^)]*?)\bname=([^,]+)")
+    # A name may be bound to a local first. That is not a way around the rule - the binding
+    # still has to come from `research_name` - and it is how a notebook passes one name to
+    # both `create` and `population_supersedes` without writing the call twice, which is
+    # where two copies of a name would drift apart. Only a binding whose right-hand side is
+    # a `research_name(` call counts, so an f-string assigned to a variable still fails.
+    binding = re.compile(r"^[ \t]*(\w+) = (.+)$", re.MULTILINE)
     unscoped: list[str] = []
     for stem in ("13_backtest", "14_portfolio_management", "15_costs", "16_risk_management"):
         source = (NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8")
+        from_research_name = {
+            m.group(1) for m in binding.finditer(source) if m.group(2).startswith("research_name(")
+        }
         for match in pattern.finditer(source):
             name_expr = match.group(4).strip()
-            if not name_expr.startswith("research_name("):
-                unscoped.append(f"{stem}: {match.group(1)}.{match.group(2)} name={name_expr}")
+            if name_expr.startswith("research_name(") or name_expr in from_research_name:
+                continue
+            unscoped.append(f"{stem}: {match.group(1)}.{match.group(2)} name={name_expr}")
 
     assert not unscoped, (
         "a population name that does not go through research_name cannot be isolated, "

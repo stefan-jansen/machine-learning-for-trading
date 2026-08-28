@@ -600,6 +600,14 @@ jobs:
       # nothing. They need no data and no ml4t-* package - every ml4t import in
       # utils/cv_splits.py is inside a function, and these tests substitute the
       # functions that reach them.
+      #
+      # test_awaiting_rebuild, test_cme_futures_research and
+      # test_cross_sectional_ic_mean are here for the same reason, having been
+      # committed to tests/ without any job naming them. Every job in this file
+      # selects by explicit path, so a file nobody lists never runs. It matters
+      # most for test_awaiting_rebuild: what it holds is that a skip expires
+      # when the input it waits for arrives, and a skip mechanism whose expiry
+      # check never runs is just a permanent skip.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -625,6 +633,9 @@ jobs:
             tests/test_artifact_digest.py \
             tests/test_sp500_equity_option_analytics_research.py \
             tests/test_research_declared_menu_coverage.py \
+            tests/test_awaiting_rebuild.py \
+            tests/test_cme_futures_research.py \
+            tests/test_cross_sectional_ic_mean.py \
             -v --tb=short
 
       # Reads only committed notebook JSON and its paired .py, so it belongs to
@@ -955,6 +966,7 @@ jobs:
             tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
+            tests/test_model_source_identity_versions.py \
             tests/test_registry_metrics.py \
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \
@@ -967,6 +979,7 @@ jobs:
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_runtime.py \
+            tests/test_training_identity_migration.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------
