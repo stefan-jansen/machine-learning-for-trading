@@ -102,14 +102,17 @@ tests/test_tabular_dl_runtime.py
 #
 # The first three collect nothing but notebook executions, so the whole file
 # goes. `test_model_registry.py` does not: only `test_model_notebook` runs a
-# notebook, and its other nine tests are pure config assertions that finish in
+# notebook, and its other ten tests are pure config assertions that finish in
 # 0.07s. Excluding the file threw those away, which is the same
 # exclude-more-than-you-meant defect the subtraction below exists to fix.
+# Ten, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
+# parametrized over five stages, so counting `def test_` undercounts what the
+# deselect leaves behind. Measured 2026-08-27: 88 collected, 78 deselected.
 # ---------------------------------------------------------------------------
 tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
 tests/test_chapter_notebooks.py                  # chNN (test-chapters)
 tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
-tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other nine tests run here
+tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other ten tests run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import

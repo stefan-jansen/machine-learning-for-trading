@@ -1273,8 +1273,12 @@ def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
     assert preview.root == case_dir
     assert (preview.root / "run_log").is_symlink()
 
-    # What the helper does on its own: it finds the canonical generation and offers the hash.
-    assert population_supersedes(preview, name=name, declared=first.hash) == first.hash
+    # What the helper does on its own. Until #637 it read the registry before the tier, found
+    # the canonical generation through the symlinks above and offered the hash - the defect this
+    # test was written against. #637 decides the tier first, so the library now withholds here
+    # on its own and the notebooks' `supersedes_declaration` is a second line rather than the
+    # only one. Asserted, not deleted: it is the guarantee the symlinked layout exists to check.
+    assert population_supersedes(preview, name=name, declared=first.hash) is None
 
     # What the notebooks pass. Both call `supersedes_declaration` with their own tier, so the
     # composition below is the expression they evaluate, not a restatement of it.
@@ -1288,6 +1292,13 @@ def test_preview_never_carries_a_supersedes_hash(tmp_path: Path):
 
     # And the canonical tier still reaches the registry, so this cannot be satisfied by a
     # declaration that is withheld everywhere.
+    #
+    # `activate` first, because #637 reads the tier from `ML4T_OUTPUT_DIR`, which `activate`
+    # stamps process-globally rather than per study. Opening the preview above stamped it, and
+    # without this the canonical half inherits that stamp and is withheld too - so the test
+    # would report a canonical failure that no notebook can hit, since a notebook runs one tier
+    # per process. This makes the process tier match the study each half is describing.
+    released.activate()
     assert supersedes_declaration("canonical", first.hash) == first.hash
     assert (
         population_supersedes(

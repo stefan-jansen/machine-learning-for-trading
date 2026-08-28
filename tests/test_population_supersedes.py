@@ -22,6 +22,7 @@ from case_studies.research import (
     superseded_members,
     supersedes_for_run,
 )
+from case_studies.research import population as population_module
 from case_studies.research.workspace import Study
 from tests.test_research_workspace import _seed_release
 
@@ -364,8 +365,27 @@ class TestThePreviewTier:
         # an absence: the same registry, the same name, the same declaration.
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        # The value `Study.activate` writes, not merely some path ending in `.preview`: the
+        # guard asks whether the stamp belongs to *this* study, so a hand-made path that no
+        # activation would produce tests a signal the code never sees.
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.output_root / ".preview"))
         assert population_supersedes(study, name=first.name, declared=first.hash) is None
+
+    def test_another_study_s_preview_does_not_withhold_from_this_one(
+        self, study: Study, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`ML4T_OUTPUT_DIR` is process-global and `activate` never clears it.
+
+        So "a preview is active somewhere in this process" and "this study is that preview"
+        are different questions, and answering the first withholds the hash from a canonical
+        study that merely ran second. A notebook runs one tier and never notices; any process
+        that opens both - a test module, a backfill over several case studies - gets a
+        canonical declaration silently withheld and the run dies at `create` for naming no
+        predecessor, after paying for every fit.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path / "elsewhere" / ".preview"))
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
     def test_the_refusal_to_create_reads_the_same_signal(
         self, study: Study, monkeypatch: pytest.MonkeyPatch
@@ -374,3 +394,59 @@ class TestThePreviewTier:
         monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
         with pytest.raises(ValueError, match="preview run cannot create an official population"):
             _publish(study, MEMBERS_TWO)
+
+
+class TestWhenTheRegistryReadItselfFails:
+    """ "No generation is published here" is one operational error, not every one.
+
+    The clean clone raises ``no such table: official_populations``. A lock timeout, an I/O
+    error and a half-migrated schema raise from the same call and mean nothing of the sort.
+    Answering all four with ``None`` withholds a predecessor the author does hold, and the
+    notebook then refits every configuration before ``create`` refuses the write for naming
+    none - the exact expense the declaration exists to avoid.
+    """
+
+    def test_a_missing_table_is_still_the_clean_clone(self, study: Study) -> None:
+        db_path = study.root / "run_log" / "registry.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(db_path)
+        db.execute("CREATE TABLE IF NOT EXISTS unrelated (x INTEGER)")
+        db.commit()
+        db.close()
+        assert (
+            population_supersedes(study, name="etfs-linear-validation-v1", declared="aaaa11112222")
+            is None
+        )
+
+    def test_a_lock_timeout_propagates(self, study: Study, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _publish(study, MEMBERS_ONE)
+
+        def locked(*args: object, **kwargs: object) -> OfficialPopulation:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(OfficialPopulation, "one", classmethod(locked))
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            population_supersedes(study, name=first.name, declared=first.hash)
+
+    def test_the_read_waits_as_long_as_every_other_reader_of_this_file(
+        self, study: Study, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """120s on the driver and 60s server-side, the pair ``_open_registry`` sets.
+
+        These reads open the registry directly rather than through ``_open_registry``, which
+        would run the schema DDL and create the very tables a clean clone is being asked
+        about - so the timeouts have to be set here or they fall back to SQLite's five
+        seconds, which ordinary contention with a concurrent writer exceeds. Checked on the
+        connection ``population_supersedes`` actually opens, not on the helper in isolation.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        opened: list[float | None] = []
+        real_connect = sqlite3.connect
+
+        def record(path, *args, **kwargs):
+            opened.append(kwargs.get("timeout"))
+            return real_connect(path, *args, **kwargs)
+
+        monkeypatch.setattr(population_module.sqlite3, "connect", record)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+        assert opened and all(timeout == 120.0 for timeout in opened)
