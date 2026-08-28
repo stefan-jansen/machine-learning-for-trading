@@ -457,16 +457,6 @@ pca_fold = prepare_cv_folds(
 )[0]
 pca = PCA().fit(pca_fold["X_train"])
 cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
-pca_summary = pl.DataFrame(
-    {
-        "variance_threshold": [0.90, 0.95, 0.99],
-        "components": [
-            int(np.searchsorted(cumulative_variance, threshold)) + 1
-            for threshold in (0.90, 0.95, 0.99)
-        ],
-        "available_features": [len(feature_names)] * 3,
-    }
-)
 
 fig = go.Figure(
     go.Scatter(
@@ -477,7 +467,14 @@ fig = go.Figure(
     )
 )
 for threshold in (0.90, 0.95, 0.99):
-    fig.add_hline(y=threshold, line_width=1, line_dash="dot")
+    components = int(np.searchsorted(cumulative_variance, threshold)) + 1
+    fig.add_hline(
+        y=threshold,
+        line_width=1,
+        line_dash="dot",
+        annotation_text=f"{threshold:.0%}: {components} of {len(feature_names)} components",
+        annotation_position="top left",
+    )
 fig.update_layout(
     title="Training-only cumulative variance of financial features",
     xaxis_title="Principal components",
@@ -485,7 +482,6 @@ fig.update_layout(
     yaxis_range=[0, 1.01],
 )
 fig.show()
-pca_summary
 
 # %% [markdown]
 # These result tables and figures describe validation-only mechanism checks for the diagnostic
