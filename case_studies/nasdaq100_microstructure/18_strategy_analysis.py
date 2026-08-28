@@ -199,7 +199,7 @@ else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
 
 if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
-    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG)
+    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG, replace_all=True)
     _n_pairs = sum(1 for row in _pairs if "skip" not in row)
     print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
 else:

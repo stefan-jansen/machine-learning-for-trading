@@ -127,3 +127,36 @@ def test_the_legacy_spec_shape_is_read_too(case_dir: Path) -> None:
         db.execute("INSERT INTO cohort_metrics VALUES (?)", ("aaaa",))
 
     assert derived_tables_off_canonical_universe(case_dir, "cost_feasible") == set()
+
+
+def test_a_synthetic_benchmark_names_no_run_and_is_not_evidence(case_dir: Path) -> None:
+    """The equal-weight benchmark is `side_ew:<cs>:<label>`, deliberately not a backtest.
+
+    `backtest_paired_metrics` carries no FK on `benchmark_hash`, and pair #1 always writes this
+    identifier. Defaulting an absent hash to `full` would report the paired table stale on the
+    run that just rebuilt it, and on every run after that, forever.
+    """
+    with _registry(case_dir) as db:
+        _run(db, "aaaa", "cost_feasible")
+        db.execute(
+            "INSERT INTO backtest_paired_metrics VALUES (?, ?)",
+            ("aaaa", "side_ew:nasdaq100_microstructure:fwd_ret_5m"),
+        )
+
+    assert derived_tables_off_canonical_universe(case_dir, "cost_feasible") == set()
+
+
+def test_a_real_run_on_the_wrong_universe_still_counts_beside_a_synthetic_one(
+    case_dir: Path,
+) -> None:
+    """Ignoring absent hashes must not stop the check from seeing the hashes that are there."""
+    with _registry(case_dir) as db:
+        _run(db, "bbbb", "full")
+        db.execute(
+            "INSERT INTO backtest_paired_metrics VALUES (?, ?)",
+            ("bbbb", "side_ew:nasdaq100_microstructure:fwd_ret_5m"),
+        )
+
+    assert derived_tables_off_canonical_universe(case_dir, "cost_feasible") == {
+        "backtest_paired_metrics"
+    }

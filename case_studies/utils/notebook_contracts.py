@@ -392,6 +392,18 @@ def derived_tables_off_canonical_universe(case_dir: Path, universe_filter: str |
     from what the rows point at: every referenced ``backtest_runs`` row carries its universe in
     ``spec_json``, and a canonical table cannot reference a run outside the canonical universe.
 
+    Only hashes that name a ``backtest_runs`` row are judged. ``backtest_paired_metrics``
+    carries no FK on ``benchmark_hash`` and its equal-weight side is a synthetic
+    ``side_ew:<cs>:<label>`` identifier that is deliberately not a run; an identifier that
+    names no run cannot be evidence of a run outside the universe. Treating an absent hash as
+    ``"full"`` instead would report the paired table stale on every run forever.
+
+    ``cohort_metrics`` records only ``leader_hash``, so a cohort whose leader is canonical but
+    whose membership was drawn from a wider universe reads as clean here. Its trial counts,
+    DSR and PBO are computed over that wider membership, and ``k_variants`` counts the members
+    that had usable return series rather than the members selected, so it cannot stand in for
+    the missing selection identity. Closing that gap needs the selection persisted on the row.
+
     Returns the table names to rebuild. An unpinned case study passes ``None`` and gets the
     empty set, because there is no canonical universe for a row to be outside of.
     """
@@ -428,6 +440,6 @@ def derived_tables_off_canonical_universe(case_dir: Path, universe_filter: str |
                     for row in db.execute(f"SELECT {column} FROM {table}")  # noqa: S608
                     if row[0] is not None
                 ]
-                if any(universes.get(h, "full") != universe_filter for h in referenced):
+                if any(universes[h] != universe_filter for h in referenced if h in universes):
                     stale.add(table)
     return stale

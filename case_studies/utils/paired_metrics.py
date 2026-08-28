@@ -708,6 +708,7 @@ def populate_paired_metrics(
     carrier_pin_predicate: pl.Expr | None = None,
     freq: str = "daily",
     verbose: bool = True,
+    replace_all: bool = False,
     write_case_dir: Path | None = None,
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
@@ -725,6 +726,14 @@ def populate_paired_metrics(
       (us_firm_characteristics → ``config_name == 'default_huber'``); None else.
     * ``freq`` — cadence key for periods-per-year (``FREQ_MAP[cs]``).
 
+    ``replace_all`` makes the call a complete snapshot: pairs it did not write are
+    deleted, so a rebuild under a different selection does not leave the previous
+    selection's rows behind. Registration alone is an UPSERT keyed on
+    ``(challenger_hash, benchmark_hash)``, which cannot remove a row it no longer
+    produces. Default False keeps the additive behaviour every other caller relies
+    on. A call that writes nothing prunes nothing - that is a failed rebuild, not
+    an empty snapshot.
+
     ``cme_futures`` uses all defaults (no restriction, daily). Returns the list
     of per-pair summary dicts (mirrors the ``paired_rows`` + ``extra_paired_rows``
     the Ch20 producer builds); each pair is also written to
@@ -738,6 +747,13 @@ def populate_paired_metrics(
         explorer = BacktestExplorer(cs)
     ppy = _PPY_BY_FREQ.get(freq, 252)
     rows: list[dict] = []
+    written_keys: set[tuple[str, str]] = set()
+
+    def _pair(cs_, challenger_hash, benchmark_hash, *args, **kwargs):
+        result = _populate_pair(cs_, challenger_hash, benchmark_hash, *args, **kwargs)
+        if "skip" not in result:
+            written_keys.add((challenger_hash, benchmark_hash))
+        return result
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
     cand = pl.concat(
@@ -799,6 +815,7 @@ def populate_paired_metrics(
                                 periods_per_year=ppy,
                                 case_dir=write_case_dir,
                             )
+                            written_keys.add((leader_hash, benchmark_hash))
                             rows.append(
                                 {
                                     "case_study": DISPLAY_NAMES.get(cs, cs),
@@ -876,7 +893,7 @@ def populate_paired_metrics(
     if bench_ho_resolved is not None and chal_ho is not None:
         bench_ho_hash, bench_ho_norm, bench_ho_label = bench_ho_resolved
         rows.append(
-            _populate_pair(
+            _pair(
                 cs,
                 ho_hash,
                 bench_ho_hash,
@@ -922,7 +939,7 @@ def populate_paired_metrics(
             val_self_returns = _aligned_returns(cs, val_self_hash) if val_self_hash else None
         if val_self_hash is not None and val_self_returns is not None:
             rows.append(
-                _populate_pair(
+                _pair(
                     cs,
                     ho_hash,
                     val_self_hash,
@@ -954,7 +971,7 @@ def populate_paired_metrics(
         if prev_returns is None or this_returns is None:
             continue
         rows.append(
-            _populate_pair(
+            _pair(
                 cs,
                 this_hash,
                 prev_hash,
@@ -967,8 +984,62 @@ def populate_paired_metrics(
             )
         )
 
+    # Only on the path that ran every pair. The early returns above leave a partial
+    # set, and pruning to a partial set would delete pairs a complete earlier run
+    # produced. A stale table that stays stale is recoverable; deleted rows are not.
+    if replace_all:
+        _prune_paired_metrics(cs, written_keys, write_case_dir, verbose)
     _report(cs, rows, verbose)
     return rows
+
+
+def _prune_paired_metrics(
+    cs: str,
+    written_keys: set[tuple[str, str]],
+    write_case_dir: Path | None,
+    verbose: bool,
+) -> int:
+    """Delete ``backtest_paired_metrics`` rows this run did not write. Returns the count.
+
+    The complement, not the whole table: a rebuild writes the pairs its current
+    selection produces, and every row it did not write belongs to an earlier
+    selection. Deleting nothing when ``written_keys`` is empty is deliberate - a
+    run that produced no pair failed, and an empty snapshot would destroy the last
+    good one.
+    """
+    if not written_keys:
+        if verbose:
+            print(
+                f"[paired_metrics] {cs}: no pairs written, keeping existing rows",
+                flush=True,
+            )
+        return 0
+    case_dir = write_case_dir if write_case_dir is not None else get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return 0
+    db = sqlite3.connect(str(db_path), timeout=120.0)
+    try:
+        db.execute("PRAGMA busy_timeout = 60000;")
+        existing = {
+            (row[0], row[1])
+            for row in db.execute(
+                "SELECT challenger_hash, benchmark_hash FROM backtest_paired_metrics"
+            )
+        }
+        obsolete = existing - written_keys
+        if obsolete:
+            db.executemany(
+                "DELETE FROM backtest_paired_metrics "
+                "WHERE challenger_hash = ? AND benchmark_hash = ?",
+                sorted(obsolete),
+            )
+        db.commit()
+    finally:
+        db.close()
+    if obsolete and verbose:
+        print(f"[paired_metrics] {cs}: pruned {len(obsolete)} obsolete pair(s)", flush=True)
+    return len(obsolete)
 
 
 def _report(cs: str, rows: list[dict], verbose: bool) -> None:
