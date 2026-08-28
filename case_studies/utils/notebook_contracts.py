@@ -274,3 +274,56 @@ def filter_active_model_rows(
         return df
 
     return df.filter(~pl.col(family_col).is_in(sorted(excluded)))
+
+
+def declared_population_members(
+    study,
+    case_dir: Path,
+    names: dict[str, str],
+    *,
+    produced: dict[str, int],
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Resolve each family's declared population, or report that none is declared.
+
+    Three states reach this, and `OfficialPopulation.one` reports two of them in the same
+    words, which is why the decision lives here rather than in an exception handler.
+
+    A registry that has published no population is not broken - a fixture, or a reader's clean
+    clone. It is answered with a note, and the comparison downstream rests on catalog
+    admissibility, which is a weaker claim than a declared population but a statable one. The
+    resolver is not asked at all: on a registry whose schema predates the mechanism it raises
+    ``sqlite3.OperationalError: no such table``, so tolerating that state means not entering it.
+
+    A registry that has published populations and cannot resolve this name has a broken
+    lineage. That refuses when the family has registered rows, because comparing them would
+    report a family no declaration covers; where the family produced nothing it is only a note,
+    since there is nothing yet to be undeclared.
+
+    Returns the resolved members per family and the notes to print.
+    """
+    from case_studies.research import OfficialPopulation, published_population_names_at
+
+    published = published_population_names_at(case_dir)
+    if not published:
+        return {}, [
+            f"{case_dir} publishes no official populations, so nothing is checked against a "
+            "declaration: every comparison rests on catalog admissibility alone."
+        ]
+
+    members: dict[str, set[str]] = {}
+    notes: list[str] = []
+    for family, name in names.items():
+        try:
+            members[family] = set(OfficialPopulation.one(study, name=name).members)
+        except (ValueError, FileNotFoundError) as error:
+            if produced.get(family):
+                msg = (
+                    f"{family} has {produced[family]} registered prediction sets but its "
+                    f"declared population {name} does not resolve ({error}). This registry "
+                    f"publishes {len(published)} population name(s), so the declaration is "
+                    "missing rather than unused. Comparing them would report a family no "
+                    "declaration covers. Republish the population, or name the one in force."
+                )
+                raise RuntimeError(msg) from error
+            notes.append(f"no current official population for {family} ({name}): {error}")
+    return members, notes

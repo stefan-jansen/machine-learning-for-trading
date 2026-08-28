@@ -64,10 +64,8 @@ import polars as pl
 import yaml
 
 from case_studies.research import (
-    OfficialPopulation,
     Result,
     Study,
-    published_population_names_at,
     superseded_members,
 )
 from case_studies.utils.model_analysis import (
@@ -93,6 +91,7 @@ from case_studies.utils.model_viz import (
     plot_regime_bars,
 )
 from case_studies.utils.notebook_contracts import (
+    declared_population_members,
     degenerate_prediction_hashes,
     excluded_families,
     filter_active_model_rows,
@@ -286,42 +285,21 @@ else:
 # above already holds - it is the check that the rows compared here are the ones those notebooks
 # declared before they fitted anything. A family whose cohort has not run yet resolves to no
 # population and is reported rather than silently omitted.
-# Whether this registry declares populations at all has to be settled before a name that will
-# not resolve can be read. Both states answer `OfficialPopulation.one` with the same
-# "0 current identities", and they call for opposite responses. A registry that has never
-# published one - a fixture, or a registry written before the mechanism - is not broken: the
-# comparison there rests on catalog admissibility, which is a weaker claim than a declared
-# population and worth saying out loud, but it is a claim. A registry that does publish them and
-# cannot resolve *this* name has a broken lineage, and comparing its rows would report a family
-# no declaration covers.
-_published = published_population_names_at(CASE_DIR)
-
-_population_members: dict[str, set[str]] = {}
-if not _published:
-    # Nothing published means there is nothing to resolve, and asking anyway is not harmless:
-    # on a registry whose schema predates the mechanism `OfficialPopulation.one` raises
-    # `sqlite3.OperationalError: no such table`, which is neither of the errors the handler
-    # below expects. A reader's clean clone is exactly that registry.
-    print(
-        f"{CASE_DIR} publishes no official populations, so nothing below is checked against a "
-        "declaration: every comparison rests on catalog admissibility alone."
-    )
-else:
-    for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
-        try:
-            _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
-        except (ValueError, FileNotFoundError) as _exc:
-            _produced = _catalog.filter(pl.col("family") == _family).height
-            if _produced:
-                msg = (
-                    f"{_family} has {_produced} registered prediction sets but its declared "
-                    f"population {_name} does not resolve ({_exc}). This registry publishes "
-                    f"{len(_published)} population name(s), so the declaration is missing "
-                    "rather than unused. Comparing them would report a family no declaration "
-                    "covers. Republish the population, or name the one in force."
-                )
-                raise RuntimeError(msg) from _exc
-            print(f"no current official population for {_family} ({_name}): {_exc}")
+# Which registry states this has to tell apart, and why the decision is a contract rather
+# than an exception handler, is stated at `declared_population_members`. In short: a registry
+# that publishes no population is not broken, and `OfficialPopulation.one` reports that state
+# and a broken lineage in the same words.
+_population_members, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    {"linear": LINEAR_POPULATION, "gbm": GBM_POPULATION},
+    produced={
+        _family: _catalog.filter(pl.col("family") == _family).height
+        for _family in ("linear", "gbm")
+    },
+)
+for _note in _population_notes:
+    print(_note)
 
 # A population is declared before anything is fitted; degeneracy is only visible afterwards.
 # `load_all_metrics` drops any prediction set with a constant-prediction fold, because its
