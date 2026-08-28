@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
@@ -117,6 +118,65 @@ def degenerate_prediction_hashes(case_dir: Path) -> set[str]:
         ).fetchone():
             return set()
         return {row[0] for row in db.execute(f"SELECT DISTINCT {_DEGENERATE_SUBQUERY[7:]}")}
+
+
+def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -> dict[str, str]:
+    """Which of ``hashes`` are registered but not finished, and what is short in each.
+
+    A headline row in ``prediction_metrics`` is not evidence that a prediction set arrived.
+    Coverage, the headline metrics and the per-fold metrics are committed as separate writes,
+    so a run interrupted between them leaves a hash that every metrics query returns and that
+    `PredictionResult.complete` rejects. A leaderboard reading the headline alone then scores a
+    member over the folds it managed, and a short window is an easier window.
+
+    Checks coverage present and reporting ``complete``, one ``fold_metrics`` row per expected
+    fold, and the predictions parquet on disk. The file is checked for existence and not read:
+    `PredictionResult.complete` re-digests it, which is minutes of I/O for a caller running this
+    over a thousand members on every execution, and the failure that catches is corruption after
+    registration rather than the interrupted registration at issue. A member whose artifact was
+    deleted or never written is a different matter - the registry still lists it, the leaderboard
+    still ranks it, and `load_predictions` then returns nothing for it without saying so.
+
+    Returns ``{hash: reason}`` for the members that fall short, empty when they all arrived or
+    when the registry has no coverage table to check them against.
+    """
+    run_log = Path(case_dir) / "run_log"
+    db_path = run_log / "registry.db"
+    predictions_dir = run_log / "predictions"
+    wanted = sorted(set(hashes))
+    if not wanted or not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if not {"prediction_coverage", "fold_metrics"} <= tables:
+            return {}
+        coverage = {
+            row[0]: (row[1], row[2])
+            for row in db.execute(
+                "SELECT prediction_hash, status, n_folds_expected FROM prediction_coverage"
+            )
+        }
+        folds = dict(
+            db.execute("SELECT prediction_hash, COUNT(*) FROM fold_metrics GROUP BY 1").fetchall()
+        )
+    short: dict[str, str] = {}
+    for member in wanted:
+        if member not in coverage:
+            short[member] = "no coverage row"
+            continue
+        status, expected = coverage[member]
+        actual = folds.get(member, 0)
+        artifact = predictions_dir / member / "predictions.parquet"
+        if status != "complete":
+            short[member] = f"coverage {status}"
+        elif expected is not None and actual != expected:
+            short[member] = f"{actual} of {expected} folds scored"
+        elif not artifact.is_file():
+            short[member] = "no predictions.parquet"
+    return short
 
 
 def full_coverage_prediction_sql(
