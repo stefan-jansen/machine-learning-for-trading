@@ -107,11 +107,13 @@ study = open_study(
 # %% [markdown]
 # ## 1. Which labels, and what the configuration says
 #
-# Every label whose training menu declares `latent_factors:` is fitted, and three do: `fwd_ret_5d`,
-# the stock's total return over the five trading days after the decision date; `fwd_ret_10d`, the
-# same over ten; and `fwd_ret_risk_adj_5d`, the five-day return divided by a measure of its own
-# dispersion. The two `fwd_dir_*` classification labels declare linear and gradient boosting only,
-# so they are absent here rather than dropped.
+# Every label whose training menu declares `latent_factors:` is fitted, and the cell below reads
+# which those are rather than this sentence asserting a count that would go stale the moment a
+# sixth label declared the family. What the names mean is the part prose has to supply:
+# `fwd_ret_5d` is the stock's total return over the five trading days after the decision date,
+# `fwd_ret_10d` the same over ten, and `fwd_ret_risk_adj_5d` the five-day return divided by a
+# measure of its own dispersion. A `fwd_dir_*` classification label declaring only linear and
+# gradient boosting is absent here rather than dropped.
 
 # %%
 declared_labels(study, "latent_factors")
@@ -335,9 +337,14 @@ print(f"population {population.name}: {len(population.members)} prediction sets"
 # %% [markdown]
 # ## 4. What came out
 #
-# One row per label and checkpoint. `ic_mean` is the **information coefficient**: on each validation
-# date, rank the stocks by the model's prediction, rank them by the return they went on to earn,
-# correlate the two rankings, and average that daily correlation over the validation period.
+# One row per label and checkpoint. The **information coefficient** is the rank correlation, on one
+# validation date, between the stocks ordered by the model's prediction and the stocks ordered by
+# the return they went on to earn.
+#
+# `ic_mean` aggregates that **over folds, not over days**: each fold's own mean IC is computed and
+# those are averaged with equal weight (`latent_factors/cv.py`, and the convention is stated in
+# `registry/metrics.py`). With folds of unequal length the fold mean and the pooled daily mean are
+# different numbers, and this column is the first.
 #
 # `ic_n_days` is how many validation dates produced a defined correlation, and it decides which rows
 # are comparable with each other. `auc_scored_against` says what the AUC column was scored against:

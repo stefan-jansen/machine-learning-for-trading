@@ -76,6 +76,19 @@ if TYPE_CHECKING:
 
 _SEQUENCE_PREVIEW_FIELDS = {"folds", "max_symbols", "max_train_sequences"}
 
+SEQUENCE_RUNNER_VERSION = 1
+SEQUENCE_PREPARATION_VERSION = 1
+SEQUENCE_STATE_VERSION = 1
+SEQUENCE_BACKEND_VERSIONS = {"darts": 1, "pytorch": 1}
+SEQUENCE_ARCHITECTURE_VERSIONS = {
+    "lstm": 1,
+    "nbeats": 1,
+    "nlinear": 1,
+    "patchtst": 1,
+    "tcn": 1,
+    "tsmixer": 1,
+}
+
 
 @dataclass(frozen=True)
 class SequenceResearchContext:
@@ -106,27 +119,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _module_path(module: Any) -> Path:
-    source_file = getattr(module, "__file__", None)
-    if not isinstance(source_file, str):
-        raise RuntimeError(f"{module.__name__} has no source file")
-    return Path(source_file)
-
-
-def _sequence_source_identity(config: dict[str, Any]) -> dict[str, str]:
-    from case_studies.utils import deep_model_state, sequence_dataset
-
-    paths = [Path(__file__), _module_path(deep_model_state), _module_path(sequence_dataset)]
-    if config.get("library") == "darts":
-        from case_studies.utils import darts_forecasting
-
-        paths.append(_module_path(darts_forecasting))
-    else:
-        architecture = str(config["params"]["architecture"])
-        model_class = _get_model_registry()[architecture]
-        module = __import__(model_class.__module__, fromlist=[model_class.__name__])
-        paths.append(_module_path(module))
-    return {path.name: _sha256(path) for path in paths}
+def _sequence_source_identity(config: dict[str, Any]) -> dict[str, int | str]:
+    """Return the declared implementation versions that can change sequence results."""
+    architecture = str(config["params"]["architecture"])
+    library = "darts" if config.get("library") == "darts" else "pytorch"
+    try:
+        architecture_version = SEQUENCE_ARCHITECTURE_VERSIONS[architecture]
+        backend_version = SEQUENCE_BACKEND_VERSIONS[library]
+    except KeyError as exc:
+        raise ValueError(f"no implementation version declared for {exc.args[0]!r}") from exc
+    return {
+        "sequence_runner": SEQUENCE_RUNNER_VERSION,
+        "sequence_preparation": SEQUENCE_PREPARATION_VERSION,
+        "sequence_state": SEQUENCE_STATE_VERSION,
+        "backend": f"{library}/v{backend_version}",
+        "architecture": f"{architecture}/v{architecture_version}",
+    }
 
 
 def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
@@ -369,7 +377,9 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     splits, cv_record = _sequence_splits(mds, request)
     configs = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "deep_learning")
+        for config in load_configs(
+            study.case_study, label_ref.name, "deep_learning", case_dir=study.root
+        )
     }
     try:
         configured = configs[request["config_name"]]

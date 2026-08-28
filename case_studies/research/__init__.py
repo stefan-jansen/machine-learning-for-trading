@@ -1,6 +1,12 @@
 from .adapters import AdapterBinding, get_adapter, register_adapter, registered_adapters
-from .catalog import BacktestCatalog, PredictionCatalog
-from .causal import CausalRequest, CausalResult, ResolvedCausalRequest, supersedes_for
+from .catalog import BacktestCatalog, PredictionCatalog, prediction_rows_at
+from .causal import (
+    CausalRequest,
+    CausalResult,
+    ResolvedCausalRequest,
+    causal_supersedes,
+    supersedes_for,
+)
 from .comparison import CandidateSet
 from .configs import (
     declared_labels,
@@ -45,14 +51,17 @@ from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
     population_supersedes,
+    published_population_names_at,
     research_name,
     superseded_members,
+    superseded_members_at,
 )
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
 __all__ = [
+    "causal_supersedes",
     "supersedes_for",
     "AdapterBinding",
     "BacktestResult",
@@ -105,6 +114,7 @@ __all__ = [
     "require_declared_menu_coverage",
     "expected_prediction_hashes",
     "planned_model_plan",
+    "prediction_rows_at",
     "primary_label",
     "population_supersedes",
     "research_name",
@@ -113,6 +123,8 @@ __all__ = [
     "run_locked_holdout",
     "run_model_population",
     "superseded_members",
+    "published_population_names_at",
+    "superseded_members_at",
     "run_models",
     "run_official_model_subset",
     "run_official_models",

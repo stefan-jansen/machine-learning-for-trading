@@ -47,8 +47,10 @@ from case_studies.research import (
     Result,
     open_study,
     plan_backtests,
+    population_supersedes,
     research_name,
     run_backtests,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
@@ -71,6 +73,7 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
+SUPERSEDES_COST_BACKTESTS: str = ""
 
 # %% [markdown]
 # ## Select one strategy for each label
@@ -120,6 +123,18 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     & pl.col("complete")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+# `SUPERSEDES_COST_BACKTESTS` names the snapshot this run replaces under the name it publishes,
+# offered through `population_supersedes` on the same rule. It is empty until that name has a
+# first generation; after that, an upstream refit changes this population's member list and
+# the registry refuses the write without it. `13_backtest` states the reasoning once.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if TOP_N_PREDICTIONS is not None:
@@ -168,7 +183,7 @@ def _preview_leader(rows: pl.DataFrame, registered_allocations: pl.DataFrame) ->
     disagreement.
     """
     registered = registered_allocations.filter(
-        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
     )
     if registered.is_empty():
         raise RuntimeError(
@@ -194,7 +209,9 @@ if include_preview:
     # a reduction the run was told to make as a missing upstream.
     registered_allocations = _registered_preview_allocations()
     covered = catalog.filter(
-        pl.col("prediction_hash").is_in(registered_allocations.get_column("prediction_hash"))
+        pl.col("prediction_hash").is_in(
+            registered_allocations.get_column("prediction_hash").implode()
+        )
     )
     if covered.is_empty():
         raise RuntimeError(
@@ -343,18 +360,38 @@ if len(planned_hashes) != len(set(planned_hashes)):
 
 cost_population = None
 if not include_preview:
+    costs_name = research_name(CASE_STUDY_ID, "cost-sensitivity-backtests", scope=POPULATION_NAME)
     cost_population = OfficialPopulation.create(
         study,
-        name=research_name(CASE_STUDY_ID, "cost-sensitivity-backtests", scope=POPULATION_NAME),
+        name=costs_name,
         member_kind="backtest",
         members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=costs_name, declared=SUPERSEDES_COST_BACKTESTS
+        ),
     )
     print(f"Frozen expected cost population: {cost_population.hash}")
 
 # %% [markdown]
-# ## Execute the frozen cost grid
+# ## Execute the frozen cost grid, and validate its membership without making it selectable
+#
+# The population is validated in the cell that fills it: the expected set was written down before
+# the first member ran, and `require_complete` is what turns that declaration into a published
+# result. Publishing it does not make it selectable - a cost sensitivity is a curve through a
+# parameter the strategy does not choose, and later selection reads the allocation population.
 
 # %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
 cost_results: list[BacktestResult] = []
 cost_rows = []
 for job in cost_jobs:
@@ -380,6 +417,7 @@ for job in cost_jobs:
     if result.registry_record()["stage"] != "cost_sensitivity" or not result.complete:
         raise RuntimeError("a cost result is incomplete or misclassified")
     cost_results.append(result)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
     cost_rows.append(
         {
             "label": job["label"],
@@ -389,12 +427,12 @@ for job in cost_jobs:
         }
     )
 
-pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
+served = run_status.count("reused")
+print(
+    f"Cost siblings: {len(cost_results) - served} computed, {served} served from the registry, "
+    f"{len(cost_results)} in the population"
+)
 
-# %% [markdown]
-# ## Validate sensitivity membership without making it selectable
-
-# %% tags=["results"]
 if not include_preview:
     if cost_population is None:
         raise RuntimeError("the canonical cost population was not frozen before execution")
@@ -402,6 +440,8 @@ if not include_preview:
     print(f"Official cost-sensitivity population: {cost_population.hash}")
 else:
     print("Preview cost curves remain outside official populations and candidate sets.")
+
+pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
 
 # %% [markdown]
 # ## Key takeaways

@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS training_runs (
 CREATE INDEX IF NOT EXISTS idx_training_family_label ON training_runs(family, label);
 CREATE INDEX IF NOT EXISTS idx_training_config_name ON training_runs(config_name);
 
+CREATE TABLE IF NOT EXISTS training_identity_migrations (
+    target_training_hash TEXT PRIMARY KEY REFERENCES training_runs(training_hash),
+    source_training_hash TEXT NOT NULL,
+    target_spec_json     TEXT NOT NULL,
+    prediction_map_json TEXT NOT NULL,
+    proof_json          TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_migration_source
+    ON training_identity_migrations(source_training_hash);
+
 CREATE TABLE IF NOT EXISTS prediction_sets (
     prediction_hash     TEXT PRIMARY KEY,
     training_hash       TEXT NOT NULL REFERENCES training_runs(training_hash),
@@ -727,9 +739,8 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     ):
         db.execute("ALTER TABLE causal_runs ADD COLUMN refutation_n_successful INTEGER")
 
-    # Additive, and it costs no recompute: _causal_source_identity hashes
-    # case_studies/utils/causal.py and nothing else, so a column outside the spec
-    # moves no causal_hash and invalidates no registered row.
+    # Additive, and it costs no recompute: the column is outside the causal computation
+    # specification, so it moves no causal hash and invalidates no registered row.
     if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
         db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
 

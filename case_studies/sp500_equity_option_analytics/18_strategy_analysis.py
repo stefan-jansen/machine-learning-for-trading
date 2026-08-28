@@ -625,12 +625,15 @@ aligned = (
     .join(leader_returns.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
     .sort("timestamp")
 )
-nonzero = aligned.with_row_index().filter(
-    (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("challenger_ret").abs() > 1e-15)
-)
-if nonzero.is_empty():
+if aligned.is_empty():
     raise RuntimeError("The overlay and its baseline are flat across the canonical window")
-aligned = aligned.slice(nonzero["index"].min())
+# `challenger_overlays_baseline` says what a flat session on the challenger means, and here
+# the challenger is a risk overlay running on top of this exact carrier. Both are live from
+# the carrier's first traded session, so a session the overlay sits out is a position it
+# chose to hold and belongs in the comparison - it is the effect being measured. The default
+# is for two independent series, where the challenger's leading zeros are a warmup before its
+# first signal, and applying it here would delete the overlay's largest effect and pull
+# `sharpe_diff` toward zero in the direction the overlay is under test.
 paired_risk = compute_paired_uncertainty(
     aligned["challenger_ret"],
     aligned["baseline_ret"],
@@ -639,6 +642,7 @@ paired_risk = compute_paired_uncertainty(
     label=LABEL,
     n_boot=2000,
     seed=SEED,
+    challenger_overlays_baseline=True,
 )
 
 # %% [markdown]

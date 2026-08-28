@@ -2713,7 +2713,9 @@ def _latent_study(tmp_path, monkeypatch):
         "case_studies.utils.latent_factors.case_study.load_case_study_context",
         lambda *args, **kwargs: context,
     )
-    monkeypatch.setattr(latent_adapter, "_source_identity", lambda: {"fixture": "v1"})
+    monkeypatch.setattr(
+        latent_adapter, "_source_identity", lambda model_name: {model_name: "fixture-v1"}
+    )
     return study
 
 

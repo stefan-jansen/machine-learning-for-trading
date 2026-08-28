@@ -29,6 +29,7 @@ from case_studies.research import (
     run_backtests,
     run_models,
 )
+from case_studies.research.contracts import ExecutionTier
 from case_studies.research.execution import ModelExecution
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.artifact_digest import value_digest
@@ -40,30 +41,56 @@ from utils.modeling import load_configs
 from utils.paths import REPO_ROOT
 
 CASE_STUDY = "cme_futures"
-ALL_LABELS = ("fwd_ret_5d", "fwd_ret_21d")
+
+
+def _declared_sweep_labels() -> tuple[str, ...]:
+    """The labels ``config/setup.yaml`` declares for the sweep, primary first.
+
+    Read from the declaration rather than restated beside it. A literal tuple here is a
+    second copy of what ``setup.yaml`` says, and nothing compares the two: adding a
+    variant to the sweep would leave every notebook fitting the old set and publishing a
+    population one label short, silently. That is the failure a ``PRIMARY_LABEL`` default
+    causes in other case studies, reached by a different route.
+
+    Anchored at ``REPO_ROOT`` rather than ``get_case_study_dir``, which honours
+    ``ML4T_OUTPUT_DIR``. The sweep declaration is committed source, not an output, so a
+    preview workspace or a test redirect must not be able to change which labels are
+    declared. The order is ``sweep_labels``' order - primary, then variants as written -
+    because a population hashes its members as an ordered list, and re-ordering would give
+    every published population a new identity.
+    """
+    setup = yaml.safe_load(
+        (REPO_ROOT / "case_studies" / CASE_STUDY / "config" / "setup.yaml").read_text()
+    )
+    labels = (setup or {}).get("labels") or {}
+    primary = labels.get("primary")
+    if not primary:
+        raise ValueError(f"{CASE_STUDY}: setup.yaml declares no labels.primary")
+    ordered = [str(primary)]
+    ordered += [str(name) for name in (labels.get("variants") or []) if str(name) != str(primary)]
+    return tuple(ordered)
+
+
+ALL_LABELS = _declared_sweep_labels()
 FRONT_CONTRACT_POSITION = 0
 ROLL_POLICY = "volume_rolled_multiplicative_back_adjustment"
 EXPIRY_POLICY = "continuous_front_contract_rolls_before_delivery"
 # The result-protocol fields that differ between the two return horizons, and the axis the
 # final cross-horizon comparison therefore spans.
 HORIZON_DEPENDENT_PROTOCOL_FIELDS = ("cv", "feature_artifacts", "label_artifact")
-# Every name here has to be one a notebook actually registers. Nothing a reader runs enforces
-# that yet: `official_prediction_catalog` would resolve each with `OfficialPopulation.one`, which
-# raises on a name that does not exist, but no CME notebook calls it - `12_model_analysis` reads
-# the registry directly. What holds the tuple to its producers today is
-# `tests/test_cme_futures_research.py`, which greps the notebooks for the names they publish.
-#
-# The first two carry the case-study id, which is what the other eight case studies do; the
-# remaining three keep the abbreviation their producers still use, and move when 08, 09 and 10a
-# are next run. `10b_stochastic_discount_factor` publishes nothing at all: it still runs through
-# the latent-factor library path rather than the research boundary, so there is no
-# `cme-sdf-validation-v1`, and its name joins this tuple when that notebook registers one.
+# Every name here has to be one a notebook actually registers: `official_prediction_catalog`
+# resolves each with `OfficialPopulation.one`, which raises on a name that does not exist, so a
+# name declared and never written stops `12_model_analysis` rather than being ignored. All six now
+# read `<case study>-<what the producer publishes>-validation-v1`, which is what the other eight
+# case studies do. The first four name the training family; 10a and 10b split one family between
+# two notebooks, so they name the model instead.
 MODEL_POPULATION_NAMES = (
     "cme_futures-linear-validation-v1",
     "cme_futures-gbm-validation-v1",
-    "cme-tabular-dl-validation-v1",
-    "cme-sequence-validation-v1",
-    "cme-pca-validation-v1",
+    "cme_futures-tabular_dl-validation-v1",
+    "cme_futures-deep_learning-validation-v1",
+    "cme_futures-pca-validation-v1",
+    "cme_futures-sdf-validation-v1",
 )
 
 
@@ -81,20 +108,56 @@ class FuturesPricePath:
 class FuturesBacktestExecution:
     results: tuple[BacktestResult, ...]
     catalog_rows: pl.DataFrame
-    population: OfficialPopulation
+    # None under a preview run. A population is canonical by definition and
+    # `OfficialPopulation.create` refuses a preview member outright
+    # (research/population.py:101-103), so a reduced re-execution publishes no snapshot.
+    population: OfficialPopulation | None
 
 
-def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> Study:
-    """Open canonical regeneration or an isolated reader preview."""
+def open_study(
+    *,
+    execution_tier: str,
+    workspace: str | Path | None = None,
+    entry_point: str | None = None,
+) -> Study:
+    """Open canonical regeneration, canonical execution into a workspace, or a reader preview.
+
+    Canonical with no workspace regenerates the case study's artifacts in place, which is the
+    production path and needs the generated-artifact directory symlinks a maintainer worktree
+    carries. Canonical *with* a workspace is the same computation writing to that root instead,
+    which is the only form a checkout without those symlinks can run: CI seeds its fixture into
+    ``ML4T_OUTPUT_DIR`` and has no `features`, `labels` or `run_log` symlink to regenerate over,
+    so `Study.regenerate` refused there and took notebooks 13 through 17 red on every run.
+
+    ``execution_tier`` and ``entry_point`` are stamped on the returned study rather than left to
+    their defaults. Both were dropped here while the library set them, which is the hazard a
+    private wrapper carries: this one restates the library's construction and had drifted from it
+    on both fields. A study built with no tier reports ``canonical`` whatever it was opened for,
+    and `OfficialPopulation.create` refuses a preview member by reading exactly that field, so a
+    preview through this wrapper could publish a population the library would have refused.
+    """
     if execution_tier == "canonical":
-        return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT)
+        if workspace is None:
+            return Study.regenerate(CASE_STUDY, release_root=REPO_ROOT, entry_point=entry_point)
+        return Study.open(
+            CASE_STUDY,
+            workspace=Path(workspace).expanduser().resolve(),
+            release_root=REPO_ROOT,
+            entry_point=entry_point,
+        )
     if execution_tier != "preview":
         raise ValueError("execution_tier must be canonical or preview")
     if workspace is None:
         raise ValueError("preview execution requires an explicit workspace")
     workspace = Path(workspace).expanduser().resolve()
     try:
-        return Study.open(CASE_STUDY, workspace=workspace, release_root=REPO_ROOT)
+        return Study.open(
+            CASE_STUDY,
+            workspace=workspace,
+            release_root=REPO_ROOT,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
+        )
     except ValueError as error:
         generated = tuple(
             REPO_ROOT / "case_studies" / CASE_STUDY / name
@@ -114,6 +177,8 @@ def open_study(*, execution_tier: str, workspace: str | Path | None = None) -> S
             release_root=REPO_ROOT,
             output_root=workspace,
             read_only=False,
+            entry_point=entry_point,
+            execution_tier=ExecutionTier.PREVIEW,
             manifest={
                 "schema_version": 1,
                 "case_study": CASE_STUDY,
@@ -212,30 +277,6 @@ def run_resolved_model_requests(
     return execution
 
 
-def _require_resolved_requests_cover_the_catalog(
-    request_catalog: pl.DataFrame,
-    resolved: tuple[ResolvedModelRequest, ...],
-) -> None:
-    """Refuse a snapshot built from a resolved set that is not the declared catalog.
-
-    Supplying ``resolved_requests`` is how a caller avoids resolving twice, not a way to narrow
-    what the population contains. Without this check, a stale or partial set snapshots under the
-    catalog's name and reports complete, and every configuration it omitted silently leaves the
-    comparison the population exists to define.
-    """
-    declared = set(request_catalog.select("family", "label", "config_name").unique().iter_rows())
-    submitted = {
-        (request.family, request.spec["label"], request.spec.get("config_name"))
-        for request in resolved
-    }
-    if submitted != declared:
-        missing = sorted(declared - submitted)
-        extra = sorted(submitted - declared)
-        raise ValueError(
-            f"resolved requests do not match the declared catalog: missing={missing}, extra={extra}"
-        )
-
-
 def run_official_model_catalog(
     study: Study,
     request_catalog: pl.DataFrame,
@@ -258,7 +299,6 @@ def run_official_model_catalog(
         resolved = resolve_model_requests(study, request_catalog, execution_tier="canonical")
     if any(request.spec["execution_tier"] != "canonical" for request in resolved):
         raise ValueError("official model populations require canonical requests")
-    _require_resolved_requests_cover_the_catalog(request_catalog, resolved)
     expected = expected_prediction_hashes(resolved)
     population = OfficialPopulation.create(
         study,
@@ -640,8 +680,24 @@ def publish_product_weights(
             "expiry_policy": EXPIRY_POLICY,
         },
         source_identity=source_identity,
+        # Positions carry across a fold boundary rather than being liquidated.
+        #
+        # The five expanding-window folds are adjacent in calendar time and nothing
+        # happens in the market on the four dates that separate them, so flattening
+        # there would be an artifact of the evaluation index rather than a property
+        # of the strategy. Liquidating also cannot be executed here in any case: the
+        # configured weekly_friday_close -> monday_open delay means the engine has no
+        # weight row to snap the reset onto, and research/strategy.py:128-149 refuses
+        # to snap it forward because that carries the old state across the boundary
+        # and then pays a round trip for no change in exposure.
+        #
+        # What this gives up: per-fold metrics are no longer computed from a flat
+        # start, so a fold inherits at most one week of exposure from the fold before
+        # it. Four boundaries against roughly 260 weekly decisions, so about 1.5% of
+        # them. Any notebook reporting per-fold results must say so rather than claim
+        # each fold begins flat.
         state_transition_policy=StateTransitionPolicy(
-            fold_boundary="liquidate",
+            fold_boundary="continue",
             temporal_gap="continue",
         ),
         canonical=canonical,
@@ -672,20 +728,98 @@ def strategy_request_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
     )
 
 
+def supersedes_declaration(execution_tier: str, declared: str) -> str | None:
+    """What `06_linear` and `07_gbm` may offer as their population's `supersedes`.
+
+    `population_supersedes` answers a registry question - does the name's current generation
+    match this declaration - and answers it by reading `study.root`. That is the right question
+    and the wrong root for a preview in a maintainer worktree. `open_study` gives a preview its
+    own root only when the case study's generated directories are real; where they are symlinks
+    to shared artifacts, which `create_experiment` cannot copy, it reads them in place and
+    redirects only the writes. `root` stays the canonical case directory, the lookup finds the
+    canonical generation, and the helper correctly returns a hash that this run must not use:
+    `run_model_population` refuses a preview carrying one, so the preview fails before its first
+    fit. It fails only for the maintainer, because a CI checkout has no symlinks.
+
+    The tier is therefore decided before the registry is consulted, not after. A preview
+    population is discarded with its workspace and has no lineage to extend, so there is no tier
+    other than canonical in which the declaration means anything.
+
+    This lives here rather than inline in each notebook so that both pass the same expression and
+    a test can exercise it. It deliberately does not wrap `population_supersedes`: what that
+    function decides is the registry's business and is tested against real registries.
+    """
+    return declared if execution_tier == "canonical" else None
+
+
+def preview_prediction_candidates(
+    study: Study,
+    *,
+    labels: Iterable[str],
+    limit: int,
+) -> pl.DataFrame:
+    """The preview validation predictions to backtest, capped per label.
+
+    The cap is per label and not over the whole frame. A single head across a label-sorted
+    frame spends the budget on whichever label sorts first, so a later label is left with
+    fewer rows than it was allotted - or with none at all when the first label alone fills
+    the budget.
+
+    Only the second of those is caught downstream: a label reduced to zero is refused by the
+    emptiness check below, while a label reduced merely *below* its budget is not, and that
+    one is invisible. Both are the silent narrowing the sweep contracts exist to prevent, so
+    the cap is applied per group rather than repaired afterwards.
+
+    This lives here rather than inline in `13_backtest` so the notebook and its test call the
+    same code. A test that rebuilds the expression asserts Polars' semantics and keeps passing
+    when the notebook regresses.
+    """
+    labels = list(labels)
+    if not labels:
+        raise ValueError("preview prediction selection requires at least one label")
+    if limit < 1:
+        raise ValueError("preview prediction selection requires a positive limit")
+    candidates = (
+        study.predictions.table(include_preview=True)
+        .filter(
+            (pl.col("execution_tier") == "preview")
+            & (pl.col("split") == "validation")
+            & pl.col("complete")
+            & pl.col("label").is_in(labels)
+        )
+        .sort("label", "family", "config_name", "checkpoint_kind", "checkpoint_value")
+        .group_by("label", maintain_order=True)
+        .head(limit)
+    )
+    starved = [label for label in labels if candidates.filter(pl.col("label") == label).is_empty()]
+    if starved:
+        raise RuntimeError(
+            f"preview execution found no complete validation predictions for {starved}"
+        )
+    return candidates
+
+
 def run_official_backtest_requests(
     study: Study,
     requests: pl.DataFrame,
     *,
-    population_name: str,
+    population_name: str | None,
 ) -> FuturesBacktestExecution:
-    """Resolve, snapshot, and execute visible canonical futures strategy requests."""
+    """Resolve, snapshot, and execute visible futures strategy requests.
+
+    ``population_name`` is None for a preview run, which publishes no snapshot: a backtest
+    inherits its tier from the predictions it reads (research/execution.py:364), preview
+    results are refused entry to an official population, and the workspace holding them is
+    discarded afterwards. Everything else - the expected-identity snapshot before the engine
+    runs, the order check, the per-request completeness - applies to both tiers.
+    """
     required = {"request_name", "prediction_hash", "label", "signal"}
     missing = required - set(requests.columns)
     if missing:
         raise ValueError(f"strategy requests are missing columns: {sorted(missing)}")
     if requests.is_empty() or requests.get_column("request_name").n_unique() != requests.height:
         raise ValueError("strategy request names must be non-empty and unique")
-    catalog = study.predictions.table()
+    catalog = study.predictions.table(include_preview=True)
     price_cache: dict[tuple[str, int], FuturesPricePath] = {}
     prepared = []
     expected = []
@@ -718,7 +852,12 @@ def run_official_backtest_requests(
             allocation=allocation,
             risk=risk,
             costs=costs,
-            canonical=True,
+            # A decision artifact is canonical when the prediction it decides on is, and not
+            # by declaration: `DecisionArtifact.publish` resolves its lineage with
+            # `include_preview=not canonical` (research/decisions.py:192), so asserting
+            # canonical over a preview prediction sends that lookup to the wrong registry and
+            # the publish fails on its own input with `Unknown result hash`.
+            canonical=prediction.execution_tier == "canonical",
         )
         plan = plan_backtests(
             study,
@@ -738,16 +877,26 @@ def run_official_backtest_requests(
         prepared.append((row, selected, price_path, signal, allocation, decision, expected_hash))
     if len(expected) != len(set(expected)):
         raise ValueError("strategy requests resolve to duplicate backtest identities")
-    population = OfficialPopulation.create(
-        study,
-        name=population_name,
-        member_kind="backtest",
-        members=expected,
+    population = (
+        OfficialPopulation.create(
+            study,
+            name=population_name,
+            member_kind="backtest",
+            members=expected,
+        )
+        if population_name is not None
+        else None
     )
     results = []
     rows = []
     for row, selected, price_path, signal, allocation, decision, expected_hash in prepared:
-        result = run_backtests(
+        # `run_backtests` says per member whether it computed the backtest or served an
+        # identical one from the registry, and that distinction is kept rather than dropped.
+        # Without it a re-run of an already-registered sweep displays the same table of N
+        # complete rows as the run that computed them, and a reader cannot tell a cold sweep
+        # from a no-op - a wrong reading that looks exactly like a right one, and one that
+        # gets more misleading every time the sweep is re-run.
+        executed = run_backtests(
             study,
             predictions=selected,
             signal=signal,
@@ -757,7 +906,9 @@ def run_official_backtest_requests(
             costs=row.get("costs"),
             chapter=row.get("chapter"),
             decision=decision,
-        ).results[0]
+        )
+        result = executed.results[0]
+        source = "computed" if executed.diagnostics[0]["status"] == "completed" else "reused"
         if result.hash != expected_hash:
             raise RuntimeError(f"backtest identity changed: {expected_hash} -> {result.hash}")
         results.append(result)
@@ -769,19 +920,101 @@ def run_official_backtest_requests(
                 "decision_hash": decision.hash,
                 "backtest_hash": result.hash,
                 "complete": result.complete,
+                "source": source,
             }
         )
     if tuple(result.hash for result in results) != tuple(expected):
         raise RuntimeError("backtest execution did not preserve declared request order")
-    population.require_complete()
+    if population is not None:
+        population.require_complete()
+    elif not all(result.complete for result in results):
+        raise RuntimeError("a preview backtest did not complete")
     return FuturesBacktestExecution(tuple(results), pl.DataFrame(rows), population)
+
+
+CANDIDATE_SET_STAGES = ("signal", "allocation", "risk", "pre-overlay", "final-validation")
+
+
+def candidate_set_name(stage: str, label: str) -> str:
+    """Name one per-label candidate set.
+
+    Every writer and every reader of a per-label set goes through this function. A stage the
+    funnel does not define is refused here rather than minting a second namespace a reader
+    would then find empty: a candidate set opened under a name nothing wrote does not fail
+    loudly, it carries an absent or stale pool into the notebooks downstream.
+    """
+    if stage not in CANDIDATE_SET_STAGES:
+        raise ValueError(
+            f"unknown candidate set stage {stage!r}, expected one of {CANDIDATE_SET_STAGES}"
+        )
+    return f"cme_futures-{stage}-{label}-v1"
+
+
+# `setup` is the case-study configuration digest, not a feature input. The latent-factor adapter
+# records it alongside the feature artifacts and the other families do not, so it is dropped before
+# the comparison rather than being read as a difference in what the members trained on.
+NON_FEATURE_ARTIFACT_ROLES = frozenset({"setup"})
+_NORMALIZED_FEATURE_ARTIFACT_CONTRACT = {"comparable_fields": ["feature_artifacts"]}
+
+
+def _feature_artifact_digests(result: Result) -> dict[str, str]:
+    """Return ``{role: digest}`` for the feature inputs, from any recorded shape.
+
+    Three shapes reach the registry for the same information. The tabular families record
+    ``{role: {"sha256": <hex>, "size": int}}``, the latent-factor adapter records
+    ``[{"role": ..., "sha256": "sha256:<hex>"}]``, and a role may carry a bare digest string.
+    Comparing the recorded field by equality therefore refuses a mixed-family set over how the
+    same digests were written down. Normalizing first keeps the guarantee the protocol check
+    exists to give - every member of a comparable set read the same features - instead of
+    declaring the field uncomparable and giving it up.
+    """
+    recorded = result.protocol()["feature_artifacts"]
+    if isinstance(recorded, dict):
+        entries = recorded.items()
+    else:
+        entries = [(entry["role"], entry) for entry in recorded or ()]
+    digests = {}
+    for role, value in entries:
+        if role in NON_FEATURE_ARTIFACT_ROLES:
+            continue
+        digest = value.get("sha256") if isinstance(value, dict) else value
+        if not digest:
+            raise ValueError(f"result {result.hash} records no digest for {role!r}")
+        digests[role] = str(digest).removeprefix("sha256:")
+    return digests
+
+
+def _require_agreeing_feature_artifacts(members: Iterable[Result]) -> None:
+    """Refuse a candidate set whose members did not read the same feature artifacts."""
+    baseline = None
+    for member in members:
+        digests = _feature_artifact_digests(member)
+        if baseline is None:
+            baseline = digests
+            continue
+        if digests != baseline:
+            differing = sorted(set(baseline) ^ set(digests)) or sorted(
+                role for role in baseline if baseline[role] != digests[role]
+            )
+            raise ValueError(f"candidate set members read different feature artifacts: {differing}")
+
+
+def _create_comparable_set(study: Study, name: str, members: list[Result]) -> CandidateSet:
+    """Create one set whose members are checked to share their feature artifacts."""
+    _require_agreeing_feature_artifacts(members)
+    return CandidateSet.create(
+        study,
+        name,
+        members,
+        comparison_contract=dict(_NORMALIZED_FEATURE_ARTIFACT_CONTRACT),
+    )
 
 
 def create_label_candidate_sets(
     study: Study,
     execution: FuturesBacktestExecution,
     *,
-    name_prefix: str,
+    stage: str,
 ) -> dict[str, CandidateSet]:
     """Create one immutable comparable backtest set per label."""
     labels = execution.catalog_rows.get_column("label").unique().sort().to_list()
@@ -790,12 +1023,117 @@ def create_label_candidate_sets(
         hashes = execution.catalog_rows.filter(pl.col("label") == label).get_column("backtest_hash")
         members_by_hash = {result.hash: result for result in execution.results}
         members = [members_by_hash[value] for value in hashes]
-        output[label] = CandidateSet.create(
+        output[label] = _create_comparable_set(
             study,
-            f"{name_prefix}-{label}-v1",
+            candidate_set_name(stage, label),
             members,
         )
     return output
+
+
+# The candidate-set stage names and the registry's ``backtest_runs.stage`` values are two
+# vocabularies. A set is named for the funnel step it freezes; a row is named for the
+# computation that produced it. Only the three executed steps appear in both - `pre-overlay`
+# and `final-validation` name unions, and no backtest row carries either.
+REGISTRY_STAGE_BY_SET_STAGE = {
+    "signal": "signal",
+    "allocation": "allocation",
+    "risk": "risk_overlay",
+}
+
+
+def stage_backtest_results(
+    study: Study,
+    *,
+    stage: str,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The eligible results of one funnel step for one label, at the tier that produced them.
+
+    Canonical reads the immutable per-label candidate set, which is what makes a selection
+    reproducible from the registry alone: the pool is fixed before anything ranks it. A preview
+    has no set to read, because `CandidateSet.create` refuses a preview member outright
+    (research/comparison.py:50-51), so it reads its own workspace rows for the same step. The
+    guarantee therefore differs by tier and the notebooks say so: canonical selects from a
+    frozen pool, preview selects from whatever its reduced run produced.
+    """
+    if execution_tier == "canonical":
+        members = CandidateSet.one(study, name=candidate_set_name(stage, label)).members
+        return tuple(Result.open(study, value) for value in members)
+    if execution_tier != "preview":
+        raise ValueError("execution_tier must be canonical or preview")
+    registry_stage = REGISTRY_STAGE_BY_SET_STAGE.get(stage)
+    if registry_stage is None:
+        raise ValueError(f"{stage!r} names a union of steps, which no backtest row carries")
+    rows = study.backtests.table(include_preview=True).filter(
+        (pl.col("execution_tier") == "preview")
+        & (pl.col("split") == "validation")
+        & (pl.col("stage") == registry_stage)
+        & (pl.col("label") == label)
+        & pl.col("complete")
+    )
+    return tuple(
+        Result.open(study, value, include_preview=True)
+        for value in rows.get_column("backtest_hash")
+    )
+
+
+def rank_by_validation_sharpe(
+    study: Study,
+    results: Iterable[Result],
+) -> tuple[BacktestResult, ...]:
+    """Order backtest results by validation Sharpe, ties broken by identity.
+
+    The same rule `CandidateSet._ranked_validation_hashes` applies, so a preview ranking and a
+    canonical one differ in which rows they see and in nothing else. A member with no Sharpe is
+    refused rather than sorted to an end, which is what a null would otherwise do silently.
+    """
+    members = {result.hash: result for result in results}
+    if not members:
+        raise ValueError("ranking by validation Sharpe requires at least one result")
+    rows = (
+        study.backtests.table(include_preview=True)
+        .filter(pl.col("backtest_hash").is_in(list(members)) & pl.col("sharpe").is_not_null())
+        .sort("sharpe", "backtest_hash", descending=[True, False])
+    )
+    if rows.height != len(members):
+        raise ValueError("a result being ranked has no validation Sharpe recorded")
+    return tuple(members[value] for value in rows.get_column("backtest_hash"))
+
+
+def pre_overlay_results(
+    study: Study,
+    *,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The signal and allocation pool for one label, at the tier that produced it."""
+    if execution_tier == "canonical":
+        pool = pre_overlay_candidate_set(study, label=label)
+        return tuple(Result.open(study, value) for value in pool.members)
+    return (
+        *stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier),
+        *stage_backtest_results(
+            study, stage="allocation", label=label, execution_tier=execution_tier
+        ),
+    )
+
+
+def final_validation_results(
+    study: Study,
+    *,
+    label: str,
+    execution_tier: str,
+) -> tuple[BacktestResult, ...]:
+    """The full selection pool for one label: signal, allocation and the risk overlay."""
+    if execution_tier == "canonical":
+        pool = final_validation_candidate_set(study, label=label)
+        return tuple(Result.open(study, value) for value in pool.members)
+    return (
+        *pre_overlay_results(study, label=label, execution_tier=execution_tier),
+        *stage_backtest_results(study, stage="risk", label=label, execution_tier=execution_tier),
+    )
 
 
 def shortlist_signal_configurations(
@@ -803,12 +1141,13 @@ def shortlist_signal_configurations(
     *,
     label: str,
     limit: int,
+    execution_tier: str = "canonical",
 ) -> tuple[BacktestResult, ...]:
     """Select the strongest signal result for each distinct model configuration."""
-    candidates = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
+    pool = stage_backtest_results(study, stage="signal", label=label, execution_tier=execution_tier)
     selected = []
     configurations = set()
-    for result in candidates.ranked_validation_sharpe():
+    for result in rank_by_validation_sharpe(study, pool):
         assert isinstance(result, BacktestResult)
         training = result.lineage()["training_spec"]
         key = (training["family"], training.get("config_name"))
@@ -827,18 +1166,18 @@ def shortlist_signal_configurations(
 
 def pre_overlay_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the immutable union of signal and allocation validation results."""
-    signal = CandidateSet.one(study, name=f"cme-signal-{label}-v1")
-    allocation = CandidateSet.one(study, name=f"cme-allocation-{label}-v1")
+    signal = CandidateSet.one(study, name=candidate_set_name("signal", label))
+    allocation = CandidateSet.one(study, name=candidate_set_name("allocation", label))
     members = [Result.open(study, value) for value in (*signal.members, *allocation.members)]
-    return CandidateSet.create(study, f"cme-pre-overlay-{label}-v1", members)
+    return _create_comparable_set(study, candidate_set_name("pre-overlay", label), members)
 
 
 def final_validation_candidate_set(study: Study, *, label: str) -> CandidateSet:
     """Return the selection pool across signal, allocation, and risk-overlay stages."""
     pre_overlay = pre_overlay_candidate_set(study, label=label)
-    risk = CandidateSet.one(study, name=f"cme-risk-{label}-v1")
+    risk = CandidateSet.one(study, name=candidate_set_name("risk", label))
     members = [Result.open(study, value) for value in (*pre_overlay.members, *risk.members)]
-    return CandidateSet.create(study, f"cme-final-validation-{label}-v1", members)
+    return _create_comparable_set(study, candidate_set_name("final-validation", label), members)
 
 
 def final_selection_candidate_set(study: Study) -> CandidateSet:
@@ -859,16 +1198,24 @@ def final_selection_candidate_set(study: Study) -> CandidateSet:
         members.extend(Result.open(study, value) for value in pool.members)
     return CandidateSet.create(
         study,
-        "cme-final-selection-v1",
+        "cme_futures-final-selection-v1",
         members,
         comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
     )
 
 
-def selection_catalog(study: Study, candidates: CandidateSet) -> pl.DataFrame:
-    """Return the registered catalog rows for one immutable selection pool."""
-    table = study.backtests.table().filter(pl.col("backtest_hash").is_in(candidates.members))
-    if table.height != len(candidates.members):
+def selection_catalog(study: Study, members: Iterable[str]) -> pl.DataFrame:
+    """Return the registered catalog rows for one selection pool, given its member hashes.
+
+    Takes the hashes rather than a `CandidateSet` because only a canonical pool is a set: a
+    preview pool is the rows its own reduced run produced, and there is no immutable object to
+    pass. The check that every member is described by the catalog applies to both.
+    """
+    members = list(members)
+    table = study.backtests.table(include_preview=True).filter(
+        pl.col("backtest_hash").is_in(members)
+    )
+    if table.height != len(members):
         raise ValueError("the backtest catalog does not describe every candidate")
     return table.select(
         "label",

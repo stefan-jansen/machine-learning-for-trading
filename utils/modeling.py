@@ -57,50 +57,6 @@ MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing
 MAX_TEMPORAL_WARMUP_FRACTION = 0.10
 
 
-def cross_sectional_ic_mean(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    dates: np.ndarray,
-    entities: np.ndarray,
-    *,
-    min_obs: int = 10,
-) -> float:
-    """Mean cross-sectional Spearman IC over the dates where it is defined.
-
-    The library computes the per-date series from two polars frames. Model
-    evaluation reaches it holding four aligned numpy arrays instead - what a
-    scikit-learn or Optuna objective has in hand inside a fold - so this adapts
-    the one to the other. It is the only thing this function does: the
-    correlation itself is ``ml4t.diagnostic``'s.
-
-    A date carries no coefficient when fewer than ``min_obs`` entities are
-    priced, or when every prediction or every return ties. ml4t-diagnostic 0.1.2
-    and later report those as null; 0.1.1 returns NaN, which ``drop_nulls`` does
-    not remove and which turns the mean of the whole series into NaN. Both are
-    dropped here, so the value does not depend on which of the two is installed.
-
-    Returns NaN when no date has a defined coefficient - a real answer to "what
-    was the average IC", unlike 0.0, which reads as "measured, and it was zero".
-    """
-    # Local import: `ml4t.diagnostic` brings scikit-learn's OpenMP runtime up
-    # transitively, and this module is imported by notebooks that must load a
-    # gradient-boosting library first. See .github/scripts/check_openmp_import_order.py.
-    from ml4t.diagnostic.metrics import cross_sectional_ic_series
-
-    ic_per_date = cross_sectional_ic_series(
-        pl.DataFrame({"timestamp": dates, "symbol": entities, "prediction": y_pred}),
-        pl.DataFrame({"timestamp": dates, "symbol": entities, "forward_return": y_true}),
-        pred_col="prediction",
-        ret_col="forward_return",
-        date_col="timestamp",
-        entity_col="symbol",
-        method="spearman",
-        min_obs=min_obs,
-    )
-    defined = ic_per_date.drop_nulls("ic").filter(pl.col("ic").is_finite())
-    return float(defined["ic"].mean()) if defined.height else float("nan")
-
-
 def seed_everything(seed: int = RANDOM_SEED) -> None:
     """Set all random seeds for full reproducibility (CPU + GPU).
 
@@ -1056,10 +1012,17 @@ def append_holdout_fold_if_needed(
 ) -> None:
     """Append a holdout fold to ``mds.splits`` when ``prediction_split=='holdout'``.
 
-    The holdout fold trains on everything available before ``holdout_start`` and
-    validates on ``[holdout_start, holdout_end]``. It becomes fold N+1, so downstream
-    code iterating ``mds.splits`` produces one holdout prediction set per
-    (training run, config) pair without any other change to the training loop.
+    The boundaries come from :func:`case_studies.research.holdout.build_holdout_cv`, which is
+    the one derivation of them. This function used to compute its own, and computed them
+    wrongly: it set ``train_end = val_start = holdout_start``, where ``build_holdout_cv`` stops
+    one label buffer short. Two things were wrong with that. The last training label's outcome
+    window reached into the holdout, which is the leak the buffer exists to prevent; and the
+    training mask in this module is inclusive at both ends, so the boundary session sat in the
+    training set *and* the evaluation set of the same fold - a holdout model fitted on a session
+    it is scored on, independent of any label horizon.
+
+    The fold becomes fold N+1, so downstream code iterating ``mds.splits`` produces one holdout
+    prediction set per (training run, config) pair without any other change to the training loop.
 
     "Everything available" is ``min(train_start)`` across the CV folds, not
     ``splits[0]["train_start"]``. ``generate_cv_splits`` steps backward from the holdout
@@ -1087,6 +1050,8 @@ def append_holdout_fold_if_needed(
             "at least one CV fold for this case study."
         )
         raise RuntimeError(msg)
+    from case_studies.research.holdout import build_holdout_cv
+
     path = get_case_study_dir(case_study_id) / "config" / "setup.yaml"
     with open(path) as f:
         setup = yaml.safe_load(f)
@@ -1116,10 +1081,18 @@ def append_holdout_fold_if_needed(
     )
     if already_covered:
         return
+    # The label is only read for the outcome-horizon check: `build_holdout_cv` takes the gap
+    # from the case study's widest declared buffer, because one fold serves every label.
+    derived = build_holdout_cv(
+        {"label": str(setup["labels"]["primary"]), "computation": {"cv": {"folds": mds.splits}}},
+        case_study=case_study_id,
+        timeline=mds.dataset.get_column(mds.date_col).unique().sort().to_list(),
+    )
+    fold = dict(derived["folds"][0])
     holdout_fold = {
         "fold": len(mds.splits),
-        "train_start": earliest_train_start(mds.splits),
-        "train_end": ho_start_ts,
+        "train_start": pd.Timestamp(fold["train_start"]),
+        "train_end": pd.Timestamp(fold["train_end"]),
         "val_start": ho_start_ts,
         "val_end": ho_end_ts,
     }
@@ -1219,6 +1192,8 @@ def load_configs(
     case_study_id: str,
     label: str,
     family: str,
+    *,
+    case_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Load model configurations for a label and family.
 
@@ -1235,6 +1210,14 @@ def load_configs(
         ``config/training/``.
     family : str
         Model family (e.g., "linear", "gbm", "deep_learning").
+    case_dir : Path, optional
+        The case study directory to read the menu and presets from. Callers
+        holding a ``Study`` pass ``study.root``, which the study resolved when it
+        was opened. Without it the directory comes from ``ML4T_OUTPUT_DIR``, which
+        is process-global and can be changed after the study was opened - a
+        read-only release study clears the variable on activation, so anything
+        that re-installs it afterwards silently redirects these reads to a
+        different, possibly reduced, set of menus.
 
     Returns
     -------
@@ -1246,7 +1229,7 @@ def load_configs(
     ConfigError
         If the training menu file or a referenced preset is missing.
     """
-    case_dir = get_case_study_dir(case_study_id)
+    case_dir = Path(case_dir) if case_dir is not None else get_case_study_dir(case_study_id)
     label_config_path = case_dir / "config" / "training" / f"{label}.yaml"
 
     if not label_config_path.exists():
