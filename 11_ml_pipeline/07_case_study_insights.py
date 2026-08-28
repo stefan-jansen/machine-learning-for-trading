@@ -1466,6 +1466,23 @@ else:
 
 # %% [markdown] tags=[]
 # ## 7. Cross-CS Takeaways
+
+
+# %% tags=[]
+# Panel-specificity is a claim about two panels disagreeing, so it cannot be made
+# from one. Where the overlap could not be computed, the bullet reports the sign
+# consistency it does have and says the comparison is missing, rather than
+# asserting the conclusion the missing half was there to support.
+coefficient_takeaway = (
+    f"**Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
+    f"0.8 mean sign consistency, and the largest top-{TOP_N} cross-panel feature overlap is "
+    f"{overlap_phrase}."
+    if has_overlap
+    else f"**Coefficient behavior across panels is not established here:** "
+    f"{stable_sign_count} selected fits clear 0.8 mean sign consistency, but the top-{TOP_N} "
+    f"cross-panel feature overlap is {overlap_phrase}, so whether the panels draw on "
+    "different features is not something this run can say."
+)
 #
 # **Next**: Ch12 extends the comparison with gradient boosting and
 # tabular deep learning; Ch13 with temporal deep learning.
@@ -1482,8 +1499,6 @@ display(
         f"estimate uses only {icir_leader['n_folds']} folds.\n"
         f"- **Ranking and direction are not symmetric:** regression-score mean daily AUC stays "
         f"within {max_auc_gap:.3f} of chance in the tested pairs.\n"
-        f"- **Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
-        f"0.8 mean sign consistency, and the largest top-{TOP_N} cross-panel feature overlap is "
-        f"{overlap_phrase}."
+        f"- {coefficient_takeaway}"
     )
 )
