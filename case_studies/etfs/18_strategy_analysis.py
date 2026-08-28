@@ -80,6 +80,7 @@ from ml4t.diagnostic.integration import (
     generate_tearsheet_from_run_artifacts,
 )
 
+from case_studies.research import open_study, split_retired_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_metrics import compute_and_register
@@ -98,6 +99,7 @@ from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
     load_paired_metrics,
+    load_prediction_index,
 )
 from case_studies.utils.strategy_analysis import (
     ci_status,
@@ -116,6 +118,11 @@ from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
 MAX_SYMBOLS = 0
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %%
 CASE_STUDY = "etfs"
@@ -130,6 +137,30 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
 
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
+
+# %% [markdown]
+# **Which prediction sets their publishers still stand behind.** A refit publishes a second
+# generation under the same population name, and the generation it replaced stays in the registry:
+# complete, current under a schema version that has not moved, and carrying every backtest the
+# previous sweep registered for it. The configuration this notebook describes is chosen by
+# backtest Sharpe over that pool, so without the lineage the analysis can be about a strategy the
+# case study no longer publishes.
+
+# %%
+LIVE_PREDICTIONS = (
+    split_retired_members(
+        open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+        load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation"),
+    )
+    .live["prediction_hash"]
+    .to_list()
+)
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(
+        f"no live prediction sets for {CASE_STUDY}/{PRIMARY_LABEL}/validation; run the model "
+        "stage and 14_backtest first"
+    )
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
 # Both derived tables fill in two waves - stage transitions once allocation, cost and risk have
 # run, holdout kinds only once the holdout has been evaluated - so the predicate is whether every
@@ -222,7 +253,10 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
 _HOLDOUT_STAGES = ("signal", "allocation", "risk_overlay")
 top_signal = (
     pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _HOLDOUT_STAGES],
+        [
+            explorer.best(stage=s, top_n=2000, prediction_hashes=LIVE_PREDICTIONS)
+            for s in _HOLDOUT_STAGES
+        ],
         how="diagonal_relaxed",
     )
     .filter(pl.col("family") != "benchmark")
@@ -284,7 +318,7 @@ print(f"  CI status: {ci_status(ic_lo, ic_hi)}")
 # section is where the shape it prices becomes visible.
 
 # %%
-ctx = explorer.search_context("signal")
+ctx = explorer.search_context("signal", prediction_hashes=LIVE_PREDICTIONS)
 search_table = pl.DataFrame(
     [
         {"metric": "Total signal backtests", "value": f"{ctx['total']:,}"},

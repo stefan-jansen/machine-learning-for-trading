@@ -60,6 +60,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
+from case_studies.research import open_study, split_retired_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
@@ -74,6 +75,7 @@ from case_studies.utils.backtest_presets import (
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
 from case_studies.utils.registry import (
     load_existing_backtest_hashes,
+    load_prediction_index,
     read_predictions,
     resolve_best_backtest_runs,
 )
@@ -93,6 +95,11 @@ LABEL = ""
 MAX_SYMBOLS = 0
 MAX_RISK_VARIANTS = 0  # 0 = every declared control; >0 caps position and portfolio controls each
 TOP_N_COMBOS: int | None = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. What the overlays are applied to
@@ -117,9 +124,35 @@ IS_VECTORIZED = CASE_STUDY_ID in VECTORIZED_CASE_STUDIES
 print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}")
 print(f"Backtest mode: {'vectorized' if IS_VECTORIZED else 'engine'}")
 
+# %% [markdown]
+# **The population the baselines are drawn from.** A refit publishes a second generation under the
+# same population name and leaves the one it replaced in the registry, backtests and all. An
+# overlay applied to a retired baseline measures a rule against a strategy its own publisher no
+# longer stands behind, and the comparison reads exactly like a valid one.
+
+# %%
+LIVE_PREDICTIONS = (
+    split_retired_members(
+        open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+        load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
+    )
+    .live["prediction_hash"]
+    .to_list()
+)
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(
+        f"no live prediction sets for {CASE_STUDY_ID}/{LABEL}/validation; run 14_backtest first"
+    )
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
+
 # %% tags=["results"]
 top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
+    CASE_STUDY_ID,
+    LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=TOP_N_COMBOS,
+    prediction_hashes=set(LIVE_PREDICTIONS),
 )
 if top_combos.is_empty():
     raise RuntimeError(
@@ -131,7 +164,7 @@ if top_combos.is_empty():
 # read from the explorer and joined on `backtest_hash`, which both carry.
 explorer = BacktestExplorer(CASE_STUDY_ID)
 sources = dict(
-    explorer.best(stage="allocation", top_n=100000, label=LABEL)
+    explorer.best(stage="allocation", top_n=100000, label=LABEL, prediction_hashes=LIVE_PREDICTIONS)
     .select("backtest_hash", "source")
     .iter_rows()
 )
@@ -308,10 +341,10 @@ print(
 )
 if failures:
     failure_frame = pl.DataFrame(failures)
-    print(f"{failure_frame.height} overlays raised. Distinct causes:")
+    print(f"{failure_frame.height} overlays failed. Distinct causes:")
     print(failure_frame.group_by("error").len().sort("len", descending=True))
 else:
-    print("no overlay raised")
+    print("no overlay failed")
 
 # %% [markdown]
 # ## 4. What each rule cost and what it bought
