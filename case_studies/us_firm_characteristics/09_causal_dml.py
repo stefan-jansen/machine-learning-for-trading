@@ -80,10 +80,15 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # configuration that carries the DML budget. Everything else the analysis needs comes from the
 # case study's own declarations and is resolved below rather than chosen here.
 #
-# The label is the one the strategy chapters trade. The configuration is the first the case study
-# declares for it, which is a preset of its own rather than the shared one: this panel is wide, the
-# row cap is spent on whole decision months, and the inference below runs along the time axis, so a
-# cap sized for a narrower case study would buy this one a short window.
+# The label is the one the strategy chapters trade, and the configuration is the first the case
+# study declares for it. **Its `max_samples` does not apply here.** A canonical request resolves
+# the full declared population, and a row cap reaches the resolver only through
+# `preview_reductions`, which a canonical request may not carry; the resolved spec records
+# `max_samples: 0` accordingly. The preset still declares one because six case-study DML stages
+# have not migrated to this path and read it as their own default. What that changes for this
+# notebook is the size of the analysis: the cap used to be spent on the most recent whole decision
+# months that fit under it, so the estimate was computed on the last two years of the panel rather
+# than on all of it.
 
 # %%
 label = LABEL or primary_label(study)
@@ -154,12 +159,15 @@ design
 # horizon** is how far past its own timestamp a label resolves, and it sets the floor on the
 # Newey-West bandwidth, because that is the span over which consecutive outcomes overlap.
 #
-# The three are separate numbers here and the table below prints all of them. The label buffer is
-# one month. The outcome horizon is also one month by declaration, and this release pairs
-# characteristics observed at the close of one month with the return earned over the next while
-# dating the row by the month the return was earned, so the outcome is already realised on the
-# timestamp its row carries and no two labels overlap at all. With no overlap the bandwidth falls
-# to the sample-size rule.
+# The three are separate numbers here and the table below prints all of them, counted in the
+# panel's own observations. `labels.buffer` is `1M`, one observation on a monthly panel.
+# `labels.horizons` declares `0D` for this label: the release pairs characteristics observed at
+# the close of one month with the return earned over the next and dates the row by the month the
+# return was earned, so the outcome is already realised on the timestamp its row carries and no
+# two labels overlap at all. `label_horizon_steps` reads 1 rather than 0 because the step count
+# floors at one observation - a span shorter than a bar still covers the bar it resolves inside -
+# so read that column as the floor and the `0D` declaration as the statement about overlap. With
+# no overlap the bandwidth falls to the sample-size rule.
 #
 # The block is neither of those. The treatment is a cumulative return from twelve months back to
 # two months back, so it is autocorrelated over its whole construction window whatever the label
@@ -238,10 +246,14 @@ effect_table
 # %% [markdown]
 # ## 5. Read the estimate against its own uncertainty
 #
-# The interval below is the DML coefficient plus and minus 1.96 Driscoll-Kraay standard errors.
-# The naive estimate is drawn as a point on the same axis because it is computed on the same rows,
-# so the distance between them is the adjustment and not a difference in sample. Both are monthly
-# effects in basis points.
+# The band below is the DML coefficient plus and minus 1.96 Driscoll-Kraay standard errors, which
+# is a normal-approximation reading of that standard error and **not** the interval implied by the
+# registered `p_hac`: that p-value comes from a Student-t on the second-stage period count, which
+# the registry does not carry, so an exact inversion is not available to a reader of the row. The
+# two agree closely at this many periods and are not the same statement, and the band is drawn
+# from the quantity that is recorded. The naive estimate is a point on the same axis because it is
+# computed on the same rows, so the distance between them is the adjustment rather than a
+# difference in sample. Both are monthly effects in basis points.
 #
 # Every number in this figure is read back from the registered row, so it redraws identically
 # whether this run fitted the model or the registry served it. The placebo draws themselves are
@@ -272,12 +284,12 @@ ax.legend(frameon=False, loc="upper left")
 add_message_title(
     ax,
     (
-        "The adjusted effect is separable from zero by its own standard error"
+        "Adjusting moves the estimate, and its own standard error separates it from zero"
         if separable
-        else "The adjusted effect is not separable from zero by its own standard error"
+        else "Adjusting moves the estimate, but its own standard error does not separate it from zero"
     ),
     subtitle=(
-        f"95% Driscoll-Kraay interval [{lo:+.1f}, {hi:+.1f}] bps; "
+        f"effect +/-1.96 Driscoll-Kraay standard errors, [{lo:+.1f}, {hi:+.1f}] bps; "
         f"permutation p {metrics['refutation_p']:.3f} over "
         f"{metrics['refutation_n_successful']} successful refits"
     ),

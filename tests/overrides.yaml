@@ -1235,6 +1235,7 @@ case_studies/cme_futures/07_gbm:
       folds: [0, 1]
       max_iterations: 20
       max_symbols: 5
+  # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   gpu: true
@@ -2382,8 +2383,31 @@ case_studies/us_firm_characteristics/04_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/us_firm_characteristics/05_linear:
+  parameters:
+    # Restored after #560 removed MAX_FOLDS/MAX_SYMBOLS and left the timeout that had
+    # been measured against them, so this preview had been fitting the full declared
+    # catalog on a budget priced for a fifteenth of it (ml4t/agent-workspace#942). One
+    # fold and five firms is the smoke test: every configuration is exercised, none at
+    # scale. `max_symbols` is stated rather than left to the empty-dict fallback in
+    # tests/pm_helpers.py, which only fires when the whole mapping is empty.
+    PREVIEW_REDUCTIONS:
+      folds: [0]
+      max_symbols: 5
+  # Measured 2026-08-27 with the reductions above: 88.7 s for the whole pytest
+  # invocation, fixture seeding included, at load average 40.8 on 24 cores. No cell
+  # approached the per-cell cap, so 120 s is kept rather than raised.
   timeout: 120
 case_studies/us_firm_characteristics/06_gbm:
+  parameters:
+    # As 05_linear, plus the two axes boosting adds. The checkpoint dimension is what
+    # this notebook is about, so it is reduced rather than removed: 20 trees checkpointed
+    # every 10 still registers two checkpoints per configuration.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0]
+      max_iterations: 20
+      max_symbols: 5
+  # Measured the same way and at the same load: 172.9 s end to end. Kept at 180 s.
   timeout: 180
 case_studies/us_firm_characteristics/07_tabular_dl:
   # setup.yaml pins modeling.tabular_dl.device: cuda, and resolve_torch_device
