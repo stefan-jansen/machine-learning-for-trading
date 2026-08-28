@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import time as dt_time
 from typing import Any
 
 import pandas as pd
@@ -408,6 +409,21 @@ def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str,
     return widest[1], widest[2]
 
 
+def _boundary_iso(moment: pd.Timestamp) -> str:
+    """Render a fold boundary the way the panel it describes carries its dates.
+
+    A midnight boundary is a date, and writing it as `2023-11-29T00:00:00` says the panel
+    has a time of day that it does not. Every daily panel stores its dates as `Date`, and
+    Polars reads a full ISO datetime into `Date` as null rather than truncating it, so the
+    datetime rendering could not be read back by the consumer it was written for. The time
+    is kept when there is one - `crypto_perps_funding` and `nasdaq100_microstructure` are
+    intraday and their boundaries are not midnight.
+    """
+    if moment.time() == dt_time(0, 0):
+        return moment.date().isoformat()
+    return moment.isoformat()
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
@@ -539,10 +555,10 @@ def build_holdout_cv(
 
     fold = {
         "fold": max(int(entry["fold"]) for entry in folds) + 1,
-        "train_start": train_start.isoformat(),
-        "train_end": train_end.isoformat(),
-        "val_start": pd.Timestamp(holdout_start).isoformat(),
-        "val_end": pd.Timestamp(holdout_end).isoformat(),
+        "train_start": _boundary_iso(train_start),
+        "train_end": _boundary_iso(train_end),
+        "val_start": _boundary_iso(pd.Timestamp(holdout_start)),
+        "val_end": _boundary_iso(pd.Timestamp(holdout_end)),
     }
     identity = value_digest(pl.DataFrame([fold]))
     if identity == validation_cv.get("identity"):
