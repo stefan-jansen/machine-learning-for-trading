@@ -100,3 +100,62 @@ def test_write_artifact_round_trips(frame: pl.DataFrame, tmp_path) -> None:
     assert json.loads(sidecar_path(path).read_text())["digest"] == value_digest(
         pl.read_parquet(path)
     )
+
+
+def test_metadata_reaches_the_sidecar_and_the_reader_that_needs_it(
+    frame: pl.DataFrame, tmp_path
+) -> None:
+    """A fold `generate_cv_splits` does not produce is invisible without this.
+
+    `temporal_artifact_fold_boundaries` reads `fold_geometry` off the sidecar when it is
+    there and otherwise regenerates the fold set from the label timeline, which yields the
+    cross-validation folds alone. A stage-04 artifact carrying a holdout fold therefore
+    exposes eight folds to every consumer while the parquet holds nine, and nothing in the
+    frame says what any fold's boundaries were.
+    """
+    geometry = [
+        {
+            "fold": 8,
+            "train_start": "2011-01-05",
+            "train_end": "2023-11-29",
+            "val_start": "2024-01-01",
+            "val_end": "2025-12-31",
+        }
+    ]
+    path = tmp_path / "features" / "model_based.parquet"
+    record = write_artifact(
+        frame,
+        path,
+        keys=["timestamp", "symbol"],
+        written_by="04_model_based_features",
+        metadata={"fold_geometry": geometry},
+    )
+
+    assert record["fold_geometry"] == geometry
+    assert read_digest(path)["fold_geometry"] == geometry
+    # The record's own fields survive the merge rather than being displaced by it.
+    assert record["digest"] == value_digest(frame)
+    assert record["n_rows"] == frame.height
+
+
+def test_metadata_may_not_redefine_the_record_it_is_merged_into(frame: pl.DataFrame) -> None:
+    """Overwriting `digest` would let a sidecar describe a file it was not computed from."""
+    with pytest.raises(ValueError, match="digest"):
+        digest_sidecar(
+            frame,
+            keys=["timestamp", "symbol"],
+            written_by="02_labels",
+            metadata={"digest": "0" * 16},
+        )
+
+
+def test_absent_metadata_leaves_the_record_exactly_as_it_was(frame: pl.DataFrame) -> None:
+    baseline = digest_sidecar(frame, keys=["timestamp", "symbol"], written_by="02_labels")
+    assert (
+        digest_sidecar(frame, keys=["timestamp", "symbol"], written_by="02_labels", metadata={})
+        == baseline
+    )
+    assert (
+        digest_sidecar(frame, keys=["timestamp", "symbol"], written_by="02_labels", metadata=None)
+        == baseline
+    )
