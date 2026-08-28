@@ -615,6 +615,88 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place, before a lock.
+
+    ``spec`` arrives with its CV already replaced by the single derived holdout fold, and with
+    ``expected_prediction_keys`` and ``effective_params_by_fold`` still describing the VALIDATION
+    folds. Both are checked after the lock by ``validate_locked_expected_keys`` and by
+    ``reconstruct_locked_request``, so carrying them forward produces a lock that fails at
+    execution and dropping them produces one that fails differently. They have to be recomputed.
+
+    Recomputing is not copying. A data-derived penalty - any ``alpha_frac`` configuration - is
+    resolved from the training rows of its own fold, so the holdout fold's alpha is a different
+    number from every validation fold's, and carrying one forward would lock a model that is not
+    the model selection chose. Measured on ``fx_pairs``: 48 of 84 linear specs vary their
+    parameters across folds, ``lasso_f0.85`` among them.
+
+    The rule that derives them lives in the preset, not in the spec, which records only the
+    resolved values. So the preset is loaded by ``config_name`` and **verified against a recorded
+    validation fold before it is trusted**: if replaying the rule does not reproduce the
+    parameters the spec already carries, the preset has changed since the validation run and
+    deriving the holdout parameters from it would silently lock a different configuration. One
+    fold is enough to establish that, and eight would cost eight fold preparations.
+    """
+    from case_studies.research.models import locked_holdout_split
+
+    computation = spec["computation"]
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("locked linear runner requires timestamp and an entity key")
+    entity_col = mds.entity_cols[0]
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    expected = _expected_keys_from_dataset(
+        mds.dataset,
+        [split],
+        entity_col=entity_col,
+        date_col=mds.date_col,
+        label_col=mds.label_col,
+    )
+    computation["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected.get_column("fold").n_unique(),
+    }
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or "effective_params_by_fold" not in model:
+        return
+    recorded = model["effective_params_by_fold"]
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError("locked linear spec records no effective parameters to re-key")
+
+    config = _load_preset(spec["config_name"])
+    validation_folds = _normalize_folds(validation_spec["computation"]["cv"]["folds"])
+    witness = next((fold for fold in validation_folds if str(int(fold["fold"])) in recorded), None)
+    if witness is None:
+        raise ValueError(
+            "locked linear spec records parameters for no fold the validation CV declares"
+        )
+    witness_id = str(int(witness["fold"]))
+    replayed = _effective_params(
+        config, {}, prepare_standardized_folds(mds, [dict(witness)], train_sample_frac=1.0)
+    )
+    if replayed.get(witness_id) != recorded[witness_id]:
+        raise ValueError(
+            f"preset {spec['config_name']!r} no longer reproduces the recorded parameters for "
+            f"validation fold {witness_id}: {replayed.get(witness_id)!r} != "
+            f"{recorded[witness_id]!r}. The holdout parameters are derived from this preset, so "
+            "locking now would evaluate a configuration other than the one selection ranked."
+        )
+
+    holdout_folds = prepare_standardized_folds(mds, [split], train_sample_frac=1.0)
+    if not holdout_folds:
+        raise ValueError("locked linear holdout fold could not be prepared")
+    model["effective_params_by_fold"] = _effective_params(config, {}, holdout_folds)
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],

@@ -118,6 +118,7 @@ def _locked_study(
         "evaluation_start": "2024-01-11",
         "evaluation_end": "2024-01-11",
     }
+    _fixture_rekey(holdout_spec)
     holdout_prices = _prices().with_columns(pl.lit(date(2024, 1, 11)).alias("timestamp"))
     _patch_holdout_prices(monkeypatch, holdout_prices)
     lock = study.lifecycle.lock(
@@ -148,6 +149,34 @@ def test_lock_reopens_its_candidate_set_when_the_name_has_two_generations(
     with pytest.raises(ValueError, match="resolved to 2 identities"):
         CandidateSet.one(study, name="locked-selection")
     assert lock.candidate_set().hash == locked.hash
+
+
+def _fixture_rekey(spec: dict) -> dict:
+    """Stand in for a family's re-key, doing the one thing every family must do.
+
+    A real family recomputes these from the holdout fold's own training rows. The fixture has no
+    rows to recompute from, so it does the part the driver checks and the lock identity depends
+    on: point both fold-derived fields at the holdout fold instead of the validation folds they
+    were inherited from.
+
+    ``_locked_study`` applies it too. The re-keyed spec is what the driver locks, so a fixture
+    that pre-locked the un-re-keyed spec would hash a different lock and every driver test would
+    fail on a lock collision rather than on what it is testing.
+    """
+    computation = spec["computation"]
+    cv = computation["cv"]
+    folds = cv.get("folds")
+    fold_id = str(int(folds[0]["fold"] if folds else cv.get("fold", 0)))
+    computation["expected_prediction_keys"] = {
+        "digest": "fixture-holdout-manifest",
+        "n_rows": 1,
+        "n_folds": 1,
+    }
+    model = computation.get("model")
+    if isinstance(model, dict) and "effective_params_by_fold" in model:
+        carried = next(iter(model["effective_params_by_fold"].values()))
+        model["effective_params_by_fold"] = {fold_id: carried}
+    return spec
 
 
 def _install_fixture_adapter(
@@ -195,6 +224,7 @@ def _install_fixture_adapter(
         reconstruct_locked_request=reconstruct,
         run_resolved_request=run,
         validate_locked_run=validate,
+        rekey_holdout_spec=lambda study, spec, *, validation_spec: _fixture_rekey(spec),
     )
     monkeypatch.setattr(models, "get_adapter", lambda kind, name: adapter)
     if interrupt_after_stage:
