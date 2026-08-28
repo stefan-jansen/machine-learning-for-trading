@@ -129,17 +129,20 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
     `PredictionResult.complete` rejects. A leaderboard reading the headline alone then scores a
     member over the folds it managed, and a short window is an easier window.
 
-    This is the registry half of that check: coverage present and reporting ``complete``, and
-    one ``fold_metrics`` row per expected fold. It deliberately does not re-digest the
-    predictions parquet the way `PredictionResult.complete` does - that reads every artifact in
-    the population, which is minutes of I/O for a caller that runs this over a thousand members
-    on every execution. A file corrupted after registration therefore passes here; an
-    interrupted registration does not.
+    Checks coverage present and reporting ``complete``, one ``fold_metrics`` row per expected
+    fold, and the predictions parquet on disk. The file is checked for existence and not read:
+    `PredictionResult.complete` re-digests it, which is minutes of I/O for a caller running this
+    over a thousand members on every execution, and the failure that catches is corruption after
+    registration rather than the interrupted registration at issue. A member whose artifact was
+    deleted or never written is a different matter - the registry still lists it, the leaderboard
+    still ranks it, and `load_predictions` then returns nothing for it without saying so.
 
     Returns ``{hash: reason}`` for the members that fall short, empty when they all arrived or
     when the registry has no coverage table to check them against.
     """
-    db_path = Path(case_dir) / "run_log" / "registry.db"
+    run_log = Path(case_dir) / "run_log"
+    db_path = run_log / "registry.db"
+    predictions_dir = run_log / "predictions"
     wanted = sorted(set(hashes))
     if not wanted or not db_path.is_file():
         return {}
@@ -166,10 +169,13 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
             continue
         status, expected = coverage[member]
         actual = folds.get(member, 0)
+        artifact = predictions_dir / member / "predictions.parquet"
         if status != "complete":
             short[member] = f"coverage {status}"
         elif expected is not None and actual != expected:
             short[member] = f"{actual} of {expected} folds scored"
+        elif not artifact.is_file():
+            short[member] = "no predictions.parquet"
     return short
 
 

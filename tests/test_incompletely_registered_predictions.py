@@ -37,13 +37,23 @@ def _registry(tmp_path: Path) -> Path:
     return case_dir
 
 
-def _register(case_dir: Path, member: str, *, status: str, expected: int, scored: int) -> None:
+def _register(
+    case_dir: Path, member: str, *, status: str, expected: int, scored: int, artifact: bool = True
+) -> None:
     with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
         db.execute("INSERT INTO prediction_coverage VALUES (?, ?, ?)", (member, status, expected))
         db.executemany(
             "INSERT INTO fold_metrics VALUES (?, ?, ?)",
             [(member, fold, 0.01) for fold in range(scored)],
         )
+    if artifact:
+        _write_artifact(case_dir, member)
+
+
+def _write_artifact(case_dir: Path, member: str) -> None:
+    path = case_dir / "run_log" / "predictions" / member
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "predictions.parquet").write_bytes(b"PAR1")
 
 
 @pytest.fixture
@@ -92,6 +102,17 @@ class TestAMemberInterruptedPartWay:
     def test_a_member_with_no_coverage_row_is_reported(self, case_dir: Path) -> None:
         assert incompletely_registered_predictions(case_dir, [INTERRUPTED]) == {
             INTERRUPTED: "no coverage row"
+        }
+
+    def test_a_complete_registration_whose_artifact_is_absent_is_reported(
+        self, case_dir: Path
+    ) -> None:
+        """The registry lists it and the leaderboard ranks it, but `load_predictions` returns
+        nothing for it - so every analysis that reads predictions rather than stored metrics is
+        quietly computed over a different set of members than the one that was ranked."""
+        _register(case_dir, INTERRUPTED, status="complete", expected=5, scored=5, artifact=False)
+        assert incompletely_registered_predictions(case_dir, [INTERRUPTED]) == {
+            INTERRUPTED: "no predictions.parquet"
         }
 
 
