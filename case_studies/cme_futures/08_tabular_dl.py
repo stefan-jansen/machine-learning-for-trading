@@ -57,6 +57,14 @@ SUPERSEDES_POPULATION: str | None = None
 # Both configured return horizons enter the same visible request table. Preview epoch or fold limits
 # must be passed through `PREVIEW_REDUCTIONS`, which changes identity and excludes the output from
 # the canonical catalog.
+#
+# **TabM runs on the GPU, and the request says so rather than inheriting it.** With no override the
+# shared adapter falls back to a literal `"cuda"` written in `case_studies/utils/tabular_dl.py`, and
+# `resolve_torch_device` raises `CUDA was requested but is unavailable` rather than quietly moving
+# the fit to the CPU. A CUDA device is therefore a hard requirement of this population, declared two
+# layers below the notebook: without one these configurations cannot be reproduced at all. Naming it
+# in the request puts that requirement where a reader meets it. The resolved specification hash is
+# the same with the override as without, so this states what the published run already did.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
@@ -65,6 +73,7 @@ resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
+    overrides={"device": "cuda"},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 universe = product_universe_table()
@@ -84,7 +93,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme-tabular-dl-validation-v1",
+        population_name="cme_futures-tabular_dl-validation-v1",
         resolved_requests=resolved,
         supersedes=SUPERSEDES_POPULATION,
     )

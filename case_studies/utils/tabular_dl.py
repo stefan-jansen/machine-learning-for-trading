@@ -420,7 +420,9 @@ def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
     )
     configured_by_name = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+        for config in load_configs(
+            study.case_study, label_ref.name, "tabular_dl", case_dir=study.root
+        )
     }
     return (
         label_ref,

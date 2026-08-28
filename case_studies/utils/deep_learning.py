@@ -369,7 +369,9 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     splits, cv_record = _sequence_splits(mds, request)
     configs = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "deep_learning")
+        for config in load_configs(
+            study.case_study, label_ref.name, "deep_learning", case_dir=study.root
+        )
     }
     try:
         configured = configs[request["config_name"]]
