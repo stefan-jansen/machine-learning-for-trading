@@ -48,9 +48,12 @@
 # **Prerequisites**: case-study pipeline through `14_backtest`; the
 # locked registry (`case_studies/nasdaq100_microstructure/run_log/registry.db`).
 #
-# **Scope**: registry-read only — no training, no re-backtesting, no
-# registry writes. The `backtest_paired_metrics` table was populated by
-# `20_strategy_synthesis/01_aggregate_synthesis.py`.
+# **Scope**: no training and no re-backtesting. The notebook reads what
+# `14_backtest` through `17_risk_management` registered, and derives
+# `cohort_metrics` and `backtest_paired_metrics` from those runs itself when
+# they are absent, so the case study no longer depends on a chapter-20
+# notebook having been run first. On an already-populated registry it writes
+# nothing.
 
 # %%
 """NASDAQ-100 Microstructure — Strategy Analysis."""
@@ -77,6 +80,7 @@ from ml4t.diagnostic.integration import (
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
+from case_studies.utils.cohort_metrics import compute_and_register
 from case_studies.utils.factor_attribution import (
     compute_bootstrap_ci,
     compute_rolling_exposures,
@@ -86,7 +90,12 @@ from case_studies.utils.factor_attribution import (
     plot_rolling_exposures,
     run_factor_regression,
 )
-from case_studies.utils.notebook_contracts import excluded_families
+from case_studies.utils.notebook_contracts import (
+    derived_tables_off_canonical_universe,
+    excluded_families,
+    strategy_input_counts,
+)
+from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
     load_backtest_metrics,
@@ -104,6 +113,7 @@ from case_studies.utils.strategy_analysis import (
     plot_sharpe_waterfall,
     write_strategy_assessment,
 )
+from case_studies.utils.sweep_config import get_universe_filters_for
 from utils.paths import get_case_study_dir, get_output_dir
 
 # %% tags=["parameters"]
@@ -121,6 +131,117 @@ with open(CASE_DIR / "config" / "setup.yaml") as f:
 
 explorer = BacktestExplorer(CASE_STUDY)
 print(explorer)
+
+# %% [markdown]
+# ### Produce the derived tables this notebook reads
+#
+# `cohort_metrics` and `backtest_paired_metrics` are read below - the first for the deflated
+# Sharpe and PBO columns, the second to find the validation counterpart of a holdout run. Until
+# now nothing in this case study wrote either. The header of this notebook said so outright:
+# they "were populated by `20_strategy_synthesis/01_aggregate_synthesis.py`", a chapter-20
+# notebook. A case study that depends upward into the chapter that aggregates it cannot be run
+# from its own pipeline, and its numbers exist only after something outside it happens to run.
+#
+# Both producers already exist as case-study-scoped functions, extracted from those very Ch20
+# loops - `populate_paired_metrics` says so in its own docstring - and `cme_futures/17` is the
+# notebook that uses them. This adopts the same pattern.
+#
+# Population is idempotent (keyed upserts, reproducing stored values exactly), but it still
+# rewrites the registry, so it runs only when a table is absent or empty. On an already-populated
+# registry this notebook stays a pure reader and touches nothing.
+
+# %%
+_db = CASE_DIR / "run_log" / "registry.db"
+_counts_before = strategy_input_counts(CASE_DIR)
+_n_backtests = _counts_before["backtest_runs"]
+_n_cohorts = _counts_before["cohort_metrics"]
+_n_pairs = _counts_before["backtest_paired_metrics"]
+
+if _n_backtests == 0:
+    # Refuse rather than report. Every figure and gate below is computed from backtest runs, so
+    # with none registered this notebook does not produce a weaker answer - it produces an empty
+    # one that reads like a finished analysis. `14_backtest` is what fills this.
+    raise RuntimeError(
+        f"{CASE_STUDY} has no registered backtest runs, so there is nothing to analyse. "
+        "Run 14_backtest through 17_risk_management first; this notebook reads what they "
+        "register and computes no backtests of its own."
+    )
+
+# Both producers need this case study's canonical selection, and passing neither is not a
+# smaller version of passing both - it is a different selection. `setup.yaml` says the
+# full-universe variant "is NOT a canonical rank-1 / cohort / DSR candidate" and lives only in
+# the 16_costs comparison, so a cohort computed without the filter mixes rows the case study
+# excludes by declaration into the leaders, trial counts, DSR and PBO. The filter is read from
+# `setup.yaml` rather than written here, so it cannot disagree with the sweep that produced the
+# runs. The rung pin is the matching statement for paired metrics: nasdaq's carrier is the
+# cost-feasible ensemble, fixed before the holdout was opened.
+_UNIVERSE_FILTER = get_universe_filters_for(CASE_STUDY)[0]
+_RUNG = rung_for(CASE_STUDY)
+
+# The two tables are filled independently. A single `if either is empty` guard recomputed both,
+# and `compute_and_register` writes with `replace_all=True` - so a registry with correct cohorts
+# and an empty paired table would have had its cohorts replaced as a side effect of populating
+# the pairs.
+# A row count answers "has this been populated", which is not what a rerun needs to know. Both
+# tables are written from a selection, and one populated by an earlier run that selected
+# differently - before this notebook passed the universe filter, say - is fully populated and
+# wrong. Neither table records the selection that produced it, so it is recovered from what the
+# rows point at: a canonical row cannot reference a backtest run outside the canonical universe.
+_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+for _table in sorted(_stale):
+    print(f"{_table} references runs outside {_UNIVERSE_FILTER}, so it is rebuilt")
+
+if _n_cohorts == 0 or "cohort_metrics" in _stale:
+    # `compute_and_register` writes with `replace_all=True`, so a rebuild that computes no
+    # cohort empties the table rather than leaving the previous one - the opposite of what
+    # `populate_paired_metrics` does on the same failure. An emptied table is also clean by
+    # the universe check below, which reads rows and finds none, so the wipe would pass
+    # unnoticed and every cohort figure would render blank. Catch it here, where the before
+    # and after counts are both in hand.
+    _n_cohorts_before = _n_cohorts
+    _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
+    _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
+    if _n_cohorts == 0:
+        # Backtests are registered - the refusal above guarantees it - so a run that computes
+        # no cohort means the canonical selection matched nothing, or matched too few variants
+        # per group for a cohort to exist. Either way the selection-bias figures have no input,
+        # and rendering them blank reads like an analysis that found nothing rather than one
+        # that was never computed. That is the same reason this notebook refuses an empty
+        # `backtest_runs`, so it refuses here too.
+        _lost = (
+            f" and replaced {_n_cohorts_before} existing rows with none"
+            if _n_cohorts_before > 0
+            else ""
+        )
+        raise RuntimeError(
+            f"rebuilding cohort_metrics for {_UNIVERSE_FILTER} produced no cohort{_lost}. "
+            f"Check that {_UNIVERSE_FILTER} matches the backtest runs this case study "
+            f"registered, and that the sweep left more than one variant per cohort."
+        )
+    print(f"populated cohort_metrics: {_n_cohorts} rows")
+else:
+    print(f"already populated: cohort_metrics {_n_cohorts} rows")
+
+if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
+    _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG, replace_all=True)
+    _n_pairs = sum(1 for row in _pairs if "skip" not in row)
+    print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
+else:
+    print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
+
+# A rebuild that could not produce a canonical table leaves the previous one in place, which
+# is the right call for the data - a stale table is recoverable and deleted rows are not - but
+# the wrong one for this notebook, which would go on to read those rows and present selection
+# statistics computed under a universe the chapter does not claim. Refuse instead of rendering
+# them. An unpopulated registry has nothing off-universe to find and never reaches this.
+_still_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+if _still_stale:
+    raise RuntimeError(
+        f"{', '.join(sorted(_still_stale))} still reference runs outside "
+        f"{_UNIVERSE_FILTER} after rebuilding. The rebuild produced nothing to replace them "
+        f"with, so every figure below would describe a selection this case study does not "
+        f"make. Re-run the backtests for {_UNIVERSE_FILTER} before this notebook."
+    )
 
 
 def _fmt_ci(point: float | None, lo: float | None, hi: float | None, fmt: str = ".3f") -> str:
