@@ -168,8 +168,14 @@ class TestWhatTheWindowCanSettle:
     `_train_linear` and `_train_gbm` predict it exactly. The sequence, latent-factor and
     tabular runners answer for less: a gap-free lookback drops each entity's first rows,
     an evaluation label can be missing where the training label is not, and the latent
-    path can require an entity to persist. So `n_missing` is not evidence about the model,
-    while a key outside the window, a key predicted twice and a non-finite score are.
+    path can require an entity to persist.
+
+    The driver separates the two kinds of disagreement because only one of them is
+    evidence about the model. A key outside the window, a key predicted twice and a
+    non-finite score are wrong whatever the family, and reject the candidate. Being short
+    is not, and cannot be told apart from a genuinely short fit by anything this frame
+    knows - so `generate_holdout` stops on it rather than falling back, since the holdout
+    is spent once. These tests pin the distinction the driver acts on.
     """
 
     def test_a_key_outside_the_window_is_not_excused_by_the_narrowing(self) -> None:
@@ -188,7 +194,7 @@ class TestWhatTheWindowCanSettle:
         assert coverage.n_missing == 1
         assert coverage.n_extra == 1
 
-    def test_a_family_that_narrows_the_window_is_short_and_nothing_else(self) -> None:
+    def test_a_short_fit_is_short_and_nothing_else(self) -> None:
         mds = _panel(
             [
                 ("AAA", date(2016, 1, 29), 0.02),

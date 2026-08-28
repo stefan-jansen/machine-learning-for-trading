@@ -1305,13 +1305,30 @@ def generate_holdout(
             continue
 
         if coverage.n_missing:
-            # Registered with `allow_partial`, so the row records what was eligible and
-            # what came back rather than a declaration copied off the predictions, which
-            # would be complete by construction and describe nothing.
-            _log(
-                f"    {coverage.n_missing:,} of {coverage.n_expected:,} eligible keys are "
-                f"not predicted, which is this family's own eligibility narrowing the "
-                f"window rather than a gap in the fit"
+            # Not a rejection, and not something to register either.
+            #
+            # `register_backtest_run` requires `prediction_coverage.status = 'complete'`
+            # (registration.py:1176), so a short holdout registered with `allow_partial`
+            # produces a prediction set whose backtest is then refused - the run fails
+            # later and further from the cause. And falling back would demote the
+            # selection on evidence this path cannot read: it cannot tell a family whose
+            # runner narrows the window by design - a gap-free lookback, an evaluation
+            # label missing where the training label is not, an entity required to
+            # persist - from a fit that is genuinely short.
+            #
+            # The holdout is used once, so an ambiguity about which candidate deserves it
+            # stops here and asks, rather than resolving itself quietly. Supporting these
+            # families means their runner declaring its own eligible key frame, which is
+            # the open half of ml4t/agent-workspace#938.
+            raise RuntimeError(
+                f"{family}/{candidate['config_name']} predicted "
+                f"{coverage.n_actual:,} of the {coverage.n_expected:,} keys eligible in "
+                f"the holdout window, {coverage.n_missing:,} short. This path declares the "
+                "window itself as the expectation, which is exact for the linear and GBM "
+                "runners and too wide for any family that narrows eligibility. It cannot "
+                "tell that case from a short fit, and the holdout is spent once, so it "
+                "stops rather than falling back to another candidate. The runner has to "
+                "declare its own eligible keys - ml4t/agent-workspace#938."
             )
 
         # Backtest gate: even with non-degenerate predictions, the engine may
@@ -1347,7 +1364,6 @@ def generate_holdout(
                 split="holdout",
                 predictions=predictions,
                 expected_keys=expected_keys,
-                allow_partial=True,
                 task_type=mds.task_type,
                 class_values=mds.class_values or None,
             )
@@ -1487,7 +1503,6 @@ def generate_holdout(
             split="holdout",
             predictions=predictions,
             expected_keys=expected_keys,
-            allow_partial=True,
             metrics=metrics_payload,
             task_type=mds.task_type,
             class_values=mds.class_values or None,
