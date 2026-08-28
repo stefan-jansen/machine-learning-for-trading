@@ -62,6 +62,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
+from case_studies.research import open_study, split_retired_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -97,6 +98,11 @@ TOP_K = 0  # 0 = the smallest feasible k from setup.yaml backtest.sweep.top_k_gr
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False
 TOP_N_PREDICTIONS: int | None = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. The protocol, and a test of the engine
@@ -210,13 +216,53 @@ if random_sharpe is not None:
 # directly. Each is hashed from the prediction identity and the serialized specification, so a
 # combination already in the registry is skipped rather than recomputed, and an interrupted sweep
 # resumes where it stopped.
+#
+# **What the index is, and what it is not.** `load_prediction_index` returns every registered
+# prediction set for this label and split. That is the catalog, and the catalog carries no
+# lineage: when a model notebook refits, it publishes a second generation under the same
+# population name and the first generation's rows stay behind - complete, current under a schema
+# version that has not moved, and indistinguishable in this table from the rows that replaced
+# them. Sweeping both does not fail. It backtests twice, ranks a retired identity against a live
+# one, and carries whichever wins into every stage downstream.
+#
+# `split_retired_members` asks the population lineage instead of the catalog, and the retired
+# side is printed rather than counted, so a reader can see which configurations left the sweep
+# and why. Retirement is decided per member within a population name, so a refit that moved
+# three of ten identities retires three and leaves seven.
 
 # %%
 pred_index = load_prediction_index(CASE_STUDY_ID, label=LABEL, split=SPLIT)
 if pred_index.is_empty():
     raise RuntimeError(f"no predictions registered for {CASE_STUDY_ID}/{LABEL}/{SPLIT}")
+
+candidates = split_retired_members(
+    open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+    pred_index,
+)
+pred_index = candidates.live
+if pred_index.is_empty():
+    raise RuntimeError(
+        f"every registered prediction set for {CASE_STUDY_ID}/{LABEL}/{SPLIT} belongs to a "
+        "retired generation, so there is nothing live to sweep"
+    )
+print(f"Registered prediction sets: {candidates.live.height + candidates.retired.height:,}")
+if candidates.retired.is_empty():
+    print("Retired by a later generation: none")
+else:
+    print(f"Retired by a later generation: {candidates.retired.height:,}")
+    print(
+        candidates.retired.group_by("family", "config_name")
+        .agg(n=pl.len(), ic_max=pl.col("ic_mean").max())
+        .sort("n", descending=True)
+    )
+
 if TOP_N_PREDICTIONS > 0:
     pred_index = pred_index.head(TOP_N_PREDICTIONS)
+
+# The population every reader below is scoped to. The retired backtests a previous sweep
+# registered are still in the registry, so a reader that names no population reports over them
+# even when this run's sweep skipped those rows.
+LIVE_PREDICTIONS = pred_index["prediction_hash"].to_list()
 
 entry_schemes = get_entry_schemes_for(
     CASE_STUDY_ID, LABEL, n_assets, long_short=bt_config.long_short
@@ -390,11 +436,11 @@ print(repr(explorer))
 # it came from.
 
 # %% tags=["results"]
-top = explorer.best(stage="signal", top_n=10)
+top = explorer.best(stage="signal", top_n=10, prediction_hashes=LIVE_PREDICTIONS)
 print("Leading signal-stage backtests:")
 print(top.select("source", "signal_method", "sharpe", "cagr", "max_drawdown"))
 print("\nBy model family:")
-print(explorer.compare_families(stage="signal"))
+print(explorer.compare_families(stage="signal", prediction_hashes=LIVE_PREDICTIONS))
 
 # %% [markdown]
 # ### Does a better ranking make a better strategy?
@@ -405,7 +451,7 @@ print(explorer.compare_families(stage="signal"))
 # one means it is not, and that two configurations with the same IC can trade very differently.
 
 # %%
-all_signal = explorer.best(stage="signal", top_n=100000)
+all_signal = explorer.best(stage="signal", top_n=100000, prediction_hashes=LIVE_PREDICTIONS)
 if all_signal.is_empty():
     raise RuntimeError("no signal-stage backtests are registered, so there is nothing to read")
 
