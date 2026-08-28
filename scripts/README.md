@@ -32,6 +32,10 @@ them; opening a pull request can, and the failure tells you which:
 - `sanitize_notebook_paths.py` — strips machine-specific absolute paths out of
   committed notebook outputs. It currently rewrites source as well as outputs, so
   check its diff before committing.
+- `update_offerings.py` - rewrites the courses, workshops, and free lessons block in
+  the root README from the public Maven schedule, so a date in the README cannot
+  outlive the event. `--check` reports staleness without writing; the
+  `README Offerings` workflow runs it daily and opens a pull request when it drifts.
 
 > Internal registry-maintenance tooling (backfills, schema migrations, one-off data
 > repairs) is intentionally **not** in this repository — it lives in the separate
