@@ -169,6 +169,19 @@ def test_an_artifact_cannot_supersede_itself(tmp_path):
     assert "cannot supersede itself" in result.stderr
 
 
+def test_two_copies_of_one_artifact_are_one_artifact(tmp_path):
+    """A lock pins a digest, not a path, so identical bytes at two paths supersede nothing."""
+    frame = _frame(range(2))
+    old = _write(frame, tmp_path / "archived" / "model_based.parquet")
+    new = _write(frame, tmp_path / "current" / "model_based.parquet")
+    assert _sha256(old) == _sha256(new)
+
+    result = _record(old, new)
+    assert result.returncode == 1
+    assert "cannot supersede itself" in result.stderr
+    assert "supersedes" not in read_digest(new)
+
+
 def test_the_recorded_block_survives_json_round_tripping(tmp_path):
     old = _write(_frame(range(2)), tmp_path / "old.parquet")
     new = _write(_frame(range(3)), tmp_path / "new.parquet")

@@ -75,11 +75,18 @@ def main() -> int:
         if not path.is_file():
             print(f"error: {path} is not a file", file=sys.stderr)
             return 1
-    if old_path.resolve() == new_path.resolve():
-        print("error: an artifact cannot supersede itself", file=sys.stderr)
+    old_sha, new_sha = sha256_file(old_path), sha256_file(new_path)
+    if old_sha == new_sha:
+        # Identity is the digest, not the path. Two byte-identical files are one artifact to
+        # every lock that pins one, so an edge from that digest to itself asserts a
+        # supersession that did not happen and names no replaced vintage.
+        print(
+            f"error: {old_path} and {new_path} are the same artifact ({old_sha[:12]}); "
+            "an artifact cannot supersede itself",
+            file=sys.stderr,
+        )
         return 1
 
-    old_sha = sha256_file(old_path)
     if args.expect_sha256 and old_sha != args.expect_sha256:
         print(
             f"error: {old_path} hashes to {old_sha}, not the expected {args.expect_sha256}. "
