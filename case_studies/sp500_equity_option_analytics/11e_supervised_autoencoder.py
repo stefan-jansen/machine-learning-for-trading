@@ -47,7 +47,8 @@
 #
 # **Learning objectives.** By the end of this notebook you will be able to:
 #
-# - State the one difference between this model and the conditional autoencoder.
+# - State the four differences between this model and the conditional autoencoder, and say why
+#   only one of them is the one the comparison is about.
 # - Explain why supervising a factor model is a weaker constraint rather than more information.
 # - Read a pair of notebooks as a controlled comparison, and say what is being controlled.
 # - Say why a higher validation IC here would not settle whether supervision helped.
@@ -129,15 +130,19 @@ declared_labels(study, "latent_factors")
 
 # %% [markdown]
 # `case_studies/config/sae/sae.yaml` declares `n_factors: 5`, `n_epochs: 50` and
-# `checkpoint_interval: 5` - the same three values, with the same meanings, as
-# `case_studies/config/cae/cae.yaml`. That is not a coincidence to be tidied away: the two presets
-# agree so that the pair of notebooks differs in the objective and in nothing else. A reader who
-# changes one for their own run should change both, or lose the comparison.
+# `checkpoint_interval: 5`, the same three keys with the same meanings as
+# `case_studies/config/cae/cae.yaml`. The epoch schedule really is shared. `n_factors` is not what
+# it appears to be: `run_sae_fold` discards it and `bottleneck_dim` sets the width, which is 96
+# here against the conditional autoencoder's 5 - one of the four differences the section above
+# lists, and the reason the training log's `sae (K=5)` should not be read as a factor count.
 #
 # The case study may override any of these under `modeling.latent_factors.model_kwargs` in
-# `config/setup.yaml`, which wins where it is given; this one declares entries for `ipca` and `sdf`
-# only, so the supervised autoencoder's values are the preset's. A reduced run may then override
-# them again through `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview identity.
+# `config/setup.yaml`, which wins where it is given, and this one declares a `sae` entry: a
+# `batch_size` of 10,000 rows. Without it `SAEConfig.batch_size` is `None`, which the library
+# reads as one batch holding the whole training window - about 250,000 rows here, which does not
+# fit a 24 GB card. `run_cae_fold` has carried the same value as a runner default all along; only
+# the SAE runner never passed one. A reduced run may override any of this again through
+# `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview identity.
 
 # %%
 configs = load_model_configs(
