@@ -118,7 +118,15 @@ REGIME_WINDOW = 63
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
+# %% [markdown]
+# The study is opened before anything resolves a path or reads the registry. Under the preview
+# tier, opening it activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, and every
+# later `get_case_study_dir` call resolves against that. A `CASE_DIR` or a metrics table built
+# first would point at the released registry while everything after it reads the preview one.
+
 # %%
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
@@ -195,10 +203,7 @@ print(
 # Phase 1: Load pre-computed metrics for ALL labels (coverage + multi-label analysis)
 all_labels_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
 
-_generations = split_retired_members(
-    open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
-    all_labels_metrics,
-)
+_generations = split_retired_members(study, all_labels_metrics)
 all_labels_metrics = _generations.live
 print(f"Registered metric rows: {_generations.live.height + _generations.retired.height:,}")
 if _generations.retired.is_empty():
@@ -275,8 +280,11 @@ for row in best_per_family.filter(pl.col("family") != "causal_dml").iter_rows(na
     config = row["config_name"]
     checkpoint = row.get("checkpoint_value")
 
+    # By hash, not by attributes: family, config and checkpoint do not identify a generation,
+    # so a refit's retired rows share all three with the live ones and would concatenate here.
     preds = load_predictions(
         CASE_STUDY,
+        prediction_hash=row["prediction_hash"],
         family=family,
         label=PRIMARY_LABEL,
         config_name=config,
@@ -1160,7 +1168,7 @@ for model_name in ("cae", "sae"):
 # fail after half the block had already printed.
 
 # %% tags=["results"]
-causal_study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+causal_study = study
 try:
     causal = CausalResult.one(causal_study, label=PRIMARY_LABEL)
 except ValueError as error:

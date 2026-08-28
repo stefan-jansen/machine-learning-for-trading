@@ -201,6 +201,10 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} tradeable fu
 
 
 # %%
+# Accumulated across both regime sweeps and read by the curve loader below.
+SWEPT_COST_HASHES: set[str] = set()
+
+
 def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
     """Re-price every leading combination at every level of one cost grid.
 
@@ -217,6 +221,10 @@ def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
     registered, served, failures = 0, 0, []
     started = time.time()
     total = len(top_combos) * len(grid)
+    # Every row this sweep stands behind, cached ones included. The registry also holds
+    # cost-sensitivity rows from earlier sweeps whose leaders differed; averaging those into the
+    # curves below would price a combination this run never selected.
+    swept: set[str] = SWEPT_COST_HASHES
     registered_before = load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
     print(f"{regime}: {len(registered_before):,} cost-sensitivity backtests already registered")
 
@@ -258,6 +266,7 @@ def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
                     }
                 )
                 continue
+            swept.add(result.backtest_hash)
             if result.backtest_hash in registered_before:
                 served += 1
             registered += 1
@@ -318,6 +327,11 @@ def load_cost_curve(commission_model: str) -> pl.DataFrame:
         top_n=100000,
         prediction_hashes=set(LIVE_PREDICTIONS),
     )
+    if rows.is_empty():
+        return pl.DataFrame()
+    # Not every cost-sensitivity row for a live prediction belongs to this sweep: a previous
+    # leader that is still live left its own curve behind. Keep the rows this run produced.
+    rows = rows.filter(pl.col("backtest_hash").is_in(list(SWEPT_COST_HASHES)))
     if rows.is_empty():
         return pl.DataFrame()
     parsed = []

@@ -50,6 +50,7 @@ from case_studies.research import (
     run_model_population,
 )
 from case_studies.utils.analytics import load_best_ic_per_family
+from case_studies.utils.model_analysis import common_sample_daily_ic, load_predictions
 from case_studies.utils.registry import load_prediction_metrics
 from utils.style import COLORS
 
@@ -138,12 +139,15 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 # Full coverage is decided within a family, not across families. A family whose best run failed
 # partway sets its own lower bar and still reports a full-coverage leader, so two families can
 # each be complete by their own measure and be scored over different windows with nothing saying
-# so. Section 7 therefore compares `ic_n_days` before it compares IC, rather than taking the
-# comparability on trust.
+# so. Equal date *counts* would not settle it either: a sequence model drops the warm-up rows a
+# flat model keeps, so the same date can carry a different cross-section in each family. Section 7
+# therefore intersects the three prediction sets on their exact `(symbol, timestamp)` keys and
+# recomputes the IC on what they share, rather than taking the comparability on trust.
 
 # %%
 prior_baselines = {}
 baseline_days = {}
+baseline_hashes = {}
 _baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
 for row in _baselines.iter_rows(named=True):
     # The full-coverage linear leader is a Ridge configuration; name it plainly so the comparison
@@ -152,6 +156,7 @@ for row in _baselines.iter_rows(named=True):
     if name:
         prior_baselines[name] = row["ic_mean"]
         baseline_days[name] = row["ic_n_days"]
+        baseline_hashes[name] = row.get("prediction_hash")
 
 if prior_baselines:
     for name, ic in prior_baselines.items():
@@ -296,11 +301,18 @@ checkpoints = (
     )
     .join(_daily, on="prediction_hash", how="inner")
     .filter(pl.col("label") == PRIMARY_LABEL)
-    .with_columns(
-        (pl.col("ic_n_days") == pl.col("ic_n_days").max().over("config_name")).alias(
-            "full_coverage"
-        )
+    .join(
+        plan.filter(pl.col("label") == PRIMARY_LABEL).select(
+            "config_name", pl.col("eligible_dates").alias("expected_days")
+        ),
+        on="config_name",
+        how="left",
     )
+    # Against the dates the resolved eligibility says this configuration should have scored, not
+    # against the best its own grid managed. A grid where every checkpoint loses the same dates
+    # has a maximum that is itself short, and calling that full coverage would publish truncated
+    # coverage as complete.
+    .with_columns((pl.col("ic_n_days") == pl.col("expected_days")).alias("full_coverage"))
     .sort("checkpoint_value")
 )
 if checkpoints.is_empty():
@@ -318,6 +330,12 @@ if not checkpoints["complete"].all():
 
 # %% tags=["results"]
 eligible = checkpoints.filter("full_coverage")
+if eligible.is_empty():
+    _short = checkpoints.select("checkpoint_value", "ic_n_days", "expected_days")
+    raise RuntimeError(
+        "no checkpoint scored on every date its resolved eligibility declares, so there is "
+        f"nothing to publish as a full-coverage candidate:\n{_short}"
+    )
 peak_row = eligible.sort("ic_mean_daily", descending=True).row(0, named=True)
 PEAK_EPOCH = int(peak_row["checkpoint_value"])
 PEAK_IC = float(peak_row["ic_mean_daily"])
@@ -394,29 +412,49 @@ fig_lc.show()
 # notebook exists to make: whether reading the history as a sequence adds anything over handing
 # the same history to a model as columns.
 #
-# The comparison only means anything if the three numbers were scored over the same days, and
-# section 2 explained why that is not guaranteed - each family's coverage bar is its own. So the
-# check runs first and the chart is drawn only if it passes. All three are the daily-pooled IC:
-# `load_model_ic` returns `COALESCE(ic_mean_daily, ic_mean)` under the name `ic_mean`, which is
-# the same statistic section 5 reads for the sequence family.
+# The comparison only means anything if the three numbers describe the same rows, and section 2
+# explained why that is not guaranteed. Matching date counts would not be enough: sequence
+# eligibility drops the warm-up rows a flat model keeps, so the same date can carry a different
+# cross-section in each family, and each family's stored IC is computed over its own sample.
+#
+# So the stored numbers are not what the chart plots. The three prediction sets are intersected
+# on their exact `(symbol, timestamp)` keys and the daily rank IC is recomputed on the rows all
+# three share. That is a different and smaller sample than any family's own, which is the point:
+# it is the only sample on which the three are one comparison rather than three.
 
 # %%
-ridge_ic = prior_baselines.get("Ridge (Ch11)", float("nan"))
-gbm_ic = prior_baselines.get("GBM (Ch12)", float("nan"))
 
-_mismatched = {
-    name: days for name, days in baseline_days.items() if days is not None and days != FULL_DAYS
-}
-if _mismatched:
+_missing = [name for name, phash in baseline_hashes.items() if not phash]
+if _missing:
     raise RuntimeError(
-        f"the baselines were scored over {_mismatched} validation dates and this notebook's "
-        f"checkpoints over {FULL_DAYS:.0f}; comparing the IC would measure the periods as much "
-        "as the models. Re-run the stage whose leader is short before reading this comparison"
+        f"no prediction_hash registered for {_missing}, so their rows cannot be intersected "
+        "with this notebook's; re-run the stage that published them"
     )
-print(f"All three leaders scored over {FULL_DAYS:.0f} validation dates")
+
+_frames = {
+    name: load_predictions(CASE_STUDY_ID, prediction_hash=phash)
+    for name, phash in baseline_hashes.items()
+}
+_frames[f"LSTM ({CONFIG_NAME})"] = load_predictions(CASE_STUDY_ID, prediction_hash=PEAK_PHASH)
+_empty = [name for name, frame in _frames.items() if frame.is_empty()]
+if _empty:
+    raise RuntimeError(f"no prediction rows on disk for {_empty}; the comparison cannot be made")
+
+COMMON_IC, COMMON_DAYS, COMMON_ROWS = common_sample_daily_ic(_frames)
+if not COMMON_IC:
+    raise RuntimeError(
+        "the three prediction sets share no (symbol, timestamp) rows, so there is no sample "
+        "on which they can be compared"
+    )
+print(
+    f"Common sample: {COMMON_ROWS:,} rows on {COMMON_DAYS:,} dates "
+    f"(each family's own full-coverage count was {FULL_DAYS:.0f})"
+)
+for _name, _ic in COMMON_IC.items():
+    print(f"  {_name}: IC={_ic:+.4f} on the shared rows")
 
 _labels = ["Ridge (Ch11)", "GBM (Ch12)", f"LSTM ({CONFIG_NAME})"]
-_vals = [ridge_ic, gbm_ic, PEAK_IC]
+_vals = [COMMON_IC[name] for name in _labels]
 fig_cmp = go.Figure(
     go.Bar(
         x=_labels,
@@ -432,7 +470,10 @@ fig_cmp = go.Figure(
     )
 )
 fig_cmp.update_layout(
-    title=f"Peak-checkpoint daily IC by family, all scored over {FULL_DAYS:.0f} validation dates",
+    title=(
+        f"Peak-checkpoint daily IC by family, recomputed on the {COMMON_ROWS:,} rows "
+        f"({COMMON_DAYS:,} dates) all three share"
+    ),
     height=500,
     width=1000,
     margin=dict(t=70),
@@ -450,7 +491,12 @@ fig_cmp.show()
 # one whose mean is carried by a single fold.
 
 # %% tags=["results"]
-folds = Result.open(study, PEAK_PHASH).folds().select("fold_id", "ic", "n_entities").sort("fold_id")
+folds = (
+    Result.open(study, PEAK_PHASH, include_preview=EXECUTION_TIER == "preview")
+    .folds()
+    .select("fold_id", "ic", "n_entities")
+    .sort("fold_id")
+)
 print(f"Per-fold validation IC ({CONFIG_NAME} @ epoch {PEAK_EPOCH}):")
 print(folds)
 NEGATIVE_FOLDS = int(folds.filter(pl.col("ic") < 0).height)
@@ -469,10 +515,13 @@ _coverage_text = (
 display(
     Markdown(
         f"""
-- **The sequence model is measured against the flat-feature families over the same
-  {FULL_DAYS:.0f} validation dates**, checked rather than assumed, and on the same daily-pooled
-  IC. Its strongest checkpoint is epoch **{PEAK_EPOCH}** at **{PEAK_IC:+.3f}**, against Ridge
-  **{ridge_ic:+.3f}** and GBM **{gbm_ic:+.3f}**.
+- **The sequence model is measured against the flat-feature families on rows all three
+  actually share** - {COMMON_ROWS:,} of them across {COMMON_DAYS:,} dates, intersected on
+  `(symbol, timestamp)` and recomputed rather than assumed comparable. On that common sample the
+  peak checkpoint scores **{COMMON_IC[f"LSTM ({CONFIG_NAME})"]:+.3f}**, against Ridge
+  **{COMMON_IC["Ridge (Ch11)"]:+.3f}** and GBM **{COMMON_IC["GBM (Ch12)"]:+.3f}**. Its own
+  full-sample IC is **{PEAK_IC:+.3f}** at epoch **{PEAK_EPOCH}**; the two differ because they
+  are different samples.
 - **Nothing here is chosen.** All **{PUBLISHED_CHECKPOINTS}** full-coverage checkpoints are
   published as candidates; the peak above is a diagnostic that says where training stopped
   helping. Selection happens in the evaluation stage, on validation backtest Sharpe.

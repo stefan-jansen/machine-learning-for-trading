@@ -107,12 +107,22 @@ WORKSPACE: str = ""
 # %% [markdown]
 # ## 1. The protocol, and a test of the engine
 #
+# The study is opened first, before anything reads the registry. Opening it under the preview
+# tier activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide, which is what every
+# later `get_case_study_dir` call resolves against. A catalog, an explorer or a candidate index
+# built before that line points at the released registry while the sweep writes to the preview
+# one, and the two never meet: the sweep finds nothing registered, and every reader scoped to
+# hashes from the other root returns empty. Opening first makes one root serve the whole
+# notebook.
+#
 # The term sheet below is the whole execution model in one place: which calendar the strategy
 # trades on, how often it rebalances, what a leg costs, and whether it may go short. None of it is
 # chosen here - it is declared in `config/setup.yaml` and read back, so a reader can see what the
 # Sharpe ratios later in this notebook were earned under.
 
 # %%
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+
 bt_config = get_backtest_config(CASE_STUDY_ID)
 if TOP_N_PREDICTIONS is None:
     TOP_N_PREDICTIONS = get_top_n_predictions(CASE_STUDY_ID, "signal")
@@ -235,10 +245,7 @@ pred_index = load_prediction_index(CASE_STUDY_ID, label=LABEL, split=SPLIT)
 if pred_index.is_empty():
     raise RuntimeError(f"no predictions registered for {CASE_STUDY_ID}/{LABEL}/{SPLIT}")
 
-candidates = split_retired_members(
-    open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
-    pred_index,
-)
+candidates = split_retired_members(study, pred_index)
 pred_index = candidates.live
 if pred_index.is_empty():
     raise RuntimeError(
@@ -325,7 +332,8 @@ for i, pred_row in enumerate(pred_index.iter_rows(named=True)):
             chapter="ch16",
             signal=signal,
         )
-        if backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec)) in existing_hashes:
+        already = backtest_hash_from_parts(pred_hash, serializable_backtest_spec(spec))
+        if already in existing_hashes and not FORCE_REBACKTEST:
             skipped += 1
             continue
         # The grid position travels with the work rather than being read off the loop variable
@@ -548,7 +556,7 @@ print(
 # universe pays more for its search than a higher-frequency one would.
 
 # %% tags=["results"]
-print_stage_dsr_summary(explorer, top_n=20, head=10)
+print_stage_dsr_summary(explorer, top_n=20, head=10, prediction_hashes=LIVE_PREDICTIONS)
 
 # %% [markdown]
 # ### Where the leading prediction goes next

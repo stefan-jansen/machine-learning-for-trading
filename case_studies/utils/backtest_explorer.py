@@ -949,8 +949,13 @@ class BacktestExplorer:
     # risk_impact: risk overlay comparison from registry
     # -----------------------------------------------------------------
 
-    def risk_impact(self, *, prediction_hash: str | None = None) -> pl.DataFrame:
-        """Load risk overlay results and compute impact vs baseline.
+    def risk_impact(
+        self,
+        *,
+        prediction_hash: str | None = None,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+    ) -> pl.DataFrame:
+        """Load risk overlay results and compute impact vs the baseline each one modified.
 
         Parameters
         ----------
@@ -959,19 +964,36 @@ class BacktestExplorer:
             Case studies with a pinned carrier (e.g. nasdaq's cost-feasible
             ensemble) must scope to the carrier so the full-universe overlay
             demonstration rows do not pool into the headline.
+        prediction_hashes : sequence of str, optional
+            Restrict to overlays on these predictions. An overlay is a change to
+            one allocation, so pooling overlays from predictions the caller did
+            not sweep measures rules against strategies it never built.
 
         Returns
         -------
         pl.DataFrame
-            Columns: risk_name, risk_type, sharpe, max_drawdown,
-            num_trades, baseline_sharpe, sharpe_delta
+            Columns: risk_name, risk_type, sharpe, max_drawdown, num_trades,
+            allocator, prediction_hash, baseline_sharpe, sharpe_delta
+
+        Each overlay's ``baseline_sharpe`` is the no-overlay Sharpe of the
+        allocation it was applied to, matched on ``(prediction_hash,
+        allocator)``. One registry-wide maximum would measure most overlays
+        against a strategy they did not modify, so an overlay could appear to
+        destroy Sharpe purely because a different prediction allocated better.
         """
-        pred_clause = "" if prediction_hash is None else " AND b.prediction_hash = ?"
-        pred_params = () if prediction_hash is None else (prediction_hash,)
+        pred_clause = ""
+        pred_params: tuple = ()
+        if prediction_hash is not None:
+            pred_clause = " AND b.prediction_hash = ?"
+            pred_params = (prediction_hash,)
+        elif prediction_hashes:
+            pred_clause = " AND b.prediction_hash IN (SELECT value FROM json_each(?))"
+            pred_params = (json.dumps(list(prediction_hashes)),)
         df = self._query(
             f"""
             SELECT
                 b.spec_json,
+                b.prediction_hash,
                 t.family,
                 t.config_name,
                 bm.sharpe,
@@ -996,8 +1018,9 @@ class BacktestExplorer:
             return df
 
         rows = []
-        for spec_str, sharpe, max_dd, trades in zip(
+        for spec_str, pred_h, sharpe, max_dd, trades in zip(
             df["spec_json"].to_list(),
+            df["prediction_hash"].to_list(),
             df["sharpe"].to_list(),
             df["max_drawdown"].to_list(),
             df["num_trades"].to_list(),
@@ -1026,6 +1049,10 @@ class BacktestExplorer:
                     "sharpe": sharpe,
                     "max_drawdown": max_dd,
                     "num_trades": trades,
+                    "prediction_hash": pred_h,
+                    "allocator": strategy_view(spec)
+                    .get("allocation", {})
+                    .get("method", "equal_weight"),
                 }
             )
 
@@ -1048,6 +1075,8 @@ class BacktestExplorer:
             f"""
             SELECT
                 bm.sharpe,
+                b.prediction_hash,
+                b.spec_json,
                 t.family,
                 t.config_name
             FROM backtest_metrics bm
@@ -1061,19 +1090,37 @@ class BacktestExplorer:
             tuple(excluded_family_sql(self.case_study, "t.family")[1]) + pred_params,
         )
         baseline_df = self._filter_active_models(baseline_df)
-        baseline_sharpe = baseline_df["sharpe"].max() if not baseline_df.is_empty() else None
 
-        if baseline_sharpe is not None:
-            result = result.with_columns(
-                pl.lit(baseline_sharpe).alias("baseline_sharpe"),
-                (pl.col("sharpe") - baseline_sharpe).alias("sharpe_delta"),
-            )
-        else:
-            result = result.with_columns(
+        if baseline_df.is_empty():
+            return result.with_columns(
                 pl.lit(None).cast(pl.Float64).alias("baseline_sharpe"),
                 pl.lit(None).cast(pl.Float64).alias("sharpe_delta"),
-            )
+            ).sort("sharpe", descending=True)
 
+        # The parent of an overlay is the no-overlay run of the same prediction under the same
+        # allocator. Matching on both is what makes `sharpe_delta` the effect of the rule; a
+        # single registry-wide maximum would charge every overlay for the gap between its own
+        # allocation and the best allocation anywhere in the registry.
+        parents = (
+            baseline_df.with_columns(
+                pl.col("spec_json")
+                .map_elements(
+                    lambda js: (
+                        strategy_view(_parse_spec(js) or {})
+                        .get("allocation", {})
+                        .get("method", "equal_weight")
+                    ),
+                    return_dtype=pl.String,
+                )
+                .alias("allocator")
+            )
+            .group_by("prediction_hash", "allocator")
+            .agg(pl.col("sharpe").max().alias("baseline_sharpe"))
+        )
+        result = result.join(parents, on=["prediction_hash", "allocator"], how="left")
+        result = result.with_columns(
+            (pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_delta")
+        )
         return result.sort("sharpe", descending=True)
 
     # -----------------------------------------------------------------

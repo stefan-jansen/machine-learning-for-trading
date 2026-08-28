@@ -358,9 +358,20 @@ else:
 # the rule found the losses worth avoiding, or merely closed positions.
 
 # %% tags=["results"]
-risk_df = explorer.risk_impact()
+risk_df = explorer.risk_impact(prediction_hashes=top_combos["prediction_hash"].to_list())
 if risk_df.is_empty():
     raise RuntimeError("the risk-overlay stage registered no readable rows")
+# An overlay whose parent allocation is not in the registry has nothing to be a change *to*, so
+# it is named rather than ranked against a baseline that is not its own.
+_orphans = risk_df.filter(pl.col("baseline_sharpe").is_null())
+if not _orphans.is_empty():
+    print(
+        f"Excluded, no matching parent allocation: "
+        f"{', '.join(sorted(set(_orphans['risk_name'].to_list())))}"
+    )
+    risk_df = risk_df.filter(pl.col("baseline_sharpe").is_not_null())
+if risk_df.is_empty():
+    raise RuntimeError("no risk overlay could be matched to the allocation it modified")
 risk_df.select("risk_name", "risk_type", "sharpe", "max_drawdown", "sharpe_delta").sort(
     "sharpe_delta", descending=True
 )

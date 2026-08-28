@@ -263,6 +263,9 @@ def load_model_ic(
                 )
         coverage_enforced = require_full_coverage and coverage_usable
         coverage_clause = full_coverage_prediction_sql("p", "t", "pm") if coverage_enforced else ""
+        # The probe above tolerates a legacy registry without the column; selecting it anyway
+        # would fail those same registries with `no such column`.
+        n_days_expr = "pm.ic_n_days" if "ic_n_days" in pm_cols else "NULL"
 
         sql = f"""
             SELECT
@@ -278,7 +281,7 @@ def load_model_ic(
                 -- the legacy column while quoting the daily interval mixes two statistics.
                 {ic_expr} AS ic_mean,
                 pm.ic_std,
-                pm.ic_n_days
+                {n_days_expr} AS ic_n_days
             FROM training_runs t
             JOIN prediction_sets p ON t.training_hash = p.training_hash
             JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
@@ -407,8 +410,10 @@ def load_best_ic_per_family(
     trade or fit from this result is not.
 
     Returns: case_study, display_name, family, config_name, label, ic_mean,
-    ic_n_days. The coverage bar is per family, so ``ic_n_days`` is what lets a
-    caller comparing families confirm they were scored over the same days.
+    ic_n_days, and ``prediction_hash`` where the source carries it. The coverage
+    bar is per family, so ``ic_n_days`` lets a caller comparing families confirm
+    they were scored over the same *number* of days; ``prediction_hash`` is what
+    lets it load the rows and confirm they were the same days.
     """
     all_ic = load_model_ic(families, split=split, case_studies=case_studies)
     if all_ic.is_empty():
@@ -432,7 +437,15 @@ def load_best_ic_per_family(
         )
         .group_by(["case_study", "family"])
         .first()
-        .select("case_study", "family", "config_name", "label", "ic_mean", "ic_n_days")
+        .select(
+            "case_study",
+            "family",
+            "config_name",
+            "label",
+            "ic_mean",
+            "ic_n_days",
+            *(["prediction_hash"] if "prediction_hash" in all_ic.columns else []),
+        )
     )
 
     # Add display names

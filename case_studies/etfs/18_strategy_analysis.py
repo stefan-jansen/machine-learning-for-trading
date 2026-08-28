@@ -124,10 +124,17 @@ MAX_SYMBOLS = 0
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 
+# %% [markdown]
+# The study is opened before any path or registry read. Under the preview tier, opening it
+# activates a workspace and rewrites `ML4T_OUTPUT_DIR` process-wide; a `CASE_DIR` or a
+# `BacktestExplorer` built first would address the released registry while everything after it
+# reads the preview one.
+
 # %%
 CASE_STUDY = "etfs"
 PRIMARY_LABEL = "fwd_ret_21d"
 PERIODS_PER_YEAR = 252  # NYSE calendar, daily bars
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 CASE_DIR = get_case_study_dir(CASE_STUDY)
 OUTPUT_DIR = get_output_dir(20, CASE_STUDY)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -149,7 +156,7 @@ print(explorer)
 # %%
 LIVE_PREDICTIONS = (
     split_retired_members(
-        open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+        study,
         load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation"),
     )
     .live["prediction_hash"]
@@ -195,20 +202,76 @@ def _derived_table_state() -> tuple[set[str], set[str]]:
     return kinds, cohorts
 
 
+def _stale_derived_rows(live: list[str]) -> tuple[int, int]:
+    """Derived rows whose leader or challenger backtest ran on a retired prediction.
+
+    Presence of every enum value says the tables were built; it does not say they were built
+    over the population this notebook reports. A refit retires the generation a previous run
+    led with, and its cohort and paired rows survive intact under those same enum values.
+    """
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as db:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        payload = json.dumps(live)
+        stale_cohort = (
+            db.execute(
+                """
+                SELECT COUNT(*) FROM cohort_metrics cm
+                JOIN backtest_runs b ON b.backtest_hash = cm.leader_hash
+                WHERE b.prediction_hash NOT IN (SELECT value FROM json_each(?))
+                """,
+                (payload,),
+            ).fetchone()[0]
+            if "cohort_metrics" in tables
+            else 0
+        )
+        stale_paired = (
+            db.execute(
+                """
+                SELECT COUNT(*) FROM backtest_paired_metrics pm
+                JOIN backtest_runs b ON b.backtest_hash = pm.challenger_hash
+                WHERE b.prediction_hash NOT IN (SELECT value FROM json_each(?))
+                """,
+                (payload,),
+            ).fetchone()[0]
+            if "backtest_paired_metrics" in tables
+            else 0
+        )
+    return stale_cohort, stale_paired
+
+
 have_kinds, have_cohorts = _derived_table_state()
+stale_cohort, stale_paired = _stale_derived_rows(LIVE_PREDICTIONS)
 missing_kinds = sorted(set(PAIRED_KINDS) - have_kinds)
 missing_cohorts = sorted(set(COHORT_TYPES) - have_cohorts)
-if missing_cohorts:
+if missing_cohorts or stale_cohort:
+    reason = (
+        f"{len(missing_cohorts)} granularity(ies) missing"
+        if missing_cohorts
+        else f"{stale_cohort} row(s) led by a retired prediction"
+    )
     counts = compute_and_register(CASE_STUDY)
-    print(f"cohort_metrics: computed {sum(counts.values())} rows across {sorted(counts)}")
+    print(
+        f"cohort_metrics: recomputed {sum(counts.values())} rows across {sorted(counts)} ({reason})"
+    )
 else:
-    print(f"cohort_metrics: {len(have_cohorts)} granularities already present, nothing recomputed")
-if missing_kinds:
+    print(
+        f"cohort_metrics: {len(have_cohorts)} granularities present and every leader is live, "
+        "nothing recomputed"
+    )
+if missing_kinds or stale_paired:
+    reason = (
+        f"missing {', '.join(missing_kinds)}"
+        if missing_kinds
+        else f"{stale_paired} pair(s) challenged by a retired prediction"
+    )
     rows = populate_paired_metrics(CASE_STUDY)
     written = sum(1 for r in rows if "skip" not in r)
-    print(f"backtest_paired_metrics: wrote {written} pairs (missing {', '.join(missing_kinds)})")
+    print(f"backtest_paired_metrics: wrote {written} pairs ({reason})")
 else:
-    print("backtest_paired_metrics: every kind this notebook reads is present, nothing recomputed")
+    print(
+        "backtest_paired_metrics: every kind this notebook reads is present and every "
+        "challenger is live, nothing recomputed"
+    )
 
 have_kinds, have_cohorts = _derived_table_state()
 STILL_MISSING_KINDS = sorted(set(PAIRED_KINDS) - have_kinds)
@@ -351,7 +414,9 @@ with sqlite3.connect(str(_db)) as _con:
               AND p.split = 'validation'
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-            """
+              AND b.prediction_hash IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(LIVE_PREDICTIONS),),
         ).fetchall(),
         schema=["family", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"],
         orient="row",
@@ -1109,10 +1174,11 @@ else:
     )
     print()
     print(
-        "The validation and holdout windows are disjoint by design, so the populator pairs the "
-        "bootstrapped Sharpe series by row index after truncating to the shorter one. Read the "
-        "interval as a bootstrap-resampled Sharpe difference under index-paired draws, not as a "
-        "comparison over overlapping calendar time."
+        "The validation and holdout windows are disjoint by design, so the populator "
+        "bootstraps each window separately over its whole length and takes the difference of "
+        "independent draws. Nothing is truncated and no two draws are paired. Read the interval "
+        "as a difference of two independently resampled Sharpes, not as a comparison over "
+        "overlapping calendar time."
     )
 
 # %%
@@ -1165,9 +1231,11 @@ else:
 # larger than the noise. The paired bootstrap resamples the two return series together and gives
 # the difference its own confidence interval, which is the quantity the section-9 gate reads.
 #
-# **The windows do not overlap in calendar time**, so the pairing is by row index after truncating
-# to the shorter series. That is a statement about resampled draws rather than about the same days,
-# and an interval read as though the two series were contemporaneous would be read as something
+# **The windows do not overlap in calendar time**, so there is nothing to pair. Each window is
+# bootstrapped separately over its whole length and the difference is formed from independent
+# draws, which is why the information ratio is null here: an information ratio needs a difference
+# *series*, and disjoint windows produce no such series. An interval read as though the two were
+# contemporaneous, or as though draws were matched to each other, would be read as something
 # stronger than it is.
 #
 # **The holdout is short.** Whatever the point estimates, an interval computed over a window this

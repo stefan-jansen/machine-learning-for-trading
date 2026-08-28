@@ -283,6 +283,22 @@ print(
     f"{n_done - served - len(failures)} computed, {served} served from the registry, "
     f"{len(failures)} failed"
 )
+
+# What this sweep actually advanced, which is narrower than "every live prediction". The
+# allocation stage holds rows from earlier sweeps too, and a live prediction this run did not
+# advance still has historical allocation rows. Reporting over those would let a prediction the
+# current sweep never touched set the source spreads, the concentration table and the leaders.
+ADVANCED_PREDICTIONS = top_preds["prediction_hash"].to_list()
+
+# An allocator dropped part-way through the grid has results for some cells and not others, so
+# its average is taken over an easier subset than a complete allocator's. Comparing the two
+# would read the truncation as a property of the method.
+INCOMPLETE_ALLOCATORS = sorted(MVO_METHODS) if skip_mvo else []
+if INCOMPLETE_ALLOCATORS:
+    print(
+        f"Excluded from the allocator comparison, incomplete grid: "
+        f"{', '.join(INCOMPLETE_ALLOCATORS)}"
+    )
 if failures:
     failure_frame = pl.DataFrame(failures)
     print(f"{failure_frame.height} backtests raised. Distinct causes:")
@@ -305,8 +321,10 @@ else:
 explorer = BacktestExplorer(CASE_STUDY_ID)
 alloc_comparison = explorer.compare_allocators(
     label=LABEL,
-    prediction_hashes=top_preds["prediction_hash"].to_list(),
+    prediction_hashes=ADVANCED_PREDICTIONS,
 )
+if INCOMPLETE_ALLOCATORS:
+    alloc_comparison = alloc_comparison.filter(~pl.col("allocator").is_in(INCOMPLETE_ALLOCATORS))
 if alloc_comparison.is_empty():
     raise RuntimeError("the allocation stage registered no comparable rows")
 
@@ -373,7 +391,7 @@ specs = resolve_best_backtest_runs(
     split="validation",
     stage="allocation",
     top_n=100000,
-    prediction_hashes=set(LIVE_PREDICTIONS),
+    prediction_hashes=set(ADVANCED_PREDICTIONS),
 )
 if specs.is_empty():
     raise RuntimeError("the allocation stage registered no rows for this label")
@@ -395,7 +413,7 @@ allocation_rows = (
             stage="allocation",
             top_n=100000,
             label=LABEL,
-            prediction_hashes=LIVE_PREDICTIONS,
+            prediction_hashes=ADVANCED_PREDICTIONS,
         ).select("backtest_hash", "source", "sharpe"),
         on="backtest_hash",
         how="inner",
@@ -425,6 +443,7 @@ print(
 
 concentration = (
     allocation_rows.drop_nulls(["top_k", "allocator"])
+    .filter(~pl.col("allocator").is_in(INCOMPLETE_ALLOCATORS))
     .group_by("top_k", "allocator")
     .agg(pl.col("sharpe").mean().alias("avg_sharpe"))
     .sort("top_k", "allocator")
@@ -438,9 +457,9 @@ print(concentration.pivot(on="allocator", index="top_k", values="avg_sharpe"))
 # ### The leading combinations
 
 # %% tags=["results"]
-explorer.best(stage="allocation", top_n=10, label=LABEL, prediction_hashes=LIVE_PREDICTIONS).select(
-    "source", "signal_method", "sharpe", "cagr", "max_drawdown"
-)
+explorer.best(
+    stage="allocation", top_n=10, label=LABEL, prediction_hashes=ADVANCED_PREDICTIONS
+).select("source", "signal_method", "sharpe", "cagr", "max_drawdown")
 
 # %% [markdown]
 # ## 4. What to notice

@@ -1292,3 +1292,56 @@ def indistinguishable_groups(
             running_lo = float(lo)
 
     return ordered.with_columns(pl.Series("group", groups))
+
+
+def common_sample_daily_ic(
+    predictions: dict[str, pl.DataFrame],
+    *,
+    entity_col: str = "symbol",
+    date_col: str = "timestamp",
+) -> tuple[dict[str, float], int, int]:
+    """Daily rank IC for several prediction sets over the rows all of them share.
+
+    Two families can be scored over the same *number* of validation dates and still not be
+    comparable: sequence models drop the warm-up rows a flat model keeps, so the same date can
+    carry a different cross-section in each. Comparing the stored ICs then measures the samples
+    as much as the models.
+
+    This intersects on exact ``(entity, date)`` keys, recomputes the daily cross-sectional
+    Spearman correlation on what survives, and returns the mean per key alongside the number of
+    dates and rows the comparison rests on. Dates left with fewer than two entities carry no
+    cross-sectional correlation and are dropped.
+
+    Returns ``({name: mean_daily_ic}, n_dates, n_rows_per_set)``.
+    """
+    if not predictions:
+        return {}, 0, 0
+
+    keyed = {
+        name: df.select(entity_col, date_col, "prediction", "actual").unique(
+            subset=[entity_col, date_col]
+        )
+        for name, df in predictions.items()
+    }
+    common: pl.DataFrame | None = None
+    for frame in keyed.values():
+        keys = frame.select(entity_col, date_col)
+        common = keys if common is None else common.join(keys, on=[entity_col, date_col])
+    if common is None or common.is_empty():
+        return {}, 0, 0
+
+    ics: dict[str, float] = {}
+    for name, frame in keyed.items():
+        sample = frame.join(common, on=[entity_col, date_col])
+        per_day = (
+            sample.group_by(date_col)
+            .agg(
+                pl.corr(
+                    pl.col("prediction").rank(), pl.col("actual").rank(), method="pearson"
+                ).alias("ic"),
+                pl.len().alias("n"),
+            )
+            .filter((pl.col("n") >= 2) & pl.col("ic").is_not_null())
+        )
+        ics[name] = float(per_day["ic"].mean()) if per_day.height else float("nan")
+    return ics, common.select(date_col).n_unique(), common.height
