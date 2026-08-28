@@ -294,3 +294,38 @@ class TestWhatALaterGenerationRetires:
         shutil.copy(released_db, refitter.root / "run_log" / "registry.db")
         _publish(refitter, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members(refitter) == frozenset(MEMBERS_ONE)
+
+
+class TestThePreviewTier:
+    """A preview never creates an official population, so it never supersedes one.
+
+    This has to be decided from the tier rather than from what the registry holds, because in a
+    maintainer worktree the registry a preview reads *is* the canonical one. `features`,
+    `labels` and `run_log` are symlinks into the shared artifact store, which `create_experiment`
+    cannot copy, so `open_study(execution_tier="preview")` takes the read-in-place branch and
+    returns a study whose `root` is the canonical case directory with only its writes redirected.
+
+    Asking the registry first then returns a real generation, the hash is offered, and
+    `run_model_population` refuses the whole run - "preview populations cannot supersede a
+    snapshot" - before the first fit. A CI checkout has no symlinks and never takes that branch,
+    so this fails only on a maintainer's machine.
+    """
+
+    def test_a_preview_is_never_offered_the_hash(
+        self, study: Study, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        # Canonical resolves it, which is what makes the preview answer a decision rather than
+        # an absence: the same registry, the same name, the same declaration.
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        assert population_supersedes(study, name=first.name, declared=first.hash) is None
+
+    def test_the_refusal_to_create_reads_the_same_signal(
+        self, study: Study, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One derivation for both, so they cannot drift into disagreeing about the tier."""
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(study, MEMBERS_TWO)
