@@ -273,9 +273,7 @@ ablation = pl.DataFrame(
 )
 if ablation.get_column("key_digest").n_unique() != 1:
     raise RuntimeError("ablation requests do not share exact validation coverage")
-ablation
 
-# %% tags=["results"]
 fig = go.Figure(
     go.Bar(
         x=ablation.get_column("request").to_list(),
@@ -296,6 +294,7 @@ fig.update_layout(
     yaxis_title="Mean daily rank IC",
 )
 fig.show()
+ablation
 
 # %% [markdown]
 # ## IV lag decay
@@ -358,9 +357,7 @@ for lag in lags:
         }
     )
 lag_results = pl.DataFrame(lag_rows)
-lag_results
 
-# %% tags=["results"]
 fig = go.Figure(
     go.Scatter(
         x=lag_results.get_column("lag_sessions").to_list(),
@@ -380,6 +377,7 @@ fig.update_layout(
     yaxis_title="Mean daily rank IC",
 )
 fig.show()
+lag_results
 
 # %% [markdown]
 # ## Return decomposition
@@ -418,9 +416,7 @@ decomposition_ic = pl.DataFrame(
         for target_name, target in decomposition_targets.items()
     ]
 )
-decomposition_ic
 
-# %% tags=["results"]
 heatmap = decomposition_ic.pivot(
     on="target",
     index="feature",
@@ -445,11 +441,12 @@ fig.update_layout(
     yaxis_title="Financial feature",
 )
 fig.show()
+decomposition_ic
 
 # %% [markdown]
 # ## Training-only feature dimensionality
 
-# %% tags=["results"]
+# %%
 pca_fold = prepare_cv_folds(
     dataset.to_pandas(),
     splits[:1],
@@ -470,9 +467,7 @@ pca_summary = pl.DataFrame(
         "available_features": [len(feature_names)] * 3,
     }
 )
-pca_summary
 
-# %% tags=["results"]
 fig = go.Figure(
     go.Scatter(
         x=list(range(1, len(cumulative_variance) + 1)),
@@ -490,6 +485,7 @@ fig.update_layout(
     yaxis_range=[0, 1.01],
 )
 fig.show()
+pca_summary
 
 # %% [markdown]
 # These result tables and figures describe validation-only mechanism checks for the diagnostic
