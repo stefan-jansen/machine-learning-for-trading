@@ -1017,8 +1017,18 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
     symbols = ["SYM0", "SYM1", "SYM2", "SYM3", "SYM4"]
     holdout_start = "2024-01-01"
     entity_col = "symbol"
+    # Labels whose predictions carry a continuous evaluation target beside the class
+    # one. `labels.classification_eval_label` in setup.yaml is where production
+    # decides this: utils.modeling.load_modeling_dataset reads it for a
+    # classification label, and every writer then persists the column as
+    # `eval_actual` (registry/store.py). The mapping holds exactly - across all nine
+    # canonical registries, every artifact of a label named here carries the column
+    # and no other artifact does - so it is also what tells this function which
+    # synthetic artifacts need it.
+    eval_target_labels: set = set()
     if setup_path.exists():
         setup = yaml.safe_load(setup_path.read_text())
+        eval_target_labels = set((setup.get("labels") or {}).get("classification_eval_label") or {})
         universe = setup.get("universe", {})
         assets = universe.get("assets", [])
         if assets:
@@ -1190,7 +1200,17 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         pred_dir.mkdir(parents=True, exist_ok=True)
         score_seed = int(hashlib.sha256(p_hash.encode()).hexdigest()[:16], 16)
         scores = np.random.default_rng(score_seed).normal(0, 0.01, n).tolist()
-        template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
+        frame = template.with_columns(_pl.Series("prediction", scores))
+        if label in eval_target_labels:
+            # A classification prediction set that the registry credits with an IC can
+            # only have got it from this column, so an artifact without it contradicts
+            # its own registry row. 11_ml_pipeline/07_case_study_insights recomputes
+            # that IC from the artifact and refused the whole notebook over it; the
+            # refusal was right and the fixture was what was wrong. `actual` is the
+            # panel's realized target here, which for a classification label is what
+            # production stores as `eval_actual`.
+            frame = frame.with_columns(_pl.col("actual").alias("eval_actual"))
+        frame.write_parquet(str(pred_file))
 
 
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:
