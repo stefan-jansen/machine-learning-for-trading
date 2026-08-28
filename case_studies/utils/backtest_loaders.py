@@ -1622,6 +1622,7 @@ def print_stage_dsr_summary(
     stages: tuple[str, ...] = ("signal", "allocation", "cost_sensitivity", "risk_overlay"),
     top_n: int = 20,
     head: int = 10,
+    prediction_hashes: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Print per-stage DSR / PSR tables for a case-study explorer.
 
@@ -1634,7 +1635,9 @@ def print_stage_dsr_summary(
     for stage in stages:
         display_stage = "equal-weight baseline" if stage == "signal" else stage
         try:
-            table = explorer.deflated_sharpe(stage=stage, top_n=top_n)
+            table = explorer.deflated_sharpe(
+                stage=stage, top_n=top_n, prediction_hashes=prediction_hashes
+            )
         except ValueError as exc:
             if "zero variance" in str(exc).lower():
                 print(f"\n--- DSR @ {display_stage}: skipped ({exc}) ---")

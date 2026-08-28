@@ -325,8 +325,22 @@ class BacktestExplorer:
     # compare_families: model family comparison at a stage
     # -----------------------------------------------------------------
 
-    def compare_families(self, stage: str = "signal") -> pl.DataFrame:
+    def compare_families(
+        self,
+        stage: str = "signal",
+        *,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+    ) -> pl.DataFrame:
         """Compare model families by backtest Sharpe at a given stage.
+
+        Parameters
+        ----------
+        prediction_hashes : sequence of str, optional
+            Restrict the comparison to these prediction identities. The coverage bar is
+            then taken within them, matching ``best`` and ``compare_allocators``: a family
+            whose full-coverage rows are outside the population must be compared on its own
+            terms rather than dropped against a bar nothing in the population can meet.
+            An empty sequence is a population with no members and compares nothing.
 
         Returns
         -------
@@ -334,6 +348,19 @@ class BacktestExplorer:
             Columns: family, n, sharpe_median, sharpe_max, sharpe_q75,
             pct_positive
         """
+        scope_sql = ""
+        scope_params: tuple[str, ...] = ()
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
+        if prediction_hashes is not None:
+            placeholders = ", ".join("?" for _ in prediction_hashes)
+            scope_sql = f" AND p.prediction_hash IN ({placeholders})"
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            scope_params = (json.dumps(list(prediction_hashes)), *prediction_hashes)
         df = self._query(
             f"""
             SELECT
@@ -347,11 +374,12 @@ class BacktestExplorer:
             WHERE b.stage = ?
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {scope_sql}
             """,
-            (stage, *excluded_family_sql(self.case_study, "t.family")[1]),
+            (stage, *excluded_family_sql(self.case_study, "t.family")[1], *scope_params),
         )
         if df.is_empty():
             return df
@@ -685,6 +713,7 @@ class BacktestExplorer:
         *,
         top_n: int = 20,
         periods_per_year: int = 252,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
     ) -> pl.DataFrame:
         """Per-variant Sharpe with selection-bias DSR for family leaders.
 
@@ -713,7 +742,7 @@ class BacktestExplorer:
         """
         from ml4t.diagnostic.evaluation.stats import deflated_sharpe_ratio
 
-        top = self.best(stage=stage, top_n=top_n)
+        top = self.best(stage=stage, top_n=top_n, prediction_hashes=prediction_hashes)
         if top.is_empty():
             return pl.DataFrame()
 
@@ -1212,11 +1241,23 @@ class BacktestExplorer:
     # search_context: distribution stats for a stage
     # -----------------------------------------------------------------
 
-    def search_context(self, stage: str = "signal") -> dict[str, Any]:
+    def search_context(
+        self,
+        stage: str = "signal",
+        *,
+        prediction_hashes: tuple[str, ...] | list[str] | None = None,
+    ) -> dict[str, Any]:
         """Distribution statistics for all backtests at a stage.
 
         Quantifies search risk: how exceptional is the champion relative
         to the full sweep?
+
+        Parameters
+        ----------
+        prediction_hashes : sequence of str, optional
+            Restrict the sweep to these prediction identities. The trial count and the
+            distribution the champion is placed in are then the ones the shortlist was
+            actually drawn from.
 
         Returns
         -------
@@ -1225,6 +1266,19 @@ class BacktestExplorer:
             champion_sharpe, champion_source, champion_percentile,
             pct_positive
         """
+        scope_sql = ""
+        scope_params: tuple[str, ...] = ()
+        coverage_sql = full_coverage_prediction_sql("p", "t", "pm")
+        if prediction_hashes is not None:
+            placeholders = ", ".join("?" for _ in prediction_hashes)
+            scope_sql = f" AND p.prediction_hash IN ({placeholders})"
+            coverage_sql = full_coverage_prediction_sql(
+                "p",
+                "t",
+                "pm",
+                population_subquery="SELECT value FROM json_each(?)",
+            )
+            scope_params = (json.dumps(list(prediction_hashes)), *prediction_hashes)
         df = self._query(
             f"""
             SELECT
@@ -1237,11 +1291,12 @@ class BacktestExplorer:
             JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
             WHERE b.stage = ?
               AND p.split != 'holdout'
-              {full_coverage_prediction_sql("p", "t", "pm")}
+              {coverage_sql}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {scope_sql}
             """,
-            (stage,),
+            (stage, *scope_params),
         )
         if df.is_empty():
             return {}

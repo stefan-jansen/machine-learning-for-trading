@@ -44,8 +44,10 @@ from .model_planning import (
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
+    RetirementSplit,
     population_supersedes,
     research_name,
+    split_retired_members,
     superseded_members,
 )
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
@@ -83,6 +85,7 @@ __all__ = [
     "ResolvedModelRequest",
     "ResolvedCausalRequest",
     "ResolvedSpec",
+    "RetirementSplit",
     "ResolvedCVSpec",
     "Result",
     "Strategy",
@@ -112,6 +115,7 @@ __all__ = [
     "run_backtests",
     "run_locked_holdout",
     "run_model_population",
+    "split_retired_members",
     "superseded_members",
     "run_models",
     "run_official_model_subset",

@@ -12,6 +12,8 @@ from case_studies.utils.registry.store import _open_registry, _utc_now
 from .results import Result
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from .workspace import Study
 
 
@@ -327,6 +329,58 @@ def _lineage(
     finally:
         db.close()
     return rows, members
+
+
+@dataclass(frozen=True)
+class RetirementSplit:
+    """A candidate index divided into what its publishers still stand behind and what they do not.
+
+    Both sides carry every column of the index they came from, so the retired side is
+    reportable - which family, which configuration, what IC it would have swept on - rather
+    than a count with no way to check it.
+    """
+
+    live: pl.DataFrame
+    retired: pl.DataFrame
+
+
+def split_retired_members(
+    study: Study,
+    index: pl.DataFrame,
+    *,
+    member_kind: str = "prediction",
+    column: str = "prediction_hash",
+) -> RetirementSplit:
+    """Divide a candidate index on whether each identity's publisher has moved past it.
+
+    A sweep builds its candidates from the registry catalog, and the catalog does not carry
+    lineage: a refit leaves the previous generation complete, current under an unmoved schema
+    version, and indistinguishable from the generation that replaced it. Selecting over both
+    does not fail. It ranks twice as many rows, and a retired identity that outranks a live
+    one takes its slot and is carried into every stage downstream.
+
+    The predicate is ``superseded_members``, applied to the index rather than folded into the
+    query that built it. Keeping it here is what lets the notebook print the two halves: a
+    filter inside the loader would drop the rows before anything could say which ones or why,
+    and an index that silently shrinks between runs is the failure this exists to prevent.
+
+    Retirement is member-wise within a population name, so a refit that moved three of ten
+    identities retires three and leaves seven live. With no supersession edge anywhere -
+    a clean clone, or a study that has published exactly one generation - nothing is retired
+    and the index passes through whole.
+    """
+    import polars as pl
+
+    if column not in index.columns:
+        raise ValueError(
+            f"candidate index has no {column!r} column, so retirement cannot be decided on it; "
+            f"it carries {sorted(index.columns)}"
+        )
+    retired = superseded_members(study, member_kind=member_kind)
+    if not retired:
+        return RetirementSplit(live=index, retired=index.clear())
+    is_retired = pl.col(column).is_in(list(retired))
+    return RetirementSplit(live=index.filter(~is_retired), retired=index.filter(is_retired))
 
 
 def superseded_members(study: Study, *, member_kind: str = "prediction") -> frozenset[str]:
