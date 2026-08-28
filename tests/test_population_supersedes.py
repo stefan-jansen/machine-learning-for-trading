@@ -19,6 +19,7 @@ import pytest
 from case_studies.research import (
     OfficialPopulation,
     population_supersedes,
+    published_population_names_at,
     superseded_members,
     superseded_members_at,
 )
@@ -451,3 +452,61 @@ class TestTheRootBasedForm:
         _publish(study, MEMBERS_TWO, supersedes=first.hash)
         assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
         assert superseded_members_at(study.release_case_root) == frozenset()
+
+
+class TestWhetherARegistryDeclaresPopulationsAtAll:
+    """The question that separates "not used here" from "broken here".
+
+    `OfficialPopulation.one` answers both with the same "0 current identities": a registry that
+    has never published a population, and one that publishes several but cannot resolve the
+    name asked for. `13_model_analysis` has to tell them apart, because the first is the
+    ordinary state of a fixture and the second means a family's rows would enter every
+    comparison with no declaration covering them.
+    """
+
+    def test_a_registry_with_no_populations_names_none(self, study: Study) -> None:
+        assert published_population_names_at(study.root) == frozenset()
+
+    def test_it_names_a_generation_that_is_still_in_force(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_it_names_a_forked_name_that_will_not_resolve(self, study: Study) -> None:
+        """The case the notebook must not read as "this registry declares no populations".
+
+        `create` refuses to write this state - a second generation under a name must name what
+        it supersedes - so it is built here at the storage layer, which is also how it would
+        arise: a hand-edited registry, or one written under an earlier schema. Two generations
+        with no edge between them leave the name with no single answer, and
+        `OfficialPopulation.one` refuses it in the same words a registry that has published
+        nothing produces. The registry plainly does declare populations, so the notebook must
+        refuse the comparison rather than fall back to catalog admissibility.
+        """
+        first = _publish(study, MEMBERS_ONE)
+
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(official_populations)")]
+            row = dict(
+                zip(
+                    columns,
+                    db.execute(
+                        "SELECT * FROM official_populations WHERE population_hash = ?",
+                        (first.hash,),
+                    ).fetchone(),
+                    strict=True,
+                )
+            )
+            row["population_hash"] = "f0rked0000000000"
+            db.execute(
+                f"INSERT INTO official_populations ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                [row[column] for column in columns],
+            )
+
+        with pytest.raises(ValueError, match="current identities"):
+            OfficialPopulation.one(study, name=first.name)
+
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_a_directory_with_no_registry_names_none(self, tmp_path: Path) -> None:
+        assert published_population_names_at(tmp_path / "absent") == frozenset()

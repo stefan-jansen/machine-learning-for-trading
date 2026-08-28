@@ -67,6 +67,7 @@ from case_studies.research import (
     OfficialPopulation,
     Result,
     Study,
+    published_population_names_at,
     superseded_members,
 )
 from case_studies.utils.model_analysis import (
@@ -285,25 +286,38 @@ else:
 # above already holds - it is the check that the rows compared here are the ones those notebooks
 # declared before they fitted anything. A family whose cohort has not run yet resolves to no
 # population and is reported rather than silently omitted.
+# Whether this registry declares populations at all has to be settled before a name that will
+# not resolve can be read. Both states answer `OfficialPopulation.one` with the same
+# "0 current identities", and they call for opposite responses. A registry that has never
+# published one - a fixture, or a registry written before the mechanism - is not broken: the
+# comparison there rests on catalog admissibility, which is a weaker claim than a declared
+# population and worth saying out loud, but it is a claim. A registry that does publish them and
+# cannot resolve *this* name has a broken lineage, and comparing its rows would report a family
+# no declaration covers.
+_published = published_population_names_at(CASE_DIR)
+
 _population_members: dict[str, set[str]] = {}
 for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
     try:
         _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
     except (ValueError, FileNotFoundError) as _exc:
-        # Failing to resolve the declaration is not the same as there being nothing to check,
-        # and answering both with a printed note turns a broken lineage into an unchecked
-        # family: its rows still reach every comparison below, now with nothing saying they
-        # were the ones declared. Tolerated only where the family has produced no rows at all.
         _produced = _catalog.filter(pl.col("family") == _family).height
-        if _produced:
+        if _published and _produced:
             msg = (
                 f"{_family} has {_produced} registered prediction sets but its declared "
-                f"population {_name} does not resolve ({_exc}). Comparing them would report a "
-                "family no declaration covers. Republish the population, or name the one in "
-                "force."
+                f"population {_name} does not resolve ({_exc}). This registry publishes "
+                f"{len(_published)} population name(s), so the declaration is missing rather "
+                "than unused. Comparing them would report a family no declaration covers. "
+                "Republish the population, or name the one in force."
             )
             raise RuntimeError(msg) from _exc
         print(f"no current official population for {_family} ({_name}): {_exc}")
+
+if not _published:
+    print(
+        f"{CASE_DIR} publishes no official populations, so nothing below is checked against a "
+        "declaration: every comparison rests on catalog admissibility alone."
+    )
 
 # A population is declared before anything is fitted; degeneracy is only visible afterwards.
 # `load_all_metrics` drops any prediction set with a constant-prediction fold, because its

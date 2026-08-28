@@ -51,6 +51,7 @@ from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
     population_supersedes,
+    published_population_names_at,
     research_name,
     superseded_members,
     superseded_members_at,
@@ -122,6 +123,7 @@ __all__ = [
     "run_locked_holdout",
     "run_model_population",
     "superseded_members",
+    "published_population_names_at",
     "superseded_members_at",
     "run_models",
     "run_official_model_subset",

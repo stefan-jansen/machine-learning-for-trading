@@ -497,6 +497,25 @@ def _retired(
     return frozenset(retired)
 
 
+def published_population_names_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str]:
+    """Every population name this registry has ever published, in force or superseded.
+
+    The question a reader needs before it can interpret a name that will not resolve. An empty
+    answer means the registry does not declare populations at all - a fixture, or a registry
+    written before the mechanism existed - and a comparison there rests on catalog
+    admissibility, which is a weaker claim but a statable one. A non-empty answer means the
+    registry does declare them, and a name that resolves to nothing in *that* registry is a
+    broken lineage rather than an absent mechanism.
+
+    Answering both with "the name did not resolve" is what makes the two indistinguishable, and
+    they call for opposite responses: proceed and say so, or refuse.
+    """
+    rows, _ = _lineage(Path(case_dir), member_kind)
+    return frozenset(name for _, name, _ in rows)
+
+
 def superseded_members_at(
     case_dir: str | Path, *, member_kind: str = "prediction"
 ) -> frozenset[str]:
