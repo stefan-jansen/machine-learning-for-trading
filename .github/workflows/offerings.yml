@@ -36,6 +36,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # actions/checkout persists whichever token it is given as the git
+          # credential, and `git push` uses that one, not GH_TOKEN. Without this
+          # the push always runs as the default token and the required checks
+          # never fire on the pull request.
+          token: ${{ secrets.OFFERINGS_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
         with:
