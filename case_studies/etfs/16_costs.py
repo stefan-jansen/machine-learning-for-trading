@@ -64,6 +64,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
+from case_studies.research import open_study, split_retired_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
@@ -76,6 +77,7 @@ from case_studies.utils.backtest_presets import (
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
     load_existing_backtest_hashes,
+    load_prediction_index,
     read_predictions,
     resolve_best_backtest_runs,
 )
@@ -94,6 +96,11 @@ CASE_STUDY_ID = "etfs"
 LABEL = ""
 MAX_SYMBOLS = 0
 TOP_N_COMBOS: int | None = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. What is being re-priced, and under what
@@ -127,9 +134,35 @@ print(f"Per-share commission: ${PER_SHARE_COMMISSION}/share")
 print(f"Basis-point grid:     {COST_GRID_BPS}")
 print(f"Half-spread grid (¢): {[round(v * 100, 2) for v in COST_GRID_HALF_SPREAD_USD]}")
 
+# %% [markdown]
+# **The population the leaders are drawn from.** A refit publishes a second generation under the
+# same population name and leaves the one it replaced in the registry, backtests and all. Reading
+# the leaders without asking the population lineage lets a retired identity be re-priced here and
+# carried onward as though it were what the model notebook publishes.
+
+# %%
+LIVE_PREDICTIONS = (
+    split_retired_members(
+        open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+        load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
+    )
+    .live["prediction_hash"]
+    .to_list()
+)
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(
+        f"no live prediction sets for {CASE_STUDY_ID}/{LABEL}/validation; run 14_backtest first"
+    )
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
+
 # %% tags=["results"]
 top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=TOP_N_COMBOS
+    CASE_STUDY_ID,
+    LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=TOP_N_COMBOS,
+    prediction_hashes=set(LIVE_PREDICTIONS),
 )
 if top_combos.is_empty():
     raise RuntimeError(
@@ -141,7 +174,7 @@ if top_combos.is_empty():
 # read from the explorer and joined on `backtest_hash`, which both carry.
 sources = dict(
     BacktestExplorer(CASE_STUDY_ID)
-    .best(stage="allocation", top_n=100000, label=LABEL)
+    .best(stage="allocation", top_n=100000, label=LABEL, prediction_hashes=LIVE_PREDICTIONS)
     .select("backtest_hash", "source")
     .iter_rows()
 )
@@ -278,7 +311,12 @@ COST_REGIMES = {"percentage": "bps per leg", "per_share": "cents of half-spread 
 def load_cost_curve(commission_model: str) -> pl.DataFrame:
     """Read the registered cost-sensitivity rows for one commission model."""
     rows = resolve_best_backtest_runs(
-        CASE_STUDY_ID, LABEL, split="validation", stage="cost_sensitivity", top_n=100000
+        CASE_STUDY_ID,
+        LABEL,
+        split="validation",
+        stage="cost_sensitivity",
+        top_n=100000,
+        prediction_hashes=set(LIVE_PREDICTIONS),
     )
     if rows.is_empty():
         return pl.DataFrame()
