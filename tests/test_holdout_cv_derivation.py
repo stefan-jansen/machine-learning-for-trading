@@ -377,3 +377,139 @@ def test_no_case_study_declares_an_outcome_horizon_its_widest_buffer_cannot_cove
                 "buffer any of its labels declares, so its last training label resolves "
                 "inside the holdout"
             )
+
+
+def test_a_midnight_boundary_is_written_as_a_date_because_the_panel_carries_dates() -> None:
+    """`2023-11-29T00:00:00` cannot be read back into a `Date` column - Polars returns null.
+
+    Every daily panel stores its dates as `Date`, so a datetime rendering made the derived
+    fold unreadable by the consumer it was written for, and the refusal named the symptom
+    ("locked holdout CV contains an invalid boundary") rather than the format.
+    """
+    fold = _fold(build_holdout_cv(_validation_spec(), case_study="fx_pairs", timeline=SESSIONS))
+
+    for name in ("train_start", "train_end", "val_start", "val_end"):
+        assert "T" not in fold[name], (
+            f"{name}={fold[name]!r} carries a time of day that a daily panel cannot represent"
+        )
+        assert pd.Timestamp(fold[name]).time() == pd.Timestamp("00:00:00").time()
+
+
+def _daily_panel() -> Any:
+    import polars as pl
+
+    dates = pd.date_range("2011-01-04", "2025-12-31", freq="B")
+    return pl.DataFrame({"timestamp": [d.date() for d in dates], "symbol": ["EURUSD"] * len(dates)})
+
+
+def _holdout_spec(**boundaries: str) -> dict[str, Any]:
+    return {
+        "label": "fwd_ret_1d",
+        "computation": {
+            "cv": {
+                "split": "holdout",
+                "folds": [{"fold": 8, **boundaries}],
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "rendering",
+    [
+        pytest.param(
+            {
+                "train_start": "2011-01-04",
+                "train_end": "2023-11-29",
+                "val_start": "2024-01-01",
+                "val_end": "2025-12-31",
+            },
+            id="date",
+        ),
+        pytest.param(
+            {
+                "train_start": "2011-01-04T00:00:00",
+                "train_end": "2023-11-29T00:00:00",
+                "val_start": "2024-01-01T00:00:00",
+                "val_end": "2025-12-31T00:00:00",
+            },
+            id="datetime",
+        ),
+    ],
+)
+def test_the_consumer_reads_either_rendering_of_the_same_midnight_boundary(
+    rendering: dict[str, str],
+) -> None:
+    """Both are ISO strings, and a `strict=False` cast read one of them as null.
+
+    That null was indistinguishable from a boundary that was never recorded, so the
+    refusal said "invalid boundary" for what was a disagreement about format. Parsing
+    makes the consumer robust to whichever rendering a producer sends.
+    """
+    from case_studies.research.models import locked_holdout_split
+
+    resolved = locked_holdout_split(
+        _holdout_spec(**rendering), _daily_panel(), "timestamp", "fx_pairs"
+    )
+    fold = resolved["folds"][0] if "folds" in resolved else resolved
+
+    assert pd.Timestamp(fold["train_end"]) == pd.Timestamp("2023-11-29")
+    assert pd.Timestamp(fold["val_start"]) == pd.Timestamp("2024-01-01")
+
+
+def test_a_boundary_that_is_not_a_date_at_all_is_named_rather_than_read_as_none() -> None:
+    from case_studies.research.models import locked_holdout_split
+
+    with pytest.raises(ValueError, match="not an ISO date or datetime"):
+        locked_holdout_split(
+            _holdout_spec(
+                train_start="the beginning",
+                train_end="2023-11-29",
+                val_start="2024-01-01",
+                val_end="2025-12-31",
+            ),
+            _daily_panel(),
+            "timestamp",
+            "fx_pairs",
+        )
+
+
+def _intraday_panel(tz: str | None) -> Any:
+    import polars as pl
+
+    stamps = pd.date_range("2022-01-01 00:00", "2025-12-31 23:00", freq="h", tz=tz)
+    return pl.DataFrame(
+        {"timestamp": stamps.to_pydatetime().tolist(), "symbol": ["BTCUSDT"] * len(stamps)}
+    )
+
+
+@pytest.mark.parametrize("tz", [None, "UTC"], ids=["naive", "aware"])
+def test_a_date_only_val_end_covers_the_whole_final_session_on_an_intraday_panel(
+    tz: str | None,
+) -> None:
+    """`timestamp <= val_end` at midnight drops every bar of the last session.
+
+    A configured end date means the whole of that date. On a daily panel the bar sits at
+    midnight and the two readings agree, which is why this only shows on an intraday
+    panel - and it cost nasdaq100_microstructure 38,610 rows the last time it was missed.
+    """
+    from case_studies.research.models import locked_holdout_split
+
+    panel = _intraday_panel(tz)
+    resolved = locked_holdout_split(
+        _holdout_spec(
+            train_start="2022-01-01T00:00:00",
+            train_end="2023-12-30T23:00:00",
+            val_start="2024-01-01",
+            val_end="2025-12-31",
+        ),
+        panel,
+        "timestamp",
+        "fx_pairs",
+    )
+    fold = resolved["folds"][0] if "folds" in resolved else resolved
+    val_end = pd.Timestamp(fold["val_end"])
+
+    assert val_end > pd.Timestamp("2025-12-31 23:00", tz=tz), (
+        f"val_end={val_end} excludes the final session's own bars"
+    )
