@@ -205,6 +205,20 @@ if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
 else:
     print(f"already populated: backtest_paired_metrics {_n_pairs} pairs")
 
+# A rebuild that could not produce a canonical table leaves the previous one in place, which
+# is the right call for the data - a stale table is recoverable and deleted rows are not - but
+# the wrong one for this notebook, which would go on to read those rows and present selection
+# statistics computed under a universe the chapter does not claim. Refuse instead of rendering
+# them. An unpopulated registry has nothing off-universe to find and never reaches this.
+_still_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+if _still_stale:
+    raise RuntimeError(
+        f"{', '.join(sorted(_still_stale))} still reference runs outside "
+        f"{_UNIVERSE_FILTER} after rebuilding. The rebuild produced nothing to replace them "
+        f"with, so every figure below would describe a selection this case study does not "
+        f"make. Re-run the backtests for {_UNIVERSE_FILTER} before this notebook."
+    )
+
 
 def _fmt_ci(point: float | None, lo: float | None, hi: float | None, fmt: str = ".3f") -> str:
     if point is None:
