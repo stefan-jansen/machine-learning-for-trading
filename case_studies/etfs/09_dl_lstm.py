@@ -44,6 +44,7 @@ from case_studies.research import (
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
@@ -60,7 +61,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
-SUPERSEDES_POPULATION: str = ""
+SUPERSEDES_POPULATION: str = "1c04632dec9c"
 DEVICE: str = ""
 
 # %%
@@ -130,24 +131,33 @@ if (narrows or device != PUBLISHED_DEVICE) and not POPULATION_NAME:
 # %% [markdown]
 # ## 2. The baselines this is measured against
 #
-# Read back from the registry rather than re-fitted here. Each is its family's full-coverage
-# validation leader, so all three numbers in the family comparison below are measured over the
-# same validation dates on the same cross-section.
+# Read back from the registry rather than re-fitted here: each is its family's full-coverage
+# validation leader, reported as the daily-pooled IC that `load_model_ic` returns for every
+# family alike.
+#
+# Full coverage is decided within a family, not across families. A family whose best run failed
+# partway sets its own lower bar and still reports a full-coverage leader, so two families can
+# each be complete by their own measure and be scored over different windows with nothing saying
+# so. Section 7 therefore compares `ic_n_days` before it compares IC, rather than taking the
+# comparability on trust.
 
 # %%
 prior_baselines = {}
+baseline_days = {}
 _baselines = load_best_ic_per_family(["linear", "gbm"], case_studies=[CASE_STUDY_ID])
 for row in _baselines.iter_rows(named=True):
     # The full-coverage linear leader is a Ridge configuration; name it plainly so the comparison
     # below resolves it.
-    if row["family"] == "linear":
-        prior_baselines["Ridge (Ch11)"] = row["ic_mean"]
-    elif row["family"] == "gbm":
-        prior_baselines["GBM (Ch12)"] = row["ic_mean"]
+    name = {"linear": "Ridge (Ch11)", "gbm": "GBM (Ch12)"}.get(row["family"])
+    if name:
+        prior_baselines[name] = row["ic_mean"]
+        baseline_days[name] = row["ic_n_days"]
 
 if prior_baselines:
     for name, ic in prior_baselines.items():
-        print(f"  {name}: IC={ic:+.4f}" if ic is not None else f"  {name}: IC=n/a")
+        days = baseline_days[name]
+        scored = f" over {days:.0f} validation dates" if days is not None else ""
+        print(f"  {name}: IC={ic:+.4f}{scored}" if ic is not None else f"  {name}: IC=n/a")
 else:
     print("  No prior results registered - run 06_linear and 07_gbm first")
 
@@ -224,10 +234,15 @@ plan.select(
 # holds the matching rows and the saved weights, and `reused` in the line below counts what came
 # back from store rather than from a GPU.
 #
-# `SUPERSEDES_POPULATION` names the population hash this run replaces. It is empty here because
-# this run publishes a name nothing has published before; a later refit under changed code produces
-# a different member set, and the registry refuses the write until it is told which snapshot it
-# retires.
+# `SUPERSEDES_POPULATION` names the population snapshot this run replaces, which the registry
+# refuses the write without once a name has been published before. The declaration below retires
+# the generation fitted while the sequence runner's identity was a hash of its source file, before
+# that became a declared version.
+#
+# The hash is committed source, so it is wrong for every reader: `run_log/` is gitignored and a
+# clean clone has no `official_populations` table to hold it. `population_supersedes` resolves the
+# declaration against the registry in hand and withholds it where there is nothing to retire, so
+# one committed value is right for the author's refit and the reader's first run alike.
 
 # %%
 population_name = POPULATION_NAME or "etfs-lstm-validation-v1"
@@ -235,7 +250,7 @@ execution, population = run_model_population(
     study,
     resolved,
     population_name=population_name,
-    supersedes=SUPERSEDES_POPULATION or None,
+    supersedes=population_supersedes(study, name=population_name, declared=SUPERSEDES_POPULATION),
 )
 
 reused = sum(1 for item in execution.diagnostics if item.get("reused"))
@@ -294,32 +309,37 @@ if not checkpoints["complete"].all():
     raise RuntimeError("an incomplete checkpoint is registered; the population cannot be read")
 
 # %% [markdown]
-# The selection rule is the sequence-model analogue of early stopping: scan the checkpoint grid on
-# the validation folds and keep the highest-IC checkpoint among those with full coverage. The
-# holdout is not touched.
+# Every full-coverage checkpoint is published as a candidate; this notebook chooses none of them.
+# Scanning the grid for the highest validation IC is the sequence-model analogue of early
+# stopping, and it is read here as a diagnostic - it says where in training the signal peaked, and
+# it anchors the learning curve and the per-fold table below. It is not the pipeline's selection:
+# IC ranks nothing anywhere in this pipeline, and a configuration is chosen on validation backtest
+# Sharpe in the evaluation stage, from the whole grid published here. The holdout is not touched.
 
 # %% tags=["results"]
 eligible = checkpoints.filter("full_coverage")
-best_row = eligible.sort("ic_mean_daily", descending=True).row(0, named=True)
-BEST_EPOCH = int(best_row["checkpoint_value"])
-BEST_IC = float(best_row["ic_mean_daily"])
-BEST_NAME = best_row["config_name"]
-BEST_PHASH = best_row["prediction_hash"]
-FULL_DAYS = float(best_row["ic_n_days"])
+peak_row = eligible.sort("ic_mean_daily", descending=True).row(0, named=True)
+PEAK_EPOCH = int(peak_row["checkpoint_value"])
+PEAK_IC = float(peak_row["ic_mean_daily"])
+CONFIG_NAME = peak_row["config_name"]
+PEAK_PHASH = peak_row["prediction_hash"]
+FULL_DAYS = float(peak_row["ic_n_days"])
+PUBLISHED_CHECKPOINTS = int(eligible.height)
 partial_epochs = (
     checkpoints.filter(~pl.col("full_coverage"))["checkpoint_value"].cast(pl.Int64).to_list()
 )
 
-print(f"Config: {BEST_NAME}   full-coverage validation days = {int(FULL_DAYS)}")
+print(f"Config: {CONFIG_NAME}   full-coverage validation days = {int(FULL_DAYS)}")
 print(checkpoints.select("checkpoint_value", "ic_mean_daily", "ic_n_days", "full_coverage"))
-print(f"\nFull-coverage winner: {BEST_NAME} @ epoch {BEST_EPOCH} (IC={BEST_IC:+.4f})")
+print(f"\nPublished as candidates: {PUBLISHED_CHECKPOINTS} full-coverage checkpoints")
+print(f"Highest validation IC: epoch {PEAK_EPOCH} (IC={PEAK_IC:+.4f})")
 if partial_epochs:
-    print(f"Excluded before selection, partial coverage: epochs {partial_epochs}")
+    print(f"Not published, partial coverage: epochs {partial_epochs}")
 
 # %% [markdown]
 # ## 6. The learning curve
 #
-# Validation IC at each epoch checkpoint. The selected checkpoint is amber; any checkpoint excluded
+# Validation IC at each epoch checkpoint. The peak is amber; any checkpoint left unpublished
 # for partial coverage is copper. A curve that rises and then falls is the model fitting and then
 # overfitting the validation folds; a flat one says the epoch count was never the binding choice.
 
@@ -329,7 +349,7 @@ _ics = checkpoints["ic_mean_daily"].to_list()
 _days = checkpoints["ic_n_days"].to_list()
 _colors = [
     COLORS["amber"]
-    if epoch == BEST_EPOCH
+    if epoch == PEAK_EPOCH
     else (COLORS["copper"] if epoch in partial_epochs else COLORS["blue"])
     for epoch in _epochs
 ]
@@ -341,22 +361,22 @@ fig_lc = go.Figure(
         line=dict(color=COLORS["silver_muted"], width=1.5),
         marker=dict(
             color=_colors,
-            size=[16 if epoch == BEST_EPOCH else 11 for epoch in _epochs],
+            size=[16 if epoch == PEAK_EPOCH else 11 for epoch in _epochs],
             line=dict(color="white", width=1),
         ),
         text=[
-            f"{days:.0f}d" if epoch == BEST_EPOCH or days < FULL_DAYS else ""
+            f"{days:.0f}d" if epoch == PEAK_EPOCH or days < FULL_DAYS else ""
             for epoch, days in zip(_epochs, _days, strict=True)
         ],
         textposition="top center",
         showlegend=False,
     )
 )
-fig_lc.add_vline(x=BEST_EPOCH, line=dict(color=COLORS["amber"], width=1, dash="dot"))
+fig_lc.add_vline(x=PEAK_EPOCH, line=dict(color=COLORS["amber"], width=1, dash="dot"))
 fig_lc.update_layout(
     title=(
-        f"Validation IC by checkpoint; epoch {BEST_EPOCH} selected"
-        + (f", partial epochs {partial_epochs} excluded" if partial_epochs else "")
+        f"Validation IC by checkpoint; peak at epoch {PEAK_EPOCH}"
+        + (f", partial epochs {partial_epochs} not published" if partial_epochs else "")
     ),
     height=500,
     width=1000,
@@ -370,17 +390,33 @@ fig_lc.show()
 # %% [markdown]
 # ## 7. Against the flat-feature baselines
 #
-# The selected checkpoint against the linear and gradient-boosting leaders, all three on the same
-# label and the same validation split. This is the comparison the notebook exists to make: whether
-# reading the history as a sequence adds anything over handing the same history to a model as
-# columns.
+# The peak checkpoint against the linear and gradient-boosting leaders. This is the comparison the
+# notebook exists to make: whether reading the history as a sequence adds anything over handing
+# the same history to a model as columns.
+#
+# The comparison only means anything if the three numbers were scored over the same days, and
+# section 2 explained why that is not guaranteed - each family's coverage bar is its own. So the
+# check runs first and the chart is drawn only if it passes. All three are the daily-pooled IC:
+# `load_model_ic` returns `COALESCE(ic_mean_daily, ic_mean)` under the name `ic_mean`, which is
+# the same statistic section 5 reads for the sequence family.
 
 # %%
 ridge_ic = prior_baselines.get("Ridge (Ch11)", float("nan"))
 gbm_ic = prior_baselines.get("GBM (Ch12)", float("nan"))
 
-_labels = ["Ridge (Ch11)", "GBM (Ch12)", f"LSTM ({BEST_NAME})"]
-_vals = [ridge_ic, gbm_ic, BEST_IC]
+_mismatched = {
+    name: days for name, days in baseline_days.items() if days is not None and days != FULL_DAYS
+}
+if _mismatched:
+    raise RuntimeError(
+        f"the baselines were scored over {_mismatched} validation dates and this notebook's "
+        f"checkpoints over {FULL_DAYS:.0f}; comparing the IC would measure the periods as much "
+        "as the models. Re-run the stage whose leader is short before reading this comparison"
+    )
+print(f"All three leaders scored over {FULL_DAYS:.0f} validation dates")
+
+_labels = ["Ridge (Ch11)", "GBM (Ch12)", f"LSTM ({CONFIG_NAME})"]
+_vals = [ridge_ic, gbm_ic, PEAK_IC]
 fig_cmp = go.Figure(
     go.Bar(
         x=_labels,
@@ -396,7 +432,7 @@ fig_cmp = go.Figure(
     )
 )
 fig_cmp.update_layout(
-    title="Peak-checkpoint IC by family, measured on the same validation dates",
+    title=f"Peak-checkpoint daily IC by family, all scored over {FULL_DAYS:.0f} validation dates",
     height=500,
     width=1000,
     margin=dict(t=70),
@@ -414,12 +450,12 @@ fig_cmp.show()
 # one whose mean is carried by a single fold.
 
 # %% tags=["results"]
-folds = Result.open(study, BEST_PHASH).folds().select("fold_id", "ic", "n_entities").sort("fold_id")
-print(f"Per-fold validation IC ({BEST_NAME} @ epoch {BEST_EPOCH}):")
+folds = Result.open(study, PEAK_PHASH).folds().select("fold_id", "ic", "n_entities").sort("fold_id")
+print(f"Per-fold validation IC ({CONFIG_NAME} @ epoch {PEAK_EPOCH}):")
 print(folds)
 NEGATIVE_FOLDS = int(folds.filter(pl.col("ic") < 0).height)
 print(f"\n  Folds with negative IC: {NEGATIVE_FOLDS} of {folds.height}")
-print(f"  Winner prediction_hash: {BEST_PHASH}")
+print(f"  Peak-IC prediction_hash: {PEAK_PHASH}")
 
 # %% [markdown]
 # ## 9. What to notice
@@ -428,17 +464,21 @@ print(f"  Winner prediction_hash: {BEST_PHASH}")
 _coverage_text = (
     f"All {checkpoints.height} checkpoints cover {FULL_DAYS:.0f} validation dates."
     if not partial_epochs
-    else f"Checkpoints at epochs {partial_epochs} were excluded before selection."
+    else f"Checkpoints at epochs {partial_epochs} were not published, on partial coverage."
 )
 display(
     Markdown(
         f"""
-- **The sequence model is measured against the flat-feature families on the same dates.** The
-  checkpoint it selects is epoch **{BEST_EPOCH}** at validation IC **{BEST_IC:+.3f}**, against
-  Ridge **{ridge_ic:+.3f}** and GBM **{gbm_ic:+.3f}**.
-- **Coverage is comparable across the checkpoint choice.** {_coverage_text} The guard stays
+- **The sequence model is measured against the flat-feature families over the same
+  {FULL_DAYS:.0f} validation dates**, checked rather than assumed, and on the same daily-pooled
+  IC. Its strongest checkpoint is epoch **{PEAK_EPOCH}** at **{PEAK_IC:+.3f}**, against Ridge
+  **{ridge_ic:+.3f}** and GBM **{gbm_ic:+.3f}**.
+- **Nothing here is chosen.** All **{PUBLISHED_CHECKPOINTS}** full-coverage checkpoints are
+  published as candidates; the peak above is a diagnostic that says where training stopped
+  helping. Selection happens in the evaluation stage, on validation backtest Sharpe.
+- **Coverage is comparable across the checkpoint grid.** {_coverage_text} The guard stays
   necessary either way: a collapsed checkpoint scores on fewer dates and can look better for it.
-- **The average is not the whole story.** The selected checkpoint is negative in
+- **The average is not the whole story.** The peak checkpoint is negative in
   **{NEGATIVE_FOLDS} of {folds.height}** validation folds. The holdout is not read here; it is
   evaluated once, after the development-stage selection is fixed.
 
