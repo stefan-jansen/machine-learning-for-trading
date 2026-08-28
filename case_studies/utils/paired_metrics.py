@@ -579,10 +579,14 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        c_arr, b_arr = joint_returns(
+        # Measured here, applied once inside `compute_paired_uncertainty`, which trims
+        # whatever it is handed. Passing the trimmed pair on would trim it twice, and the
+        # default rule is not idempotent: it starts at the later of the two first traded
+        # sessions, so when the earlier starter is exactly zero on that session a second
+        # pass slides the start forward again and drops observations the first pass kept.
+        n_overlap = joint_returns(
             c_arr, b_arr, challenger_overlays_baseline=challenger_overlays_baseline
-        )
-        n_overlap = c_arr.size
+        )[0].size
         if n_overlap < min_n:
             return {
                 "cs": cs,
@@ -714,10 +718,11 @@ def populate_paired_metrics(
                 min_n = _min_paired_n(ppy)
                 aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
                 if aligned.height >= min_n:
-                    c_arr, b_arr = joint_returns(
-                        aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
-                    )
-                    if c_arr.size >= min_n:
+                    c_arr = aligned["ret"].to_numpy()
+                    b_arr = aligned["ret_b"].to_numpy()
+                    # Sized here, trimmed once inside `compute_paired_uncertainty`; see
+                    # `_populate_pair` for why the pair must not arrive pre-trimmed.
+                    if joint_returns(c_arr, b_arr)[0].size >= min_n:
                         paired = compute_paired_uncertainty(
                             c_arr,
                             b_arr,

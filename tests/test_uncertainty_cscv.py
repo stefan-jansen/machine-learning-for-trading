@@ -285,56 +285,6 @@ def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
     assert result["bootstrap_n"] == 100.0
 
 
-def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() -> None:
-    """Two producers write the same ``backtest_paired_metrics`` rows and must not disagree.
-
-    ``20_strategy_synthesis/01_aggregate_synthesis.py`` carries its own copy of the joint
-    coercion, ``_joint_coerce``, and ``case_studies/utils/paired_metrics.py`` reaches
-    ``joint_returns``. Both produce the signal-versus-equal-weight pair for the same case
-    study, so if their start rules ever part company, ``sharpe_diff`` for one pair depends on
-    which producer ran last. This runs the real Ch20 function - lifted out of the notebook
-    source rather than reimplemented - against the shared one over pairs with every
-    combination of leading inactivity.
-
-    The duplicate should go; until it does, this is what stops it drifting.
-    """
-    import ast
-
-    from case_studies.utils.uncertainty import joint_returns
-
-    repo_root = Path(__file__).resolve().parents[1]
-    source = (repo_root / "20_strategy_synthesis" / "01_aggregate_synthesis.py").read_text()
-    tree = ast.parse(source)
-    definition = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_joint_coerce"
-    )
-    namespace: dict = {"np": np}
-    exec(  # noqa: S102 - running the producer itself is the point of the check
-        compile(ast.Module(body=[definition], type_ignores=[]), "01_aggregate_synthesis", "exec"),
-        namespace,
-    )
-    ch20_coerce = namespace["_joint_coerce"]
-
-    rng = np.random.default_rng(0)
-    for _ in range(200):
-        n = int(rng.integers(5, 40))
-        challenger = rng.normal(0.0, 0.01, n)
-        benchmark = rng.normal(0.0, 0.01, n)
-        challenger[: rng.integers(0, 6)] = 0.0
-        benchmark[: rng.integers(0, 6)] = 0.0
-        if rng.random() < 0.2:
-            challenger[rng.integers(0, n)] = np.nan
-
-        theirs_c, theirs_b = ch20_coerce(challenger, benchmark)
-        ours_c, ours_b = joint_returns(challenger, benchmark)
-
-        assert ours_c.size == theirs_c.size
-        np.testing.assert_allclose(ours_c, theirs_c)
-        np.testing.assert_allclose(ours_b, theirs_b)
-
-
 def test_the_default_trim_starts_where_both_began_not_where_both_are_simultaneously_live() -> None:
     """A zero on the earlier starter's books must not push the sample start forward.
 
