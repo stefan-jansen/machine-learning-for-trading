@@ -510,3 +510,30 @@ class TestWhetherARegistryDeclaresPopulationsAtAll:
 
     def test_a_directory_with_no_registry_names_none(self, tmp_path: Path) -> None:
         assert published_population_names_at(tmp_path / "absent") == frozenset()
+
+    def test_a_registry_predating_the_mechanism_must_not_be_asked_to_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """Why `13_model_analysis` branches on this answer instead of catching a failure.
+
+        A registry written before official populations existed has no `official_populations`
+        table, and `OfficialPopulation.one` raises `sqlite3.OperationalError` there rather than
+        the `ValueError` a resolvable-but-absent name produces. A reader's clean clone is that
+        registry. So the notebook has to decide *not to ask*, and this pins the pairing it
+        decides on: the helper answers, the resolver raises.
+
+        If `one` is ever made tolerant of the missing table, this fails and the branch it
+        justifies can be simplified - which is the point of asserting the resolver's behaviour
+        here rather than only the helper's.
+        """
+        case_dir = tmp_path / "etfs"
+        (case_dir / "run_log").mkdir(parents=True)
+        with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+            db.execute("CREATE TABLE unrelated (x INTEGER)")
+
+        assert published_population_names_at(case_dir) == frozenset()
+
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            OfficialPopulation.one(
+                Study.at(case_dir, case_study="etfs"), name="etfs-linear-validation-v1"
+            )

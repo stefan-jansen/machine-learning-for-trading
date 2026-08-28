@@ -297,27 +297,31 @@ else:
 _published = published_population_names_at(CASE_DIR)
 
 _population_members: dict[str, set[str]] = {}
-for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
-    try:
-        _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
-    except (ValueError, FileNotFoundError) as _exc:
-        _produced = _catalog.filter(pl.col("family") == _family).height
-        if _published and _produced:
-            msg = (
-                f"{_family} has {_produced} registered prediction sets but its declared "
-                f"population {_name} does not resolve ({_exc}). This registry publishes "
-                f"{len(_published)} population name(s), so the declaration is missing rather "
-                "than unused. Comparing them would report a family no declaration covers. "
-                "Republish the population, or name the one in force."
-            )
-            raise RuntimeError(msg) from _exc
-        print(f"no current official population for {_family} ({_name}): {_exc}")
-
 if not _published:
+    # Nothing published means there is nothing to resolve, and asking anyway is not harmless:
+    # on a registry whose schema predates the mechanism `OfficialPopulation.one` raises
+    # `sqlite3.OperationalError: no such table`, which is neither of the errors the handler
+    # below expects. A reader's clean clone is exactly that registry.
     print(
         f"{CASE_DIR} publishes no official populations, so nothing below is checked against a "
         "declaration: every comparison rests on catalog admissibility alone."
     )
+else:
+    for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
+        try:
+            _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
+        except (ValueError, FileNotFoundError) as _exc:
+            _produced = _catalog.filter(pl.col("family") == _family).height
+            if _produced:
+                msg = (
+                    f"{_family} has {_produced} registered prediction sets but its declared "
+                    f"population {_name} does not resolve ({_exc}). This registry publishes "
+                    f"{len(_published)} population name(s), so the declaration is missing "
+                    "rather than unused. Comparing them would report a family no declaration "
+                    "covers. Republish the population, or name the one in force."
+                )
+                raise RuntimeError(msg) from _exc
+            print(f"no current official population for {_family} ({_name}): {_exc}")
 
 # A population is declared before anything is fitted; degeneracy is only visible afterwards.
 # `load_all_metrics` drops any prediction set with a constant-prediction fold, because its
