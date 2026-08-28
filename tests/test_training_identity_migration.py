@@ -1,5 +1,7 @@
 """Verified reuse of complete training results across identity representation changes."""
 
+# ruff: noqa: E402  # pytest.importorskip must run before the torch-backed imports
+
 from __future__ import annotations
 
 import copy
@@ -11,6 +13,9 @@ from types import SimpleNamespace
 
 import joblib
 import pytest
+
+pytest.importorskip("torch")
+
 from torch import nn
 
 from case_studies.research import (

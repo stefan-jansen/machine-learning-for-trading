@@ -1,10 +1,14 @@
 """Semantic implementation versions for model families that used to hash source files."""
 
+# ruff: noqa: E402  # pytest.importorskip must run before the torch-backed imports
+
 from __future__ import annotations
 
 from copy import deepcopy
 
 import pytest
+
+pytest.importorskip("torch")
 
 from case_studies.utils import causal, deep_learning, tabular_dl
 from case_studies.utils.latent_factors import adapter as latent_adapter
