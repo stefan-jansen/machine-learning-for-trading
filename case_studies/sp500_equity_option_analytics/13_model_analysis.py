@@ -104,6 +104,7 @@ from case_studies.utils.model_viz import (
 from case_studies.utils.notebook_contracts import (
     declared_population_members,
     degenerate_prediction_hashes,
+    incompletely_registered_predictions,
 )
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
@@ -269,6 +270,17 @@ if _declared:
             f"{len(_missing)} declared member(s) never reached the registry: "
             f"{', '.join(_missing[:5])}. The populations were published before their members "
             "finished fitting, so the comparison below would be short without saying so."
+        )
+    # Present is not the same as finished either. Coverage, the headline metrics and the
+    # per-fold metrics are separate writes, so a run interrupted between them leaves a member
+    # that this leaderboard scores over the folds it managed - and a shorter window is an
+    # easier window, which is the direction that flatters it.
+    _short = incompletely_registered_predictions(CASE_DIR, CURRENT_MEMBERS)
+    if _short:
+        _named = ", ".join(f"{h}: {why}" for h, why in sorted(_short.items())[:5])
+        raise RuntimeError(
+            f"{len(_short)} declared member(s) are registered but unfinished: {_named}. "
+            "Their scores cover fewer folds than they were asked for."
         )
     print(
         f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force"
