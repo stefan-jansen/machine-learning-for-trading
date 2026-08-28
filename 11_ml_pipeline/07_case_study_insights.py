@@ -1250,6 +1250,9 @@ if sign_df.height > 0:
     fig.show()
 
 # %% tags=[]
+# Counted on both paths: the closing takeaways quote it, and an empty frame is a
+# count of zero rather than an absent name.
+stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
 if sign_df.is_empty():
     display(
         Markdown(
@@ -1260,7 +1263,6 @@ if sign_df.is_empty():
         )
     )
 else:
-    stable_sign_count = sign_df.filter(pl.col("mean_consistency") >= 0.8).height
     sign_leader = sign_df.row(0, named=True)
     display(
         Markdown(
@@ -1435,14 +1437,32 @@ if cs_names:
 
 # %% tags=[]
 off_diagonal = J[~np.eye(len(cs_names), dtype=bool)]
-max_overlap = float(np.nanmax(off_diagonal)) if off_diagonal.size else float("nan")
-display(
-    Markdown(
-        f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
-        "Each selected fit draws primarily on its panel-specific feature library; recurring "
-        "momentum or volatility primitives do not form a universal short list."
-    )
+# An overlap is a statement about two panels, so it needs two of them. With one
+# feature set, or none, the off-diagonal is empty and there is no largest value -
+# reported as unavailable rather than as a number the matrix does not contain.
+has_overlap = bool(off_diagonal.size) and bool(np.isfinite(off_diagonal).any())
+max_overlap = float(np.nanmax(off_diagonal)) if has_overlap else float("nan")
+overlap_phrase = (
+    f"only {max_overlap:.2f}"
+    if has_overlap
+    else "unavailable, because fewer than two panels contributed a feature set"
 )
+if has_overlap:
+    display(
+        Markdown(
+            f"The largest off-diagonal top-{TOP_N} Jaccard overlap is **{max_overlap:.2f}**. "
+            "Each selected fit draws primarily on its panel-specific feature library; recurring "
+            "momentum or volatility primitives do not form a universal short list."
+        )
+    )
+else:
+    display(
+        Markdown(
+            f"Fewer than two case studies contributed a top-{TOP_N} feature set here, so there "
+            "is no cross-panel overlap to report. The comparison needs two selected fits with "
+            "stored coefficients."
+        )
+    )
 
 # %% [markdown] tags=[]
 # ## 7. Cross-CS Takeaways
@@ -1463,7 +1483,7 @@ display(
         f"- **Ranking and direction are not symmetric:** regression-score mean daily AUC stays "
         f"within {max_auc_gap:.3f} of chance in the tested pairs.\n"
         f"- **Coefficient behavior is panel-specific:** {stable_sign_count} selected fits clear "
-        f"0.8 mean sign consistency, yet the largest top-{TOP_N} cross-panel feature overlap is "
-        f"only {max_overlap:.2f}."
+        f"0.8 mean sign consistency, and the largest top-{TOP_N} cross-panel feature overlap is "
+        f"{overlap_phrase}."
     )
 )
