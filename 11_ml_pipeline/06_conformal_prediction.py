@@ -61,6 +61,12 @@ from sklearn.preprocessing import StandardScaler
 
 from data import load_macro
 from utils.cv_splits import generate_cv_splits
+from utils.modeling import (
+    array_sha256,
+    conformal_quantile,
+    file_sha256,
+    notebook_cache_signature,
+)
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS
@@ -89,7 +95,6 @@ if is_reduced_run and not ARTIFACT_TAG:
     ARTIFACT_TAG = "_fast"
 
 RESULTS_PATH = MODELS_DIR / f"conformal_results{ARTIFACT_TAG}.joblib"
-NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
 
 # %% [markdown] tags=[]
 # ## Load Features and Labels
@@ -245,9 +250,11 @@ else:
 # interval must be the width of an actual calibration score, the one at that rank
 # in the sorted list. A quantile function that interpolates between two
 # neighbouring scores returns something slightly narrower, and that difference is
-# exactly the finite-sample margin the ceiling was there to provide. So the
-# calls below pass `method="higher"`, which rounds up to the score at the rank
-# rather than landing between two of them.
+# exactly the finite-sample margin the ceiling was there to provide. The calls
+# below therefore select the rank directly, through
+# `utils.modeling.conformal_quantile`, which also returns an unbounded interval
+# when the rank exceeds the calibration set - a set of 5 scores cannot certify
+# 90% coverage, and saying so is better than quoting its largest score.
 
 
 # %% tags=[]
@@ -277,9 +284,7 @@ def predict_split_conformal(state, X, coverage=TARGET_COVERAGE):
     X_scaled = state["scaler"].transform(X)
     y_pred = state["model"].predict(X_scaled)
 
-    n_cal = len(state["cal_scores"])
-    quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    q = np.quantile(state["cal_scores"], quantile_level, method="higher")
+    q = conformal_quantile(state["cal_scores"], coverage)
 
     return y_pred, y_pred - q, y_pred + q
 
@@ -327,9 +332,7 @@ def fit_cqr(X_train, y_train, X_cal, y_cal, coverage=TARGET_COVERAGE):
     q_upper_cal = model_hi.predict(X_cal_scaled)
     scores = np.maximum(q_lower_cal - y_cal, y_cal - q_upper_cal)
 
-    n_cal = len(scores)
-    quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    cal_adj = np.quantile(scores, quantile_level, method="higher")
+    cal_adj = conformal_quantile(scores, coverage)
 
     return {"model_lo": model_lo, "model_hi": model_hi, "scaler": scaler, "cal_adj": cal_adj}
 
@@ -420,14 +423,12 @@ def predict_aci_adaptive(
     decision_dates = np.unique(dates)
     rows_on_date = [np.where(dates == d)[0] for d in decision_dates]
 
-    n_cal = len(state["cal_scores"])
     alpha_t = target_alpha
     alpha_history = [alpha_t]
 
     for i, rows in enumerate(rows_on_date):
         # Price the whole cross-section from the current, pre-outcome alpha.
-        q_level = min(np.ceil((n_cal + 1) * (1 - alpha_t)) / n_cal, 1.0)
-        q = np.quantile(state["cal_scores"], q_level, method="higher")
+        q = conformal_quantile(state["cal_scores"], 1 - alpha_t)
         lower[rows] = y_pred[rows] - q
         upper[rows] = y_pred[rows] + q
 
@@ -532,19 +533,65 @@ def run_conformal_evaluation(features, targets, cv_splits, dates, coverage=TARGE
     return results
 
 
+# %% [markdown] tags=[]
+# The fitted results are cached so a re-read of the notebook does not refit three
+# conformal methods across every fold. What the cache is keyed on decides whether
+# that is a convenience or a hazard. Keyed on the file existing, an edit to any of
+# the code below would leave the previous run's numbers on the page underneath the
+# new source, and nothing downstream would notice: the provenance stamp binds this
+# `.py` to its `.ipynb`, and after an edit and a re-run both of those are current.
+# So the cache carries a signature of the notebook's own source, the two input
+# files, the exact cleaned arrays and the settings that change a fit, and a run
+# that does not match it refits.
+
+
 # %% tags=[]
+CACHE_SIGNATURE = notebook_cache_signature(
+    get_chapter_dir(11) / "06_conformal_prediction.py",
+    inputs={
+        "features_file": file_sha256(FEATURES_PATH),
+        "labels_file": file_sha256(LABELS_PATH),
+        "features_array": array_sha256(features_array),
+        "target_array": array_sha256(target_array),
+        "dates": array_sha256(dates_np),
+        "cv_splits": array_sha256(
+            np.concatenate([np.concatenate([tr, [-1], te, [-2]]) for tr, te in cv_splits]).astype(
+                np.int64
+            )
+        ),
+    },
+    settings={
+        "seed": SEED,
+        "ridge_alpha": RIDGE_ALPHA,
+        "target_coverage": TARGET_COVERAGE,
+        "max_qr_samples": MAX_QR_SAMPLES,
+    },
+)
+
+
+# %% tags=[]
+def _cache_is_usable(cached: dict) -> tuple[bool, str]:
+    """Whether a loaded cache was produced by this code, on these inputs, at this scale."""
+    if cached.get("cache_signature") != CACHE_SIGNATURE:
+        return False, "the notebook source, its inputs or its settings changed"
+    if len(cached.get("fold_stats", [])) < len(cv_splits):
+        return False, "it holds fewer folds than this run evaluates"
+    return True, ""
+
+
+NEED_TRAINING = RETRAIN or not RESULTS_PATH.exists()
+if not NEED_TRAINING:
+    conformal_results = joblib.load(RESULTS_PATH)
+    usable, reason = _cache_is_usable(conformal_results)
+    if not usable:
+        print(f"Refitting: cached results at {display_path(RESULTS_PATH)} are stale - {reason}.")
+        NEED_TRAINING = True
+
 if NEED_TRAINING:
     conformal_results = run_conformal_evaluation(
         features_array, target_array, cv_splits, dates_np, coverage=TARGET_COVERAGE
     )
-else:
-    conformal_results = joblib.load(RESULTS_PATH)
-    if len(conformal_results.get("fold_stats", [])) < len(cv_splits):
-        print("Cached conformal results missing fold-level stats; recomputing.")
-        conformal_results = run_conformal_evaluation(
-            features_array, target_array, cv_splits, dates_np, coverage=TARGET_COVERAGE
-        )
-        NEED_TRAINING = True
+    conformal_results["cache_signature"] = CACHE_SIGNATURE
 
 # %% [markdown] tags=[]
 # ## Calibration Analysis
@@ -894,8 +941,9 @@ if fold_stats:
 vol_arr = np.array(conformal_results["vol_proxy"])
 n_covered = len(conformal_results["sc"]["covered"])
 assert len(vol_arr) == n_covered, (
-    f"vol_proxy ({len(vol_arr):,}) and covered ({n_covered:,}) disagree — the cached "
-    f"results at {display_path(RESULTS_PATH)} do not match this run. Delete it and re-run."
+    f"vol_proxy ({len(vol_arr):,}) and covered ({n_covered:,}) disagree, so the two were "
+    "not recorded in the same pass over the folds. The cache signature above should have "
+    f"caught that; if this fires, delete {display_path(RESULTS_PATH)} and re-run."
 )
 
 # %% tags=[]
@@ -959,7 +1007,7 @@ tercile_table
 if NEED_TRAINING:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(conformal_results, RESULTS_PATH)
-    print(f"Saved results to {RESULTS_PATH}")
+    print(f"Saved results to {display_path(RESULTS_PATH)}")
 
 # %% [markdown] tags=[]
 # ## Bridge to Position Sizing
