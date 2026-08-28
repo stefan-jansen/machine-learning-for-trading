@@ -16,7 +16,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -224,3 +224,92 @@ def test_schema_without_timestamp_or_date_raises(
 
     with pytest.raises(ValueError, match=r"neither 'timestamp' nor 'date'"):
         _fold_splits(cs, "fwd_ret_21d")
+
+
+def test_a_fold_boundary_survives_the_trip_into_a_polars_date_filter(
+    isolated_case_study: Path,
+) -> None:
+    """A fold span must still select the sessions it names after it reaches polars.
+
+    ``generate_cv_splits`` indexes the label timeline with a pandas ``DatetimeIndex``, so every
+    boundary it hands back is a ``Timestamp`` regardless of whether the parquet stored ``Date`` or
+    ``Datetime``. ``str()`` on one is ``2020-01-06 00:00:00``, and a consumer that stores the
+    boundary as text and rebuilds the filter with ``str.to_date`` gets a ``ComputeError`` instead
+    of rows: that is what stopped ``sp500_equity_option_analytics/04_model_based_features``.
+    ``fold_boundary_date`` is the one conversion, so the span stays a calendar date the whole way.
+    """
+    from case_studies.utils.cv_window import modeling_fold_boundaries
+
+    cs = "test_cs_fold_boundary_into_polars"
+    label = "fwd_ret_5d"
+    cs_dir = isolated_case_study / cs
+    _seed_setup_yaml(cs_dir, with_buffer=True, label=label, horizon="5D")
+    _seed_label_parquet(cs_dir, label=label, date_col="timestamp")
+
+    folds = modeling_fold_boundaries(cs, label)
+    assert folds is not None
+    fold = folds[0]
+    start = fold["val_start"]
+    end = fold["val_end"]
+    assert isinstance(start, date) and not isinstance(start, datetime)
+
+    sessions = pl.DataFrame(
+        {"timestamp": pl.date_range(date(2015, 1, 1), date(2024, 12, 31), "1d", eager=True)}
+    )
+    selected = sessions.filter(
+        (pl.col("timestamp") >= pl.lit(start, dtype=pl.Date))
+        & (pl.col("timestamp") <= pl.lit(end, dtype=pl.Date))
+    )["timestamp"]
+
+    assert selected.min() == start
+    assert selected.max() == end
+
+
+def test_fold_boundary_date_refuses_a_boundary_carrying_a_time_of_day() -> None:
+    """Dropping a time of day would silently move the span, so the conversion refuses instead.
+
+    The feature producers that use this conversion write daily spans. Intraday artifacts retain
+    their timestamps through ``temporal_artifact_fold_boundaries`` instead.
+    """
+    import pandas as pd
+
+    from case_studies.utils.cv_window import fold_boundary_date
+
+    assert fold_boundary_date(pd.Timestamp("2020-01-06")) == date(2020, 1, 6)
+    assert fold_boundary_date(date(2020, 1, 6)) == date(2020, 1, 6)
+    assert fold_boundary_date("2020-01-06") == date(2020, 1, 6)
+
+    with pytest.raises(ValueError, match="time of day"):
+        fold_boundary_date(pd.Timestamp("2020-01-06 09:30:00"))
+    with pytest.raises(ValueError, match="time of day"):
+        fold_boundary_date("2020-01-06 00:00:00.500000")
+
+
+def test_a_fold_end_is_comparable_to_the_holdout_start_the_configuration_states(
+    isolated_case_study: Path,
+) -> None:
+    """An evaluation notebook seals its folds by comparing the latest fold end to the holdout.
+
+    ``setup.yaml`` states ``evaluation.holdout_start`` as a calendar date and the fold generator
+    returns pandas ``Timestamp`` boundaries, and Python refuses that comparison outright rather
+    than answering it. So the seal - the check that no validation window reaches the holdout -
+    raised a ``TypeError`` instead of passing or failing, which is what stopped
+    ``sp500_equity_option_analytics/05_evaluation``. Both sides have to be calendar dates for the
+    seal to mean anything.
+    """
+    from case_studies.utils.cv_window import modeling_fold_boundaries
+
+    cs = "test_cs_fold_end_against_holdout"
+    label = "fwd_ret_5d"
+    cs_dir = isolated_case_study / cs
+    _seed_setup_yaml(cs_dir, with_buffer=True, label=label, horizon="5D")
+    _seed_label_parquet(cs_dir, label=label, date_col="timestamp")
+
+    setup = yaml.safe_load((cs_dir / "config" / "setup.yaml").read_text())
+    holdout_start = date.fromisoformat(str(setup["evaluation"]["holdout_start"]))
+
+    folds = modeling_fold_boundaries(cs, label)
+    assert folds is not None
+    latest_end = max(f["val_end"] for f in folds)
+
+    assert latest_end < holdout_start

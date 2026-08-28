@@ -59,6 +59,63 @@ def test_identical_causal_result_does_not_refresh_execution_provenance(tmp_path)
     assert changed[4] == first[4]
 
 
+def _causal_hash(case_dir, **identity) -> str:
+    """Register one causal result and return the hash its specification produced."""
+    from case_studies.utils.causal import register_causal_run as register_with_spec
+
+    results = {
+        "dml_result": {
+            "theta": -0.02,
+            "se_hac": 0.01,
+            "n_obs": 100,
+            "covariance_type": "HAC",
+        },
+        "refutation": {"empirical_p": 0.01},
+        "p_value_hac": 0.25,
+        "naive_effect": -0.03,
+        "confounding_bias_pct": -0.5,
+    }
+    return register_with_spec(
+        case_study_id="test_case",
+        label="fwd_ret_5d",
+        results=results,
+        treatment_col="ivrv_spread",
+        confounder_cols=["rv_20"],
+        n_folds=5,
+        embargo=10,
+        case_dir=case_dir,
+        **identity,
+    )
+
+
+def test_every_knob_that_changes_the_estimate_changes_the_causal_hash(tmp_path) -> None:
+    case_dir = tmp_path / "test_case"
+    base = {
+        "block_size": 20,
+        "n_placebo": 200,
+        "seed": 42,
+        "horizon": 10,
+        "max_samples": 50_000,
+        "max_symbols": 100,
+        "development_end": "2020-01-01",
+    }
+    baseline = _causal_hash(case_dir, **base)
+    assert _causal_hash(case_dir, **base) == baseline
+
+    for knob, other in (
+        ("block_size", 5),
+        ("n_placebo", 100),
+        ("seed", 7),
+        ("horizon", 5),
+        ("max_samples", 10_000),
+        ("max_symbols", 25),
+        ("development_end", "2019-01-01"),
+    ):
+        assert _causal_hash(case_dir, **{**base, knob: other}) != baseline, knob
+
+    assert (case_dir / "run_log" / "registry.db").is_file()
+
+
 def _register_immutable(case_dir, **overrides) -> None:
     """Registers through the immutable path, which `_register` above does not reach.
     `register_causal_run` enforces immutability only when the spec carries an

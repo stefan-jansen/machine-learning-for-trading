@@ -282,7 +282,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils", "data", "case_studies"]
+include = ["utils", "data", "case_studies", "scripts"]
 namespaces = false
 
 # Auto-loaded at interpreter startup to put numbered chapter dirs on sys.path

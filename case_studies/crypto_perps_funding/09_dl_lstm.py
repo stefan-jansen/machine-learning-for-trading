@@ -77,11 +77,7 @@ plan = plan_model_catalog(
 )
 # Sequence eligibility follows from the resolved gap policy and lookback, so read both from the
 # frozen specification instead of restating the configuration file here.
-# `preprocessing` sits at the top level for the current sequence spec and under `computation`
-# for every family already migrated to the shared resolved specification; read either shape.
-resolved_preprocessing = [
-    spec.get("computation", spec)["preprocessing"] for spec in plan_specs(plan)
-]
+resolved_preprocessing = [spec["computation"]["preprocessing"] for spec in plan_specs(plan)]
 contracts = declared_contracts(plan).with_columns(
     pl.Series("gap_policy", [step["gap_policy"] for step in resolved_preprocessing]),
     pl.Series("lookback", [step["lookback"] for step in resolved_preprocessing]),

@@ -1055,6 +1055,85 @@ def test_resolving_a_population_by_name_returns_the_generation_in_force(tmp_path
     assert OfficialPopulation.one(study, name="gbm-v1").hash == third.hash
 
 
+def test_declared_supersedes_applies_only_to_the_generation_it_produces(tmp_path: Path) -> None:
+    """A notebook declaring the hash it supersedes must reproduce a tip, never extend past one.
+
+    fx_pairs/07_gbm carries a non-empty ``SUPERSEDES_POPULATION`` so that re-running it resolves
+    to the published generation rather than writing a new one. That declaration describes exactly
+    one generation - the one produced by superseding that hash - so it applies only while that
+    generation is the one in force. Asking instead whether *any* generation exists gets the second
+    run on a clean clone wrong: run 1 writes the first generation, whose own supersedes is None,
+    and offering the hash again there writes a second generation nobody asked for.
+    """
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    def declared_for(name: str, declared: str | None) -> str | None:
+        """The notebook's rule, in one place, so the assertions below exercise it rather than restate it."""
+        try:
+            current = OfficialPopulation.one(study, name=name)
+        except (ValueError, sqlite3.OperationalError):
+            return None
+        return declared if declared in (current.supersedes, current.hash) else None
+
+    # Run 1 on an empty registry: nothing to supersede, so the declaration is withheld.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    first = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+
+    # Run 2 on that same registry is the case the wrong rule breaks. The generation in force is
+    # the first one, whose supersedes is None, so the declaration still does not apply and the
+    # rerun resolves to the identical hash rather than writing a second generation.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+    rerun = snapshot_official_models(
+        study,
+        [request(1.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", "deadbeefcafe"),
+    )
+    assert rerun.hash == first.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == first.hash
+
+    # Now supersede for real, and the declaration naming the retired hash becomes the one that
+    # reproduces the tip - which is the state a maintainer's registry is in.
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="gbm-declared-v1", supersedes=first.hash
+    )
+    assert declared_for("gbm-declared-v1", first.hash) == first.hash
+    again = snapshot_official_models(
+        study,
+        [request(2.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", first.hash),
+    )
+    assert again.hash == second.hash
+
+    # And a declaration naming some other generation does not apply, so it cannot fork the chain.
+    assert declared_for("gbm-declared-v1", "deadbeefcafe") is None
+
+    # The authoring case, which testing only `current.supersedes == declared` blocks. An author
+    # holding the tip and declaring THAT hash is publishing the next generation, not reproducing
+    # one, and withholding there would fix the reader by making the publication impossible.
+    tip = OfficialPopulation.one(study, name="gbm-declared-v1")
+    assert declared_for("gbm-declared-v1", tip.hash) == tip.hash
+    third = snapshot_official_models(
+        study,
+        [request(3.0)],
+        population_name="gbm-declared-v1",
+        supersedes=declared_for("gbm-declared-v1", tip.hash),
+    )
+    assert third.hash != tip.hash
+    assert OfficialPopulation.one(study, name="gbm-declared-v1").hash == third.hash
+
+
 def test_interrupted_linear_run_reuses_completed_fold_on_retry(tmp_path: Path, monkeypatch) -> None:
     study = _linear_study(tmp_path, monkeypatch)
     request = study.model(family="linear", label="fwd_ret_1d", config_name="ridge")
@@ -1134,3 +1213,52 @@ def test_prediction_retry_finishes_metrics_without_new_identity(
 
     assert finalized.hash == prediction_hash
     assert finalized.complete
+
+
+def test_reproducing_a_published_population_is_a_no_op_whatever_it_says_it_supersedes(
+    tmp_path: Path,
+) -> None:
+    """A notebook must be able to re-run itself. `supersedes` sits inside the hashed
+    snapshot as well as in its own column, so a second generation's hash depends on which
+    generation it replaced. The notebook that published it holds no record of that - all six
+    multi-generation ETF populations are produced by notebooks declaring
+    `SUPERSEDES_POPULATION = ""` - so re-running one recomputes the same members and a
+    different hash, and the name check rejects it as changed. Reproducing the published list
+    is not a change and must return the published snapshot."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    first = snapshot_official_models(study, [request(1.0)], population_name="pca-v1")
+    second = snapshot_official_models(
+        study, [request(2.0)], population_name="pca-v1", supersedes=first.hash
+    )
+    assert second.hash != first.hash
+
+    # The notebook re-run: same members as the published generation, and no predecessor to
+    # name, because the notebook never recorded one.
+    again = snapshot_official_models(study, [request(2.0)], population_name="pca-v1")
+
+    assert again.hash == second.hash
+    assert again.members == second.members
+    assert OfficialPopulation.one(study, name="pca-v1").hash == second.hash
+
+
+def test_a_member_list_that_actually_differs_still_needs_its_predecessor(tmp_path: Path) -> None:
+    """The relaxation above must not reach a list that changed. Publishing different members
+    under a live name without naming what they replace is what leaves a reader unable to tell
+    which snapshot a downstream result was computed over."""
+    study = _study(tmp_path)
+
+    def request(alpha: float) -> ResolvedModelRequest:
+        spec = _resolved_spec(alpha=alpha)
+        spec["computation"]["checkpoint_schedule"] = [{"kind": "epoch", "value": 1}]
+        return ResolvedModelRequest(study=study, family="linear", spec=spec, _context=None)
+
+    snapshot_official_models(study, [request(1.0)], population_name="ipca-v1")
+
+    with pytest.raises(ValueError, match="supersedes"):
+        snapshot_official_models(study, [request(2.0)], population_name="ipca-v1")

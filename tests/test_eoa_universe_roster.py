@@ -36,7 +36,7 @@ import yaml
 
 from data import load_sp500_daily_bars, load_sp500_options_surface
 from data.exceptions import DataNotFoundError
-from utils.paths import get_case_study_dir
+from utils import CASE_STUDIES_DIR
 
 CASE_STUDY_ID = "sp500_equity_option_analytics"
 ROSTER_STAGES = ("02_labels", "03_financial_features", "04_model_based_features")
@@ -48,9 +48,7 @@ def _window(start: str, end: str) -> pl.Expr:
 
 @pytest.fixture(scope="module")
 def declared_n_assets() -> int:
-    setup = yaml.safe_load(
-        (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
-    )
+    setup = yaml.safe_load((CASE_STUDIES_DIR / CASE_STUDY_ID / "config" / "setup.yaml").read_text())
     return setup["universe"]["n_assets"]
 
 
@@ -147,7 +145,7 @@ def _roster_source_call(stem: str) -> ast.Call:
     Found by walking from the assignment rather than by matching text, so reformatting the
     cell cannot make the check pass or fail.
     """
-    tree = ast.parse((get_case_study_dir(CASE_STUDY_ID) / f"{stem}.py").read_text())
+    tree = ast.parse((CASE_STUDIES_DIR / CASE_STUDY_ID / f"{stem}.py").read_text())
     names: dict[str, ast.expr] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):

@@ -42,7 +42,7 @@ import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style  # noqa: F401
-from case_studies.research import CausalResult, Result, Study
+from case_studies.research import CausalResult, Result, open_study, superseded_members
 from case_studies.research.results import PredictionResult
 from case_studies.utils.conformal import split_conformal_coverage
 from utils.modeling import load_configs
@@ -52,6 +52,13 @@ from utils.paths import get_case_study_dir
 CASE_STUDY = "fx_pairs"
 PRIMARY_LABEL = "fwd_ret_1d"
 N_BUCKETS = 5
+# This notebook reads; it fits nothing and registers nothing, so it has no preview form - a
+# preview population is not the thing whose assembly it checks. It still takes the pair,
+# because WORKSPACE is what lets a run read an isolated registry instead of the published one.
+# Study.open(CASE_STUDY) resolved through the repo case directory, which holds a registry only
+# where a maintainer worktree has linked one there; anywhere else it read nothing at all.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Load the canonical population
@@ -64,12 +71,22 @@ N_BUCKETS = 5
 case_dir = get_case_study_dir(CASE_STUDY)
 setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
 configured_labels = [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
-study = Study.open(CASE_STUDY)
+study = open_study(CASE_STUDY, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 catalog = study.predictions.table().filter(
     (pl.col("identity_status") == "current")
     & (pl.col("execution_tier") == "canonical")
     & (pl.col("split") == "validation")
 )
+# `identity_status` names the schema version a row was written under. It says nothing about
+# which generation the row's producer still publishes: a model notebook that refits leaves the
+# generation it replaced in the registry, complete and current under that column, so the filter
+# above carries retired prediction sets into the analysis. The lineage is what answers it, and
+# `superseded_members` reads that - the same exclusion `13_backtest` applies before it freezes
+# the baseline population, so the analysed catalog and the backtested one describe one set of
+# models rather than two.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 
 if catalog.is_empty():
     raise RuntimeError("no current canonical validation predictions are registered")

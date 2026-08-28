@@ -261,3 +261,112 @@ class CausalRequest:
 
     def run(self) -> CausalResult:
         return self.resolve().run()
+
+
+def causal_supersedes(
+    study: Study,
+    declaration: str | None,
+    label: str,
+    *,
+    labels: list[str] | None = None,
+    execution_tier: str = "canonical",
+) -> str | None:
+    """The declared predecessor, offered only where this registry holds it.
+
+    A notebook that has refit under a changed causal identity must name the identity it
+    retires, or ``_enforce_causal_supersedes`` refuses the write - after the DML fit and every
+    placebo refit have been paid for. So the hash is committed source, and then it is wrong for
+    everyone who is not the author: ``run_log/`` is gitignored, a reader's clone holds no causal
+    rows at all, and naming a predecessor that does not exist fails at exactly the same place,
+    after exactly the same computation. The author's fix becomes the reader's bug.
+
+    Passing the mapping as a run-time parameter instead does not work here, because
+    ``run-production-notebook.sh`` executes with no parameter overrides - the provenance gate
+    requires the committed notebook to be the current source executed clean - so a value that
+    only ever arrives as an override can never be stamped.
+
+    Resolving it against the registry is what makes one committed declaration right for both.
+    The hash is offered when this registry holds a current identity for the label, and withheld
+    when it does not, which is the clean clone. It is the same rule
+    :func:`case_studies.research.population.population_supersedes` applies to a population hash,
+    for the same reason.
+
+    Parsing is still :func:`supersedes_for`: this only decides whether the parsed value applies.
+    A declaration naming a label the notebook does not fit still raises there, before the fit.
+    """
+    declared = supersedes_for(declaration, label, labels=labels)
+    if not declared:
+        return None
+    tier = ExecutionTier(execution_tier)
+    db_path = study.storage_root(tier) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return None
+    # The registry's own timeouts, as `population_supersedes` uses: five seconds is short
+    # enough that ordinary contention with a concurrent writer raises `database is locked`.
+    db = sqlite3.connect(str(db_path), timeout=120.0)
+    try:
+        db.execute("PRAGMA busy_timeout = 60000")
+        try:
+            current = current_causal_identities(db, label=label, tier=tier.value)
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                # A lock timeout, an I/O error and a half-migrated schema are not evidence that
+                # this registry holds no causal identity. Reading them as a clean clone withholds
+                # the predecessor, and the notebook then pays for the DML fit and every placebo
+                # refit before registration refuses the write for naming none.
+                raise
+            # No causal table at all, which is the ordinary state of a reader's clone rather than
+            # the exotic one. Same reasoning as `population_supersedes`.
+            return None
+    finally:
+        db.close()
+    return declared if declared in current else None
+
+
+def supersedes_for(
+    declaration: str | None, label: str, *, labels: list[str] | None = None
+) -> str | None:
+    """Read one label's superseded causal identity out of a notebook parameter.
+
+    A refit produces a second canonical identity for the same label and
+    ``CausalResult.one`` resolves a label to exactly one, so the run has to say which
+    identity it retires. Papermill passes parameters as strings, so the declaration is
+    one of three things: empty, meaning nothing is being retired and the fit must leave
+    a single current identity on its own; a bare causal hash, for a notebook that fits
+    one label; or a JSON object mapping label to hash, for one that fits several.
+
+    A hash declared for a label the notebook does not fit is a typo rather than a
+    no-op - the run would proceed, retire nothing, and fail at registration - so it
+    raises here, before the fit is paid for.
+    """
+    text = (declaration or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            mapping = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"SUPERSEDES_CAUSAL is not valid JSON: {text!r}. Give a bare causal hash "
+                f'for a single-label notebook, or {{"<label>": "<hash>"}} for several.'
+            ) from error
+        if not isinstance(mapping, dict):
+            raise ValueError(
+                f"SUPERSEDES_CAUSAL must be an object mapping label to hash, got {text!r}"
+            )
+        known = set(labels) if labels is not None else None
+        if known is not None:
+            unknown = sorted(set(mapping) - known)
+            if unknown:
+                raise ValueError(
+                    f"SUPERSEDES_CAUSAL names {unknown}, which this notebook does not fit. "
+                    f"It fits {sorted(known)}."
+                )
+        value = mapping.get(label)
+        return str(value) if value else None
+    if labels is not None and len(labels) > 1:
+        raise ValueError(
+            f"SUPERSEDES_CAUSAL is a bare hash but this notebook fits {sorted(labels)}. "
+            f'Use {{"<label>": "<hash>"}} so each label retires its own identity.'
+        )
+    return text

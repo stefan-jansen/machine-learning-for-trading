@@ -34,13 +34,18 @@ Usage:
     uv run pytest tests/test_model_registry.py --collect-only
 """
 
-import re
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from tests.pm_helpers import get_overrides, run_notebook
+from tests.pm_helpers import (
+    STAGE_RE,
+    get_overrides,
+    resolved_registry_path,
+    run_notebook,
+    stage_sort_key,
+)
 
 REPO_ROOT = Path(__file__).parent.parent
 PROD_CS_DIR = REPO_ROOT / "case_studies"
@@ -161,11 +166,18 @@ _REGISTERING_SUFFIXES = frozenset(
 )
 
 
+# Notebooks whose recorded entry point is the MODEL name rather than their own stem, which is
+# what the pre-migration `run_case_study_model(..., notebook=f"dl_{MODEL}")` wrote.
+#
+# `sp500_equity_option_analytics` is not in this map: its ten registering notebooks all record
+# their stem, which is the value that answers the question the column exists for - which
+# notebook produced this row. `dl_lstm` names a model, and two notebooks in different case
+# studies can fit the same one. The remaining four entries are other case studies' to settle,
+# and until they do, the fleet has both conventions in circulation - measured 2026-08-25, when
+# the only two non-NULL rows in all nine registries were `09_dl_lstm` and `dl_tsmixer`.
 _DL_FAMILY_ENTRY_POINTS = {
     ("cme_futures", "09_dl_lstm"): "dl_lstm",
     ("etfs", "10_dl_tsmixer"): "dl_tsmixer",
-    ("sp500_equity_option_analytics", "09_dl_lstm"): "dl_lstm",
-    ("sp500_equity_option_analytics", "10_dl_patchtst"): "dl_patchtst",
     ("sp500_options", "09a_lstm"): "dl_lstm",
     ("sp500_options", "09b_patchtst"): "dl_patchtst",
 }
@@ -176,9 +188,6 @@ def _expected_entry_point(case_study: str, stage: str) -> str:
     return _DL_FAMILY_ENTRY_POINTS.get((case_study, stage), stage)
 
 
-_STAGE_RE = re.compile(r"^(\d{2})[a-z]?_")
-
-
 def _quick_parameters(
     case_study: str,
     stage: str,
@@ -186,7 +195,7 @@ def _quick_parameters(
 ) -> tuple[dict, str]:
     parameters = dict(_QUICK_PARAMS)
 
-    stage_match = _STAGE_RE.match(stage)
+    stage_match = STAGE_RE.match(stage)
     suffix = stage[len(stage_match.group(0)) :] if stage_match else stage
     if suffix in _LATENT_FACTOR_SUFFIXES:
         parameters.update(_LATENT_FACTOR_OVERRIDES)
@@ -232,7 +241,7 @@ def test_etf_checkpoint_contract_parameters_come_from_notebook_overrides() -> No
 def test_registering_stage_maps_to_its_actual_entry_point(
     case_study: str, stage: str, entry_point: str
 ) -> None:
-    match = _STAGE_RE.match(stage)
+    match = STAGE_RE.match(stage)
     assert match is not None
     suffix = stage[len(match.group(0)) :]
     assert suffix in _REGISTERING_SUFFIXES
@@ -247,18 +256,18 @@ def test_registering_stage_maps_to_its_actual_entry_point(
 def _collect_model_notebooks() -> list[tuple[str, str, Path]]:
     """Discover all model notebooks (stage >= 06) across case studies.
 
-    Returns (case_study, stage_stem, notebook_path) tuples sorted by
-    case study order then filename within each case study.
+    Returns (case_study, stage_stem, notebook_path) tuples in case-study and stage order,
+    with lettered producers before the bare aggregate for the same stage number.
     """
     tests = []
     for cs in CASE_STUDIES:
         cs_dir = PROD_CS_DIR / cs
         if not cs_dir.exists():
             continue
-        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py")):
+        for notebook in sorted(cs_dir.glob("[0-9][0-9]*_*.py"), key=stage_sort_key):
             if notebook.name.startswith("_"):
                 continue
-            match = _STAGE_RE.match(notebook.name)
+            match = STAGE_RE.match(notebook.name)
             if not match:
                 continue
             stage_num = int(match.group(1))
@@ -280,6 +289,23 @@ def test_collection_includes_us_firm_linear_stage() -> None:
         case_study == "us_firm_characteristics" and stage == "05_linear"
         for case_study, stage, _ in MODEL_TESTS
     )
+
+
+def test_lettered_producers_sort_before_the_stage_aggregate() -> None:
+    stages = [
+        stage
+        for case_study, stage, _ in MODEL_TESTS
+        if case_study == "sp500_equity_option_analytics" and stage.startswith("11")
+    ]
+
+    assert stages == [
+        "11a_pca",
+        "11b_ipca",
+        "11c_conditional_autoencoder",
+        "11d_stochastic_discount_factor",
+        "11e_supervised_autoencoder",
+        "11_latent_factors",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +468,15 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     timeout = overrides.get("timeout", default_timeout)
 
     # --- Snapshot registry state before run ---
-    registry_db = isolated_model_output / case_study / "run_log" / "registry.db"
+    # Resolved through the harness rather than named here: `research_preview=True` below
+    # puts a migrated Study notebook on the preview tier, which writes under
+    # `<workspace>/.preview`. Naming the canonical path in this file snapshotted and
+    # queried a database the run never opened, and the empty result surfaced as
+    # "found no training run with entry_point=..." on notebooks that had registered
+    # everything they were asked to.
+    registry_db = resolved_registry_path(
+        notebook_path, isolated_model_output, case_study, research_preview=True
+    )
     before = _registry_summary(registry_db)
 
     # --- Execute ---
@@ -463,7 +497,7 @@ def test_model_notebook(case_study, stage, notebook_path, isolated_model_output)
     after = _registry_summary(registry_db)
 
     # Check if this notebook is expected to register (match on suffix)
-    stage_match = _STAGE_RE.match(stage)
+    stage_match = STAGE_RE.match(stage)
     suffix = stage[len(stage_match.group(0)) :] if stage_match else stage
     expects_registration = suffix in _REGISTERING_SUFFIXES
 

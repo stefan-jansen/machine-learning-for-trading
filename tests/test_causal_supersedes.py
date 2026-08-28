@@ -240,17 +240,14 @@ _CANNED = {
 }
 
 
-def _refit_under_a_changed_causal_module(monkeypatch, digest: str) -> None:
-    """What a refit is: the same request against a changed case_studies/utils/causal.py.
-
-    `_causal_source_identity` hashes that file, so editing it is what produces a second
-    identity for the same label. Simulating it here keeps the test about the chain
-    rather than about which edit was made.
-    """
+def _refit_under_a_changed_causal_module(monkeypatch, version: int) -> None:
+    """Run the same request against a new causal computation version."""
     from case_studies.utils import causal as causal_module
 
     monkeypatch.setattr(causal_module, "run_dml_analysis", lambda *a, **k: dict(_CANNED))
-    monkeypatch.setattr(causal_module, "_causal_source_identity", lambda: {"causal.py": digest})
+    monkeypatch.setattr(
+        causal_module, "_causal_source_identity", lambda: {"causal_runner": version}
+    )
 
 
 def test_a_refit_through_the_request_path_is_refused_without_a_declaration(
@@ -259,10 +256,10 @@ def test_a_refit_through_the_request_path_is_refused_without_a_declaration(
     from tests.test_causal_adapter import _causal_fixture
 
     study, label, _frame = _causal_fixture(tmp_path, monkeypatch)
-    _refit_under_a_changed_causal_module(monkeypatch, "a" * 64)
+    _refit_under_a_changed_causal_module(monkeypatch, 1)
     first = study.causal(method="dml", label=label.name).run()
 
-    _refit_under_a_changed_causal_module(monkeypatch, "b" * 64)
+    _refit_under_a_changed_causal_module(monkeypatch, 2)
     with pytest.raises(ValueError, match="SUPERSEDES_CAUSAL"):
         study.causal(method="dml", label=label.name).run()
 
@@ -425,3 +422,48 @@ def test_a_new_fit_into_a_broken_registry_is_still_refused(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="would still be current"):
         _register(case_dir, "causal_new", effect=-0.05, supersedes="causal_a")
+
+
+def test_declaring_a_predecessor_for_a_hash_no_row_carries_is_refused(tmp_path) -> None:
+    """The repair is typed by hand from an error message, so a typo must not report success.
+
+    `_enforce_causal_supersedes` validates the predecessor against the current set and
+    never that `causal_hash` itself exists, so before this check the UPDATE matched zero
+    rows, committed, and returned None - the author saw success and the label still
+    resolved to two identities.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+
+    with pytest.raises(ValueError, match="nothing to declare a predecessor for"):
+        declare_causal_supersedes(
+            "test_case",
+            "deadbeefdeadbeef",  # no row carries this
+            supersedes_hash="causal_first",
+            label=LABEL,
+            case_dir=case_dir,
+        )
+
+    # And the registry is untouched: the refusal happens before the UPDATE.
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = db.execute("SELECT causal_hash, supersedes_hash FROM causal_runs").fetchall()
+    assert stored == [("causal_first", None)]
+
+
+def test_a_conflicting_declaration_is_refused_on_the_register_path_too(tmp_path) -> None:
+    """One column holds one edge, so both paths must answer a contradiction the same way.
+
+    The INSERT uses COALESCE, which keeps the stored value and drops the new one without
+    a word, while `declare_causal_supersedes` raises for the same case. Which function
+    the author happened to call decided whether the contradiction was reported.
+    """
+    case_dir = tmp_path / "test_case"
+    _register(case_dir, "causal_first")
+    _register(case_dir, "causal_second", supersedes="causal_first")
+
+    with pytest.raises(ValueError, match="cannot also supersede"):
+        _register(case_dir, "causal_second", supersedes="causal_other")
+
+    with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+        stored = dict(db.execute("SELECT causal_hash, supersedes_hash FROM causal_runs"))
+    assert stored == {"causal_first": None, "causal_second": "causal_first"}

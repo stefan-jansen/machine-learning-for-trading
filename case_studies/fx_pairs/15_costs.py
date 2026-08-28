@@ -14,368 +14,438 @@
 # ---
 
 # %% [markdown]
-# # FX Pairs: Transaction-Cost Sensitivity
+# # Transaction-Cost Sensitivity - FX Pairs
 #
-# **Chapter 18 - Transaction Costs and Execution**
+# This notebook selects one validation strategy per label from the equal-weight and allocation
+# populations, then changes only its percentage transaction costs. The sensitivity grid does not
+# participate in later model or strategy selection.
 #
-# Trading friction consumes the selected allocation's small point estimate. The frozen validation
-# curve falls from Sharpe 0.324 without costs to 0.037 at the configured 7 bps per leg, then crosses
-# zero near 7.91 bps. Even the zero-cost confidence interval spans zero, so the curve measures cost
-# exposure rather than establishing a dependable edge.
+# **Learning objectives**
 #
-# 1. **Reproduction contract** - analyze the registry without writing by default
-# 2. **Cost sweep** - optionally apply the declared 11-point grid to the selected 21-day lineage
-# 3. **Execution evidence** - locate breakeven and compare it with configured FX spread bands
+# - Select from an immutable validation candidate set by backtest Sharpe.
+# - Preserve model, checkpoint, signal, allocation, and execution identities across a cost curve.
+# - Keep cost sensitivity outside the official selection cohort.
 #
-# **Book Reference:** Chapter 18, Sections 18.2-18.5
+# **Book reference**: Chapter 18
 #
-# **Prerequisites:** Completed Ch17 allocation results in `registry.db`.
+# **Prerequisite**: `14_portfolio_management`.
 
 # %%
-"""Ch18 transaction-cost sensitivity for the FX pairs case study."""
+"""Run one cost-sensitivity curve per FX prediction label."""
 
-import json
-import sqlite3
-import time
-from collections import defaultdict
-from datetime import UTC, datetime
+from copy import deepcopy
+from typing import Any
 
-import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
+import yaml
 
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    load_backtest_prices_for,
-    warmup_periods_for,
+from case_studies.research import (
+    BacktestResult,
+    CandidateSet,
+    OfficialPopulation,
+    PredictionResult,
+    Result,
+    open_study,
+    plan_backtests,
+    population_supersedes,
+    research_name,
+    run_backtests,
+    superseded_members,
 )
-from case_studies.utils.backtest_presets import (
-    clone_backtest_spec,
-    ensure_backtest_spec,
-    serializable_backtest_spec,
-    set_backtest_costs_bps,
-    strategy_view,
+from case_studies.utils.sweep_config import (
+    get_allocators,
+    get_cost_grid_bps,
+    get_top_k_values_for,
 )
-from case_studies.utils.backtest_runner import normalize_prediction_columns, run_backtest
-from case_studies.utils.registry import (
-    backtest_hash_from_parts,
-    load_existing_backtest_hashes,
-    read_predictions,
-    resolve_best_backtest_runs,
-)
-from case_studies.utils.sweep_config import get_cost_grid_bps, get_top_n_predictions
 from utils.paths import get_case_study_dir
-from utils.style import COLORS
+from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "fx_pairs"
-LABEL = "fwd_ret_21d"
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+LABEL = ""
 SPLIT = "validation"
-MAX_SYMBOLS = 0
-TOP_N_COMBOS = None
-RUN_SWEEP = False
+TOP_K = 0
+TOP_N_PREDICTIONS = None
+MAX_COST_POINTS = 0
+SEED = 42
+RUN_SWEEP = True
 FORCE_REBACKTEST = False
+POPULATION_NAME = ""
+SUPERSEDES_COST_BACKTESTS: str = ""
 
 # %% [markdown]
-# ## 1. The default path is read-only
+# ## Select one strategy for each label
 #
-# The cost curve uses validation predictions, next-bar-open execution, and the selected 21-day
-# Ridge/HRP top-5 allocation. The 2024-2025 holdout remains outside this decision.
+# Production selection considers only the signal and allocation populations. Cost variants are
+# descendants of that choice and cannot improve their own chance of selection. Preview mode uses a
+# deterministic allocation request from the reduced catalog and remains outside candidate sets.
 
-# %%
-CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
-REGISTRY_PATH = CASE_DIR / "run_log" / "registry.db"
-bt_config = get_backtest_config(CASE_STUDY_ID)
-if TOP_N_COMBOS is None:
-    TOP_N_COMBOS = get_top_n_predictions(CASE_STUDY_ID, "cost_sensitivity")
-COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
-
-print(f"""=== Protocol Term Sheet ===
-  Case study:    {CASE_STUDY_ID}
-  Label:         {LABEL}
-  Split:         {SPLIT}
-  Calendar:      {bt_config.calendar}
-  Cadence:       {bt_config.cadence}
-  Execution:     {bt_config.execution_delay}
-  Cost grid:     {COST_GRID_BPS}
-  Registry mode: {"write enabled" if RUN_SWEEP else "read only"}
-""")
-
-# %%
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    stage="allocation",
-    top_n=TOP_N_COMBOS,
-)
-if top_combos.is_empty():
-    raise RuntimeError("No validation allocation result found for the 21-day label")
-
-for row in top_combos.iter_rows(named=True):
-    allocation = strategy_view(json.loads(row["spec_json"]))["allocation"]
-    print(
-        f"Selected allocation: {allocation['method']} top-{allocation['top_k']} "
-        f"Sharpe={row['sharpe']:.3f} hash={row['backtest_hash']}"
-    )
-
-# %%
-prices = load_backtest_prices_for(
-    CASE_STUDY_ID,
-    LABEL,
-    split=SPLIT,
-    warmup_periods=warmup_periods_for(CASE_STUDY_ID),
-    max_symbols=MAX_SYMBOLS,
-)
-validation_end = prices["timestamp"].max()
-if isinstance(validation_end, datetime):
-    validation_end = validation_end.date()
-holdout_start = datetime.fromisoformat(bt_config.holdout_start).date()
-assert validation_end < holdout_start
-print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} pairs")
-print(f"Validation ends {validation_end}; sealed holdout starts {holdout_start}")
-
-# %% [markdown]
-# ## 2. The optional sweep applies the declared cost grid
-#
-# Each grid point holds predictions, selection, allocation, and execution timing fixed. Total cost
-# is split equally between commission and slippage so only the total-bps axis changes. The configured
-# production mix is 5 bps commission plus 2 bps slippage; at the shared 7 bps total, the two mixes
-# differ by less than three millionths of a Sharpe unit in the frozen registry.
-
-
-# %%
-def _build_sweep_jobs() -> list[dict]:
-    jobs = []
-    for combo in top_combos.iter_rows(named=True):
-        prediction_hash = combo["prediction_hash"]
-        base_spec = ensure_backtest_spec(
-            CASE_STUDY_ID,
-            bt_config,
-            json.loads(combo["spec_json"]),
-            prices=prices,
-            prediction_hash=prediction_hash,
-            initial_cash=bt_config.initial_cash,
-        )
-        allocation = strategy_view(base_spec)["allocation"]["method"]
-        for cost_bps in COST_GRID_BPS:
-            spec = set_backtest_costs_bps(
-                clone_backtest_spec(base_spec),
-                commission_bps=cost_bps / 2,
-                slippage_bps=cost_bps / 2,
-            )
-            spec["chapter"] = "ch18"
-            jobs.append(
-                {
-                    "prediction_hash": prediction_hash,
-                    "allocation": allocation,
-                    "cost_bps": float(cost_bps),
-                    "spec": spec,
-                    "hash": backtest_hash_from_parts(
-                        prediction_hash, serializable_backtest_spec(spec)
-                    ),
-                }
-            )
-    return jobs
-
-
-sweep_jobs = _build_sweep_jobs()
-print(f"Cost grid: {len(sweep_jobs)} backtests")
-
-# %%
-existing_hashes = load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
-expected_hashes = {job["hash"] for job in sweep_jobs}
-portable_overlap = expected_hashes & existing_hashes
-print(f"Stored cost-sensitivity hashes: {len(existing_hashes)}")
-print(f"Current-grid portable-hash overlap: {len(portable_overlap)}/{len(expected_hashes)}")
-
-if RUN_SWEEP and existing_hashes and not portable_overlap:
-    raise RuntimeError(
-        "RUN_SWEEP refused: this registry uses legacy hashes. Migrate it or use a fresh registry."
-    )
+# %% tags=["results"]
+set_global_seeds(SEED)
+universe_symbols = yaml.safe_load(
+    (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
+)["universe"]["symbols"]
+n_assets = len(universe_symbols)
+if SPLIT != "validation":
+    raise ValueError("cost sensitivity uses validation backtests")
+if FORCE_REBACKTEST:
+    raise ValueError("identical complete backtests are reused by identity")
 if not RUN_SWEEP:
-    print("Reproduce-only mode: no backtests or registry rows will be written.")
+    raise ValueError("set RUN_SWEEP=True to execute the visible cost request")
 
+study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
+# The execution tier decides which registry namespace this run reads and writes;
+# the reduction knobs decide only how much of it is covered. Inferring the tier
+# from the knobs conflated the two, so any reduced run went looking for preview
+# predictions - and a reduced run over a canonical upstream, which is what the
+# test suite exercises, then resolved no rows at all.
+include_preview = EXECUTION_TIER == "preview"
 
-# %%
-def _run_job(job: dict, predictions: pl.DataFrame) -> dict:
-    result = run_backtest(
-        CASE_STUDY_ID,
-        job["prediction_hash"],
-        job["spec"],
-        prices=prices,
-        predictions=predictions,
-        label=LABEL,
-        register=True,
-        force_rebacktest=FORCE_REBACKTEST,
-        initial_cash=bt_config.initial_cash,
-        calendar=bt_config.calendar,
+# The tier decides the namespace, so a canonical run may legitimately be narrowed -
+# but a narrowed run declares a different set of members than the canonical
+# population does, and a population is immutable once written. Such a run must
+# publish under its own name rather than register a partial snapshot of the cost sweep
+# under the canonical one.
+if (
+    (TOP_K or TOP_N_PREDICTIONS is not None or MAX_COST_POINTS or LABEL)
+    and not include_preview
+    and not POPULATION_NAME
+):
+    raise ValueError(
+        "this run narrows the cost sweep, so it cannot publish the canonical "
+        "population; pass POPULATION_NAME to give it its own"
     )
+catalog = study.predictions.table(include_preview=include_preview).filter(
+    (pl.col("identity_status") == "current")
+    & (pl.col("split") == SPLIT)
+    & pl.col("complete")
+    & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
+)
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+# `SUPERSEDES_COST_BACKTESTS` names the snapshot this run replaces under the name it publishes,
+# offered through `population_supersedes` on the same rule. It is empty until that name has a
+# first generation; after that, an upstream refit changes this population's member list and
+# the registry refuses the write without it. `13_backtest` states the reasoning once.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
+if LABEL:
+    catalog = catalog.filter(pl.col("label") == LABEL)
+if TOP_N_PREDICTIONS is not None:
+    catalog = catalog.sort("label", "family", "config_name", "checkpoint_value").head(
+        TOP_N_PREDICTIONS
+    )
+if catalog.is_empty():
+    raise RuntimeError("cost sensitivity resolved no complete prediction rows")
+
+
+def _open_backtests(population: OfficialPopulation) -> list[BacktestResult]:
+    population.require_complete()
+    opened = [Result.open(study, value) for value in population.members]
+    if any(not isinstance(result, BacktestResult) for result in opened):
+        raise TypeError(f"population {population.name!r} contains a non-backtest result")
+    return [result for result in opened if isinstance(result, BacktestResult)]
+
+
+def _label(result: BacktestResult) -> str:
+    return str(result.lineage()["training_spec"]["label"])
+
+
+def _registered_preview_allocations() -> pl.DataFrame:
+    """The allocation backtests an upstream preview registered.
+
+    One predicate, read once. Stating it twice - once to decide which labels are covered
+    and once to pick a label's leader - makes the two required to agree forever: tighten
+    one and the other admits a label whose backtests it then rejects, which is exactly the
+    "no preview allocation backtests are registered" failure this exists to prevent.
+    """
+    return study.backtests.table(include_preview=True).filter(
+        (pl.col("stage") == "allocation")
+        & (pl.col("execution_tier") == "preview")
+        & (pl.col("identity_status") == "current")
+        & pl.col("complete")
+    )
+
+
+def _preview_leader(rows: pl.DataFrame, registered_allocations: pl.DataFrame) -> BacktestResult:
+    """One allocation backtest for this label, read from what 14 registered.
+
+    Rebuilding the identity restated two of the upstream run's choices - its `top_k` and
+    which allocator came first - from this notebook's own defaults. A preview reduces
+    each notebook independently, so those are guesses about another run's parameters,
+    and a guess that is wrong looks for a hash nothing wrote instead of reporting the
+    disagreement.
+    """
+    registered = registered_allocations.filter(
+        pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
+    )
+    if registered.is_empty():
+        raise RuntimeError(
+            "no preview allocation backtests are registered for this prediction "
+            "catalog; run 14_portfolio_management at the same reduction first"
+        )
+    row = registered.sort("family", "config_name", "checkpoint_value", "backtest_hash").row(
+        0, named=True
+    )
+    result = Result.open(study, row["backtest_hash"], include_preview=True)
+    if not isinstance(result, BacktestResult) or not result.complete:
+        raise RuntimeError("the deterministic preview allocation result is not complete")
+    return result
+
+
+selected_by_label: dict[str, BacktestResult] = {}
+candidate_sets: dict[str, CandidateSet] = {}
+if include_preview:
+    # The labels come from what the upstream preview registered, the same rule the
+    # canonical branch below follows. Enumerating this notebook's own catalog asks
+    # _preview_leader for labels 14_portfolio_management was configured not to allocate,
+    # and it raises "no preview allocation backtests are registered" for each - reporting
+    # a reduction the run was told to make as a missing upstream.
+    registered_allocations = _registered_preview_allocations()
+    covered = catalog.filter(
+        pl.col("prediction_hash").is_in(
+            registered_allocations.get_column("prediction_hash").implode()
+        )
+    )
+    if covered.is_empty():
+        raise RuntimeError(
+            "no preview allocation backtests cover this prediction catalog; "
+            "run 14_portfolio_management at the same reduction first"
+        )
+    for label in sorted(covered.get_column("label").unique()):
+        selected_by_label[label] = _preview_leader(
+            covered.filter(pl.col("label") == label), registered_allocations
+        )
+else:
+    baselines = _open_backtests(
+        OfficialPopulation.one(
+            study,
+            name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
+        )
+    )
+    allocations = _open_backtests(
+        OfficialPopulation.one(
+            study,
+            name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
+        )
+    )
+    # The labels come from the upstream populations this run resolved, not from this
+    # notebook's own catalog. A narrowed upstream covers fewer labels than the catalog
+    # holds, and rebuilding the list locally reproduces the upstream narrowing by
+    # convention. Unscoped, the run publishes canonical names and the two must agree.
+    upstream = [*baselines, *allocations]
+    upstream_labels = sorted({_label(result) for result in upstream})
+    if not upstream_labels:
+        raise RuntimeError("the upstream populations carry no labels")
+    if not POPULATION_NAME and upstream_labels != sorted(catalog.get_column("label").unique()):
+        raise RuntimeError(
+            "the canonical upstream populations do not cover every label in the catalog: "
+            f"upstream {upstream_labels}, "
+            f"catalog {sorted(catalog.get_column('label').unique())}"
+        )
+    for label in upstream_labels:
+        members = [result for result in upstream if _label(result) == label]
+        candidates = CandidateSet.create(
+            study,
+            name=research_name(
+                CASE_STUDY_ID, f"{label}:pre-cost-strategies", scope=POPULATION_NAME
+            ),
+            members=members,
+        )
+        candidate_sets[label] = candidates
+        leader = candidates.best_validation_sharpe()
+        if not isinstance(leader, BacktestResult):
+            raise TypeError("strategy selection did not return a backtest")
+        selected_by_label[label] = leader
+
+pl.DataFrame(
+    [
+        {
+            "label": label,
+            "backtest_hash": result.hash,
+            "prediction_hash": result.registry_record()["prediction_hash"],
+            "stage": result.registry_record()["stage"],
+        }
+        for label, result in selected_by_label.items()
+    ]
+)
+
+# %% [markdown]
+# ## Plan and freeze exact cost siblings
+#
+# The configured cost grid is expressed as total basis points per traded leg. Commission and
+# slippage each receive half. The identity audit removes only the cost fields and the chapter label;
+# every remaining field must match the selected validation strategy. Production freezes the full
+# sensitivity set before the first backtest is written.
+
+# %% tags=["results"]
+cost_grid = get_cost_grid_bps(CASE_STUDY_ID)
+if MAX_COST_POINTS:
+    cost_grid = cost_grid[:MAX_COST_POINTS]
+if not cost_grid:
+    raise RuntimeError("the cost grid is empty")
+
+
+def _catalog_row(result: BacktestResult) -> pl.DataFrame:
+    prediction_hash = result.registry_record()["prediction_hash"]
+    row = catalog.filter(pl.col("prediction_hash") == prediction_hash)
+    if row.height != 1:
+        raise RuntimeError(f"prediction {prediction_hash} resolved to {row.height} catalog rows")
+    return row
+
+
+def _strategy_arguments(result: BacktestResult) -> dict[str, Any]:
+    strategy = result.spec()["strategy"]
     return {
-        "backtest_hash": result.backtest_hash,
-        "prediction_hash": job["prediction_hash"],
-        "allocator": job["allocation"],
-        "cost_bps": job["cost_bps"],
-        "sharpe": result.metrics.get("sharpe"),
+        "signal": deepcopy(strategy["signal"]),
+        "allocation": deepcopy(strategy.get("allocation")),
+        "risk": deepcopy(strategy.get("risk")),
+        "execution_mode": strategy.get("rebalance", {}).get("mode"),
     }
 
 
-# %%
-sweep_results = []
-if RUN_SWEEP:
-    pending = [job for job in sweep_jobs if FORCE_REBACKTEST or job["hash"] not in existing_hashes]
-    grouped = defaultdict(list)
-    for job in pending:
-        grouped[job["prediction_hash"]].append(job)
-    started = time.time()
-    completed = failed = 0
-    for prediction_hash, jobs in grouped.items():
-        predictions = normalize_prediction_columns(read_predictions(CASE_STUDY_ID, prediction_hash))
-        for job in jobs:
-            try:
-                sweep_results.append(_run_job(job, predictions))
-                completed += 1
-            except Exception as exc:
-                failed += 1
-                stamp = datetime.now(UTC).isoformat(timespec="seconds")
-                print(f"[{stamp}] FAILED {job['hash']}: {type(exc).__name__}: {exc}")
-            processed = completed + failed
-            if processed % 5 == 0 or processed == len(pending):
-                stamp = datetime.now(UTC).isoformat(timespec="seconds")
-                print(f"[{stamp}] completed={completed} failed={failed} total={len(pending)}")
-    print(f"Sweep elapsed: {time.time() - started:.1f}s")
-    if failed:
-        raise RuntimeError(f"Cost sweep finished with {failed} failed backtests")
+def _non_cost_projection(spec: dict[str, Any]) -> dict[str, Any]:
+    projected = deepcopy(spec)
+    projected.pop("chapter", None)
+    projected.pop("_runtime_backtest_config", None)
+    config = projected.get("backtest_config", {})
+    config.pop("commission", None)
+    config.pop("slippage", None)
+    metadata = config.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("chapter", None)
+    return projected
+
+
+cost_jobs = []
+for label, selected in selected_by_label.items():
+    arguments = _strategy_arguments(selected)
+    for total_bps in cost_grid:
+        costs = {
+            "commission_bps": total_bps / 2.0,
+            "slippage_bps": total_bps / 2.0,
+        }
+        plan = plan_backtests(
+            study,
+            predictions=_catalog_row(selected),
+            signal=arguments["signal"],
+            allocation=arguments["allocation"],
+            risk=arguments["risk"],
+            costs=costs,
+            chapter="ch18",
+            execution_mode=arguments["execution_mode"],
+        )
+        if len(plan.members) != 1:
+            raise RuntimeError("a cost plan must contain exactly one backtest")
+        cost_jobs.append(
+            {
+                "label": label,
+                "selected": selected,
+                "arguments": arguments,
+                "total_bps": total_bps,
+                "costs": costs,
+                "backtest_hash": plan.expected_hashes[0],
+            }
+        )
+
+planned_hashes = [job["backtest_hash"] for job in cost_jobs]
+if len(planned_hashes) != len(set(planned_hashes)):
+    raise RuntimeError("two planned cost requests collapse to the same identity")
+
+cost_population = None
+if not include_preview:
+    costs_name = research_name(CASE_STUDY_ID, "cost-sensitivity-backtests", scope=POPULATION_NAME)
+    cost_population = OfficialPopulation.create(
+        study,
+        name=costs_name,
+        member_kind="backtest",
+        members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=costs_name, declared=SUPERSEDES_COST_BACKTESTS
+        ),
+    )
+    print(f"Frozen expected cost population: {cost_population.hash}")
 
 # %% [markdown]
-# ## 3. Costs erase the point estimate near 8 bps
+# ## Execute the frozen cost grid, and validate its membership without making it selectable
 #
-# The frozen registry contains one 11-point cost curve for each label. The analysis below pins the
-# 21-day prediction chosen by Ch17, so the three horizon-specific curves cannot be pooled.
+# The population is validated in the cell that fills it: the expected set was written down before
+# the first member ran, and `require_complete` is what turns that declaration into a published
+# result. Publishing it does not make it selectable - a cost sensitivity is a curve through a
+# parameter the strategy does not choose, and later selection reads the allocation population.
 
-# %%
-COST_SQL = """
-SELECT br.backtest_hash, br.prediction_hash,
-       tr.family, tr.config_name, tr.label,
-       json_extract(br.spec_json, '$.strategy.allocation.method') AS allocator,
-       CAST(json_extract(br.spec_json, '$.strategy.allocation.top_k') AS INTEGER) AS top_k,
-       (json_extract(br.spec_json, '$.backtest_config.commission.rate')
-        + json_extract(br.spec_json, '$.backtest_config.slippage.rate')) * 10000.0 AS cost_bps,
-       bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi,
-       bm.cagr, bm.max_drawdown, bm.total_return, bm.num_trades
-FROM backtest_runs br
-JOIN backtest_metrics bm USING (backtest_hash)
-JOIN prediction_sets ps USING (prediction_hash)
-JOIN training_runs tr USING (training_hash)
-WHERE br.stage = 'cost_sensitivity'
-  AND ps.split = 'validation'
-  AND br.prediction_hash = ?
-ORDER BY cost_bps
-"""
+# %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
+cost_results: list[BacktestResult] = []
+cost_rows = []
+for job in cost_jobs:
+    selected = job["selected"]
+    arguments = job["arguments"]
+    execution = run_backtests(
+        study,
+        predictions=_catalog_row(selected),
+        signal=arguments["signal"],
+        allocation=arguments["allocation"],
+        risk=arguments["risk"],
+        costs=job["costs"],
+        chapter="ch18",
+        execution_mode=arguments["execution_mode"],
+    )
+    if len(execution.results) != 1:
+        raise RuntimeError("a cost request must produce exactly one backtest")
+    result = execution.results[0]
+    if result.hash != job["backtest_hash"]:
+        raise RuntimeError("a completed cost identity differs from the frozen plan")
+    if _non_cost_projection(result.spec()) != _non_cost_projection(selected.spec()):
+        raise RuntimeError("a cost sibling changed a non-cost strategy field")
+    if result.registry_record()["stage"] != "cost_sensitivity" or not result.complete:
+        raise RuntimeError("a cost result is incomplete or misclassified")
+    cost_results.append(result)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
+    cost_rows.append(
+        {
+            "label": job["label"],
+            "total_cost_bps": job["total_bps"],
+            "backtest_hash": result.hash,
+            "prediction_hash": result.registry_record()["prediction_hash"],
+        }
+    )
 
-
-# %%
-def _read_registry(query: str, parameters: tuple = ()) -> pl.DataFrame:
-    connection = sqlite3.connect(f"file:{REGISTRY_PATH}?mode=ro&immutable=1", uri=True)
-    try:
-        return pl.read_database(query, connection, execute_options={"parameters": parameters})
-    finally:
-        connection.close()
-
-
-leader_prediction_hash = top_combos["prediction_hash"][0]
-cost_rows = _read_registry(COST_SQL, (leader_prediction_hash,))
-if cost_rows.is_empty():
-    raise RuntimeError(f"No stored cost curve found for prediction {leader_prediction_hash}")
-assert np.allclose(cost_rows["cost_bps"].to_numpy(), COST_GRID_BPS, rtol=0.0, atol=1e-12)
-assert (cost_rows["sharpe"].diff().drop_nulls() < 0).all()
-print(cost_rows.select("cost_bps", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"))
-
-# %%
-positive = cost_rows.filter(pl.col("sharpe") >= 0).tail(1).row(0, named=True)
-negative = cost_rows.filter(pl.col("cost_bps") > positive["cost_bps"]).head(1).row(0, named=True)
-span = negative["cost_bps"] - positive["cost_bps"]
-breakeven_bps = positive["cost_bps"] + (
-    positive["sharpe"] / (positive["sharpe"] - negative["sharpe"]) * span
-)
-
-configured_cost = bt_config.commission_bps + bt_config.slippage_bps
-configured_row = cost_rows.filter((pl.col("cost_bps") - configured_cost).abs() < 1e-12).row(
-    0, named=True
-)
-allocation_sharpe = top_combos["sharpe"][0]
-split_difference = allocation_sharpe - configured_row["sharpe"]
-print(f"Interpolated zero-Sharpe crossing: {breakeven_bps:.2f} bps per leg")
+served = run_status.count("reused")
 print(
-    f"Configured 5+2 bps allocation Sharpe={allocation_sharpe:.6f}; "
-    f"sweep 3.5+3.5 bps Sharpe={configured_row['sharpe']:.6f}; "
-    f"difference={split_difference:.8f}"
+    f"Cost siblings: {len(cost_results) - served} computed, {served} served from the registry, "
+    f"{len(cost_results)} in the population"
 )
 
-# %% [markdown]
-# ### Removing configured costs has a measurable effect
-#
-# A paired 21-date block bootstrap compares the zero-cost curve endpoint with the same allocation
-# at its configured 7 bps. The Sharpe difference is 0.282 with a 95% interval of 0.242 to 0.329.
-# This isolates friction from model and allocation changes, but it does not make the zero-cost
-# strategy statistically reliable: its standalone Sharpe interval still crosses zero.
+if not include_preview:
+    if cost_population is None:
+        raise RuntimeError("the canonical cost population was not frozen before execution")
+    cost_population.require_complete()
+    print(f"Official cost-sensitivity population: {cost_population.hash}")
+else:
+    print("Preview cost curves remain outside official populations and candidate sets.")
 
-# %%
-PAIRED_SQL = """
-SELECT sharpe_diff, sharpe_diff_ci95_lo, sharpe_diff_ci95_hi,
-       p_value, bootstrap_block_length, bootstrap_n
-FROM backtest_paired_metrics
-WHERE challenger_hash = ?
-  AND benchmark_hash = ?
-  AND benchmark_kind = 'allocation_leader'
-"""
-paired = _read_registry(
-    PAIRED_SQL,
-    (cost_rows["backtest_hash"][0], top_combos["backtest_hash"][0]),
-)
-if paired.height != 1:
-    raise RuntimeError("Expected one paired zero-cost versus configured-cost comparison")
-print(paired)
-
-# %%
-x = cost_rows["cost_bps"].to_numpy()
-y = cost_rows["sharpe"].to_numpy()
-lower = cost_rows["sharpe_ci95_lo"].to_numpy()
-upper = cost_rows["sharpe_ci95_hi"].to_numpy()
-
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.axvspan(1, 3, color=COLORS["silver_muted"], alpha=0.8, label="Major pairs: 1-3 bps")
-ax.axvspan(3, 8, color=COLORS["amber"], alpha=0.16, label="Cross pairs: 3-8 bps")
-ax.fill_between(x, lower, upper, color=COLORS["slate"], alpha=0.15, label="95% interval")
-ax.plot(x, y, color=COLORS["blue"], marker="o", linewidth=2, label="HRP top-5")
-ax.axhline(0, color=COLORS["neutral"], linewidth=1, linestyle="--")
-ax.axvline(configured_cost, color=COLORS["amber"], linewidth=1.5, linestyle=":")
-ax.scatter(
-    [configured_cost],
-    [configured_row["sharpe"]],
-    color=COLORS["amber"],
-    edgecolor=COLORS["blue"],
-    s=75,
-    zorder=4,
-)
-ax.set_xlabel("Total cost per traded leg (bps)")
-ax.set_ylabel("Validation Sharpe ratio")
-ax.set_title("Costs erase the FX allocation point estimate near 8 bps")
-ax.legend(frameon=False, ncol=2)
-ax.grid(axis="both", alpha=0.22)
-fig.show()
+pl.DataFrame(cost_rows).sort("label", "total_cost_bps")
 
 # %% [markdown]
 # ## Key takeaways
 #
-# 1. **The point estimate crosses zero near 7.91 bps.** Sharpe declines monotonically from 0.324
-#    without costs to 0.037 at 7 bps and -0.086 at 10 bps.
-# 2. **The configured cost sits on the boundary.** The 1-3 bps major-pair band retains a positive
-#    point estimate; the 3-8 bps cross-pair band reaches the interpolated breakeven.
-# 3. **Cost drag is measurable, but alpha is not.** Removing 7 bps improves paired Sharpe by 0.282
-#    with interval [0.242, 0.329], while the zero-cost standalone interval still crosses zero.
-# 4. **Execution quality cannot rescue weak evidence.** Cost control preserves more of the small
-#    allocation estimate, but it does not turn this validation search into a dependable strategy.
-#
-# **Next:** The risk-management notebook tests whether position controls improve the selected
-# lineage without adding enough turnover to erase the remaining point estimate.
+# - Each label has one validation-selected parent strategy.
+# - Cost siblings preserve every non-cost identity field.
+# - Cost sensitivity is frozen for completeness but excluded from later selection.

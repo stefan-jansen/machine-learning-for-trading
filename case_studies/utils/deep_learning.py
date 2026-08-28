@@ -76,6 +76,19 @@ if TYPE_CHECKING:
 
 _SEQUENCE_PREVIEW_FIELDS = {"folds", "max_symbols", "max_train_sequences"}
 
+SEQUENCE_RUNNER_VERSION = 1
+SEQUENCE_PREPARATION_VERSION = 1
+SEQUENCE_STATE_VERSION = 1
+SEQUENCE_BACKEND_VERSIONS = {"darts": 1, "pytorch": 1}
+SEQUENCE_ARCHITECTURE_VERSIONS = {
+    "lstm": 1,
+    "nbeats": 1,
+    "nlinear": 1,
+    "patchtst": 1,
+    "tcn": 1,
+    "tsmixer": 1,
+}
+
 
 @dataclass(frozen=True)
 class SequenceResearchContext:
@@ -106,27 +119,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _module_path(module: Any) -> Path:
-    source_file = getattr(module, "__file__", None)
-    if not isinstance(source_file, str):
-        raise RuntimeError(f"{module.__name__} has no source file")
-    return Path(source_file)
-
-
-def _sequence_source_identity(config: dict[str, Any]) -> dict[str, str]:
-    from case_studies.utils import deep_model_state, sequence_dataset
-
-    paths = [Path(__file__), _module_path(deep_model_state), _module_path(sequence_dataset)]
-    if config.get("library") == "darts":
-        from case_studies.utils import darts_forecasting
-
-        paths.append(_module_path(darts_forecasting))
-    else:
-        architecture = str(config["params"]["architecture"])
-        model_class = _get_model_registry()[architecture]
-        module = __import__(model_class.__module__, fromlist=[model_class.__name__])
-        paths.append(_module_path(module))
-    return {path.name: _sha256(path) for path in paths}
+def _sequence_source_identity(config: dict[str, Any]) -> dict[str, int | str]:
+    """Return the declared implementation versions that can change sequence results."""
+    architecture = str(config["params"]["architecture"])
+    library = "darts" if config.get("library") == "darts" else "pytorch"
+    try:
+        architecture_version = SEQUENCE_ARCHITECTURE_VERSIONS[architecture]
+        backend_version = SEQUENCE_BACKEND_VERSIONS[library]
+    except KeyError as exc:
+        raise ValueError(f"no implementation version declared for {exc.args[0]!r}") from exc
+    return {
+        "sequence_runner": SEQUENCE_RUNNER_VERSION,
+        "sequence_preparation": SEQUENCE_PREPARATION_VERSION,
+        "sequence_state": SEQUENCE_STATE_VERSION,
+        "backend": f"{library}/v{backend_version}",
+        "architecture": f"{architecture}/v{architecture_version}",
+    }
 
 
 def _sequence_runtime_identity(config: dict[str, Any]) -> dict[str, str]:
@@ -271,6 +279,43 @@ def _resolve_sequence_config(config: dict[str, Any], overrides: dict[str, Any]) 
     return resolved
 
 
+def resolve_dl_device(config: Mapping[str, Any] | None, requested: str | None = None) -> str:
+    """Resolve the sequence-training backend a case study declares, into a torch device.
+
+    ``config`` is a case study's ``modeling.dl`` block and ``requested`` is a runtime
+    override, empty meaning "use what the case study declared". The declaration is
+    required: a notebook that falls back to ``gpu`` when nothing declares one turns a
+    missing config section into a hardware requirement nobody wrote down, and a
+    CUDA-free environment then fails on it.
+
+    The resolved device is part of what a run is registered under, so an unavailable
+    accelerator raises here rather than letting the run retrain on CPU and register the
+    result as though it had the accelerator. Passing ``requested="cpu"`` is how a CPU run
+    is asked for and recorded as one.
+    """
+    declared = (config or {}).get("device")
+    source = "the DEVICE override"
+    if requested:
+        device = str(requested).lower()
+    elif declared:
+        device, source = str(declared).lower(), "modeling.dl.device"
+    else:
+        raise ValueError(
+            "modeling.dl.device must be declared explicitly in config/setup.yaml, "
+            "or supplied as the DEVICE parameter"
+        )
+    if device == "gpu":
+        device = "cuda"
+    if device not in {"cpu", "cuda"}:
+        raise ValueError(f"unsupported sequence device {device!r} (from {source})")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"{source} requests a GPU and no CUDA device is visible. Make the GPU "
+            f"available, or set DEVICE='cpu' so the change is recorded with the run."
+        )
+    return device
+
+
 def _sequence_runtime_spec(
     device: str,
     *,
@@ -315,7 +360,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"unsupported sequence preview reductions: {sorted(unknown_reductions)}")
     study.require_writable()
     study.activate(tier)
-    label_ref = study.labels.get(request["label"])
+    label_ref = study.labels.get(request["label"], execution_tier=tier)
     mds = load_modeling_dataset(
         study.case_study,
         label_ref.name,
@@ -332,7 +377,9 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     splits, cv_record = _sequence_splits(mds, request)
     configs = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "deep_learning")
+        for config in load_configs(
+            study.case_study, label_ref.name, "deep_learning", case_dir=study.root
+        )
     }
     try:
         configured = configs[request["config_name"]]
@@ -791,7 +838,11 @@ def _cached_sequence_run(study: Study, spec: dict[str, Any], context: SequenceRe
     complete_predictions = tuple(
         result for result in predictions if isinstance(result, PredictionResult)
     )
-    return ModelRun(training=training, predictions=complete_predictions)
+    return ModelRun(
+        training=training,
+        predictions=complete_predictions,
+        diagnostics={"reused": True},
+    )
 
 
 def _predict_reconstructed_sequence(
@@ -1188,7 +1239,11 @@ def run_resolved_request(
                 cpu_s=fit_cpu_s,
             ),
         )
-    return ModelRun(training=training, predictions=prediction_results)
+    return ModelRun(
+        training=training,
+        predictions=prediction_results,
+        diagnostics={"reused": reused_fitted_state},
+    )
 
 
 def validate_locked_run(
@@ -1646,6 +1701,55 @@ def _decision_time_checkpoint_metrics(
 # ---------------------------------------------------------------------------
 
 
+def sequence_identity_params(
+    config: dict[str, Any],
+    *,
+    identity_params: dict[str, Any] | None,
+    input_data_spec: dict[str, Any] | None,
+    label_col: str,
+    case_study: str | None,
+    max_train_sequences: int,
+    device: str,
+) -> dict[str, Any] | None:
+    """The identity-bearing fields of one sequence training run.
+
+    ``device`` is one of them. Two fits of the same configuration on CPU and on GPU are
+    not the same fit - different kernels, different reduction orders, a different
+    nondeterminism profile (``reference/gpu-reproducibility.md``) - so they must not
+    share a ``training_hash``. Without it a completed CPU run satisfies the
+    already-complete check that skips a GPU fit, and a run registers under a device it
+    did not have. The device index is dropped: ``cuda:0`` and ``cuda:1`` are the same
+    claim about what the numbers came from.
+    """
+    from case_studies.utils.darts_forecasting import darts_training_identity, uses_darts_backend
+
+    params = dict(identity_params or {})
+    params["device"] = torch.device(str(device).lower().replace("gpu", "cuda")).type
+    if input_data_spec is not None:
+        if uses_darts_backend([config]):
+            if case_study is None:
+                raise ValueError("Darts identity requires case_study")
+            params.update(
+                darts_training_identity(
+                    config,
+                    label_col,
+                    case_study=case_study,
+                    input_data_spec=input_data_spec,
+                    max_train_sequences=max_train_sequences,
+                )
+            )
+        else:
+            params.update(
+                {
+                    "batch_size": config.get("batch_size", 2048),
+                    "input_data_spec": input_data_spec,
+                    "lookback": config.get("params", {}).get("lookback", 60),
+                    "max_train_sequences": max_train_sequences,
+                }
+            )
+    return params or None
+
+
 def run_dl_cv(
     dataset_pd: pd.DataFrame,
     splits: list[dict[str, Any]],
@@ -1749,30 +1853,15 @@ def run_dl_cv(
     cached_result = None
 
     def _config_identity_params(cfg: dict[str, Any]) -> dict[str, Any] | None:
-        params = dict(identity_params or {})
-        if input_data_spec is not None:
-            if uses_darts_backend([cfg]):
-                if case_study is None:
-                    raise ValueError("Darts identity requires case_study")
-                params.update(
-                    darts_training_identity(
-                        cfg,
-                        label_col,
-                        case_study=case_study,
-                        input_data_spec=input_data_spec,
-                        max_train_sequences=max_train_sequences,
-                    )
-                )
-            else:
-                params.update(
-                    {
-                        "batch_size": cfg.get("batch_size", 2048),
-                        "input_data_spec": input_data_spec,
-                        "lookback": cfg.get("params", {}).get("lookback", 60),
-                        "max_train_sequences": max_train_sequences,
-                    }
-                )
-        return params or None
+        return sequence_identity_params(
+            cfg,
+            identity_params=identity_params,
+            input_data_spec=input_data_spec,
+            label_col=label_col,
+            case_study=case_study,
+            max_train_sequences=max_train_sequences,
+            device=device,
+        )
 
     from case_studies.utils.registry import build_training_spec
 
@@ -1876,23 +1965,19 @@ def run_dl_cv(
         configs = pending_configs
 
     if register and case_study and force_retrain:
-        from case_studies.utils.registry import (
-            build_training_spec,
-            clear_prediction_sets,
-            training_hash_from_spec,
-        )
+        from case_studies.utils.registry import clear_prediction_sets, training_hash_from_spec
 
         for cfg in configs:
-            spec = build_training_spec(
-                cfg["family"],
-                cfg["config_name"],
-                label_col,
-                n_folds=len(splits),
-                n_epochs=cfg.get("n_epochs"),
-            )
+            # The spec this run registers under, not a second one built from a subset of
+            # its fields. Rebuilding here dropped `extra_params`, so the clear targeted a
+            # hash nothing was ever written to and every stale prediction set survived the
+            # retrain, sitting alongside the new one. The two used to coincide for a caller
+            # that passed neither `identity_params` nor `input_data_spec`, which is why it
+            # went unnoticed; `sequence_identity_params` always emits `device`, so from
+            # here on they could never coincide for anyone.
             removed = clear_prediction_sets(
                 case_study,
-                training_hash_from_spec(spec),
+                training_hash_from_spec(training_specs[cfg["config_name"]]),
                 split=prediction_split,
             )
             if removed["prediction_sets"]:

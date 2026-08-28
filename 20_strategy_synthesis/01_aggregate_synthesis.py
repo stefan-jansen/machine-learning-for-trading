@@ -258,20 +258,26 @@ def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
     return df.filter(rung["predicate"])
 
 
-# Carrier pin (validation-time a-priori tie-break) — distinct from the rung
-# restrictions above. It selects the deployed MODEL carrier when the cross-stage
-# val rank-1 is statistically tied with a more diversified / more precisely-
-# estimated config. us_firm_characteristics: default_huber (signal-stage rank-1,
-# val 2.754, block-bootstrap Sharpe CI [2.33,3.37] width 1.04) is pinned over
-# leaves_7_mae (cross-stage rank-1, val 2.759, CI [2.10,3.57] width 1.46) — same
-# point estimate, narrower CI, far more diversified deployment (50 equal-weight
-# names vs 10 score-weighted; holdout MaxDD -8.6% vs -34%). Pinning on
-# config_name (NOT allocator) keeps both equal_weight and score_weighted in the
-# §20.5 allocator comparison on the carrier's prediction. Mirrors
-# case_studies.utils.strategy_analysis.CARRIER_PINS — keep in sync.
-_CARRIER_PIN_PREDICATES: dict[str, pl.Expr] = {
-    "us_firm_characteristics": pl.col("config_name") == "default_huber",
-}
+# Carrier pin: a validation-time a-priori tie-break, distinct from the rung restrictions
+# above. EMPTY, and that is the normal state. It held
+# `"us_firm_characteristics": pl.col("config_name") == "default_huber"` until 2026-08-25,
+# copied from case_studies.utils.strategy_analysis.CARRIER_PINS and translated into a
+# config-name predicate, under a "keep in sync" comment doing the job a mechanism should.
+#
+# It had not been in sync for a rebuild. Against the current registry `default_huber` is the
+# WEAKEST of the ten configs that reached the allocation stage (48 validation backtests, best
+# Sharpe 2.128, 2.075 average - tenth of ten), while the documented rule selects `leaves_63_mse`
+# (59 backtests, 3.116). So this restricted one case study to its worst advanced configuration
+# while every notebook inside that case study reported its best.
+#
+# Worse than the hash pin removed from CARRIER_PINS the same day, because a hash pin dies loudly:
+# every hash changes when a sweep is rebuilt, so it resolves to nothing and stops. A config-name
+# predicate survives the rebuild and keeps selecting, silently and wrongly.
+#
+# If a carrier restriction is ever needed here again, call `carrier_pins.carrier_config_name(cs)`,
+# which resolves a pin to its config through the registry - the thing this copy existed to avoid
+# and the thing that would have failed loudly instead of filtering to the wrong config.
+_CARRIER_PIN_PREDICATES: dict[str, pl.Expr] = {}
 
 
 def _apply_carrier_pin(df: pl.DataFrame, cs: str) -> pl.DataFrame:

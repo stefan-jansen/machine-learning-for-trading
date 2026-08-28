@@ -57,6 +57,15 @@ SUPERSEDES_POPULATION: str | None = None
 #
 # The request rows identify architecture, label, and published configuration. Sequence length,
 # checkpoint schedule, seed, gap policy, and device enter the resolved computation identity.
+#
+# **The device is declared here rather than inherited.** With no override the shared sequence
+# adapter falls back to a literal `"cuda"` written in `case_studies/utils/deep_learning.py`, and
+# resolving the request raises `CUDA was requested for sequence training, but CUDA is unavailable`
+# rather than quietly moving the fit to the CPU. That refusal comes from resolving the request, so
+# it arrives before any fitting starts. A CUDA device is therefore a hard requirement of this
+# population, and stating it in the request puts that requirement where a reader meets it instead
+# of two layers below. The resolved specification hash is the same with the override as without,
+# so this names what the published run already did.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE)
@@ -65,6 +74,7 @@ resolved = resolve_model_requests(
     study,
     requests,
     execution_tier=EXECUTION_TIER,
+    overrides={"device": "cuda"},
     preview_reductions=PREVIEW_REDUCTIONS,
 )
 universe = product_universe_table()
@@ -84,7 +94,7 @@ if EXECUTION_TIER == "canonical":
     execution, population = run_official_model_catalog(
         study,
         requests,
-        population_name="cme-sequence-validation-v1",
+        population_name="cme_futures-deep_learning-validation-v1",
         resolved_requests=resolved,
         supersedes=SUPERSEDES_POPULATION,
     )
