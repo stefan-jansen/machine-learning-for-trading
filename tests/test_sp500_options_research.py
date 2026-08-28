@@ -990,9 +990,32 @@ def test_a_contract_ended_by_a_corporate_action_is_not_traded(tmp_path: Path) ->
         "symbol"
     ).to_list() == ["A"]
 
-    with pytest.raises(ValueError, match="ended by a corporate action") as refusal:
+    with pytest.raises(ValueError, match="no quote to mark it at") as refusal:
         _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
     assert "B" not in str(refusal.value)
+
+
+def test_a_session_the_contract_is_not_quoted_on_is_not_a_defect(tmp_path: Path) -> None:
+    """A corporate action can take a contract out of the chain for one session and give it back.
+
+    PFE is the live case: its contract is quoted from entry to expiration except on the day its
+    spinoff took effect. The position resumes, so nothing about the chain is broken, but there
+    is still no quote to mark it at on that session. That is the same absence as a contract
+    that never comes back and gets the same answer, which is why the screen tests whether a
+    session is quoted at all rather than whether the quotes stop.
+    """
+    raw_dir = tmp_path / "raw"
+    _write_raw_options(raw_dir)
+    chain = pl.read_parquet(raw_dir / "year=2024.parquet")
+    runner_up = chain.with_columns(symbol=pl.lit("B"))
+    # Both legs of an interior session, so the contract is absent rather than half-quoted.
+    interior = chain.filter(pl.col("date") != date(2024, 1, 9))
+    pl.concat([interior, runner_up]).write_parquet(raw_dir / "year=2024.parquet")
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
+
+    assert cohorts.get_column("symbol").to_list() == ["B"]
 
 
 def test_a_dropped_corporate_action_reweights_the_names_actually_opened(tmp_path: Path) -> None:
