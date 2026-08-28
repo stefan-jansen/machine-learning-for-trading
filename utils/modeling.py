@@ -134,18 +134,31 @@ def conformal_quantile(scores: np.ndarray, coverage: float) -> float:
 
     Returns ``inf`` in that case, so the interval it produces is unbounded and
     obviously so.
+
+    An infinite score is kept and ranked, not filtered: it is a real
+    nonconformity score, it orders above every finite one, and dropping it would
+    shrink ``n`` and hand back a *narrower* interval than the calibration set
+    supports. A NaN score has no rank at all, so it is refused rather than
+    dropped, for the same reason: silently removing it changes the denominator
+    the guarantee is computed from.
     """
     if not 0 < coverage < 1:
         raise ValueError(f"coverage must lie strictly between 0 and 1, got {coverage}")
-    finite = np.asarray(scores, dtype=float)
-    finite = finite[np.isfinite(finite)]
-    n = finite.size
+    ranked = np.asarray(scores, dtype=float)
+    n_nan = int(np.isnan(ranked).sum())
+    if n_nan:
+        raise ValueError(
+            f"{n_nan} of {ranked.size} calibration scores are NaN and cannot be ranked. "
+            "A conformal quantile is a rank in the calibration set, so dropping them would "
+            "change the sample size the coverage guarantee is computed from."
+        )
+    n = ranked.size
     if n == 0:
         return float("inf")
     rank = math.ceil((n + 1) * coverage)
     if rank > n:
         return float("inf")
-    return float(np.partition(finite, rank - 1)[rank - 1])
+    return float(np.partition(ranked, rank - 1)[rank - 1])
 
 
 def seed_everything(seed: int = RANDOM_SEED) -> None:

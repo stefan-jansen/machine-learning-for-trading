@@ -54,10 +54,20 @@ def test_wider_coverage_never_narrows_the_interval():
     assert widths == sorted(widths)
 
 
-def test_non_finite_scores_are_dropped_rather_than_poisoning_the_rank():
-    clean = np.random.default_rng(3).random(200)
-    dirty = np.concatenate([clean, [np.nan, np.inf]])
-    assert conformal_quantile(dirty, 0.9) == conformal_quantile(clean, 0.9)
+def test_an_infinite_score_is_ranked_rather_than_dropped():
+    # Dropping it would shrink n and return a NARROWER interval than the
+    # calibration set supports. At 50% on [0, inf] the required rank is 2, so the
+    # answer is inf; filtering first leaves n=1 and answers 0.
+    assert conformal_quantile(np.array([0.0, np.inf]), 0.5) == float("inf")
+    scores = np.append(np.random.default_rng(3).random(200), np.inf)
+    assert math.isfinite(conformal_quantile(scores, 0.9))
+    assert conformal_quantile(scores, 0.999) == float("inf")
+
+
+def test_a_nan_score_is_refused_rather_than_dropped():
+    scores = np.append(np.random.default_rng(4).random(200), np.nan)
+    with pytest.raises(ValueError, match="NaN"):
+        conformal_quantile(scores, 0.9)
 
 
 def test_no_calibration_score_is_unbounded():
