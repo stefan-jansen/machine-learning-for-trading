@@ -320,3 +320,40 @@ def test_sessions_outside_every_declared_window_are_a_gap(case_dir):
     )
     with pytest.raises(CoverageError, match="belong to no declared|outside the declared"):
         check_backtest_input_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+# A frame checked against the wrong label reports a gap that is not there. Measured in
+# `crypto_perps_funding`: the 8-hour label declares 2,189 validation sessions and the
+# 24-hour label 2,187, because a decision at 2023-12-31 00:00 realizes inside the
+# holdout under a 24-hour horizon and the seal purges it. Checking a 24-hour artifact
+# against the primary 8-hour label therefore reports exactly two missing sessions on a
+# correct result - and a gate that cries wolf on correct artifacts gets switched off.
+
+
+def test_a_frame_carrying_another_label_is_refused(case_dir):
+    frame = _frame().with_columns(pl.lit("fwd_ret_5d").alias("label"))
+    with pytest.raises(CoverageError, match="not 'fwd_ret_1d'"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+
+
+def test_a_frame_carrying_the_same_label_passes(case_dir):
+    frame = _frame().with_columns(pl.lit(LABEL).alias("label"))
+    report = check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
+    assert report.complete
+
+
+def test_a_frame_with_no_label_column_is_checked_as_before(case_dir):
+    # The cross-check is skipped rather than asserted on absent evidence.
+    report = check_prediction_coverage(_frame(), "cs", LABEL, case_dir=case_dir)
+    assert report.complete
+
+
+def test_a_frame_mixing_labels_is_refused(case_dir):
+    frame = _frame().with_columns(
+        pl.when(pl.col("timestamp").dt.day() <= 10)
+        .then(pl.lit(LABEL))
+        .otherwise(pl.lit("fwd_ret_5d"))
+        .alias("label")
+    )
+    with pytest.raises(CoverageError, match="fwd_ret_5d"):
+        check_prediction_coverage(frame, "cs", LABEL, case_dir=case_dir)
