@@ -42,7 +42,7 @@ import yaml
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style  # noqa: F401
-from case_studies.research import CausalResult, Result, open_study
+from case_studies.research import CausalResult, Result, open_study, superseded_members
 from case_studies.research.results import PredictionResult
 from case_studies.utils.conformal import split_conformal_coverage
 from utils.modeling import load_configs
@@ -77,6 +77,16 @@ catalog = study.predictions.table().filter(
     & (pl.col("execution_tier") == "canonical")
     & (pl.col("split") == "validation")
 )
+# `identity_status` names the schema version a row was written under. It says nothing about
+# which generation the row's producer still publishes: a model notebook that refits leaves the
+# generation it replaced in the registry, complete and current under that column, so the filter
+# above carries retired prediction sets into the analysis. The lineage is what answers it, and
+# `superseded_members` reads that - the same exclusion `13_backtest` applies before it freezes
+# the baseline population, so the analysed catalog and the backtested one describe one set of
+# models rather than two.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 
 if catalog.is_empty():
     raise RuntimeError("no current canonical validation predictions are registered")
