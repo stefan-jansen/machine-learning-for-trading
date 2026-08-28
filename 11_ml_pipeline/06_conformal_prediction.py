@@ -238,8 +238,16 @@ else:
 #
 # For regression, the nonconformity score is the absolute residual:
 # $s_i = |y_i - \hat{y}_i|$. The prediction interval at coverage level
-# $1 - \alpha$ uses the $\lceil (n+1)(1-\alpha) \rceil / n$ quantile of
-# calibration scores.
+# $1 - \alpha$ uses the $\lceil (n+1)(1-\alpha) \rceil$-th smallest calibration
+# score.
+#
+# The ceiling is what earns the guarantee, and it has to be taken literally. The
+# interval must be the width of an actual calibration score, the one at that rank
+# in the sorted list. A quantile function that interpolates between two
+# neighbouring scores returns something slightly narrower, and that difference is
+# exactly the finite-sample margin the ceiling was there to provide. So the
+# calls below pass `method="higher"`, which rounds up to the score at the rank
+# rather than landing between two of them.
 
 
 # %% tags=[]
@@ -271,7 +279,7 @@ def predict_split_conformal(state, X, coverage=TARGET_COVERAGE):
 
     n_cal = len(state["cal_scores"])
     quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    q = np.quantile(state["cal_scores"], quantile_level)
+    q = np.quantile(state["cal_scores"], quantile_level, method="higher")
 
     return y_pred, y_pred - q, y_pred + q
 
@@ -321,7 +329,7 @@ def fit_cqr(X_train, y_train, X_cal, y_cal, coverage=TARGET_COVERAGE):
 
     n_cal = len(scores)
     quantile_level = min(np.ceil((n_cal + 1) * coverage) / n_cal, 1.0)
-    cal_adj = np.quantile(scores, quantile_level)
+    cal_adj = np.quantile(scores, quantile_level, method="higher")
 
     return {"model_lo": model_lo, "model_hi": model_hi, "scaler": scaler, "cal_adj": cal_adj}
 
@@ -419,7 +427,7 @@ def predict_aci_adaptive(
     for i, rows in enumerate(rows_on_date):
         # Price the whole cross-section from the current, pre-outcome alpha.
         q_level = min(np.ceil((n_cal + 1) * (1 - alpha_t)) / n_cal, 1.0)
-        q = np.quantile(state["cal_scores"], q_level)
+        q = np.quantile(state["cal_scores"], q_level, method="higher")
         lower[rows] = y_pred[rows] - q
         upper[rows] = y_pred[rows] + q
 
