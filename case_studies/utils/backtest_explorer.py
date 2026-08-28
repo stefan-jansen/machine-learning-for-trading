@@ -1099,9 +1099,10 @@ class BacktestExplorer:
             ).sort("sharpe", descending=True)
 
         # The parent of an overlay is the no-overlay run of the same prediction under the same
-        # allocator. Matching on both is what makes `sharpe_delta` the effect of the rule; a
-        # single registry-wide maximum would charge every overlay for the gap between its own
-        # allocation and the best allocation anywhere in the registry.
+        # allocator at the same concentration. All three are needed: a single registry-wide
+        # maximum would charge every overlay for the gap between its own allocation and the best
+        # allocation anywhere in the registry, and dropping `top_k` would still leave several
+        # distinct parents sharing a key, whose maximum is not the run the overlay modified.
         parents = (
             baseline_df.with_columns(
                 pl.col("spec_json")
@@ -1113,12 +1114,18 @@ class BacktestExplorer:
                     ),
                     return_dtype=pl.String,
                 )
-                .alias("allocator")
+                .alias("allocator"),
+                pl.col("spec_json")
+                .map_elements(
+                    lambda js: strategy_view(_parse_spec(js) or {}).get("signal", {}).get("top_k"),
+                    return_dtype=pl.Int64,
+                )
+                .alias("top_k"),
             )
-            .group_by("prediction_hash", "allocator")
+            .group_by("prediction_hash", "allocator", "top_k")
             .agg(pl.col("sharpe").max().alias("baseline_sharpe"))
         )
-        result = result.join(parents, on=["prediction_hash", "allocator"], how="left")
+        result = result.join(parents, on=["prediction_hash", "allocator", "top_k"], how="left")
         result = result.with_columns(
             (pl.col("sharpe") - pl.col("baseline_sharpe")).alias("sharpe_delta")
         )
