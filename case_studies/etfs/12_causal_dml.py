@@ -84,7 +84,7 @@
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import ExecutionTier, open_study, primary_label, supersedes_for
+from case_studies.research import ExecutionTier, causal_supersedes, open_study, primary_label
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -101,10 +101,15 @@ N_PLACEBO = 0
 # WORKSPACE is the other half: a preview has nowhere else to write.
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-# The identity this run retires: the estimate fitted with a placebo block sized by the label
-# buffer, before the block was sized by the treatment window. Empty on a clean clone, which has
-# nothing to retire; the registry names the hash in the error it raises when there is.
-SUPERSEDES_CAUSAL: str = "c4abd6b2f6ff"
+# Incrementing the causal runner's semantic version moves this notebook's causal identity, and
+# the registering write then refuses a second current identity for the same label. This names the
+# one to retire: the estimate fitted before the placebo block was sized by the treatment window.
+# The hash is committed source and so is wrong for every reader, whose gitignored `run_log/` holds
+# no causal rows at all. `causal_supersedes` resolves it against the registry in hand and
+# withholds it where there is nothing to retire, which is what makes one declaration right for
+# both. Passing it as a run-time override instead cannot work: the provenance gate requires the
+# committed notebook to be the source executed clean, so an override-only value is never stamped.
+SUPERSEDES_CAUSAL: str = "6f50892349b9"
 
 # %% [markdown]
 # ## 1. Declaring the request
@@ -145,7 +150,9 @@ request = study.causal(
     execution_tier=tier,
     preview_reductions=reductions,
     overrides={},
-    supersedes=supersedes_for(SUPERSEDES_CAUSAL, label, labels=[label]),
+    supersedes=causal_supersedes(
+        study, SUPERSEDES_CAUSAL, label, labels=[label], execution_tier=tier.value
+    ),
 )
 print(f"{CASE_STUDY_ID}: causal DML on {label}, tier {tier.value}")
 
