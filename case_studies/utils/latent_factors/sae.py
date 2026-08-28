@@ -13,7 +13,6 @@ from case_studies.utils.latent_factors.library_bridge import run_sae_fold_with_l
 # Bumped when a change to this module would change a fitted SAE result. It enters
 # every sae training identity through `adapter._source_identity`, which declares behaviour
 # rather than hashing these bytes - see that function for why.
-SAE_RUNNER_VERSION = 2
 
 
 def run_sae_fold(

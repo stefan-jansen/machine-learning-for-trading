@@ -57,22 +57,14 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 from utils.modeling import RANDOM_SEED, seed_everything
 
-# Bumped when a change to this module would change a fitted TabM result. See
-# `_tabm_source_identity` for why this is a declaration rather than a digest.
-TABM_RUNNER_VERSION = 1
-# The same, for the checkpoint state a TabM prediction is restored from. Declared here rather than
-# in `deep_model_state.py` on purpose: `deep_learning.py` still hashes that file's bytes into its
-# own identities, so adding a constant to it would refit eleven registered sequence-model rows to
-# say something only TabM reads. It moves back beside the code it describes when `deep_learning`
-# and `causal` migrate off the digest scheme too.
-DEEP_MODEL_STATE_VERSION = 1
-
 _TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
 # What a case study gets when its setup.yaml declares no `modeling.tabular_dl` block. Eight of the
 # nine declare none, so these are the values every existing TabM identity was fitted under.
 DEFAULT_TABM_DEVICE = "cuda"
 DEFAULT_TABM_NUM_THREADS = 8
+TABM_RUNNER_VERSION = 1
+TABM_STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -107,24 +99,10 @@ def _sha256(path: Path) -> str:
 
 
 def _tabm_source_identity() -> dict[str, int]:
-    """The behaviour of this runner, declared rather than fingerprinted.
-
-    This used to be the SHA-256 of ``tabular_dl.py`` and ``deep_model_state.py``. Both digests sat
-    inside the hashed ``computation``, so every edit to either file - a comment, a log line,
-    threading a provenance field through - invalidated every TabM result ever registered. That is
-    unworkable against the rule that a fix which does not change a result must not force a refit.
-    ``linear.py`` and ``gbm.py`` retired the same scheme for the same reason; this finishes it for
-    one of the two families left on it.
-
-    What replaces it is a declaration. ``TABM_RUNNER_VERSION`` is bumped when a change to this
-    module would change a fitted result, and ``DEEP_MODEL_STATE_VERSION`` covers the checkpoint
-    state a prediction is read back from. ``tests/test_tabular_dl_identity.py`` pins what these
-    versions claim to describe and fails when it moves without a bump, so the declaration is
-    checked rather than trusted.
-    """
+    """Return declared versions for fitting TabM and persisting its state."""
     return {
         "tabm_runner": TABM_RUNNER_VERSION,
-        "deep_model_state": DEEP_MODEL_STATE_VERSION,
+        "tabm_state": TABM_STATE_VERSION,
     }
 
 

@@ -17,7 +17,7 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 33 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
+# 35 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
@@ -67,6 +67,7 @@ tests/test_latent_input_identity.py
 tests/test_holdout_evaluation_driver.py
 tests/test_locked_holdout_execution.py
 tests/test_model_analysis_selection.py
+tests/test_model_source_identity_versions.py
 tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
@@ -82,6 +83,7 @@ tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_identity.py
 tests/test_tabular_dl_runtime.py
+tests/test_training_identity_migration.py
 
 # ---------------------------------------------------------------------------
 # Executes notebooks through Papermill, against the reader's image and the

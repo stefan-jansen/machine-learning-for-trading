@@ -1,6 +1,6 @@
 """The latent-factor runners' declared versions, and the fitted results they stand for.
 
-``LATENT_RUNNER_VERSION`` and the five per-model versions sit in every latent training identity in
+``LATENT_ADAPTER_VERSION`` and the five per-model versions sit in every latent training identity in
 place of a SHA-256 of fourteen files. The digest was unworkable twice over: a comment in
 ``panel.py`` invalidated every registered latent row, and it coupled the models to each other, so
 an SAE change refit IPCA. A declared version is only worth what checks it, which is this file.
@@ -17,21 +17,23 @@ import hashlib
 import numpy as np
 import pytest
 
-from case_studies.utils.latent_factors.adapter import LATENT_RUNNER_VERSION, _source_identity
-from case_studies.utils.latent_factors.cae import CAE_RUNNER_VERSION, run_cae_fold
+from case_studies.utils.latent_factors.adapter import _source_identity
+from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.cv import (
     _MODEL_RUNNERS,
-    _MODEL_VERSIONS,
     _apply_latent_factor_runtime_spec,
+)
+from case_studies.utils.latent_factors.ipca import run_ipca_fold
+from case_studies.utils.latent_factors.pca import run_pca_fold
+from case_studies.utils.latent_factors.sae import run_sae_fold
+from case_studies.utils.latent_factors.versions import (
+    LATENT_ADAPTER_VERSION,
+    LATENT_MODEL_VERSIONS,
     latent_model_version,
 )
-from case_studies.utils.latent_factors.ipca import IPCA_RUNNER_VERSION, run_ipca_fold
-from case_studies.utils.latent_factors.pca import PCA_RUNNER_VERSION, run_pca_fold
-from case_studies.utils.latent_factors.sae import SAE_RUNNER_VERSION, run_sae_fold
-from case_studies.utils.latent_factors.sdf import SDF_RUNNER_VERSION
 
 PINNED_VERSIONS = {
-    "latent_runner": 1,
+    "latent_adapter": 1,
     "pca": 1,
     "ipca": 1,
     "cae": 1,
@@ -77,11 +79,11 @@ class TestWhatEntersTheIdentity:
         """A 64-character hex string here means the source-hashing scheme came back."""
         identity = _source_identity("pca")
 
-        assert identity["latent_runner"] == LATENT_RUNNER_VERSION
+        assert identity["latent_adapter"] == LATENT_ADAPTER_VERSION
         assert not any(isinstance(value, str) and len(value) == 64 for value in identity.values())
 
     def test_it_covers_the_shared_machinery_and_the_one_model_being_fitted(self) -> None:
-        assert set(_source_identity("ipca")) == {"latent_runner", "latent_model"}
+        assert set(_source_identity("ipca")) == {"latent_adapter", "latent_model"}
 
     def test_every_model_the_runner_dispatches_to_declares_a_version(self) -> None:
         """A model reachable through `_MODEL_RUNNERS` with no declared version would fit under an
@@ -98,7 +100,7 @@ class TestWhatEntersTheIdentity:
         every IPCA identity too. Two models sharing a version number is not the point - what has
         to hold is that changing one of them changes only its own identities."""
         before = {name: _source_identity(name) for name in _MODEL_RUNNERS}
-        monkeypatch.setitem(_MODEL_VERSIONS, "sae", SAE_RUNNER_VERSION + 1)
+        monkeypatch.setitem(LATENT_MODEL_VERSIONS, "sae", LATENT_MODEL_VERSIONS["sae"] + 1)
         after = {name: _source_identity(name) for name in _MODEL_RUNNERS}
 
         assert after["sae"] != before["sae"]
@@ -113,12 +115,12 @@ class TestTheDeclaredVersions:
     update the pin in the same commit."""
 
     def test_the_declared_versions_match_what_this_file_pins(self) -> None:
-        assert PINNED_VERSIONS["latent_runner"] == LATENT_RUNNER_VERSION
-        assert PINNED_VERSIONS["pca"] == PCA_RUNNER_VERSION
-        assert PINNED_VERSIONS["ipca"] == IPCA_RUNNER_VERSION
-        assert PINNED_VERSIONS["cae"] == CAE_RUNNER_VERSION
-        assert PINNED_VERSIONS["sae"] == SAE_RUNNER_VERSION
-        assert PINNED_VERSIONS["sdf"] == SDF_RUNNER_VERSION
+        assert PINNED_VERSIONS["latent_adapter"] == LATENT_ADAPTER_VERSION
+        assert PINNED_VERSIONS["pca"] == LATENT_MODEL_VERSIONS["pca"]
+        assert PINNED_VERSIONS["ipca"] == LATENT_MODEL_VERSIONS["ipca"]
+        assert PINNED_VERSIONS["cae"] == LATENT_MODEL_VERSIONS["cae"]
+        assert PINNED_VERSIONS["sae"] == LATENT_MODEL_VERSIONS["sae"]
+        assert PINNED_VERSIONS["sdf"] == LATENT_MODEL_VERSIONS["sdf"]
 
     def test_pca_forecasts_no_cross_section_on_a_zero_mean_panel(self, panel) -> None:
         """PCA has no pinned digest, because on this fixture it has nothing to pin.
@@ -160,7 +162,7 @@ class TestTheDeclaredVersions:
         array = np.asarray(predictions)
 
         assert np.array_equal(array, np.asarray(again), equal_nan=True), (
-            "two PCA fits on one panel disagree, so PCA_RUNNER_VERSION does not stand "
+            "two PCA fits on one panel disagree, so LATENT_MODEL_VERSIONS['pca'] does not stand "
             "for a reproducible fit"
         )
         assert array.shape == panel["returns_val"].shape
@@ -185,7 +187,7 @@ class TestTheDeclaredVersions:
         )
 
         assert _digest(np.asarray(predictions)) == PINNED_IPCA_PREDICTIONS, (
-            "the IPCA runner now fits a different result; bump IPCA_RUNNER_VERSION in "
+            "the IPCA runner now fits a different result; bump LATENT_MODEL_VERSIONS['ipca'] in "
             "case_studies/utils/latent_factors/ipca.py and update this pin in the same commit"
         )
 
@@ -207,7 +209,7 @@ class TestTheDeclaredVersions:
 
         stacked = np.concatenate([np.asarray(checkpoints[e]) for e in sorted(checkpoints)])
         assert _digest(stacked) == PINNED_CAE_PREDICTIONS, (
-            "the CAE runner now fits a different result; bump CAE_RUNNER_VERSION in "
+            "the CAE runner now fits a different result; bump LATENT_MODEL_VERSIONS['cae'] in "
             "case_studies/utils/latent_factors/cae.py and update this pin in the same commit"
         )
 
@@ -227,12 +229,12 @@ class TestTheDeclaredVersions:
 
         stacked = np.concatenate([np.asarray(checkpoints[e]) for e in sorted(checkpoints)])
         assert _digest(stacked) == PINNED_SAE_PREDICTIONS, (
-            "the SAE runner now fits a different result; bump SAE_RUNNER_VERSION in "
+            "the SAE runner now fits a different result; bump LATENT_MODEL_VERSIONS['sae'] in "
             "case_studies/utils/latent_factors/sae.py and update this pin in the same commit"
         )
 
     def test_the_sae_batch_size_reaches_the_library(self, panel) -> None:
-        """The defect behind `SAE_RUNNER_VERSION = 2`: `run_sae_fold_with_library` built its
+        """The defect behind the sae entry sitting at 2: `run_sae_fold_with_library` built its
         `SAEConfig` without `batch_size`, so it took the library default of `None` and trained on
         the whole panel in one batch - 21.72 GiB of allocations and an OOM on a 24 GB card at one
         fold. A pin alone would not catch a re-omission, because this panel is smaller than the
@@ -303,7 +305,7 @@ class TestBothRegistrationPathsAgree:
 
     def test_a_version_bump_moves_the_legacy_spec(self, monkeypatch) -> None:
         before = self._legacy_spec("sae")
-        monkeypatch.setitem(_MODEL_VERSIONS, "sae", SAE_RUNNER_VERSION + 1)
+        monkeypatch.setitem(LATENT_MODEL_VERSIONS, "sae", LATENT_MODEL_VERSIONS["sae"] + 1)
         after = self._legacy_spec("sae")
 
         assert before != after, (
@@ -314,7 +316,7 @@ class TestBothRegistrationPathsAgree:
     def test_a_version_bump_moves_both_paths_together(self, monkeypatch) -> None:
         """The property that makes the declaration meaningful: neither route can miss a bump."""
         migrated_before, legacy_before = _source_identity("sae"), self._legacy_spec("sae")
-        monkeypatch.setitem(_MODEL_VERSIONS, "sae", SAE_RUNNER_VERSION + 1)
+        monkeypatch.setitem(LATENT_MODEL_VERSIONS, "sae", LATENT_MODEL_VERSIONS["sae"] + 1)
 
         assert _source_identity("sae") != migrated_before
         assert self._legacy_spec("sae") != legacy_before

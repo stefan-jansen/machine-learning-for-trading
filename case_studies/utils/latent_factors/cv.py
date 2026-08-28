@@ -20,17 +20,18 @@ from ml4t.diagnostic.metrics import cross_sectional_ic
 from threadpoolctl import threadpool_limits
 
 from case_studies.utils.backtest_loaders import get_rebalance_step, thin_to_rebalance_dates
-from case_studies.utils.latent_factors.cae import CAE_RUNNER_VERSION, run_cae_fold
-from case_studies.utils.latent_factors.ipca import IPCA_RUNNER_VERSION, run_ipca_fold
+from case_studies.utils.latent_factors.cae import run_cae_fold
+from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.library_bridge import configure_latent_torch_runtime
 from case_studies.utils.latent_factors.panel import (
     prepare_panel_data,
     prepare_ragged_panel_data,
     rank_normalize_cross_section,
 )
-from case_studies.utils.latent_factors.pca import PCA_RUNNER_VERSION, run_pca_fold
-from case_studies.utils.latent_factors.sae import SAE_RUNNER_VERSION, run_sae_fold
-from case_studies.utils.latent_factors.sdf import SDF_RUNNER_VERSION, run_sdf_fold
+from case_studies.utils.latent_factors.pca import run_pca_fold
+from case_studies.utils.latent_factors.sae import run_sae_fold
+from case_studies.utils.latent_factors.sdf import run_sdf_fold
+from case_studies.utils.latent_factors.versions import latent_model_version
 from utils.modeling import RANDOM_SEED, seed_everything
 
 _MODEL_RUNNERS = {
@@ -40,25 +41,6 @@ _MODEL_RUNNERS = {
     "sdf": run_sdf_fold,
     "sae": run_sae_fold,
 }
-
-# Beside the runners deliberately: whoever adds or changes one here is the person who has to say
-# whether fitted results move. A model's version enters only its own identities, so editing sae.py
-# does not refit IPCA - which the whole-file digest this replaced could not express.
-_MODEL_VERSIONS = {
-    "pca": PCA_RUNNER_VERSION,
-    "ipca": IPCA_RUNNER_VERSION,
-    "cae": CAE_RUNNER_VERSION,
-    "sdf": SDF_RUNNER_VERSION,
-    "sae": SAE_RUNNER_VERSION,
-}
-
-
-def latent_model_version(model_name: str) -> int:
-    """The declared behaviour version of one latent model."""
-    if model_name not in _MODEL_VERSIONS:
-        raise KeyError(f"no declared runner version for latent model {model_name!r}")
-    return _MODEL_VERSIONS[model_name]
-
 
 TEMPORAL_FEATURE_ASSEMBLY = "fold_scoped_v1"
 

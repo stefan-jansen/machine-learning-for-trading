@@ -15,8 +15,8 @@ import pytest
 import torch
 
 from case_studies.utils.tabular_dl import (
-    DEEP_MODEL_STATE_VERSION,
     TABM_RUNNER_VERSION,
+    TABM_STATE_VERSION,
     TabMModel,
     _tabm_source_identity,
     _train_tabm_fold,
@@ -24,7 +24,7 @@ from case_studies.utils.tabular_dl import (
 from utils.modeling import seed_everything
 
 PINNED_RUNNER_VERSION = 1
-PINNED_DEEP_MODEL_STATE_VERSION = 1
+PINNED_TABM_STATE_VERSION = 1
 
 # The architecture, as the exact integers a build cannot change: every parameter tensor
 # by name and shape, and the total parameter count.
@@ -94,7 +94,7 @@ class TestWhatEntersTheIdentity:
 
     def test_it_covers_the_runner_and_the_state_a_checkpoint_restores(self) -> None:
         """A prediction is read back from persisted state, so that state is part of the result."""
-        assert {"tabm_runner", "deep_model_state"} == set(_tabm_source_identity())
+        assert {"tabm_runner", "tabm_state"} == set(_tabm_source_identity())
 
     def test_it_does_not_depend_on_where_the_file_lives(self) -> None:
         """The digest scheme made the identity a property of the checkout, not of the behaviour."""
@@ -108,7 +108,7 @@ class TestTheDeclaredVersion:
 
     def test_the_declared_versions_match_what_this_file_pins(self) -> None:
         assert TABM_RUNNER_VERSION == PINNED_RUNNER_VERSION
-        assert DEEP_MODEL_STATE_VERSION == PINNED_DEEP_MODEL_STATE_VERSION
+        assert TABM_STATE_VERSION == PINNED_TABM_STATE_VERSION
 
     def test_the_architecture_keeps_its_declared_shape(self) -> None:
         """Covers the backbone, the rank-1 adapters and the per-member heads.
