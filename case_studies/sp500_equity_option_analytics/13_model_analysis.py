@@ -101,7 +101,10 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
-from case_studies.utils.notebook_contracts import declared_population_members
+from case_studies.utils.notebook_contracts import (
+    declared_population_members,
+    degenerate_prediction_hashes,
+)
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE
@@ -249,7 +252,28 @@ for _note in _population_notes:
 
 if _declared:
     CURRENT_MEMBERS = frozenset().union(*_declared.values())
-    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+    # Filtering to the members is not the same as checking the members arrived. A population is
+    # published before its members finish fitting, so an interrupted run leaves a member absent
+    # from the registry rather than incomplete in it - the filter then silently returns a
+    # shorter leaderboard, and every recommendation below is made over whatever did arrive.
+    # `load_all_metrics` drops a prediction set with a constant-prediction fold, because its
+    # pooled IC is computed over the surviving folds only and is not a model result; those are
+    # declared members that correctly never reach a leaderboard, so they are counted rather than
+    # reported as missing.
+    _degenerate = degenerate_prediction_hashes(CASE_DIR)
+    _arrived = set(raw_metrics.get_column("prediction_hash").unique().to_list())
+    _dropped = CURRENT_MEMBERS & _degenerate
+    _missing = sorted(CURRENT_MEMBERS - _degenerate - _arrived)
+    if _missing:
+        raise RuntimeError(
+            f"{len(_missing)} declared member(s) never reached the registry: "
+            f"{', '.join(_missing[:5])}. The populations were published before their members "
+            "finished fitting, so the comparison below would be short without saying so."
+        )
+    print(
+        f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force"
+        + (f"; {len(_dropped):,} excluded as degenerate" if _dropped else "")
+    )
     raw_metrics = raw_metrics.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
 else:
     CURRENT_MEMBERS = frozenset(raw_metrics.get_column("prediction_hash").unique().to_list())
