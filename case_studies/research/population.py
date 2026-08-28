@@ -40,6 +40,27 @@ def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     return f"{scope}:{suffix}" if scope else f"{case_study_id}:{suffix}"
 
 
+def _preview_is_active() -> bool:
+    """Whether a preview tier is active, from the one signal that survives the read path.
+
+    `Study.activate` stamps `ML4T_OUTPUT_DIR` with a `.preview` root, and that is the only
+    marker a caller downstream can rely on. **`study.root` is not one.** In a maintainer
+    worktree `features`, `labels` and `run_log` are symlinks into the shared artifact store,
+    which `create_experiment` cannot copy, so `open_study(execution_tier="preview")` takes the
+    read-in-place branch (`workspace.py`) and hands back a study whose `root` *is* the canonical
+    case directory, with only its writes redirected. A preview there reads canonical rows.
+
+    That is invisible in CI, where a checkout has no symlinks and the isolated branch runs
+    instead - so a check that passes on a runner and fails on a maintainer's machine is the
+    expected shape of this bug rather than a surprising one.
+    """
+    import os
+    from pathlib import Path
+
+    active = os.environ.get("ML4T_OUTPUT_DIR")
+    return bool(active) and Path(active).name == ".preview"
+
+
 def _refuse_preview_activation() -> None:
     """A population is written to the canonical registry whatever tier is active.
 
@@ -52,11 +73,7 @@ def _refuse_preview_activation() -> None:
 
     Callers guard this too. This is the guard that does not depend on remembering.
     """
-    import os
-    from pathlib import Path
-
-    active = os.environ.get("ML4T_OUTPUT_DIR")
-    if active and Path(active).name == ".preview":
+    if _preview_is_active():
         raise ValueError(
             "a preview run cannot create an official population: it would be written to the "
             "canonical registry"
@@ -278,6 +295,14 @@ def population_supersedes(study: Study, *, name: str, declared: str | None) -> s
     whose isolated registry holds no generation under this name either.
     """
     if not declared:
+        return None
+    if _preview_is_active():
+        # Decided before the registry is consulted, because in a maintainer worktree the
+        # registry a preview reads is the canonical one. Asking it first returns a real
+        # generation, this function offers the hash, and `run_model_population` then refuses
+        # the run outright - "preview populations cannot supersede a snapshot" - before the
+        # first fit. A preview never creates an official population, so there is never a
+        # snapshot for it to supersede and the answer does not depend on what is on disk.
         return None
     try:
         current = OfficialPopulation.one(study, name=name)

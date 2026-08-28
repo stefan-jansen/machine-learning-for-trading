@@ -55,6 +55,14 @@ def test_a_scope_isolates_every_name_it_touches() -> None:
     assert all(name.startswith(f"{scope}:") for name in scoped)
 
 
+def _is_research_name(expr: ast.expr) -> bool:
+    return (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id == "research_name"
+    )
+
+
 def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     """The reader/writer agreement is only observable across notebooks, so this reads them.
 
@@ -75,8 +83,20 @@ def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
     unscoped: list[str] = []
     checked = 0
     for stem in ("13_backtest", "14_portfolio_management", "15_costs", "16_risk_management"):
-        source = (NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
+        tree = ast.parse((NOTEBOOKS / f"{stem}.py").read_text(encoding="utf-8"))
+        # A name may be bound to a local first. That is not a way around the rule - the binding
+        # still has to come from `research_name` - and it is how a notebook passes one name to
+        # both `create` and `population_supersedes` without writing the call twice, which is
+        # where two copies of a name would drift apart. Only a binding whose right-hand side is
+        # a `research_name(` call counts, so an f-string assigned to a variable still fails.
+        from_research_name = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and _is_research_name(node.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
@@ -88,15 +108,12 @@ def test_every_population_name_in_the_fx_phase_two_chain_is_scoped() -> None:
             if name_kw is None:
                 continue
             checked += 1
-            call = f"{func.value.id}.{func.attr}"
             expr = name_kw.value
-            scoped = (
-                isinstance(expr, ast.Call)
-                and isinstance(expr.func, ast.Name)
-                and expr.func.id == "research_name"
+            scoped = _is_research_name(expr) or (
+                isinstance(expr, ast.Name) and expr.id in from_research_name
             )
             if not scoped:
-                unscoped.append(f"{stem}: {call} name={ast.unparse(expr)}")
+                unscoped.append(f"{stem}: {func.value.id}.{func.attr} name={ast.unparse(expr)}")
 
     assert not unscoped, (
         "a population name that does not go through research_name cannot be isolated, "

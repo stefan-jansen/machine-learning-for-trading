@@ -263,6 +263,54 @@ class CausalRequest:
         return self.resolve().run()
 
 
+def causal_supersedes(
+    study: Study,
+    declaration: str | None,
+    label: str,
+    *,
+    labels: list[str] | None = None,
+    execution_tier: str = "canonical",
+) -> str | None:
+    """The declared predecessor, offered only where this registry holds it.
+
+    A notebook that has refit under a changed causal identity must name the identity it
+    retires, or ``_enforce_causal_supersedes`` refuses the write - after the DML fit and every
+    placebo refit have been paid for. So the hash is committed source, and then it is wrong for
+    everyone who is not the author: ``run_log/`` is gitignored, a reader's clone holds no causal
+    rows at all, and naming a predecessor that does not exist fails at exactly the same place,
+    after exactly the same computation. The author's fix becomes the reader's bug.
+
+    Passing the mapping as a run-time parameter instead does not work here, because
+    ``run-production-notebook.sh`` executes with no parameter overrides - the provenance gate
+    requires the committed notebook to be the current source executed clean - so a value that
+    only ever arrives as an override can never be stamped.
+
+    Resolving it against the registry is what makes one committed declaration right for both.
+    The hash is offered when this registry holds a current identity for the label, and withheld
+    when it does not, which is the clean clone. It is the same rule
+    :func:`case_studies.research.population.population_supersedes` applies to a population hash,
+    for the same reason.
+
+    Parsing is still :func:`supersedes_for`: this only decides whether the parsed value applies.
+    A declaration naming a label the notebook does not fit still raises there, before the fit.
+    """
+    declared = supersedes_for(declaration, label, labels=labels)
+    if not declared:
+        return None
+    tier = ExecutionTier(execution_tier)
+    db_path = study.storage_root(tier) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return None
+    try:
+        with sqlite3.connect(db_path) as db:
+            current = current_causal_identities(db, label=label, tier=tier.value)
+    except sqlite3.OperationalError:
+        # No causal table at all, which is the ordinary state of a reader's clone rather than
+        # the exotic one. Same reasoning as `population_supersedes`.
+        return None
+    return declared if declared in current else None
+
+
 def supersedes_for(
     declaration: str | None, label: str, *, labels: list[str] | None = None
 ) -> str | None:
