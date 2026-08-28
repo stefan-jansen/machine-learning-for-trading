@@ -20,10 +20,11 @@ strategy you can actually run, and keep running, in a live market.
 machine to a running notebook, prerequisites included. The short version is under
 [Quick Start](#quick-start) below.
 
-> **Free reader's guide:** Join [Navigate ML for Trading, 3rd Edition](https://maven.com/p/c6e0e7/navigate-ml-for-trading-3rd-edition)
-> on **July 30, 2026 at 11:00 AM ET** for a 30-minute map of the book, case studies, code, and companion resources.
-> See all current [courses and workshops](https://maven.com/stefan-jansen); the cohort courses are listed under
-> [Courses](#courses) below.
+> **Free live sessions and cohort courses:** short free lessons on the book's material run
+> most months, and the cohort courses work through the full research process with your own
+> question. Current schedule:
+> [ml4trading.io/courses](https://ml4trading.io/courses/?utm_source=github&utm_medium=readme&utm_campaign=repo_callout&utm_content=readme_top).
+> The cohort courses are also listed under [Courses](#courses) below.
 
 <p align="center">
   <a href="https://amzn.to/4eigy2F"><img src="assets/cover.png" width="45%" alt="Machine Learning for Trading, 3rd Edition"></a>
