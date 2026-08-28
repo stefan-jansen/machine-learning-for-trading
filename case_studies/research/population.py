@@ -498,6 +498,28 @@ def current_prediction_members(study: Study, *, verify_members: bool = True) -> 
     prediction catalog then overlays released rows into - subtracting retirements computed
     across both roots from a union computed from one.
     """
+    return frozenset().union(
+        *current_prediction_populations(study, verify_members=verify_members).values()
+    )
+
+
+def current_prediction_populations(
+    study: Study, *, verify_members: bool = True
+) -> dict[str, frozenset[str]]:
+    """The same set as :func:`current_prediction_members`, kept split by publishing name.
+
+    The union is what a stage selecting across the whole case study wants, and it is what
+    :func:`current_prediction_members` returns. A stage reporting on one family wants the
+    names apart, because "every member this population publishes reached the catalog" is a
+    question only a name can answer: a member absent from the catalog cannot be attributed to
+    a family on its own, but the population that lists it can be, from the members that did
+    arrive.
+
+    Retirement is subtracted per name rather than left to the caller, for the reason given
+    above: a frozen snapshot lists members its own publisher has since retired, so a per-name
+    view that skipped the subtraction would hand them back one name at a time.
+    """
+    retired = superseded_members(study, member_kind="prediction")
     names = sorted(
         {
             row[0]
@@ -509,10 +531,10 @@ def current_prediction_members(study: Study, *, verify_members: bool = True) -> 
             )
         }
     )
-    current: set[str] = set()
+    populations: dict[str, frozenset[str]] = {}
     for name in names:
         population = OfficialPopulation.one(study, name=name)
         if verify_members:
             population.require_complete()
-        current.update(population.members)
-    return frozenset(current - superseded_members(study, member_kind="prediction"))
+        populations[name] = frozenset(population.members) - retired
+    return populations

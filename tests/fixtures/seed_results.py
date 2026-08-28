@@ -1193,6 +1193,65 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         template.with_columns(_pl.Series("prediction", scores)).write_parquet(str(pred_file))
 
 
+def _publish_seeded_populations(output_dir: Path, cs_id: str) -> None:
+    """Give the seeded registry the official populations its schema has room for and no rows in.
+
+    The registries shipped in test-data predate ``official_populations``: nine of nine carry
+    prediction sets and none carries the table, so ``_upgrade_seeded_registry`` creates it empty
+    and every question asked of the lineage answers "nothing is published". A notebook that scopes
+    its candidates to the populations in force - which is what the registry read path does not do
+    for itself - therefore selects nothing here while selecting correctly in production, and fails
+    on an empty frame several cells later.
+
+    So the fixture publishes what a case study that has run its modelling stages would have:
+    one population per training family over that family's complete validation prediction sets.
+    The name is deliberately not the canonical ``{cs}-{family}-validation-v1`` a modelling
+    notebook composes - a population is immutable per name, and a notebook publishing its own
+    members under a name the fixture had already frozen would be refused. ``fixture`` in the name
+    is what keeps the two apart, and costs nothing downstream: every consumer enumerates the
+    names the registry holds rather than composing them.
+
+    Nothing is published when the registry already holds a population, so a session in which the
+    modelling notebooks ran first is left exactly as they left it.
+    """
+    from case_studies.research import OfficialPopulation
+    from case_studies.research.workspace import Study
+
+    cs_dir = output_dir / cs_id
+    if not (cs_dir / "run_log" / "registry.db").is_file():
+        return
+
+    db = _open_registry(cs_dir)
+    try:
+        if db.execute("SELECT COUNT(*) FROM official_populations").fetchone()[0]:
+            return
+        families = db.execute(
+            """SELECT t.family, p.prediction_hash
+               FROM prediction_sets p
+               JOIN training_runs t ON t.training_hash = p.training_hash
+               JOIN prediction_coverage c ON c.prediction_hash = p.prediction_hash
+               WHERE p.split = 'validation' AND c.status = 'complete'
+               ORDER BY t.family, p.prediction_hash"""
+        ).fetchall()
+    finally:
+        db.close()
+
+    members: dict[str, list[str]] = {}
+    for family, prediction_hash in families:
+        members.setdefault(family, []).append(prediction_hash)
+    if not members:
+        return
+
+    study = Study.open(cs_id, workspace=output_dir)
+    for family, family_members in sorted(members.items()):
+        OfficialPopulation.create(
+            study,
+            name=f"{cs_id}-fixture-{family}-validation-v1",
+            member_kind="prediction",
+            members=family_members,
+        )
+
+
 def _seed_causal_json(results_dir: Path, cs_id: str, label: str) -> None:
     """Seed results/causal_dml.json for Ch15 insights."""
     path = results_dir / "causal_dml.json"
@@ -1496,6 +1555,10 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         # (must run AFTER _seed_registry_db, and also when registry was pre-seeded)
         _backfill_all_prediction_parquets(cs_dir, cs_id)
         _record_prediction_artifact_digests(cs_dir)
+
+        # After the digests: OfficialPopulation.create resolves every member it is given,
+        # and a member whose artifact has no recorded digest does not resolve.
+        _publish_seeded_populations(output_dir, cs_id)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry
         # so downstream notebooks (e.g., 17/01_portfolio_metrics) that resolve a

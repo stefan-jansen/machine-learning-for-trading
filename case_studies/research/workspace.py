@@ -371,6 +371,29 @@ class Study:
         return CausalRequest.from_request(self, request)
 
 
+def open_reader(case_study: str, *, release_root: str | Path = REPO_ROOT) -> Study:
+    """Open a case study for reading, without moving the root the process already reads from.
+
+    :func:`open_study` answers "where does this notebook write", and every answer it gives
+    moves something. Canonical with no workspace is :meth:`Study.regenerate`, the maintainer's
+    rewrite-in-place handle, which refuses unless ``features``, ``labels`` and ``run_log`` are
+    directory symlinks - true in a maintainer worktree, false in a clean clone and false under
+    the test fixture, which copies them. Preview relocates the output root to
+    ``<workspace>/.preview``.
+
+    A notebook that only resolves which results are in force needs neither, and both hurt it.
+    It reads the rest of its inputs through the case-study path helpers, which resolve against
+    ``ML4T_OUTPUT_DIR``; a handle that relocated that root would leave the registry read and
+    the metric read pointing at different trees, and one that demanded symlinks would refuse
+    to open at all. So the active root is taken from the environment rather than set into it,
+    which also makes a harnessed run take the same branch on a maintainer machine as it does
+    on a runner - the difference that hid this failure until CI found it.
+    """
+    return Study.open(
+        case_study, workspace=os.environ.get("ML4T_OUTPUT_DIR"), release_root=release_root
+    )
+
+
 def open_study(
     case_study: str,
     *,

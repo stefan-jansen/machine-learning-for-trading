@@ -19,6 +19,7 @@ import pytest
 from case_studies.research import (
     OfficialPopulation,
     current_prediction_members,
+    current_prediction_populations,
     population_supersedes,
     superseded_members,
 )
@@ -364,3 +365,72 @@ class TestTheSetASelectingStageConsumes:
             "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
         )
         assert current_prediction_members(study, verify_members=False) == frozenset()
+
+
+class TestTheSetOneFamilyReportsOn:
+    """`current_prediction_populations` keeps the same set split by the name that publishes it.
+
+    `11_latent_factors` composed `{case_study}-{model}-validation-v1` for each of its five
+    siblings. A sibling that narrows its catalog is required to pass `POPULATION_NAME` instead,
+    which the CI overrides do for three of the five, so the composed name resolved to nothing
+    and the notebook refused on a registry that was entirely healthy. Reading the names out of
+    the registry is what removes the assumption.
+    """
+
+    def test_a_population_published_under_a_narrowed_name_is_still_found(
+        self, study: Study
+    ) -> None:
+        OfficialPopulation.create(
+            study,
+            name="etfs-linear-preview",
+            member_kind="prediction",
+            members=list(MEMBERS_ONE),
+        )
+
+        populations = current_prediction_populations(study, verify_members=False)
+        assert populations == {"etfs-linear-preview": frozenset(MEMBERS_ONE)}
+
+    def test_each_name_answers_for_its_own_members_only(self, study: Study) -> None:
+        """The union hides which population a member is missing from; the split does not."""
+        _publish(study, MEMBERS_ONE)
+        OfficialPopulation.create(
+            study,
+            name="etfs-gbm-validation-v1",
+            member_kind="prediction",
+            members=list(MEMBERS_TWO),
+        )
+
+        assert current_prediction_populations(study, verify_members=False) == {
+            "etfs-linear-validation-v1": frozenset(MEMBERS_ONE),
+            "etfs-gbm-validation-v1": frozenset(MEMBERS_TWO),
+        }
+
+    def test_a_frozen_snapshot_lists_no_member_its_publisher_retired(self, study: Study) -> None:
+        """Retirement is subtracted per name, so no caller can forget to subtract it."""
+        first = _publish(study, MEMBERS_ONE)
+        OfficialPopulation.create(
+            study,
+            name="fx-preflight-baselines",
+            member_kind="prediction",
+            members=list(MEMBERS_ONE),
+        )
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+
+        populations = current_prediction_populations(study, verify_members=False)
+        assert populations["fx-preflight-baselines"] == frozenset()
+        assert populations["etfs-linear-validation-v1"] == frozenset(MEMBERS_TWO)
+
+    def test_the_union_is_what_the_selecting_stages_consume(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        OfficialPopulation.create(
+            study,
+            name="etfs-gbm-preview",
+            member_kind="prediction",
+            members=list(MEMBERS_ONE),
+        )
+
+        populations = current_prediction_populations(study, verify_members=False)
+        assert frozenset().union(*populations.values()) == current_prediction_members(
+            study, verify_members=False
+        )

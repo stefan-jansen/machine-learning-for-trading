@@ -45,13 +45,14 @@ from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
     current_prediction_members,
+    current_prediction_populations,
     population_supersedes,
     research_name,
     superseded_members,
 )
 from .results import BacktestResult, PredictionResult, Result, TrainingResult
 from .strategy import Strategy, strategy_warmup_periods
-from .workspace import Study, open_study
+from .workspace import Study, open_reader, open_study
 
 __all__ = [
     "supersedes_for",
@@ -97,6 +98,7 @@ __all__ = [
     "load_model_configs",
     "narrows_declared_catalog",
     "model_requests",
+    "open_reader",
     "open_study",
     "register_adapter",
     "registered_adapters",
@@ -114,6 +116,7 @@ __all__ = [
     "run_locked_holdout",
     "run_model_population",
     "current_prediction_members",
+    "current_prediction_populations",
     "superseded_members",
     "run_models",
     "run_official_model_subset",

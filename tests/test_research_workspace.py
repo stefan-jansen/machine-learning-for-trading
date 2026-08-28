@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import CVSpec, LabelDefinition, Study, open_study
+from case_studies.research import CVSpec, LabelDefinition, Study, open_reader, open_study
 from case_studies.research.contracts import ExecutionTier
 from case_studies.research.model_planning import ModelPlan, PlannedModel
 from case_studies.utils import linear
@@ -843,3 +843,53 @@ def test_a_second_study_previewing_into_one_workspace_repoints_the_input_links(
     link = workspace / ".preview" / "etfs" / "labels"
     assert link.is_symlink()
     assert link.resolve(strict=True) == second_labels
+
+
+class TestTheHandleAConsumingNotebookOpens:
+    """`open_reader` takes the root the process is reading from; it never sets one.
+
+    Six notebooks in `sp500_equity_option_analytics` opened `open_study(cs, "canonical")` to
+    resolve which predictions are in force. That is `Study.regenerate`, which refuses unless
+    the generated directories are symlinks - so they passed in the maintainer worktree that
+    has them and failed in CI, which copies them. Routing them through preview instead swaps
+    one divergence for another: the preview branch relocates the output root, and the metric
+    reads that follow resolve against it.
+    """
+
+    def test_a_release_whose_generated_directories_are_copies_still_opens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release_root = _seed_release(tmp_path)
+        case_dir = release_root / "case_studies" / "etfs"
+        for name in ("features", "labels"):
+            (case_dir / name).mkdir(exist_ok=True)
+        assert not any(
+            (case_dir / name).is_symlink() for name in ("features", "labels", "run_log")
+        ), "fixture must reproduce the CI condition: ordinary directories, not symlinks"
+
+        with pytest.raises(PermissionError):
+            open_study("etfs", execution_tier=ExecutionTier.CANONICAL, release_root=release_root)
+
+        monkeypatch.delenv("ML4T_OUTPUT_DIR", raising=False)
+        study = open_reader("etfs", release_root=release_root)
+        assert study.root == case_dir
+        assert study.read_only
+
+    def test_the_active_output_root_is_read_and_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The registry read and the metric reads have to land in the same tree.
+
+        Everything else in a consuming notebook resolves through `ML4T_OUTPUT_DIR`, so a
+        handle that moved it would answer for a different tree than the rows it filters.
+        """
+        release_root = _seed_release(tmp_path)
+        workspace = tmp_path / "workspace"
+        open_study("etfs", workspace=workspace, release_root=release_root)
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(workspace))
+
+        study = open_reader("etfs", release_root=release_root)
+
+        assert os.environ["ML4T_OUTPUT_DIR"] == str(workspace)
+        assert study.root == workspace / "etfs"
+        assert study.release_case_root == release_root / "case_studies" / "etfs"
