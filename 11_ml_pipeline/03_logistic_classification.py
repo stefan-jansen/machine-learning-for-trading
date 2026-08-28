@@ -69,9 +69,11 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
     log_loss,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -79,7 +81,7 @@ from sklearn.preprocessing import StandardScaler
 from utils.cv_splits import generate_cv_splits
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from utils.style import COLORS, show_with_alt
 
 warnings.filterwarnings("ignore")
 
@@ -246,7 +248,10 @@ def evaluate_classification(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.n
         "precision": precision_score(y_true, y_pred, zero_division=0),
         "recall": recall_score(y_true, y_pred, zero_division=0),
         "f1": f1_score(y_true, y_pred, zero_division=0),
-        "auc_roc": roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else 0.5,
+        # A fold where every label is the same class has no ROC curve and no
+        # log-loss reference. NaN says that; 0.5 would claim the model was
+        # measured and found no better than a coin.
+        "auc_roc": roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else np.nan,
         "log_loss": log_loss(y_true, y_prob) if len(np.unique(y_true)) > 1 else np.nan,
     }
 
@@ -528,9 +533,11 @@ if NEED_TRAINING:
 # %% [markdown] tags=[]
 # ## L2 Regularized Logistic Regression (Ridge)
 #
-# The regularization parameter $C$ is the *inverse* of penalty strength:
-# small $C$ means strong regularization. We sweep six values from heavy
-# ($C=0.001$) to light ($C=100$) regularization.
+# The regularization parameter $C$ is the *inverse* of penalty strength: small
+# $C$ means a strong penalty and a heavily shrunk model, large $C$ means an
+# almost unpenalized one. The sweep below spans several orders of magnitude in
+# both directions, because where the useful range sits is a property of the data
+# rather than something to carry over from another dataset.
 
 # %% tags=[]
 if NEED_TRAINING:
@@ -601,10 +608,12 @@ cw_df = pl.DataFrame(rows_cw)
 cw_df
 
 # %% [markdown] tags=[]
-# The result below is generated from the current run so a new data vintage cannot
-# leave a stale class-balance claim behind.
+# Read the three metrics against each other rather than one at a time. Recall and
+# F1 describe a decision rule at a fixed threshold, so reweighting the classes
+# moves them. AUC describes the ranking underneath, which reweighting leaves
+# largely alone: the same observations are still ordered the same way.
 
-# %% tags=[]
+# %% tags=["results"]
 cw_default, cw_balanced = cw_df.iter_rows(named=True)
 display(
     Markdown(
@@ -680,8 +689,8 @@ if NEED_TRAINING:
 # %% [markdown] tags=[]
 # ## Model Comparison
 #
-# We compare the best L2 and L1 configurations against a naive baseline
-# that always predicts the majority class.
+# We compare the selected L2 and L1 configurations against a naive baseline that
+# always predicts the majority class of its own training fold.
 
 # %% tags=[]
 rows = []
@@ -703,8 +712,9 @@ for label, res_df in [
 
 
 # %% [markdown] tags=[]
-# Each naive fold learns its class and probability from that fold's training rows.
-# This preserves chronology and yields the correct metric-specific references.
+# The baseline has to be fitted like a model, fold by fold. Its predicted class
+# and its predicted probability both come from the training rows of that fold
+# only, so it never sees the validation window it is scored on.
 
 
 # %% tags=[]
@@ -739,8 +749,9 @@ comparison
 
 
 # %% [markdown] tags=[]
-# The chart uses each naive metric as its own reference. Accuracy and F1 therefore
-# do not inherit AUC's 0.5 constant-score benchmark.
+# The dashed line in each panel is what the majority-class baseline scores on
+# that panel's metric. Only AUC has a fixed no-information value; for accuracy
+# and F1 the reference depends on how often the label is Up.
 
 
 # %% tags=[]
@@ -780,15 +791,23 @@ for ax, metric, title in zip(
     ax.set_xlim(0, max(max(vals), baseline_value) * 1.18)
     ax.legend(loc="lower right", fontsize=8)
 
-fig.suptitle("L1 and L2 deliver nearly identical validation discrimination")
+fig.suptitle("Both penalties land on the same operating point")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Three horizontal bar panels - accuracy, AUC-ROC and F1 - each showing the L2 "
+    "and L1 models against a dashed line for the majority-class baseline.",
+)
 
 # %% [markdown] tags=[]
-# The interpretation is computed from the comparison table. These are
-# cross-validation diagnostics, not a sealed final holdout estimate.
+# Two references matter here and they are different numbers. For AUC the
+# no-information reference is one half, the score of any constant ranking. For
+# accuracy it is the majority-class rate, which on a panel of ETFs over a long
+# expansion is well above one half. A model can beat the first and lose to the
+# second at the same time, which is why accuracy alone is the wrong headline for
+# a directional model.
 
-# %% tags=[]
+# %% tags=["results"]
 l2_row, l1_row, naive_row = comparison.iter_rows(named=True)
 display(
     Markdown(
@@ -804,8 +823,10 @@ display(
 # %% [markdown] tags=[]
 # ## Detailed Classification Analysis
 #
-# We aggregate validation predictions across all walk-forward folds for the best L2 model
-# to examine the confusion matrix, ROC curve, and precision-recall tradeoff.
+# We pool the validation predictions of the selected L2 model across all
+# walk-forward folds to examine the confusion matrix, the ROC curve and the
+# precision-recall tradeoff. Pooling is legitimate here because every prediction
+# in it was made out of sample, on the fold that produced it.
 
 # %% tags=[]
 best_preds = l2_all[best_l2_C]["predictions"]
@@ -851,12 +872,18 @@ for i in range(2):
         )
 
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two-by-two confusion matrix of actual against predicted direction, each cell "
+    "labelled with its count and shaded by size.",
+)
 
 # %% [markdown] tags=[]
-# The cell below quantifies how the fixed threshold changes the predicted base rate.
+# The confusion matrix counts one particular decision rule: predict Up whenever
+# the estimated probability clears one half. That threshold is a choice, and it
+# interacts with how often the label is Up in the first place.
 
-# %% tags=[]
+# %% tags=["results"]
 actual_up_rate = all_y_true.mean()
 predicted_up_rate = all_y_pred.mean()
 display(
@@ -871,22 +898,15 @@ display(
 # %% [markdown] tags=[]
 # ### ROC Curve
 #
-# The ROC curve plots the true positive rate against the false positive rate
-# at various probability thresholds. An AUC above 0.5 indicates the model
-# does better than random coin-flipping.
+# The ROC curve plots the true positive rate against the false positive rate as
+# the decision threshold sweeps from one extreme to the other, so it describes
+# the ranking rather than any one threshold. The area under it is the probability
+# that a randomly chosen Up observation is scored above a randomly chosen Down
+# one; a coin flip scores one half.
 
 # %% tags=[]
-# Manual argsort+cumsum ROC sweep. sklearn's _binary_clf_curve raises a
-# state-dependent IndexError on some score arrays under the pinned
-# scikit-learn / numpy 2.x stack; this path is the exact ROC definition,
-# deterministic, and equivalent on these scores.
 auc_val = roc_auc_score(all_y_true, all_y_prob)
-_order = np.argsort(-all_y_prob, kind="mergesort")
-_yt_sorted = all_y_true[_order].astype(np.int64)
-_n_pos = int(_yt_sorted.sum())
-_n_neg = len(_yt_sorted) - _n_pos
-fpr = np.concatenate([[0.0], np.cumsum(1 - _yt_sorted) / _n_neg])
-tpr = np.concatenate([[0.0], np.cumsum(_yt_sorted) / _n_pos])
+fpr, tpr, _ = roc_curve(all_y_true, all_y_prob)
 
 fig, ax = plt.subplots(figsize=(6, 5))
 ax.plot(fpr, tpr, linewidth=2, label=f"Logistic L2 (AUC = {auc_val:.3f})")
@@ -896,7 +916,11 @@ ax.set_ylabel("True Positive Rate")
 ax.set_title("Validation discrimination remains close to chance")
 ax.legend(loc="lower right")
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "ROC curve of true positive rate against false positive rate, drawn against "
+    "the diagonal that a random ranking would trace.",
+)
 
 # %% [markdown] tags=[]
 # ### Precision-Recall Curve
@@ -905,12 +929,7 @@ fig.show()
 # the precision-recall curve is more informative than ROC.
 
 # %% tags=[]
-# Manual precision-recall sweep, same rationale as the ROC cell above.
-_pr_order = np.argsort(-all_y_prob, kind="mergesort")
-_pr_yt = all_y_true[_pr_order].astype(np.int64)
-_tps = np.cumsum(_pr_yt)
-prec = _tps / np.arange(1, len(_pr_yt) + 1)
-rec = _tps / int(_pr_yt.sum())
+prec, rec, _ = precision_recall_curve(all_y_true, all_y_prob)
 baseline = all_y_true.mean()
 
 fig, ax = plt.subplots(figsize=(6, 5))
@@ -921,7 +940,11 @@ ax.set_ylabel("Precision")
 ax.set_title("Precision converges to the positive-class base rate")
 ax.legend()
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Precision against recall, with a dashed horizontal line at the share of "
+    "observations whose realized direction is up.",
+)
 
 # %% [markdown] tags=[]
 # ## L1 Feature Importance
@@ -959,7 +982,7 @@ ax.set_yticks(range(len(top15)))
 ax.set_yticklabels(top15["feature"].to_list())
 ax.invert_yaxis()
 ax.set_xlabel("Mean |Coefficient|")
-ax.set_title(f"L1 distributes weight across the leading features (C={best_l1_C})")
+ax.set_title("L1 spreads weight across several correlated features")
 ax.legend(
     handles=[
         Patch(color=COLORS["blue"], label="Positive mean coefficient"),
@@ -968,15 +991,21 @@ ax.legend(
     loc="lower right",
 )
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Horizontal bars of mean absolute coefficient for the leading features, "
+    "coloured by the sign of the mean coefficient.",
+)
 
 # %% [markdown] tags=[]
 # ## Probability Calibration
 #
-# For a well-calibrated classifier, predicted probabilities should match
-# observed frequencies. If the model says "70% chance of going up," we
-# should see ~70% of those outcomes actually go up. Good calibration is
-# essential for converting probabilities into position sizes.
+# A classifier is calibrated when its stated probabilities match observed
+# frequencies: among the observations it scores at some probability of going up,
+# that share should actually go up. Discrimination and calibration are separate
+# properties. A model can rank correctly and still state probabilities that are
+# uniformly too confident, which matters as soon as the probability is used to
+# size a position rather than only to sort.
 
 
 # %% tags=[]
@@ -990,7 +1019,11 @@ ax.set_ylabel("Observed Fraction Positive")
 ax.set_title("Observed frequencies reveal probability calibration gaps")
 ax.legend()
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Reliability diagram: observed fraction of up outcomes against mean predicted "
+    "probability, in ten bins, against the diagonal of perfect calibration.",
+)
 
 # %% [markdown] tags=[]
 # **Interpretation**: A curve above the diagonal means the model is
@@ -1060,8 +1093,9 @@ cal_model.fit(features_array[tr_last], target_array[tr_last])
 y_prob_platt = cal_model.predict_proba(features_array[te_last])[:, 1]
 
 # %% [markdown] tags=[]
-# The comparison model uses the same outer training and validation rows. Its scaler
-# remains fold-local but receives no additional sigmoid calibration.
+# The uncorrected model for the comparison is fitted on exactly the same rows,
+# with the same fold-local scaler, and differs only in that no sigmoid is applied
+# to its output.
 
 
 # %% tags=[]
@@ -1081,8 +1115,10 @@ frac_orig, mean_orig = calibration_curve(y_te_platt, y_prob_orig, n_bins=10)
 frac_platt, mean_platt = calibration_curve(y_te_platt, y_prob_platt, n_bins=10)
 
 # %% [markdown] tags=[]
-# The reliability diagram reveals how sigmoid calibration changes the latest-fold
-# probabilities. It does not assume that the correction must improve them.
+# Both curves are drawn on the same fold so the comparison is like for like. A
+# calibration correction is fitted, which means it can also fit noise: the
+# question the diagram answers is whether the corrected curve sits closer to the
+# diagonal, not whether it was supposed to.
 
 
 # %% tags=[]
@@ -1095,9 +1131,13 @@ ax.set_ylabel("Observed Fraction Positive")
 ax.set_title("Chronological Platt scaling reshapes latest-fold calibration")
 ax.legend()
 fig.tight_layout()
-fig.show()
+show_with_alt(
+    fig,
+    "Two reliability curves on the same fold, one from the raw model and one after "
+    "sigmoid calibration, against the diagonal of perfect calibration.",
+)
 
-# %% tags=[]
+# %% tags=["results"]
 orig_log_loss = log_loss(y_te_platt, y_prob_orig)
 platt_log_loss = log_loss(y_te_platt, y_prob_platt)
 calibration_direction = "improves" if platt_log_loss < orig_log_loss else "worsens"
@@ -1112,9 +1152,10 @@ display(
 # %% [markdown] tags=[]
 # ### Hit Rate by Confidence
 #
-# If the classifier is informative, accuracy should increase with prediction
-# confidence (distance from 0.5). We bin pooled out-of-sample predictions
-# by confidence and check for monotonicity.
+# If the classifier is informative, accuracy should increase with confidence,
+# measured as the distance of the predicted probability from the midpoint. We bin
+# the pooled validation predictions into confidence quintiles and check whether
+# accuracy rises across them.
 
 # %% tags=[]
 confidence = np.abs(all_y_prob - 0.5)
@@ -1140,10 +1181,11 @@ hit_table = pl.DataFrame(hit_rows)
 hit_table
 
 # %% [markdown] tags=[]
-# The generated interpretation compares the highest-confidence bucket with the
-# lower four without assuming that a previous vintage's pattern persists.
+# What to look for: accuracy rising monotonically from the lowest quintile to the
+# highest is the property that makes distance from one half usable as a strength
+# signal. Bumps in the middle mean the ordering is only reliable at the extremes.
 
-# %% tags=[]
+# %% tags=["results"]
 hit_rows_named = list(hit_table.iter_rows(named=True))
 lower_accuracies = [row["accuracy"] for row in hit_rows_named[:4]]
 top_hit = hit_rows_named[-1]
@@ -1238,9 +1280,12 @@ pl.DataFrame(
 )
 
 # %% [markdown] tags=[]
-# The class-level interpretation is generated from the current latest fold.
+# Compare the per-class recalls rather than the headline accuracy. Equal recall
+# across the three terciles would mean the model finds extremes as readily as it
+# finds the middle; unequal recall means it is systematically better at one end
+# of the return distribution than the other.
 
-# %% tags=[]
+# %% tags=["results"]
 top_metrics = ternary_report["Top"]
 bottom_metrics = ternary_report["Bottom"]
 display(
@@ -1275,8 +1320,10 @@ display(
 #    Chronological Platt scaling reshapes those probabilities but does not guarantee
 #    improvement, so evaluate calibration on data that follows every fitted step.
 #
-# 5. **Walk-forward validation is not a final holdout.** These folds support model
-#    comparison and diagnostics; a sealed holdout is required for a final strategy claim.
+# 5. **Walk-forward validation is not a final holdout.** These folds support
+#    model comparison and diagnostics. A claim about what a strategy would have
+#    earned needs a stretch of data that was held back from every choice made
+#    along the way, including the choice of $C$.
 #
 # **Next**: `04_nested_cv_hpo` adds Optuna-based hyperparameter optimization
 # with proper nested cross-validation to control selection bias.
