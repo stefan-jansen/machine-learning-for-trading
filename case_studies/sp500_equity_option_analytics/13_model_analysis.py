@@ -271,16 +271,17 @@ if _declared:
             f"{', '.join(_missing[:5])}. The populations were published before their members "
             "finished fitting, so the comparison below would be short without saying so."
         )
-    # Present is not the same as finished either. Coverage, the headline metrics and the
-    # per-fold metrics are separate writes, so a run interrupted between them leaves a member
-    # that this leaderboard scores over the folds it managed - and a shorter window is an
-    # easier window, which is the direction that flatters it.
+    # Present is not the same as finished either. Coverage, the headline metrics, the per-fold
+    # metrics and the predictions parquet are separate writes, so a run interrupted between them
+    # leaves a member this leaderboard ranks off whatever did land - a score over the folds it
+    # managed, where a shorter window is an easier window, or a rank on a set whose predictions
+    # nothing downstream can read. Each member is reported with which of those it is.
     _short = incompletely_registered_predictions(CASE_DIR, CURRENT_MEMBERS)
     if _short:
         _named = ", ".join(f"{h}: {why}" for h, why in sorted(_short.items())[:5])
         raise RuntimeError(
             f"{len(_short)} declared member(s) are registered but unfinished: {_named}. "
-            "Their scores cover fewer folds than they were asked for."
+            "Ranking them would compare a partial run against complete ones."
         )
     print(
         f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force"
