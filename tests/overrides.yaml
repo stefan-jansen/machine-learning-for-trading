@@ -1199,26 +1199,77 @@ case_studies/cme_futures/05_evaluation:
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
 case_studies/cme_futures/06_linear:
+  parameters:
+    # Restored after #560, same removal as 07_gbm below. This one has been passing on its 120s
+    # budget rather than failing, which is the reason to fix it now: it is mispriced in exactly
+    # the same way and only the margin differs, so it fails on the first contended run instead
+    # of reproducibly. Linear takes no iteration or checkpoint axis, so folds and max_symbols
+    # are the whole reduction - which is what #560 removed. The 120s budget is left as it was,
+    # for the same reason as 07_gbm below: the reduction is what it was calibrated against.
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/cme_futures/07_gbm:
+  parameters:
+    # Restored after #560. That PR moved this notebook onto the shared model boundary, where
+    # reductions arrive as one PREVIEW_REDUCTIONS mapping, and correctly dropped the MAX_FOLDS: 2
+    # and MAX_SYMBOLS: 5 the notebook could no longer receive - but the timeout below was the
+    # number calibrated to them, and it stayed. From 2026-08-20 the preview fitted the full
+    # config set on a budget measured for a fifteenth of it, and failed as a 180s per-cell
+    # papermill timeout, which reads as a flake rather than as the misconfiguration it is.
+    #
+    # folds and max_symbols restore what #560 removed. The two boosting axes are new here and are
+    # what makes this a smoke test again: production is 500 iterations checkpointed every 50, so
+    # 20 every 10 shrinks the fit ~25x while still publishing more than one checkpoint - the
+    # dimension this notebook is about, and one a coarser cut would remove rather than reduce.
+    # No train_sample_frac: 30 products over a daily panel is already small, and thinning rows
+    # would leave folds too short to fit rather than merely quick.
+    #
+    # The timeout below is left at the number #560 inherited. Restoring the reduction restores
+    # what 180s was measured against, so changing it too would replace a calibrated number with
+    # a guess. Measured 2026-08-27: 129s for this notebook and 06_linear together, reductions
+    # applied, at load average 10.1 on 24 cores. Without them the fit alone ran 388s.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0, 1]
+      max_iterations: 20
+      max_symbols: 5
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had. The CI fixture is the reduction here.
   timeout: 300
 case_studies/cme_futures/09_dl_lstm:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had.
+    #
+    # `gpu: true` skips this on every runner without a card, which is every CI runner, so the
+    # sequence family currently has no coverage at all. The two reasons recorded here before
+    # were both measured and both wrong. A preview does not fail the next notebook: it takes
+    # the `run_resolved_model_requests` branch, publishes no official population, and CI runs
+    # notebooks independently in any case. And the fit does not need a card - with CUDA hidden
+    # and `device: cpu`, all four configurations complete on CPU with the 60-step lookback
+    # untouched:
+    #
+    #   folds [0], max_symbols 5                          nlinear 18.2s  lstm_h64 245.7s  total 542.0s
+    #   folds [0], max_symbols 5, max_train_sequences 2000 nlinear  4.2s  lstm_h64  52.6s  total 130.2s
+    #
+    # Both runs published 80 complete prediction sets inside the preview root. The recurrent
+    # architecture is 91% of the cost, so capping training sequences is the reduction that
+    # matters here and cutting symbols further is not.
+    #
+    # What still blocks CPU coverage is neither of those: the notebook hard-codes
+    # `overrides={"device": "cuda"}` at its resolve call, and this file is static YAML that
+    # cannot override an argument the source pins. The preview workspace is not a blocker -
+    # `research_preview_parameters` injects a per-run WORKSPACE for any notebook whose
+    # parameters cell declares both EXECUTION_TIER and WORKSPACE, which this one does.
+    # Enabling CPU coverage needs a DEVICE parameter and nothing else, and that is queued
+    # behind the pending 09 refit rather than done here.
   timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
@@ -1238,31 +1289,50 @@ case_studies/cme_futures/11_causal_dml:
       n_folds: 2
       n_placebo: 25
   timeout: 300
+# 12 through 17 run in the preview tier here, and the tier is what reduces them.
+#
+# `tests/pm_helpers.py::research_preview_parameters` injects EXECUTION_TIER="preview" and
+# WORKSPACE=<the isolated output dir> into a notebook's parameters cell - but only if that cell
+# declares BOTH names. A cell declaring one of them silently gets neither, which is the trap: the
+# notebook then runs canonical against a checkout with no canonical registry. That is what these
+# six did, and it is why they were red on every run while 01-11 passed.
+#
+# PREVIEW_LABELS is the one reduction they take. It is a real narrowing rather than a redundant
+# one: each of these notebooks accumulates across `for label in labels` into a single structure -
+# 14 builds one request_rows list, 17 one selection pool spanning both horizons - so the label
+# axis is the only axis they combine over, and collapsing it to the primary horizon is what keeps
+# the reduced run cheap without changing the shape of what the notebook does. The remaining scale
+# comes from the fixture registry itself.
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
 case_studies/cme_futures/13_backtest:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
-    TOP_N_PREDICTIONS: 2
-  timeout: 120
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_PREDICTIONS: 4
+  timeout: 600
 case_studies/cme_futures/14_portfolio_management:
+  # PREVIEW_MAX_BASELINE_ROWS is the preview's own shortlist width. The canonical width comes
+  # from setup.yaml's top_n_predictions.allocation and is 10, which the preview signal stage
+  # cannot supply: 13_backtest caps itself at PREVIEW_MAX_PREDICTIONS and those resolve to two
+  # distinct (family, config_name) pairs. Declaring 2 keeps the notebook's refusal strict -
+  # it still fails if the pool cannot supply exactly this many - rather than letting it take
+  # whatever it finds.
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_PREDICTIONS: 2
-  timeout: 300
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_BASELINE_ROWS: 2
+  timeout: 600
 case_studies/cme_futures/15_costs:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/16_risk_management:
   parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/17_strategy_analysis:
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
+  timeout: 600
 case_studies/crypto_perps_funding/01_feasibility_analysis:
   parameters:
     # No START_DATE: the notebook already declares 2020-01-01, which is the data start, so an
@@ -1558,8 +1628,22 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
+  # Restores the reduction #560 removed. It dropped MAX_FOLDS: 2 / MAX_SYMBOLS: 5 when the
+  # stage moved onto the shared boundary and left the timeout priced for them, so since
+  # 2026-08-20 this has run all 8 folds over all 20 pairs on a budget measured against 2 and 5.
+  # Same two axes, in the keys the shared runner accepts (`_PREVIEW_FIELDS`, linear.py:69).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/fx_pairs/07_gbm:
+  # Same story as 06_linear above: #560 removed MAX_FOLDS: 2 / MAX_SYMBOLS: 5 and left the
+  # 180s budget behind. Keys are `_GBM_PREVIEW_FIELDS` (gbm.py:76).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1741,12 +1825,8 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
-  skip: true
-  skip_reason: "The fixture registry predates the research interface: training_runs carries neither execution_tier nor identity_version, so catalog.py resolves every row to a legacy identity and no prediction set is complete. The declared-population cross-check then reports all 12 declared linear members absent against 0 admissible rows. Lifts when the test-data registry is regenerated on the current schema."
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
-  skip: true
-  skip_reason: "Same fixture registry limitation as 13_model_analysis: with no identity_version column, no prediction set is complete, and the admissibility guard refuses rather than sweep a population that cannot be official. Lifts when the test-data registry is regenerated on the current schema."
   parameters:
     # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
     # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.

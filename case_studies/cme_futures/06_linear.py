@@ -78,11 +78,13 @@ import plotly.graph_objects as go
 import polars as pl
 from plotly.subplots import make_subplots
 
+from case_studies.cme_futures.research_workflow import supersedes_declaration
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
     open_study,
+    population_supersedes,
     primary_label,
     resolved_model_plan,
     run_model_population,
@@ -94,6 +96,7 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
+SUPERSEDES_POPULATION: str = "8337482ecb59"
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
 
@@ -269,10 +272,50 @@ plan.select(
 # publish the first label and be refused for the second, which is what happened before this
 # notebook fitted them together. Everything that finished stays registered, and re-running fits
 # only what is missing.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities, so anything that moves a training identity produces a different
+# population under the same name, and the registry refuses to write it without being told which
+# snapshot it supersedes. Here it records the refit onto the corrected ARIMA feature: `04` now
+# walks each product over its own history instead of truncating all thirty to the shortest, which
+# moved `model_based.parquet`'s digest and therefore every training identity fitted on it.
+#
+# It defaults to the hash the published population actually superseded, not to empty. The hash is
+# part of what the snapshot is hashed over, so a run that left it empty would compute a different
+# population and be refused against the one on record.
+#
+# **A default that is a real hash only means something where a population of that name already
+# exists**, and two ordinary situations reach this cell where one does not. `run_log/` is not in
+# the repository, so a reader running this notebook from a fresh checkout is writing the first
+# version of its population; and a run narrowed under a `POPULATION_NAME` of the caller's choosing,
+# which the worked example below does, is the first version of that name whatever the built-in
+# default says. In both, a hash passed here is refused by `OfficialPopulation.create` as a first
+# version that cannot supersede anything, before any fit happens. `population_supersedes` drops it in
+# exactly those two cases and in a preview, where a population is discarded with its workspace and
+# has no lineage to extend.
+#
+# What it does not do is second-guess a disagreement. A hash naming neither the generation in force
+# nor the one that generation superseded describes no state this registry is in, so it is withheld
+# and `OfficialPopulation.create` refuses the changed population with a message naming the snapshot
+# it requires. The refusal is the registry's to make; withholding is how it is left to it.
+#
+# **The tier is decided here rather than inside the helper.** `population_supersedes` reads
+# `study.root`, and a preview in a maintainer worktree does not get its own root: `open_study`
+# links the generated directories in place and redirects only the writes, so the lookup finds the
+# canonical generation and hands back a real hash. `run_model_population` then refuses a preview
+# carrying one, and the preview dies before it fits anything. Withholding the declaration outside
+# the tier that can use it is what keeps that path runnable.
 
 # %%
 population_name = POPULATION_NAME or "cme_futures-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+supersedes = population_supersedes(
+    study,
+    name=population_name,
+    declared=supersedes_declaration(EXECUTION_TIER, SUPERSEDES_POPULATION),
+)
+execution, population = run_model_population(
+    study, resolved, population_name=population_name, supersedes=supersedes
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)

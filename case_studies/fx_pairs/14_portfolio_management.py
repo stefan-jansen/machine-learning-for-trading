@@ -17,14 +17,14 @@
 # # Portfolio Allocation - FX Pairs
 #
 # This notebook compares allocation methods after the equal-weight baseline. Production advances
-# the ten model configurations with highest validation backtest Sharpe for each label, then retains
-# every checkpoint belonging to those configurations. Preview mode uses a deterministic reduced
-# catalog selection and never writes an official population or candidate set.
+# the ten model configurations with highest validation backtest Sharpe for each label. Each carries
+# its best checkpoint and signal mapping into the allocation comparison. Preview mode uses a
+# deterministic reduced catalog selection and never writes an official population or candidate set.
 #
 # **Learning objectives**
 #
 # - Select configurations from an immutable equal-weight candidate set.
-# - Preserve checkpoint identity when configurations advance to allocation.
+# - Preserve the selected checkpoint and signal mapping when configurations advance to allocation.
 # - Change allocation while holding prediction, signal, costs, and execution fixed.
 #
 # **Book reference**: Chapter 17
@@ -49,13 +49,14 @@ from case_studies.research import (
     Result,
     open_study,
     plan_backtests,
+    population_supersedes,
     research_name,
     run_backtests,
     strategy_warmup_periods,
+    superseded_members,
 )
 from case_studies.utils.sweep_config import (
     get_allocators,
-    get_top_k_values_for,
     get_top_n_predictions,
 )
 from utils.paths import get_case_study_dir
@@ -74,15 +75,17 @@ SEED = 42
 RUN_SWEEP = True
 FORCE_REBACKTEST = False
 POPULATION_NAME = ""
+BASELINE_POPULATION_NAME = None
+SUPERSEDES_ALLOCATION_BACKTESTS: str = ""
 
 # %% [markdown]
 # ## Resolve the equal-weight inputs
 #
 # Canonical execution reads the exact population frozen by the baseline notebook. Its label-specific
 # candidate sets provide the only performance ranking used here. The selected unit is a model
-# configuration. After a configuration advances, all of its complete checkpoints advance.
+# configuration. After a configuration advances, its best checkpoint and signal mapping advance.
 
-# %% tags=["results"]
+# %%
 set_global_seeds(SEED)
 universe_symbols = yaml.safe_load(
     (get_case_study_dir(CASE_STUDY_ID) / "config" / "setup.yaml").read_text()
@@ -104,6 +107,13 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 # test suite exercises, then resolved no rows at all.
 include_preview = EXECUTION_TIER == "preview"
 
+
+def _resolve_baseline_scope(output_scope: str, input_scope: str | None) -> str:
+    return output_scope if input_scope is None else input_scope
+
+
+baseline_population_name = _resolve_baseline_scope(POPULATION_NAME, BASELINE_POPULATION_NAME)
+
 # The tier decides the namespace, so a canonical run may legitimately be narrowed -
 # but a narrowed run declares a different set of members than the canonical
 # population does, and a population is immutable once written. Such a run must
@@ -124,6 +134,18 @@ catalog = study.predictions.table(include_preview=include_preview).filter(
     & pl.col("complete")
     & (pl.col("execution_tier") == ("preview" if include_preview else "canonical"))
 )
+# `identity_status` is the schema version a row was written under, not a statement about which
+# generation its producer publishes. A model notebook that refits leaves the generation it
+# replaced in the registry, complete and current, so this filter alone would carry a retired
+# prediction set into the sweep. `superseded_members` reads the lineage instead - see
+# `13_backtest`, which drops the same set before it freezes the baseline population.
+# `SUPERSEDES_ALLOCATION_BACKTESTS` names the snapshot this run replaces under the name it publishes,
+# offered through `population_supersedes` on the same rule. It is empty until that name has a
+# first generation; after that, an upstream refit changes this population's member list and
+# the registry refuses the write without it. `13_backtest` states the reasoning once.
+retired = superseded_members(study, member_kind="prediction")
+if retired:
+    catalog = catalog.filter(~pl.col("prediction_hash").is_in(list(retired)))
 if LABEL:
     catalog = catalog.filter(pl.col("label") == LABEL)
 if catalog.is_empty():
@@ -133,6 +155,30 @@ if catalog.is_empty():
 def _result_config(result: BacktestResult) -> tuple[str, str, str]:
     training = result.lineage()["training_spec"]
     return str(training["label"]), str(training["family"]), str(training["config_name"])
+
+
+def _select_configuration_survivors(
+    ranked_results: Iterable[BacktestResult], limit: int
+) -> list[BacktestResult]:
+    """Keep the best baseline result for each distinct model configuration."""
+    survivors = []
+    seen: set[tuple[str, str]] = set()
+    for result in ranked_results:
+        config = _result_config(result)[1:]
+        if config in seen:
+            continue
+        survivors.append(result)
+        seen.add(config)
+        if len(survivors) == limit:
+            break
+    return survivors
+
+
+def _baseline_top_k(result: BacktestResult) -> int:
+    signal = result.spec()["strategy"]["signal"]
+    if signal.get("method") != "equal_weight_top_k" or not isinstance(signal.get("top_k"), int):
+        raise RuntimeError(f"baseline {result.hash} does not carry a valid top-k signal mapping")
+    return int(signal["top_k"])
 
 
 def _open_backtests(hashes: Iterable[str]) -> list[BacktestResult]:
@@ -156,7 +202,7 @@ def _preview_baselines(rows: pl.DataFrame) -> list[BacktestResult]:
     registered = study.backtests.table(include_preview=True).filter(
         (pl.col("stage") == "signal")
         & (pl.col("execution_tier") == "preview")
-        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash"))
+        & pl.col("prediction_hash").is_in(rows.get_column("prediction_hash").implode())
         & (pl.col("identity_status") == "current")
         & pl.col("complete")
     )
@@ -173,7 +219,11 @@ if include_preview:
 else:
     baseline_population = OfficialPopulation.one(
         study,
-        name=research_name(CASE_STUDY_ID, "equal-weight-baselines", scope=POPULATION_NAME),
+        name=research_name(
+            CASE_STUDY_ID,
+            "equal-weight-baselines",
+            scope=baseline_population_name,
+        ),
     )
     baseline_population.require_complete()
     baseline_results = _open_backtests(baseline_population.members)
@@ -182,16 +232,15 @@ if any(result.registry_record()["stage"] != "signal" for result in baseline_resu
     raise RuntimeError("the allocation input contains a non-baseline backtest")
 
 # %% [markdown]
-# ## Advance configurations without dropping checkpoints
+# ## Advance one checkpoint and mapping per configuration
 #
-# Production ranks the complete baseline results for each label. Once the first result for a model
-# configuration appears, that configuration occupies one of the declared slots. The catalog filter
-# then restores every checkpoint for each selected configuration, rather than advancing only the
-# checkpoint that happened to rank highest.
+# Production ranks the complete baseline results for each label. The first result for a model
+# configuration is its best checkpoint and signal mapping by validation Sharpe. That result occupies
+# one declared slot and is the only member of the configuration that advances.
 
 # %% tags=["results"]
 top_n = TOP_N_CONFIGS or get_top_n_predictions(CASE_STUDY_ID, "allocation")
-selected_configs: dict[str, set[tuple[str, str]]] = {}
+selected_baselines: dict[str, list[BacktestResult]] = {}
 candidate_sets: dict[str, CandidateSet] = {}
 
 # The labels come from the baselines this run resolved, not from this notebook's own
@@ -211,7 +260,10 @@ if not POPULATION_NAME and baseline_labels != sorted(catalog.get_column("label")
 for label in baseline_labels:
     label_results = [result for result in baseline_results if _result_config(result)[0] == label]
     if include_preview:
-        ordered_configs = sorted({_result_config(result)[1:] for result in label_results})
+        ranked_results = sorted(
+            label_results,
+            key=lambda result: (*_result_config(result)[1:], result.hash),
+        )
     else:
         candidates = CandidateSet.create(
             study,
@@ -221,24 +273,14 @@ for label in baseline_labels:
             members=label_results,
         )
         candidate_sets[label] = candidates
-        ordered_configs = []
-        for result in candidates.ranked_validation_sharpe():
-            if not isinstance(result, BacktestResult):
-                raise TypeError("validation-Sharpe ranking returned a non-backtest result")
-            config = _result_config(result)[1:]
-            if config not in ordered_configs:
-                ordered_configs.append(config)
-    selected_configs[label] = set(ordered_configs[:top_n])
-    if len(selected_configs[label]) != min(top_n, len(set(ordered_configs))):
+        ranked_results = list(candidates.ranked_validation_sharpe())
+        if any(not isinstance(result, BacktestResult) for result in ranked_results):
+            raise TypeError("validation-Sharpe ranking returned a non-backtest result")
+    selected_baselines[label] = _select_configuration_survivors(ranked_results, top_n)
+    available_configs = {_result_config(result)[1:] for result in label_results}
+    if len(selected_baselines[label]) != min(top_n, len(available_configs)):
         raise RuntimeError(f"configuration selection for {label} is incomplete")
 
-# Restoring every checkpoint of a selected configuration is the intended behaviour, but the
-# checkpoints have to come from what the upstream run actually backtested. Taking them from
-# this notebook's own catalog restores predictions 13_backtest never produced a baseline for,
-# and the equal-weight sibling check below then finds none - so a narrowed upstream fails
-# here rather than at the point the mismatch was introduced. In a full canonical run the two
-# sets are identical and this filter removes nothing, which is why the unscoped case asserts
-# it instead of trusting it.
 baseline_predictions = {result.registry_record()["prediction_hash"] for result in baseline_results}
 if not POPULATION_NAME:
     missing = set(catalog.get_column("prediction_hash")) - baseline_predictions
@@ -247,20 +289,16 @@ if not POPULATION_NAME:
             "the canonical baseline population does not cover every prediction in the "
             f"catalog: {len(missing)} uncovered"
         )
-covered = catalog.filter(pl.col("prediction_hash").is_in(list(baseline_predictions)))
-
 selected_rows = []
-for label, configs in selected_configs.items():
-    label_rows = covered.filter(pl.col("label") == label)
-    for family, config_name in sorted(configs):
-        members = label_rows.filter(
-            (pl.col("family") == family) & (pl.col("config_name") == config_name)
-        )
-        if members.is_empty():
+for label, survivors in selected_baselines.items():
+    for baseline in survivors:
+        prediction_hash = baseline.registry_record()["prediction_hash"]
+        member = catalog.filter(pl.col("prediction_hash") == prediction_hash)
+        if member.height != 1:
             raise RuntimeError(
-                f"selected configuration disappeared: {label}/{family}/{config_name}"
+                f"selected baseline {baseline.hash} resolved to {member.height} prediction rows"
             )
-        selected_rows.append(members)
+        selected_rows.append(member.with_columns(pl.lit(_baseline_top_k(baseline)).alias("top_k")))
 
 selected = pl.concat(selected_rows).unique(subset=["prediction_hash"], maintain_order=True)
 if selected.get_column("prediction_hash").n_unique() != selected.height:
@@ -271,15 +309,16 @@ selected.select(
     "config_name",
     "checkpoint_kind",
     "checkpoint_value",
+    "top_k",
     "prediction_hash",
 ).sort("label", "family", "config_name", "checkpoint_value")
 
 # %% [markdown]
 # ## Plan and freeze the allocation grid
 #
-# Each request changes only the allocator and `top_k`. The complete selected prediction rows pass
-# directly to the shared backtest boundary. Production freezes every expected identity before the
-# first allocation result is written.
+# Each request changes only the allocator. The selected prediction and `top_k` mapping pass directly
+# from the winning baseline result to the shared backtest boundary. Production freezes every
+# expected identity before the first allocation result is written.
 
 # %%
 allocators = get_allocators(CASE_STUDY_ID)
@@ -287,27 +326,25 @@ if not allocators or any(config.get("method") == "equal_weight" for config in al
     raise RuntimeError("allocation methods must be non-empty and exclude the equal-weight baseline")
 
 jobs: list[dict[str, Any]] = []
-for label in sorted(selected.get_column("label").unique()):
-    rows = selected.filter(pl.col("label") == label)
-    top_k_values = [TOP_K] if TOP_K else get_top_k_values_for(CASE_STUDY_ID, label, n_assets)
-    oversized = sorted({value for value in top_k_values if value > max_sleeve})
-    if oversized:
+if TOP_K and selected.filter(pl.col("top_k") != TOP_K).height:
+    raise RuntimeError("TOP_K differs from the mapping selected by the upstream baseline")
+for label, top_k in selected.select("label", "top_k").unique().sort("label", "top_k").iter_rows():
+    rows = selected.filter((pl.col("label") == label) & (pl.col("top_k") == top_k)).drop("top_k")
+    if top_k > max_sleeve:
         raise RuntimeError(
-            f"top_k {oversized} exceed the {max_sleeve}-pair sleeve ceiling for a long-short "
-            f"account on {n_assets} pairs; the engine clamps them to {max_sleeve}, so each would "
-            "register a duplicate weight series under a distinct identity"
+            f"selected top_k {top_k} exceeds the {max_sleeve}-pair sleeve ceiling for a "
+            f"long-short account on {n_assets} pairs"
         )
-    for top_k in top_k_values:
-        for allocation in allocators:
-            jobs.append(
-                {
-                    "label": label,
-                    "top_k": top_k,
-                    "allocation": allocation,
-                    "predictions": rows,
-                    "expected": rows.height,
-                }
-            )
+    for allocation in allocators:
+        jobs.append(
+            {
+                "label": label,
+                "top_k": top_k,
+                "allocation": allocation,
+                "predictions": rows,
+                "expected": rows.height,
+            }
+        )
 
 pl.DataFrame(
     [
@@ -339,18 +376,37 @@ if len(planned_hashes) != len(set(planned_hashes)):
 
 allocation_population = None
 if not include_preview:
+    allocations_name = research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME)
     allocation_population = OfficialPopulation.create(
         study,
-        name=research_name(CASE_STUDY_ID, "allocation-backtests", scope=POPULATION_NAME),
+        name=allocations_name,
         member_kind="backtest",
         members=planned_hashes,
+        supersedes=population_supersedes(
+            study, name=allocations_name, declared=SUPERSEDES_ALLOCATION_BACKTESTS
+        ),
     )
     print(f"Frozen expected allocation population: {allocation_population.hash}")
 
 # %% [markdown]
-# ## Execute the frozen allocation grid
+# ## Execute the frozen allocation grid, then validate what was frozen
+#
+# The population is validated in the cell that fills it, because the two are one act: the expected
+# set was written down before the first member ran, and `require_complete` is what turns that
+# declaration into a published result.
 
 # %% tags=["results"]
+# A sweep that recomputes everything and a sweep that recomputes nothing print the same summary
+# unless the two are counted apart. `run_backtests` serves an identity that is already registered
+# and complete instead of running it again, which is what makes a re-run affordable and what makes
+# a bare member count say nothing about whether this run did any work.
+#
+# The runner already knows which it did and says so per member in `execution.diagnostics`, as
+# `status` "reused" or "completed". Comparing against the registered hashes instead would be
+# wrong in both directions: a registered-but-partial backtest is in that set, gets recomputed and
+# would report as reused, and a preview re-run reads a table that excludes preview rows by default
+# and would report every reused member as computed.
+run_status: list[str] = []
 allocation_results = []
 for job in jobs:
     execution = run_backtests(
@@ -363,6 +419,7 @@ for job in jobs:
     if len(execution.results) != job["expected"]:
         raise RuntimeError("an allocation member disappeared during execution")
     allocation_results.extend(execution.results)
+    run_status.extend(entry["status"] for entry in execution.diagnostics)
 
 expected_count = sum(job["expected"] for job in jobs)
 if len(allocation_results) != expected_count:
@@ -376,6 +433,12 @@ if any(
     for result in allocation_results
 ):
     raise RuntimeError("the allocation population is incomplete or misclassified")
+
+served = run_status.count("reused")
+print(
+    f"Allocation backtests: {len(allocation_results) - served} computed, {served} served from the registry, "
+    f"{len(allocation_results)} in the population"
+)
 
 
 def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -453,10 +516,6 @@ for result in allocation_results:
             )
         )
 
-# %% [markdown]
-# ## Validate the frozen allocation population
-
-# %% tags=["results"]
 if not include_preview:
     if allocation_population is None:
         raise RuntimeError("the canonical allocation population was not frozen before execution")
@@ -469,5 +528,5 @@ else:
 # ## Key takeaways
 #
 # - Validation Sharpe ranks an immutable equal-weight candidate set for each label.
-# - Configuration selection retains every complete checkpoint for each advancing configuration.
+# - Each advancing configuration retains its best baseline checkpoint and signal mapping.
 # - Preview reductions exercise the same backtest engine without entering production populations.

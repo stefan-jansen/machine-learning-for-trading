@@ -60,9 +60,11 @@
 """CME Futures: Temporal Feature Engineering."""
 
 import multiprocessing
+import os
 import re
 import time
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 
 # Pin the start method to fork before any pool-using import: Python 3.14 defaults to
@@ -600,73 +602,132 @@ def _date_lit(value) -> pl.Expr:
 
 
 # %% [markdown]
-# One period: the products with enough history to model, the walk length they share, and
-# the forecasts the library returns for every product-date inside the window. The walk
-# has to be the same length for every series in one call, so the shortest one sets it:
-# each product walks over its final (shortest length minus burn-in) sessions, and a
-# product with more history in this period loses the excess off the front. What that
-# costs is measured two cells below.
+# **One walk per product over the whole history, not one per period.** The forecasts are then
+# replicated onto every period, which is what section C.2 already does with the spectral
+# features.
+#
+# The periods do not bound this model. Section A gives two honest ways to keep a fitted
+# feature causal, and ARIMA uses the second: it re-estimates every `ARIMA_REFIT_FREQ` sessions
+# on everything up to that point, so a forecast for a session is made by weights fitted only on
+# earlier ones. That holds whether or not a period boundary happens to sit nearby. It is the
+# hidden Markov model in C.3 that needs the window, because it fits once per period and then
+# holds its parameters fixed.
+#
+# Cutting the walk per period bought nothing and cost two things. `cross_validation` takes one
+# `n_windows` for every series in a call and validates it against the shortest - hand it a
+# longer walk and it raises `The following series are too short for the cross validation
+# settings` rather than returning what it can. So one call per period meant one walk length per
+# period, and RTY, listed 2017-07-10, was the shortest eligible series in all five. Every other
+# product was truncated to RTY's length, the forecasts landed at the end of each window, and
+# every period's ARIMA began in 2018 whatever its window was - including the period that opens
+# in 2015. The last period's training rows ended up 99.87% empty of a feature its fits declared
+# they were using. The second cost is quieter: the burn-in year was paid once per period rather
+# than once.
+#
+# Carry is not thin early. It is 99.3% non-null across all thirty products back to 2011; the gap
+# was the call shape.
+#
+# One walk per product is also **cheaper than what it replaces**, which is not the usual
+# direction for a correctness fix. The five periods overlap - the most recent spans 2015 to
+# 2023, the oldest 2011 to 2019 - so the per-period design forecast the same product-dates up to
+# five times and kept one. On this panel: 86,204 forecasts against 123,870.
 
 
 # %%
-def _arima_fold(split: dict, fold_idx: int) -> pl.DataFrame | None:
-    """One-step walk-forward ARIMA forecasts for every eligible product in one fold."""
-    print(
-        f"\nFold {fold_idx}: train {_as_date(split['train_start'])}→"
-        f"{_as_date(split['train_end'])}, test {_as_date(split['val_start'])}→"
-        f"{_as_date(split['val_end'])}",
-        flush=True,
+def _arima_one_product(payload: tuple[str, int, pd.DataFrame]) -> pd.DataFrame:
+    """Walk one product. Module level and picklable, because it runs in a worker process."""
+    _product, n_windows, series = payload
+    return StatsForecast(models=[AutoARIMA(season_length=1)], freq="B", n_jobs=1).cross_validation(
+        df=pd.DataFrame(
+            {
+                "unique_id": series["product"],
+                "ds": pd.to_datetime(series["timestamp"]),
+                "y": series["carry_zscore"].to_numpy(),
+            }
+        ),
+        h=1,
+        step_size=1,
+        n_windows=n_windows,
+        refit=ARIMA_REFIT_FREQ,
     )
-    in_window = (
+
+
+def _arima_walk() -> pl.DataFrame:
+    """One-step walk-forward ARIMA forecasts per product, over the whole development history."""
+    # The cut is on the INPUT, and that is the whole holdout guarantee for this model.
+    # `cross_validation` refits on everything up to each step, so a holdout-dated row left in
+    # here would enter weights used to forecast pre-holdout sessions. No assertion over the
+    # output frame can see that - the weights are not in the frame - and the existing
+    # `max(timestamp) < HOLDOUT_START` check below would keep passing while it happened.
+    history = (
         carry.filter(pl.col("product").is_in(ARIMA_PRODUCTS))
-        .filter(
-            (pl.col("timestamp") >= _date_lit(split["train_start"]))
-            & (pl.col("timestamp") <= _date_lit(split["val_end"]))
-        )
+        .filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
         .drop_nulls(subset=["carry_zscore"])
         .sort(["product", "timestamp"])
     )
-    series_lengths = in_window.group_by("product").len().sort("len")
-    eligible = series_lengths.filter(pl.col("len") >= ARIMA_BURNIN + 30)["product"].to_list()
-    if not eligible:
-        print("  no eligible products for fold")
-        return None
-    in_window = in_window.filter(pl.col("product").is_in(eligible))
+    series_lengths = history.group_by("product").len().sort("len")
+    required = ARIMA_BURNIN + 30
+    eligible_lengths = series_lengths.filter(pl.col("len") >= required)
+    excluded = series_lengths.filter(pl.col("len") < required)
+    if excluded.height:
+        # Named, not counted. A product missing from this feature changes what it covers, and
+        # until 2026-08-23 the exclusion happened silently.
+        listed = ", ".join(f"{row[0]} ({row[1]})" for row in excluded.iter_rows())
+        print(f"  excluded, under {required} carry sessions before the holdout: {listed}")
+    if not eligible_lengths.height:
+        print("  no eligible products")
+        return pl.DataFrame(
+            schema={
+                "timestamp": pl.Date,
+                "product": pl.String,
+                "arima_carry_forecast": pl.Float64,
+                "arima_carry_residual": pl.Float64,
+            }
+        )
+    history = history.filter(pl.col("product").is_in(eligible_lengths["product"].to_list()))
 
-    # The shortest eligible series sets the walk length, because it has to be uniform.
-    min_len = int(series_lengths.filter(pl.col("product").is_in(eligible))["len"].min())
-    n_windows = min_len - ARIMA_BURNIN
-    fold_input = pd.DataFrame(
-        {
-            "unique_id": in_window["product"].to_list(),
-            "ds": pd.to_datetime(in_window["timestamp"].to_list()),
-            "y": in_window["carry_zscore"].to_numpy(),
-        }
+    # One call per product, spread across processes. `n_jobs=-1` inside a single call
+    # parallelises over the series IN that call, so with one series per call it buys nothing -
+    # the walks have to be spread here or the notebook runs thirty ARIMA searches on one core.
+    # Measured: sequential was still going after 49 minutes where the whole notebook used to
+    # take 19. A fork context is named rather than left to the default, because Python 3.14
+    # defaults to forkserver, which re-imports the parent module and cannot reach a function
+    # defined in a notebook kernel.
+    jobs = [
+        (product, int(length) - ARIMA_BURNIN)
+        for product, length in eligible_lengths.sort("product").iter_rows()
+    ]
+    payloads = [
+        (
+            product,
+            n_windows,
+            history.filter(pl.col("product") == product)
+            .select(["product", "timestamp", "carry_zscore"])
+            .to_pandas(),
+        )
+        for product, n_windows in jobs
+    ]
+    workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
+    print(f"  fitting {len(payloads)} products across {workers} processes", flush=True)
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("fork")
+    ) as pool:
+        frames = list(pool.map(_arima_one_product, payloads))
+    walks = jobs
+    shortest = min(walks, key=lambda item: item[1])
+    longest = max(walks, key=lambda item: item[1])
+    print(
+        f"  {len(walks)} products fitted, {sum(w for _, w in walks):,} forecasts; "
+        f"walk lengths {shortest[1]:,} ({shortest[0]}) to {longest[1]:,} ({longest[0]})",
+        flush=True,
     )
-    cv = StatsForecast(models=[AutoARIMA(season_length=1)], freq="B", n_jobs=-1).cross_validation(
-        df=fold_input, h=1, step_size=1, n_windows=n_windows, refit=ARIMA_REFIT_FREQ
-    )
-    print(f"  {len(eligible)} products fitted, n_windows={n_windows}", flush=True)
-    return _fold_forecasts(in_window, cv, fold_idx)
-
-
-# %% [markdown]
-# The library returns one row per forecast and none for the burn-in head, so the
-# forecasts are joined back onto the period's own rows and the head stays empty. An empty
-# cell here means no forecast could have been made, which is a different thing from a
-# forecast of zero, and the models downstream have to be able to tell them apart.
-
-
-# %%
-def _fold_forecasts(in_window: pl.DataFrame, cv: pd.DataFrame, fold_idx: int) -> pl.DataFrame:
-    """Join one fold's forecasts back onto its rows and name the two features."""
     cv_pl = (
-        pl.from_pandas(cv)
+        pl.from_pandas(pd.concat(frames, ignore_index=True))
         .rename({"unique_id": "product", "ds": "timestamp"})
         .with_columns(pl.col("timestamp").cast(pl.Date))
     )
     return (
-        in_window.select(["product", "timestamp"])
+        history.select(["product", "timestamp"])
         .join(
             cv_pl.select(["product", "timestamp", "AutoARIMA", "y"]),
             on=["product", "timestamp"],
@@ -675,22 +736,27 @@ def _fold_forecasts(in_window: pl.DataFrame, cv: pd.DataFrame, fold_idx: int) ->
         .with_columns(
             arima_carry_forecast=pl.col("AutoARIMA"),
             arima_carry_residual=pl.col("y") - pl.col("AutoARIMA"),
-            fold=pl.lit(fold_idx, dtype=pl.Int64),
         )
-        .select(["timestamp", "product", "arima_carry_forecast", "arima_carry_residual", "fold"])
+        .select(["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"])
     )
 
 
 # %% [markdown]
-# Every period, in order.
+# One walk, then one copy per period. The period column exists so this artifact joins the
+# fold-keyed panel the model notebooks read; for this feature every period carries the same
+# value on the same date, which is the same shape `fft_pl` takes in C.2.
 
 # %%
 arima_t0 = time.time()
-arima_results = [
-    fold_df
-    for fold_df in (_arima_fold(split, split["fold"]) for split in splits)
-    if fold_df is not None
-]
+arima_walk = _arima_walk()
+arima_results = (
+    [
+        arima_walk.with_columns(pl.lit(split["fold"], dtype=pl.Int64).alias("fold"))
+        for split in splits
+    ]
+    if arima_walk.height
+    else []
+)
 arima_elapsed = time.time() - arima_t0
 
 # %%
@@ -716,61 +782,73 @@ else:
     print("No ARIMA results generated")
 
 # %% [markdown]
-# **Check what the emitted rows are dated.** The next cell asserts that every row a
-# period contributes falls inside that period's own span and that no period reaches the
-# holdout.
+# **Check what the emitted rows are dated, and what each period actually receives.**
 #
-# Be clear about what that does and does not establish. It bounds the dates ARIMA speaks
-# for; it does not bound where its weights came from, and no assertion over the output
-# frame could, because the weights are not in the frame. What bounds them is the shape of
-# the call: every refit reads a prefix that ends before the sessions it goes on to
-# forecast, so a weight fitted on a session it then predicts cannot arise. That is a
-# property of `cross_validation` with `h=1`, not something this notebook re-checks - the
-# hidden Markov model in C.3, whose parameters are fixed per period and therefore *are*
-# checkable against a date, is where an assertion of that kind belongs and where one runs.
+# The date check is now one line, because the walk is one series per product rather than five
+# windows: nothing may be dated on or after the holdout. What used to be checked here - that a
+# period's rows sit inside that period's own span - is no longer a property this feature has or
+# should have. Every period carries the same forecast for the same date, so the next cell checks
+# the replication instead: the five copies must agree.
 #
-# It then measures what the shared walk length costs. The walk is as long as the shortest
-# series allows, so a product with more history in this period than that one loses the
-# excess, and the per-period counts printed above shrink as the periods get earlier. The
-# count below says where the loss lands: against the product-sessions each evaluation
-# window actually quotes. That is a coverage question and not a look-ahead question, and
-# it is what separates the ARIMA row in the coverage table in section E - which is taken
-# over the whole panel, most of which no walk ever reaches - from the coverage the models
-# downstream see.
+# What none of this establishes is where the weights came from, and no assertion over the output
+# frame could, because the weights are not in the frame. What bounds them is the shape of the
+# call - every refit reads a prefix ending before the sessions it goes on to forecast - together
+# with the holdout cut being applied to the input in `_arima_walk`. The hidden Markov model in
+# C.3, whose parameters are fixed per period and therefore *are* checkable against a date, is
+# where an assertion of that kind belongs and where one runs.
+#
+# Then the coverage, **in both windows of every period**. Until 2026-08-23 this reported the
+# validation window only, and a model trains on the other one - so the number printed here was
+# healthy on every run while the oldest period's training rows were 99.87% empty of the same
+# feature. A coverage diagnostic that reads the window the model does not fit on is not evidence
+# about the fit. `rules/notebook-standards.md` C16 now requires both, and this cell is what
+# motivated the clause.
 
 # %%
 if len(arima_pl) > 0:
-    for split in splits:
-        rows = arima_pl.filter(pl.col("fold") == split["fold"])
-        if len(rows) == 0:
-            continue
-        assert rows["timestamp"].min() >= _as_date(split["train_start"]), (
-            f"period {split['fold']}: ARIMA row before its own train_start"
-        )
-        assert rows["timestamp"].max() <= _as_date(split["val_end"]), (
-            f"period {split['fold']}: ARIMA row after its own val_end"
-        )
     assert arima_pl["timestamp"].max() < HOLDOUT_START, "ARIMA emitted a holdout-dated row"
-    print(
-        f"Every ARIMA row falls inside its own period, across "
-        f"{arima_pl['fold'].n_unique()} of them; the last date emitted anywhere is "
-        f"{arima_pl['timestamp'].max()}, before the holdout opens on {HOLDOUT_START}."
+    _feature_cols = ["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"]
+    folds_present = sorted(arima_pl["fold"].unique().to_list())
+    reference_fold = folds_present[0]
+    reference = (
+        arima_pl.filter(pl.col("fold") == reference_fold)
+        .select(_feature_cols)
+        .sort(["product", "timestamp"])
     )
-    print("Evaluation product-sessions carrying an ARIMA value, per period:")
+    for fold in folds_present[1:]:
+        other = (
+            arima_pl.filter(pl.col("fold") == fold)
+            .select(_feature_cols)
+            .sort(["product", "timestamp"])
+        )
+        assert other.equals(reference), (
+            f"period {fold} disagrees with period {reference_fold} on a feature that is "
+            "computed once and copied, so the copies have drifted"
+        )
+    print(
+        f"One walk, copied to {len(folds_present)} periods, which agree exactly; the last date "
+        f"emitted anywhere is {arima_pl['timestamp'].max()}, before the holdout opens on "
+        f"{HOLDOUT_START}."
+    )
+    print("Product-sessions carrying an ARIMA value, per period, in each window:")
     for split in splits:
-        _in_val = (pl.col("timestamp") >= _as_date(split["val_start"])) & (
-            pl.col("timestamp") <= _as_date(split["val_end"])
-        )
-        quoted = carry.filter(_in_val).height
-        covered = (
-            arima_pl.filter((pl.col("fold") == split["fold"]) & _in_val)
-            .drop_nulls("arima_carry_forecast")
-            .height
-        )
-        print(
-            f"  period {split['fold']}: {covered:>6,} of {quoted:>6,} quoted "
-            f"({100 * covered / max(quoted, 1):.1f}%)"
-        )
+        for window, start_date, end_date in (
+            ("train", split["train_start"], split["train_end"]),
+            ("valid", split["val_start"], split["val_end"]),
+        ):
+            _in = (pl.col("timestamp") >= _as_date(start_date)) & (
+                pl.col("timestamp") <= _as_date(end_date)
+            )
+            quoted = carry.filter(_in).height
+            covered = (
+                arima_pl.filter((pl.col("fold") == split["fold"]) & _in)
+                .drop_nulls("arima_carry_forecast")
+                .height
+            )
+            print(
+                f"  period {split['fold']} {window}: {covered:>7,} of {quoted:>7,} quoted "
+                f"({100 * covered / max(quoted, 1):5.1f}%)"
+            )
 
 # %% [markdown]
 # ---
