@@ -201,12 +201,22 @@ if _n_cohorts == 0 or "cohort_metrics" in _stale:
     _n_cohorts_before = _n_cohorts
     _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
     _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
-    if _n_cohorts == 0 and _n_cohorts_before > 0:
+    if _n_cohorts == 0:
+        # Backtests are registered - the refusal above guarantees it - so a run that computes
+        # no cohort means the canonical selection matched nothing, or matched too few variants
+        # per group for a cohort to exist. Either way the selection-bias figures have no input,
+        # and rendering them blank reads like an analysis that found nothing rather than one
+        # that was never computed. That is the same reason this notebook refuses an empty
+        # `backtest_runs`, so it refuses here too.
+        _lost = (
+            f" and replaced {_n_cohorts_before} existing rows with none"
+            if _n_cohorts_before > 0
+            else ""
+        )
         raise RuntimeError(
-            f"rebuilding cohort_metrics for {_UNIVERSE_FILTER} produced no cohort and "
-            f"replaced {_n_cohorts_before} existing rows with none. The selection-bias "
-            f"figures below have no input, and the rows they had are gone. Check that "
-            f"{_UNIVERSE_FILTER} matches the backtest runs this case study registered."
+            f"rebuilding cohort_metrics for {_UNIVERSE_FILTER} produced no cohort{_lost}. "
+            f"Check that {_UNIVERSE_FILTER} matches the backtest runs this case study "
+            f"registered, and that the sweep left more than one variant per cohort."
         )
     print(f"populated cohort_metrics: {_n_cohorts} rows")
 else:
