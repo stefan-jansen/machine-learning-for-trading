@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -365,3 +366,60 @@ def strategy_input_counts(case_dir: Path) -> dict[str, int]:
                 db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if table in present else 0
             )
     return counts
+
+
+_DERIVED_TABLE_REFERENCES: dict[str, tuple[str, ...]] = {
+    "cohort_metrics": ("leader_hash",),
+    "backtest_paired_metrics": ("challenger_hash", "benchmark_hash"),
+}
+
+
+def derived_tables_off_canonical_universe(case_dir: Path, universe_filter: str | None) -> set[str]:
+    """Derived tables holding rows that were selected under a different universe.
+
+    A row count answers "has this been populated", which is not the question a rerun needs.
+    ``cohort_metrics`` and ``backtest_paired_metrics`` are written from a *selection*, and a
+    table populated by an earlier run that made a different selection is fully populated and
+    wrong. Nothing in either table records which selection produced it, so it is recovered
+    from what the rows point at: every referenced ``backtest_runs`` row carries its universe in
+    ``spec_json``, and a canonical table cannot reference a run outside the canonical universe.
+
+    Returns the table names to rebuild. An unpinned case study passes ``None`` and gets the
+    empty set, because there is no canonical universe for a row to be outside of.
+    """
+    if universe_filter is None:
+        return set()
+
+    from case_studies.utils.backtest_explorer import _parse_spec
+    from case_studies.utils.backtest_presets import strategy_view
+
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return set()
+
+    stale: set[str] = set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "backtest_runs" not in present:
+            return set()
+        universes = {
+            row[0]: (
+                strategy_view(_parse_spec(row[1]) or {}).get("signal", {}).get("universe_filter")
+                or "full"
+            )
+            for row in db.execute("SELECT backtest_hash, spec_json FROM backtest_runs")
+        }
+        for table, columns in _DERIVED_TABLE_REFERENCES.items():
+            if table not in present:
+                continue
+            for column in columns:
+                referenced = [
+                    row[0]
+                    for row in db.execute(f"SELECT {column} FROM {table}")  # noqa: S608
+                    if row[0] is not None
+                ]
+                if any(universes.get(h, "full") != universe_filter for h in referenced):
+                    stale.add(table)
+    return stale

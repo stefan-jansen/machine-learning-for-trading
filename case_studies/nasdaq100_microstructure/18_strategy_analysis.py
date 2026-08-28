@@ -90,7 +90,11 @@ from case_studies.utils.factor_attribution import (
     plot_rolling_exposures,
     run_factor_regression,
 )
-from case_studies.utils.notebook_contracts import excluded_families, strategy_input_counts
+from case_studies.utils.notebook_contracts import (
+    derived_tables_off_canonical_universe,
+    excluded_families,
+    strategy_input_counts,
+)
 from case_studies.utils.paired_metrics import populate_paired_metrics, rung_for
 from case_studies.utils.registry import (
     load_backtest_fold_metrics,
@@ -178,14 +182,23 @@ _RUNG = rung_for(CASE_STUDY)
 # and `compute_and_register` writes with `replace_all=True` - so a registry with correct cohorts
 # and an empty paired table would have had its cohorts replaced as a side effect of populating
 # the pairs.
-if _n_cohorts == 0:
+# A row count answers "has this been populated", which is not what a rerun needs to know. Both
+# tables are written from a selection, and one populated by an earlier run that selected
+# differently - before this notebook passed the universe filter, say - is fully populated and
+# wrong. Neither table records the selection that produced it, so it is recovered from what the
+# rows point at: a canonical row cannot reference a backtest run outside the canonical universe.
+_stale = derived_tables_off_canonical_universe(CASE_DIR, _UNIVERSE_FILTER)
+for _table in sorted(_stale):
+    print(f"{_table} references runs outside {_UNIVERSE_FILTER}, so it is rebuilt")
+
+if _n_cohorts == 0 or "cohort_metrics" in _stale:
     _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
     _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
     print(f"populated cohort_metrics: {_n_cohorts} rows")
 else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
 
-if _n_pairs == 0:
+if _n_pairs == 0 or "backtest_paired_metrics" in _stale:
     _pairs = populate_paired_metrics(CASE_STUDY, explorer, rung=_RUNG)
     _n_pairs = sum(1 for row in _pairs if "skip" not in row)
     print(f"populated backtest_paired_metrics: {_n_pairs} pairs")
