@@ -130,19 +130,22 @@ declared_labels(study, "latent_factors")
 
 # %% [markdown]
 # `case_studies/config/sae/sae.yaml` declares `n_factors: 5`, `n_epochs: 50` and
-# `checkpoint_interval: 5`, the same three keys with the same meanings as
-# `case_studies/config/cae/cae.yaml`. The epoch schedule really is shared. `n_factors` is not what
-# it appears to be: `run_sae_fold` discards it and `bottleneck_dim` sets the width, which is 96
-# here against the conditional autoencoder's 5 - one of the four differences the section above
-# lists, and the reason the training log's `sae (K=5)` should not be read as a factor count.
+# `checkpoint_interval: 5` - the same three keys `case_studies/config/cae/cae.yaml` declares, and
+# the epoch schedule really is shared. `n_factors` is not: `run_sae_fold` deletes the argument and
+# takes its width from `bottleneck_dim`, which is 96 here against the conditional autoencoder's 5.
+# That is why the training log's `sae (K=5)` should not be read as a factor count.
 #
 # The case study may override any of these under `modeling.latent_factors.model_kwargs` in
 # `config/setup.yaml`, which wins where it is given, and this one declares a `sae` entry: a
-# `batch_size` of 10,000 rows. Without it `SAEConfig.batch_size` is `None`, which the library
-# reads as one batch holding the whole training window - about 250,000 rows here, which does not
-# fit a 24 GB card. `run_cae_fold` has carried the same value as a runner default all along; only
-# the SAE runner never passed one. A reduced run may override any of this again through
-# `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview identity.
+# `batch_size` of 10,000 rows. It names the value the runner would use anyway - `run_sae_fold`
+# carries the same 10,000 as its own default, the value `run_cae_fold` has always had. What
+# declaring it buys is that the number is hashed into the training identity rather than inherited
+# from whichever version of the runner is installed. The value itself is not a choice about
+# gradient estimation: it is batching at all, because `SAEConfig.batch_size` is `None` when
+# nothing passes one and the library reads that as a single batch over the whole training window
+# - about 250,000 rows here, which does not fit a 24 GB card. A reduced run may override any of
+# this again through `PREVIEW_REDUCTIONS`, where the reduction becomes part of the preview
+# identity.
 
 # %%
 configs = load_model_configs(

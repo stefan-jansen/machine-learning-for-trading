@@ -482,9 +482,11 @@ show_plotly_with_alt(
 # shared; the return panel is not, because `prepare_panel_data` fills it from each member's own
 # label, and neither are the dates scored, because a ten-day forward window runs out earlier than
 # a five-day one. `fwd_ret_10d` is the same construction over twice the horizon, and
-# `fwd_ret_risk_adj_5d` is `fwd_ret_5d` divided by a measure of its own dispersion - so a gap
-# between those two rows is a statement about scaling by width, read across samples that differ
-# by however much their scored-date counts differ.
+# `fwd_ret_risk_adj_5d` is `fwd_ret_5d` divided by a measure of its own dispersion. A gap between
+# two of these rows therefore carries the change of target and the change of sample together, and
+# nothing here separates them: scoring the same rows under both targets is what would, and this
+# notebook does not do it. Read the gaps as a ranking of what was fitted, not as a measurement of
+# what scaling by width costs.
 #
 # **PCA cannot see the features this case study is about, and that is what it is for.** No implied
 # volatility, no skew, no term structure, no variance risk premium reaches the decomposition. Read
