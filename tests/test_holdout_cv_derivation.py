@@ -249,3 +249,64 @@ def test_the_lock_refuses_a_holdout_interval_identical_to_the_validation_one() -
 
     with pytest.raises(ValueError, match="explicit, distinct CV interval"):
         _locked_training_spec(validation, unchanged)
+
+
+class _TemporalStub:
+    """The three fields ``_require_holdout_temporal_features`` reads, and nothing else."""
+
+    def __init__(self, artifact_splits: list[dict[str, Any]] | None) -> None:
+        self.temporal_by_fold = {} if artifact_splits is not None else None
+        self.temporal_keys = ("symbol", "timestamp") if artifact_splits is not None else ()
+        self.temporal_feature_names = ("kalman_trend", "arima_forecast") if artifact_splits else ()
+        self.temporal_artifact_splits = artifact_splits or []
+
+
+_VALIDATION_FOLD_0 = {
+    "fold": 0,
+    "train_start": "2010-01-31",
+    "train_end": "2014-12-31",
+    "val_start": "2015-01-31",
+    "val_end": "2015-12-31",
+}
+
+
+def test_a_holdout_fold_colliding_with_a_validation_fold_id_is_refused() -> None:
+    """The silent case: `locked_holdout_split` defaults the fold id to 0, and fold 0 exists.
+
+    The join against fold-scoped temporal features would then succeed against features fitted
+    on validation fold 0's training window, which ends years before the holdout interval
+    starts. Nothing raises, and the holdout number is computed from the wrong feature vintage.
+    This is the failure the check exists for, so the test asserts the refusal names the fold.
+    """
+    from case_studies.utils.linear import _require_holdout_temporal_features
+
+    holdout = dict(_VALIDATION_FOLD_0)
+    holdout.update(
+        train_start="2010-01-31",
+        train_end="2019-12-31",
+        val_start="2020-01-31",
+        val_end="2021-12-31",
+    )
+
+    with pytest.raises(ValueError, match=r"holdout fold 0 .*wrong fold or from none at all"):
+        _require_holdout_temporal_features(_TemporalStub([_VALIDATION_FOLD_0]), holdout)
+
+
+def test_a_holdout_fold_absent_from_the_artifact_is_refused() -> None:
+    """The other direction: a fresh id joins nothing and the model fits on all-null features."""
+    from case_studies.utils.linear import _require_holdout_temporal_features
+
+    holdout = dict(_VALIDATION_FOLD_0, fold=8, val_start="2020-01-31", val_end="2021-12-31")
+
+    with pytest.raises(ValueError, match=r"holdout fold 8 .*carries folds \[0\]"):
+        _require_holdout_temporal_features(_TemporalStub([_VALIDATION_FOLD_0]), holdout)
+
+
+def test_a_case_study_without_fold_scoped_temporal_features_is_not_refused() -> None:
+    """The failure direction of the two above: the check must not block a case study it
+    does not apply to, or it would refuse every holdout rather than the unsafe ones."""
+    from case_studies.utils.linear import _require_holdout_temporal_features
+
+    holdout = dict(_VALIDATION_FOLD_0, fold=8, val_start="2020-01-31", val_end="2021-12-31")
+
+    _require_holdout_temporal_features(_TemporalStub(None), holdout)
