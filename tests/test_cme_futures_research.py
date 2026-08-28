@@ -36,6 +36,7 @@ from case_studies.research import (
     open_study,
     population_supersedes,
 )
+from case_studies.research.contracts import ExecutionTier
 from case_studies.utils.registry.store import _open_registry
 from tests.test_research_contract_catalog import _resolved_spec
 from tests.test_research_registry import _training_spec
@@ -1511,3 +1512,58 @@ def test_preview_prediction_selection_refuses_a_label_it_found_nothing_for(
         research_workflow.preview_prediction_candidates(
             study, labels=("fwd_ret_21d", "fwd_ret_5d"), limit=2
         )
+
+
+def test_wrapper_stamps_the_tier_it_was_opened_for_and_the_notebook_that_opened_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The case study's own `open_study` must stamp what the library `open_study` stamps.
+
+    `research_workflow.open_study` restates the library's construction rather than calling it,
+    and a restatement drifts. It had dropped two fields the library sets at every one of its
+    construction sites.
+
+    `execution_tier` is the one that can publish something wrong. `OfficialPopulation.create`
+    refuses a preview member by reading exactly that field (`research/population.py:90`), and a
+    study built without it reports `canonical` whatever it was opened for - so a preview through
+    this wrapper was refused by nothing. `entry_point` is the column that answers which notebook
+    wrote a training run, and with it dropped every one of cme's 186 rows is NULL (#930).
+
+    Both tiers are asserted because the wrapper constructs them on separate paths, and a fix to
+    one says nothing about the other.
+    """
+    from case_studies.cme_futures import research_workflow
+
+    released = _study(tmp_path / "released")
+
+    release_root = tmp_path / "worktree"
+    case_dir = release_root / "case_studies" / "cme_futures"
+    case_dir.mkdir(parents=True)
+    (release_root / "case_studies" / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "config", target_is_directory=True
+    )
+    (case_dir / "config").symlink_to(
+        REPO_ROOT / "case_studies" / "cme_futures" / "config", target_is_directory=True
+    )
+    for generated in ("features", "labels", "run_log"):
+        target = released.root / generated
+        target.mkdir(exist_ok=True)
+        (case_dir / generated).symlink_to(target, target_is_directory=True)
+
+    monkeypatch.setattr(research_workflow, "REPO_ROOT", release_root)
+
+    preview = research_workflow.open_study(
+        execution_tier="preview",
+        workspace=tmp_path / "preview-workspace",
+        entry_point="09_dl_lstm",
+    )
+    assert preview.execution_tier is ExecutionTier.PREVIEW
+    assert preview.entry_point == "09_dl_lstm"
+
+    canonical = research_workflow.open_study(
+        execution_tier="canonical",
+        workspace=tmp_path / "canonical-workspace",
+        entry_point="08_tabular_dl",
+    )
+    assert canonical.execution_tier is ExecutionTier.CANONICAL
+    assert canonical.entry_point == "08_tabular_dl"
