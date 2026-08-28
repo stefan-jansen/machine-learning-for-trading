@@ -60,12 +60,14 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
+from case_studies.research import open_study, split_retired_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, strategy_view
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.registry import (
     load_existing_backtest_hashes,
+    load_prediction_index,
     read_predictions,
     resolve_best_backtest_runs,
     resolve_best_predictions,
@@ -85,6 +87,11 @@ CASE_STUDY_ID = "etfs"
 LABEL = ""
 MAX_SYMBOLS = 0
 TOP_N_PREDICTIONS: int | None = None
+# Both names stay bound here although nothing below reads them: that is what makes the harness
+# force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
+# branch regenerates in place, which needs symlinks a CI checkout does not have.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
 
 # %% [markdown]
 # ## 1. Which predictions the sweep starts from
@@ -109,6 +116,30 @@ if not LABEL:
 CHECKPOINTS_PER_CONFIG = get_checkpoints_per_config(CASE_STUDY_ID)
 print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}")
 
+# %% [markdown]
+# **The population the ranking runs over.** A model notebook that refits publishes a second
+# generation under the same population name, and the generation it replaced stays in the registry:
+# complete, current under a schema version that has not moved, and carrying whatever backtests the
+# previous sweep registered for it. Ranking over both lets an identity its own publisher has
+# retired take a slot from a live one, which is not a reporting error - the retired row is what
+# every stage after this one then builds on. `split_retired_members` reads the population lineage,
+# and the surviving members are what every reader below is scoped to.
+
+# %%
+LIVE_PREDICTIONS = (
+    split_retired_members(
+        open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
+        load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
+    )
+    .live["prediction_hash"]
+    .to_list()
+)
+if not LIVE_PREDICTIONS:
+    raise RuntimeError(
+        f"no live prediction sets for {CASE_STUDY_ID}/{LABEL}/validation; run 14_backtest first"
+    )
+print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
+
 # %%
 top_preds = resolve_best_predictions(
     CASE_STUDY_ID,
@@ -117,6 +148,7 @@ top_preds = resolve_best_predictions(
     stage="signal",
     top_n=TOP_N_PREDICTIONS,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
+    prediction_hashes=set(LIVE_PREDICTIONS),
 )
 if top_preds.is_empty():
     raise RuntimeError(
@@ -336,7 +368,12 @@ def _strategy_field(spec_json: str, section: str, field: str):
 
 
 specs = resolve_best_backtest_runs(
-    CASE_STUDY_ID, LABEL, split="validation", stage="allocation", top_n=100000
+    CASE_STUDY_ID,
+    LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=100000,
+    prediction_hashes=set(LIVE_PREDICTIONS),
 )
 if specs.is_empty():
     raise RuntimeError("the allocation stage registered no rows for this label")
@@ -354,9 +391,12 @@ allocation_rows = (
     )
     .drop("spec_json", "sharpe")
     .join(
-        explorer.best(stage="allocation", top_n=100000, label=LABEL).select(
-            "backtest_hash", "source", "sharpe"
-        ),
+        explorer.best(
+            stage="allocation",
+            top_n=100000,
+            label=LABEL,
+            prediction_hashes=LIVE_PREDICTIONS,
+        ).select("backtest_hash", "source", "sharpe"),
         on="backtest_hash",
         how="inner",
     )
@@ -398,7 +438,7 @@ print(concentration.pivot(on="allocator", index="top_k", values="avg_sharpe"))
 # ### The leading combinations
 
 # %% tags=["results"]
-explorer.best(stage="allocation", top_n=10, label=LABEL).select(
+explorer.best(stage="allocation", top_n=10, label=LABEL, prediction_hashes=LIVE_PREDICTIONS).select(
     "source", "signal_method", "sharpe", "cagr", "max_drawdown"
 )
 
