@@ -15,6 +15,21 @@ if TYPE_CHECKING:
     from .workspace import Study
 
 
+def _connect(case_dir: Path) -> sqlite3.Connection:
+    """Open one case study's registry for reading, with the timeouts every other reader uses.
+
+    A registry is written by notebooks, backfills and scripts that run at the same time, so a
+    read that takes SQLite's five-second default raises ``database is locked`` under nothing
+    worse than ordinary contention. ``_open_registry`` sets 120s on the driver and 60s
+    server-side for exactly that reason; a read here has the same contention and needs the same
+    patience. It cannot call ``_open_registry`` itself, which runs the schema DDL and would
+    create the tables a clean clone is being asked about.
+    """
+    db = sqlite3.connect(str(case_dir / "run_log" / "registry.db"), timeout=120.0)
+    db.execute("PRAGMA busy_timeout = 60000")
+    return db
+
+
 def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     """Name one published artifact, isolated as a whole chain when a run is narrowed.
 
@@ -209,7 +224,7 @@ class OfficialPopulation:
         supersedes; two of those under a single name means the chain forked and no answer is
         defensible.
         """
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        with _connect(study.root) as db:
             rows = db.execute(
                 "SELECT population_hash, supersedes_hash FROM official_populations "
                 "WHERE name = ? ORDER BY population_hash",
@@ -226,7 +241,7 @@ class OfficialPopulation:
 
     @classmethod
     def open(cls, study: Study, population_hash: str) -> OfficialPopulation:
-        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+        with _connect(study.root) as db:
             row = db.execute(
                 "SELECT name, member_kind, snapshot_json, supersedes_hash "
                 "FROM official_populations WHERE population_hash = ?",
@@ -306,7 +321,17 @@ def population_supersedes(study: Study, *, name: str, declared: str | None) -> s
         return None
     try:
         current = OfficialPopulation.one(study, name=name)
-    except (ValueError, sqlite3.OperationalError, KeyError):
+    except (ValueError, KeyError):
+        # No generation under this name: `one` raises `ValueError` when the query returns no
+        # current snapshot, and `open` raises `KeyError` for a hash the table does not hold.
+        return None
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            # A lock timeout, an I/O error and a half-migrated schema are not evidence that
+            # nothing has been published. Swallowing them withholds the hash, and the notebook
+            # then pays for a full refit before `create` refuses the write for naming no
+            # predecessor. Same rule as `_lineage`.
+            raise
         return None
     return declared if declared in (current.supersedes, current.hash) else None
 
@@ -331,9 +356,8 @@ def _lineage(
     db_path = case_dir / "run_log" / "registry.db"
     if not db_path.exists():
         return [], {}
-    db = sqlite3.connect(str(db_path), timeout=120.0)
+    db = _connect(case_dir)
     try:
-        db.execute("PRAGMA busy_timeout = 60000")
         try:
             rows = db.execute(
                 "SELECT population_hash, name, supersedes_hash FROM official_populations "
