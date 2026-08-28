@@ -301,13 +301,25 @@ def causal_supersedes(
     db_path = study.storage_root(tier) / "run_log" / "registry.db"
     if not db_path.is_file():
         return None
+    # The registry's own timeouts, as `population_supersedes` uses: five seconds is short
+    # enough that ordinary contention with a concurrent writer raises `database is locked`.
+    db = sqlite3.connect(str(db_path), timeout=120.0)
     try:
-        with sqlite3.connect(db_path) as db:
+        db.execute("PRAGMA busy_timeout = 60000")
+        try:
             current = current_causal_identities(db, label=label, tier=tier.value)
-    except sqlite3.OperationalError:
-        # No causal table at all, which is the ordinary state of a reader's clone rather than
-        # the exotic one. Same reasoning as `population_supersedes`.
-        return None
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                # A lock timeout, an I/O error and a half-migrated schema are not evidence that
+                # this registry holds no causal identity. Reading them as a clean clone withholds
+                # the predecessor, and the notebook then pays for the DML fit and every placebo
+                # refit before registration refuses the write for naming none.
+                raise
+            # No causal table at all, which is the ordinary state of a reader's clone rather than
+            # the exotic one. Same reasoning as `population_supersedes`.
+            return None
+    finally:
+        db.close()
     return declared if declared in current else None
 
 
