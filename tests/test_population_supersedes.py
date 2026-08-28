@@ -24,6 +24,7 @@ from case_studies.research import (
     superseded_members_at,
 )
 from case_studies.research import population as population_module
+from case_studies.research.contracts import ExecutionTier
 from case_studies.research.workspace import Study, open_study
 from tests.test_research_workspace import _seed_release
 
@@ -404,6 +405,29 @@ class TestThePreviewTier:
         # environment read: its stamp replaced the preview's, so the preview read as canonical.
         study.activate()
         assert population_supersedes(preview, name=first.name, declared=first.hash) is None
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+    def test_a_study_that_activates_preview_per_run_is_a_preview_while_it_does(
+        self, study: Study
+    ) -> None:
+        """The tier is per activation, not only per open, and both readings must hold.
+
+        `linear`, `gbm`, `tabular_dl`, `deep_learning`, `latent_factors` and `causal` all open
+        one study and then call `study.activate(tier)` with whichever tier the run asked for.
+        Those studies are opened canonical, so a guard reading only the field would say
+        canonical while the run writes into `.preview` - and the population would land in the
+        shared registry, which is the failure this guard exists for.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+
+        study.activate("preview")
+        assert study.execution_tier is ExecutionTier.CANONICAL
+        assert population_supersedes(study, name=first.name, declared=first.hash) is None
+        with pytest.raises(ValueError, match="preview run cannot create an official population"):
+            _publish(study, MEMBERS_TWO)
+
+        study.activate("canonical")
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
     def test_the_refusal_to_create_reads_the_same_signal(

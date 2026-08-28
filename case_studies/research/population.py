@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,8 +79,20 @@ def _preview_is_active(study: Study) -> bool:
     isolated preview was stamped canonical and `_refuse_preview_activation` never ran on the
     one path CI exercises. No amount of scoping an environment read reaches that, because the
     marker it would scope was never written.
+
+    The field is not the whole answer, because `activate` takes a tier per call: every model
+    adapter opens one study and activates whichever tier the run asked for, so a study opened
+    canonical can be writing as a preview right now. The field answers what the study was
+    opened for; the active output root answers what it is writing as. It is a preview if
+    either says so, and the root is compared against this study's own preview directory so a
+    second study's activation cannot answer for this one.
     """
-    return study.execution_tier is ExecutionTier.PREVIEW
+    if study.execution_tier is ExecutionTier.PREVIEW:
+        return True
+    active = os.environ.get("ML4T_OUTPUT_DIR")
+    if not active or study.output_root is None:
+        return False
+    return Path(active).resolve() == (Path(study.output_root) / ".preview").resolve()
 
 
 def _refuse_preview_activation(study: Study) -> None:
