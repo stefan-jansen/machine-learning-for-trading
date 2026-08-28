@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
 
 _LATENT_MODELS = {"cae", "ipca", "pca", "sae", "sdf"}
+LATENT_ADAPTER_VERSION = 1
+LATENT_MODEL_VERSIONS = {model: 1 for model in _LATENT_MODELS}
 _PREVIEW_FIELDS = {
     "folds",
     "max_iter",
@@ -99,26 +101,16 @@ def _package_version(name: str) -> str | None:
         return None
 
 
-def _source_identity() -> dict[str, str]:
-    root = Path(__file__).parent
-    release_root = root.parents[2]
-    files = [
-        root / "adapter.py",
-        root / "cae.py",
-        root / "case_study.py",
-        root / "common.py",
-        root / "cv.py",
-        root / "ipca.py",
-        root / "library_bridge.py",
-        root / "macro_context.py",
-        root / "panel.py",
-        root / "pca.py",
-        root / "sae.py",
-        root / "sdf.py",
-        release_root / "utils" / "artifact_specs.py",
-        release_root / "utils" / "modeling.py",
-    ]
-    return {path.relative_to(release_root).as_posix(): _sha256(path) for path in files}
+def _source_identity(model_name: str) -> dict[str, int | str]:
+    """Return the shared adapter version and the requested factor model version."""
+    try:
+        version = LATENT_MODEL_VERSIONS[model_name]
+    except KeyError as exc:
+        raise ValueError(f"no latent implementation version declared for {model_name!r}") from exc
+    return {
+        "latent_adapter": LATENT_ADAPTER_VERSION,
+        "latent_model": f"{model_name}/v{version}",
+    }
 
 
 def _runtime_identity() -> dict[str, str | None]:
@@ -500,7 +492,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
             "num_threads": num_threads,
         },
         "sampling": {"max_symbols": max_symbols},
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
     }
     if tier is ExecutionTier.PREVIEW:
@@ -573,7 +565,7 @@ def reconstruct_locked_request(
         "feature_artifacts": case.input_data_spec["files"],
         "feature_names": list(case.feature_names),
         "input_data_spec": case.input_data_spec,
-        "source_identity": _source_identity(),
+        "source_identity": _source_identity(model_name),
         "runtime_identity": _runtime_identity(),
         "task": {
             "type": case.task_type,

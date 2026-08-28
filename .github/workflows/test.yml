@@ -966,6 +966,7 @@ jobs:
             tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
+            tests/test_model_source_identity_versions.py \
             tests/test_registry_metrics.py \
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \
@@ -978,6 +979,7 @@ jobs:
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_runtime.py \
+            tests/test_training_identity_migration.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------

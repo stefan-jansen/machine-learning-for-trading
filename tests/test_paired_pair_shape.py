@@ -20,10 +20,10 @@ behaviour at ``_populate_pair``; the last drives ``populate_paired_metrics`` its
 test that passes the flag in by hand cannot see what the producer chooses.
 
 The producer hands the bootstrap an untrimmed pair and reads the sample size back out of it,
-rather than trimming first and passing the result on. The default rule is not idempotent -
-applied twice it slides the start forward again whenever the earlier starter is exactly zero on
-the later starter's first traded session - so a producer that pre-trims silently shortens the
-sample and then reports the longer figure it measured. Both are checked below.
+rather than trimming first and passing the result on, so the size it registers is always the
+size the bootstrap saw. Both rules survive a second application today; the point of the
+pass-through is that neither has to, and the check below is on what the bootstrap received
+rather than on what the producer measured.
 """
 
 from __future__ import annotations
@@ -205,10 +205,10 @@ def test_the_producer_reports_the_sample_the_bootstrap_ran_on(captured: list[dic
 
     The producer measures the trim and then hands `compute_paired_uncertainty` the untrimmed
     pair, which trims it once itself. Trimming first and passing the result on would leave the
-    two figures free to drift apart the moment either rule stops being idempotent, and the
-    registered `n_overlap` would name a sample that was never used. The pair below is the case
-    where that is easiest to get wrong: the challenger starts three sessions late and the
-    baseline is flat on the session it opens.
+    two figures free to drift apart the moment either rule stops surviving a second
+    application, and the registered `n_overlap` would then name a sample that was never used.
+    The pair below is the case where the two rules are closest to parting company: the
+    challenger starts three sessions late and the baseline is flat on the session it opens.
     """
     rng = np.random.default_rng(11)
     baseline = list(rng.normal(0.0005, 0.01, size=30))
