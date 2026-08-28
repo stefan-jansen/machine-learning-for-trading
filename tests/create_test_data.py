@@ -522,10 +522,18 @@ def build_sp500_options(source: Path, output: Path) -> list[Path]:
     # option analytics case study is bounded by it. A fixture that gives two
     # tickers one sec_id pools two companies inside a window that is supposed to
     # sit in one; the previous build gave AMZN, GOOG and GOOGL sec_id 0.
-    duplicated = bars.filter(pl.struct(["sec_id", "timestamp"]).is_duplicated())
-    if duplicated.height:
-        collisions = duplicated.group_by("sec_id").agg(pl.col("symbol").unique())
-        raise ValueError(f"sec_id does not identify a price series: {collisions}")
+    # Checked as "one sec_id, one symbol", not as "no two rows share a (sec_id,
+    # timestamp)": two tickers whose histories do not overlap can share an id and
+    # collide on neither key while still pooling two companies inside one window.
+    # The converse is allowed and occurs - DIS carries two sec_ids here, which is a
+    # security change and is what the id exists to express.
+    collisions = (
+        bars.group_by("sec_id")
+        .agg(pl.col("symbol").unique().alias("symbols"))
+        .filter(pl.col("symbols").list.len() > 1)
+    )
+    if collisions.height:
+        raise ValueError(f"sec_id does not identify a price series: {collisions.to_dicts()}")
     bars.write_parquet(output / SP500_BARS)
     written.append(output / SP500_BARS)
     print(
@@ -577,11 +585,27 @@ def build_sp500_options(source: Path, output: Path) -> list[Path]:
         .collect()
         .sort("date", "symbol", "expiration", "call_put", "strike")
     )
-    # An underlying the panel trades and the chain cannot price yields a null
-    # premium for every one of its rows, which is what the 22-versus-8 split did.
-    priced = set(chain["symbol"].unique().to_list())
-    if missing := sorted(set(straddles["symbol"].unique().to_list()) - priced):
-        raise ValueError(f"straddle panel names underlyings the raw chain cannot price: {missing}")
+    # Checked per contract and per leg, not per underlying. `_label_artifacts` joins
+    # on the exact (symbol, strike, expiration) key and reads a call and a put, so a
+    # symbol that keeps one contract in the chain while losing another still yields a
+    # null premium on every row of the one it lost - and a symbol-level check passes.
+    # The 22-versus-8 split this replaces was only the coarsest form of that.
+    uncovered = contracts.join(chain.select(_CONTRACT_KEYS).unique(), on=_CONTRACT_KEYS, how="anti")
+    if uncovered.height:
+        raise ValueError(
+            f"{uncovered.height} of {contracts.height} contracts the straddle panel "
+            f"selects have no row in the raw chain, e.g. {uncovered.head(3).to_dicts()}"
+        )
+    one_legged = (
+        chain.group_by(_CONTRACT_KEYS)
+        .agg(pl.col("call_put").n_unique().alias("legs"))
+        .filter(pl.col("legs") < 2)
+    )
+    if one_legged.height:
+        raise ValueError(
+            f"{one_legged.height} selected contracts carry only one leg in the raw "
+            f"chain, e.g. {one_legged.head(3).to_dicts()}"
+        )
 
     raw_dir = output / SP500_RAW_CHAIN
     raw_dir.mkdir(parents=True, exist_ok=True)
