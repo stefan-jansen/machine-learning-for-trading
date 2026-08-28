@@ -290,6 +290,19 @@ for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
     try:
         _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
     except (ValueError, FileNotFoundError) as _exc:
+        # Failing to resolve the declaration is not the same as there being nothing to check,
+        # and answering both with a printed note turns a broken lineage into an unchecked
+        # family: its rows still reach every comparison below, now with nothing saying they
+        # were the ones declared. Tolerated only where the family has produced no rows at all.
+        _produced = _catalog.filter(pl.col("family") == _family).height
+        if _produced:
+            msg = (
+                f"{_family} has {_produced} registered prediction sets but its declared "
+                f"population {_name} does not resolve ({_exc}). Comparing them would report a "
+                "family no declaration covers. Republish the population, or name the one in "
+                "force."
+            )
+            raise RuntimeError(msg) from _exc
         print(f"no current official population for {_family} ({_name}): {_exc}")
 
 # A population is declared before anything is fitted; degeneracy is only visible afterwards.

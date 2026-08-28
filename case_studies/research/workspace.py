@@ -381,6 +381,17 @@ class Study:
         return BacktestCatalog(self)
 
     @property
+    def release_root_is_immutable(self) -> bool:
+        """Whether the released case directory is guaranteed not to change while this is open.
+
+        A released root is a checkout, so a reader may tell SQLite the file is immutable and
+        skip locking. A `Study.at` root is whatever directory the caller named and can still be
+        written - so that promise would be false, and a read under it can miss rows committed
+        after the study was constructed.
+        """
+        return self.release_case_dir is None
+
+    @property
     def release_case_root(self) -> Path:
         if self.release_case_dir is not None:
             return self.release_case_dir
