@@ -693,9 +693,10 @@ if fold_ic.height > 0:
 # With two folds, and the highest-IC point estimates compressed close to zero (§3),
 # the box plots are minimally informative -
 # each "distribution" is two dots, and the inter-family overlap is
-# almost complete. The four positive highest-IC configurations
-# (`tabm_s`, SDF, NLinear, and `default_huber`) cluster together; the
-# ridge_a100.0 baseline sits below them. None of the families has
+# almost complete. Four of the five family leaders are positive and cluster
+# together (`tabm_m` at 0.0155, `pca` at 0.0099, `lstm_h64` at 0.0066 and
+# `leaves_7_mse` at 0.0050); the linear leader `enet_f0.08` sits below them
+# at -0.0022. None of the families has
 # established time-series robustness in the formal sense on this
 # label, and the daily-pooled HAC CIs (§3) - which use the full
 # panel rather than the 2 fold-aggregates - are the binding
@@ -746,9 +747,11 @@ if bucket_results:
 
 # %% [markdown]
 # The decile plot is read alongside the 6-20 bps round-trip cost range.
-# TabM produces a 44 bps top-minus-bottom spread. NLinear and linear reach
-# 11 and 8 bps, while SDF and GBM are approximately flat at -3 and -1 bps
-# despite positive mean IC. With only two validation
+# TabM produces a 27 bps top-minus-bottom spread. The LSTM and PCA reach
+# 21 and 14 bps, linear 8, and GBM is approximately flat at -2 bps despite
+# a positive mean IC. Ordering by spread is not the ordering by IC: the
+# LSTM ranks third on IC and second here, which is what a decile spread
+# measures that a rank correlation does not. With only two validation
 # folds, these gross spreads are diagnostics rather than trading claims.
 # They reinforce the Section 3 result that the primary-label evidence is
 # weak and sensitive to the representation used.
@@ -983,15 +986,18 @@ if gbm_importance is not None and gbm_importance.height > 0:
     print(f"Equity features in top {TOP_N_FEATURES}: {len(eq_in_top)} - {eq_in_top}")
 
 # %% [markdown]
-# **Equity features outnumber option-derived features.** Five of the top
-# 15 are option-derived: the near-ATM term slope plus four IV
-# level or momentum features. The remaining ten include price momentum,
-# realized volatility, Garman-Klass volatility, and realized skew.
+# **Equity features hold a narrow majority of the top slots.** Eight of the top
+# 15 are equity-side and seven are option-derived: five IV levels across the
+# 7, 30 and 90-day tenors and the 25-delta put and call wings, the 252-day
+# z-score of 30-day ATM IV, and the ATM term ratio. The eight equity features
+# are realized volatility at 20 and 63 days, Garman-Klass volatility, and
+# momentum at 63, 126 and 252 days plus its risk-adjusted and skip-recent
+# variants.
 #
-# The dominant equity-side features include **rv_63** (63-day realized
-# volatility), `gk_vol_21` (Garman-Klass volatility), and realized skew.
-# The near- and far-ATM term slopes and momentum at 21, 63, and 126 days
-# also appear.
+# Only two features hold a top-5 slot in at least three quarters of folds:
+# `iv_30_put_25d` and `rv_63`. With two folds that is a weak statement about
+# persistence, and it is the reason the ranking below is read as breadth
+# rather than as a stable ordering.
 #
 # The feature importance pattern tells a nuanced story:
 #
@@ -999,21 +1005,22 @@ if gbm_importance is not None and gbm_importance.height > 0:
 #    volatility (equity) and implied volatility (option) are the
 #    strongest individual predictors. The signal is fundamentally
 #    about volatility regime positioning.
-# 2. **Option features add breadth**: five of 15 slots show that the
+# 2. **Option features add breadth**: seven of 15 slots show that the
 #    option surface participates in the forecast, but this importance
 #    ranking is not an ablation and does not isolate incremental value.
 # 3. **The IV-RV spread is absent**: ivrv_spread does not rank in the
 #    top 15, despite being the theoretically most interesting option
 #    feature. This may reflect high noise at the individual stock level.
-# 4. **Momentum features are secondary**: mom_21d and mom_skip_recent
-#    appear but do not dominate, suggesting that pure price momentum
+# 4. **Momentum features are secondary**: momentum at 63, 126 and 252 days
+#    and `mom_skip_recent` all appear but none reaches the top of the
+#    ranking, suggesting that pure price momentum
 #    is less important than volatility regime for weekly stock selection
 #    in S&P 500.
 #
 # The feature-level view shows why joint equity-option structure remains
 # worth testing. It does not explain family superiority on the primary
-# label: SDF is the latent-factor leader there, and all family-leader CIs
-# still include zero.
+# label: PCA is the latent-factor leader there, and every family-leader CI
+# on this label still includes zero.
 
 # %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes
