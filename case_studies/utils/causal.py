@@ -1595,6 +1595,7 @@ def run_resolved_causal_request(
 
     from case_studies.research.causal import CausalResult
     from case_studies.utils.registry.registration import (
+        check_causal_supersedes,
         declare_causal_supersedes,
     )
     from case_studies.utils.registry.registration import register_causal_run as register_record
@@ -1631,6 +1632,19 @@ def run_resolved_causal_request(
             )
         return cached
 
+    # Before the fit, not after it. The registry can already hold a current identity for
+    # this label that this run does not retire - the ordinary state whenever this module
+    # has been edited, since the spec carries a hash of the whole file - and the write
+    # refuses that. Asking now costs one read and names the hash to declare; asking at
+    # the write costs the fit and every placebo refit first. See #953.
+    check_causal_supersedes(
+        study.case_study,
+        causal_hash,
+        label=context.outcome_col,
+        tier=str(spec["execution_tier"]),
+        supersedes_hash=supersedes,
+        case_dir=study.storage_root(spec["execution_tier"]),
+    )
     nuisance_y = HistGradientBoostingRegressor(**context.nuisance_params)
     nuisance_t = HistGradientBoostingRegressor(**context.nuisance_params)
     thread_limit = int(
