@@ -50,7 +50,6 @@
 
 import hashlib
 import inspect
-import json
 import warnings
 from importlib.metadata import version
 
@@ -79,6 +78,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from utils.cv_splits import generate_cv_splits
+from utils.modeling import array_sha256, canonical_sha256, file_sha256
 from utils.paths import display_path, get_case_study_dir, get_chapter_dir, get_output_dir
 from utils.reproducibility import set_global_seeds
 from utils.style import COLORS, show_with_alt
@@ -361,39 +361,13 @@ def cross_validate_logistic(
 
 
 # %% [markdown] tags=[]
-# A content hash makes the cache dependency explicit and portable across machines.
+# The three digests the contract is built from are shared with the other notebooks
+# that cache a fit, in `utils.modeling`: a content hash of each input file, an
+# array hash that also covers filtering, symbol limits, row order, feature order
+# and cleaning semantics, and a canonical hash of the nested contract itself.
 
 
 # %% tags=[]
-def file_sha256(path) -> str:
-    """Return the SHA-256 digest for an input artifact."""
-    with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
-
-
-# %% [markdown] tags=[]
-# Array hashes cover filtering, symbol limits, row order, feature order, and cleaning
-# semantics after the two source files have been joined.
-
-
-# %% tags=[]
-def array_sha256(array: np.ndarray) -> str:
-    """Hash array shape, dtype, and contiguous values."""
-    contiguous = np.ascontiguousarray(array)
-    digest = hashlib.sha256()
-    digest.update(str(contiguous.dtype).encode())
-    digest.update(repr(contiguous.shape).encode())
-    digest.update(contiguous.tobytes())
-    return digest.hexdigest()
-
-
-# %% tags=[]
-def canonical_sha256(payload: dict) -> str:
-    """Hash a nested contract with stable key ordering and date serialization."""
-    serialized = json.dumps(payload, sort_keys=True, default=str).encode()
-    return hashlib.sha256(serialized).hexdigest()
-
-
 def assess_cache(cached: dict, expected_signature: dict) -> tuple[list[str], bool]:
     """Return missing result keys and whether the training signature matches."""
     required = {"l2_all", "l2_summary", "best_l2_C", "l1_all", "l1_summary", "best_l1_C"}
