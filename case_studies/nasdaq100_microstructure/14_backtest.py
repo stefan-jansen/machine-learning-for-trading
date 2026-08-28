@@ -48,7 +48,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import prediction_rows_at
+from case_studies.research import prediction_rows_at, superseded_members_at
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
 from case_studies.utils.backtest_runner import (
@@ -238,21 +238,47 @@ if pred_index.is_empty():
 # answer for a different registry than the one being filtered and re-point the rest of the
 # notebook - including where `run_backtest(register=True)` writes - at the activated root.
 _catalog = prediction_rows_at(CASE_DIR)
-_admissible = _catalog.filter(pl.col("complete")).select("prediction_hash")
+# `complete` does not answer supersession, and the two look like the same question. A row is
+# complete when its artifacts and fold metrics are present, and `identity_status == "current"`
+# only says the registry still understands the schema it was written under. Neither moves when
+# a model notebook refits: the retired generation's rows stay complete and current, and a sweep
+# selecting on the catalog alone runs over both generations at once. It does not fail - it
+# succeeds over twice the population and freezes the mixture into every backtest downstream.
+#
+# Measured here on 2026-08-27: this registry records two supersedes edges, and the retired
+# generation of `nasdaq100_microstructure-gbm-validation-v1` lists 150 prediction identities
+# that no generation in force still lists. None of them is in the catalog *today*, because the
+# gbm rows have not been re-registered yet - so this join currently removes nothing. That is
+# the reason to land it now rather than after the first sweep: the day 07_gbm registers, the
+# filter goes from a no-op to the only thing standing between the sweep and both generations.
+_retired = superseded_members_at(CASE_DIR)
+_admissible = _catalog.filter(
+    pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
+).select("prediction_hash")
 _offered = len(pred_index)
+_offered_hashes = set(pred_index["prediction_hash"])
 pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
 if pred_index.is_empty():
     msg = (
         f"{_offered} prediction sets exist for {CASE_STUDY_ID}/{LABEL}/{SPLIT} but none is "
-        "complete: every row is missing an artifact or a fold metric, or carries an identity "
-        "this schema version no longer recognises. Backtesting them would produce a full sweep "
-        "over a population that cannot be official. Re-run the model notebooks on the research "
-        "interface first."
+        "admissible. Either every row is missing an artifact or a fold metric, or carries an "
+        "identity this schema version no longer recognises; or every row belongs to a "
+        f"generation its own name has moved past ({len(_retired)} identities in this registry "
+        "are retired that way). Backtesting them would produce a full sweep over a population "
+        "that cannot be official. Re-run the model notebooks on the research interface first."
     )
     raise RuntimeError(msg)
 if len(pred_index) < _offered:
+    # Two conditions were tested and they call for different work, so they are counted apart: an
+    # incomplete row needs its own fit finished, a superseded one needs nothing - it is a
+    # retired generation and the sweep is right to leave it. Supersession is named first because
+    # it decides the row on its own; completing a retired row would not readmit it.
+    _dropped = _offered_hashes - set(pred_index["prediction_hash"])
+    _dropped_superseded = len(_dropped & _retired)
     print(
-        f"  Excluded {_offered - len(pred_index)} of {_offered} prediction sets: not complete",
+        f"  Excluded {len(_dropped)} of {_offered} prediction sets: "
+        f"{len(_dropped) - _dropped_superseded} not complete, "
+        f"{_dropped_superseded} superseded by a later generation of their own population",
         flush=True,
     )
 

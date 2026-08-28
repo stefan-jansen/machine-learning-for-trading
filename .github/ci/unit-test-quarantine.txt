@@ -17,13 +17,13 @@
 
 # ---------------------------------------------------------------------------
 # Needs the modelling environment - run by test-unit-image, in ml4t/ml4t:latest.
-# 26 files, 392 tests, 3m21s.
+# 32 files. The 26 that existed on 2026-08-24 measured 392 tests, 3m21s.
 #
 # `case_studies/utils/gbm.py` imports torch at module scope, so the LightGBM
 # files are behind this boundary too even though LightGBM itself is a small
 # wheel. The multi-GB estimate this block used to carry is right, and it is not
-# torch that makes it so: importing all 26 pulls 110 distributions, because
-# ml4t-models brings shap, numba and xarray, and three files bring darts with
+# torch that makes it so: importing them pulls 110 distributions, because
+# ml4t-models brings shap, numba and xarray, and four files bring darts with
 # pytorch-lightning, transformers and triton behind it. A CPU torch wheel is
 # 184 MB and would not reach any of them.
 #
@@ -38,12 +38,7 @@ tests/test_darts_temporal.py
 tests/test_deep_learning_adapter.py
 tests/test_deep_learning_state.py
 tests/test_deep_model_state.py
-# Carries a strict=True xfail, which is a tripwire: it is meant to turn into a
-# failure the moment the identity batch lands and the force_retrain fix works.
-# Behind this boundary nothing runs it, so the tripwire cannot fire and the fix
-# would land silently. It does need torch - case_studies/utils/deep_learning.py
-# imports it at module scope (:42) - so the entry is right and the cost is real.
-# Raised by fx_pairs on a push-gate review. Goes away with the torch decision.
+tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
 tests/test_gbm_identity.py
@@ -51,18 +46,28 @@ tests/test_gbm_runtime.py
 tests/test_insight_chapter.py
 tests/test_latent_factors_no_leak.py
 tests/test_latent_input_identity.py
+# Imports `_install_fixture_adapter` and `_locked_study` from
+# test_locked_holdout_execution, so it inherits that module's torch dependency
+# transitively rather than importing torch itself. Same boundary, same reason.
+tests/test_holdout_evaluation_driver.py
 tests/test_locked_holdout_execution.py
 tests/test_model_analysis_selection.py
+tests/test_model_source_identity_versions.py
 tests/test_registry_metrics.py
 tests/test_research_contract_execution.py
 tests/test_research_model_planning.py
 tests/test_research_models.py
+tests/test_sae_batch_size.py
 tests/test_sdf_checkpoint_numbering.py
 tests/test_sdf_macro_context.py
 tests/test_sequence_dataset.py
+# case_studies/utils/deep_learning.py imports torch at module scope (:42), and
+# this module imports sequence_identity_params from it.
+tests/test_sequence_identity_roundtrip.py
 tests/test_tabular_dl.py
 tests/test_tabular_dl_adapter.py
 tests/test_tabular_dl_runtime.py
+tests/test_training_identity_migration.py
 
 # ---------------------------------------------------------------------------
 # Executes notebooks through Papermill, against the reader's image and the
@@ -77,14 +82,17 @@ tests/test_tabular_dl_runtime.py
 #
 # The first three collect nothing but notebook executions, so the whole file
 # goes. `test_model_registry.py` does not: only `test_model_notebook` runs a
-# notebook, and its other nine tests are pure config assertions that finish in
+# notebook, and its other ten tests are pure config assertions that finish in
 # 0.07s. Excluding the file threw those away, which is the same
 # exclude-more-than-you-meant defect the subtraction below exists to fix.
+# Ten, not nine: `test_registering_stage_maps_to_its_actual_entry_point` is
+# parametrized over five stages, so counting `def test_` undercounts what the
+# deselect leaves behind. Measured 2026-08-27: 88 collected, 78 deselected.
 # ---------------------------------------------------------------------------
 tests/test_case_studies.py                       # cs-<case-study> (test-case-studies)
 tests/test_chapter_notebooks.py                  # chNN (test-chapters)
 tests/test_docker_notebooks.py                   # test-py312, test-neo4j, test-benchmark
-tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other nine tests run here
+tests/test_model_registry.py::test_model_notebook  # nothing runs it; the file's other ten tests run here
 
 # ---------------------------------------------------------------------------
 # Needs the reader's Docker image. It walks every declared third-party import
@@ -144,6 +152,3 @@ tests/test_sp500_options_gbm_contract.py
 # The `results` cell at case_studies/sp500_options/06_linear.py:401 runs 47
 # lines against the standard's hard maximum of 40.
 tests/test_sp500_options_linear_fold_alignment.py::test_no_code_cell_exceeds_the_standards_hard_maximum
-# MODEL_POPULATION_NAMES declares `cme-sdf-validation-v1` and no cme_futures
-# notebook publishes it.
-tests/test_cme_futures_research.py::test_every_declared_model_population_is_published_by_a_notebook

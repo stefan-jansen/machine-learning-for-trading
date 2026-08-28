@@ -63,7 +63,11 @@ import numpy as np
 import polars as pl
 import yaml
 
-from case_studies.research import OfficialPopulation, Result, open_study
+from case_studies.research import (
+    Result,
+    Study,
+    superseded_members,
+)
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
     fold_performance_matrix,
@@ -87,6 +91,7 @@ from case_studies.utils.model_viz import (
     plot_regime_bars,
 )
 from case_studies.utils.notebook_contracts import (
+    declared_population_members,
     degenerate_prediction_hashes,
     excluded_families,
     filter_active_model_rows,
@@ -111,9 +116,25 @@ REGIME_WINDOW = 252
 LINEAR_POPULATION = "nasdaq100_microstructure-linear-validation-v1"
 GBM_POPULATION = "nasdaq100_microstructure-gbm-validation-v1"
 
+# %% [markdown]
+# This notebook reads; it registers nothing. That decides how it opens the registry, and the
+# distinction is not cosmetic. Every route through `open_study` ends in `Study.activate()`,
+# which rewrites `ML4T_OUTPUT_DIR` for the rest of the process and clears the caches keyed on
+# it, so every later `get_case_study_dir` answers for a different directory than the one
+# resolved here. On the canonical tier with no workspace that route is `Study.regenerate`,
+# which refuses outright unless `features`, `labels` and `run_log` are symlinks - true in a
+# maintainer worktree, false in every clean clone. On the preview tier it repoints the notebook
+# at `.preview/<case>`, whose registry `activate()` creates *empty*: measured here, the catalog
+# went from 30 registered prediction sets to 0 and the comparison below reported on nothing
+# while reporting success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks - the catalog, the lineage, the populations, the artifacts - is
+# answered from it.
+
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
-study = open_study(CASE_STUDY, entry_point="13_model_analysis")
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -205,29 +226,57 @@ if excluded_families(CASE_STUDY):
 # interval, the t statistic - which the catalog's metric projection does not expose. Reading
 # admissibility off one and detail off the other keeps both, where swapping wholesale to the
 # catalog would have narrowed the columns and silently emptied the interval on every forest tile.
+# `complete` is about the row; supersession is about the name that published it. A refit
+# leaves the retired generation complete and current - the schema version it was written under
+# has not moved - so a comparison selecting on the catalog alone puts two generations of the
+# same name in one table, and the family representative below can be drawn from either. The
+# table would not look wrong; it would just be answering two questions at once.
+#
+# Both calls take the study, and on a `Study.at` handle that is the same thing as naming the
+# directory: `root` and `release_case_root` are both `CASE_DIR`, and `PredictionCatalog.table`
+# short-circuits on a read-only study to read that one registry. The sibling calls in
+# `14_backtest` are `prediction_rows_at` and `superseded_members_at`, which take the directory
+# directly, because that notebook registers backtests and so holds no study at all.
 _catalog = study.predictions.table()
-_admissible = pl.col("complete")
+_retired = superseded_members(study)
+_admissible = pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
 _ok = _catalog.filter(_admissible).select("prediction_hash")
 _rejected = _catalog.filter(~_admissible)
 
+# `load_all_metrics` returns a bare frame with no columns when the registry holds no scored
+# rows, so every expression below it fails on a missing column instead of on the absence that
+# caused it. The distinction is worth one branch: "nothing has been fitted into this registry"
+# is a state a reader can act on, and `unable to find column "label"; valid columns: []` is not.
+_raw_metrics = load_all_metrics(CASE_STUDY, label=None)
+if _raw_metrics.is_empty():
+    msg = (
+        f"{CASE_DIR} holds no scored prediction sets, so there is nothing to compare. Its "
+        f"catalog lists {_catalog.height} registered prediction sets. Run the model notebooks "
+        "against this registry first."
+    )
+    raise RuntimeError(msg)
+
 all_labels_metrics = filter_active_model_rows(
-    load_all_metrics(CASE_STUDY, label=None)
-    .filter(pl.col("label").is_not_null())
-    .join(_ok, on="prediction_hash", how="inner"),
+    _raw_metrics.filter(pl.col("label").is_not_null()).join(_ok, on="prediction_hash", how="inner"),
     CASE_STUDY,
 )
 all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
 
 # Say what was set aside and why, rather than letting the row count speak for itself.
 if _rejected.height:
-    # One condition was tested, so there is one count to report. A legacy identity is named
-    # separately because it is the one cause of incompleteness that no re-run of the same code
-    # will clear - the row has to be refitted under the current identity scheme.
-    _legacy = _rejected.filter(pl.col("identity_status") == "legacy").height
-    _detail = f", {_legacy} of them for a legacy identity" if _legacy else ""
+    # Two conditions were tested, so two counts are reported. A superseded row is complete and
+    # was correct when it was written; reporting it as incomplete sends a reader looking for a
+    # fit that never failed. Supersession is named first because it decides the row on its own:
+    # a retired generation is not brought back by completing it. A legacy identity is named
+    # separately for the opposite reason - it is the one cause of incompleteness that no re-run
+    # of the same code will clear, because the row has to be refitted under the current scheme.
+    _superseded = _rejected.filter(pl.col("prediction_hash").is_in(list(_retired)))
+    _incomplete = _rejected.filter(~pl.col("prediction_hash").is_in(list(_retired)))
+    _legacy = _incomplete.filter(pl.col("identity_status") == "legacy").height
     print(
-        f"{_rejected.height} of {_catalog.height} registered prediction sets are not complete"
-        f"{_detail}"
+        f"{_rejected.height} of {_catalog.height} registered prediction sets are inadmissible: "
+        f"{_incomplete.height} not complete ({_legacy} of those carry a legacy identity), "
+        f"{_superseded.height} superseded by a later generation of their own population"
     )
 else:
     print(f"all {_catalog.height} registered prediction sets are admissible")
@@ -236,12 +285,21 @@ else:
 # above already holds - it is the check that the rows compared here are the ones those notebooks
 # declared before they fitted anything. A family whose cohort has not run yet resolves to no
 # population and is reported rather than silently omitted.
-_population_members: dict[str, set[str]] = {}
-for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
-    try:
-        _population_members[_family] = set(OfficialPopulation.one(study, name=_name).members)
-    except (ValueError, FileNotFoundError) as _exc:
-        print(f"no current official population for {_family} ({_name}): {_exc}")
+# Which registry states this has to tell apart, and why the decision is a contract rather
+# than an exception handler, is stated at `declared_population_members`. In short: a registry
+# that publishes no population is not broken, and `OfficialPopulation.one` reports that state
+# and a broken lineage in the same words.
+_population_members, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    {"linear": LINEAR_POPULATION, "gbm": GBM_POPULATION},
+    produced={
+        _family: _catalog.filter(pl.col("family") == _family).height
+        for _family in ("linear", "gbm")
+    },
+)
+for _note in _population_notes:
+    print(_note)
 
 # A population is declared before anything is fitted; degeneracy is only visible afterwards.
 # `load_all_metrics` drops any prediction set with a constant-prediction fold, because its
@@ -249,6 +307,7 @@ for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
 # declared members that correctly never reach a leaderboard, so the comparison allows for them
 # and says how many rather than reporting a correct exclusion as a missing member.
 _degenerate = degenerate_prediction_hashes(study.root)
+_registered = set(_catalog.get_column("prediction_hash"))
 
 for _family, _members in _population_members.items():
     _have = set(
@@ -256,7 +315,15 @@ for _family, _members in _population_members.items():
     )
     _dropped = _members & _degenerate
     _missing, _extra = _members - _degenerate - _have, _have - _members
-    if not _have and _members:
+    # Both halves of the sentence this prints have to be true before it is printed. "None of
+    # the declared members has been produced" is a question for the registry, not for `_have`:
+    # that set is the *admissible* rows, so a cohort that ran and whose every member is
+    # incomplete, legacy or superseded reaches here empty too, and reading it as "not run yet"
+    # would skip the check below in exactly the case the check exists for. "This family is
+    # absent from every comparison" is the other half, and it is a question for `_have`: a
+    # family can have no declared member registered and still contribute rows, which are
+    # undeclared by construction and are what `_extra` below exists to reject.
+    if not (_members & _registered) and not _have:
         print(
             f"{_family}: none of the {len(_members)} declared members has been produced yet - "
             "the cohort has not run, so this family is absent from every comparison below"
@@ -376,6 +443,8 @@ else:
 
 # %%
 SAMPLE_EVERY_N = 4  # keep every 4th decision time
+# The registered artifact's names, and the names the analysis helpers read.
+_RAW_TO_ANALYSIS = {"fold": "fold_id", "prediction": "y_score", "actual": "y_true"}
 representative_preds = []
 
 # The representative rows came from the catalog, so each already carries the identity of the
@@ -388,6 +457,16 @@ for row in best_per_family.filter(pl.col("family") != "causal_dml").iter_rows(na
     family, config = row["family"], row["config_name"]
     prediction = Result.open(study, row["prediction_hash"])
     df = prediction.load()
+    # `Result.load` returns the registered artifact, whose columns are `fold`, `prediction` and
+    # `actual`. Every helper this notebook feeds the frame to - `fold_performance_matrix`,
+    # `select_best_checkpoint`, `cross_sectional_ic` - reads `fold_id`, `y_score` and `y_true`,
+    # which is the vocabulary `case_studies/utils/backtest_loaders.py` normalises raw prediction
+    # artifacts into (:278). This notebook used to reach the same rows through a loader that had
+    # already done that rename; going through the study resolves the identity properly but hands
+    # back the raw names, so do the rename here rather than teaching each call site a second
+    # vocabulary. Conditional because a family that already registered normalised names must not
+    # be renamed twice.
+    df = df.rename({old: new for old, new in _RAW_TO_ANALYSIS.items() if old in df.columns})
     # Keep every Nth decision time, preserving the whole cross-section at each one it keeps. This
     # reduces only what the correlation and bucket displays below read; every registered score is
     # computed on the full grid and is unaffected.

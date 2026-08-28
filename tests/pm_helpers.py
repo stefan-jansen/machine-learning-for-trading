@@ -69,6 +69,7 @@ overrides.yaml schema (per-notebook, all optional):
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,18 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 OVERRIDES_PATH = REPO_ROOT / "tests" / "overrides.yaml"
+
+STAGE_RE = re.compile(r"^(\d{2})([a-z]?)_")
+
+
+def stage_sort_key(path: Path) -> tuple[str, int, str]:
+    """Order lettered producer notebooks before the bare aggregate for a stage number."""
+    match = STAGE_RE.match(path.name)
+    if match is None:
+        return (path.name, 1, path.name)
+    number, letter = match.group(1), match.group(2)
+    return (number, 1 if not letter else 0, path.name)
+
 
 # Thread-pool caps for the papermill kernel.
 #
@@ -1029,16 +1042,44 @@ def injected_parameters(
 ) -> dict | None:
     """Return what Papermill should inject, given the tier this run declares.
 
-    ``PREVIEW_REDUCTIONS`` only means anything under the preview tier, and the request
-    builders reject it outright on a canonical one. An override file declares it once and
-    both paths read that file: ``tests/generate_intermediates.py`` passes the same entry
-    with ``research_preview=False``, so leaving it in fails at request construction
-    instead of reducing anything.
+    A ``PREVIEW_*`` parameter only means anything under the preview tier, and the notebooks
+    reject one outright on a canonical run. An override file declares it once and both paths
+    read that file: ``tests/generate_intermediates.py`` passes the same entry with
+    ``research_preview=False``, so leaving it in fails at request construction instead of
+    reducing anything.
+
+    Every ``PREVIEW_``-prefixed key is stripped rather than a named list of them. The list
+    form named ``PREVIEW_REDUCTIONS`` alone while ``tests/overrides.yaml`` had grown to
+    fourteen distinct ``PREVIEW_`` names, so thirteen were reaching the canonical path
+    already - ``PREVIEW_LABELS``, ``PREVIEW_MAX_ALLOCATORS``, ``PREVIEW_MAX_BASELINE_ROWS``,
+    ``PREVIEW_MAX_COST_VALUES``, ``PREVIEW_MAX_DIAGNOSTICS``, ``PREVIEW_MAX_PREDICTIONS``,
+    ``PREVIEW_MAX_RISK_CONTROLS``, ``PREVIEW_MAX_SAMPLES``, ``PREVIEW_MAX_SOURCE_ROWS``,
+    ``PREVIEW_N_EPOCHS``, ``PREVIEW_N_FACTORS``, ``PREVIEW_N_FOLDS`` and
+    ``PREVIEW_N_PLACEBO``. A named list is stale as soon as anyone adds a parameter without
+    editing it, and nobody had for thirteen of them.
+
+    It was latent rather than live because a leaked parameter only matters to a notebook that
+    refuses one: ``cme_futures`` 13 through 17 raise "canonical execution cannot declare
+    preview reductions", which is what makes the gap reachable, and they sit above
+    ``generate_intermediates.py``'s default ``--through-stage 8``. A higher stage bound, or
+    the same guard added to an earlier notebook, reaches it.
+
+    **The prefix narrows the gap; it does not close it.** Preview-only-ness is a property of
+    the notebook, not of the name. ``MAX_SYMBOLS`` carries no prefix and is a preview-only
+    reduction for ``us_equities_panel`` 16 through 19, whose canonical branch refuses it
+    (``16_backtest.py:99``) while ``tests/overrides.yaml`` declares it for all four - so a
+    canonical run of those still fails on its first cell. It cannot be added to the strip
+    either: elsewhere it is a legitimate canonical parameter, which
+    ``test_injected_parameters_keeps_everything_else_on_a_canonical_run`` pins. Deciding this
+    properly means reading which names a notebook's own canonical branch refuses, or marking
+    the entry in the override file; both are design changes that belong with whoever owns the
+    preview contract. What is here covers every ``PREVIEW_``-prefixed name and nothing else.
     """
     if research_preview:
         return research_preview_parameters(py_path, parameters, output_dir)
     resolved = dict(parameters or {})
-    resolved.pop("PREVIEW_REDUCTIONS", None)
+    for name in [key for key in resolved if key.startswith("PREVIEW_")]:
+        resolved.pop(name)
     # Declining the preview tier must NOT decline the isolated workspace. They are two
     # decisions and this flag used to collapse them: false left WORKSPACE at the
     # notebook's declared "", `open_study` took the `workspace=None` branch

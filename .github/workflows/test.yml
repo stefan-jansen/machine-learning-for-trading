@@ -485,7 +485,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2" ml4t-backtest ml4t-data ml4t-engineer databento
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -600,6 +600,14 @@ jobs:
       # nothing. They need no data and no ml4t-* package - every ml4t import in
       # utils/cv_splits.py is inside a function, and these tests substitute the
       # functions that reach them.
+      #
+      # test_awaiting_rebuild, test_cme_futures_research and
+      # test_cross_sectional_ic_mean are here for the same reason, having been
+      # committed to tests/ without any job naming them. Every job in this file
+      # selects by explicit path, so a file nobody lists never runs. It matters
+      # most for test_awaiting_rebuild: what it holds is that a skip expires
+      # when the input it waits for arrives, and a skip mechanism whose expiry
+      # check never runs is just a permanent skip.
       - name: Run shared case-study helper tests
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -625,6 +633,9 @@ jobs:
             tests/test_artifact_digest.py \
             tests/test_sp500_equity_option_analytics_research.py \
             tests/test_research_declared_menu_coverage.py \
+            tests/test_awaiting_rebuild.py \
+            tests/test_cme_futures_research.py \
+            tests/test_cross_sectional_ic_mean.py \
             -v --tb=short
 
       # Reads only committed notebook JSON and its paired .py, so it belongs to
@@ -779,13 +790,31 @@ jobs:
   test-unit-data:
     runs-on: ubuntu-latest
     # secrets.TEST_DATA_DEPLOY_KEY is not exposed to a pull_request from a fork,
-    # so the checkout below cannot succeed there. Skip rather than fail red on a
-    # contribution that has done nothing wrong. This job is not a required
-    # context, so a skip blocks nothing.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # so the checkout below cannot succeed there, and every step after the first
+    # is gated on the key being present rather than the job being skipped.
+    #
+    # The gate is a step and not the job's `if:` because this IS a required
+    # context. A job-level `if:` that evaluates false creates no check run at
+    # all, and a required context with no check run blocks the pull request
+    # forever - there is no state a fork contributor can reach that satisfies
+    # it. Measured 2026-08-25 on #595, a one-line packaging fix from a fork
+    # that had guards, lint and test-unit green and could not merge. Gated at
+    # the step level the job still runs, reports success, and asserts nothing
+    # it was unable to check.
     steps:
+      - name: Can this run reach the test data?
+        id: reach
+        run: |
+          if [ -n "${{ secrets.TEST_DATA_DEPLOY_KEY }}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=" >> "$GITHUB_OUTPUT"
+            echo "::notice::No test-data deploy key in this context, which is a fork pull request. The data-dependent tests do not run here; they run on the branch once it is merged."
+          fi
       - uses: actions/checkout@v6
+        if: steps.reach.outputs.have_key
       - name: Checkout test data
+        if: steps.reach.outputs.have_key
         uses: actions/checkout@v6
         with:
           repository: ml4t/third-edition-test-data
@@ -793,24 +822,28 @@ jobs:
           ssh-key: ${{ secrets.TEST_DATA_DEPLOY_KEY }}
           lfs: false
       - uses: astral-sh/setup-uv@v6
+        if: steps.reach.outputs.have_key
         with:
           version: "latest"
       - name: Install minimal test deps
+        if: steps.reach.outputs.have_key
         run: |
           uv venv --python 3.14
           uv pip install pytest numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2"
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3
       # The precondition is the load-bearing half, the same shape as the
       # data-root anchoring step above. Every test in this job skips politely
       # when the data is absent, so a checkout that silently produced an empty
       # tree would turn the job green while running nothing.
       - name: The data this job exists for is actually here
+        if: steps.reach.outputs.have_key
         run: |
           test -d test-data/data || { echo "test-data/data missing"; exit 1; }
           test -d test-data/intermediates || { echo "test-data/intermediates missing"; exit 1; }
           echo "data: $(du -sh test-data/data | cut -f1), intermediates: $(du -sh test-data/intermediates | cut -f1)"
       - name: Run data-dependent unit tests
+        if: steps.reach.outputs.have_key
         env:
           PYTHONPATH: ${{ github.workspace }}
           ML4T_PATH: ${{ github.workspace }}
@@ -850,7 +883,7 @@ jobs:
       # exits 0 on a full sheet of skips, which is exactly the state that let
       # 13 tests sit unrun without anything going red.
       - name: No test in this job skipped
-        if: always()
+        if: always() && steps.reach.outputs.have_key
         run: |
           .venv/bin/python - <<'PY'
           import sys, xml.etree.ElementTree as ET
@@ -864,18 +897,21 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 26 test files that need the modelling environment.
+  # The 30 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
   # the reader's Docker image, which is where the environment already exists" -
   # correctly, but that job was never built, so the exclusion moved them from
-  # gated to unrun. Measured 2026-08-24 in the full environment: 392 tests, 3m21s.
+  # gated to unrun. The 26 files present on 2026-08-24 measured 392 tests, 3m21s in the full
+  # environment.
   #
-  # torch alone does not reach them. Importing all 26 pulls 110 distributions:
-  # ml4t-models brings shap, numba/llvmlite and xarray, and three files
-  # (test_darts_state, test_darts_temporal, test_latent_input_identity) bring
-  # darts with pytorch-lightning, transformers, accelerate and triton behind it.
+  # torch alone does not reach them. Importing them pulls 110 distributions:
+  # ml4t-models brings shap, numba/llvmlite and xarray, and four files
+  # (test_darts_state, test_darts_temporal, test_latent_input_identity, and
+  # test_dl_device_contract, whose sequence_identity_params reaches the darts
+  # identity branch) bring darts with pytorch-lightning, transformers,
+  # accelerate and triton behind it.
   # That is the whole project environment, which is why this runs in the image
   # the repo already builds rather than installing a package list.
   #
@@ -885,7 +921,8 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
-    # Measured runtime is 3m21s. --timeout=900 bounds a hung test but not a hung
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 30.
+    # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
     timeout-minutes: 30
@@ -918,6 +955,7 @@ jobs:
             tests/test_deep_learning_adapter.py \
             tests/test_deep_learning_state.py \
             tests/test_deep_model_state.py \
+            tests/test_dl_device_contract.py \
             tests/test_dl_force_retrain_identity.py \
             tests/test_gbm_classification_target.py \
             tests/test_gbm_identity.py \
@@ -925,18 +963,23 @@ jobs:
             tests/test_insight_chapter.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
+            tests/test_model_source_identity_versions.py \
             tests/test_registry_metrics.py \
             tests/test_research_contract_execution.py \
             tests/test_research_model_planning.py \
             tests/test_research_models.py \
+            tests/test_sae_batch_size.py \
             tests/test_sdf_checkpoint_numbering.py \
             tests/test_sdf_macro_context.py \
             tests/test_sequence_dataset.py \
+            tests/test_sequence_identity_roundtrip.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
             tests/test_tabular_dl_runtime.py \
+            tests/test_training_identity_migration.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf
 
   # ---------------------------------------------------------------------------

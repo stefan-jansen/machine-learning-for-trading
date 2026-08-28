@@ -170,12 +170,18 @@ def _open_value(value: Any) -> Any:
     return canonical_json({"value": value})[9:-1]
 
 
-def _registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _registry_rows(root: Path, origin: str, *, immutable: bool = False) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -397,12 +403,20 @@ def _frame(
     return pl.DataFrame(normalized, schema=schema).select(columns)
 
 
-def _backtest_registry_rows(root: Path, origin: str) -> list[dict[str, Any]]:
+def _backtest_registry_rows(
+    root: Path, origin: str, *, immutable: bool = False
+) -> list[dict[str, Any]]:
     db_path = root / "run_log" / "registry.db"
     if not db_path.is_file() or db_path.stat().st_size == 0:
         return []
     query = f"file:{db_path}?mode=ro"
-    if origin == "released":
+    if immutable:
+        # `immutable=1` promises SQLite the file cannot change while open, which lets it skip
+        # locking and WAL recovery. That is true of a released case directory and false of any
+        # root a `Study.at` handle was pointed at - a fixture, an output tree, a live case
+        # directory another notebook is writing. Deciding it from the caller rather than from
+        # the `origin` label keeps the two questions apart: `origin` records where a row came
+        # from, this records whether the file can still move underneath the read.
         query += "&immutable=1"
     with closing(sqlite3.connect(query, uri=True)) as db:
         tables = _tables(db)
@@ -671,7 +685,11 @@ class PredictionCatalog:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _registry_rows(self.study.release_case_root, "released")
+        released = _registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released).sort("prediction_hash")
         workspace = _registry_rows(self.study.root, "workspace")
@@ -743,7 +761,11 @@ class BacktestCatalog:
         self.study = study
 
     def table(self, *, include_preview: bool = False) -> pl.DataFrame:
-        released = _backtest_registry_rows(self.study.release_case_root, "released")
+        released = _backtest_registry_rows(
+            self.study.release_case_root,
+            "released",
+            immutable=self.study.release_root_is_immutable,
+        )
         if self.study.read_only:
             return _frame(released, BACKTEST_RESERVED_COLUMNS).sort("backtest_hash")
         workspace = _backtest_registry_rows(self.study.root, "workspace")

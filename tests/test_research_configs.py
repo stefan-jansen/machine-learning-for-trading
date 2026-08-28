@@ -7,8 +7,12 @@ complaining when a configuration name was mistyped, which is the first test here
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import (
     Study,
@@ -181,3 +185,35 @@ def test_narrows_declared_catalog_catches_a_configuration_subset() -> None:
     subset = load_model_configs(opened, "linear", config_names=["ols"])
     assert not narrows_declared_catalog(opened, "linear", complete)
     assert narrows_declared_catalog(opened, "linear", subset)
+
+
+def test_the_catalog_follows_the_study_not_the_output_root(tmp_path, monkeypatch) -> None:
+    """An ML4T_OUTPUT_DIR installed after the study was opened cannot change its menus.
+
+    `Study.open(case_study)` with no workspace is a read-only release, and `activate()`
+    clears ML4T_OUTPUT_DIR to say so. Anything that re-installs the variable afterwards -
+    in the test corpus, the autouse `restore_output_root` fixture putting the session's
+    seeded root back after each test - used to redirect `load_model_configs` at that root's
+    `<case_study>/config`. The seeded root holds `tests/preset_patches.py`'s trimmed menus,
+    two configurations per sweep family instead of the menu's full width, so a module-scoped
+    study read the full catalog in the first test of a file and a two-row one in every test
+    after it. Reading through `study.root` makes the answer a property of the study.
+    """
+    opened = Study.open("etfs")
+    expected = load_model_configs(opened, "linear", labels=["fwd_ret_21d"])
+
+    decoy = tmp_path / "decoy"
+    shutil.copytree(
+        Path(opened.root) / "config",
+        decoy / "etfs" / "config",
+    )
+    shutil.copytree(Path(opened.root).parent / "config", decoy / "config")
+    menu = decoy / "etfs" / "config" / "training" / "fwd_ret_21d.yaml"
+    trimmed = yaml.safe_load(menu.read_text())
+    trimmed["linear"] = trimmed["linear"][:2]
+    menu.write_text(yaml.safe_dump(trimmed))
+    assert len(trimmed["linear"]) < expected.height, "the decoy must be narrower than the menu"
+
+    monkeypatch.setenv("ML4T_OUTPUT_DIR", str(decoy))
+    after = load_model_configs(opened, "linear", labels=["fwd_ret_21d"])
+    assert after.get_column("config_name").to_list() == expected.get_column("config_name").to_list()

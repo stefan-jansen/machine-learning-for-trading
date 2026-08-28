@@ -36,11 +36,17 @@
 
 import polars as pl
 import torch
-import yaml
 
-from case_studies.research import ExecutionTier, Study, plan_models
+from case_studies.research import (
+    ExecutionTier,
+    declared_labels,
+    narrows_declared_catalog,
+    open_study,
+    plan_models,
+    population_supersedes,
+    sweep_labels,
+)
 from utils.modeling import load_configs
-from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
 
 # %% tags=["parameters"]
@@ -54,22 +60,55 @@ N_EPOCHS = 0
 BATCH_SIZE = 0
 DEVICE = ""
 SEED = 42
+POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = "0044e1f31b9c"
+# The tier is a parameter, not something inferred from whether a reduction happens to be set.
+# Inferring it meant a run could be reduced and still open the case study's own artifacts in
+# place, which is the production path; a reader under test then wrote where the published run
+# writes. WORKSPACE is the other half: a preview has nowhere else to put its results.
+EXECUTION_TIER = "canonical"
+WORKSPACE: str | None = None
 
 # %% [markdown]
 # ## Select the task and execution tier
 #
-# Canonical execution uses every configured fold, symbol, epoch, and batch setting. Supplying a
-# reduction creates a preview identity in an isolated registry. A preview proves the path but cannot
-# join the official model population.
+# Canonical execution uses every configured fold, symbol, epoch, and batch setting. A preview
+# declares its reductions, takes an isolated workspace, and creates a preview identity there. A
+# preview proves the path but cannot join the official model population.
+#
+# The reductions are read before the study is opened, because which study to open is decided by
+# the tier and the two have to agree: a preview that reduces nothing is a canonical run wearing
+# the wrong tier, and a canonical run carrying reductions would publish a narrowed population
+# under the canonical name.
 
 # %%
 set_global_seeds(SEED)
-case_dir = get_case_study_dir(CASE_STUDY_ID)
-setup = yaml.safe_load((case_dir / "config" / "setup.yaml").read_text())
+REDUCTION_PARAMETERS = {
+    "folds": list(range(MAX_FOLDS)) if MAX_FOLDS else None,
+    "max_symbols": MAX_SYMBOLS or None,
+    "n_epochs": N_EPOCHS or None,
+}
+reductions = {key: value for key, value in REDUCTION_PARAMETERS.items() if value is not None}
+tier = ExecutionTier(EXECUTION_TIER)
+if tier is ExecutionTier.PREVIEW and not reductions:
+    raise ValueError("preview execution must declare at least one reduction")
+if tier is ExecutionTier.CANONICAL and reductions:
+    raise ValueError(f"canonical execution cannot carry reductions: {sorted(reductions)}")
+study = open_study(CASE_STUDY_ID, execution_tier=tier, workspace=WORKSPACE or None)
+
+# Which labels this notebook fits is a question for the training menus, not for the sweep list:
+# `setup.yaml` says which labels the case study carries, a menu says what to fit for one of them,
+# and a label in the sweep whose menu declares no `tabular_dl:` section owes nothing here. The two
+# agree in this case study today, so restating the sweep list produced the right answer by
+# coincidence and would have kept producing it silently after a menu changed. The order stays
+# `setup.yaml`'s rather than `declared_labels`' menu-file order because the population is named
+# after its labels and hashed over its members as an ordered list, so re-ordering would give the
+# published population a new identity and demand a supersedes for a run that fits the same models.
+fits_tabm = set(declared_labels(study, "tabular_dl"))
 labels = (
     [PRIMARY_LABEL]
     if PRIMARY_LABEL
-    else [setup["labels"]["primary"], *setup["labels"].get("variants", [])]
+    else [label for label in sweep_labels(study) if label in fits_tabm]
 )
 
 if PREDICTION_SPLIT != "validation":
@@ -77,13 +116,6 @@ if PREDICTION_SPLIT != "validation":
 if FORCE_RETRAIN:
     raise ValueError("valid checkpoints are reloaded by identity; change the request to refit")
 
-reductions = {
-    **({"folds": list(range(MAX_FOLDS))} if MAX_FOLDS else {}),
-    **({"max_symbols": MAX_SYMBOLS} if MAX_SYMBOLS else {}),
-    **({"n_epochs": N_EPOCHS} if N_EPOCHS else {}),
-}
-tier = ExecutionTier.PREVIEW if reductions else ExecutionTier.CANONICAL
-study = Study.regenerate(CASE_STUDY_ID)
 
 print(f"Labels: {', '.join(labels)}")
 print(f"Execution tier: {tier.value}")
@@ -111,6 +143,29 @@ menu = [
     for label in labels
     for config in load_configs(CASE_STUDY_ID, label, family="tabular_dl")
 ]
+
+# `PRIMARY_LABEL` narrows what is fitted, and a narrowed run declares a different set of members
+# than the canonical population does. A population is immutable once written, so such a run must
+# publish under its own name. The comparison is over `(label, config_name)` pairs rather than a
+# row count, and it says so here rather than several cells later in a message about hashes.
+if (
+    narrows_declared_catalog(
+        study,
+        "tabular_dl",
+        pl.DataFrame(
+            {
+                "label": [label for label, _ in menu],
+                "config_name": [config["config_name"] for _, config in menu],
+            }
+        ),
+    )
+    and not POPULATION_NAME
+):
+    raise ValueError(
+        f"this run declares {len(menu)} label-configuration pairs, which is not the complete "
+        "declared catalog, so it cannot publish the canonical population; pass POPULATION_NAME "
+        "to give it its own"
+    )
 requests = [
     study.model(
         family="tabular_dl",
@@ -167,10 +222,30 @@ pl.DataFrame(
 #
 # Compatible TabM requests share base-fold materialization. Candidate-specific scaling, random
 # state, weights, and prediction identities remain separate. Any failed member stops the cell.
+#
+# `SUPERSEDES_POPULATION` names the population hash this run replaces. A population is the set of
+# prediction identities it publishes, so anything that moves a training identity produces a
+# different population under the same name, and the registry refuses to write it without being
+# told which snapshot it supersedes. That lineage is the only record of which generation is which,
+# and what moved the identities here was a change to the family's own source file rather than to
+# anything the notebook declares.
+#
+# `population_supersedes` decides whether the declared hash may be offered. It is offered when the
+# name already carries the generation this declaration produced, so a re-run resolves to the
+# population it published, and when the declaration names the generation in force, so a refit
+# publishes the next one. It is withheld everywhere else - on a reader's clean clone, where
+# `run_log/` is gitignored and the registry has no generation at all; under a caller's own
+# `POPULATION_NAME`; and in a preview, whose isolated registry holds nothing under this name.
 
 # %% tags=["results"]
+population_name = POPULATION_NAME or f"{CASE_STUDY_ID}:{'+'.join(labels)}:tabular_dl"
 population = (
-    plan.create_population(name=f"{CASE_STUDY_ID}:{'+'.join(labels)}:tabular_dl")
+    plan.create_population(
+        name=population_name,
+        supersedes=population_supersedes(
+            study, name=population_name, declared=SUPERSEDES_POPULATION
+        ),
+    )
     if tier is ExecutionTier.CANONICAL
     else None
 )

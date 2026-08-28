@@ -30,7 +30,7 @@
 # and positioning.
 #
 # **Learning Objectives**:
-# - Keep the sealed holdout outside an exploratory causal analysis
+# - Keep the holdout outside an exploratory causal analysis
 # - Cross-fit a panel by complete decision time with a time-based embargo
 # - Compare the adjusted estimate with naive OLS and a block-permutation null
 #
@@ -68,6 +68,7 @@ from case_studies.utils.causal import (
     register_causal_run,
     run_dml_analysis,
 )
+from utils.artifact_specs import resolve_label_horizon
 from utils.modeling import load_configs, load_modeling_dataset
 from utils.paths import get_case_study_dir
 from utils.reproducibility import set_global_seeds
@@ -77,38 +78,44 @@ warnings.filterwarnings("ignore")
 
 # %% tags=["parameters"]
 CASE_STUDY_ID = "sp500_equity_option_analytics"
-PRIMARY_LABEL = ""
 MAX_SYMBOLS = 0
-RANDOM_SEED = 42
-CV_FOLDS = 5
-MAX_SAMPLES = 50000
-N_PLACEBO = 100
+# Each of these is zero or empty for "take the declared value". A run that passes one
+# overrides the declaration; a run that passes none reproduces the published analysis.
+LABEL = ""
+SEED = 0
+N_FOLDS = 0
+MAX_SAMPLES = 0
+N_PLACEBO = 0
+
+# %% [markdown]
+# ### What is asked for, and what it resolves to
+#
+# The parameters above are the request. The values the analysis runs on are resolved below and
+# carry different names, so the two can be read side by side and neither can quietly overwrite
+# the other. Precedence is: an injected parameter wins, otherwise the case study's declaration.
+#
+# The declaration is read with `[...]` rather than `.get(key, literal)`. A literal default here
+# would substitute a number the case study never declared - silently, and only on the
+# configurations that happen to omit the key - so a missing key raises instead.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 setup = yaml.safe_load((CASE_DIR / "config" / "setup.yaml").read_text())
-if not PRIMARY_LABEL:
-    PRIMARY_LABEL = setup["labels"]["primary"]
+PRIMARY_LABEL = LABEL or setup["labels"]["primary"]
 
 causal_configs = load_configs(CASE_STUDY_ID, PRIMARY_LABEL, "causal_dml")
 dml_cfg = causal_configs[0]
 
-for key, val in [
-    ("n_folds", CV_FOLDS),
-    ("n_placebo", N_PLACEBO),
-    ("max_samples", MAX_SAMPLES),
-    ("seed", RANDOM_SEED),
-]:
-    if dml_cfg.get(key, val) != val:
-        dml_cfg[key] = val
-
-CV_FOLDS = dml_cfg.get("n_folds", 5)
-N_PLACEBO = dml_cfg.get("n_placebo", 100)
-MAX_SAMPLES = dml_cfg.get("max_samples", 50000)
-RANDOM_SEED = dml_cfg.get("seed", 42)
+CV_FOLDS = N_FOLDS or int(dml_cfg["n_folds"])
+PLACEBO_REPS = N_PLACEBO or int(dml_cfg["n_placebo"])
+ROW_CAP = MAX_SAMPLES or int(dml_cfg["max_samples"])
+RANDOM_SEED = SEED or int(dml_cfg["seed"])
 
 print(f"DML config: {dml_cfg['config_name']}")
+print(
+    f"  folds {CV_FOLDS} | placebo reps {PLACEBO_REPS} | row cap {ROW_CAP:,} | seed {RANDOM_SEED}"
+)
 
 # %% [markdown]
 # The case-study configuration defines the treatment and confounders. Keeping
@@ -134,7 +141,7 @@ print(f"  Treatment: {TREATMENT_COL}")
 print(f"  Outcome: {PRIMARY_LABEL}")
 print(f"  Confounders: {CONFOUNDER_COLS}")
 print(f"  CV folds: {CV_FOLDS}")
-print(f"  Placebo reps: {N_PLACEBO}")
+print(f"  Placebo reps: {PLACEBO_REPS}")
 
 # %% [markdown]
 # ## 1. Load Artifacts
@@ -193,15 +200,73 @@ merged_clean = (
 
 # %% [markdown]
 # The forward-label buffer closes the development sample early enough that no
-# outcome interval crosses into the sealed holdout.
+# outcome interval crosses into the holdout.
+
+# %% [markdown]
+# Three quantities decide how this estimate is measured, and they answer different questions.
+#
+# The **embargo** separates a fold's training window from its test window, so a label measured in
+# training cannot still be running when testing starts. `labels.buffer` sets it, and that buffer is
+# declared deliberately longer than the outcome it protects, so it is not a statement about the
+# outcome. The **outcome horizon** is how long one outcome stays open: `labels.horizons` names it
+# per label, and for the primary label it is the shorter of the two. The **permutation block size** is the scale of the dependence
+# the placebo has to preserve: shuffling in blocks shorter than that scale pulls dependent
+# observations apart, and the placebo degrades towards an independent draw - the permutation that
+# is too easy to pass and therefore proves nothing.
+#
+# **Two scales qualify for the block size, and it has to cover both.** One is the outcome horizon.
+# The other is the treatment's own persistence: `ivrv_spread` subtracts a rolling realized
+# volatility from implied, so consecutive values share most of their input and stay dependent over
+# that rolling window whatever the label does. That window is the first entry of
+# `features.windows.realized_vol` in `config/setup.yaml`, and it is the longer of the two here. The
+# block size below takes the larger, so the placebo keeps whichever dependence runs longer.
+#
+# The treatment's persistence does not follow from `causal.treatment` alone - it follows from how
+# that column is built in the feature stage. The assignment below therefore names the treatment it
+# knows how to read and refuses any other, rather than applying a window that may not describe it.
+#
+# The **Newey-West bandwidth** in the second stage has to cover the overlap between successive
+# outcomes, which is the outcome horizon and not the buffer. The buffer is a cross-validation
+# device that holds a fold's training rows clear of its validation labels; it says nothing about
+# how far apart two outcomes stop sharing a return window. A bandwidth shorter than the overlap
+# understates the standard error, and a longer one moves it in whichever direction the extra
+# sample autocovariances happen to point, so the notebook passes the horizon itself.
+#
+# The **development cutoff** is counted in sessions, because that is the unit the labels are
+# built in. `forward_return` in `02_labels.py` takes the close a fixed number of sessions ahead
+# and keeps a row only where the session index spans exactly that many. Subtracting the buffer
+# as a calendar duration answers a different question: ten days is about seven sessions on this
+# calendar, so the notebook delivered seven where it declared ten, and a label variant whose
+# horizon exceeded seven resolved its return inside the holdout with nothing to show it.
 
 # %%
-EMBARGO_PERIODS = embargo_from_buffer(mds.label_buffer)
-BLOCK_SIZE = EMBARGO_PERIODS
+BUFFER_PERIODS = embargo_from_buffer(mds.label_buffer)
+EMBARGO_PERIODS = BUFFER_PERIODS
+OUTCOME_HORIZON = embargo_from_buffer(resolve_label_horizon(CASE_STUDY_ID, PRIMARY_LABEL, setup))
+if OUTCOME_HORIZON > BUFFER_PERIODS:
+    raise ValueError(
+        f"Outcome horizon {OUTCOME_HORIZON} exceeds the label buffer {BUFFER_PERIODS}. "
+        "The cutoff below subtracts the buffer to keep development labels clear of the "
+        "holdout, so a longer outcome would still reach into it. Raise labels.buffer in "
+        "setup.yaml, or correct labels.horizons."
+    )
+if TREATMENT_COL != "ivrv_spread":
+    raise ValueError(
+        f"Treatment '{TREATMENT_COL}' has no persistence window this notebook knows how to read. "
+        "The block size below follows how ivrv_spread is built in 03_financial_features.py."
+    )
+TREATMENT_PERSISTENCE = int(setup["features"]["windows"]["realized_vol"][0])
+BLOCK_SIZE = max(OUTCOME_HORIZON, TREATMENT_PERSISTENCE)
 HOLDOUT_START = pd.Timestamp(setup["evaluation"]["holdout_start"])
-DEVELOPMENT_CUTOFF = HOLDOUT_START - pd.Timedelta(mds.label_buffer)
+pre_holdout = np.sort(merged_clean.loc[merged_clean[date_col] < HOLDOUT_START, date_col].unique())
+if len(pre_holdout) <= BUFFER_PERIODS:
+    raise ValueError(
+        f"The panel holds {len(pre_holdout)} sessions before {HOLDOUT_START.date()}, which "
+        f"cannot absorb a {BUFFER_PERIODS}-session buffer and leave anything to analyse."
+    )
+DEVELOPMENT_CUTOFF = pd.Timestamp(pre_holdout[-BUFFER_PERIODS])
 
-# Labels at or after this cutoff can overlap the sealed holdout return window.
+# Labels at or after this cutoff can overlap the holdout return window.
 merged_clean = merged_clean.loc[merged_clean[date_col] < DEVELOPMENT_CUTOFF].copy()
 
 sort_cols = [date_col, *entity_cols]
@@ -215,12 +280,12 @@ if entity_cols and merged_clean.duplicated([date_col, entity_cols[0]]).any():
 # construction cannot cut through a decision time.
 
 # %%
-if MAX_SAMPLES > 0 and len(merged_clean) > MAX_SAMPLES:
+if ROW_CAP > 0 and len(merged_clean) > ROW_CAP:
     date_counts = merged_clean.groupby(date_col, sort=True).size()
     reverse_cumulative = date_counts.iloc[::-1].cumsum()
-    selected_dates = reverse_cumulative[reverse_cumulative <= MAX_SAMPLES].index
+    selected_dates = reverse_cumulative[reverse_cumulative <= ROW_CAP].index
     if len(selected_dates) == 0:
-        raise ValueError(f"MAX_SAMPLES={MAX_SAMPLES:,} cannot fit one complete decision time")
+        raise ValueError(f"ROW_CAP={ROW_CAP:,} cannot fit one complete decision time")
     print(
         f"Taking {len(selected_dates):,} most recent complete decision times "
         f"({int(date_counts.loc[selected_dates].sum()):,} rows) from {len(merged_clean):,}"
@@ -234,15 +299,19 @@ assert merged_clean[date_col].max() < DEVELOPMENT_CUTOFF
 # %% [markdown]
 # > **Scope**: This is a development-period sensitivity analysis, not a holdout
 # > evaluation. The label buffer removes observations whose forward returns could
-# > overlap the sealed holdout. `MAX_SAMPLES` keeps complete cross-sections, so
+# > overlap the holdout. `ROW_CAP` keeps complete cross-sections, so
 # > neither folds nor embargoes cut through a decision time.
 
 # %%
 print(f"\nAnalysis data: {len(merged_clean):,} rows")
 print(f"Date range: {merged_clean[date_col].min()} to {merged_clean[date_col].max()}")
-print(f"Sealed holdout begins: {HOLDOUT_START.date()}")
+print(f"Holdout begins: {HOLDOUT_START.date()}")
 print(f"Development cutoff after label buffer: {DEVELOPMENT_CUTOFF.date()}")
-print(f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE}")
+print(
+    f"Embargo: {EMBARGO_PERIODS} decision times | Block size: {BLOCK_SIZE} "
+    f"(outcome horizon {OUTCOME_HORIZON}, treatment window {TREATMENT_PERSISTENCE}) | "
+    f"HAC horizon: {OUTCOME_HORIZON}"
+)
 if entity_cols:
     print(f"Entities: {merged_clean[entity_cols[0]].nunique()}")
 
@@ -262,10 +331,10 @@ results = run_dml_analysis(
     confounder_cols=CONFOUNDER_COLS,
     n_folds=CV_FOLDS,
     embargo=EMBARGO_PERIODS,
-    n_placebo=N_PLACEBO,
+    n_placebo=PLACEBO_REPS,
     block_size=BLOCK_SIZE,
     seed=RANDOM_SEED,
-    horizon=EMBARGO_PERIODS,
+    horizon=OUTCOME_HORIZON,
     time_col=date_col,
     entity_col=entity_cols[0] if entity_cols else None,
 )
@@ -310,9 +379,13 @@ bias_pct = results["confounding_bias_pct"]
 # p-value computed in run_dml_analysis (no duplication)
 p_value = results["p_value_hac"]
 
-ref = results.get("refutation", {})
-p_value_perm = ref.get("empirical_p", 1.0)
-ref_class = ref.get("refutation_class", classify_refutation(p_value_perm))
+ref = results.get("refutation") or {}
+if "empirical_p" not in ref:
+    # Defaulting to 1.0 here would report "cannot reject" for a refutation that never ran,
+    # which is the one reading a missing test must not produce.
+    raise RuntimeError("the DML run published no block-permutation refutation")
+p_value_perm = ref["empirical_p"]
+ref_class = ref.get("refutation_class", classify_refutation(p_value_perm, ref.get("n_successful")))
 
 print("Statistical significance:")
 print(f"  p-value (HAC): {p_value:.4f}")
@@ -419,8 +492,11 @@ summary = {
 }
 
 # %% [markdown]
-# Registration writes only the corrected v3.1 candidate. The frozen v3.0
-# registry remains read-only for publication comparison.
+# Every argument below that changes what the estimate is enters the hashed causal specification,
+# so a run at a different block size, placebo count, seed, bandwidth, row cap, entity cap or
+# development cutoff registers as its own result rather than overwriting the one before it. Leaving one out is not a
+# smaller record: it is two runs sharing an identity, and the registry cannot tell them apart
+# afterwards.
 
 # %%
 register_causal_run(
@@ -432,28 +508,40 @@ register_causal_run(
     confounder_cols=CONFOUNDER_COLS,
     n_folds=CV_FOLDS,
     embargo=EMBARGO_PERIODS,
+    time_col=date_col,
+    block_size=BLOCK_SIZE,
+    n_placebo=PLACEBO_REPS,
+    seed=RANDOM_SEED,
+    horizon=OUTCOME_HORIZON,
+    max_samples=ROW_CAP,
+    max_symbols=MAX_SYMBOLS,
+    development_end=str(DEVELOPMENT_CUTOFF.date()),
     notebook="12_causal_dml",
 )
 
 # %% [markdown]
 # ## Key Takeaways
 #
-# 1. **The sealed holdout remains unused**: The analysis ends before the
+# 1. **The holdout is never read**: The analysis ends before the
 #    label-buffer cutoff, so exploratory causal diagnostics cannot influence or
 #    consume the final evaluation window.
 #
-# 2. **The adjusted association is not distinguishable from zero under panel
-#    uncertainty**: The DML estimate is -0.0228 units of five-day return per 1.0
-#    annualized IV-RV spread, with Driscoll-Kraay SE 0.0200 and p = 0.257.
+# 2. **Read the coefficient against its panel-aware standard error, not against zero**:
+#    the DML estimate is a five-day return per one annualized unit of IV-RV spread, and the
+#    Driscoll-Kraay standard error beside it is the one that allows for both serial and
+#    cross-sectional dependence. The summary cell above prints both, with the p-value.
 #
-# 3. **Observed confounders barely move the same-sample estimate**: Naive OLS is
-#    -0.022934 versus -0.022823 for DML, a -0.49% difference. Comparing both
-#    estimators on the same 38,422 out-of-fold rows removes the apparent large
-#    correction created by unequal samples.
+# 3. **Compare naive OLS and DML on the same rows**: `confounding_bias_pct` is the gap
+#    between them as a share of the adjusted estimate. Both are computed on the same
+#    out-of-fold sample, which is what stops an apparent large correction that is really
+#    two estimators reading different numbers of rows.
 #
-# 4. **The permutation result is supporting, not decisive**: The 100-placebo,
-#    5-fold block-null p-value is 0.01, indicating unusual time alignment under
-#    that diagnostic. It does not override the panel-aware coefficient uncertainty.
+# 4. **The permutation disturbs timing, not confounding**: its block size is the longer of the
+#    outcome horizon and the treatment's own rolling window, so the placebo series retain whichever
+#    dependence runs longer and the null they generate is not narrowed by the shuffle itself. Its
+#    p-value still has a floor of one over the number of placebo draws plus one, so a run of this
+#    size cannot report zero however extreme the estimate is, and it does not override the
+#    coefficient's own uncertainty.
 #
 # 5. **Diagnostics do not establish identification**: Complete-date cross-fitting
 #    and both uncertainty checks strengthen the sensitivity analysis, but a

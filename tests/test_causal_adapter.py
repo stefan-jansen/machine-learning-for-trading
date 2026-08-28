@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import yaml
 
 from case_studies.research import CausalResult, LabelDefinition, Study
 from case_studies.utils import causal
@@ -28,14 +29,33 @@ def _restore_output_root():
     workspace._clear_root_sensitive_caches()
 
 
-def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer: str = "8H"):
+def _causal_fixture(
+    tmp_path,
+    monkeypatch,
+    entity: str = "symbol",
+    label_buffer: str = "8H",
+    label_horizon: str | None = None,
+    treatment_window: int | None = 1,
+):
     study = Study.open(
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     setup_path = study.root / "config" / "setup.yaml"
-    setup_path.write_text(
-        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
-    )
+    # `treatment` here is a per-row column carrying its own timestamp, so one bar is
+    # the honest window. It is declared rather than omitted because a canonical run now
+    # refuses an undeclared window, and every test below that is not about that refusal
+    # would otherwise fail on it. Pass treatment_window=None to exercise the refusal.
+    causal_block = "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
+    if treatment_window is not None:
+        causal_block += f"  treatment_window: {treatment_window}\n"
+    setup_path.write_text(setup_path.read_text() + causal_block)
+    if label_horizon is not None:
+        # Merged through a yaml round-trip rather than appended. `labels` already exists in
+        # this setup, and a second top-level `labels:` key would replace it outright rather
+        # than add to it, taking the buffers with it.
+        setup = yaml.safe_load(setup_path.read_text())
+        setup.setdefault("labels", {}).setdefault("horizons", {})["fwd_ret_8h"] = label_horizon
+        setup_path.write_text(yaml.safe_dump(setup, sort_keys=False))
     rows = []
     for timestamp_index, timestamp in enumerate(
         pl.datetime_range(
@@ -59,7 +79,7 @@ def _causal_fixture(tmp_path, monkeypatch, entity: str = "symbol", label_buffer:
             )
     frame = pl.DataFrame(rows)
     label = study.labels.publish(
-        LabelDefinition("fwd_ret_8h", "regression", label_buffer),
+        LabelDefinition("fwd_ret_8h", "regression", label_horizon or label_buffer),
         frame.rename({entity: "symbol"}).select("symbol", "timestamp", "fwd_ret_8h"),
     )
     mds = SimpleNamespace(
@@ -554,8 +574,11 @@ def _session_causal_fixture(tmp_path, monkeypatch):
         "etfs", workspace=tmp_path / "workspace", release_root=_seed_release(tmp_path)
     )
     setup_path = study.root / "config" / "setup.yaml"
+    # One bar: `treatment` carries the row's own timestamp. Declared because a canonical
+    # run refuses an undeclared window, and this fixture is about the holdout seal.
     setup_path.write_text(
-        setup_path.read_text() + "causal:\n  treatment: treatment\n  confounders: [confounder]\n"
+        setup_path.read_text()
+        + "causal:\n  treatment: treatment\n  confounders: [confounder]\n  treatment_window: 1\n"
     )
     sessions = [
         timestamp
@@ -765,3 +788,135 @@ def test_holdout_seal_holds_a_one_session_horizon_over_a_weekend_boundary(
     assert computation["estimand"]["holdout_endpoint_cutoff"] == last_session.isoformat()
     symbols = frame.get_column("symbol").n_unique()
     assert computation["analysis_population"]["n_rows"] == (len(pre_holdout) - 1) * symbols
+
+
+def test_the_bandwidth_takes_the_outcome_horizon_and_the_block_takes_the_buffer(
+    tmp_path, monkeypatch
+) -> None:
+    """The two are different quantities, and only one of them describes outcome overlap.
+
+    The buffer keeps a fold's training rows clear of its validation labels; the
+    outcome horizon is how long one outcome stays open, which is what makes
+    successive outcomes overlap and therefore what the Newey-West bandwidth has to
+    cover. They agree in most case studies here, so a resolver that derives both
+    from the buffer passes everywhere except where they differ. On 8-hour bars a
+    24-hour buffer over an 8-hour label is three bars against one.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="24H", label_horizon="8H"
+    )
+
+    resolved = study.causal(
+        method="dml",
+        label=label.name,
+        execution_tier="preview",
+        preview_reductions={"max_samples": 240, "max_symbols": 6, "n_folds": 2, "n_placebo": 10},
+    ).resolve()
+
+    computation = resolved.spec["computation"]
+    assert computation["estimand"]["outcome_horizon"] == str(pd.Timedelta("8h"))
+    assert computation["refutation"]["block_size"] == 3
+    assert resolved._context.horizon == 1
+
+
+def test_a_horizon_longer_than_its_buffer_is_refused(tmp_path, monkeypatch) -> None:
+    """The placebo block and the per-entity seal assume the buffer is the longer one.
+
+    Both values are hand-authored in setup.yaml and nothing pairs them, so the
+    ordering that used to hold structurally now holds by configuration. Reversed,
+    the placebo block would be shorter than the dependence it holds fixed and the
+    seal would leave outcomes reaching into the holdout, neither with a symptom.
+    """
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, label_buffer="8H", label_horizon="24H"
+    )
+
+    with pytest.raises(ValueError, match="exceeds the CV buffer"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()
+
+
+def test_a_canonical_run_refuses_an_undeclared_treatment_window(tmp_path, monkeypatch) -> None:
+    """A block that cannot be shown to span the treatment must not reach the registry.
+
+    Preview warns and proceeds - that tier exists to run reduced and be thrown away. Canonical
+    refuses, because the alternative is a registered refutation whose p-value reads stronger
+    than it is and that nothing downstream can distinguish from a correctly sized one.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, treatment_window=None)
+
+    with pytest.raises(ValueError, match="no construction window is declared"):
+        study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
+
+
+def test_preview_warns_on_an_undeclared_window_rather_than_failing(tmp_path, monkeypatch) -> None:
+    """Failing preview would block CI on every case study that had not declared one yet."""
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, treatment_window=None)
+
+    with pytest.warns(UserWarning, match="no construction window is declared"):
+        study.causal(
+            method="dml",
+            label=label.name,
+            execution_tier="preview",
+            preview_reductions={
+                "max_samples": 240,
+                "max_symbols": 6,
+                "n_folds": 2,
+                "n_placebo": 10,
+            },
+        ).resolve()
+
+
+def test_the_block_spans_the_treatment_when_it_outlasts_the_buffer(tmp_path, monkeypatch) -> None:
+    """The case the defect produced: a wide treatment permuted in blocks sized by the label.
+
+    ETFs permuted a six-month momentum column in blocks of 21 sessions this way. The spec must
+    also record which of the two scales bound it, so a reader can tell the two apart.
+    """
+    study, label, _frame = _causal_fixture(tmp_path, monkeypatch, treatment_window=21)
+
+    resolved = study.causal(method="dml", label=label.name, execution_tier="canonical").resolve()
+
+    refutation = resolved.spec["computation"]["refutation"]
+    assert refutation["block_size"] == 21
+    assert refutation["block_size_basis"] == "treatment_window"
+    assert refutation["treatment_window_steps"] == 21
+    assert refutation["label_buffer_steps"] < 21
+
+
+def test_the_outcome_horizon_is_registered_and_is_not_the_buffer(tmp_path, monkeypatch) -> None:
+    """The bandwidth the second stage is HAC-corrected at has to be readable from the spec.
+
+    ``run_dml_analysis`` is already given the outcome horizon in observation periods, and until
+    now the resolver computed it and threw it away. A notebook comparing bandwidth against block
+    size then had nothing registered to read: crypto's ``12_model_analysis`` printed a value it
+    derived from a key that had never existed under any version of the resolver.
+
+    The assertion that carries this is the second one. ``label_buffer_steps`` is the CV gap and
+    may be deliberately longer than the outcome it seals, so a horizon read off the buffer is
+    wrong in exactly the case where the two differ - which is the fixture here.
+    """
+    # A buffer three cadences long over an eight-hour panel, sealing a one-cadence outcome.
+    # That gap is the case the two quantities are told apart in: a horizon read off the
+    # buffer would report 3 where the label resolves in 1.
+    study, label, _frame = _causal_fixture(
+        tmp_path, monkeypatch, treatment_window=21, label_buffer="24H", label_horizon="8H"
+    )
+
+    refutation = (
+        study.causal(method="dml", label=label.name, execution_tier="canonical")
+        .resolve()
+        .spec["computation"]["refutation"]
+    )
+
+    assert refutation["label_buffer_steps"] == 3
+    assert refutation["label_horizon_steps"] == 1

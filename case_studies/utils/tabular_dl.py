@@ -58,6 +58,8 @@ from utils.modeling import RANDOM_SEED, seed_everything
 
 _TABM_PREVIEW_FIELDS = {"checkpoint_interval", "folds", "max_symbols", "n_epochs"}
 _TABM_IMBALANCE_METHODS = {"balanced", "none"}
+TABM_RUNNER_VERSION = 1
+TABM_STATE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -91,16 +93,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tabm_source_identity() -> dict[str, str]:
-    from case_studies.utils import deep_model_state
-
-    deep_model_state_file = deep_model_state.__file__
-    if deep_model_state_file is None:
-        raise RuntimeError("deep_model_state has no source file")
-    deep_model_state_path = Path(deep_model_state_file)
+def _tabm_source_identity() -> dict[str, int]:
+    """Return declared versions for fitting TabM and persisting its state."""
     return {
-        Path(__file__).name: _sha256(Path(__file__)),
-        deep_model_state_path.name: _sha256(deep_model_state_path),
+        "tabm_runner": TABM_RUNNER_VERSION,
+        "tabm_state": TABM_STATE_VERSION,
     }
 
 
@@ -420,7 +417,9 @@ def _materialize_tabm_request_group(study: Study, request: dict[str, Any]):
     )
     configured_by_name = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "tabular_dl")
+        for config in load_configs(
+            study.case_study, label_ref.name, "tabular_dl", case_dir=study.root
+        )
     }
     return (
         label_ref,

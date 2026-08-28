@@ -405,3 +405,67 @@ def test_prediction_rows_at_reads_the_case_dir_it_is_given_not_the_activated_roo
     # and here unsets the one the caller resolved against.
     Study.open("etfs", release_root=release).predictions.table()
     assert "ML4T_OUTPUT_DIR" not in os.environ
+
+
+class TestASingleRootStudyReadsALiveRegistry:
+    """`Study.at` names a directory that can still be written, so it cannot promise immutability.
+
+    `immutable=1` lets SQLite skip locking and WAL recovery on the promise that the file will
+    not change while open. That holds for a released case directory, which is a checkout. It
+    does not hold for any root `Study.at` is pointed at - a fixture the harness is seeding, an
+    output tree, or a case directory another notebook is registering into - and a read under a
+    false promise misses rows rather than failing, which is the failure mode with no symptom.
+    """
+
+    def test_it_sees_a_row_a_concurrent_writer_has_committed(self, tmp_path: Path) -> None:
+        """The write is committed and still in the WAL, which is where `immutable=1` loses it.
+
+        A commit becomes invisible under a false immutability promise only while it lives in
+        the `-wal` file: `immutable=1` tells SQLite there is no journal to consult, so the read
+        goes straight to the main database and answers from before the commit. Closing the
+        writer checkpoints the WAL and folds the row in, which is why a test that publishes and
+        closes passes either way and proves nothing. The open writer here is not contrivance -
+        it is the case this form exists for, a second notebook registering into the directory
+        this one is reading.
+        """
+        release = _seed_release(tmp_path)
+        case_dir = release / "case_studies" / "etfs"
+        first = _publish(case_dir, spec=_resolved_spec(alpha=1.0))
+
+        study = Study.at(case_dir, case_study="etfs")
+        assert set(study.predictions.table()["prediction_hash"]) == {first}
+
+        db_path = case_dir / "run_log" / "registry.db"
+        writer = sqlite3.connect(db_path)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            columns = [row[1] for row in writer.execute("PRAGMA table_info(prediction_sets)")]
+            source = dict(
+                zip(
+                    columns,
+                    writer.execute(
+                        "SELECT * FROM prediction_sets WHERE prediction_hash = ?", (first,)
+                    ).fetchone(),
+                    strict=True,
+                )
+            )
+            source["prediction_hash"] = "c0ncurrent01"
+            writer.execute(
+                f"INSERT INTO prediction_sets ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                [source[column] for column in columns],
+            )
+            writer.commit()
+            assert (case_dir / "run_log" / "registry.db-wal").stat().st_size > 0
+
+            assert set(study.predictions.table()["prediction_hash"]) == {first, "c0ncurrent01"}
+        finally:
+            writer.close()
+
+    def test_a_released_root_is_still_read_immutably(self, tmp_path: Path) -> None:
+        """The optimisation stays where its promise is true, so this is not a blanket removal."""
+        release = _seed_release(tmp_path)
+        study = Study.open("etfs", release_root=release)
+
+        assert study.release_root_is_immutable
+        assert not Study.at(release / "case_studies" / "etfs").release_root_is_immutable

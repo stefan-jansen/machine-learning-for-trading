@@ -616,9 +616,11 @@ def test_unusable_parameters_does_not_take_a_function_local_for_a_read(tmp_path:
 
 
 def test_unusable_parameters_ignores_a_committed_injected_parameters_cell(tmp_path: Path) -> None:
-    """`case_studies/etfs/11a_pca` has one: a leftover from a papermill run, which
-    the next run replaces. Reading it as notebook code would report the notebook
-    overwriting exactly what papermill is about to inject."""
+    """Papermill writes such a cell into any notebook it executes, and the next run
+    replaces it, so reading it as notebook code would report the notebook overwriting
+    exactly what papermill is about to inject. `case_studies/etfs/11a_pca` and
+    `11b_ipca` carried one committed each - the last two in the repo - until their
+    migrations rewrote the parameters cell; the helper still has to ignore one."""
     py = _notebook(
         tmp_path,
         '# %% tags=["parameters"]\nUSE_CACHE = True\n\n'
@@ -1150,6 +1152,43 @@ def test_injected_parameters_drops_preview_reductions_on_a_canonical_run() -> No
     )
     assert resolved == {"MAX_SYMBOLS": 5}
     assert declared["PREVIEW_REDUCTIONS"] == {"max_samples": 5000}
+
+
+def test_injected_parameters_strips_every_preview_prefixed_name_on_a_canonical_run() -> None:
+    """The strip is a prefix rule, not a list of names that has to be maintained.
+
+    `tests/generate_intermediates.py` passes `overrides["parameters"]` verbatim with
+    `research_preview=False`, so a preview-only name left in reaches a notebook whose
+    EXECUTION_TIER is still "canonical" - and the notebooks that refuse one raise on their
+    first cell. The strip named `PREVIEW_REDUCTIONS` alone while `tests/overrides.yaml` had
+    grown to fourteen `PREVIEW_` names, so thirteen were passing through.
+
+    The invented name is the point: it is the only assertion here that a named list cannot
+    satisfy, so a regression to one fails rather than passing on the four real names.
+
+    This does not claim no preview-only parameter can reach a canonical run. `MAX_SYMBOLS`
+    is preview-only for `us_equities_panel` 16-19 and carries no prefix, and the test below
+    pins that it survives because elsewhere it is a legitimate canonical parameter. That gap
+    is named in `injected_parameters`' docstring.
+    """
+    overrides = {
+        "PREVIEW_REDUCTIONS": {"max_folds": 1},
+        "PREVIEW_LABELS": ["fwd_ret_21d"],
+        "PREVIEW_MAX_PREDICTIONS": 4,
+        "PREVIEW_MAX_BASELINE_ROWS": 2,
+        "PREVIEW_SOMETHING_NOT_INVENTED_YET": 7,
+    }
+    declined = (
+        injected_parameters(
+            Path("case_studies/cme_futures/13_backtest.py"),
+            overrides,
+            None,
+            research_preview=False,
+        )
+        or {}
+    )
+    leaked = sorted(key for key in declined if key.startswith("PREVIEW_"))
+    assert not leaked, f"canonical injection carries preview-only parameters: {leaked}"
 
 
 def test_injected_parameters_keeps_everything_else_on_a_canonical_run() -> None:

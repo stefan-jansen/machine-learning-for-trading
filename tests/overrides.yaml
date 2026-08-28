@@ -1199,26 +1199,77 @@ case_studies/cme_futures/05_evaluation:
   # evaluates, and the reduction bought nothing: the panel is 38k rows either way.
   timeout: 600
 case_studies/cme_futures/06_linear:
+  parameters:
+    # Restored after #560, same removal as 07_gbm below. This one has been passing on its 120s
+    # budget rather than failing, which is the reason to fix it now: it is mispriced in exactly
+    # the same way and only the margin differs, so it fails on the first contended run instead
+    # of reproducibly. Linear takes no iteration or checkpoint axis, so folds and max_symbols
+    # are the whole reduction - which is what #560 removed. The 120s budget is left as it was,
+    # for the same reason as 07_gbm below: the reduction is what it was calibrated against.
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/cme_futures/07_gbm:
+  parameters:
+    # Restored after #560. That PR moved this notebook onto the shared model boundary, where
+    # reductions arrive as one PREVIEW_REDUCTIONS mapping, and correctly dropped the MAX_FOLDS: 2
+    # and MAX_SYMBOLS: 5 the notebook could no longer receive - but the timeout below was the
+    # number calibrated to them, and it stayed. From 2026-08-20 the preview fitted the full
+    # config set on a budget measured for a fifteenth of it, and failed as a 180s per-cell
+    # papermill timeout, which reads as a flake rather than as the misconfiguration it is.
+    #
+    # folds and max_symbols restore what #560 removed. The two boosting axes are new here and are
+    # what makes this a smoke test again: production is 500 iterations checkpointed every 50, so
+    # 20 every 10 shrinks the fit ~25x while still publishing more than one checkpoint - the
+    # dimension this notebook is about, and one a coarser cut would remove rather than reduce.
+    # No train_sample_frac: 30 products over a daily panel is already small, and thinning rows
+    # would leave folds too short to fit rather than merely quick.
+    #
+    # The timeout below is left at the number #560 inherited. Restoring the reduction restores
+    # what 180s was measured against, so changing it too would replace a calibrated number with
+    # a guess. Measured 2026-08-27: 129s for this notebook and 06_linear together, reductions
+    # applied, at load average 10.1 on 24 cores. Without them the fit alone ran 388s.
+    PREVIEW_REDUCTIONS:
+      checkpoint_interval: 10
+      folds: [0, 1]
+      max_iterations: 20
+      max_symbols: 5
   timeout: 180
 case_studies/cme_futures/08_tabular_dl:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had. The CI fixture is the reduction here.
   timeout: 300
 case_studies/cme_futures/09_dl_lstm:
   gpu: true
     # BATCH_SIZE, MAX_FOLDS, MAX_SYMBOLS, N_EPOCHS and LOOKBACK were the pre-migration knobs.
     # This notebook plans through the shared catalog and reads none of them, so setting them
-    # reduced nothing while the override file said it had. Its only scale control is
-    # EXECUTION_TIER=preview, which writes to a throwaway workspace barred from official
-    # populations and so fails the next notebook in the pipeline. The CI fixture is the
-    # reduction here.
+    # reduced nothing while the override file said it had.
+    #
+    # `gpu: true` skips this on every runner without a card, which is every CI runner, so the
+    # sequence family currently has no coverage at all. The two reasons recorded here before
+    # were both measured and both wrong. A preview does not fail the next notebook: it takes
+    # the `run_resolved_model_requests` branch, publishes no official population, and CI runs
+    # notebooks independently in any case. And the fit does not need a card - with CUDA hidden
+    # and `device: cpu`, all four configurations complete on CPU with the 60-step lookback
+    # untouched:
+    #
+    #   folds [0], max_symbols 5                          nlinear 18.2s  lstm_h64 245.7s  total 542.0s
+    #   folds [0], max_symbols 5, max_train_sequences 2000 nlinear  4.2s  lstm_h64  52.6s  total 130.2s
+    #
+    # Both runs published 80 complete prediction sets inside the preview root. The recurrent
+    # architecture is 91% of the cost, so capping training sequences is the reduction that
+    # matters here and cutting symbols further is not.
+    #
+    # What still blocks CPU coverage is neither of those: the notebook hard-codes
+    # `overrides={"device": "cuda"}` at its resolve call, and this file is static YAML that
+    # cannot override an argument the source pins. The preview workspace is not a blocker -
+    # `research_preview_parameters` injects a per-run WORKSPACE for any notebook whose
+    # parameters cell declares both EXECUTION_TIER and WORKSPACE, which this one does.
+    # Enabling CPU coverage needs a DEVICE parameter and nothing else, and that is queued
+    # behind the pending 09 refit rather than done here.
   timeout: 300
 case_studies/cme_futures/10_latent_factors:
   timeout: 180
@@ -1238,31 +1289,50 @@ case_studies/cme_futures/11_causal_dml:
       n_folds: 2
       n_placebo: 25
   timeout: 300
+# 12 through 17 run in the preview tier here, and the tier is what reduces them.
+#
+# `tests/pm_helpers.py::research_preview_parameters` injects EXECUTION_TIER="preview" and
+# WORKSPACE=<the isolated output dir> into a notebook's parameters cell - but only if that cell
+# declares BOTH names. A cell declaring one of them silently gets neither, which is the trap: the
+# notebook then runs canonical against a checkout with no canonical registry. That is what these
+# six did, and it is why they were red on every run while 01-11 passed.
+#
+# PREVIEW_LABELS is the one reduction they take. It is a real narrowing rather than a redundant
+# one: each of these notebooks accumulates across `for label in labels` into a single structure -
+# 14 builds one request_rows list, 17 one selection pool spanning both horizons - so the label
+# axis is the only axis they combine over, and collapsing it to the primary horizon is what keeps
+# the reduced run cheap without changing the shape of what the notebook does. The remaining scale
+# comes from the fixture registry itself.
 case_studies/cme_futures/12_model_analysis:
   timeout: 300
 case_studies/cme_futures/13_backtest:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
-    TOP_N_PREDICTIONS: 2
-  timeout: 120
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_PREDICTIONS: 4
+  timeout: 600
 case_studies/cme_futures/14_portfolio_management:
+  # PREVIEW_MAX_BASELINE_ROWS is the preview's own shortlist width. The canonical width comes
+  # from setup.yaml's top_n_predictions.allocation and is 10, which the preview signal stage
+  # cannot supply: 13_backtest caps itself at PREVIEW_MAX_PREDICTIONS and those resolve to two
+  # distinct (family, config_name) pairs. Declaring 2 keeps the notebook's refusal strict -
+  # it still fails if the pool cannot supply exactly this many - rather than letting it take
+  # whatever it finds.
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_PREDICTIONS: 2
-  timeout: 300
+    PREVIEW_LABELS: [fwd_ret_21d]
+    PREVIEW_MAX_BASELINE_ROWS: 2
+  timeout: 600
 case_studies/cme_futures/15_costs:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/16_risk_management:
   parameters:
-    MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
+    PREVIEW_LABELS: [fwd_ret_21d]
   timeout: 600
 case_studies/cme_futures/17_strategy_analysis:
+  parameters:
+    PREVIEW_LABELS: [fwd_ret_21d]
+  timeout: 600
 case_studies/crypto_perps_funding/01_feasibility_analysis:
   parameters:
     # No START_DATE: the notebook already declares 2020-01-01, which is the data start, so an
@@ -1417,19 +1487,40 @@ case_studies/etfs/10_dl_tsmixer:
     N_EPOCHS: 2
   timeout: 180
 case_studies/etfs/11a_pca:
-  # MAX_SYMBOLS must match 04_model_based_features, which builds the temporal
-  # artifact these notebooks validate against. With no override they ran on the
+  # max_symbols must match 04_model_based_features, which builds the temporal
+  # artifact these notebooks validate against. With no reduction they ran on the
   # full fixture universe while the artifact covered 5 symbols, so the CV splits
   # spanned dates the artifact never saw and fold 0 validation came out at 93.5%,
   # just under the 95% floor in MIN_TEMPORAL_DATE_COVERAGE.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-pca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 300
 case_studies/etfs/11b_ipca:
+  # max_symbols must match 04_model_based_features for the same reason as 11a,
+  # which leaves IPCA five funds to fit a 71-characteristic Gamma on. At the
+  # production n_factors=5 that is 355 parameters against five assets a date and
+  # the ALS does not identify. Measured on this fixture at the declared
+  # max_iter=100, per fold: K=5 fails on both folds (110.0s, 113.6s), K=3 fails
+  # on both (55.7s, 57.0s), K=2 converges on fold 0 in 21.8s and fails on fold 1
+  # at 42.0s, K=1 converges on both in 0.6s and 0.8s. The times are the tell -
+  # a fold that fails takes the full cap, so the failures are the cap and not a
+  # local minimum. K=2 sitting half in and half out is the identification
+  # boundary, and it is the same boundary sp500_equity_option_analytics measured
+  # at K=2 on 19-21 assets and found unstable across machines. n_factors=1 is
+  # below it rather than on it, which is why it is chosen over raising max_iter.
+  # A reduced run declares a different member set than the canonical population,
+  # so it names its own.
   parameters:
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: etfs-ipca-preview
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
+      n_factors: 1
   timeout: 300
 case_studies/etfs/11_latent_factors:
   gpu: true
@@ -1448,6 +1539,13 @@ case_studies/etfs/12_causal_dml:
     CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
+    # Five draws are below the ten run_dml_analysis assembles a refutation from at all, so it
+    # published none and this notebook's `ref.get("empirical_p", 1.0)` wrote p = 1.00 and a
+    # class of "Fails" into causal_runs - measurements from a test that never ran. Every
+    # on-screen trace is suppressed: the printed line is guarded by `if ref:` and the histogram
+    # and its subtitle by `len(placebo_arr) > 0`, so whoever ran it saw no line, no figure and
+    # no error. A value nobody is shown cannot be sanity-checked, which is why the count moved
+    # rather than the default. Measured at 18s against a 120s cap.
     N_PLACEBO: 25
   timeout: 120
 case_studies/etfs/13_model_analysis:
@@ -1490,8 +1588,22 @@ case_studies/fx_pairs/05_evaluation:
     MAX_SYMBOLS: 5
   timeout: 300
 case_studies/fx_pairs/06_linear:
+  # Restores the reduction #560 removed. It dropped MAX_FOLDS: 2 / MAX_SYMBOLS: 5 when the
+  # stage moved onto the shared boundary and left the timeout priced for them, so since
+  # 2026-08-20 this has run all 8 folds over all 20 pairs on a budget measured against 2 and 5.
+  # Same two axes, in the keys the shared runner accepts (`_PREVIEW_FIELDS`, linear.py:69).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 120
 case_studies/fx_pairs/07_gbm:
+  # Same story as 06_linear above: #560 removed MAX_FOLDS: 2 / MAX_SYMBOLS: 5 and left the
+  # 180s budget behind. Keys are `_GBM_PREVIEW_FIELDS` (gbm.py:76).
+  parameters:
+    PREVIEW_REDUCTIONS:
+      folds: [0, 1]
+      max_symbols: 5
   timeout: 180
 case_studies/fx_pairs/08_tabular_dl:
   parameters:
@@ -1524,29 +1636,45 @@ case_studies/fx_pairs/11_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/fx_pairs/12_model_analysis:
+  research_preview: false
+  skip: true
+  skip_reason: "Asserts the assembled canonical population equals the configured menu, and the
+    fixture cannot present both consistently: _trim_label_configs trims the seeded config dir
+    while the seeded registry carries the full production population, so the guard reports 117
+    unexpected members (3 labels x 13 gbm + 26 linear configs) and nothing missing. Same class
+    as 17_strategy_analysis - not a reduction that can be made to work. It reads no preview
+    rows either, so a preview tier is not the alternative."
   timeout: 300
 case_studies/fx_pairs/13_backtest:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
+    POPULATION_NAME: fx_pairs:preflight
     TOP_K: 2
-  timeout: 600
-case_studies/fx_pairs/14_portfolio_management:
-  parameters:
-    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
-  timeout: 300
+  timeout: 900
+case_studies/fx_pairs/14_portfolio_management:
+  research_preview: false
+  parameters:
+    POPULATION_NAME: fx_pairs:preflight
+    TOP_K: 2
+    TOP_N_CONFIGS: 1
+  timeout: 900
 case_studies/fx_pairs/15_costs:
+  research_preview: false
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+    POPULATION_NAME: fx_pairs:preflight
+    MAX_COST_POINTS: 1
+  timeout: 900
 case_studies/fx_pairs/16_risk_management:
+  research_preview: false
   parameters:
+    POPULATION_NAME: fx_pairs:preflight
     MAX_RISK_VARIANTS: 3
-    MAX_SYMBOLS: 5
-    TOP_N_COMBOS: 1
-  timeout: 600
+  timeout: 900
 case_studies/fx_pairs/17_strategy_analysis:
+  skip: true
+  skip_reason: "Requires RESEARCH_LOCK_HASH from the one-shot holdout transaction - a lock exists only after that workflow runs in production"
+  timeout: 300
 case_studies/nasdaq100_microstructure/01_feasibility_analysis:
   parameters:
     MAX_SYMBOLS: 5
@@ -1604,24 +1732,33 @@ case_studies/nasdaq100_microstructure/07_gbm:
   tier: weekly
   timeout: 900
 case_studies/nasdaq100_microstructure/08_dl_nlinear:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/09_dl_lstm:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
     N_EPOCHS: 1
   timeout: 600
 case_studies/nasdaq100_microstructure/10_dl_tcn:
+  # The CPU CI image has no CUDA and this case study declares gpu for production. DEVICE
+  # is passed so the run is registered as the CPU run it is, rather than skipped.
   parameters:
     BATCH_SIZE: 32
+    DEVICE: cpu
     LOOKBACK: 5
     MAX_FOLDS: 2
     MAX_SYMBOLS: 5
@@ -1648,6 +1785,20 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
+  parameters:
+    # The fixture publishes its populations under a `-fixture-` prefix rather than the case
+    # study's own names, and it has to: `OfficialPopulation.create` matches on the member list,
+    # so a modelling notebook publishing its own newly-fitted hashes under a name the fixture
+    # had frozen is refused outright. The prefix is what lets the fixture's declarations and a
+    # notebook's own coexist, so the notebook is pointed at the fixture's names here instead.
+    #
+    # Inert until the fixture actually seeds populations: today every seeded registry holds an
+    # empty `official_populations`, so `declared_population_members` takes its "this registry
+    # declares none" branch and never resolves either name. Verified against that state rather
+    # than assumed. Landing it early is the safe order - the reverse, seeding before the names
+    # are here, makes the notebook refuse a family it cannot check.
+    LINEAR_POPULATION: nasdaq100_microstructure-fixture-linear-validation-v1
+    GBM_POPULATION: nasdaq100_microstructure-fixture-gbm-validation-v1
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
   parameters:
@@ -1694,31 +1845,79 @@ case_studies/sp500_equity_option_analytics/06_linear:
 case_studies/sp500_equity_option_analytics/07_gbm:
   timeout: 180
 case_studies/sp500_equity_option_analytics/08_tabular_dl:
+  # DEVICE and POPULATION_NAME travel together. The runner refuses to substitute a CPU
+  # for a requested GPU, and the device is inside the training identity, so a CPU run
+  # declares a different member set and the notebook makes it name its own population.
+  # BATCH_SIZE and N_EPOCHS named nothing after the migration; the epoch budget comes
+  # from the patched fixture presets in tests/preset_patches.py, not from a parameter.
+  # MAX_FOLDS and MAX_SYMBOLS are gone for a subtler reason: the folding in
+  # _collect_preview_reductions happens on the papermill path, after
+  # test_every_declared_parameter_reaches_its_notebook has read this file, so the migrated
+  # notebook binds neither name and both are rejected. A reduction reaches it only under
+  # the name it declares. The tier comes from the harness: research_preview_parameters sees
+  # EXECUTION_TIER and WORKSPACE in the parameters cell and injects preview plus an isolated
+  # output root.
+  #
+  # The reduction is stated rather than left to the max_symbols: 5 the harness would
+  # substitute. It stops at the universe: tests/preset_patches.py already patches every tabm
+  # preset to n_epochs 2 at checkpoint_interval 1, so CI runs two epoch checkpoints and
+  # exercises the per-epoch prediction sets this notebook is about. Declaring n_epochs here
+  # would override that patch rather than add to it - 50 epochs at interval 25 is the same
+  # two checkpoints for twenty-five times the training.
   parameters:
-    BATCH_SIZE: 32
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-tabular_dl-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_equity_option_analytics/09_dl_lstm:
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl above: the device is
+  # part of the training identity, so a CPU run declares a different member set and the
+  # notebook makes it name its own population rather than write into the published one.
+  #
+  # This entry said gpu: true until the notebook was measured on CPU. The reason recorded
+  # was the sixty-observation lookback, which no sequence preview reduction narrows
+  # (_SEQUENCE_PREVIEW_FIELDS is folds, max_symbols and max_train_sequences). That was not
+  # the binding constraint. The fixture carries about five years of daily rows per stock, so
+  # a sixty-step window costs eligibility nothing, and the notebook finishes on CPU in under
+  # a minute with the lookback left alone. What gpu: true did was skip the test outright
+  # wherever no card is present, which is every CI runner, so the sequence family had no
+  # coverage at all. On CPU the run fits six configurations across the three declared labels
+  # and publishes twelve prediction sets, all inside the preview root.
+  #
+  # The epoch budget comes from tests/preset_patches.py, which patches lstm and nlinear to
+  # two epochs at checkpoint_interval one. Declaring N_EPOCHS here would override that patch
+  # rather than add to it. BATCH_SIZE, LOOKBACK, MAX_FOLDS and MAX_SYMBOLS name nothing the
+  # migrated notebook binds, so test_every_declared_parameter_reaches_its_notebook rejects
+  # them; a reduction reaches this notebook only under PREVIEW_REDUCTIONS. That reduction is
+  # stated rather than left to the max_symbols the harness would substitute, so the preview
+  # identity records what it narrowed.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 5
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sequence-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/10_dl_patchtst:
+  # Same reasoning as 09_dl_lstm, and the same measured outcome on CPU. Its own population
+  # name keeps the patchtst slice separate from the population 09 declares.
   parameters:
-    BATCH_SIZE: 32
-    LOOKBACK: 24
-    MAX_FOLDS: 2
-    MAX_SYMBOLS: 5
-    N_EPOCHS: 1
-  timeout: 180
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-patchtst-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
 case_studies/sp500_equity_option_analytics/11_latent_factors:
   timeout: 600
-case_studies/sp500_equity_option_analytics/11a_pca: {}
+case_studies/sp500_equity_option_analytics/11a_pca:
+  # The harness forces EXECUTION_TIER=preview and WORKSPACE for any notebook declaring both, and
+  # _collect_preview_reductions would otherwise substitute a bare max_symbols: 5. Declared here so
+  # the preview identity says what it reduced. PCA needs no factor reduction: it decomposes the
+  # return panel, so the fixture's cross-section bounds nothing the way it does for IPCA below.
+  parameters:
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 300
 case_studies/sp500_equity_option_analytics/11b_ipca:
   # IPCA estimates a 45-characteristic Gamma from the cross-section. Production
   # has 634 symbols; the CI fixture has 23, giving 19-21 assets per date, so at
@@ -1753,30 +1952,88 @@ case_studies/sp500_equity_option_analytics/11b_ipca:
   # reruns: 2 stays as a second line of defense, now that
   # pytest-rerunfailures is actually installed in the case-study CI job
   # (.github/workflows/test.yml) - it was a silent no-op before.
+  #
+  # After the migration none of those knobs is a papermill parameter any more. N_FACTORS was a
+  # positional argument of the retired run_case_study_model; it is now a declared preview
+  # reduction, which is where it belongs - it changes the preview identity rather than silently
+  # refitting a different model under the canonical name. MAX_VARIANT_LABELS is gone with the
+  # variant path: the notebook fits every declared label through one population, and the
+  # non-identified second variant the old comment describes is covered by the same n_factors
+  # reduction. The factor_ridge/gamma_ridge patch in tests/preset_patches.py is unchanged and
+  # still does the numerical work described above.
   parameters:
-    MAX_VARIANT_LABELS: 1
-    N_FACTORS: 2
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_factors: 2
   reruns: 2
   timeout: 600
 
+case_studies/sp500_equity_option_analytics/11c_conditional_autoencoder:
+  # DEVICE and POPULATION_NAME travel together, as in 08_tabular_dl and the sequence pair above.
+  # config/setup.yaml declares this family on cuda, and the library refuses to substitute a CPU
+  # for a requested card (case_studies/utils/latent_factors/library_bridge.py:53-54), so without
+  # DEVICE this notebook cannot run on a CI machine at all. The device is inside the training
+  # identity, so the CPU fit declares a different member set and publishes under its own name.
+  # Five symbols, and nothing else. n_epochs is deliberately absent: preset_patches.py already
+  # patches cae to n_epochs 2 / checkpoint_interval 1, and declaring n_epochs here would override
+  # that patch rather than reinforce it - the notebook would train the full schedule for the same
+  # two checkpoints.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-cae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+  timeout: 600
+
 case_studies/sp500_equity_option_analytics/11d_stochastic_discount_factor:
-  # The SDF training cell exceeded the 300s default in CI while the whole
-  # notebook runs in 98s locally on the same image, so the cap is what fails,
-  # not the notebook. Sized for the slower runner with headroom.
-  timeout: 900
+  # SDF is the one latent model preset_patches.py cannot reduce: its entry patches `n_epochs`,
+  # which this model does not read - the budgets are n_epochs_unc, n_epochs_moment and
+  # n_epochs_cond, so an unreduced CI run trains 256 + 64 + 1024 epochs. They are reduced here
+  # instead, which the adapter supports directly and which also rebuilds `checkpoint_epochs`
+  # against the smaller budget (case_studies/utils/latent_factors/adapter.py:248-260).
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sdf-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
+      n_epochs_unc: 2
+      n_epochs_moment: 2
+      n_epochs_cond: 4
+  # Measured at 537s on CPU on this workstation with the reductions above, against a 900s cap
+  # sized when the family still fell back to whichever device the host had. That is under two
+  # times headroom on a machine faster than the runner, so the cap is raised rather than left
+  # to fail on the next slow one. 11c and 11e are 67s and 73s under the same conditions and
+  # keep theirs.
+  timeout: 1800
 
 case_studies/sp500_equity_option_analytics/11e_supervised_autoencoder:
-  # 95s locally, ~190s on the CI runner - passing, but close enough to the 300s
-  # default that the next slow runner turns it red. Same headroom as 11d.
+  # Five symbols. As with 11c, n_epochs stays out: preset_patches.py patches sae to 2 epochs and
+  # declaring it here would replace that patch with the full schedule. DEVICE and POPULATION_NAME
+  # carry the same reason they do for 11c and 11d.
+  parameters:
+    DEVICE: cpu
+    POPULATION_NAME: sp500_equity_option_analytics-sae-preview
+    PREVIEW_REDUCTIONS:
+      max_symbols: 5
   timeout: 900
 
 case_studies/sp500_equity_option_analytics/12_causal_dml:
+  # CV_FOLDS was renamed N_FOLDS: the notebook now separates the request from the resolved
+  # value, so the parameter and the number the analysis runs on no longer share a name.
+  # N_PLACEBO was 5, below the ten successful draws run_dml_analysis assembles a refutation
+  # from at all, so it published none and this notebook's guard against a missing refutation
+  # fired on every CI run. The bar is not that a refutation is computed but that a verdict below
+  # alpha is reachable: the plus-one correction floors the reported p-value at 1/(n+1), so
+  # ceil(1/REFUTATION_ALPHA) = 20 successful draws is where "Passes" becomes attainable and
+  # anything less returns "Underpowered" whatever the data said. The 20 is derived; the five
+  # draws above it are a chosen margin, because a draw can fail and drop the survivors below the
+  # bar. Measured at 14s against a 300s cap.
   parameters:
-    CV_FOLDS: 2
     MAX_SAMPLES: 3000
     MAX_SYMBOLS: 5
+    N_FOLDS: 2
     N_PLACEBO: 25
-  timeout: 120
+  timeout: 300
 case_studies/sp500_equity_option_analytics/13_model_analysis:
   timeout: 300
 case_studies/sp500_equity_option_analytics/14_backtest:
