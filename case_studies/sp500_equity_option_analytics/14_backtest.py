@@ -49,7 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import open_study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
@@ -58,6 +58,7 @@ from case_studies.utils.backtest_runner import (
     run_backtest,
     run_plumbing_test,
 )
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.notebook_render import selection_adjusted_leader_table
 from case_studies.utils.registry import (
     backtest_dir,
@@ -206,25 +207,35 @@ except ValueError as e:
 # configuration enter the ranking as separate candidates, with near-identical scores, and the
 # published leaders are then fewer distinct strategies than they appear to be.
 #
-# `current_prediction_members` is that filter, and it takes two steps because neither is enough
+# `prediction_members_in_force` is that filter, and it takes two steps because neither is enough
 # alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
 # generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
 # has forked - and then subtracts the members those names have retired. The subtraction is needed
 # because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
 # and stays in force under its own name forever, so the union alone hands a retired generation back
 # through the frozen name that still lists it.
+#
+# A registry that publishes no population at all - a fixture, or a reader's clean clone - is not
+# the same as one whose populations are empty, and the filter is skipped rather than applied to
+# nothing. It says so where it does that; the sweep below then rests on catalog admissibility.
 
 # %%
 _study = open_study(CASE_STUDY_ID, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
-print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 pred_index = load_prediction_index(
     CASE_STUDY_ID,
     label=BACKTEST_LABEL,
     split=SPLIT,
-).filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+)
+if CURRENT_MEMBERS is not None:
+    pred_index = pred_index.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
 
 if pred_index.is_empty():
     msg = f"No predictions found for {CASE_STUDY_ID}/{BACKTEST_LABEL}/{SPLIT}"
@@ -392,7 +403,11 @@ print(repr(explorer))
 # at all, and by how much - not the identity of the row at the top.
 
 # %%
-all_baselines = explorer.best(stage="signal", top_n=9999, prediction_hashes=sorted(CURRENT_MEMBERS))
+all_baselines = explorer.best(
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=sorted(CURRENT_MEMBERS) if CURRENT_MEMBERS is not None else None,
+)
 search_context = {
     "total": len(all_baselines),
     "median_sharpe": all_baselines["sharpe"].median(),

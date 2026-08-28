@@ -59,7 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -72,6 +72,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
@@ -140,8 +141,12 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 
 # %%
 _study = open_study(CASE_STUDY_ID, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
-print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}

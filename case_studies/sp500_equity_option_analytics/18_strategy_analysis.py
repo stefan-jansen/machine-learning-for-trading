@@ -61,7 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -70,6 +70,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.cv_window import canonical_window
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     load_backtest_fold_metrics,
@@ -138,8 +139,12 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 
 # %%
 _study = open_study(CASE_STUDY, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
-print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
 top_predictions = resolve_best_predictions(

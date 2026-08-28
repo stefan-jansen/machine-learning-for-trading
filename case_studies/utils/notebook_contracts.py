@@ -179,6 +179,50 @@ def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -
     return short
 
 
+def prediction_members_in_force(study) -> tuple[frozenset[str] | None, list[str]]:
+    """Every prediction set the registry's populations currently publish, and the notes to print.
+
+    A downstream sweep does not name the families it draws from - it ranks whatever is
+    admissible - so the question here is not `declared_population_members`' "did these declared
+    names resolve" but "which members are in force at all". The answer takes two steps and
+    neither is enough alone.
+
+    A population is immutable and every generation stays readable, so a candidate pool built
+    straight from the registry counts a refitted configuration twice: nothing in the read path
+    filters on supersession (`case_studies/utils/registry/queries.py` contains no occurrence of
+    ``supersed``), and the published leaders are then fewer distinct strategies than they look.
+    Resolving each published name through `OfficialPopulation.one` takes the generation nothing
+    supersedes - it refuses rather than guesses if a chain has forked. Subtracting the retired
+    members is still needed after that, because a narrowed or preview run freezes its own
+    snapshot of whatever the catalog held that day and stays in force under its own name
+    forever, so the union alone hands a retired generation back through the frozen name that
+    still lists it.
+
+    Returns ``None`` and a note where the registry publishes no populations - a fixture or a
+    reader's clean clone, where there is no declaration to filter against. ``None`` rather than
+    an empty set because these callers pass the result straight to a ``prediction_hashes``
+    parameter that already reads ``None`` as unscoped, and because an empty set there would turn
+    "nothing to filter by" into "nothing is admissible" - a candidate pool of zero reported as
+    an ordinary result.
+    """
+    from case_studies.research import (
+        OfficialPopulation,
+        published_population_names_at,
+        superseded_members_at,
+    )
+
+    names = sorted(published_population_names_at(study.root))
+    if not names:
+        return None, [
+            f"{study.root} publishes no official populations, so no supersession filter is "
+            "applied: the candidate pool rests on catalog admissibility alone."
+        ]
+    published: set[str] = set()
+    for name in names:
+        published.update(OfficialPopulation.one(study, name=name).members)
+    return frozenset(published - superseded_members_at(study.root)), []
+
+
 def full_coverage_prediction_sql(
     prediction_set_alias: str = "p",
     training_run_alias: str = "t",

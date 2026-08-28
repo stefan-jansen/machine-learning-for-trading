@@ -50,7 +50,6 @@ from .model_planning import (
 from .models import ModelRequest, ModelRun, ResolvedModelRequest
 from .population import (
     OfficialPopulation,
-    current_prediction_members,
     population_supersedes,
     published_population_names_at,
     research_name,
@@ -123,7 +122,6 @@ __all__ = [
     "run_backtests",
     "run_locked_holdout",
     "run_model_population",
-    "current_prediction_members",
     "superseded_members",
     "published_population_names_at",
     "superseded_members_at",

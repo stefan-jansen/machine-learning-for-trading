@@ -49,7 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import open_study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -63,6 +63,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
@@ -114,7 +115,10 @@ print(
 )
 
 _study = open_study(CASE_STUDY_ID, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
 
 # %% [markdown]
 # ## 1. Advance the leading eligible strategy
