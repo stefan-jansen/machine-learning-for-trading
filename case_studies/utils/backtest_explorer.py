@@ -1053,6 +1053,7 @@ class BacktestExplorer:
                     "allocator": strategy_view(spec)
                     .get("allocation", {})
                     .get("method", "equal_weight"),
+                    "top_k": strategy_view(spec).get("signal", {}).get("top_k"),
                 }
             )
 

@@ -1299,6 +1299,8 @@ def common_sample_daily_ic(
     *,
     entity_col: str = "symbol",
     date_col: str = "timestamp",
+    score_col: str = "y_score",
+    target_col: str = "y_true",
 ) -> tuple[dict[str, float], int, int]:
     """Daily rank IC for several prediction sets over the rows all of them share.
 
@@ -1312,13 +1314,16 @@ def common_sample_daily_ic(
     dates and rows the comparison rests on. Dates left with fewer than two entities carry no
     cross-sectional correlation and are dropped.
 
+    Column names default to what :func:`load_predictions` returns (``y_score``, ``y_true``),
+    which is the only supported source for these frames.
+
     Returns ``({name: mean_daily_ic}, n_dates, n_rows_per_set)``.
     """
     if not predictions:
         return {}, 0, 0
 
     keyed = {
-        name: df.select(entity_col, date_col, "prediction", "actual").unique(
+        name: df.select(entity_col, date_col, score_col, target_col).unique(
             subset=[entity_col, date_col]
         )
         for name, df in predictions.items()
@@ -1337,7 +1342,7 @@ def common_sample_daily_ic(
             sample.group_by(date_col)
             .agg(
                 pl.corr(
-                    pl.col("prediction").rank(), pl.col("actual").rank(), method="pearson"
+                    pl.col(score_col).rank(), pl.col(target_col).rank(), method="pearson"
                 ).alias("ic"),
                 pl.len().alias("n"),
             )

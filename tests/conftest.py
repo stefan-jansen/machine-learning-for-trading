@@ -376,6 +376,16 @@ def seeded_output_dir(tmp_path_factory):
 
     seed_results(output_dir, CASE_STUDY_IDS)
 
+    # The same fixtures under `.preview/`, which is where a preview study writes and reads.
+    # `Study.activate()` links only `labels` and `features` into the preview case directory and
+    # opens an empty registry there; `run_log` is deliberately not carried across, because a
+    # preview run is meant to read and write exactly one registry rather than straddle two.
+    # That is right for a notebook that fits its own reduced population, and leaves a notebook
+    # that only reads an already-registered one with nothing to read. Seeding the preview root
+    # the same way as the released root keeps the single-registry property and lets the
+    # read-only downstream notebooks resolve a candidate index under preview.
+    seed_results(output_dir / ".preview", CASE_STUDY_IDS)
+
     # The reader-facing crypto workflow opens the seeded case directory as a Study workspace.
     # Mark that existing fixture root explicitly so Study.open does not confuse it with an
     # unrelated directory and so preview outputs remain under this test worker's output root.
