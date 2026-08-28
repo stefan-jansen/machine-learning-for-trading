@@ -320,8 +320,27 @@ class TestThePreviewTier:
         # an absence: the same registry, the same name, the same declaration.
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        # The value `Study.activate` writes, not merely some path ending in `.preview`: the
+        # guard asks whether the stamp belongs to *this* study, so a hand-made path that no
+        # activation would produce tests a signal the code never sees.
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.output_root / ".preview"))
         assert population_supersedes(study, name=first.name, declared=first.hash) is None
+
+    def test_another_study_s_preview_does_not_withhold_from_this_one(
+        self, study: Study, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`ML4T_OUTPUT_DIR` is process-global and `activate` never clears it.
+
+        So "a preview is active somewhere in this process" and "this study is that preview"
+        are different questions, and answering the first withholds the hash from a canonical
+        study that merely ran second. A notebook runs one tier and never notices; any process
+        that opens both - a test module, a backfill over several case studies - gets a
+        canonical declaration silently withheld and the run dies at `create` for naming no
+        predecessor, after paying for every fit.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path / "elsewhere" / ".preview"))
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
     def test_the_refusal_to_create_reads_the_same_signal(
         self, study: Study, monkeypatch: pytest.MonkeyPatch

@@ -55,7 +55,7 @@ def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     return f"{scope}:{suffix}" if scope else f"{case_study_id}:{suffix}"
 
 
-def _preview_is_active() -> bool:
+def _preview_is_active(study: Study | None = None) -> bool:
     """Whether a preview tier is active, from the one signal that survives the read path.
 
     `Study.activate` stamps `ML4T_OUTPUT_DIR` with a `.preview` root, and that is the only
@@ -68,12 +68,24 @@ def _preview_is_active() -> bool:
     That is invisible in CI, where a checkout has no symlinks and the isolated branch runs
     instead - so a check that passes on a runner and fails on a maintainer's machine is the
     expected shape of this bug rather than a surprising one.
+
+    The variable is process-global and `activate` never clears it, so "a preview is active"
+    and "*this* study is the preview" are different questions. Pass ``study`` to ask the
+    second. `activate` stamps ``study.output_root / ".preview"``, so a stamp whose parent is
+    some other study's output root says nothing about this one. Without the argument this
+    still answers the first question, which is what `_refuse_preview_activation` wants: a
+    population is written to whichever registry the active tier points at, so any active
+    preview is grounds to refuse the write.
     """
     import os
     from pathlib import Path
 
     active = os.environ.get("ML4T_OUTPUT_DIR")
-    return bool(active) and Path(active).name == ".preview"
+    if not active or Path(active).name != ".preview":
+        return False
+    if study is None or study.output_root is None:
+        return True
+    return Path(active).parent.resolve() == Path(study.output_root).resolve()
 
 
 def _refuse_preview_activation() -> None:
@@ -311,7 +323,7 @@ def population_supersedes(study: Study, *, name: str, declared: str | None) -> s
     """
     if not declared:
         return None
-    if _preview_is_active():
+    if _preview_is_active(study):
         # Decided before the registry is consulted, because in a maintainer worktree the
         # registry a preview reads is the canonical one. Asking it first returns a real
         # generation, this function offers the hash, and `run_model_population` then refuses
