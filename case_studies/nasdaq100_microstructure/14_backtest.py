@@ -256,6 +256,7 @@ _admissible = _catalog.filter(
     pl.col("complete") & ~pl.col("prediction_hash").is_in(list(_retired))
 ).select("prediction_hash")
 _offered = len(pred_index)
+_offered_hashes = set(pred_index["prediction_hash"])
 pred_index = pred_index.join(_admissible, on="prediction_hash", how="inner")
 if pred_index.is_empty():
     msg = (
@@ -268,8 +269,16 @@ if pred_index.is_empty():
     )
     raise RuntimeError(msg)
 if len(pred_index) < _offered:
+    # Two conditions were tested and they call for different work, so they are counted apart: an
+    # incomplete row needs its own fit finished, a superseded one needs nothing - it is a
+    # retired generation and the sweep is right to leave it. Supersession is named first because
+    # it decides the row on its own; completing a retired row would not readmit it.
+    _dropped = _offered_hashes - set(pred_index["prediction_hash"])
+    _dropped_superseded = len(_dropped & _retired)
     print(
-        f"  Excluded {_offered - len(pred_index)} of {_offered} prediction sets: not complete",
+        f"  Excluded {len(_dropped)} of {_offered} prediction sets: "
+        f"{len(_dropped) - _dropped_superseded} not complete, "
+        f"{_dropped_superseded} superseded by a later generation of their own population",
         flush=True,
     )
 

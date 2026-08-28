@@ -263,14 +263,19 @@ all_metrics = all_labels_metrics.filter(pl.col("label") == PRIMARY_LABEL)
 
 # Say what was set aside and why, rather than letting the row count speak for itself.
 if _rejected.height:
-    # One condition was tested, so there is one count to report. A legacy identity is named
-    # separately because it is the one cause of incompleteness that no re-run of the same code
-    # will clear - the row has to be refitted under the current identity scheme.
-    _legacy = _rejected.filter(pl.col("identity_status") == "legacy").height
-    _detail = f", {_legacy} of them for a legacy identity" if _legacy else ""
+    # Two conditions were tested, so two counts are reported. A superseded row is complete and
+    # was correct when it was written; reporting it as incomplete sends a reader looking for a
+    # fit that never failed. Supersession is named first because it decides the row on its own:
+    # a retired generation is not brought back by completing it. A legacy identity is named
+    # separately for the opposite reason - it is the one cause of incompleteness that no re-run
+    # of the same code will clear, because the row has to be refitted under the current scheme.
+    _superseded = _rejected.filter(pl.col("prediction_hash").is_in(list(_retired)))
+    _incomplete = _rejected.filter(~pl.col("prediction_hash").is_in(list(_retired)))
+    _legacy = _incomplete.filter(pl.col("identity_status") == "legacy").height
     print(
-        f"{_rejected.height} of {_catalog.height} registered prediction sets are not complete"
-        f"{_detail}"
+        f"{_rejected.height} of {_catalog.height} registered prediction sets are inadmissible: "
+        f"{_incomplete.height} not complete ({_legacy} of those carry a legacy identity), "
+        f"{_superseded.height} superseded by a later generation of their own population"
     )
 else:
     print(f"all {_catalog.height} registered prediction sets are admissible")
@@ -292,6 +297,7 @@ for _family, _name in (("linear", LINEAR_POPULATION), ("gbm", GBM_POPULATION)):
 # declared members that correctly never reach a leaderboard, so the comparison allows for them
 # and says how many rather than reporting a correct exclusion as a missing member.
 _degenerate = degenerate_prediction_hashes(study.root)
+_registered = set(_catalog.get_column("prediction_hash"))
 
 for _family, _members in _population_members.items():
     _have = set(
@@ -299,7 +305,12 @@ for _family, _members in _population_members.items():
     )
     _dropped = _members & _degenerate
     _missing, _extra = _members - _degenerate - _have, _have - _members
-    if not _have and _members:
+    # "Never produced" has to be decided from the registry, not from `_have`: that set is the
+    # admissible rows, so a cohort that ran and whose every member is incomplete, legacy or
+    # superseded reaches here empty too. Reading it as "not run yet" would skip the check below
+    # in exactly the case the check exists for, and drop the whole family from the comparison
+    # while reporting an absence rather than a rejection.
+    if not _members & _registered:
         print(
             f"{_family}: none of the {len(_members)} declared members has been produced yet - "
             "the cohort has not run, so this family is absent from every comparison below"
