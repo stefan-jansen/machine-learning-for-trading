@@ -34,6 +34,7 @@ import hashlib
 import importlib.metadata
 import json
 import platform
+import re
 import time
 import warnings
 from dataclasses import dataclass
@@ -1194,6 +1195,51 @@ def _resolve_nuisance_params(config: dict[str, Any], overrides: dict[str, Any], 
     return estimator.get_params(deep=True)
 
 
+# A calendar month is 28 to 31 days long, so the modal gap of a monthly panel lands in this
+# range whichever months the sample happens to span, and no daily, hourly or minute panel
+# can. It is the whole test: a declaration of `1M` can only be counted in observations on a
+# panel whose observations are months.
+_MONTHLY_CADENCE = (pd.Timedelta(days=27), pd.Timedelta(days=32))
+_MONTH_DECLARATION = re.compile(r"^(\d+)\s*M$")
+
+
+def _declared_steps(declaration: str, cadence: pd.Timedelta, *, field: str) -> tuple[int, str]:
+    """Observations a declared duration spans, and how to record it.
+
+    Buffers and horizons are hand-authored in ``setup.yaml`` as duration strings, and every
+    use of them below is a count of the panel's own observations. Most units are fixed spans
+    and divide by the measured cadence. A month is not: `pd.Timedelta` refuses ``1M``
+    outright, because January and February are different lengths and there is no answer that
+    is right for both.
+
+    On a monthly panel there is no ambiguity to resolve - one month is one observation - so
+    the count is the declared number, once the panel has been shown to be recorded in months.
+    On any other panel the declaration cannot be honoured at all and this raises rather than
+    substituting a nominal month, which would be wrong by however far that panel's month
+    differs from the nominal one and would not show in the result.
+
+    Returns the count and the string the resolved spec records. That string is
+    ``str(pd.Timedelta(...))`` wherever the duration is fixed, which is what the spec has
+    always carried, so a case study whose buffer is expressible as a Timedelta keeps the
+    identity it already published.
+    """
+    # pandas deprecated the uppercase hour alias; the buffers still use it.
+    text = re.sub(r"(?<=\d)H\b", "h", declaration.strip())
+    month = _MONTH_DECLARATION.match(text)
+    if month is None:
+        span = pd.Timedelta(text)
+        return max(1, int(np.ceil(span / cadence))), str(span)
+    low, high = _MONTHLY_CADENCE
+    if not low <= cadence <= high:
+        raise ValueError(
+            f"{field} is declared as {declaration!r}, a calendar month, but this panel is "
+            f"recorded at {cadence}. A month has no fixed length, so it can be counted in "
+            "observations only on a panel whose observations are months. Declare the span in "
+            "days on a panel recorded in days."
+        )
+    return max(1, int(month.group(1))), text
+
+
 def resolve_causal_request(study: Study, request: dict[str, Any]):
     import polars as pl
     import yaml
@@ -1272,26 +1318,10 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     # second and its docstring says it may be shorter than the first. They agree in most case
     # studies here, but by configuration rather than by construction, so deriving the bandwidth
     # from the buffer is right by luck wherever it is right at all.
-    buffer_delta = pd.Timedelta(str(mds.label_buffer).replace("H", "h"))
-    outcome_delta = pd.Timedelta(
-        str(
-            resolve_label_horizon(study.case_study, label_ref.name, setup) or mds.label_buffer
-        ).replace("H", "h")
+    buffer_declaration = str(mds.label_buffer)
+    horizon_declaration = str(
+        resolve_label_horizon(study.case_study, label_ref.name, setup) or mds.label_buffer
     )
-    # The seal and the placebo block below both take the buffer, on the grounds that it is the
-    # longer of the two. Nothing enforces that: both values are hand-authored in setup.yaml and
-    # `resolve_label_horizon` promises only that the horizon *may* be shorter. A case study
-    # declaring a horizon longer than its buffer would get a permutation block shorter than the
-    # dependence it exists to hold fixed, and a seal that leaves outcomes reaching into the
-    # holdout, both silently.
-    if outcome_delta > buffer_delta:
-        raise ValueError(
-            f"outcome horizon {outcome_delta} exceeds the CV buffer {buffer_delta} for "
-            f"{label_ref.name!r}. The buffer bounds the pre-holdout window and sizes the "
-            "placebo block, so it cannot be shorter than the outcome it is holding clear. "
-            "Raise labels.buffer (or labels.variant_buffers) in setup.yaml, or correct "
-            "labels.horizons."
-        )
     date_dtype = mds.dataset.schema[mds.date_col]
     # The cutoff steps back a count of observations, not a calendar duration. The horizons
     # these buffers describe are counted in the panel's own observations, so subtracting the
@@ -1313,8 +1343,29 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     if pre_holdout.is_empty():
         raise ValueError("DML request resolved an empty pre-holdout analysis frame")
     cadence = _observed_cadence(pre_holdout, mds.date_col)
-    buffer_steps = max(1, int(np.ceil(buffer_delta / cadence)))
-    outcome_horizon_steps = max(1, int(np.ceil(outcome_delta / cadence)))
+    buffer_steps, _ = _declared_steps(buffer_declaration, cadence, field="labels.buffer")
+    outcome_horizon_steps, outcome_horizon_label = _declared_steps(
+        horizon_declaration, cadence, field="labels.horizons"
+    )
+    # The seal and the placebo block below both take the buffer, on the grounds that it is the
+    # longer of the two. Nothing enforces that: both values are hand-authored in setup.yaml and
+    # `resolve_label_horizon` promises only that the horizon *may* be shorter. A case study
+    # declaring a horizon longer than its buffer would get a permutation block shorter than the
+    # dependence it exists to hold fixed, and a seal that leaves outcomes reaching into the
+    # holdout, both silently.
+    #
+    # Compared as observation counts rather than as durations, because that is the comparison
+    # the two quantities are used for below and it is the only one a calendar month can take
+    # part in: `1M` is not a fixed span, so `pd.Timedelta` refuses it outright.
+    if outcome_horizon_steps > buffer_steps:
+        raise ValueError(
+            f"outcome horizon {horizon_declaration} spans {outcome_horizon_steps} observations "
+            f"and the CV buffer {buffer_declaration} spans {buffer_steps} for "
+            f"{label_ref.name!r}. The buffer bounds the pre-holdout window and sizes the "
+            "placebo block, so it cannot be shorter than the outcome it is holding clear. "
+            "Raise labels.buffer (or labels.variant_buffers) in setup.yaml, or correct "
+            "labels.horizons."
+        )
     # The step-back is counted within each entity, not across the panel's distinct
     # timestamps. A label advances by that entity's own observations, so on a panel where
     # one product is missing some of the final sessions, a global count reaches back fewer
@@ -1379,7 +1430,15 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
     try:
         embargo = embargo_from_buffer(mds.label_buffer, observed_step=cadence)
     except ValueError:
-        embargo = embargo_from_buffer(mds.label_buffer)
+        # `periods_per_year` is what the calendar branch needs to answer a month buffer in
+        # observations. Omitting it made `1M` resolve to twenty-one periods on a monthly
+        # panel - the trading days in a month, on a panel whose observations are months -
+        # which is an embargo twenty-one times the declaration and longer than most of the
+        # samples it would be applied to.
+        embargo = embargo_from_buffer(
+            mds.label_buffer,
+            periods_per_year=int(setup["evaluation"]["periods_per_year"]),
+        )
     # Two separate scales create the serial dependence the placebo has to preserve, and the
     # block spans the longer of them: the overlapping labels span the label horizon, and the
     # treatment's own construction window spans itself. Sizing by the horizon alone permutes
@@ -1432,7 +1491,7 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
             "treatment": treatment,
             "confounders": list(confounders),
             "treatment_observed_at": "decision_timestamp",
-            "outcome_horizon": str(outcome_delta),
+            "outcome_horizon": outcome_horizon_label,
             "holdout_endpoint_cutoff": endpoint_cutoff.isoformat(),
         },
         "cv": {

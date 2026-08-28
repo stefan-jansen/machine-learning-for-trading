@@ -2425,10 +2425,16 @@ case_studies/us_firm_characteristics/08d_supervised_autoencoder:
   timeout: 300
 case_studies/us_firm_characteristics/09_causal_dml:
   parameters:
-    N_FOLDS: 2
-    MAX_SAMPLES: 5000
-    MAX_SYMBOLS: 5
-    N_PLACEBO: 25
+    # The DML resolver refuses a preview request that omits any reduction, because a
+    # preview missing max_samples resolves the full population and is an uncapped run
+    # wearing the cheap tier. `_collect_preview_reductions` translates MAX_FOLDS and
+    # MAX_SYMBOLS only, and neither maps to n_folds or n_placebo, so all four are
+    # declared here as the mapping the notebook parameter carries.
+    PREVIEW_REDUCTIONS:
+      n_folds: 2
+      max_samples: 5000
+      max_symbols: 5
+      n_placebo: 25
   timeout: 120
 case_studies/us_firm_characteristics/10_model_analysis:
   timeout: 300
