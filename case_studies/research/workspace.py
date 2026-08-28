@@ -142,6 +142,13 @@ class Study:
     # under papermill the executing file is a temp .ipynb and `__file__` may be absent entirely,
     # so a frame walk is wrong exactly where it would be needed.
     entry_point: str | None = None
+    # The tier this study was opened for, held rather than re-derived. `ML4T_OUTPUT_DIR` is
+    # process-global and `activate` never clears it, so every consumer that read the tier from
+    # the environment was answering "is a preview active anywhere in this process" while asking
+    # "is this study a preview". Those differ whenever one process holds two studies, and they
+    # differ in both directions - see the two failures this closes.
+    execution_tier: ExecutionTier = ExecutionTier.CANONICAL
+
     # Set only by `Study.at`, where the released case directory is the one root the study was
     # given and is not derivable from `release_root`: a fixture root, or any output directory
     # that is not `<repo>/case_studies/<name>`.
@@ -192,7 +199,9 @@ class Study:
         *,
         release_root: str | Path = REPO_ROOT,
         entry_point: str | None = None,
+        execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL,
     ) -> Study:
+        execution_tier = ExecutionTier(execution_tier)
         release_root = Path(release_root).expanduser().resolve()
         release_case_dir = release_root / "case_studies" / case_study
         if not release_case_dir.is_dir():
@@ -212,6 +221,7 @@ class Study:
                     "baseline_manifest_sha256": _release_manifest_digest(release_case_dir),
                 },
                 entry_point=entry_point,
+                execution_tier=execution_tier,
             )
             study.activate()
             return study
@@ -266,6 +276,7 @@ class Study:
             read_only=False,
             manifest=manifest,
             entry_point=entry_point,
+            execution_tier=execution_tier,
         )
         from case_studies.utils.registry.store import _open_registry
 
@@ -310,9 +321,9 @@ class Study:
         study.activate()
         return study
 
-    def activate(self, execution_tier: str | ExecutionTier = ExecutionTier.CANONICAL) -> Path:
+    def activate(self, execution_tier: str | ExecutionTier | None = None) -> Path:
         global _ACTIVE_OUTPUT_ROOT
-        tier = ExecutionTier(execution_tier)
+        tier = self.execution_tier if execution_tier is None else ExecutionTier(execution_tier)
         if self.read_only:
             os.environ.pop("ML4T_OUTPUT_DIR", None)
             _ACTIVE_OUTPUT_ROOT = None
@@ -464,6 +475,7 @@ def open_study(
             workspace=workspace,
             release_root=release_root,
             entry_point=entry_point,
+            execution_tier=tier,
         )
 
     # A maintainer worktree links its generated directories to shared data, which
@@ -485,6 +497,7 @@ def open_study(
             "baseline_source_commit": _source_commit(release_root),
             "preview_only": True,
         },
+        execution_tier=tier,
     )
-    study.activate(tier)
+    study.activate()
     return study
