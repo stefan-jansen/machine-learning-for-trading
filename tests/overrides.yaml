@@ -1786,12 +1786,8 @@ case_studies/nasdaq100_microstructure/12_causal_dml:
     N_PLACEBO: 25
   timeout: 120
 case_studies/nasdaq100_microstructure/13_model_analysis:
-  skip: true
-  skip_reason: "The fixture registry predates the research interface: training_runs carries neither execution_tier nor identity_version, so catalog.py resolves every row to a legacy identity and no prediction set is complete. The declared-population cross-check then reports all 12 declared linear members absent against 0 admissible rows. Lifts when the test-data registry is regenerated on the current schema."
   timeout: 300
 case_studies/nasdaq100_microstructure/14_backtest:
-  skip: true
-  skip_reason: "Same fixture registry limitation as 13_model_analysis: with no identity_version column, no prediction set is complete, and the admissibility guard refuses rather than sweep a population that cannot be official. Lifts when the test-data registry is regenerated on the current schema."
   parameters:
     # Test data has 6 nasdaq symbols; the slot grid's smallest max_slots (5)
     # needs n_assets > 5, so cap at 6 (not 5) or every scheme is filtered out.

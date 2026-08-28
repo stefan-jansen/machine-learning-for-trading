@@ -51,12 +51,6 @@ tests/test_darts_temporal.py
 tests/test_deep_learning_adapter.py
 tests/test_deep_learning_state.py
 tests/test_deep_model_state.py
-# Carries a strict=True xfail, which is a tripwire: it is meant to turn into a
-# failure the moment the identity batch lands and the force_retrain fix works.
-# Behind this boundary nothing runs it, so the tripwire cannot fire and the fix
-# would land silently. It does need torch - case_studies/utils/deep_learning.py
-# imports it at module scope (:42) - so the entry is right and the cost is real.
-# Raised by fx_pairs on a push-gate review. Goes away with the torch decision.
 tests/test_dl_device_contract.py
 tests/test_dl_force_retrain_identity.py
 tests/test_gbm_classification_target.py
