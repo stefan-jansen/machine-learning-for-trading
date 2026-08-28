@@ -364,6 +364,50 @@ def _validation_folds(validation_spec: Mapping[str, Any]) -> list[dict[str, Any]
     return [dict(fold) for fold in folds]
 
 
+def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the widest buffer any of a case study's labels declares, and whose it is.
+
+    The holdout fold is one fold. A fold-scoped temporal artifact carries a single set of
+    boundaries per fold id, and a fold-fitted feature's ``train_end`` is what that feature
+    knows, so the fold's geometry has to be the same whichever label a model is later fitted
+    on. That leaves one question: which buffer.
+
+    It is the widest, and the narrow ones are unsafe rather than merely tighter. A fold built
+    on a one-day buffer and handed to a twenty-one-day model gives that model training rows
+    whose features were fitted on data twenty sessions past its own ``train_end`` - the leak
+    the buffer exists to prevent, arriving through the feature instead of the label. The
+    widest buffer costs the shorter-horizon models a longer gap than they need, which is the
+    conservative direction and, on the case studies measured, twenty sessions out of thousands.
+
+    Labels are read from ``labels.primary`` and ``labels.variants`` and resolved through
+    :func:`utils.artifact_specs.resolve_label_buffer`, so a label carrying its own spec
+    artifact still wins over the setup block.
+    """
+    from utils.artifact_specs import resolve_label_buffer
+    from utils.cv_splits import normalize_label_buffer
+
+    labels = setup.get("labels") or {}
+    names = [str(labels["primary"])] if labels.get("primary") else []
+    names += [str(name) for name in (labels.get("variants") or [])]
+    if not names:
+        raise ValueError(f"{case_study} declares no labels, so no holdout buffer can be derived")
+
+    widest: tuple[pd.Timedelta, str, str] | None = None
+    for name in names:
+        buffer = resolve_label_buffer(case_study, name, setup)
+        if not buffer:
+            continue
+        span = pd.Timedelta(normalize_label_buffer(buffer))
+        if widest is None or span > widest[0]:
+            widest = (span, str(buffer), name)
+    if widest is None:
+        raise ValueError(
+            f"{case_study} declares labels {names} and a buffer for none of them, so the gap "
+            "sealing holdout training from the holdout window cannot be derived"
+        )
+    return widest[1], widest[2]
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
@@ -425,12 +469,12 @@ def build_holdout_cv(
     # for every case study whose label carries no separate spec artifact - which is all nine
     # for their primary label. Passing the setup is what makes the buffer resolvable at all.
     setup = load_setup_config(case_study)
-    buffer = resolve_label_buffer(case_study, resolved_label, setup)
-    if not buffer:
-        raise ValueError(
-            f"{case_study} declares no label buffer for {resolved_label!r}, so the gap sealing "
-            "holdout training from the holdout window cannot be derived"
-        )
+    # The case study's widest buffer, not the selected label's own. The fold-scoped temporal
+    # artifact carries one holdout fold whose features every label's holdout model is fitted
+    # on, so its boundary has to be label-independent, and the widest is the only choice that
+    # leaks for no label. `widest_label_buffer` carries the argument. The selected label still
+    # supplies the horizon check below, which this now satisfies by construction.
+    buffer, buffer_label = widest_label_buffer(case_study, setup)
     holdout_open = pd.Timestamp(holdout_start)
     observations = sorted({pd.Timestamp(str(value)) for value in timeline})
     if len(observations) < 2:
@@ -510,6 +554,7 @@ def build_holdout_cv(
         "request": {
             "source": "case_study_holdout",
             "label_buffer": str(buffer),
+            "label_buffer_label": buffer_label,
             "label_buffer_steps": buffer_steps,
             "observation_cadence": str(cadence),
             "periods_per_year": periods_per_year,

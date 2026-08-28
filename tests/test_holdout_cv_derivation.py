@@ -310,3 +310,70 @@ def test_a_case_study_without_fold_scoped_temporal_features_is_not_refused() -> 
     holdout = dict(_VALIDATION_FOLD_0, fold=8, val_start="2020-01-31", val_end="2021-12-31")
 
     _require_holdout_temporal_features(_TemporalStub(None), holdout)
+
+
+def test_the_gap_is_the_case_studys_widest_buffer_whatever_label_is_selected() -> None:
+    """One fold, one geometry, and the only safe one is the widest.
+
+    The fold-scoped temporal artifact carries a single set of boundaries per fold id, and a
+    fold-fitted feature's `train_end` is what that feature knows. A fold built on fx_pairs'
+    primary `1D` buffer and then handed to a `fwd_ret_21d` model would give that model training
+    rows whose features were fitted twenty sessions past its own `train_end` - the leak the
+    buffer exists to prevent, arriving through the feature rather than the label.
+
+    fx_pairs is the discriminating case: its primary declares `1D` and a variant declares `21D`,
+    so a derivation that read the selected label would return 1 here and a derivation that reads
+    the case study would return 21.
+    """
+    for label in ("fwd_ret_1d", "fwd_ret_5d", "fwd_ret_21d"):
+        cv = build_holdout_cv(_validation_spec(label), case_study="fx_pairs", timeline=SESSIONS)
+        assert cv["request"]["label_buffer"] == "21D", label
+        assert cv["request"]["label_buffer_label"] == "fwd_ret_21d", label
+        assert cv["request"]["label_buffer_steps"] == 21, label
+
+    # Every label therefore lands on one boundary, which is what makes the single fold usable.
+    boundaries = {
+        _fold(build_holdout_cv(_validation_spec(label), case_study="fx_pairs", timeline=SESSIONS))[
+            "train_end"
+        ]
+        for label in ("fwd_ret_1d", "fwd_ret_5d", "fwd_ret_21d")
+    }
+    assert len(boundaries) == 1
+
+
+def test_no_case_study_declares_an_outcome_horizon_its_widest_buffer_cannot_cover() -> None:
+    """The horizon check reads the selected label, so widening the buffer can only relax it.
+
+    Taking the maximum over a case study's labels returns at least each label's own buffer, and
+    the refusal already compared every label against that. Asserted across the nine rather than
+    argued, because the refusal is what stands between a short gap and a leaked holdout.
+    """
+    from case_studies.research.holdout import widest_label_buffer
+    from utils.artifact_specs import resolve_label_horizon
+    from utils.cv_splits import normalize_label_buffer
+
+    case_studies = [
+        "fx_pairs",
+        "cme_futures",
+        "crypto_perps_funding",
+        "etfs",
+        "sp500_options",
+        "us_firm_characteristics",
+        "sp500_equity_option_analytics",
+        "nasdaq100_microstructure",
+        "us_equities_panel",
+    ]
+    for case_study in case_studies:
+        setup = load_setup_config(case_study)
+        buffer, _ = widest_label_buffer(case_study, setup)
+        widest = pd.Timedelta(normalize_label_buffer(buffer))
+        labels = setup["labels"]
+        for label in [labels["primary"], *labels.get("variants", [])]:
+            horizon = resolve_label_horizon(case_study, label, setup)
+            if not horizon:
+                continue
+            assert pd.Timedelta(normalize_label_buffer(horizon)) <= widest, (
+                f"{case_study}/{label} declares an outcome horizon longer than the widest "
+                "buffer any of its labels declares, so its last training label resolves "
+                "inside the holdout"
+            )
