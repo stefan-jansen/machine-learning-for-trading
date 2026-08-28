@@ -192,8 +192,22 @@ for _table in sorted(_stale):
     print(f"{_table} references runs outside {_UNIVERSE_FILTER}, so it is rebuilt")
 
 if _n_cohorts == 0 or "cohort_metrics" in _stale:
+    # `compute_and_register` writes with `replace_all=True`, so a rebuild that computes no
+    # cohort empties the table rather than leaving the previous one - the opposite of what
+    # `populate_paired_metrics` does on the same failure. An emptied table is also clean by
+    # the universe check below, which reads rows and finds none, so the wipe would pass
+    # unnoticed and every cohort figure would render blank. Catch it here, where the before
+    # and after counts are both in hand.
+    _n_cohorts_before = _n_cohorts
     _counts = compute_and_register(CASE_STUDY, universe_filter=_UNIVERSE_FILTER)
     _n_cohorts = sum(_counts[k] for k in ("family", "stagelabel", "label"))
+    if _n_cohorts == 0 and _n_cohorts_before > 0:
+        raise RuntimeError(
+            f"rebuilding cohort_metrics for {_UNIVERSE_FILTER} produced no cohort and "
+            f"replaced {_n_cohorts_before} existing rows with none. The selection-bias "
+            f"figures below have no input, and the rows they had are gone. Check that "
+            f"{_UNIVERSE_FILTER} matches the backtest runs this case study registered."
+        )
     print(f"populated cohort_metrics: {_n_cohorts} rows")
 else:
     print(f"already populated: cohort_metrics {_n_cohorts} rows")
