@@ -300,6 +300,14 @@ def declared_population_members(
     report a family no declaration covers; where the family produced nothing it is only a note,
     since there is nothing yet to be undeclared.
 
+    A notebook naming its *real* populations will not find them in a CI fixture. The seeded
+    registries publish under a ``{cs}-fixture-{family}-validation-v1`` prefix, which they have
+    to: ``OfficialPopulation.create`` matches on the member list, so a modelling notebook
+    publishing its own newly-fitted hashes under a name the fixture had frozen is refused. Point
+    the notebook's population-name parameters at the fixture names in ``tests/overrides.yaml``
+    rather than working around it here - the name a notebook declares is the one it means in
+    production, and the fixture is the thing that differs.
+
     Returns the resolved members per family and the notes to print.
     """
     from case_studies.research import OfficialPopulation, published_population_names_at
