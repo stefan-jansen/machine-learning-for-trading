@@ -632,7 +632,9 @@ def compute_calibration_metrics(results: dict) -> pl.DataFrame:
             {
                 "method": {"sc": "Split-Conformal", "cqr": "CQR", "aci": "ACI"}[method],
                 "actual_coverage": actual,
-                "coverage_gap": actual - 0.9,
+                # Against the configured target, not a literal 0.9: a parameterized run
+                # at another coverage level would otherwise report its gap from 90%.
+                "coverage_gap": actual - TARGET_COVERAGE,
                 "mean_width": np.mean(data["widths"]),
                 "std_width": np.std(data["widths"]),
                 "fold_std": np.std(fold_coverages),
@@ -697,11 +699,22 @@ if _closest == _steadiest == _widest:
         f"- All three are **{_closest}**, which is the trade in one method: it holds "
         "coverage nearest and steadiest by keeping its intervals open."
     )
+_covers_more = _cqr["actual_coverage"] > _sc["actual_coverage"]
+_is_narrower = _cqr["mean_width"] < _sc["mean_width"]
+_verdict = {
+    (True, True): "Higher coverage and narrower intervals at once, which is what setting "
+    "the width per observation can buy.",
+    (True, False): "Higher coverage, but paid for in width, so on this run the per-"
+    "observation width is not free.",
+    (False, True): "Narrower intervals, but at lower coverage, so on this run the "
+    "adaptivity trades coverage away rather than buying it.",
+    (False, False): "Lower coverage and wider intervals, so on this run the per-"
+    "observation width bought nothing.",
+}[(_covers_more, _is_narrower)]
 _lines.append(
     f"- CQR reaches {_cqr['actual_coverage']:.1%} coverage at mean width "
     f"{_cqr['mean_width']:.3f}, against split conformal's {_sc['actual_coverage']:.1%} at "
-    f"{_sc['mean_width']:.3f}. Higher coverage and narrower intervals at once is what "
-    "setting the width per observation buys."
+    f"{_sc['mean_width']:.3f}. {_verdict}"
 )
 display(Markdown("\n".join(_lines)))
 
@@ -925,13 +938,19 @@ if fold_stats:
     cqr_width_bps = width_df["cqr_width_mean"].to_numpy() * 1e4
 
     fig, ax1 = plt.subplots(figsize=(11, 5))
-    ax1.plot(plot_dates, cqr_width_bps, "o-", color=COLORS["amber"], lw=2, label="CQR width (mean)")
-    ax1.axhline(
-        y=float(np.mean(sc_width_bps)),
+    # Both series per fold. Split conformal used to be one horizontal line at the grand
+    # mean of its folds, which is the shape the claim is about - so the chart could not
+    # show whether it held, and a reader had to take the caption's word for it.
+    ax1.plot(
+        plot_dates, cqr_width_bps, "o-", color=COLORS["amber"], lw=2, label="CQR width (fold mean)"
+    )
+    ax1.plot(
+        plot_dates,
+        sc_width_bps,
+        "s-",
         color=COLORS["blue"],
         lw=1.5,
-        ls="--",
-        label="Split-conformal width (mean)",
+        label="Split-conformal width (fold mean)",
     )
     ax1.set_xlabel("Fold End Date")
     ax1.set_ylabel("Interval Width (bps)")
@@ -979,17 +998,22 @@ if fold_stats:
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", frameon=False)
 
-    ax1.set_title("CQR width follows the volatility overlay; split conformal does not")
+    ax1.set_title("Fold-to-fold interval width against the volatility overlay")
     show_with_alt(
         fig,
-        "Interval width per method over time on the left axis, with a volatility series "
-        "on a right axis and its top quartile shaded.",
+        "Fold-mean interval width for CQR and for split conformal against fold end date "
+        "on the left axis, with a volatility series on a right axis and its top quartile "
+        "shaded.",
     )
 
 # %% [markdown] tags=[]
-# **Interpretation**: CQR intervals have higher variance (wider during volatile
-# periods), which is desirable for risk-aware position sizing. Split-conformal
-# and ACI produce near-constant widths since they use the same base Ridge model.
+# **What to read off it.** CQR sets its width per observation, so its fold means can
+# move with the volatility overlay; split conformal fixes one width per fold from the
+# calibration residuals of the same Ridge model, so its line has far less to move
+# with. Whether the two lines separate in the direction that description predicts is
+# what the chart is for. A width that rises with volatility is the property that makes
+# an interval usable for position sizing, and a width that does not is why a marginal
+# coverage number can look fine while the interval fails when it matters.
 
 # %% [markdown] tags=[]
 # ## Conditional Coverage: Volatility Stratification
