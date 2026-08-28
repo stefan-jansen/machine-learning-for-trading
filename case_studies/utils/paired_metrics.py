@@ -44,6 +44,7 @@ from case_studies.utils.uncertainty import (
     SIGNAL_BASELINE_BY_CASE_STUDY,
     compute_independent_diff_uncertainty,
     compute_paired_uncertainty,
+    joint_returns,
 )
 from utils.paths import get_case_study_dir
 
@@ -69,27 +70,6 @@ def _min_paired_n(ppy: int) -> int:
     if ppy <= 52:  # weekly
         return 12
     return 21  # daily / 8h / intraday
-
-
-def _joint_coerce(c_arr, b_arr):
-    """Filter NaN/non-finite jointly across paired series and trim leading
-    rows where *either* is zero. Matches ``_coerce_returns`` semantics but
-    preserves index alignment so ``compute_paired_uncertainty``'s
-    equal-length precondition survives — the upstream helper trims leading
-    zeros independently per series, which can desynchronize a paired
-    bootstrap if one side has more leading inactive bars than the other.
-    """
-    c = np.asarray(c_arr, dtype=np.float64)
-    b = np.asarray(b_arr, dtype=np.float64)
-    finite = np.isfinite(c) & np.isfinite(b)
-    c, b = c[finite], b[finite]
-    if c.size == 0:
-        return c, b
-    nonzero = np.flatnonzero((c != 0.0) & (b != 0.0))
-    if nonzero.size == 0:
-        return c[:0], b[:0]
-    start = int(nonzero[0])
-    return c[start:], b[start:]
 
 
 # The two case studies whose canonical strategy is pinned to one rung of a cascade, mirroring
@@ -590,6 +570,7 @@ def _populate_pair(
     label,
     *,
     disjoint_windows: bool = False,
+    challenger_overlays_baseline: bool = False,
     benchmark_label: str | None = None,
     write_case_dir: Path | None = None,
 ):
@@ -600,6 +581,15 @@ def _populate_pair(
     distribution is built from independent draws. Otherwise, the streams are
     inner-joined on timestamp and a paired stationary bootstrap runs on the
     aligned diff series.
+
+    ``challenger_overlays_baseline`` says what a leading flat run on the challenger
+    means, and the two pair shapes here answer differently. Against the equal-weight
+    benchmark the challenger is an independent strategy whose returns begin at the
+    first bar rather than at its first signal, so those rows are warmup and the
+    default drops them. Across a stage transition the challenger is built on top of
+    the baseline and both are live from the same session, so a flat challenger there
+    is a position it chose to hold and the comparison keeps it. See
+    :func:`case_studies.utils.uncertainty.joint_returns`.
     """
     min_n = _min_paired_n(ppy)
     if disjoint_windows:
@@ -640,8 +630,14 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        c_arr, b_arr = _joint_coerce(c_arr, b_arr)
-        n_overlap = c_arr.size
+        # Measured here, applied once inside `compute_paired_uncertainty`, which trims
+        # whatever it is handed. Both rules happen to survive being applied twice, so passing
+        # the trimmed pair on would work today; it would stop working silently the moment a
+        # rule stops being idempotent, and the figure registered as `n_overlap` would then
+        # name a sample the bootstrap never ran on.
+        n_overlap = joint_returns(
+            c_arr, b_arr, challenger_overlays_baseline=challenger_overlays_baseline
+        )[0].size
         if n_overlap < min_n:
             return {
                 "cs": cs,
@@ -658,6 +654,7 @@ def _populate_pair(
             label=label,
             n_boot=2000,
             seed=42,
+            challenger_overlays_baseline=challenger_overlays_baseline,
         )
 
     if not paired:
@@ -679,7 +676,7 @@ def _populate_pair(
     )
     # disjoint path: paired carries n_c/n_b (post-coerce per-side sizes); use
     # min so n_overlap reflects what the bootstrap actually used. paired path:
-    # no n_c/n_b, n_overlap already the post-_joint_coerce length.
+    # no n_c/n_b, n_overlap already the post-`joint_returns` length.
     n_actual = n_overlap
     n_c = paired.get("n_c")
     n_b = paired.get("n_b")
@@ -788,10 +785,11 @@ def populate_paired_metrics(
                 min_n = _min_paired_n(ppy)
                 aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
                 if aligned.height >= min_n:
-                    c_arr, b_arr = _joint_coerce(
-                        aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
-                    )
-                    if c_arr.size >= min_n:
+                    c_arr = aligned["ret"].to_numpy()
+                    b_arr = aligned["ret_b"].to_numpy()
+                    # Sized here, trimmed once inside `compute_paired_uncertainty`; see
+                    # `_populate_pair` for why the pair is not trimmed on the way in.
+                    if joint_returns(c_arr, b_arr)[0].size >= min_n:
                         paired = compute_paired_uncertainty(
                             c_arr,
                             b_arr,
@@ -953,7 +951,27 @@ def populate_paired_metrics(
                 )
             )
 
-    # Pairs #4-6: stage transitions on the validation rank-1 lineage
+    # Pairs #4-6: stage transitions on the validation rank-1 lineage.
+    #
+    # These keep the default trim rather than the overlay one, and the reason is that neither
+    # thing the overlay rule needs is established here.
+    #
+    # `champion_lineage` takes the best-Sharpe backtest at each stage independently, sharing
+    # only the prediction hash, so the allocation entry is not necessarily the parent of the
+    # cost entry and the risk entry is not necessarily built on the cost entry. The pair is a
+    # stage comparison, not a demonstrated parent and child.
+    #
+    # And a challenger at these stages can carry a real warmup. `conformal_weighted` keeps only
+    # the timestamps that have prior-only calibration (backtest_runner.py:2240), so its leading
+    # sessions are absent because it could not yet act, not because it chose not to. Trimming
+    # them is right, and the overlay rule would keep them.
+    #
+    # `17_risk_management` and `18_strategy_analysis` do use the overlay rule, because there the
+    # overlay is paired with its own no-overlay carrier by construction rather than by a
+    # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with
+    # `20_strategy_synthesis/01_aggregate_synthesis.py`, which computes the same three
+    # transitions into the same table from its own copy of the coercion;
+    # `tests/test_uncertainty_cscv.py` runs the two against each other.
     lineage = explorer.champion_lineage(leader_phash)
     for prev_stage, this_stage, kind in [
         ("signal", "allocation", "signal_leader"),
