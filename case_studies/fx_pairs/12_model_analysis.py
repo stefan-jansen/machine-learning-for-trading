@@ -39,6 +39,7 @@
 import plotly.express as px
 import polars as pl
 import yaml
+from IPython.display import display
 from ml4t.diagnostic.metrics import cross_sectional_ic
 
 import utils.style  # noqa: F401
@@ -367,7 +368,10 @@ bucket_summary = (
     .agg(pl.col("actual").mean().alias("mean_realized_return"))
     .sort("label", "family", "bucket")
 )
-bucket_summary
+# Three labels sort as 1d, 21d, 5d, so the default row window hides the middle one entirely and
+# a reader would see the same two-thirds coverage this section exists to remove.
+with pl.Config(tbl_rows=bucket_summary.height):
+    display(bucket_summary)
 
 # %% [markdown]
 # ## Chronological conformal coverage
@@ -393,7 +397,8 @@ for keys, frame in representative_predictions.group_by(
             }
         )
 conformal = pl.DataFrame(conformal_rows).sort("label", "nominal_level", "family")
-conformal
+with pl.Config(tbl_rows=conformal.height, tbl_cols=conformal.width, tbl_width_chars=200):
+    display(conformal)
 
 # %% [markdown]
 # ## Causal evidence remains separate
