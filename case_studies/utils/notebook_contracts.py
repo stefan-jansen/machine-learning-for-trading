@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
@@ -116,6 +118,65 @@ def degenerate_prediction_hashes(case_dir: Path) -> set[str]:
         ).fetchone():
             return set()
         return {row[0] for row in db.execute(f"SELECT DISTINCT {_DEGENERATE_SUBQUERY[7:]}")}
+
+
+def incompletely_registered_predictions(case_dir: Path, hashes: Iterable[str]) -> dict[str, str]:
+    """Which of ``hashes`` are registered but not finished, and what is short in each.
+
+    A headline row in ``prediction_metrics`` is not evidence that a prediction set arrived.
+    Coverage, the headline metrics and the per-fold metrics are committed as separate writes,
+    so a run interrupted between them leaves a hash that every metrics query returns and that
+    `PredictionResult.complete` rejects. A leaderboard reading the headline alone then scores a
+    member over the folds it managed, and a short window is an easier window.
+
+    Checks coverage present and reporting ``complete``, one ``fold_metrics`` row per expected
+    fold, and the predictions parquet on disk. The file is checked for existence and not read:
+    `PredictionResult.complete` re-digests it, which is minutes of I/O for a caller running this
+    over a thousand members on every execution, and the failure that catches is corruption after
+    registration rather than the interrupted registration at issue. A member whose artifact was
+    deleted or never written is a different matter - the registry still lists it, the leaderboard
+    still ranks it, and `load_predictions` then returns nothing for it without saying so.
+
+    Returns ``{hash: reason}`` for the members that fall short, empty when they all arrived or
+    when the registry has no coverage table to check them against.
+    """
+    run_log = Path(case_dir) / "run_log"
+    db_path = run_log / "registry.db"
+    predictions_dir = run_log / "predictions"
+    wanted = sorted(set(hashes))
+    if not wanted or not db_path.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        tables = {
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if not {"prediction_coverage", "fold_metrics"} <= tables:
+            return {}
+        coverage = {
+            row[0]: (row[1], row[2])
+            for row in db.execute(
+                "SELECT prediction_hash, status, n_folds_expected FROM prediction_coverage"
+            )
+        }
+        folds = dict(
+            db.execute("SELECT prediction_hash, COUNT(*) FROM fold_metrics GROUP BY 1").fetchall()
+        )
+    short: dict[str, str] = {}
+    for member in wanted:
+        if member not in coverage:
+            short[member] = "no coverage row"
+            continue
+        status, expected = coverage[member]
+        actual = folds.get(member, 0)
+        artifact = predictions_dir / member / "predictions.parquet"
+        if status != "complete":
+            short[member] = f"coverage {status}"
+        elif expected is not None and actual != expected:
+            short[member] = f"{actual} of {expected} folds scored"
+        elif not artifact.is_file():
+            short[member] = "no predictions.parquet"
+    return short
 
 
 def full_coverage_prediction_sql(
@@ -299,6 +360,14 @@ def declared_population_members(
     report a family no declaration covers; where the family produced nothing it is only a note,
     since there is nothing yet to be undeclared.
 
+    A notebook naming its *real* populations will not find them in a CI fixture. The seeded
+    registries publish under a ``{cs}-fixture-{family}-validation-v1`` prefix, which they have
+    to: ``OfficialPopulation.create`` matches on the member list, so a modelling notebook
+    publishing its own newly-fitted hashes under a name the fixture had frozen is refused. Point
+    the notebook's population-name parameters at the fixture names in ``tests/overrides.yaml``
+    rather than working around it here - the name a notebook declares is the one it means in
+    production, and the fixture is the thing that differs.
+
     Returns the resolved members per family and the notes to print.
     """
     from case_studies.research import OfficialPopulation, published_population_names_at
@@ -327,3 +396,110 @@ def declared_population_members(
                 raise RuntimeError(msg) from error
             notes.append(f"no current official population for {family} ({name}): {error}")
     return members, notes
+
+
+_STRATEGY_ANALYSIS_TABLES = ("backtest_runs", "cohort_metrics", "backtest_paired_metrics")
+
+
+def strategy_input_counts(case_dir: Path) -> dict[str, int]:
+    """Row counts for the three tables a strategy-analysis notebook reads.
+
+    ``backtest_runs`` is what the backtesting stages register. ``cohort_metrics`` and
+    ``backtest_paired_metrics`` are *derived* from those runs, and until recently only
+    ``cme_futures/17`` derived them inside its own case study - everywhere else they existed
+    solely because ``20_strategy_synthesis/01_aggregate_synthesis.py`` had been run, which makes
+    a case study depend upward on the chapter that aggregates it.
+
+    The distinction the caller needs is between "no runs to analyse" and "runs exist but nothing
+    has derived from them". The first is a refusal: every figure and gate downstream is computed
+    from backtest runs, so with none registered the notebook does not produce a weaker answer,
+    it produces an empty one that reads like a finished analysis. The second is work to do, and
+    both producers are already case-study-scoped functions.
+
+    A missing registry or a missing table counts as zero, which is the ordinary state of a clean
+    clone, and is reported rather than raised so the caller decides what it means.
+    """
+    import sqlite3
+
+    db_path = Path(case_dir) / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return dict.fromkeys(_STRATEGY_ANALYSIS_TABLES, 0)
+    counts: dict[str, int] = {}
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in _STRATEGY_ANALYSIS_TABLES:
+            counts[table] = (
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] if table in present else 0
+            )
+    return counts
+
+
+_DERIVED_TABLE_REFERENCES: dict[str, tuple[str, ...]] = {
+    "cohort_metrics": ("leader_hash",),
+    "backtest_paired_metrics": ("challenger_hash", "benchmark_hash"),
+}
+
+
+def derived_tables_off_canonical_universe(case_dir: Path, universe_filter: str | None) -> set[str]:
+    """Derived tables holding rows that were selected under a different universe.
+
+    A row count answers "has this been populated", which is not the question a rerun needs.
+    ``cohort_metrics`` and ``backtest_paired_metrics`` are written from a *selection*, and a
+    table populated by an earlier run that made a different selection is fully populated and
+    wrong. Nothing in either table records which selection produced it, so it is recovered
+    from what the rows point at: every referenced ``backtest_runs`` row carries its universe in
+    ``spec_json``, and a canonical table cannot reference a run outside the canonical universe.
+
+    Only hashes that name a ``backtest_runs`` row are judged. ``backtest_paired_metrics``
+    carries no FK on ``benchmark_hash`` and its equal-weight side is a synthetic
+    ``side_ew:<cs>:<label>`` identifier that is deliberately not a run; an identifier that
+    names no run cannot be evidence of a run outside the universe. Treating an absent hash as
+    ``"full"`` instead would report the paired table stale on every run forever.
+
+    ``cohort_metrics`` records only ``leader_hash``, so a cohort whose leader is canonical but
+    whose membership was drawn from a wider universe reads as clean here. Its trial counts,
+    DSR and PBO are computed over that wider membership, and ``k_variants`` counts the members
+    that had usable return series rather than the members selected, so it cannot stand in for
+    the missing selection identity. Closing that gap needs the selection persisted on the row.
+
+    Returns the table names to rebuild. An unpinned case study passes ``None`` and gets the
+    empty set, because there is no canonical universe for a row to be outside of.
+    """
+    if universe_filter is None:
+        return set()
+
+    from case_studies.utils.backtest_explorer import _parse_spec
+    from case_studies.utils.backtest_presets import strategy_view
+
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return set()
+
+    stale: set[str] = set()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        present = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "backtest_runs" not in present:
+            return set()
+        universes = {
+            row[0]: (
+                strategy_view(_parse_spec(row[1]) or {}).get("signal", {}).get("universe_filter")
+                or "full"
+            )
+            for row in db.execute("SELECT backtest_hash, spec_json FROM backtest_runs")
+        }
+        for table, columns in _DERIVED_TABLE_REFERENCES.items():
+            if table not in present:
+                continue
+            for column in columns:
+                referenced = [
+                    row[0]
+                    for row in db.execute(f"SELECT {column} FROM {table}")  # noqa: S608
+                    if row[0] is not None
+                ]
+                if any(universes[h] != universe_filter for h in referenced if h in universes):
+                    stale.add(table)
+    return stale

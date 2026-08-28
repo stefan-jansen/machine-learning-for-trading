@@ -412,6 +412,80 @@ def compute_backtest_uncertainty(
 # ---------------------------------------------------------------------------
 
 
+def joint_returns(
+    challenger: np.ndarray | pl.Series,
+    baseline: np.ndarray | pl.Series,
+    *,
+    challenger_overlays_baseline: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Coerce a paired return series to the precondition of a paired bootstrap.
+
+    :func:`compute_paired_uncertainty` requires two arrays of the same length whose position
+    ``i`` is the same session on both sides, and it refuses the pair rather than bootstrap a
+    misaligned one. Coercing each side on its own does not deliver that: ``_coerce_returns``
+    drops non-finite values and the leading run of zeros per series, so two series with
+    different amounts of leading inactivity part company. Joining on the timestamp beforehand
+    does not save it either, because the per-side trim happens after.
+
+    So both decisions are taken once, over both series: keep a session only where both sides
+    are finite, then start where the comparison becomes defined.
+
+    Where it becomes defined depends on what the pair is, which is why the caller has to say.
+    A leading flat run on the challenger has two possible meanings and they are
+    indistinguishable in the numbers:
+
+    ``challenger_overlays_baseline=False`` (the default, and the strategy-versus-benchmark
+        case): the two series are independent, each live from its own first traded session.
+        A strategy has a warmup prefix before its first signal while an equal-weight
+        benchmark is invested from the first joined session, and those rows are pre-sample
+        for the strategy rather than a result. The sample starts where **both** are trading,
+        which the code below reads as the first session on which both returns are non-zero;
+        see the comment there for the difference and why it is preserved.
+
+    ``challenger_overlays_baseline=True`` (the risk-overlay case): the challenger runs on top
+        of the baseline, so both are live from the same session and a flat challenger there
+        is a position it chose to hold - the largest instance of the effect the comparison
+        exists to measure. Starting where both traded would delete exactly those rows and pull
+        the measured difference toward zero in the direction the overlay is under test. The
+        sample starts where **either** has traded.
+
+    Returns two empty arrays when no session qualifies.
+    """
+    c = _as_return_array(challenger)
+    b = _as_return_array(baseline)
+    if c.size != b.size:
+        raise ValueError(
+            f"a paired series must arrive aligned; got {c.size} and {b.size} observations"
+        )
+    finite = np.isfinite(c) & np.isfinite(b)
+    c, b = c[finite], b[finite]
+    if c.size == 0:
+        return c, b
+    if challenger_overlays_baseline:
+        # Either side having traded starts the sample, so the first index where anything is
+        # non-zero: the earlier of the two firsts, or nothing if neither ever traded.
+        first_c = np.flatnonzero(c != 0.0)
+        first_b = np.flatnonzero(b != 0.0)
+        starts = [int(x[0]) for x in (first_c, first_b) if x.size]
+        if not starts:
+            return c[:0], b[:0]
+        start = min(starts)
+    else:
+        # The first session on which both are simultaneously non-zero, which is the rule the
+        # per-case-study producer and `20_strategy_synthesis/01_aggregate_synthesis.py` have
+        # both applied since they were split apart. It is not quite the rule the paragraph
+        # above states: the later starter's own first session is skipped when the other side
+        # happens to post an exactly zero return on it, and those observations are live on
+        # both series. Correcting that moves every default pair in the registry and obliges a
+        # re-execution of the Chapter 20 synthesis, so it is left as it stands here rather
+        # than changed underneath a comparison this function was only asked to make paired.
+        both = np.flatnonzero((c != 0.0) & (b != 0.0))
+        if not both.size:
+            return c[:0], b[:0]
+        start = int(both[0])
+    return c[start:], b[start:]
+
+
 def compute_paired_uncertainty(
     challenger: np.ndarray | pl.Series,
     baseline: np.ndarray | pl.Series,
@@ -422,24 +496,35 @@ def compute_paired_uncertainty(
     label: str | None = None,
     n_boot: int = 2000,
     seed: int = 0,
+    challenger_overlays_baseline: bool = False,
 ) -> dict[str, float]:
     """Paired stationary bootstrap on daily-return differences.
 
-    Inputs must be the same length and aligned by date. Returns a flat dict for
-    upsert into ``backtest_paired_metrics``.
+    The two series must arrive the same length and aligned by date, so that position ``i``
+    is the same session on both sides; a pair that does not is refused with an empty mapping
+    rather than truncated. Which rows to drop is then decided over both series at once by
+    :func:`joint_returns`, so a caller does not have to coerce them beforehand.
+    ``challenger_overlays_baseline`` is passed straight through and says which pair this is;
+    read that function before choosing it, because the default is right for a strategy
+    against a benchmark and wrong for a risk overlay against its carrier.
+
+    Returns a flat dict for upsert into ``backtest_paired_metrics``, and an empty mapping
+    when fewer than four sessions survive.
     """
     from ml4t.diagnostic.evaluation.stats import _stationary_bootstrap_indices
 
-    c = _coerce_returns(challenger)
-    b = _coerce_returns(baseline)
-    # Caller's contract: pre-aligned by timestamp via inner-join. If the
-    # per-side leading-zero strip leaves the two arrays at different
-    # lengths, head/tail-truncation would misalign them (challenger
-    # position i and baseline position i would correspond to different
-    # original timestamps). Refuse rather than bootstrap a misaligned
-    # pair silently — callers must pre-align if they bypass _joint_coerce.
-    if c.size != b.size:
+    c_raw = _as_return_array(challenger)
+    b_raw = _as_return_array(baseline)
+    # Caller's contract: the two series arrive pre-aligned by timestamp, so position i is
+    # the same session on both sides. Nothing here can recover that if they do not, because
+    # truncating to the shorter one would compare different sessions. Refuse instead.
+    if c_raw.size != b_raw.size:
         return {}
+    # The coercion is taken once over both series rather than per side. `_coerce_returns`
+    # trims each series' own leading run of zeros, which is exactly what a risk overlay
+    # produces - it sits out sessions its carrier trades - and the two arrays then part
+    # company, so the size check above refused every overlay in `17_risk_management`.
+    c, b = joint_returns(c_raw, b_raw, challenger_overlays_baseline=challenger_overlays_baseline)
     if c.size < 4:
         return {}
 
@@ -746,7 +831,12 @@ def compute_reality_check(
 # ---------------------------------------------------------------------------
 
 
-def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+def _as_return_array(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    """The return series as a float array, with no row dropped.
+
+    Separate from :func:`_coerce_returns` because a paired comparison has to decide which
+    rows to drop over both series at once; see :func:`joint_returns`.
+    """
     if isinstance(x, pl.DataFrame):
         for col in ("daily_return", "ret", "return", "value"):
             if col in x.columns:
@@ -758,7 +848,11 @@ def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
         arr = x.to_numpy()
     else:
         arr = np.asarray(x).flatten()
-    arr = arr.astype(np.float64, copy=False)
+    return arr.astype(np.float64, copy=False)
+
+
+def _coerce_returns(x: np.ndarray | pl.Series | pl.DataFrame) -> np.ndarray:
+    arr = _as_return_array(x)
     arr = arr[np.isfinite(arr)]
     # Engine-mode parquets often carry leading zero rows from bars before the
     # first signal. Including them dilates uncertainty by underestimating

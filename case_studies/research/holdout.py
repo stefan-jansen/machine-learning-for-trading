@@ -364,6 +364,50 @@ def _validation_folds(validation_spec: Mapping[str, Any]) -> list[dict[str, Any]
     return [dict(fold) for fold in folds]
 
 
+def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the widest buffer any of a case study's labels declares, and whose it is.
+
+    The holdout fold is one fold. A fold-scoped temporal artifact carries a single set of
+    boundaries per fold id, and a fold-fitted feature's ``train_end`` is what that feature
+    knows, so the fold's geometry has to be the same whichever label a model is later fitted
+    on. That leaves one question: which buffer.
+
+    It is the widest, and the narrow ones are unsafe rather than merely tighter. A fold built
+    on a one-day buffer and handed to a twenty-one-day model gives that model training rows
+    whose features were fitted on data twenty sessions past its own ``train_end`` - the leak
+    the buffer exists to prevent, arriving through the feature instead of the label. The
+    widest buffer costs the shorter-horizon models a longer gap than they need, which is the
+    conservative direction and, on the case studies measured, twenty sessions out of thousands.
+
+    Labels are read from ``labels.primary`` and ``labels.variants`` and resolved through
+    :func:`utils.artifact_specs.resolve_label_buffer`, so a label carrying its own spec
+    artifact still wins over the setup block.
+    """
+    from utils.artifact_specs import resolve_label_buffer
+    from utils.cv_splits import normalize_label_buffer
+
+    labels = setup.get("labels") or {}
+    names = [str(labels["primary"])] if labels.get("primary") else []
+    names += [str(name) for name in (labels.get("variants") or [])]
+    if not names:
+        raise ValueError(f"{case_study} declares no labels, so no holdout buffer can be derived")
+
+    widest: tuple[pd.Timedelta, str, str] | None = None
+    for name in names:
+        buffer = resolve_label_buffer(case_study, name, setup)
+        if not buffer:
+            continue
+        span = pd.Timedelta(normalize_label_buffer(buffer))
+        if widest is None or span > widest[0]:
+            widest = (span, str(buffer), name)
+    if widest is None:
+        raise ValueError(
+            f"{case_study} declares labels {names} and a buffer for none of them, so the gap "
+            "sealing holdout training from the holdout window cannot be derived"
+        )
+    return widest[1], widest[2]
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
@@ -425,12 +469,12 @@ def build_holdout_cv(
     # for every case study whose label carries no separate spec artifact - which is all nine
     # for their primary label. Passing the setup is what makes the buffer resolvable at all.
     setup = load_setup_config(case_study)
-    buffer = resolve_label_buffer(case_study, resolved_label, setup)
-    if not buffer:
-        raise ValueError(
-            f"{case_study} declares no label buffer for {resolved_label!r}, so the gap sealing "
-            "holdout training from the holdout window cannot be derived"
-        )
+    # The case study's widest buffer, not the selected label's own. The fold-scoped temporal
+    # artifact carries one holdout fold whose features every label's holdout model is fitted
+    # on, so its boundary has to be label-independent, and the widest is the only choice that
+    # leaks for no label. `widest_label_buffer` carries the argument. The selected label still
+    # supplies the horizon check below, which this now satisfies by construction.
+    buffer, buffer_label = widest_label_buffer(case_study, setup)
     holdout_open = pd.Timestamp(holdout_start)
     observations = sorted({pd.Timestamp(str(value)) for value in timeline})
     if len(observations) < 2:
@@ -510,6 +554,7 @@ def build_holdout_cv(
         "request": {
             "source": "case_study_holdout",
             "label_buffer": str(buffer),
+            "label_buffer_label": buffer_label,
             "label_buffer_steps": buffer_steps,
             "observation_cadence": str(cadence),
             "periods_per_year": periods_per_year,
@@ -585,7 +630,7 @@ def evaluate_holdout(
         case_study=str(case_study if case_study is not None else study.case_study),
         timeline=timeline,
     )
-    _refuse_incomplete_holdout_spec(holdout_spec)
+    _rekey_holdout_spec(study, holdout_spec, validation_spec)
 
     # selection_evidence is hashed into the lock identity, so anything put here that is already
     # recorded elsewhere gives one fact two sources and makes the lock unreproducible by any
@@ -654,33 +699,78 @@ _FOLD_DERIVED_FIELDS = (
 )
 
 
-def _refuse_incomplete_holdout_spec(spec: dict[str, Any]) -> None:
-    computation = spec.get("computation")
-    if not isinstance(computation, dict):
-        raise ValueError("holdout spec has no resolved computation block")
-    present: list[str] = []
-    if "expected_prediction_keys" in computation:
-        present.append("computation.expected_prediction_keys")
+def _rekey_holdout_spec(study: Any, spec: dict[str, Any], validation_spec: dict[str, Any]) -> None:
+    """Recompute the fold-derived fields for the holdout fold, or refuse with the family named.
+
+    The fields are family-specific - each family derives them with its own rule, from its own
+    training rows - so this dispatches through ``_family_module`` exactly as
+    ``reconstruct_locked_request`` and ``validate_locked_run`` already do. A family that has not
+    implemented the hook still refuses, but it now refuses for itself rather than on behalf of
+    every family at once.
+    """
+    from .models import _family_module
+
+    family = spec.get("family")
+    module = _family_module(family)
+    hook = getattr(module, "rekey_holdout_spec", None)
+    if hook is None:
+        raise NotImplementedError(
+            f"the {family!r} family cannot yet re-key a validation training spec to the holdout "
+            "fold, so no lock can be taken for it. Implementing it means recomputing this "
+            "family's fold-derived fields against the derived holdout fold - the eligibility "
+            "manifest from the dataset, and any parameter the family resolves from a fold's own "
+            "training rows - by the same rule that produced the recorded validation values. See "
+            "`rekey_holdout_spec` in case_studies/utils/linear.py."
+        )
+    hook(study, spec, validation_spec=validation_spec)
+    _require_holdout_keyed_fields(spec)
+
+
+def _require_holdout_keyed_fields(spec: dict[str, Any]) -> None:
+    """Check the re-keyed fields describe the holdout fold, not the validation folds.
+
+    A hook that returned without recomputing, or that recomputed against the wrong split, leaves
+    fields that look present and are wrong - and the lock is the one artifact that cannot be
+    revised. So the shape is checked here rather than trusted: exactly one fold, and it is the
+    fold the derived holdout CV names.
+    """
+    computation = spec["computation"]
+    cv = computation.get("cv")
+    if not isinstance(cv, dict):
+        raise ValueError("holdout spec has no resolved CV")
+    # Both shapes `locked_holdout_split` accepts: an explicit one-fold list, or the flat form
+    # where the single fold's boundaries sit on the CV record itself.
+    folds = cv.get("folds")
+    if folds is None:
+        fold_id = str(int(cv.get("fold", 0)))
+    elif isinstance(folds, list) and len(folds) == 1:
+        fold_id = str(int(folds[0]["fold"]))
+    else:
+        raise ValueError("holdout spec must carry exactly one resolved fold")
+
+    manifest = computation.get("expected_prediction_keys")
+    if not isinstance(manifest, dict) or manifest.get("n_folds") != 1:
+        raise ValueError(f"holdout eligibility manifest was not re-keyed to one fold: {manifest!r}")
+
     model = computation.get("model")
     if isinstance(model, dict) and "effective_params_by_fold" in model:
-        present.append("computation.model.effective_params_by_fold")
+        keys = set(model["effective_params_by_fold"])
+        if keys != {fold_id}:
+            raise ValueError(
+                f"holdout parameters are keyed to {sorted(keys)}, not the holdout fold "
+                f"{fold_id!r}; they still describe the validation folds"
+            )
+
     task = computation.get("task")
     if isinstance(task, dict):
         imbalance = task.get("imbalance")
         if isinstance(imbalance, dict) and "effective_class_weights_by_fold" in imbalance:
-            present.append("computation.task.imbalance.effective_class_weights_by_fold")
-    macro = computation.get("macro_context")
-    if isinstance(macro, dict) and "resolved_fold_digest" in macro:
-        present.append("computation.macro_context.resolved_fold_digest")
-    if present:
-        raise NotImplementedError(
-            "the selected training spec carries fold-derived fields that describe its VALIDATION "
-            f"folds and must be re-keyed to the holdout fold before a lock is taken: {present}. "
-            "validate_locked_expected_keys refuses a spec without an eligibility manifest and "
-            "refuses one describing a different frame, so a lock taken now would fail at "
-            "execution. Recomputing them needs the holdout window's eligible key frame, which the "
-            "family resolver builds during a run and which is not threaded through this path yet."
-        )
+            keys = set(imbalance["effective_class_weights_by_fold"])
+            if keys != {fold_id}:
+                raise ValueError(
+                    f"holdout class weights are keyed to {sorted(keys)}, not the holdout fold "
+                    f"{fold_id!r}"
+                )
 
 
 def _confirm_recorded_selection(study: Any, lock: ResearchLock, candidate_set_name: str) -> None:
