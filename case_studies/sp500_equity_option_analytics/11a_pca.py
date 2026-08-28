@@ -428,11 +428,12 @@ by_label = catalog.select(
 by_label
 
 # %% [markdown]
-# ### The same decomposition against each target
+# ### Three decompositions, one axis
 #
 # One bar per label, on one axis, with the primary target first. The bars are the quantity the
 # downstream comparison uses; the axis is shared so the distance between them is readable rather
-# than each panel filling itself.
+# than each panel filling itself. What the axis is shared *for* is comparison, not equivalence -
+# the section above says why these three are not one decomposition scored three ways.
 
 # %%
 panel = catalog.with_columns(
@@ -477,10 +478,15 @@ show_plotly_with_alt(
 # ## 5. What to notice
 #
 # **The estimator is the same and only the target moves, which is what makes these rows
-# comparable.** They share the return panel, the folds, the dates scored and the factor count.
-# `fwd_ret_10d` is the same construction over twice the horizon, and `fwd_ret_risk_adj_5d` is
-# `fwd_ret_5d` divided by a measure of its own dispersion - so a gap between those two rows is a
-# statement about scaling by width and nothing else.
+# comparable - but they are not measured on a common sample.** The folds and the factor count are
+# shared; the return panel is not, because `prepare_panel_data` fills it from each member's own
+# label, and neither are the dates scored, because a ten-day forward window runs out earlier than
+# a five-day one. `fwd_ret_10d` is the same construction over twice the horizon, and
+# `fwd_ret_risk_adj_5d` is `fwd_ret_5d` divided by a measure of its own dispersion. A gap between
+# two of these rows therefore carries the change of target and the change of sample together, and
+# nothing here separates them: scoring the same rows under both targets is what would, and this
+# notebook does not do it. Read the gaps as a ranking of what was fitted, not as a measurement of
+# what scaling by width costs.
 #
 # **PCA cannot see the features this case study is about, and that is what it is for.** No implied
 # volatility, no skew, no term structure, no variance risk premium reaches the decomposition. Read

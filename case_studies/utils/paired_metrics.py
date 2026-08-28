@@ -72,6 +72,57 @@ def _min_paired_n(ppy: int) -> int:
     return 21  # daily / 8h / intraday
 
 
+# The two case studies whose canonical strategy is pinned to one rung of a cascade, mirroring
+# `20_strategy_synthesis/01_aggregate_synthesis.py::_CLUSTER_RUNG_RESTRICTIONS`. Held here as
+# well because a case study's own strategy-analysis notebook has to make the same selection
+# without importing a chapter, and `tests/test_rung_pins_match_chapter_20.py` fails if the two
+# definitions drift.
+#
+# sp500_options: rung-1 (mid-to-mid bps) and rung-2 (full-universe HTM) both carry
+# `universe_filter="full"`, so filtering on the universe alone leaves `ORDER BY sharpe DESC
+# LIMIT 1` free to pick whichever rung is higher in current data. The pin combines the universe
+# with `exit_at_max_days` so the rank-1 row is deterministic and HTM-coherent.
+#
+# nasdaq100_microstructure: the cost-feasible ensemble, chosen before the holdout was opened and
+# matched on those two design attributes, which any registry can satisfy.
+RUNG_PINS: dict[str, dict] = {
+    "sp500_options": {
+        "predicate": (pl.col("universe_filter") == "liquid") & pl.col("exit_at_max_days").is_null(),
+        "universe_filter": "liquid",
+        "exit_at_max_days": None,
+    },
+    "nasdaq100_microstructure": {
+        "predicate": (pl.col("universe_filter") == "cost_feasible")
+        & (pl.col("family") == "ensemble"),
+        "universe_filter": "cost_feasible",
+        "exit_at_max_days": None,
+    },
+}
+
+
+def rung_for(cs: str) -> dict | None:
+    """The rung this case study is pinned to, or None where it is not pinned."""
+    return RUNG_PINS.get(cs)
+
+
+def _best_for_rung(
+    explorer: BacktestExplorer, stage: str, rung: dict | None, top_n: int = 2000
+) -> pl.DataFrame:
+    """``explorer.best`` for a stage, fetching enough rows that the pin survives.
+
+    ``best()`` reads ``universe_filter`` out of ``spec_json`` in Python, *after* the SQL
+    ``LIMIT top_n``, and ``_apply_rung_restriction`` runs after that. For nasdaq the pinned
+    cost-feasible carrier sits below the full-universe in-sample maxima, so a small ``top_n``
+    truncates it before the predicate is ever applied and the pin silently selects nothing -
+    or, worse, the best surviving row that was never the carrier.
+
+    Ch20 solves this with the same widening (`_best_pinned`); the extraction into this module
+    dropped it, which is why every pinned selection here has to go through this helper rather
+    than call ``explorer.best`` directly.
+    """
+    return explorer.best(stage=stage, top_n=1_000_000 if rung is not None else top_n)
+
+
 def _apply_rung_restriction(df: pl.DataFrame, rung: dict | None) -> pl.DataFrame:
     """Filter ``df`` to the case study's pinned rung, if one is configured.
 
@@ -287,7 +338,7 @@ def _val_rank1_full_spec(
     under the case study's label / rung restrictions.
     """
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_for_rung(explorer, s, rung) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -579,10 +630,14 @@ def _populate_pair(
             }
         c_arr = aligned["ret"].to_numpy()
         b_arr = aligned["ret_b"].to_numpy()
-        c_arr, b_arr = joint_returns(
+        # Measured here, applied once inside `compute_paired_uncertainty`, which trims
+        # whatever it is handed. Both rules happen to survive being applied twice, so passing
+        # the trimmed pair on would work today; it would stop working silently the moment a
+        # rule stops being idempotent, and the figure registered as `n_overlap` would then
+        # name a sample the bootstrap never ran on.
+        n_overlap = joint_returns(
             c_arr, b_arr, challenger_overlays_baseline=challenger_overlays_baseline
-        )
-        n_overlap = c_arr.size
+        )[0].size
         if n_overlap < min_n:
             return {
                 "cs": cs,
@@ -650,6 +705,7 @@ def populate_paired_metrics(
     carrier_pin_predicate: pl.Expr | None = None,
     freq: str = "daily",
     verbose: bool = True,
+    replace_all: bool = False,
     write_case_dir: Path | None = None,
 ) -> list[dict]:
     """Compute all six paired-bootstrap pair types for ``cs`` and register them.
@@ -667,6 +723,14 @@ def populate_paired_metrics(
       (us_firm_characteristics → ``config_name == 'default_huber'``); None else.
     * ``freq`` — cadence key for periods-per-year (``FREQ_MAP[cs]``).
 
+    ``replace_all`` makes the call a complete snapshot: pairs it did not write are
+    deleted, so a rebuild under a different selection does not leave the previous
+    selection's rows behind. Registration alone is an UPSERT keyed on
+    ``(challenger_hash, benchmark_hash)``, which cannot remove a row it no longer
+    produces. Default False keeps the additive behaviour every other caller relies
+    on. A call that writes nothing prunes nothing - that is a failed rebuild, not
+    an empty snapshot.
+
     ``cme_futures`` uses all defaults (no restriction, daily). Returns the list
     of per-pair summary dicts (mirrors the ``paired_rows`` + ``extra_paired_rows``
     the Ch20 producer builds); each pair is also written to
@@ -680,10 +744,17 @@ def populate_paired_metrics(
         explorer = BacktestExplorer(cs)
     ppy = _PPY_BY_FREQ.get(freq, 252)
     rows: list[dict] = []
+    written_keys: set[tuple[str, str]] = set()
+
+    def _pair(cs_, challenger_hash, benchmark_hash, *args, **kwargs):
+        result = _populate_pair(cs_, challenger_hash, benchmark_hash, *args, **kwargs)
+        if "skip" not in result:
+            written_keys.add((challenger_hash, benchmark_hash))
+        return result
 
     # -- Pair #1: signal rank-1 (overall) ↔ equal-weight (overall) -----------
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     skip_pair1 = False
@@ -714,10 +785,11 @@ def populate_paired_metrics(
                 min_n = _min_paired_n(ppy)
                 aligned = chal.join(base, on="timestamp", how="inner", suffix="_b")
                 if aligned.height >= min_n:
-                    c_arr, b_arr = joint_returns(
-                        aligned["ret"].to_numpy(), aligned["ret_b"].to_numpy()
-                    )
-                    if c_arr.size >= min_n:
+                    c_arr = aligned["ret"].to_numpy()
+                    b_arr = aligned["ret_b"].to_numpy()
+                    # Sized here, trimmed once inside `compute_paired_uncertainty`; see
+                    # `_populate_pair` for why the pair is not trimmed on the way in.
+                    if joint_returns(c_arr, b_arr)[0].size >= min_n:
                         paired = compute_paired_uncertainty(
                             c_arr,
                             b_arr,
@@ -741,6 +813,7 @@ def populate_paired_metrics(
                                 periods_per_year=ppy,
                                 case_dir=write_case_dir,
                             )
+                            written_keys.add((leader_hash, benchmark_hash))
                             rows.append(
                                 {
                                     "case_study": DISPLAY_NAMES.get(cs, cs),
@@ -758,7 +831,7 @@ def populate_paired_metrics(
 
     # -- Pairs #2-6: holdout + stage transitions -----------------------------
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_for_rung(explorer, s, rung) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -818,7 +891,7 @@ def populate_paired_metrics(
     if bench_ho_resolved is not None and chal_ho is not None:
         bench_ho_hash, bench_ho_norm, bench_ho_label = bench_ho_resolved
         rows.append(
-            _populate_pair(
+            _pair(
                 cs,
                 ho_hash,
                 bench_ho_hash,
@@ -864,7 +937,7 @@ def populate_paired_metrics(
             val_self_returns = _aligned_returns(cs, val_self_hash) if val_self_hash else None
         if val_self_hash is not None and val_self_returns is not None:
             rows.append(
-                _populate_pair(
+                _pair(
                     cs,
                     ho_hash,
                     val_self_hash,
@@ -895,8 +968,10 @@ def populate_paired_metrics(
     #
     # `17_risk_management` and `18_strategy_analysis` do use the overlay rule, because there the
     # overlay is paired with its own no-overlay carrier by construction rather than by a
-    # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with the
-    # Ch20 synthesis, which computes the same three transitions - see agent-workspace#928.
+    # highest-Sharpe query. Keeping the default here also keeps this producer agreeing with
+    # `20_strategy_synthesis/01_aggregate_synthesis.py`, which computes the same three
+    # transitions into the same table from its own copy of the coercion;
+    # `tests/test_uncertainty_cscv.py` runs the two against each other.
     lineage = explorer.champion_lineage(leader_phash)
     for prev_stage, this_stage, kind in [
         ("signal", "allocation", "signal_leader"),
@@ -914,7 +989,7 @@ def populate_paired_metrics(
         if prev_returns is None or this_returns is None:
             continue
         rows.append(
-            _populate_pair(
+            _pair(
                 cs,
                 this_hash,
                 prev_hash,
@@ -927,8 +1002,62 @@ def populate_paired_metrics(
             )
         )
 
+    # Only on the path that ran every pair. The early returns above leave a partial
+    # set, and pruning to a partial set would delete pairs a complete earlier run
+    # produced. A stale table that stays stale is recoverable; deleted rows are not.
+    if replace_all:
+        _prune_paired_metrics(cs, written_keys, write_case_dir, verbose)
     _report(cs, rows, verbose)
     return rows
+
+
+def _prune_paired_metrics(
+    cs: str,
+    written_keys: set[tuple[str, str]],
+    write_case_dir: Path | None,
+    verbose: bool,
+) -> int:
+    """Delete ``backtest_paired_metrics`` rows this run did not write. Returns the count.
+
+    The complement, not the whole table: a rebuild writes the pairs its current
+    selection produces, and every row it did not write belongs to an earlier
+    selection. Deleting nothing when ``written_keys`` is empty is deliberate - a
+    run that produced no pair failed, and an empty snapshot would destroy the last
+    good one.
+    """
+    if not written_keys:
+        if verbose:
+            print(
+                f"[paired_metrics] {cs}: no pairs written, keeping existing rows",
+                flush=True,
+            )
+        return 0
+    case_dir = write_case_dir if write_case_dir is not None else get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.is_file():
+        return 0
+    db = sqlite3.connect(str(db_path), timeout=120.0)
+    try:
+        db.execute("PRAGMA busy_timeout = 60000;")
+        existing = {
+            (row[0], row[1])
+            for row in db.execute(
+                "SELECT challenger_hash, benchmark_hash FROM backtest_paired_metrics"
+            )
+        }
+        obsolete = existing - written_keys
+        if obsolete:
+            db.executemany(
+                "DELETE FROM backtest_paired_metrics "
+                "WHERE challenger_hash = ? AND benchmark_hash = ?",
+                sorted(obsolete),
+            )
+        db.commit()
+    finally:
+        db.close()
+    if obsolete and verbose:
+        print(f"[paired_metrics] {cs}: pruned {len(obsolete)} obsolete pair(s)", flush=True)
+    return len(obsolete)
 
 
 def _report(cs: str, rows: list[dict], verbose: bool) -> None:

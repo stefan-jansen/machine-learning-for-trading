@@ -77,7 +77,7 @@ import polars as pl
 import torch  # cudart preload - required before ml4t.diagnostic imports # noqa: F401
 import yaml
 
-from case_studies.research import current_prediction_members, open_study
+from case_studies.research import Study
 from case_studies.utils.latent_factors import load_fold_extras
 from case_studies.utils.model_analysis import (
     best_model_per_family_fast,
@@ -101,6 +101,11 @@ from case_studies.utils.model_viz import (
     plot_learning_curves,
     plot_regime_bars,
 )
+from case_studies.utils.notebook_contracts import (
+    declared_population_members,
+    degenerate_prediction_hashes,
+    incompletely_registered_predictions,
+)
 from case_studies.utils.notebook_render import conformal_coverage_diagnostic
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE
@@ -115,9 +120,43 @@ ENTITY_COL = "symbol"
 N_BUCKETS = 10
 TOP_N_FEATURES = 15
 REGIME_WINDOW = 63
+# The populations 06 through 11e publish, keyed by the name each notebook builds from. Named
+# rather than hashed: a name resolves to the generation in force, so a refit that supersedes its
+# predecessor is picked up here without an edit, while every superseded snapshot stays readable
+# by hash. Five metric families are spread across nine of them - `deep_learning` over two
+# sequence notebooks, `latent_factors` over the five `11*` models - so the family each belongs
+# to is carried alongside, for the counts below.
+POPULATION_FAMILY = {
+    "linear": "linear",
+    "gbm": "gbm",
+    "tabular_dl": "tabular_dl",
+    "sequence": "deep_learning",
+    "patchtst": "deep_learning",
+    "pca": "latent_factors",
+    "ipca": "latent_factors",
+    "cae": "latent_factors",
+    "sdf": "latent_factors",
+    "sae": "latent_factors",
+}
+POPULATIONS = {model: f"{CASE_STUDY}-{model}-validation-v1" for model in POPULATION_FAMILY}
+
+# %% [markdown]
+# This notebook reads; it registers nothing, and that decides how it opens the registry. Every
+# route through `open_study` ends in `Study.activate()`, which rewrites `ML4T_OUTPUT_DIR` for the
+# rest of the process and clears the caches keyed on it, so every later `get_case_study_dir`
+# answers for a different directory than the one resolved here. On the canonical tier with no
+# workspace that route is `Study.regenerate`, which refuses outright unless `features`, `labels`
+# and `run_log` are symlinks - true in a maintainer worktree, false in every clean clone and
+# every CI run. On the preview tier it repoints the notebook at `.preview/<case>`, whose registry
+# `activate()` creates empty, and the comparison below then reports on nothing while reporting
+# success.
+#
+# `Study.at` is the read-only form: one root, no activation. `CASE_DIR` is that root, and every
+# question this notebook asks is answered from it.
 
 # %%
 CASE_DIR = get_case_study_dir(CASE_STUDY)
+study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="13_model_analysis")
 
 with open(CASE_DIR / "config" / "setup.yaml") as f:
     setup = yaml.safe_load(f)
@@ -179,26 +218,82 @@ print(f"  Trading costs: {cost_range[0]}–{cost_range[1]} bps per leg")
 # configuration enter the ranking as separate candidates, with near-identical scores, and the
 # published leaders are then fewer distinct strategies than they appear to be.
 #
-# `current_prediction_members` is that filter, and it takes two steps because neither is enough
-# alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
-# generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
-# has forked - and then subtracts the members those names have retired. The subtraction is needed
-# because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
-# and stays in force under its own name forever, so the union alone hands a retired generation back
-# through the frozen name that still lists it.
-
-# %%
-_study = open_study(CASE_STUDY, execution_tier="canonical")
-CURRENT_MEMBERS = current_prediction_members(_study)
-print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+# The filter is what the nine names in `POPULATIONS` resolve to. `OfficialPopulation.one` returns
+# the one generation in a name's chain that nothing supersedes, and refuses rather than guessing
+# if the chain has forked, so a retired generation cannot arrive through the name that retired it.
+#
+# A registry that publishes no population at all is a different state, and it is not a broken one:
+# a fixture, or a clean clone whose cohorts have not run. `declared_population_members` separates
+# it from a declared name that will not resolve, which is a broken lineage and refuses when the
+# family has registered rows. Where nothing is declared, the comparison below runs on every
+# registered prediction set and says so - that is a weaker claim than a declared population, but a
+# statable one, and it is not the same as filtering everything away.
 
 # %%
 # Phase 1: Load pre-computed metrics (fast - no raw prediction loading)
-raw_metrics = (
-    load_all_metrics(CASE_STUDY, label=None)
-    .filter(pl.col("label").is_not_null())
-    .filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+raw_metrics = load_all_metrics(CASE_STUDY, label=None).filter(pl.col("label").is_not_null())
+
+# %%
+# `produced` is per family rather than per population, because which registered row belongs to
+# which of a family's populations is what the population itself declares. A family with rows and
+# an unresolvable declared name is the refusing case whichever of its names failed.
+_family_produced = dict(
+    raw_metrics.group_by("family").len().iter_rows()  # (family, count)
 )
+_declared, _population_notes = declared_population_members(
+    study,
+    CASE_DIR,
+    POPULATIONS,
+    produced={
+        model: _family_produced.get(family, 0) for model, family in POPULATION_FAMILY.items()
+    },
+)
+for _note in _population_notes:
+    print(_note)
+
+if _declared:
+    CURRENT_MEMBERS = frozenset().union(*_declared.values())
+    # Filtering to the members is not the same as checking the members arrived. A population is
+    # published before its members finish fitting, so an interrupted run leaves a member absent
+    # from the registry rather than incomplete in it - the filter then silently returns a
+    # shorter leaderboard, and every recommendation below is made over whatever did arrive.
+    # `load_all_metrics` drops a prediction set with a constant-prediction fold, because its
+    # pooled IC is computed over the surviving folds only and is not a model result; those are
+    # declared members that correctly never reach a leaderboard, so they are counted rather than
+    # reported as missing.
+    _degenerate = degenerate_prediction_hashes(CASE_DIR)
+    _arrived = set(raw_metrics.get_column("prediction_hash").unique().to_list())
+    _dropped = CURRENT_MEMBERS & _degenerate
+    _missing = sorted(CURRENT_MEMBERS - _degenerate - _arrived)
+    if _missing:
+        raise RuntimeError(
+            f"{len(_missing)} declared member(s) never reached the registry: "
+            f"{', '.join(_missing[:5])}. The populations were published before their members "
+            "finished fitting, so the comparison below would be short without saying so."
+        )
+    # Present is not the same as finished either. Coverage, the headline metrics, the per-fold
+    # metrics and the predictions parquet are separate writes, so a run interrupted between them
+    # leaves a member this leaderboard ranks off whatever did land - a score over the folds it
+    # managed, where a shorter window is an easier window, or a rank on a set whose predictions
+    # nothing downstream can read. Each member is reported with which of those it is.
+    _short = incompletely_registered_predictions(CASE_DIR, CURRENT_MEMBERS)
+    if _short:
+        _named = ", ".join(f"{h}: {why}" for h, why in sorted(_short.items())[:5])
+        raise RuntimeError(
+            f"{len(_short)} declared member(s) are registered but unfinished: {_named}. "
+            "Ranking them would compare a partial run against complete ones."
+        )
+    print(
+        f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force"
+        + (f"; {len(_dropped):,} excluded as degenerate" if _dropped else "")
+    )
+    raw_metrics = raw_metrics.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
+else:
+    CURRENT_MEMBERS = frozenset(raw_metrics.get_column("prediction_hash").unique().to_list())
+    print(
+        f"no populations declared here; comparing all {len(CURRENT_MEMBERS):,} registered "
+        "prediction sets"
+    )
 all_labels_metrics = (
     raw_metrics.with_columns(
         pl.col("ic_n_days").max().over(["family", "label"]).alias("_family_label_days")
@@ -635,9 +730,10 @@ if fold_ic.height > 0:
 # With two folds, and the highest-IC point estimates compressed close to zero (§3),
 # the box plots are minimally informative -
 # each "distribution" is two dots, and the inter-family overlap is
-# almost complete. The four positive highest-IC configurations
-# (`tabm_s`, SDF, NLinear, and `default_huber`) cluster together; the
-# ridge_a100.0 baseline sits below them. None of the families has
+# almost complete. Four of the five family leaders are positive and cluster
+# together (`tabm_m` at 0.0155, `pca` at 0.0099, `lstm_h64` at 0.0066 and
+# `leaves_7_mse` at 0.0050); the linear leader `enet_f0.08` sits below them
+# at -0.0022. None of the families has
 # established time-series robustness in the formal sense on this
 # label, and the daily-pooled HAC CIs (§3) - which use the full
 # panel rather than the 2 fold-aggregates - are the binding
@@ -688,9 +784,11 @@ if bucket_results:
 
 # %% [markdown]
 # The decile plot is read alongside the 6-20 bps round-trip cost range.
-# TabM produces a 44 bps top-minus-bottom spread. NLinear and linear reach
-# 11 and 8 bps, while SDF and GBM are approximately flat at -3 and -1 bps
-# despite positive mean IC. With only two validation
+# TabM produces a 27 bps top-minus-bottom spread. The LSTM and PCA reach
+# 21 and 14 bps, linear 8, and GBM is approximately flat at -2 bps despite
+# a positive mean IC. Ordering by spread is not the ordering by IC: the
+# LSTM ranks third on IC and second here, which is what a decile spread
+# measures that a rank correlation does not. With only two validation
 # folds, these gross spreads are diagnostics rather than trading claims.
 # They reinforce the Section 3 result that the primary-label evidence is
 # weak and sensitive to the representation used.
@@ -925,15 +1023,18 @@ if gbm_importance is not None and gbm_importance.height > 0:
     print(f"Equity features in top {TOP_N_FEATURES}: {len(eq_in_top)} - {eq_in_top}")
 
 # %% [markdown]
-# **Equity features outnumber option-derived features.** Five of the top
-# 15 are option-derived: the near-ATM term slope plus four IV
-# level or momentum features. The remaining ten include price momentum,
-# realized volatility, Garman-Klass volatility, and realized skew.
+# **Equity features hold a narrow majority of the top slots.** Eight of the top
+# 15 are equity-side and seven are option-derived: five IV levels across the
+# 7, 30 and 90-day tenors and the 25-delta put and call wings, the 252-day
+# z-score of 30-day ATM IV, and the ATM term ratio. The eight equity features
+# are realized volatility at 20 and 63 days, Garman-Klass volatility, and
+# momentum at 63, 126 and 252 days plus its risk-adjusted and skip-recent
+# variants.
 #
-# The dominant equity-side features include **rv_63** (63-day realized
-# volatility), `gk_vol_21` (Garman-Klass volatility), and realized skew.
-# The near- and far-ATM term slopes and momentum at 21, 63, and 126 days
-# also appear.
+# Only two features hold a top-5 slot in at least three quarters of folds:
+# `iv_30_put_25d` and `rv_63`. With two folds that is a weak statement about
+# persistence, and it is the reason the ranking below is read as breadth
+# rather than as a stable ordering.
 #
 # The feature importance pattern tells a nuanced story:
 #
@@ -941,21 +1042,22 @@ if gbm_importance is not None and gbm_importance.height > 0:
 #    volatility (equity) and implied volatility (option) are the
 #    strongest individual predictors. The signal is fundamentally
 #    about volatility regime positioning.
-# 2. **Option features add breadth**: five of 15 slots show that the
+# 2. **Option features add breadth**: seven of 15 slots show that the
 #    option surface participates in the forecast, but this importance
 #    ranking is not an ablation and does not isolate incremental value.
 # 3. **The IV-RV spread is absent**: ivrv_spread does not rank in the
 #    top 15, despite being the theoretically most interesting option
 #    feature. This may reflect high noise at the individual stock level.
-# 4. **Momentum features are secondary**: mom_21d and mom_skip_recent
-#    appear but do not dominate, suggesting that pure price momentum
+# 4. **Momentum features are secondary**: momentum at 63, 126 and 252 days
+#    and `mom_skip_recent` all appear but none reaches the top of the
+#    ranking, suggesting that pure price momentum
 #    is less important than volatility regime for weekly stock selection
 #    in S&P 500.
 #
 # The feature-level view shows why joint equity-option structure remains
 # worth testing. It does not explain family superiority on the primary
-# label: SDF is the latent-factor leader there, and all family-leader CIs
-# still include zero.
+# label: PCA is the latent-factor leader there, and every family-leader CI
+# on this label still includes zero.
 
 # %% [markdown]
 # ## 6. Heterogeneity: Labels, Horizons, and Regimes

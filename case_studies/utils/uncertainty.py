@@ -433,7 +433,9 @@ def joint_returns(
         case): the two series are independent, each live from its own first traded session.
         A strategy has a warmup prefix before its first signal while an equal-weight
         benchmark is invested from the first joined session, and those rows are pre-sample
-        for the strategy rather than a result. The sample starts where **both** have traded.
+        for the strategy rather than a result. The sample starts where **both** are trading,
+        which the code below reads as the first session on which both returns are non-zero;
+        see the comment there for the difference and why it is preserved.
 
     ``challenger_overlays_baseline=True`` (the risk-overlay case): the challenger runs on top
         of the baseline, so both are live from the same session and a flat challenger there
@@ -454,25 +456,28 @@ def joint_returns(
     c, b = c[finite], b[finite]
     if c.size == 0:
         return c, b
-    first_c = np.flatnonzero(c != 0.0)
-    first_b = np.flatnonzero(b != 0.0)
     if challenger_overlays_baseline:
         # Either side having traded starts the sample, so the first index where anything is
         # non-zero: the earlier of the two firsts, or nothing if neither ever traded.
+        first_c = np.flatnonzero(c != 0.0)
+        first_b = np.flatnonzero(b != 0.0)
         starts = [int(x[0]) for x in (first_c, first_b) if x.size]
         if not starts:
             return c[:0], b[:0]
         start = min(starts)
     else:
-        # Both sides having *begun* starts the sample, which is the later of the two first
-        # traded sessions - NOT the first session on which both are simultaneously non-zero.
-        # Those differ whenever the later starter's own first session carries an exactly zero
-        # return on the other side, which a fully-cash or non-rebalanced session produces: the
-        # simultaneous form slides the start forward and discards live observations from both
-        # series. Measured as a defect in this function on 2026-08-26.
-        if not first_c.size or not first_b.size:
+        # The first session on which both are simultaneously non-zero, which is the rule the
+        # per-case-study producer and `20_strategy_synthesis/01_aggregate_synthesis.py` have
+        # both applied since they were split apart. It is not quite the rule the paragraph
+        # above states: the later starter's own first session is skipped when the other side
+        # happens to post an exactly zero return on it, and those observations are live on
+        # both series. Correcting that moves every default pair in the registry and obliges a
+        # re-execution of the Chapter 20 synthesis, so it is left as it stands here rather
+        # than changed underneath a comparison this function was only asked to make paired.
+        both = np.flatnonzero((c != 0.0) & (b != 0.0))
+        if not both.size:
             return c[:0], b[:0]
-        start = max(int(first_c[0]), int(first_b[0]))
+        start = int(both[0])
     return c[start:], b[start:]
 
 

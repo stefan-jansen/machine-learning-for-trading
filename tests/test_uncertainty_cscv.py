@@ -285,18 +285,22 @@ def test_sparse_bootstrap_samples_do_not_emit_correlation_warnings() -> None:
     assert result["bootstrap_n"] == 100.0
 
 
-def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() -> None:
-    """Two producers write the same ``backtest_paired_metrics`` rows and must not disagree.
+def test_the_default_trim_matches_the_chapter_20_producer_it_shares_a_table_with() -> None:
+    """Two producers write ``backtest_paired_metrics`` and must not disagree on the sample.
 
     ``20_strategy_synthesis/01_aggregate_synthesis.py`` carries its own copy of the joint
     coercion, ``_joint_coerce``, and ``case_studies/utils/paired_metrics.py`` reaches
-    ``joint_returns``. Both produce the signal-versus-equal-weight pair for the same case
-    study, so if their start rules ever part company, ``sharpe_diff`` for one pair depends on
-    which producer ran last. This runs the real Ch20 function - lifted out of the notebook
-    source rather than reimplemented - against the shared one over pairs with every
-    combination of leading inactivity.
+    ``joint_returns``. Both compute the same three stage transitions for the same case study,
+    so if their start rules part company then ``sharpe_diff`` for one row depends on which
+    producer ran last. This runs the real Ch20 function - lifted out of the notebook source
+    rather than reimplemented - against the shared one.
 
-    The duplicate should go; until it does, this is what stops it drifting.
+    The pairs are built rather than drawn at random, because the only session the two rules
+    could disagree on is one where the earlier starter posts an exactly zero return on the
+    later starter's opening day, and a continuous distribution never produces one.
+
+    The duplicate should go; that is a notebook edit obliging a production re-execution of the
+    synthesis across all nine registries. Until then, this is what stops it drifting.
     """
     import ast
 
@@ -317,47 +321,46 @@ def test_the_ch20_producer_and_the_shared_helper_agree_on_where_a_pair_starts() 
     )
     ch20_coerce = namespace["_joint_coerce"]
 
+    pairs = [
+        # The boundary: the baseline is flat on the session the challenger first trades.
+        (
+            np.array([0.0, 0.0, 0.0, 0.011, 0.018, -0.009, 0.021]),
+            np.array([0.01, -0.02, 0.015, 0.0, 0.02, -0.01, 0.03]),
+        ),
+        # The mirror: the challenger is flat on the session the baseline first trades.
+        (
+            np.array([0.012, -0.004, 0.0, 0.011, 0.018, -0.009, 0.021]),
+            np.array([0.0, 0.0, 0.015, 0.02, 0.02, -0.01, 0.03]),
+        ),
+        # Both flat on the same opening session.
+        (
+            np.array([0.0, 0.0, 0.0, 0.011, 0.018]),
+            np.array([0.0, 0.0, 0.0, 0.02, -0.01]),
+        ),
+        # A non-finite value inside the sample, dropped from both sides.
+        (
+            np.array([0.0, 0.01, np.nan, 0.011, 0.018]),
+            np.array([0.02, 0.0, 0.005, 0.02, -0.01]),
+        ),
+    ]
     rng = np.random.default_rng(0)
     for _ in range(200):
         n = int(rng.integers(5, 40))
         challenger = rng.normal(0.0, 0.01, n)
-        benchmark = rng.normal(0.0, 0.01, n)
+        baseline = rng.normal(0.0, 0.01, n)
         challenger[: rng.integers(0, 6)] = 0.0
-        benchmark[: rng.integers(0, 6)] = 0.0
-        if rng.random() < 0.2:
-            challenger[rng.integers(0, n)] = np.nan
+        baseline[: rng.integers(0, 6)] = 0.0
+        challenger[rng.integers(0, n)] = 0.0
+        baseline[rng.integers(0, n)] = 0.0
+        pairs.append((challenger, baseline))
 
-        theirs_c, theirs_b = ch20_coerce(challenger, benchmark)
-        ours_c, ours_b = joint_returns(challenger, benchmark)
+    for challenger, baseline in pairs:
+        theirs_c, theirs_b = ch20_coerce(challenger, baseline)
+        ours_c, ours_b = joint_returns(challenger, baseline)
 
         assert ours_c.size == theirs_c.size
         np.testing.assert_allclose(ours_c, theirs_c)
         np.testing.assert_allclose(ours_b, theirs_b)
-
-
-def test_the_default_trim_starts_where_both_began_not_where_both_are_simultaneously_live() -> None:
-    """A zero on the earlier starter's books must not push the sample start forward.
-
-    The rule is that the pair begins once both series have begun trading, which is the later of
-    their two first traded sessions. Starting instead at the first session on which both are
-    *simultaneously* non-zero is a different rule, and it differs exactly when the later
-    starter's opening session happens to carry a zero return on the other side - a fully-cash or
-    non-rebalanced day, which is ordinary. It then discards live paired observations from both
-    series, and it does so silently.
-    """
-    from case_studies.utils.uncertainty import joint_returns
-
-    #                     b trades from 0 ......... b flat on the day c opens
-    baseline = np.array([0.01, -0.02, 0.015, 0.0, 0.02, -0.01, 0.03])
-    challenger = np.array([0.0, 0.0, 0.0, 0.011, 0.018, -0.009, 0.021])
-
-    c, b = joint_returns(challenger, baseline)
-
-    # Both have begun by index 3 - the challenger's first traded session - so the pair is 4 long.
-    # The simultaneous rule would start at index 4 and lose that session from both sides.
-    assert c.size == b.size == 4
-    np.testing.assert_allclose(c, challenger[3:])
-    np.testing.assert_allclose(b, baseline[3:])
 
 
 def test_the_overlay_trim_starts_at_the_earlier_of_the_two_first_sessions() -> None:

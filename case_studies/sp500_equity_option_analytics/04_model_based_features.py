@@ -1028,7 +1028,7 @@ def ic_series(frame: pl.DataFrame, column: str) -> pl.DataFrame:
 ic_rows = []
 for column in FEATURE_COLS:
     series = ic_series(scored, column)
-    if len(series) <= MIN_IC_DATES:
+    if len(series) < MIN_IC_DATES:
         print(
             f"{column}: only {len(series)} dates carry a cross-section of at least "
             f"{MIN_CROSS_SECTION} securities, and {MIN_IC_DATES} are needed for a standard "
@@ -1141,7 +1141,7 @@ paired = (
 )
 # `compute_ic_hac_stats` reads row order as time order and a join does not promise one.
 assert paired["timestamp"].is_sorted(), "the paired series is not in date order"
-COMPARABLE = paired.height > MIN_IC_DATES
+COMPARABLE = paired.height >= MIN_IC_DATES
 print(f"{paired_rows.height:,} rows carry both variants, over {paired.height:,} dates")
 if COMPARABLE:
     memory_stats = compute_ic_hac_stats(memory_series, label_horizon=LABEL_HORIZON)

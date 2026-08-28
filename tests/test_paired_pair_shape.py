@@ -18,6 +18,12 @@ Getting this wrong is a wiring defect rather than a maths one: the numbers are c
 correctly under the wrong rule and the row registers without complaint. The first tests pin the
 behaviour at ``_populate_pair``; the last drives ``populate_paired_metrics`` itself, because a
 test that passes the flag in by hand cannot see what the producer chooses.
+
+The producer hands the bootstrap an untrimmed pair and reads the sample size back out of it,
+rather than trimming first and passing the result on, so the size it registers is always the
+size the bootstrap saw. Both rules survive a second application today; the point of the
+pass-through is that neither has to, and the check below is on what the bootstrap received
+rather than on what the producer measured.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import polars as pl
 import pytest
 
 from case_studies.utils import paired_metrics
+from case_studies.utils.uncertainty import joint_returns
 
 
 @pytest.fixture
@@ -41,6 +48,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         calls.append(
             {
                 "challenger": np.asarray(challenger, dtype=np.float64),
+                "baseline": np.asarray(baseline, dtype=np.float64),
                 "overlay": kwargs.get("challenger_overlays_baseline", False),
             }
         )
@@ -73,7 +81,7 @@ def test_a_benchmark_pair_drops_the_challengers_leading_flat_run(captured: list[
     """The default shape: an independent strategy is not charged for its warmup."""
     challenger, baseline = _pair()
 
-    paired_metrics._populate_pair(
+    row = paired_metrics._populate_pair(
         "unit_cs",
         "chal",
         "bench",
@@ -86,7 +94,10 @@ def test_a_benchmark_pair_drops_the_challengers_leading_flat_run(captured: list[
 
     assert len(captured) == 1
     assert captured[0]["overlay"] is False
-    assert captured[0]["challenger"].size == 34
+    # The bootstrap is handed all 40 aligned sessions and trims once; the six the challenger
+    # sat out before its first signal are gone from the sample it reports.
+    assert captured[0]["challenger"].size == 40
+    assert row["n_overlap"] == 34
 
 
 def test_a_stage_transition_keeps_the_sessions_the_challenger_sat_out(
@@ -95,7 +106,7 @@ def test_a_stage_transition_keeps_the_sessions_the_challenger_sat_out(
     """A challenger built on top of its baseline is live from the baseline's first session."""
     challenger, baseline = _pair()
 
-    paired_metrics._populate_pair(
+    row = paired_metrics._populate_pair(
         "unit_cs",
         "chal",
         "bench",
@@ -110,6 +121,7 @@ def test_a_stage_transition_keeps_the_sessions_the_challenger_sat_out(
     assert len(captured) == 1
     assert captured[0]["overlay"] is True
     assert captured[0]["challenger"].size == 40
+    assert row["n_overlap"] == 40
 
 
 def test_the_two_shapes_do_not_agree_on_the_difference(captured: list[dict]) -> None:
@@ -186,3 +198,38 @@ def test_the_producer_gives_every_stage_transition_the_default_shape(
         "allocation_leader": False,
         "cost_sensitivity_leader": False,
     }
+
+
+def test_the_producer_reports_the_sample_the_bootstrap_ran_on(captured: list[dict]) -> None:
+    """The size the producer registers has to be the size the bootstrap saw.
+
+    The producer measures the trim and then hands `compute_paired_uncertainty` the untrimmed
+    pair, which trims it once itself. Trimming first and passing the result on would leave the
+    two figures free to drift apart the moment either rule stops surviving a second
+    application, and the registered `n_overlap` would then name a sample that was never used.
+    The pair below is the case where the two rules are closest to parting company: the
+    challenger starts three sessions late and the baseline is flat on the session it opens.
+    """
+    rng = np.random.default_rng(11)
+    baseline = list(rng.normal(0.0005, 0.01, size=30))
+    challenger = list(rng.normal(0.0005, 0.01, size=30))
+    challenger[:3] = [0.0, 0.0, 0.0]
+    baseline[3] = 0.0
+
+    row = paired_metrics._populate_pair(
+        "unit_cs",
+        "chal",
+        "bench",
+        "equal_weight",
+        _returns(challenger),
+        _returns(baseline),
+        252,
+        "fwd_ret_5d",
+    )
+
+    assert captured[0]["challenger"].size == 30
+    assert row["n_overlap"] == 26
+    # The figure the producer reports is the sample the bootstrap ran on, not a longer one
+    # measured before a second trim shortened it.
+    used, _ = joint_returns(captured[0]["challenger"], captured[0]["baseline"])
+    assert used.size == row["n_overlap"]
