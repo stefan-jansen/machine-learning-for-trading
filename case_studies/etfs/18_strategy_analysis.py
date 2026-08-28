@@ -1362,6 +1362,13 @@ fig_attr.show()
 # equal-weight ETF universe in as the benchmark series. The tear sheet
 # HTML is written under `OUTPUT_DIR` and is gitignored - readers
 # regenerate it locally.
+#
+# The artifacts are written by the stages above, not by this notebook, so the presence check
+# below is about ordering rather than about a healthy repository. Running 18 against a registry
+# where [`14_backtest`](14_backtest.ipynb) through
+# [`17_risk_management`](17_risk_management.ipynb) have not run leaves `TOP_HASH` naming a
+# directory that holds no `trades.parquet`, and the tear sheet fails on a missing file. Nothing
+# is broken and nothing needs repairing: run the backtest stages first.
 
 # %%
 backtest_dir = CASE_DIR / "run_log" / "backtest" / TOP_HASH
