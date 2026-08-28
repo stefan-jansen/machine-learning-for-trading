@@ -11,8 +11,8 @@ prediction set in them carries the ``ic_mean_daily`` production computed, and
 production only computes it against the continuous return. An artifact without the
 column therefore contradicts its own registry row, and
 ``11_ml_pipeline/07_case_study_insights`` refuses the whole notebook over it rather
-than correlate the score against the binary label - which is ``2*(AUC - 0.5)``, not
-an IC.
+than correlate the score against the binary label, which measures class separation
+rather than a ranking against realized returns.
 
 These tests pin where the column's values may come from, which is the part that is
 easy to get subtly wrong: a continuous target, never a class column.
@@ -99,8 +99,9 @@ def test_a_fabricated_classification_set_gets_a_continuous_eval_target(rewritten
 
     frame = _read(rewritten_cs_dir, "aaaa")
     assert "eval_actual" in frame.columns
-    # Continuous, not a class encoding: a Spearman IC against a two-valued column
-    # is 2*(AUC - 0.5), which is the substitution the consumer refuses to make.
+    # Continuous, not a class encoding. A rank correlation against a two-valued column
+    # measures how well the score separates the classes, which is an AUC-like quantity
+    # and not the ranking against realized returns an IC reports.
     assert frame["eval_actual"].n_unique() > 2
 
 
@@ -116,8 +117,19 @@ def test_a_reference_artifacts_own_eval_target_survives_seeding(cs_dir):
     seed_results._backfill_all_prediction_parquets(cs_dir, CASE_STUDY)
 
     seeded = _read(cs_dir, "seeded")
+    reference = _read(cs_dir, "keeper")
     assert "eval_actual" in seeded.columns
-    assert set(seeded["eval_actual"].to_list()) <= {-0.02, 0.03, 0.01, -0.04}
+    # Row-wise on the key, not set containment: a permuted or constant column drawn
+    # from the same values would pass containment while pairing every score with the
+    # wrong realized return, which is the mistake this test exists to catch.
+    joined = seeded.join(
+        reference.select("symbol", "timestamp", "eval_actual"),
+        on=["symbol", "timestamp"],
+        how="inner",
+        suffix="_reference",
+    )
+    assert joined.height == seeded.height
+    assert joined["eval_actual"].to_list() == joined["eval_actual_reference"].to_list()
 
 
 def test_a_class_valued_actual_is_never_reused_as_the_eval_target(cs_dir):

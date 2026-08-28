@@ -1218,9 +1218,10 @@ def _backfill_all_prediction_parquets(cs_dir: Path, cs_id: str) -> None:
         if label in eval_target_labels and "eval_actual" not in frame.columns:
             # The panel is a copied artifact that does not carry the column. Its
             # `actual` cannot stand in: on a classification set that is the class
-            # label, and an IC computed against it is 2*(AUC - 0.5) rather than a
-            # ranking against returns - the substitution 07_case_study_insights
-            # refuses to make. Draw a continuous target instead, per (split, label)
+            # label, and a rank correlation against it measures class separation
+            # rather than a ranking against returns - the substitution
+            # 07_case_study_insights refuses to make. Draw a continuous target
+            # instead, per (split, label)
             # so every set of the group agrees on what the realized return was.
             group_seed = int(hashlib.sha256(f"{split}/{label}".encode()).hexdigest()[:16], 16)
             frame = frame.with_columns(
