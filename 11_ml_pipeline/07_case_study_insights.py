@@ -59,6 +59,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from scipy import stats
 from sklearn.metrics import roc_auc_score
 
+from case_studies.research.population import retired_prediction_hashes
 from case_studies.utils.analytics import (
     CASE_STUDY_IDS,
     PRIMARY_LABELS,
@@ -115,6 +116,16 @@ FINITE_METRIC_FIELDS = [
 # %% [markdown] tags=[]
 # The loader preserves exact training and prediction identities so every later
 # statistic and coefficient view can be traced to one registry-selected artifact.
+#
+# It also drops the generations a refit has retired. A case study that refits under
+# a corrected input artifact publishes new prediction identities and a snapshot that
+# supersedes the previous one; the retired rows stay in the registry, because the
+# record of what was superseded is evidence rather than litter. That record lives in
+# `official_populations`, one layer above the tables joined below, so a query that
+# stops at `prediction_metrics` sees two rows where the study has one. It cannot
+# separate them on the numbers either: a refit that changes only a declared input
+# leaves the computation, and therefore every metric, bit-identical, so a `max` or an
+# `ORDER BY created_at` would pick one arbitrarily and look like it had worked.
 
 
 # %% tags=[]
@@ -133,12 +144,14 @@ def load_complete_metrics(
     with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as connection:
         connection.row_factory = sqlite3.Row
         rows = [dict(row) for row in connection.execute(query, params).fetchall()]
+        retired = retired_prediction_hashes(connection)
     if not rows:
         return pl.DataFrame()
     df = pl.DataFrame(rows, infer_schema_length=None)
     return (
         df.filter(
-            (pl.col("n_null_folds") == 0)
+            ~pl.col("prediction_hash").is_in(list(retired))
+            & (pl.col("n_null_folds") == 0)
             & pl.all_horizontal(
                 pl.col(column).is_not_null() & pl.col(column).is_finite()
                 for column in FINITE_METRIC_FIELDS
@@ -1466,6 +1479,9 @@ else:
 
 # %% [markdown] tags=[]
 # ## 7. Cross-CS Takeaways
+#
+# **Next**: Ch12 extends the comparison with gradient boosting and
+# tabular deep learning; Ch13 with temporal deep learning.
 
 
 # %% tags=[]
@@ -1483,9 +1499,6 @@ coefficient_takeaway = (
     f"cross-panel feature overlap is {overlap_phrase}, so whether the panels draw on "
     "different features is not something this run can say."
 )
-#
-# **Next**: Ch12 extends the comparison with gradient boosting and
-# tabular deep learning; Ch13 with temporal deep learning.
 
 # %% tags=[]
 display(
