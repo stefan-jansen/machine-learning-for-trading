@@ -407,7 +407,7 @@ def test_supplied_lifecycle_cannot_drop_cash_settlement(tmp_path: Path) -> None:
         pl.col("date") < pl.col("expiration")
     )
 
-    with pytest.raises(ValueError, match="cash-settle every selected contract"):
+    with pytest.raises(ValueError, match="settle every selected contract"):
         _compute_cohort_daily_pnl(
             cohorts,
             lifecycle,
@@ -972,37 +972,54 @@ def _two_names() -> tuple[pl.DataFrame, pl.DataFrame]:
     return predictions, contract_returns
 
 
-def test_a_contract_ended_by_a_corporate_action_is_not_traded(tmp_path: Path) -> None:
-    """The position cannot be followed to expiry, so it is not opened - and B does not inherit it.
+def test_a_contract_ended_by_a_corporate_action_is_still_entered(tmp_path: Path) -> None:
+    """The position is opened and marked out where the quotes stop, not withheld.
 
-    A outscores B and its contract stops being quoted before expiration. The chain holds only
-    the strikes that were at the money when the candidate was formed, never the adjusted strike
-    the position continues under, so the engine cannot account for what it would be holding.
-    Refusing the whole run is wrong: this is an ordinary corporate action, not a defect. Handing
-    A's slot to B is worse, because the decision date ranked A first and nothing about that
-    changed. The week simply holds no position.
+    A outscores B and its contract stops being quoted before expiration, which is what a
+    corporate action leaves in this chain: the position continues under an adjusted strike the
+    slice does not carry. Withholding the position would condition the realized portfolio on an
+    event nobody knew about at entry and would throw away the P&L it earned before that event.
+    So it is entered, and it settles on the last session both legs were quoted on - which is
+    what a holder who cannot follow the adjustment can actually do.
     """
     raw_dir = tmp_path / "raw"
     _chain_with_a_terminated_contract(raw_dir)
     predictions, contract_returns = _two_names()
 
-    assert _select_cohorts(predictions, contract_returns, top_k=1).get_column(
-        "symbol"
-    ).to_list() == ["A"]
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
+    assert cohorts.get_column("symbol").to_list() == ["A"]
 
-    with pytest.raises(ValueError, match="no quote to mark it at") as refusal:
-        _select_cohorts(predictions, contract_returns, top_k=1, raw_options_dir=raw_dir)
-    assert "B" not in str(refusal.value)
+    lifecycle = _load_option_lifecycle(cohorts, raw_dir)
+    settled = lifecycle.filter(pl.col("cash_settled"))
+    assert settled.get_column("date").to_list() == [date(2024, 1, 9)]
+    assert settled.get_column("date").item() < settled.get_column("expiration").item()
+
+
+def test_a_corporate_action_does_not_reweight_the_names_beside_it(tmp_path: Path) -> None:
+    """The cohort's weights are the ones the decision date set, whatever happens afterwards.
+
+    Both names are selected at k=2 and A's contract is ended by a corporate action. Dropping A
+    and handing its half to B would size B on information that did not exist when the cohort
+    was formed, and would report a portfolio concentrated in the name that happened to survive.
+    Each still carries a half.
+    """
+    raw_dir = tmp_path / "raw"
+    _chain_with_a_terminated_contract(raw_dir)
+    predictions, contract_returns = _two_names()
+
+    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
+
+    assert sorted(cohorts.get_column("symbol").to_list()) == ["A", "B"]
+    assert cohorts.get_column("weight").to_list() == [0.5, 0.5]
 
 
 def test_a_session_the_contract_is_not_quoted_on_is_not_a_defect(tmp_path: Path) -> None:
     """A corporate action can take a contract out of the chain for one session and give it back.
 
     PFE is the live case: its contract is quoted from entry to expiration except on the day its
-    spinoff took effect. The position resumes, so nothing about the chain is broken, but there
-    is still no quote to mark it at on that session. That is the same absence as a contract
-    that never comes back and gets the same answer, which is why the screen tests whether a
-    session is quoted at all rather than whether the quotes stop.
+    spinoff took effect. There is no quote to mark the position at on that session, but the
+    contract is intact and nothing about the chain is broken, so this must not raise the way a
+    chain that lost one leg of a session does.
     """
     raw_dir = tmp_path / "raw"
     _write_raw_options(raw_dir)
@@ -1015,24 +1032,7 @@ def test_a_session_the_contract_is_not_quoted_on_is_not_a_defect(tmp_path: Path)
 
     cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
 
-    assert cohorts.get_column("symbol").to_list() == ["B"]
-
-
-def test_a_dropped_corporate_action_reweights_the_names_actually_opened(tmp_path: Path) -> None:
-    """The cohort weights what was opened, not what was ranked.
-
-    Both names are selected at k=2 and A's contract ends early. B is the only position the week
-    actually carries, so it carries all of it. Leaving A in at half weight would report a
-    portfolio half invested in a contract the engine cannot price.
-    """
-    raw_dir = tmp_path / "raw"
-    _chain_with_a_terminated_contract(raw_dir)
-    predictions, contract_returns = _two_names()
-
-    cohorts = _select_cohorts(predictions, contract_returns, top_k=2, raw_options_dir=raw_dir)
-
-    assert cohorts.get_column("symbol").to_list() == ["B"]
-    assert cohorts.get_column("weight").to_list() == [1.0]
+    assert sorted(cohorts.get_column("symbol").to_list()) == ["A", "B"]
 
 
 def test_a_missing_entry_quote_does_not_shape_the_decision_universe() -> None:

@@ -166,73 +166,70 @@ def option_source_identity(labels_dir: Path, raw_options_dir: Path) -> dict[str,
 
 
 def _price_end_of_session_quotes(chain: pl.DataFrame) -> pl.DataFrame:
-    """Price the two ways this chain records an option nobody wants.
+    """Read a null bid beside a quoted ask as a bid of zero.
 
     The chain carries AlgoSeek's end-of-session quote: ``LastBidPrice``, ``LastAskPrice`` and
-    ``LastMidPrice``. Neither of the shapes below is a missing observation, and reading them as
-    missing is not a neutral simplification for this strategy. A leg of a short straddle stops
-    being quoted exactly when the underlying has moved far enough from the strike to leave it
-    worthless, which is the same move that makes the other leg expensive. Discarding those
-    sessions discards the decisions that lost money, and every performance number computed
-    afterwards would be measured on the survivors.
+    ``LastMidPrice``. A null bid beside a positive ask is not a missing observation. It is a
+    session that ended with an offer and no bid, which is what happens to an option nobody will
+    pay for, and the vendor writes no mid because it has no two-sided quote to take the midpoint
+    of. There are 9,140 such rows in the 20.5 million the validation window holds, and they
+    cluster in the last sessions before expiry.
 
-    A null bid beside a positive ask is a session that ended with an offer and no bid, and the
-    vendor writes no mid because it has no two-sided quote to take the midpoint of. The bid is
-    zero and the mid is half the ask, which is the same midpoint convention applied to the
-    interval the quote actually spans.
+    Reading them as missing is not a neutral simplification for this strategy. A leg of a short
+    straddle loses its bid exactly when the underlying has moved far enough from the strike to
+    leave it worthless, which is the same move that makes the other leg expensive. A screen that
+    discards those sessions discards the decisions that lost money, and every performance number
+    computed afterwards would be measured on the survivors.
 
-    A leg with no bid, no ask and no mid is one nobody quoted at all. Where it is also out of
-    the money it is worth nothing, and zero is not an assumption but the only value that can be
-    asserted without a quote: the contract confers the right to exercise into a loss. Where such
-    a leg is *in* the money it is left null, because its value is its intrinsic value plus a
-    time value no quote is available to measure, and inventing that would flatter a short
-    position by understating what it owes.
+    The bid is therefore zero and the mid is half the ask, which is the same midpoint convention
+    applied to the interval the quote actually spans.
+
+    A leg the vendor did not quote at all is left alone. It is tempting to call it worthless
+    when it is out of the money, but nothing here establishes that: the chain writes a delta of
+    exactly 0.0 on every one of the 1,705 fully unquoted rows in the window, including ones that
+    are not remotely worthless, so the delta is a filler rather than a measurement and cannot
+    carry the argument. An unquoted leg makes its session one the position cannot be marked at,
+    which :func:`_load_option_lifecycle` handles by settling the position at the last session it
+    can be marked at, rather than by inventing a price for it.
+
+    ``_source_quoted`` records what the vendor wrote, before this rule rewrites it. Whether a
+    session can be marked at all is a fact about the source, and reading it back off the priced
+    frame would make it a fact about this function instead.
     """
-    underlying, strike = pl.col("underlying_price"), pl.col("strike")
-    intrinsic = (
-        pl.when(pl.col("call_put") == "C")
-        .then((underlying - strike).clip(lower_bound=0.0))
-        .otherwise((strike - underlying).clip(lower_bound=0.0))
-    )
     unquoted = pl.col("bid").is_null() & pl.col("ask").is_null() & pl.col("mid_price").is_null()
-    worthless = unquoted & (intrinsic <= 0) & underlying.is_not_null()
     return chain.with_columns(
-        # What the vendor wrote, kept before the pricing rules above rewrite it. Whether a
-        # session can be marked at all is a fact about the source, and reading it back off the
-        # priced frame would make it a fact about these rules instead.
         _source_quoted=~unquoted,
-        bid=pl.when(worthless)
-        .then(pl.lit(0.0))
-        .when(pl.col("bid").is_null() & pl.col("ask").is_not_null())
+        bid=pl.when(pl.col("bid").is_null() & pl.col("ask").is_not_null())
         .then(pl.lit(0.0))
         .otherwise(pl.col("bid")),
-        ask=pl.when(worthless).then(pl.lit(0.0)).otherwise(pl.col("ask")),
-        mid_price=pl.when(worthless)
-        .then(pl.lit(0.0))
-        .when(pl.col("mid_price").is_null() & pl.col("bid").is_null() & pl.col("ask").is_not_null())
+        mid_price=pl.when(
+            pl.col("mid_price").is_null() & pl.col("bid").is_null() & pl.col("ask").is_not_null()
+        )
         .then(pl.col("ask") / 2.0)
         .otherwise(pl.col("mid_price")),
     )
 
 
-def _complete_lifecycle_contracts(
+def _defective_lifecycle_contracts(
     contract_returns: pl.DataFrame,
     raw_options_dir: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Split the entry contracts into those with a complete paired lifecycle and those without.
+) -> pl.DataFrame:
+    """Return the entry contracts whose paired lifecycle the chain contradicts itself about.
 
     Reads quotes from entry through expiration, so every input date is later than the decision
-    it belongs to. Apply it to a selection to check that the engine can account for what was
-    chosen; applying it to the candidate universe would decide the decision-time universe from
+    it belongs to. Apply it to a selection to check the data the engine is about to account
+    with; applying it to the candidate universe would decide the decision-time universe from
     data that does not exist yet.
 
-    The second frame carries the candidates the engine cannot account for, each with a
-    ``contract_unquoted`` flag saying whether the sessions it is missing are ones the contract
-    is not quoted on at all, rather than ones where the chain lost a leg. The caller decides what to do with them; this function does not, because the
-    two cases want opposite answers and only the caller knows which selection it is holding.
+    It reports a defect and never a shortfall. A contract the vendor stops quoting is not a
+    defect and must not remove anything from a selection: doing so would condition the realized
+    portfolio on a corporate action nobody knew about at entry, throw away the P&L the position
+    earned before it, and hand the missing weight to the names that happened to survive.
+    :func:`_load_option_lifecycle` settles such a position at the last session it can be marked
+    at instead.
     """
     if contract_returns.is_empty():
-        return contract_returns, contract_returns
+        return contract_returns
     candidate_keys = ["feature_date", "symbol", "strike", "expiration", "entry_date"]
     if contract_returns.n_unique(candidate_keys) != contract_returns.height:
         raise ValueError("candidate option contracts are not unique by decision and entry keys")
@@ -320,13 +317,6 @@ def _complete_lifecycle_contracts(
     )
 
     contract_join = ["symbol", "strike", "expiration"]
-    observed_legs = (
-        bounds.select("_candidate_id", "entry_date", *contract_join)
-        .join(raw_lookup.select("date", *contract_join), on=contract_join, how="left")
-        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
-        .group_by("_candidate_id")
-        .len(name="_observed_legs")
-    )
     # How many of a session's two legs the vendor quoted. A session it quoted neither leg on is
     # one the position cannot be marked at, whether the legs are absent from the chain or
     # present with every price null. A session it quoted one leg on is a chain that holds the
@@ -340,17 +330,21 @@ def _complete_lifecycle_contracts(
             on=contract_join,
             how="left",
         )
-        # The expiration session is left out. The straddle settles there in cash at intrinsic
-        # value, computed from the underlying and the strike, and the quoted mids are discarded
-        # rather than used - so the leg the chain stops carrying on that session is the
-        # worthless one, and its absence says nothing about whether the contract is intact.
-        .filter(
-            pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration"), closed="left")
-        )
-        .group_by("_candidate_id", "date")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .group_by("_candidate_id", "expiration", "date")
         .len(name="_quoted_on_date")
         .group_by("_candidate_id")
-        .agg((pl.col("_quoted_on_date") == 1).sum().alias("_half_quoted_dates"))
+        .agg(
+            # The expiration session is left out of the half-quoted count. The straddle settles
+            # there in cash at the intrinsic value of its legs, computed from the underlying and
+            # the strike, and the quoted mids are discarded rather than used - so a leg the
+            # chain stops carrying on that session is the worthless one, and its absence says
+            # nothing about whether the contract is intact.
+            ((pl.col("_quoted_on_date") == 1) & (pl.col("date") < pl.col("expiration")))
+            .sum()
+            .alias("_half_quoted_dates"),
+            (pl.col("_quoted_on_date") == 2).sum().alias("_fully_quoted_dates"),
+        )
     )
     observed_pairs = (
         bounds.select(
@@ -376,52 +370,36 @@ def _complete_lifecycle_contracts(
         )
     )
     judged = (
-        bounds.join(observed_legs, on="_candidate_id", how="left")
-        .join(quoted_legs, on="_candidate_id", how="left")
+        bounds.join(quoted_legs, on="_candidate_id", how="left")
         .join(observed_pairs, on="_candidate_id", how="left")
-        .with_columns(
-            _complete=(
-                pl.col("_expected_dates").is_not_null()
-                & (pl.col("_expected_dates") > 0)
-                & (pl.col("_observed_legs") == 2 * pl.col("_expected_dates"))
-                & (pl.col("_observed_dates") == pl.col("_expected_dates"))
-                & pl.col("_entry_matches").fill_null(False)
-            )
-        )
+        .filter(pl.col("_expected_dates").is_not_null() & (pl.col("_expected_dates") > 0))
     )
-    # A session the contract is not quoted on at all is an absence; a session it is quoted on
-    # with one leg and not the other is a defect. Corporate actions produce the first shape in
-    # two variants - the quotes stop and never resume when the contract is adjusted onto a
-    # strike this chain does not carry, and a single session drops out around the event date -
-    # and both mean the same thing for the engine: there is no quote to mark the position at.
-    # A half-quoted session means the chain holds the contract and lost a leg, which is a data
-    # defect, and the two must not be reported as the same thing.
-    unquoted = (
-        (pl.col("_half_quoted_dates").fill_null(0) == 0)
-        & (pl.col("_observed_dates") < pl.col("_expected_dates"))
-        & pl.col("_entry_matches").fill_null(False)
+    # Every session the vendor quoted both legs on must yield a valid pair. A session it quoted
+    # one leg on is a chain that holds the contract and lost a leg; a session where both legs
+    # are quoted but the pair fails validation - a nonfinite price, an ask below its bid, the
+    # two legs disagreeing on the underlying - is the same kind of problem. Both are defects in
+    # the data and both raise.
+    #
+    # A session the vendor quoted neither leg on is not a defect and does not reject anything.
+    # It is what a corporate action leaves behind, either for good once the position continues
+    # under an adjusted strike this chain does not carry, or for the single session around the
+    # event date. The position is still entered; `_load_option_lifecycle` settles it at the last
+    # session it can be marked at.
+    defective = (
+        (pl.col("_half_quoted_dates").fill_null(0) > 0)
+        | (pl.col("_observed_dates").fill_null(0) != pl.col("_fully_quoted_dates").fill_null(0))
+        | ~pl.col("_entry_matches").fill_null(False)
     )
-    judged = judged.with_columns(_unquoted=(~pl.col("_complete") & unquoted).fill_null(False))
-    complete = (
+    judged = judged.with_columns(_defective=defective.fill_null(True))
+    return (
         candidates.join(
-            judged.filter(pl.col("_complete")).select("_candidate_id"),
+            judged.filter(pl.col("_defective")).select("_candidate_id"),
             on="_candidate_id",
             how="semi",
         )
         .drop("_candidate_id")
         .sort("feature_date", "symbol")
     )
-    unheld = (
-        candidates.join(
-            judged.filter(~pl.col("_complete")).select("_candidate_id", "_unquoted"),
-            on="_candidate_id",
-            how="inner",
-        )
-        .drop("_candidate_id")
-        .rename({"_unquoted": "contract_unquoted"})
-        .sort("feature_date", "symbol")
-    )
-    return complete, unheld
 
 
 def _select_cohorts(
@@ -539,44 +517,15 @@ def _select_cohorts(
         # screen reads quotes from entry through expiration, so applying it to the candidate
         # universe would let a data gap that opens after the decision date decide what the model
         # was allowed to rank on that date.
-        complete, unheld = _complete_lifecycle_contracts(
+        defective = _defective_lifecycle_contracts(
             cohorts.rename({"timestamp": "feature_date"}), raw_options_dir
         )
-        defective = unheld.filter(~pl.col("contract_unquoted"))
         if not defective.is_empty():
             raise ValueError(
                 f"{defective.height} of {cohorts.height} selected option decisions have no "
                 f"complete paired lifecycle from entry through expiration "
                 f"(first: {defective.select('feature_date', 'symbol').head(5).to_dicts()})"
             )
-        # A selected straddle with a session no quote exists for was not rejected by the
-        # screen. The chain this case study reads holds only the strikes that were at the money
-        # when the candidate was formed, so a corporate action takes the contract out of it -
-        # either for good, once the position continues under an adjusted strike, or for the
-        # single session around the event date. Either way there is no quote to mark the
-        # position at, so it is not opened.
-        #
-        # Dropping it here is not the look-ahead the screen exists to prevent. The ranking has
-        # already happened and is untouched: the decision was made on what the decision date
-        # knew, and the cohort simply holds one name fewer that week rather than promoting the
-        # runner-up into the slot. What is lost is 309 of the 132,564 candidates the validation
-        # window offers a prediction for, on 217 of its 467 decision dates, and they are the
-        # names with a split, a spinoff or a merger over the holding period - DVN, DWDP, VFC,
-        # AAPL, NEM, GE, DISH, PFE. A drop nobody counts is
-        # indistinguishable from data that never existed, so the count belongs in the
-        # strategy-analysis notebook's reporting of what the population actually traded.
-        if not unheld.is_empty():
-            cohorts = cohorts.join(
-                unheld.select(pl.col("feature_date").alias("timestamp"), "symbol"),
-                on=["timestamp", "symbol"],
-                how="anti",
-            )
-            if cohorts.is_empty():
-                raise ValueError(
-                    "every selected option decision has a session with no quote to mark it "
-                    "at, which is a selection this engine cannot account for"
-                )
-
     if method == "score_weighted_top_k":
         cohorts = _score_proportional_weights(cohorts)
     else:
@@ -687,17 +636,30 @@ def _load_option_lifecycle(
             pl.col("underlying_price").alias("put_underlying_price"),
         ]
     )
+    paired = calls.join(puts, on=["date", "symbol", "strike", "expiration"], how="inner")
+    # Where the position ends. Normally that is expiration, where the straddle settles in cash
+    # at the intrinsic value of its two legs. A contract adjusted by a corporate action stops
+    # being quoted before then, and the adjusted strike the position continues under is not in
+    # this chain, so the position is marked out at the last session both legs were quoted on -
+    # which is what a holder who cannot follow the adjustment can actually do, and which keeps
+    # the P&L the position earned up to that point instead of discarding the whole decision.
+    final_session = (
+        paired.filter(pl.col("date") <= pl.col("expiration"))
+        .group_by(["symbol", "strike", "expiration"])
+        .agg(pl.col("date").max().alias("_final_date"))
+    )
     lifecycle = (
-        calls.join(puts, on=["date", "symbol", "strike", "expiration"], how="inner")
+        paired.join(final_session, on=["symbol", "strike", "expiration"], how="left")
         .with_columns(
-            cash_settled=pl.col("date") == pl.col("expiration"),
+            cash_settled=pl.col("date") == pl.col("_final_date"),
+            _expires=pl.col("_final_date") == pl.col("expiration"),
             instr_delta=pl.col("call_delta") + pl.col("put_delta"),
         )
         .with_columns(
-            call_mid=pl.when(pl.col("cash_settled"))
+            call_mid=pl.when(pl.col("cash_settled") & pl.col("_expires"))
             .then((pl.col("underlying_price") - pl.col("strike")).clip(lower_bound=0.0))
             .otherwise(pl.col("call_mid")),
-            put_mid=pl.when(pl.col("cash_settled"))
+            put_mid=pl.when(pl.col("cash_settled") & pl.col("_expires"))
             .then((pl.col("strike") - pl.col("underlying_price")).clip(lower_bound=0.0))
             .otherwise(pl.col("put_mid")),
         )
@@ -721,6 +683,8 @@ def _load_option_lifecycle(
                 "underlying_price",
                 "put_underlying_price",
                 "cash_settled",
+                "_final_date",
+                "_expires",
             ]
         )
     )
@@ -739,9 +703,13 @@ def _load_option_lifecycle(
         "entry_put_mid",
     ).unique()
     calendar = pl.concat(calendars).unique()
+    settles_on = lifecycle.filter(pl.col("cash_settled")).select(
+        "symbol", "strike", "expiration", pl.col("date").alias("_final_date")
+    )
     expected = (
-        cohort_keys.join(calendar, how="cross")
-        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        cohort_keys.join(settles_on, on=["symbol", "strike", "expiration"], how="inner")
+        .join(calendar, how="cross")
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("_final_date")))
         .select(
             "cohort_feature_date",
             "symbol",
@@ -753,7 +721,7 @@ def _load_option_lifecycle(
     )
     observed = (
         cohort_keys.join(lifecycle, on=["symbol", "strike", "expiration"], how="inner")
-        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("expiration")))
+        .filter(pl.col("date").is_between(pl.col("entry_date"), pl.col("_final_date")))
         .select(expected.columns)
     )
     missing = expected.join(observed, on=expected.columns, how="anti")
@@ -776,7 +744,9 @@ def _load_option_lifecycle(
     )
     if expiry_keys.height != cohort_keys.height:
         raise ValueError("selected option contracts do not all have cash-settlement inputs")
-    return lifecycle.drop("put_underlying_price").sort(["symbol", "strike", "expiration", "date"])
+    return lifecycle.drop("put_underlying_price", "_final_date", "_expires").sort(
+        ["symbol", "strike", "expiration", "date"]
+    )
 
 
 _load_daily_contract_mids = _load_option_lifecycle
@@ -840,10 +810,11 @@ def _compute_cohort_daily_pnl(
             pl.col("date").max().alias("last_date"),
             pl.col("cash_settled").last().alias("cash_settled"),
         )
-        if settlement_coverage.filter(
-            (pl.col("last_date") != pl.col("expiration")) | ~pl.col("cash_settled")
-        ).height:
-            raise ValueError("option lifecycle does not cash-settle every selected contract")
+        # Every position ends in a settlement. Where that settlement falls is the contract's
+        # own business - expiration for all but the ones a corporate action ended early - so
+        # what is checked is that the last session carries one, not that it is the expiry.
+        if settlement_coverage.filter(~pl.col("cash_settled")).height:
+            raise ValueError("option lifecycle does not settle every selected contract")
 
     # Round-trip mode: cap the holding window at entry + exit_at_max_days
     # trading days (day 1 = entry, so we keep ranks 1 .. exit_at_max_days+1).
