@@ -200,17 +200,15 @@ def test_the_producer_gives_every_stage_transition_the_default_shape(
     }
 
 
-def test_the_producer_does_not_trim_the_pair_before_handing_it_to_the_bootstrap(
-    captured: list[dict],
-) -> None:
-    """The exact case the default trim is not idempotent on.
+def test_the_producer_reports_the_sample_the_bootstrap_ran_on(captured: list[dict]) -> None:
+    """The size the producer registers has to be the size the bootstrap saw.
 
-    The challenger starts three sessions late, and the baseline - the earlier starter - posts
-    an exactly zero return on the challenger's first traded session. One application of the
-    default rule starts the sample there, at index 3. A second application sees a baseline that
-    is zero at its own index 0 and slides the start to index 4, dropping a live session from
-    both series while the producer still reports the sample it measured before the bootstrap
-    ran. Passing the untrimmed pair through is what keeps the two numbers the same one.
+    The producer measures the trim and then hands `compute_paired_uncertainty` the untrimmed
+    pair, which trims it once itself. Trimming first and passing the result on would leave the
+    two figures free to drift apart the moment either rule stops being idempotent, and the
+    registered `n_overlap` would name a sample that was never used. The pair below is the case
+    where that is easiest to get wrong: the challenger starts three sessions late and the
+    baseline is flat on the session it opens.
     """
     rng = np.random.default_rng(11)
     baseline = list(rng.normal(0.0005, 0.01, size=30))
@@ -230,7 +228,7 @@ def test_the_producer_does_not_trim_the_pair_before_handing_it_to_the_bootstrap(
     )
 
     assert captured[0]["challenger"].size == 30
-    assert row["n_overlap"] == 27
+    assert row["n_overlap"] == 26
     # The figure the producer reports is the sample the bootstrap ran on, not a longer one
     # measured before a second trim shortened it.
     used, _ = joint_returns(captured[0]["challenger"], captured[0]["baseline"])
