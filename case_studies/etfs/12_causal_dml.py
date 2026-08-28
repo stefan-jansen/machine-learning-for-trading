@@ -89,10 +89,10 @@ RANDOM_SEED = 42
 CV_FOLDS = 5
 MAX_SAMPLES = 0
 N_PLACEBO = 100
-# Any edit to case_studies/utils/causal.py moves this notebook's causal identity, because
-# _causal_source_identity hashes that file whole. The registering write then refuses a second
-# current identity for the same label and names the hash it wants retired. Declare it here -
-# a bare hash, or a JSON object keyed by label - and the refusal has a route to be answered.
+# Incrementing the causal runner's semantic version moves this notebook's causal identity.
+# The registering write then refuses a second current identity for the same label and names
+# the hash it wants retired. Declare it here - a bare hash, or a JSON object keyed by label -
+# and the refusal has a route to be answered.
 # Empty is correct against a fresh registry, where there is nothing to supersede.
 SUPERSEDES_CAUSAL: str = ""
 

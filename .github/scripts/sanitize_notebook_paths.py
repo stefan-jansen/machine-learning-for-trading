@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,6 +132,28 @@ def _iter_notebooks() -> list[Path]:
             continue
         out.append(p)
     return sorted(out)
+
+
+def iter_committed_notebooks() -> list[Path]:
+    """``_iter_notebooks`` restricted to what git tracks.
+
+    The two are deliberately different. This script fixes the working tree, so it has to see
+    a notebook that has not been added yet - that is the moment its fix is most wanted. A test
+    asserting about *committed* content must not see it: an untracked scratch copy in one
+    worktree then fails a gate that CI, checking out only tracked files, can never fail on the
+    same file, and the author has no way to reproduce it. Measured 2026-08-25 on
+    `cs6/cme_futures`, where leftover copies under `.workspace/preserved/` failed
+    `test_no_empty_cell_tags_in_committed_notebooks` locally while `test-unit` was green on the
+    same commit.
+    """
+    listed = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "*.ipynb"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    tracked = {REPO_ROOT / name for name in listed.split("\0") if name}
+    return [path for path in _iter_notebooks() if path in tracked]
 
 
 def sanitize_text(text: str) -> tuple[str, int]:

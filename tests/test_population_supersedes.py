@@ -19,8 +19,11 @@ import pytest
 from case_studies.research import (
     OfficialPopulation,
     population_supersedes,
+    published_population_names_at,
     superseded_members,
+    superseded_members_at,
 )
+from case_studies.research import population as population_module
 from case_studies.research.workspace import Study
 from tests.test_research_workspace import _seed_release
 
@@ -319,8 +322,27 @@ class TestThePreviewTier:
         # an absence: the same registry, the same name, the same declaration.
         assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
-        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
+        # The value `Study.activate` writes, not merely some path ending in `.preview`: the
+        # guard asks whether the stamp belongs to *this* study, so a hand-made path that no
+        # activation would produce tests a signal the code never sees.
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.output_root / ".preview"))
         assert population_supersedes(study, name=first.name, declared=first.hash) is None
+
+    def test_another_study_s_preview_does_not_withhold_from_this_one(
+        self, study: Study, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`ML4T_OUTPUT_DIR` is process-global and `activate` never clears it.
+
+        So "a preview is active somewhere in this process" and "this study is that preview"
+        are different questions, and answering the first withholds the hash from a canonical
+        study that merely ran second. A notebook runs one tier and never notices; any process
+        that opens both - a test module, a backfill over several case studies - gets a
+        canonical declaration silently withheld and the run dies at `create` for naming no
+        predecessor, after paying for every fit.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        monkeypatch.setenv("ML4T_OUTPUT_DIR", str(tmp_path / "elsewhere" / ".preview"))
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
 
     def test_the_refusal_to_create_reads_the_same_signal(
         self, study: Study, monkeypatch: pytest.MonkeyPatch
@@ -329,3 +351,189 @@ class TestThePreviewTier:
         monkeypatch.setenv("ML4T_OUTPUT_DIR", str(study.root / ".preview"))
         with pytest.raises(ValueError, match="preview run cannot create an official population"):
             _publish(study, MEMBERS_TWO)
+
+
+class TestWhenTheRegistryReadItselfFails:
+    """ "No generation is published here" is one operational error, not every one.
+
+    The clean clone raises ``no such table: official_populations``. A lock timeout, an I/O
+    error and a half-migrated schema raise from the same call and mean nothing of the sort.
+    Answering all four with ``None`` withholds a predecessor the author does hold, and the
+    notebook then refits every configuration before ``create`` refuses the write for naming
+    none - the exact expense the declaration exists to avoid.
+    """
+
+    def test_a_missing_table_is_still_the_clean_clone(self, study: Study) -> None:
+        db_path = study.root / "run_log" / "registry.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(db_path)
+        db.execute("CREATE TABLE IF NOT EXISTS unrelated (x INTEGER)")
+        db.commit()
+        db.close()
+        assert (
+            population_supersedes(study, name="etfs-linear-validation-v1", declared="aaaa11112222")
+            is None
+        )
+
+    def test_a_lock_timeout_propagates(self, study: Study, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = _publish(study, MEMBERS_ONE)
+
+        def locked(*args: object, **kwargs: object) -> OfficialPopulation:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(OfficialPopulation, "one", classmethod(locked))
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            population_supersedes(study, name=first.name, declared=first.hash)
+
+    def test_the_read_waits_as_long_as_every_other_reader_of_this_file(
+        self, study: Study, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """120s on the driver and 60s server-side, the pair ``_open_registry`` sets.
+
+        These reads open the registry directly rather than through ``_open_registry``, which
+        would run the schema DDL and create the very tables a clean clone is being asked
+        about - so the timeouts have to be set here or they fall back to SQLite's five
+        seconds, which ordinary contention with a concurrent writer exceeds. Checked on the
+        connection ``population_supersedes`` actually opens, not on the helper in isolation.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        opened: list[float | None] = []
+        real_connect = sqlite3.connect
+
+        def record(path, *args, **kwargs):
+            opened.append(kwargs.get("timeout"))
+            return real_connect(path, *args, **kwargs)
+
+        monkeypatch.setattr(population_module.sqlite3, "connect", record)
+        assert population_supersedes(study, name=first.name, declared=first.hash) == first.hash
+        assert opened and all(timeout == 120.0 for timeout in opened)
+
+
+class TestTheRootBasedForm:
+    """`superseded_members_at`, which answers for a directory instead of a study.
+
+    `14_backtest` reads its catalog with `prediction_rows_at(CASE_DIR)` so that no
+    `Study.open` runs: every branch of it ends in `activate()`, which re-points the rest of
+    the notebook - including where `run_backtest(register=True)` writes - at whichever root
+    the activation chose. A lineage question asked through a study there would answer for a
+    different registry than the catalog being filtered, and the join between them would be
+    meaningless rather than wrong in a visible way.
+    """
+
+    def test_it_retires_what_the_study_form_retires(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == superseded_members(study)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+
+    def test_it_is_member_wise_too(self, study: Study) -> None:
+        # The same distinction the study form is held to: a refit that moves one of two
+        # identities retires one, not the predecessor entire.
+        kept, moved = MEMBERS_ONE
+        first = _publish(study, (kept, moved))
+        _publish(study, (kept, "eeee55556666"), supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset({moved})
+
+    def test_it_retires_nothing_before_a_refit(self, study: Study) -> None:
+        _publish(study, MEMBERS_ONE)
+        assert superseded_members_at(study.root) == frozenset()
+
+    def test_a_directory_with_no_registry_retires_nothing(self, tmp_path: Path) -> None:
+        assert superseded_members_at(tmp_path / "absent") == frozenset()
+
+    def test_it_reads_the_root_it_is_given_and_not_another(self, study: Study) -> None:
+        """The property the notebook depends on, stated as the difference between two roots.
+
+        Passing the released root must not report the workspace's lineage. If it did, the
+        filter would answer for a registry other than the one `prediction_rows_at` read, which
+        is the whole reason this form exists rather than a study.
+        """
+        first = _publish(study, MEMBERS_ONE)
+        _publish(study, MEMBERS_TWO, supersedes=first.hash)
+        assert superseded_members_at(study.root) == frozenset(MEMBERS_ONE)
+        assert superseded_members_at(study.release_case_root) == frozenset()
+
+
+class TestWhetherARegistryDeclaresPopulationsAtAll:
+    """The question that separates "not used here" from "broken here".
+
+    `OfficialPopulation.one` answers both with the same "0 current identities": a registry that
+    has never published a population, and one that publishes several but cannot resolve the
+    name asked for. `13_model_analysis` has to tell them apart, because the first is the
+    ordinary state of a fixture and the second means a family's rows would enter every
+    comparison with no declaration covering them.
+    """
+
+    def test_a_registry_with_no_populations_names_none(self, study: Study) -> None:
+        assert published_population_names_at(study.root) == frozenset()
+
+    def test_it_names_a_generation_that_is_still_in_force(self, study: Study) -> None:
+        first = _publish(study, MEMBERS_ONE)
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_it_names_a_forked_name_that_will_not_resolve(self, study: Study) -> None:
+        """The case the notebook must not read as "this registry declares no populations".
+
+        `create` refuses to write this state - a second generation under a name must name what
+        it supersedes - so it is built here at the storage layer, which is also how it would
+        arise: a hand-edited registry, or one written under an earlier schema. Two generations
+        with no edge between them leave the name with no single answer, and
+        `OfficialPopulation.one` refuses it in the same words a registry that has published
+        nothing produces. The registry plainly does declare populations, so the notebook must
+        refuse the comparison rather than fall back to catalog admissibility.
+        """
+        first = _publish(study, MEMBERS_ONE)
+
+        with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(official_populations)")]
+            row = dict(
+                zip(
+                    columns,
+                    db.execute(
+                        "SELECT * FROM official_populations WHERE population_hash = ?",
+                        (first.hash,),
+                    ).fetchone(),
+                    strict=True,
+                )
+            )
+            row["population_hash"] = "f0rked0000000000"
+            db.execute(
+                f"INSERT INTO official_populations ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                [row[column] for column in columns],
+            )
+
+        with pytest.raises(ValueError, match="current identities"):
+            OfficialPopulation.one(study, name=first.name)
+
+        assert published_population_names_at(study.root) == frozenset({first.name})
+
+    def test_a_directory_with_no_registry_names_none(self, tmp_path: Path) -> None:
+        assert published_population_names_at(tmp_path / "absent") == frozenset()
+
+    def test_a_registry_predating_the_mechanism_must_not_be_asked_to_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """Why `13_model_analysis` branches on this answer instead of catching a failure.
+
+        A registry written before official populations existed has no `official_populations`
+        table, and `OfficialPopulation.one` raises `sqlite3.OperationalError` there rather than
+        the `ValueError` a resolvable-but-absent name produces. A reader's clean clone is that
+        registry. So the notebook has to decide *not to ask*, and this pins the pairing it
+        decides on: the helper answers, the resolver raises.
+
+        If `one` is ever made tolerant of the missing table, this fails and the branch it
+        justifies can be simplified - which is the point of asserting the resolver's behaviour
+        here rather than only the helper's.
+        """
+        case_dir = tmp_path / "etfs"
+        (case_dir / "run_log").mkdir(parents=True)
+        with sqlite3.connect(case_dir / "run_log" / "registry.db") as db:
+            db.execute("CREATE TABLE unrelated (x INTEGER)")
+
+        assert published_population_names_at(case_dir) == frozenset()
+
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            OfficialPopulation.one(
+                Study.at(case_dir, case_study="etfs"), name="etfs-linear-validation-v1"
+            )

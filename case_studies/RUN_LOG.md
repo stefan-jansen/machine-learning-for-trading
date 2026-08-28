@@ -291,43 +291,34 @@ identities and register as new rows. The old rows stay exactly where they were,
 still complete and still queryable, so an experiment accumulates alongside the
 published results rather than overwriting them.
 
-**What an edit to a runner costs depends on which runner.** Two schemes are in
-use, and they differ in what a change to the fitting code does to the results
-already registered.
-
-*Linear and GBM declare a version.* `LINEAR_RUNNER_VERSION`,
+**Every model family declares the implementation versions that enter its
+identity.** `LINEAR_RUNNER_VERSION`,
 `GBM_RUNNER_VERSION`, `FOLD_PREPARATION_VERSION` for the shared fold preparation,
 and `PREPROCESSING_ID` / `GBM_PREPROCESSING_ID` for the cast applied to a fold are
 what enter the identity. A comment, a log line or a refactoring that moves code
 without changing what it computes therefore leaves every registered result valid,
-and only bumping the version refits the family. The bump is the decision about
+and only incrementing a relevant version refits the family. The increment is the decision about
 compute, and it is required whenever the change would move the numbers, because a
 cache that survived such a change would be lying. What holds the declaration
 honest is `tests/test_linear_identity.py`, `tests/test_gbm_identity.py` and
 `tests/test_folds.py`: each pins the quantities its version claims to describe and
 fails when they move without a bump.
 
-*Tabular deep learning, sequence models, latent factors and causal inference
-digest their source.* The SHA-256 of each of a set of files is in the identity, so
-editing any file in that set - including a change that alters nothing a model
-computes - refits the configurations it covers on the next run. Only causal
-digests a single file; the others digest several, and latent factors digests
-fourteen, including `utils/modeling.py`. Read the set from the function that
-builds it rather than from a list here, which would drift:
+Tabular deep learning, sequence models, latent factors and causal inference use
+the following scoped declarations:
 
-| Family | Its digest set |
+| Family | Implementation identity |
 |---|---|
-| Tabular DL | `_tabm_source_identity` in `case_studies/utils/tabular_dl.py` |
-| Sequence models | `_sequence_source_identity` in `case_studies/utils/deep_learning.py` |
-| Latent factors | `_source_identity` in `case_studies/utils/latent_factors/adapter.py` |
-| Causal | `_causal_source_identity` in `case_studies/utils/causal.py` |
+| Tabular DL | runner and persisted-state versions in `case_studies/utils/tabular_dl.py` |
+| Sequence models | runner, preparation, state, backend and architecture versions in `case_studies/utils/deep_learning.py` |
+| Latent factors | shared adapter and per-model versions in `case_studies/utils/latent_factors/adapter.py` |
+| Causal | runner version in `case_studies/utils/causal.py` |
 
-Sequence models are the one case where the blast radius is narrower than the
-family: the set includes the selected architecture's own module, so editing that
-refits only the configurations that select it. Everywhere else, an edit inside the
-set refits the whole family, and is a decision about compute as well as about
-code. The declared-version scheme replaced this for linear and GBM first because
-those two are re-run most often; the remaining four have not been converted.
+Increment only the declaration whose computation changed. For example, a TCN-only
+change increments the TCN architecture version without invalidating LSTM results.
+`tests/test_model_source_identity_versions.py` pins the declared scopes and proves
+that changing a declaration changes the training identity; the model adapter tests
+cover their result-affecting behavior.
 
 The two identities downstream of a training run are built from it rather than
 from scratch; the next section gives their exact composition.

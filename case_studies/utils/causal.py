@@ -29,6 +29,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 # Fixed rather than derived from the host: a value like -1 varies with the machine, so a
 # result would not be identity-stable across the readers' hardware.
 DML_THREAD_LIMIT = 1
+CAUSAL_RUNNER_VERSION = 1
 
 import hashlib
 import importlib.metadata
@@ -1074,9 +1075,9 @@ def format_dml_summary(results: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _causal_source_identity() -> dict[str, str]:
-    path = Path(__file__)
-    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()}
+def _causal_source_identity() -> dict[str, int]:
+    """Return the declared version of the result-affecting causal implementation."""
+    return {"causal_runner": CAUSAL_RUNNER_VERSION}
 
 
 def _causal_runtime_identity() -> dict[str, str]:
@@ -1223,7 +1224,9 @@ def resolve_causal_request(study: Study, request: dict[str, Any]):
         raise ValueError(f"DML runner does not support entity key {mds.entity_cols[0]!r}")
     configs = {
         config["config_name"]: config
-        for config in load_configs(study.case_study, label_ref.name, "causal_dml")
+        for config in load_configs(
+            study.case_study, label_ref.name, "causal_dml", case_dir=study.root
+        )
     }
     try:
         config = configs[request["config_name"]]
