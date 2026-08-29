@@ -104,6 +104,7 @@ WORKSPACE: str = ""
 PREVIEW_REDUCTIONS: dict = {}
 CONFIG_NAMES: list[str] = []
 POPULATION_NAME = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %%
 study = open_study("sp500_options", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -261,13 +262,27 @@ plan.select(
 # predictions happen to be in the registry - and it is why a configuration that raises fails the
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
+#
+# **A name holds one generation at a time.** Anything that moves a training identity - a
+# change to fold derivation, to a declared model version - moves every prediction hash with
+# it, so the members this run computes are no longer the members an earlier snapshot under
+# the same name declared. `SUPERSEDES_POPULATION` names the snapshot such a run retires. It
+# is empty here because this population has no predecessor, and the value is part of what
+# the population is hashed over. Without it a refit writes a second snapshot that nothing
+# supersedes, and resolving the name then fails for every reader rather than for the run
+# that forked it.
 
 # %%
 # `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
 # the contract with them and not a label of convenience. A run that narrows the member set
 # has to pass its own.
 population_name = POPULATION_NAME or "sp500-options-linear-validation-v1"
-execution, population = run_model_population(study, resolved, population_name=population_name)
+execution, population = run_model_population(
+    study,
+    resolved,
+    population_name=population_name,
+    supersedes=SUPERSEDES_POPULATION or None,
+)
 
 fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
 reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)

@@ -49,6 +49,7 @@ DEVICE: str = ""
 
 SEQUENCE_CONFIGS = ("nlinear", "lstm_h64", "patchtst")
 POPULATION_NAME: str = ""
+SUPERSEDES_POPULATION: str = ""
 
 # %% [markdown]
 # ### The device the population was fitted on
@@ -80,6 +81,16 @@ print(f"training device: {device} (declared: {published_device})")
 #
 # The case-wide table is resolved before the first member executes. Canonical execution snapshots
 # all configuration-checkpoint identities so a failed member cannot disappear from later analysis.
+#
+# **A name holds one generation at a time**, and this notebook is the only one that writes this
+# population - `09a_lstm` and `09b_patchtst` execute members of a snapshot that already exists.
+# Anything that moves a training identity moves every prediction hash with it, so the members
+# this run computes are no longer the members an earlier snapshot under the same name declared,
+# and those two notebooks then refuse their own work as undeclared. `SUPERSEDES_POPULATION`
+# names the snapshot such a run retires, and the value is part of what the population is hashed
+# over. It is empty here because this population has no predecessor. Without it a refit writes a
+# second snapshot that nothing supersedes, and resolving the name then fails for every reader
+# rather than for the run that forked it.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
@@ -116,6 +127,7 @@ if EXECUTION_TIER == "canonical":
         all_requests,
         population_name=population_name,
         resolved_requests=all_resolved,
+        supersedes=SUPERSEDES_POPULATION or None,
     )
     execution, population = run_official_model_subset(
         study,
