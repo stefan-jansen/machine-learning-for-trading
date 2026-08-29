@@ -106,21 +106,19 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 
 
 # %%
-def _solvent_hashes(hashes: list[str]) -> set[str]:
+def _solvent_hashes(hashes):
     """Of *hashes*, those whose equity never reached zero.
 
-    The ranking below is on Sharpe, and `resolve_best_backtest_runs` returns no drawdown to
-    temper it with. A long-short book here has no margin call, so a run can compound through
-    zero and carry a Sharpe computed on a balance that no longer exists - and such a Sharpe
-    can top the ranking. Selecting one would sweep the whole cost grid against a strategy
-    that went bankrupt before any cost was charged, and report its cost sensitivity as the
-    chapter's answer.
+    A long-short book here has no margin call, so a run can compound through zero and carry
+    a Sharpe computed on a balance that no longer exists - and such a Sharpe can top a
+    ranking. Sweeping the cost grid against one would report the cost sensitivity of a
+    strategy that went bankrupt before any cost was charged.
 
     `max_drawdown` at or past -100% is that condition, the same boundary
     [`11_backtest`](11_backtest.ipynb) and
     [`12_portfolio_management`](12_portfolio_management.ipynb) apply. A run with no recorded
-    drawdown is not selected either: it cannot be shown to have survived, and this is a
-    choice of what to sweep rather than a count of what happened.
+    drawdown is not selected either: it cannot be shown to have survived, and this decides
+    what to sweep rather than counting what happened.
     """
     if not hashes:
         return set()
@@ -134,14 +132,33 @@ def _solvent_hashes(hashes: list[str]) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _resolve_pre_cost_runs(case_study: str, label: str, *, split: str, top_n: int) -> pl.DataFrame:
+def _resolve_pre_cost_runs(
+    case_study: str,
+    label: str,
+    *,
+    split: str,
+    top_n: int,
+    solvent_hashes=None,
+    ranked_pool: int = 1_000_000,
+):
+    """The highest-Sharpe solvent runs across the baseline and allocation stages.
+
+    `solvent_hashes` is passed in rather than called by name so this function does not reach
+    the registry itself: the ranking is what it decides, and it can then be exercised without
+    a database. Passing None applies no solvency filter.
+
+    `ranked_pool` asks each stage for its whole ranked list rather than its top `top_n`.
+    Truncating first and filtering after would let an insolvent leader take the slot a solvent
+    run behind it should have had - and with `top_n=1`, that drops the entire stage from
+    consideration instead of falling through to the next candidate.
+    """
     candidates = [
         resolve_best_backtest_runs(
             case_study,
             label,
             split=split,
             stage=stage,
-            top_n=top_n,
+            top_n=ranked_pool,
         )
         for stage in ("signal", "allocation")
     ]
@@ -153,9 +170,10 @@ def _resolve_pre_cost_runs(case_study: str, label: str, *, split: str, top_n: in
         .sort("sharpe", descending=True)
         .unique("backtest_hash", maintain_order=True)
     )
-    return ranked.filter(
-        pl.col("backtest_hash").is_in(list(_solvent_hashes(ranked["backtest_hash"].to_list())))
-    ).head(top_n)
+    if solvent_hashes is not None:
+        keep = solvent_hashes(ranked["backtest_hash"].to_list())
+        ranked = ranked.filter(pl.col("backtest_hash").is_in(list(keep)))
+    return ranked.head(top_n)
 
 
 top_combos = _resolve_pre_cost_runs(
@@ -163,6 +181,7 @@ top_combos = _resolve_pre_cost_runs(
     LABEL,
     split="validation",
     top_n=TOP_N_COMBOS,
+    solvent_hashes=_solvent_hashes,
 )
 
 if top_combos.is_empty():
