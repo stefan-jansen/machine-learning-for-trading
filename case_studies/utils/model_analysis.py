@@ -1294,6 +1294,37 @@ def indistinguishable_groups(
     return ordered.with_columns(pl.Series("group", groups))
 
 
+def _align_date_dtype(keyed: dict[str, pl.DataFrame], date_col: str) -> dict[str, pl.DataFrame]:
+    """*keyed* with ``date_col`` brought to one dtype, so the intersection join can run.
+
+    One registry can hold both conventions for the same trading day: etfs stores
+    ``timestamp`` as ``Date`` in 277 of its prediction files and as midnight ``Datetime``
+    in 123, because the families were registered by notebooks written months apart. A
+    join on mismatched key dtypes raises ``SchemaError`` rather than returning nothing,
+    so comparing across those families failed outright.
+
+    Widening ``Date`` to ``Datetime`` is lossless - a date becomes midnight, which is
+    what the datetime-typed rows already carry - so it is the direction taken whenever
+    both appear. Narrowing would truncate a genuine time of day, so it is never taken:
+    a case study whose timestamps really are intraday keeps them, and if it also holds
+    date-typed rows the intersection comes back empty, which is the true answer about
+    two sets that do not share keys. Anything other than these two dtypes is left alone
+    for the join to reject, because guessing a cast for it would be a fabrication.
+    """
+    dtypes = {frame.schema[date_col] for frame in keyed.values()}
+    if len(dtypes) < 2 or not dtypes <= {pl.Date, *(pl.Datetime(u) for u in ("ms", "us", "ns"))}:
+        return keyed
+    target = next(dt for dt in dtypes if dt != pl.Date)
+    return {
+        name: (
+            frame.with_columns(pl.col(date_col).cast(target))
+            if frame.schema[date_col] == pl.Date
+            else frame
+        )
+        for name, frame in keyed.items()
+    }
+
+
 def common_sample_daily_ic(
     predictions: dict[str, pl.DataFrame],
     *,
@@ -1328,6 +1359,7 @@ def common_sample_daily_ic(
         )
         for name, df in predictions.items()
     }
+    keyed = _align_date_dtype(keyed, date_col)
     common: pl.DataFrame | None = None
     for frame in keyed.values():
         keys = frame.select(entity_col, date_col)

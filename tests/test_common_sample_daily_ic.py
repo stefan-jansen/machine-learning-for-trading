@@ -1,5 +1,7 @@
 """The shared-sample IC comparison must read what `load_predictions` actually returns."""
 
+from datetime import date
+
 import polars as pl
 
 from case_studies.utils.model_analysis import common_sample_daily_ic
@@ -67,3 +69,56 @@ def test_single_entity_dates_are_dropped():
     ics, n_dates, _ = common_sample_daily_ic({"only": one})
     assert n_dates == 1
     assert ics["only"] != ics["only"]  # NaN: no date survived the >= 2 entity filter
+
+
+# --- one registry, two conventions for the same trading day -------------------------
+#
+# etfs stores `timestamp` as Date in 277 of its prediction files and as midnight Datetime
+# in 123, because the families were registered by notebooks written months apart. Polars
+# raises SchemaError on a join whose key dtypes differ rather than returning nothing, so
+# comparing across those families failed outright at `09_dl_lstm`. The stored predictions
+# are correct; only the reader was wrong.
+
+
+def _pred(as_datetime: bool, *, shift: float = 0.0, hours: int = 0) -> pl.DataFrame:
+    days = [date(2024, 1, d) for d in range(1, 6)]
+    ts = pl.Series("timestamp", days * 4)
+    if as_datetime:
+        ts = ts.cast(pl.Datetime("us"))
+    frame = pl.DataFrame(
+        {
+            "symbol": [s for s in "ABCD" for _ in days],
+            "timestamp": ts,
+            "y_score": [float(i) + shift for i in range(20)],
+            "y_true": [float(i % 7) for i in range(20)],
+        }
+    )
+    if hours:
+        frame = frame.with_columns(pl.col("timestamp") + pl.duration(hours=hours))
+    return frame
+
+
+def test_date_and_midnight_datetime_intersect_as_the_same_day():
+    ics, n_dates, n_rows = common_sample_daily_ic(
+        {"flat": _pred(False), "lstm": _pred(True, shift=0.5)}
+    )
+    assert (n_dates, n_rows) == (5, 20)
+    assert set(ics) == {"flat", "lstm"}
+
+
+def test_a_single_dtype_is_left_alone():
+    _, n_dates, n_rows = common_sample_daily_ic({"a": _pred(False), "b": _pred(False, shift=0.5)})
+    assert (n_dates, n_rows) == (5, 20)
+
+
+def test_a_real_time_of_day_is_never_truncated_into_a_match():
+    """The failure the widening direction exists to avoid.
+
+    Narrowing Datetime to Date would make 14:00 equal to midnight and report a shared
+    cross-section that does not exist. An empty intersection is the true answer about two
+    prediction sets that share no key.
+    """
+    _, n_dates, n_rows = common_sample_daily_ic(
+        {"flat": _pred(False), "intraday": _pred(True, hours=14)}
+    )
+    assert (n_dates, n_rows) == (0, 0)
