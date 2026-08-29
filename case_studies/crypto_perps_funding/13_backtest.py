@@ -169,24 +169,51 @@ catalog.group_by("family", "label").agg(
 #   sitting inside the first one's window, so `fwd_ret_24h` advances three slots and the
 #   eight-hour labels advance one.
 #
-# The check below reads the decision times out of one prediction set per label and confirms that
-# every interval between consecutive decisions inside a fold is exactly the label's horizon. It
-# reads one prediction set rather than all of them because completeness has already established
-# that every configuration for a label predicts the same keys.
+# The check below reads the decision times out of the prediction sets and confirms that every
+# interval between consecutive decisions inside a fold is exactly the label's horizon.
+#
+# It cannot read one set and let it speak for the label. The `complete` column two cells up is a
+# verdict on each member taken by itself, so a member registered as complete against a different
+# set of keys is still complete, and completeness never compares two members to each other. What
+# does compare them is `prediction_coverage.actual_key_digest`, which records the keys each
+# member was actually written at: members sharing a digest were predicted at the same keys, and
+# each distinct digest is a separate grid that has to be checked on its own. This case study
+# carries more than one per label - the sequence models write a sparser panel than the
+# cross-sectional ones over the same decision times - and every one of them is backtested, so
+# every one of them is checked here and appears in the table below.
 
 
 # %%
-def reference_predictions(label: str) -> pl.DataFrame:
-    """Load one label's first prediction set, as the reference for its decision keys."""
-    reference = catalog.filter(pl.col("label") == label).sort("prediction_hash")
-    return Result.open(study, reference.item(0, "prediction_hash")).load()
-
-
-# %%
-def decision_timeline(label: str) -> pl.DataFrame:
-    """Return the distinct fold and decision timestamps one label was predicted at."""
+def decision_grids(label: str) -> pl.DataFrame:
+    """The distinct key sets one label was predicted at, with a representative member of each."""
+    members = catalog.filter(pl.col("label") == label)
+    if members.get_column("decision_key_digest").null_count():
+        blank = members.filter(pl.col("decision_key_digest").is_null())
+        raise RuntimeError(
+            f"{label}: {blank.height} of {members.height} prediction sets record no decision-key "
+            f"digest, so the keys they were written at are unknown and cannot be checked; "
+            f"first {blank.item(0, 'prediction_hash')}"
+        )
     return (
-        reference_predictions(label).select("fold", "timestamp").unique().sort("fold", "timestamp")
+        members.group_by("decision_key_digest")
+        .agg(
+            prediction_sets=pl.len(),
+            families=pl.col("family").unique().sort(),
+            reference=pl.col("prediction_hash").min(),
+        )
+        .sort("prediction_sets", "decision_key_digest", descending=[True, False])
+    )
+
+
+# %%
+def decision_timeline(prediction_hash: str) -> pl.DataFrame:
+    """Return the distinct fold and decision timestamps one prediction set was written at."""
+    return (
+        Result.open(study, prediction_hash)
+        .load()
+        .select("fold", "timestamp")
+        .unique()
+        .sort("fold", "timestamp")
     )
 
 
@@ -207,27 +234,37 @@ def holding_periods(timeline: pl.DataFrame, step: int) -> list[timedelta]:
 decision = setup["decision"]
 intervals = []
 for label in labels:
-    timeline = decision_timeline(label)
     step = get_rebalance_step("crypto_perps_funding", label)
     horizon = study.labels.get(label).definition.horizon.upper()
     if not horizon.endswith("H") or not horizon.removesuffix("H").isdigit():
         raise RuntimeError(f"unsupported crypto label horizon {horizon!r}")
-    held = holding_periods(timeline, step)
-    if held != [timedelta(hours=int(horizon.removesuffix("H")))]:
-        raise RuntimeError(f"{label} decision intervals {held} do not match horizon {horizon}")
-    intervals.append(
-        {
-            "label": label,
-            "information_cutoff": decision["snapshot"],
-            "fill": decision["execution_delay"],
-            "outcome_horizon": horizon,
-            "rebalance_step_slots": step,
-            "decision_times": timeline.height,
-            "first_decision": timeline.get_column("timestamp").min(),
-            "last_decision": timeline.get_column("timestamp").max(),
-        }
-    )
-pl.DataFrame(intervals).sort("label")
+    expected_gap = timedelta(hours=int(horizon.removesuffix("H")))
+    for grid in decision_grids(label).iter_rows(named=True):
+        timeline = decision_timeline(grid["reference"])
+        held = holding_periods(timeline, step)
+        if held != [expected_gap]:
+            raise RuntimeError(
+                f"{label} grid {grid['decision_key_digest'][:12]} "
+                f"({'/'.join(grid['families'])}, {grid['prediction_sets']} prediction sets, "
+                f"reference {grid['reference']}): decision intervals {held} do not match "
+                f"horizon {horizon}"
+            )
+        intervals.append(
+            {
+                "label": label,
+                "grid": grid["decision_key_digest"][:12],
+                "families": "/".join(grid["families"]),
+                "prediction_sets": grid["prediction_sets"],
+                "information_cutoff": decision["snapshot"],
+                "fill": decision["execution_delay"],
+                "outcome_horizon": horizon,
+                "rebalance_step_slots": step,
+                "decision_times": timeline.height,
+                "first_decision": timeline.get_column("timestamp").min(),
+                "last_decision": timeline.get_column("timestamp").max(),
+            }
+        )
+pl.DataFrame(intervals).sort("label", "grid")
 
 # %% [markdown]
 # ### Every decision the declaration asks for
@@ -246,25 +283,31 @@ pl.DataFrame(intervals).sort("label")
 
 # %% tags=["results"]
 coverage = [
-    check_prediction_coverage(
-        reference_predictions(label),
-        "crypto_perps_funding",
-        label,
-        case_dir=study.root,
+    (
+        grid,
+        check_prediction_coverage(
+            Result.open(study, grid["reference"]).load(),
+            "crypto_perps_funding",
+            label,
+            case_dir=study.root,
+        ),
     )
     for label in labels
+    for grid in decision_grids(label).iter_rows(named=True)
 ]
 pl.DataFrame(
     [
         {
             "label": report.label,
+            "grid": grid["decision_key_digest"][:12],
+            "families": "/".join(grid["families"]),
             "declared_folds": report.declared_folds,
             "declared_sessions": report.expected_sessions,
             "observed_sessions": report.observed_sessions,
         }
-        for report in coverage
+        for grid, report in coverage
     ]
-).sort("label")
+).sort("label", "grid")
 
 # %% [markdown]
 # ## 3. Which entry rules the universe can support
@@ -336,9 +379,20 @@ feasibility
 # The count above is the universe at full listing. What decides whether a rule can be filled on a
 # given day is how many contracts were quoting *then*, and that is a series rather than a
 # constant. The chart draws it against the two thresholds the declared grid asks for.
+#
+# It counts the contracts scored on the widest of the label's decision grids - the one the most
+# prediction sets share. A sparser grid would draw a narrower panel than the market offered,
+# which is a fact about that model's own coverage rather than about what could be traded.
 
 # %%
-breadth = reference_predictions(labels[0]).group_by("timestamp").len().sort("timestamp")
+widest_grid = decision_grids(labels[0]).row(0, named=True)
+breadth = (
+    Result.open(study, widest_grid["reference"])
+    .load()
+    .group_by("timestamp")
+    .len()
+    .sort("timestamp")
+)
 
 # %%
 fig_breadth = go.Figure(
