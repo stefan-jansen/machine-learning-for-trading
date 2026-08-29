@@ -10,6 +10,7 @@ subtraction is what removes it, and these pin that both steps are there.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,11 @@ class TestARegistryThatPublishes:
         _publish(study, "etfs-gbm-validation-v1", ["cccc3333"])
         members, notes = prediction_members_in_force(study)
         assert members == frozenset({"aaaa1111", "bbbb2222", "cccc3333"})
-        assert notes == []
+        # The fixture registers no coverage rows, which is now reported rather than passed over
+        # in silence: an absent row means completeness is unevidenced, not that the run stopped
+        # part way, so the members stay in the pool and the gap is named.
+        assert len(notes) == 1
+        assert "carry no prediction_coverage row" in notes[0]
 
     def test_a_superseded_generation_is_not_in_the_pool(self, study: Study) -> None:
         first = _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
@@ -76,3 +81,49 @@ class TestARegistryThatPublishes:
         members, _ = prediction_members_in_force(study)
         assert "bbbb2222" not in members
         assert members == frozenset({"aaaa1111", "cccc3333"})
+
+
+class TestAPoolWithAnUnfinishedMember:
+    """The pool is selected from, so a member scored over fewer folds than it was asked for
+    cannot be ranked around - a shorter window is an easier window, and the error runs toward
+    the top of the ranking rather than away from it."""
+
+    def _register(self, study: Study, member: str, *, expected: int, scored: int) -> None:
+        run_log = study.root / "run_log"
+        with sqlite3.connect(run_log / "registry.db") as db:
+            # Named columns, not positional, and no CREATE TABLE for prediction_coverage. The
+            # seeded study already creates it with the fifteen columns the producer writes, so
+            # `CREATE TABLE IF NOT EXISTS` was a no-op declaring a three-column shape that does
+            # not exist, and the positional insert under it failed against the real table. Only
+            # the three columns this test is about are set; the rest keep their defaults.
+            db.execute(
+                "INSERT OR REPLACE INTO prediction_coverage ("
+                "  prediction_hash, expected_key_digest, actual_key_digest, n_expected,"
+                "  n_actual, n_duplicates, n_missing, n_extra, n_null, n_non_finite,"
+                "  n_folds_expected, n_folds_actual, schema_json, artifact_digest, status"
+                ") VALUES (?, '', '', 0, 0, 0, 0, 0, 0, 0, ?, ?, '{}', '', 'complete')",
+                (member, expected, scored),
+            )
+            db.executemany(
+                "INSERT INTO fold_metrics (prediction_hash, fold_id, computed_at, ic) "
+                "VALUES (?, ?, '2026-01-01T00:00:00Z', 0.01)",
+                [(member, fold) for fold in range(scored)],
+            )
+        artifact = run_log / "predictions" / member
+        artifact.mkdir(parents=True, exist_ok=True)
+        (artifact / "predictions.parquet").write_bytes(b"PAR1")
+
+    def test_refuses_and_names_what_is_short(self, study: Study) -> None:
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
+        self._register(study, "aaaa1111", expected=5, scored=5)
+        self._register(study, "bbbb2222", expected=5, scored=2)
+        with pytest.raises(RuntimeError, match="2 of 5 folds scored"):
+            prediction_members_in_force(study)
+
+    def test_allows_a_pool_whose_members_all_finished(self, study: Study) -> None:
+        _publish(study, "etfs-linear-validation-v1", ["aaaa1111", "bbbb2222"])
+        self._register(study, "aaaa1111", expected=5, scored=5)
+        self._register(study, "bbbb2222", expected=5, scored=5)
+        members, notes = prediction_members_in_force(study)
+        assert members == frozenset({"aaaa1111", "bbbb2222"})
+        assert notes == []

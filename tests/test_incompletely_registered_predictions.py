@@ -99,10 +99,23 @@ class TestAMemberInterruptedPartWay:
             INTERRUPTED: "coverage missing_rows"
         }
 
-    def test_a_member_with_no_coverage_row_is_reported(self, case_dir: Path) -> None:
-        assert incompletely_registered_predictions(case_dir, [INTERRUPTED]) == {
-            INTERRUPTED: "no coverage row"
-        }
+    def test_a_member_with_no_coverage_row_is_a_gap_in_the_evidence_not_a_partial_run(
+        self, case_dir: Path
+    ) -> None:
+        """The two look alike and call for opposite responses, so they are reported apart.
+
+        A coverage row saying anything but ``complete``, or a fold count short of what that row
+        declares expected, is a run that stopped part way: it must not be ranked. An absent row
+        says nothing about the run - ``prediction_coverage`` arrived as a later migration, so a
+        registry written before it leaves the row missing while the prediction set is whole.
+        Measured on etfs, where all 40 such members had both their ``prediction_sets`` row and
+        their parquet. Reporting the second as unfinished would refuse a whole pool over the
+        registry's age.
+        """
+        from case_studies.utils.notebook_contracts import predictions_without_coverage
+
+        assert incompletely_registered_predictions(case_dir, [INTERRUPTED]) == {}
+        assert predictions_without_coverage(case_dir, [INTERRUPTED]) == {INTERRUPTED}
 
     def test_a_complete_registration_whose_artifact_is_absent_is_reported(
         self, case_dir: Path
