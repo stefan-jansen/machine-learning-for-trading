@@ -963,6 +963,78 @@ def _subsampled_panel(frame, entity: str, entity_col: str, _pl):
     return panel.select(columns)
 
 
+def _normalize_prediction_timestamp_zone(cs_dir: Path) -> None:
+    """Put one case study's prediction artifacts in the timezone its labels use.
+
+    `_subsampled_panel` preserves each reference artifact's own dtype, and says
+    why: a seeded set has to meet its reference on an exact join, and a cast on
+    either side of that key silently drops every row. That is right *within* a
+    (split, label) group and says nothing across groups, so when the fixture's own
+    artifacts disagree a notebook that reads two labels together fails:
+
+        SchemaError: failed to determine supertype of datetime[us] and
+                     datetime[us, UTC]
+
+    crypto_perps_funding ships nine artifacts in three dtypes: four `ms, UTC`,
+    four `ms` naive, one `us` naive. Stripping the zone collapses all eight
+    validation artifacts onto one identical grid and the holdout artifact onto its
+    own, so the three are the same instants written three ways.
+
+    The zone comes from the case study's OWN labels rather than from a majority
+    vote or a default, because the labels are what a prediction is ultimately
+    joined against - crypto's are `ms, UTC` throughout, and normalizing the
+    predictions to naive instead traded one collision for another:
+
+        datatypes of join keys don't match - `timestamp`: datetime[ms] on left
+        does not match `timestamp`: datetime[ms, UTC] on right
+
+    Only the zone is touched. The time unit is left alone: the fixture already
+    mixes `ms` and `us` across labels and features without trouble, so unifying it
+    would rewrite artifacts to fix nothing. Values are untouched either way, so
+    the historical-target checks a replay notebook runs against a cohort leader
+    are unaffected - which is what makes it safe to rewrite an artifact that
+    otherwise survives seeding.
+
+    A case study whose artifacts already agree with its labels is not touched.
+    """
+    predictions = cs_dir / "run_log" / "predictions"
+    if not predictions.is_dir():
+        return
+    try:
+        import polars as _pl
+    except ImportError:
+        return
+
+    zone = None
+    for label_file in sorted((cs_dir / "labels").glob("*.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(label_file).get("timestamp")
+        except Exception:  # noqa: BLE001 - an unreadable label is not ours to fix here
+            continue
+        if isinstance(dtype, _pl.Datetime):
+            zone = dtype.time_zone
+            break
+    if zone is None:
+        return
+
+    for path in sorted(predictions.glob("*/predictions.parquet")):
+        try:
+            dtype = _pl.read_parquet_schema(path).get("timestamp")
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(dtype, _pl.Datetime) or dtype.time_zone == zone:
+            continue
+        frame = _pl.read_parquet(path)
+        column = _pl.col("timestamp")
+        # A naive column carries the same wall clock the zoned ones do, so it is
+        # stamped rather than shifted; a genuinely different zone is converted.
+        if dtype.time_zone is None:
+            frame = frame.with_columns(column.dt.replace_time_zone(zone))
+        else:
+            frame = frame.with_columns(column.dt.convert_time_zone(zone))
+        frame.write_parquet(path)
+
+
 def _drop_stale_conformal_widths(cs_dir: Path) -> None:
     """Remove a widths artifact that no longer matches the predictions beside it.
 
@@ -1671,6 +1743,7 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         # (must run AFTER _seed_registry_db, and also when registry was pre-seeded)
         _backfill_all_prediction_parquets(cs_dir, cs_id)
         _drop_stale_conformal_widths(cs_dir)
+        _normalize_prediction_timestamp_zone(cs_dir)
         _record_prediction_artifact_digests(cs_dir)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry
