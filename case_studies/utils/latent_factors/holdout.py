@@ -42,6 +42,15 @@ def rekey_holdout_spec(
       restricted to the fold being fitted, so the validation folds' digest describes a different
       panel slice.
 
+    The hook is necessary and not sufficient. On sp500_equity_option_analytics the lock still
+    cannot be taken, for a reason underneath it: ``build_holdout_cv`` derives the holdout
+    training window from the EARLIEST validation fold's start, deliberately, so the final fit
+    gets the longest history - 2017-01-05..2020-12-16 there - while stage 04 emits each
+    fold-scoped temporal fold over a rolling three-year window, so its fold 2 begins 2019-01-02.
+    Measured 2026-08-29 against the committed artifact: 495 of 977 training dates covered
+    (50.7%), and 252 of 252 evaluation dates (100%). The producer and the deriver disagree about
+    the holdout's training interval, and this refuses rather than fitting on half-null features.
+
     ``validation_spec`` is unused here. The linear hook needs it to replay a data-derived penalty
     against a recorded fold before trusting the preset; latent-factor models resolve no parameter
     from a fold's own training rows, so there is nothing of that kind to verify. It stays in the
