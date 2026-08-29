@@ -325,8 +325,23 @@ class BacktestExplorer:
     # compare_families: model family comparison at a stage
     # -----------------------------------------------------------------
 
-    def compare_families(self, stage: str = "signal") -> pl.DataFrame:
+    def compare_families(
+        self, stage: str = "signal", *, exclude_insolvent: bool = False
+    ) -> pl.DataFrame:
         """Compare model families by backtest Sharpe at a given stage.
+
+        Parameters
+        ----------
+        exclude_insolvent : bool, default False
+            Drop runs whose equity went negative - ``max_drawdown`` below
+            -100%, meaning the trough is past zero and every later period is
+            arithmetic on a negative balance. Their Sharpe is a number without
+            a meaning, so it distorts a median and can top a maximum. Off by
+            default, so a caller that has already reported on the full
+            population keeps reporting on it. A notebook that plots the solvent
+            subset should turn this on, so its table and its figure describe
+            one set rather than two. Runs with no recorded drawdown are dropped
+            with them, matching ``max_drawdown >= -1.0`` in Polars.
 
         Returns
         -------
@@ -334,6 +349,7 @@ class BacktestExplorer:
             Columns: family, n, sharpe_median, sharpe_max, sharpe_q75,
             pct_positive
         """
+        solvency_sql = "AND bm.max_drawdown >= -1.0" if exclude_insolvent else ""
         df = self._query(
             f"""
             SELECT
@@ -350,6 +366,7 @@ class BacktestExplorer:
               {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {solvency_sql}
             """,
             (stage, *excluded_family_sql(self.case_study, "t.family")[1]),
         )

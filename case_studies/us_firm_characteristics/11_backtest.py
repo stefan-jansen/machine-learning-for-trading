@@ -393,8 +393,8 @@ print(repr(explorer))
 # %% [markdown]
 # ### The upper tail of the surface
 #
-# The ten highest validation Sharpes the sweep registered, with the model that
-# produced each and how many names a side it was traded at. Read this as the shape
+# The ten highest validation Sharpes among the runs that stayed solvent, with the
+# model that produced each and how many names a side it was traded at. Read this as the shape
 # of the tail rather than as a selection: these are the ten largest draws from a
 # sweep of hundreds, so the largest is biased upward by however many were tried.
 # The deflated Sharpe below is the first correction for that, and the strategy
@@ -422,7 +422,12 @@ if ruined.height:
         "that are arithmetic on a negative balance"
     )
 
-top = explorer.best(stage="signal", top_n=10)
+# Ranked among the solvent runs only. An insolvent path still carries a Sharpe, and
+# on a negative balance it can exceed every strategy that held its capital - so
+# ranking the full set would let the table name one of them best. `all_runs` is
+# already ordered by Sharpe descending, so the head of the filtered frame is the
+# solvent top ten. The figures below filter identically.
+top = all_runs.filter(pl.col("max_drawdown") >= -1.0).head(10)
 
 # `best` reports `signal.method`, which is the same string for every entry scheme in
 # this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
@@ -462,11 +467,11 @@ print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 # is the model and its checkpoint, not the target they were fitted to.
 
 # %% tags=["results"]
-families = explorer.compare_families(stage="signal")
+families = explorer.compare_families(stage="signal", exclude_insolvent=True)
 print(families)
 print(
-    "Note: these aggregate every registered run, including any whose equity went "
-    "negative. The figures below exclude those."
+    f"Insolvent runs are excluded from these aggregates; {ruined.height:,} of the "
+    f"{all_runs.height:,} registered signal-stage runs went negative."
 )
 
 # %%
