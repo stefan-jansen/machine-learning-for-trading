@@ -426,7 +426,12 @@ class BacktestExplorer:
             kept out of the statistics. It cannot be shown to have stayed
             solvent, but neither did it fail: putting it under ``insolvent``
             would report a bankruptcy that was never measured. ``n``,
-            ``insolvent`` and ``unknown`` together are every run of the family.
+            ``insolvent`` and ``unknown`` together are every run of the family:
+            the query does not drop a run for having no Sharpe when this is on,
+            because a bankrupt run can carry a null one and dropping it would take
+            a wiped-out family off the table entirely. The Sharpe statistics skip
+            any solvent run without a recorded Sharpe, so they can rest on fewer
+            than ``n`` runs: these columns count runs, not measurements.
 
             Off by default, so a caller that has already reported on the full
             population keeps reporting on it, with the same columns as before.
@@ -438,6 +443,12 @@ class BacktestExplorer:
             pct_positive - and ``insolvent``, ``unknown`` when
             ``exclude_insolvent``.
         """
+        # A run that went bankrupt can carry a null Sharpe, and dropping those in SQL would
+        # remove it before `insolvent` counts it - so a family that went bankrupt in every
+        # run would leave the comparison entirely, which is the survivorship bias this
+        # option exists to expose. Under the flag the rows are kept, and the Sharpe
+        # aggregates skip the nulls themselves.
+        sharpe_sql = "" if exclude_insolvent else "AND bm.sharpe IS NOT NULL"
         df = self._query(
             f"""
             SELECT
@@ -453,7 +464,7 @@ class BacktestExplorer:
               AND p.split != 'holdout'
               {excluded_family_sql(self.case_study, "t.family")[0]}
               {full_coverage_prediction_sql("p", "t", "pm")}
-              AND bm.sharpe IS NOT NULL
+              {sharpe_sql}
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """,
             (stage, *excluded_family_sql(self.case_study, "t.family")[1]),
