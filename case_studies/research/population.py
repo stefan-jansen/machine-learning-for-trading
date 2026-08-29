@@ -32,6 +32,53 @@ def _connect(case_dir: Path) -> sqlite3.Connection:
     return db
 
 
+def retired_prediction_hashes(connection: sqlite3.Connection) -> set[str]:
+    """Prediction identities a later official population has retired.
+
+    A refit under a corrected input produces new prediction identities and publishes a
+    snapshot that supersedes the previous one, rather than replacing it: the retired
+    generation stays in ``training_runs`` and ``prediction_sets`` because the record of
+    what was superseded is evidence, not litter. Supersession is recorded one layer up,
+    in ``official_populations``, so a reader that joins ``training_runs`` to
+    ``prediction_metrics`` directly cannot tell a retired generation from a live one and
+    sees two rows where the study has one.
+
+    It cannot tell them apart on the numbers either. A refit that changes only a declared
+    input artifact - moving a feature family from the fitted set into the invariants, say -
+    changes the identity without changing the computation, so both rows carry bit-identical
+    metrics. Any ``max``, ``first`` or ``ORDER BY created_at`` picks arbitrarily and looks
+    like it worked.
+
+    A hash is retired when it appears in some prediction population and in no current one,
+    where current means nothing supersedes it. A hash in no population at all is not
+    retired: nothing has declared it so, and a registry may hold results a study never
+    published under a name.
+
+    Returns an empty set when the registry declares no populations, which includes a clean
+    clone with no ``official_populations`` table at all - there, nothing has been retired
+    because nothing has been published.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT population_hash, supersedes_hash, member_kind, snapshot_json "
+            "FROM official_populations"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+
+    superseded = {row[1] for row in rows if row[1]}
+    published: set[str] = set()
+    live: set[str] = set()
+    for population_hash, _, member_kind, snapshot_json in rows:
+        if member_kind != "prediction":
+            continue
+        members = set(json.loads(snapshot_json)["members"])
+        published |= members
+        if population_hash not in superseded:
+            live |= members
+    return published - live
+
+
 def research_name(case_study_id: str, suffix: str, *, scope: str = "") -> str:
     """Name one published artifact, isolated as a whole chain when a run is narrowed.
 
