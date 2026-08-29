@@ -45,6 +45,7 @@
 """US Firm Characteristics: Costs."""
 
 import json
+import sqlite3
 import time
 import warnings
 from collections import Counter
@@ -105,6 +106,34 @@ COST_GRID_BPS = get_cost_grid_bps(CASE_STUDY_ID)
 
 
 # %%
+def _solvent_hashes(hashes: list[str]) -> set[str]:
+    """Of *hashes*, those whose equity never reached zero.
+
+    The ranking below is on Sharpe, and `resolve_best_backtest_runs` returns no drawdown to
+    temper it with. A long-short book here has no margin call, so a run can compound through
+    zero and carry a Sharpe computed on a balance that no longer exists - and such a Sharpe
+    can top the ranking. Selecting one would sweep the whole cost grid against a strategy
+    that went bankrupt before any cost was charged, and report its cost sensitivity as the
+    chapter's answer.
+
+    `max_drawdown` at or past -100% is that condition, the same boundary
+    [`11_backtest`](11_backtest.ipynb) and
+    [`12_portfolio_management`](12_portfolio_management.ipynb) apply. A run with no recorded
+    drawdown is not selected either: it cannot be shown to have survived, and this is a
+    choice of what to sweep rather than a count of what happened.
+    """
+    if not hashes:
+        return set()
+    placeholders = ", ".join("?" for _ in hashes)
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+        rows = conn.execute(
+            f"SELECT backtest_hash FROM backtest_metrics "
+            f"WHERE backtest_hash IN ({placeholders}) AND max_drawdown > -1.0",
+            hashes,
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
 def _resolve_pre_cost_runs(case_study: str, label: str, *, split: str, top_n: int) -> pl.DataFrame:
     candidates = [
         resolve_best_backtest_runs(
@@ -119,12 +148,14 @@ def _resolve_pre_cost_runs(case_study: str, label: str, *, split: str, top_n: in
     candidates = [frame for frame in candidates if not frame.is_empty()]
     if not candidates:
         return pl.DataFrame()
-    return (
+    ranked = (
         pl.concat(candidates)
         .sort("sharpe", descending=True)
         .unique("backtest_hash", maintain_order=True)
-        .head(top_n)
     )
+    return ranked.filter(
+        pl.col("backtest_hash").is_in(list(_solvent_hashes(ranked["backtest_hash"].to_list())))
+    ).head(top_n)
 
 
 top_combos = _resolve_pre_cost_runs(
@@ -135,7 +166,7 @@ top_combos = _resolve_pre_cost_runs(
 )
 
 if top_combos.is_empty():
-    print("No baseline or allocation results found. Run the upstream notebooks first.")
+    print("No solvent baseline or allocation results found. Run the upstream notebooks first.")
 else:
     for row in top_combos.iter_rows(named=True):
         spec = json.loads(row["spec_json"])
