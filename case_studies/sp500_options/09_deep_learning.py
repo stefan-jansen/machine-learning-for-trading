@@ -88,9 +88,12 @@ print(f"training device: {device} (declared: {published_device})")
 # this run computes are no longer the members an earlier snapshot under the same name declared,
 # and those two notebooks then refuse their own work as undeclared. `SUPERSEDES_POPULATION`
 # names the snapshot such a run retires, and the value is part of what the population is hashed
-# over. It is empty here because this population has no predecessor. Without it a refit writes a
-# second snapshot that nothing supersedes, and resolving the name then fails for every reader
-# rather than for the run that forked it.
+# over. It is empty here because this population has no predecessor.
+#
+# `create` refuses a changed member list under an existing name unless this names the current
+# snapshot, so the parameter is what makes refreshing this population possible at all. Without
+# it the refit stops at the write with the hash it needs, which is the right failure but not
+# one this notebook could act on.
 
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)

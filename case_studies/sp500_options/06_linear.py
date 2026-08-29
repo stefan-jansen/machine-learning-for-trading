@@ -263,14 +263,15 @@ plan.select(
 # whole call rather than publishing a population one member short. Everything that finished stays
 # registered, and re-running fits only what is missing.
 #
-# **A name holds one generation at a time.** Anything that moves a training identity - a
-# change to fold derivation, to a declared model version - moves every prediction hash with
-# it, so the members this run computes are no longer the members an earlier snapshot under
-# the same name declared. `SUPERSEDES_POPULATION` names the snapshot such a run retires. It
-# is empty here because this population has no predecessor, and the value is part of what
-# the population is hashed over. Without it a refit writes a second snapshot that nothing
-# supersedes, and resolving the name then fails for every reader rather than for the run
-# that forked it.
+# **A name holds one generation at a time.** Anything that moves a training identity moves
+# every prediction hash with it, so the members this run computes are no longer the members
+# an earlier snapshot under the same name declared. `SUPERSEDES_POPULATION` names the
+# snapshot such a run retires. It is empty here because this population has no predecessor,
+# and the value is part of what the population is hashed over.
+#
+# `create` refuses a changed member list under an existing name unless this names the
+# current snapshot, so the parameter is how a refit is possible at all rather than a
+# precaution against corrupting anything. Republishing an identical list is a no-op.
 
 # %%
 # `11_model_analysis` and `12_backtest` resolve this population by name, so the default is
