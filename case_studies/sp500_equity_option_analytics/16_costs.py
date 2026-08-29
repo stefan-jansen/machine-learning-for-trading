@@ -49,7 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import open_study
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -114,7 +114,14 @@ print(
     f"configured one-way cost: {DEFAULT_ONE_WAY_BPS:.1f} bps"
 )
 
-_study = open_study(CASE_STUDY_ID, execution_tier="canonical")
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_costs")
 _members, _population_notes = prediction_members_in_force(_study)
 for _note in _population_notes:
     print(_note)
