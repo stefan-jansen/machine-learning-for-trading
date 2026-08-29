@@ -653,3 +653,64 @@ def test_coverage_refuses_both_cases_the_fold_id_check_refuses() -> None:
         require_fold_scoped_temporal_holdout_coverage(
             {**holdout, "fold": 8}, artifact, source_timeline=source
         )
+
+
+# --- The training floor: "the longest history" is a claim about features, not the calendar ----
+#
+# build_holdout_cv starts the holdout training window at the earliest validation fold so the
+# final fit gets the most history. For a configuration whose model-based features are fold-scoped
+# there is no feature history before the producer's fold, and training the difference fits null
+# columns - a different estimator from any that was ranked. The floor bounds the window below.
+# ml4t/agent-workspace#977 carries the measurement that produced these tests.
+
+
+def test_a_floor_later_than_the_earliest_fold_moves_the_training_start() -> None:
+    earliest = min(pd.Timestamp(entry["train_start"]) for entry in FOLDS)
+    floor = earliest + pd.Timedelta(days=400)
+
+    cv = build_holdout_cv(
+        _validation_spec(),
+        case_study="us_firm_characteristics",
+        timeline=MONTH_ENDS,
+        train_start_floor=floor,
+    )
+    fold = _fold(cv)
+
+    assert pd.Timestamp(fold["train_start"]) == floor
+    assert pd.Timestamp(fold["train_start"]) > earliest
+    # Recorded, so a reader of the locked spec can see the window is the producer's.
+    assert cv["request"]["train_start_floor"] == floor.date().isoformat()
+
+
+def test_a_floor_earlier_than_the_earliest_fold_changes_nothing_at_all() -> None:
+    """Including the identity: a spec that needed no clamp must hash as it did before this."""
+    earliest = min(pd.Timestamp(entry["train_start"]) for entry in FOLDS)
+    unclamped = build_holdout_cv(
+        _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+    )
+    clamped = build_holdout_cv(
+        _validation_spec(),
+        case_study="us_firm_characteristics",
+        timeline=MONTH_ENDS,
+        train_start_floor=earliest - pd.Timedelta(days=400),
+    )
+
+    assert _fold(clamped) == _fold(unclamped)
+    assert clamped["identity"] == unclamped["identity"]
+    assert "train_start_floor" not in clamped["request"]
+    assert "train_start_floor" not in unclamped["request"]
+
+
+def test_a_floor_that_swallows_the_training_interval_is_refused_not_silently_empty() -> None:
+    fold = _fold(
+        build_holdout_cv(
+            _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+        )
+    )
+    with pytest.raises(ValueError, match="holdout training interval is empty"):
+        build_holdout_cv(
+            _validation_spec(),
+            case_study="us_firm_characteristics",
+            timeline=MONTH_ENDS,
+            train_start_floor=pd.Timestamp(fold["train_end"]) + pd.Timedelta(days=1),
+        )
