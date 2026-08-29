@@ -240,6 +240,18 @@ if not result.complete:
 # unavailable here rather than computed from a null.
 draws = metrics.get("refutation_n_successful")
 placebo_p_floor = 1.0 / (draws + 1) if draws is not None else None
+# A null p-value reaches this point as a COMPLETE row, so the stop above does not catch it: a
+# configuration that asks for no placebos is complete without one by contract
+# (research/causal.py, `requested == 0`). Formatting it would raise from inside the figure's
+# subtitle, after the row was registered and after the axes were drawn - the same trap the draw
+# count on the line above already avoids, which is why it is avoided the same way.
+refutation_p = metrics["refutation_p"]
+refutation_clause = (
+    "no permutation test was run"
+    if refutation_p is None
+    else f"permutation p {refutation_p:.3f} over "
+    + (f"{draws} successful refits" if draws is not None else "an unrecorded draw count")
+)
 print(f"Registered causal identity: {result.hash} ({result.execution_tier})")
 
 # %% [markdown]
@@ -306,8 +318,7 @@ add_message_title(
     ),
     subtitle=(
         f"effect +/-1.96 Driscoll-Kraay standard errors, [{lo:+.1f}, {hi:+.1f}] bps; "
-        f"permutation p {metrics['refutation_p']:.3f} over "
-        + (f"{draws} successful refits" if draws is not None else "an unrecorded draw count")
+        + refutation_clause
     ),
 )
 fig.tight_layout(rect=(0, 0, 1, 0.82))
