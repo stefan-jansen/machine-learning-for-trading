@@ -416,12 +416,12 @@ print(repr(explorer))
 # is the convention notebook 12 applies to the allocation stage.
 all_runs = explorer.best(stage="signal", top_n=9999)
 ruined = all_runs.filter(pl.col("max_drawdown") <= -1.0)
-print(f"runs whose equity went negative: {ruined.height} of {all_runs.height}")
+print(f"runs whose equity reached zero or went negative: {ruined.height} of {all_runs.height}")
 if ruined.height:
     print(
         "their reported Sharpe ranges "
         f"{ruined['sharpe'].min():.2f} to {ruined['sharpe'].max():.2f}, computed on periods "
-        "that are arithmetic on a negative balance"
+        "with no capital left to earn a return"
     )
 
 # Ranked among the solvent runs only. An insolvent path still carries a Sharpe, and
@@ -468,20 +468,22 @@ print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 # The label is held fixed across every row, so what separates the families here
 # is the model and its checkpoint, not the target they were fitted to.
 #
-# The Sharpe columns are computed over the runs that stayed solvent, and `insolvent`
-# counts the runs of that family that did not. Both are needed to read the table: the
-# statistics would be meaningless with the ruined runs in them, and dropping those runs
-# without counting them would rank a family by its survivors, so a family that went to
-# zero in most of its runs would show the Sharpe of the few that did not. Read a median
-# as conditional on the count beside it.
+# The Sharpe columns are computed over the runs that stayed solvent, `insolvent` counts
+# the runs of that family that reached zero, and `unknown` those with no drawdown
+# recorded, which are held out of the statistics without being called failures. All
+# three are needed to read the table: the statistics would be meaningless with the
+# ruined runs in them, and dropping those runs without counting them would rank a
+# family by its survivors, so a family that went to zero in most of its runs would show
+# the Sharpe of the few that did not. Read a median as conditional on the counts beside
+# it.
 
 # %% tags=["results"]
 families = explorer.compare_families(stage="signal", exclude_insolvent=True)
 print(families)
 print(
-    f"Sharpe statistics are computed over solvent runs only; the `insolvent` column "
-    f"counts the rest. Across all families, {ruined.height:,} of {all_runs.height:,} "
-    f"registered signal-stage runs went to zero or past it."
+    f"Sharpe statistics are computed over solvent runs only; `insolvent` and `unknown` "
+    f"count the rest. Across all families, {ruined.height:,} of {all_runs.height:,} "
+    f"registered signal-stage runs reached zero or went past it."
 )
 
 # %%

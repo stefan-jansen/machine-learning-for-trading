@@ -21,8 +21,8 @@ ROWS = [
     # Equity exactly at zero. It cannot earn a later return, so it is ruin and not the
     # edge of solvency - the boundary notebook 12 already applies at the allocation stage.
     ("exactly_zero", "gbm", 7.0, -1.0),
-    # No recorded drawdown: cannot be shown to have stayed solvent, so it is counted
-    # with the insolvent rather than silently lost from both counts.
+    # No recorded drawdown: held out of the statistics, but counted apart from the
+    # ruined - it was never measured, so calling it a bankruptcy would invent one.
     ("no_drawdown", "gbm", 8.0, None),
     # A family with nothing left. It has no Sharpe to report, and must not vanish.
     ("wiped", "tabular_dl", 5.0, -2.0),
@@ -144,9 +144,13 @@ def test_exclude_insolvent_reports_the_ruined_rather_than_dropping_them(tmp_path
     families = BacktestExplorer("test", case_dir=case_dir).compare_families(exclude_insolvent=True)
 
     gbm = families.filter(family="gbm")
-    # solvent_a and solvent_b; ruined, exactly_zero and no_drawdown are counted, not lost.
+    # solvent_a and solvent_b carry the statistics. `ruined` and `exactly_zero` are the
+    # measured failures; `no_drawdown` is held out of both, because a run that was never
+    # measured is not a bankruptcy. The three counts add up to every run of the family.
     assert gbm["n"].item() == 2
-    assert gbm["insolvent"].item() == 3
+    assert gbm["insolvent"].item() == 2
+    assert gbm["unknown"].item() == 1
+    assert gbm["n"].item() + gbm["insolvent"].item() + gbm["unknown"].item() == 5
     assert gbm["sharpe_max"].item() == 1.0
     assert gbm["sharpe_median"].item() == 0.75
     assert gbm["pct_positive"].item() == 100.0
@@ -155,6 +159,7 @@ def test_exclude_insolvent_reports_the_ruined_rather_than_dropping_them(tmp_path
     assert wiped.height == 1
     assert wiped["n"].item() == 0
     assert wiped["insolvent"].item() == 1
+    assert wiped["unknown"].item() == 0
     assert wiped["sharpe_median"].item() is None
     assert wiped["pct_positive"].item() is None
 

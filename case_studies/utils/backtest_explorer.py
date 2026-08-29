@@ -349,17 +349,21 @@ class BacktestExplorer:
             so a reader can see what the median is conditional on. A family
             with no solvent run has null statistics and sorts last.
 
+            A run with no recorded drawdown is counted under ``unknown`` and
+            kept out of the statistics. It cannot be shown to have stayed
+            solvent, but neither did it fail: putting it under ``insolvent``
+            would report a bankruptcy that was never measured. ``n``,
+            ``insolvent`` and ``unknown`` together are every run of the family.
+
             Off by default, so a caller that has already reported on the full
             population keeps reporting on it, with the same columns as before.
-            A run with no recorded drawdown counts as ``insolvent``: it cannot
-            be shown to have stayed solvent, and in Polars ``max_drawdown >
-            -1.0`` is null rather than true for it.
 
         Returns
         -------
         pl.DataFrame
             Columns: family, n, sharpe_median, sharpe_max, sharpe_q75,
-            pct_positive - and ``insolvent`` when ``exclude_insolvent``.
+            pct_positive - and ``insolvent``, ``unknown`` when
+            ``exclude_insolvent``.
         """
         df = self._query(
             f"""
@@ -400,22 +404,28 @@ class BacktestExplorer:
                 .sort("sharpe_median", descending=True)
             )
 
-        # `fill_null(False)` so a run with no recorded drawdown lands in `insolvent`
-        # rather than in neither count: the comparison is null for it, and a null
-        # would be skipped by both sums and lose the run from the table's arithmetic.
-        solvent = (pl.col("max_drawdown") > -1.0).fill_null(False)
+        # Three outcomes, counted separately, because a run with no recorded drawdown
+        # is not a bankruptcy: reporting it under `insolvent` would put a failure on
+        # the record that was never measured. Each comparison is null for that run, so
+        # the sums skip it and it lands only in `unknown`. n + insolvent + unknown is
+        # every run of the family.
+        solvent = pl.col("max_drawdown") > -1.0
+        # Filtering needs a mask with no nulls; the counts above do not, and take the
+        # null-skipping behaviour instead.
+        solvent_mask = solvent.fill_null(False)
         return (
             df.group_by("family")
             .agg(
                 n=solvent.sum(),
-                insolvent=(~solvent).sum(),
-                sharpe_median=pl.col("sharpe").filter(solvent).median(),
-                sharpe_max=pl.col("sharpe").filter(solvent).max(),
-                sharpe_q75=pl.col("sharpe").filter(solvent).quantile(0.75),
+                insolvent=(pl.col("max_drawdown") <= -1.0).sum(),
+                unknown=pl.col("max_drawdown").is_null().sum(),
+                sharpe_median=pl.col("sharpe").filter(solvent_mask).median(),
+                sharpe_max=pl.col("sharpe").filter(solvent_mask).max(),
+                sharpe_q75=pl.col("sharpe").filter(solvent_mask).quantile(0.75),
                 # `mean` rather than `sum() / len()`: a family whose runs all went
                 # insolvent divides by zero, and mean over an empty selection is null,
                 # which is what "no solvent run to report a rate over" means.
-                pct_positive=(pl.col("sharpe").filter(solvent) > 0).mean() * 100,
+                pct_positive=(pl.col("sharpe").filter(solvent_mask) > 0).mean() * 100,
             )
             .sort("sharpe_median", descending=True, nulls_last=True)
         )
