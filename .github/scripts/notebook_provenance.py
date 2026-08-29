@@ -825,6 +825,34 @@ def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
     return [cell for cell in comparable if cell[1] == "code" or len(cell) != 2]
 
 
+def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
+    """Whether a stale-reading drift changes no code cell, so ``sync-prose`` resolves it.
+
+    The gate compares whole-file blobs, so any edit to the ``.py`` reads as stale. That is
+    the right default - it is one hash and it cannot be argued with - but it makes the
+    report say "re-run" to an author who moved a paragraph, and a re-run of
+    ``us_equities_panel`` is 52 hours to relocate a heading. This does not forgive the
+    drift: the ``.ipynb`` still carries the old prose and still has to be brought forward.
+    It only decides which of the two ways of doing that the report should name.
+
+    Same comparison ``sync_prose`` gates itself on, so a notebook this calls prose-only is
+    exactly one ``sync-prose`` away from passing, and one it calls executable really does
+    need the run.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # stamped blob is gone; cannot compare, so do not soften the report
+    before = code_cells_only(_comparable(old.stdout))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8")))
+    return before is not None and after is not None and before == after
+
+
 def _output_counts(nb: dict) -> list[int]:
     """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
     return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
@@ -1033,11 +1061,34 @@ def _cmd_check(args: argparse.Namespace) -> int:
         for r in lost:
             print(f"  {r}")
     if stale:
-        print(
-            "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
-        )
+        prose, executable = [], []
         for r in stale:
-            print(f"  {r}")
+            nb_path = REPO_ROOT / r
+            py = paired_py(nb_path)
+            stamped = (
+                json.loads(nb_path.read_text(encoding="utf-8"))
+                .get("metadata", {})
+                .get(STAMP_KEY, {})
+                .get("source_py_blob")
+            )
+            if py is not None and stamped and drift_is_prose_only(stamped, py):
+                prose.append(r)
+            else:
+                executable.append(r)
+        if prose:
+            print(
+                "STALE, prose only (no code cell moved - fold it in, do NOT re-run:\n"
+                "  uv run python .github/scripts/notebook_provenance.py sync-prose <nb.py>):"
+            )
+            for r in prose:
+                print(f"  {r}")
+        if executable:
+            print(
+                "STALE (a code cell changed since the notebook was executed - re-run in the "
+                "canonical env):"
+            )
+            for r in executable:
+                print(f"  {r}")
     if testmode:
         print(
             "TEST-MODE (committed a run with papermill parameter overrides — must be production):"
