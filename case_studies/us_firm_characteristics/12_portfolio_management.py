@@ -318,10 +318,11 @@ with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
 # this sweep used as well as to the advanced predictions, so each equal-weight run is
 # the counterpart of a pair of allocation runs rather than one of the whole Chapter 16
 # sweep.
+#
+# There is one spelling for the baseline's row label below, because the figure title compares
+# against it and a second copy would let the two drift into disagreeing about which row it is.
 
 # %%
-# One spelling for the baseline's row label, because the title below compares against it
-# and a second copy would let the two drift into disagreeing about which row it is.
 EQUAL_WEIGHT_LABEL = "equal_weight (ch16 baseline)"
 
 # %%

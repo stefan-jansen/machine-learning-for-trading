@@ -928,10 +928,11 @@ plot_regime_bars(regime_df)
 # not because that is the objective they were fitted against. An estimator whose
 # interval covers zero there has still fitted the factor structure it was asked to fit;
 # what it has not done is produce a cross-sectional ranking the panel supports.
+#
+# The per-fold diagnostics are keyed by training hash, so the config name from the metrics table
+# has to be resolved to the hash of the run that produced it.
 
 # %%
-# The per-fold diagnostics are keyed by training hash, so the config name from the
-# metrics table has to be resolved to the hash of the run that produced it.
 lf_runs = (
     all_metrics.filter(pl.col("family") == "latent_factors")
     .sort("ic_mean_daily", descending=True, nulls_last=True)

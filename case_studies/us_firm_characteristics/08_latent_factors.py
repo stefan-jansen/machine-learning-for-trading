@@ -107,13 +107,14 @@ menu
 # **A member the menu declares and no notebook claims publishes nothing, and nothing else would
 # catch it**: each execution notebook checks the labels it covers against its own declared rows, so
 # none of them can see a model that no notebook requests at all. That is what this cell is for.
+#
+# `NOTEBOOK_DIR` below is the repository, not `get_case_study_dir`. That helper answers "where does
+# this case study read and write its data", which `ML4T_OUTPUT_DIR` redirects to an isolated root -
+# correct for labels, features and the run log, and wrong here: the notebooks are source, they live
+# where the source lives, and under a redirect the glob found none of them and reported every
+# declared member as unclaimed.
 
 # %%
-# The repository, not `get_case_study_dir`. That helper answers "where does this case study read
-# and write its data", which `ML4T_OUTPUT_DIR` redirects to an isolated root - correct for labels,
-# features and the run log, and wrong here: the notebooks are source, they live where the source
-# lives, and under a redirect the glob below found none of them and reported every declared member
-# as unclaimed.
 NOTEBOOK_DIR = REPO_ROOT / "case_studies" / "us_firm_characteristics"
 
 
