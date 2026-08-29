@@ -714,3 +714,26 @@ def test_a_floor_that_swallows_the_training_interval_is_refused_not_silently_emp
             timeline=MONTH_ENDS,
             train_start_floor=pd.Timestamp(fold["train_end"]) + pd.Timedelta(days=1),
         )
+
+
+def test_every_family_hook_is_reachable_through_the_dispatch_that_calls_it() -> None:
+    """A hook the package does not export is not a hook, and `getattr` says so silently.
+
+    `_family_module` returns the family's PACKAGE, so a function defined in a submodule and left
+    out of `__init__.py` resolves to None - `_holdout_training_floor` then returns no floor and
+    `_rekey_holdout_spec` raises NotImplementedError, both of which read as "this family does not
+    implement it" rather than as the export bug they are. Resolving the way production resolves
+    is the only check that can tell those apart.
+    """
+    from case_studies.research.models import _family_module
+
+    for family, hooks in {
+        "latent_factors": ("rekey_holdout_spec", "holdout_training_floor"),
+        "linear": ("rekey_holdout_spec",),
+    }.items():
+        module = _family_module(family)
+        for hook in hooks:
+            assert callable(getattr(module, hook, None)), (
+                f"{family}.{hook} is defined in a submodule but not exported from the package "
+                f"`_family_module` returns, so the dispatch cannot see it"
+            )
