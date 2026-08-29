@@ -49,6 +49,7 @@ from case_studies.crypto_perps_funding.research_workflow import (
 
 # %% tags=["parameters"]
 EXECUTION_TIER = "canonical"
+SUPERSEDES_POPULATION: str = ""
 WORKSPACE = os.environ.get("ML4T_OUTPUT_DIR", "")
 LABELS = ALL_LABELS
 PREVIEW_REDUCTIONS = {}
@@ -60,7 +61,9 @@ OVERRIDES = {"class_weight": "balanced", "device": "cuda"}
 # %%
 study = open_study(execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
 official_population = (
-    freeze_official_model_population(study) if EXECUTION_TIER == "canonical" else None
+    freeze_official_model_population(study, supersedes=SUPERSEDES_POPULATION or None)
+    if EXECUTION_TIER == "canonical"
+    else None
 )
 requests = model_request_catalog("tabular_dl", labels=LABELS, config_prefix="tabm")
 requests

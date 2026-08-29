@@ -259,9 +259,21 @@ def declared_contracts(plan: ModelPlan) -> pl.DataFrame:
     )
 
 
-def freeze_official_model_population(study: Study) -> OfficialPopulation:
-    """Record every canonical model checkpoint before the first fit starts."""
-    return plan_official_models(study).create_population(name=OFFICIAL_POPULATION)
+def freeze_official_model_population(
+    study: Study, *, supersedes: str | None = None
+) -> OfficialPopulation:
+    """Record every canonical model checkpoint before the first fit starts.
+
+    *supersedes* names the population hash this snapshot replaces. It is required whenever
+    the membership has moved since the last snapshot - a new checkpoint, a changed model
+    identity - because a reader resolves the population name to exactly one snapshot, and
+    the registry refuses to leave two current. Every other case study threads this through
+    from a notebook parameter; this one did not, so the guard could be raised here and had
+    no way to be answered, and re-running any of the three model notebooks was impossible.
+    """
+    return plan_official_models(study).create_population(
+        name=OFFICIAL_POPULATION, supersedes=supersedes
+    )
 
 
 def run_model_plan(plan: ModelPlan, *, population_name: str | None = None) -> ModelExecution:
