@@ -333,28 +333,40 @@ class BacktestExplorer:
         Parameters
         ----------
         exclude_insolvent : bool, default False
-            Drop runs whose equity went negative - ``max_drawdown`` below
-            -100%, meaning the trough is past zero and every later period is
-            arithmetic on a negative balance. Their Sharpe is a number without
-            a meaning, so it distorts a median and can top a maximum. Off by
-            default, so a caller that has already reported on the full
-            population keeps reporting on it. A notebook that plots the solvent
-            subset should turn this on, so its table and its figure describe
-            one set rather than two. Runs with no recorded drawdown are dropped
-            with them, matching ``max_drawdown >= -1.0`` in Polars.
+            Compute the Sharpe statistics over the runs that stayed solvent,
+            and report how many did not in an added ``insolvent`` column. A run
+            whose ``max_drawdown`` reached -100% took its equity to zero or
+            past it; there is no capital left to earn a later return, so every
+            subsequent period is arithmetic on zero or a negative balance and
+            the Sharpe is a number without a meaning. Leaving those in distorts
+            a median and can top a maximum.
+
+            The count is reported rather than the runs silently dropped,
+            because dropping them alone would rank a family by its survivors: a
+            family that went to zero in nine runs out of ten would show the
+            Sharpe of the tenth and nothing to say so. ``n`` counts the solvent
+            runs the statistics are computed over and ``insolvent`` the rest,
+            so a reader can see what the median is conditional on. A family
+            with no solvent run has null statistics and sorts last.
+
+            Off by default, so a caller that has already reported on the full
+            population keeps reporting on it, with the same columns as before.
+            A run with no recorded drawdown counts as ``insolvent``: it cannot
+            be shown to have stayed solvent, and in Polars ``max_drawdown >
+            -1.0`` is null rather than true for it.
 
         Returns
         -------
         pl.DataFrame
             Columns: family, n, sharpe_median, sharpe_max, sharpe_q75,
-            pct_positive
+            pct_positive - and ``insolvent`` when ``exclude_insolvent``.
         """
-        solvency_sql = "AND bm.max_drawdown >= -1.0" if exclude_insolvent else ""
         df = self._query(
             f"""
             SELECT
                 t.family,
-                bm.sharpe
+                bm.sharpe,
+                bm.max_drawdown
             FROM backtest_metrics bm
             JOIN backtest_runs b ON bm.backtest_hash = b.backtest_hash
             JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
@@ -366,7 +378,6 @@ class BacktestExplorer:
               {full_coverage_prediction_sql("p", "t", "pm")}
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
-              {solvency_sql}
             """,
             (stage, *excluded_family_sql(self.case_study, "t.family")[1]),
         )
@@ -376,16 +387,37 @@ class BacktestExplorer:
         if df.is_empty():
             return df
 
+        if not exclude_insolvent:
+            return (
+                df.group_by("family")
+                .agg(
+                    n=pl.len(),
+                    sharpe_median=pl.col("sharpe").median(),
+                    sharpe_max=pl.col("sharpe").max(),
+                    sharpe_q75=pl.col("sharpe").quantile(0.75),
+                    pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+                )
+                .sort("sharpe_median", descending=True)
+            )
+
+        # `fill_null(False)` so a run with no recorded drawdown lands in `insolvent`
+        # rather than in neither count: the comparison is null for it, and a null
+        # would be skipped by both sums and lose the run from the table's arithmetic.
+        solvent = (pl.col("max_drawdown") > -1.0).fill_null(False)
         return (
             df.group_by("family")
             .agg(
-                n=pl.len(),
-                sharpe_median=pl.col("sharpe").median(),
-                sharpe_max=pl.col("sharpe").max(),
-                sharpe_q75=pl.col("sharpe").quantile(0.75),
-                pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+                n=solvent.sum(),
+                insolvent=(~solvent).sum(),
+                sharpe_median=pl.col("sharpe").filter(solvent).median(),
+                sharpe_max=pl.col("sharpe").filter(solvent).max(),
+                sharpe_q75=pl.col("sharpe").filter(solvent).quantile(0.75),
+                # `mean` rather than `sum() / len()`: a family whose runs all went
+                # insolvent divides by zero, and mean over an empty selection is null,
+                # which is what "no solvent run to report a rate over" means.
+                pct_positive=(pl.col("sharpe").filter(solvent) > 0).mean() * 100,
             )
-            .sort("sharpe_median", descending=True)
+            .sort("sharpe_median", descending=True, nulls_last=True)
         )
 
     # -----------------------------------------------------------------

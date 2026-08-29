@@ -13,12 +13,19 @@ import sqlite3
 
 from case_studies.utils.backtest_explorer import BacktestExplorer
 
-# (prediction_hash, sharpe, max_drawdown)
+# (prediction_hash, family, sharpe, max_drawdown)
 ROWS = [
-    ("solvent_a", 1.0, -0.2),
-    ("solvent_b", 0.5, -0.3),
-    ("ruined", 9.0, -3.0),
-    ("no_drawdown", 8.0, None),
+    ("solvent_a", "gbm", 1.0, -0.2),
+    ("solvent_b", "gbm", 0.5, -0.3),
+    ("ruined", "gbm", 9.0, -3.0),
+    # Equity exactly at zero. It cannot earn a later return, so it is ruin and not the
+    # edge of solvency - the boundary notebook 12 already applies at the allocation stage.
+    ("exactly_zero", "gbm", 7.0, -1.0),
+    # No recorded drawdown: cannot be shown to have stayed solvent, so it is counted
+    # with the insolvent rather than silently lost from both counts.
+    ("no_drawdown", "gbm", 8.0, None),
+    # A family with nothing left. It has no Sharpe to report, and must not vanish.
+    ("wiped", "tabular_dl", 5.0, -2.0),
 ]
 
 
@@ -71,11 +78,11 @@ def _build_registry(case_dir) -> None:
             );
             """
         )
-        for prediction_hash, sharpe, max_drawdown in ROWS:
+        for prediction_hash, family, sharpe, max_drawdown in ROWS:
             training_hash = f"train_{prediction_hash}"
             db.execute(
-                "INSERT INTO training_runs VALUES (?, 'gbm', ?, 'fwd_ret_5d')",
-                (training_hash, prediction_hash),
+                "INSERT INTO training_runs VALUES (?, ?, ?, 'fwd_ret_5d')",
+                (training_hash, family, prediction_hash),
             )
             db.execute(
                 "INSERT INTO prediction_sets VALUES (?, ?, 'validation', 0)",
@@ -101,29 +108,70 @@ def _build_registry(case_dir) -> None:
             )
 
 
-def test_default_keeps_every_run(tmp_path) -> None:
-    """Off by default, so callers that reported on the full population still do."""
+def test_default_keeps_every_run_and_its_columns(tmp_path) -> None:
+    """Off by default, so callers that reported on the full population still do.
+
+    The column set is part of that: the five other case studies that call this print
+    the frame, and an added column would change what their notebooks render.
+    """
     case_dir = tmp_path / "case"
     _build_registry(case_dir)
     families = BacktestExplorer("test", case_dir=case_dir).compare_families()
 
-    row = families.filter(family="gbm")
-    assert row["n"].item() == 4
-    assert row["sharpe_max"].item() == 9.0
+    assert families.columns == [
+        "family",
+        "n",
+        "sharpe_median",
+        "sharpe_max",
+        "sharpe_q75",
+        "pct_positive",
+    ]
+    gbm = families.filter(family="gbm")
+    assert gbm["n"].item() == 5
+    assert gbm["sharpe_max"].item() == 9.0
 
 
-def test_exclude_insolvent_drops_negative_equity_and_unrecorded_drawdown(tmp_path) -> None:
-    """The insolvent run holds the family maximum until it is excluded.
+def test_exclude_insolvent_reports_the_ruined_rather_than_dropping_them(tmp_path) -> None:
+    """The statistics come from the solvent runs; the count of the rest sits beside them.
 
-    ``no_drawdown`` goes with it: a run with no recorded drawdown cannot be shown to
-    have stayed solvent, and dropping it matches ``max_drawdown >= -1.0`` in Polars,
-    which the notebooks apply to their figures.
+    Dropping the ruined runs and saying nothing would rank a family by its survivors.
+    ``tabular_dl`` is the case that shows it: every run went to zero, so it has no
+    Sharpe at all, and it has to remain visible as a family that was wiped out rather
+    than disappear from the comparison.
     """
     case_dir = tmp_path / "case"
     _build_registry(case_dir)
     families = BacktestExplorer("test", case_dir=case_dir).compare_families(exclude_insolvent=True)
 
-    row = families.filter(family="gbm")
-    assert row["n"].item() == 2
-    assert row["sharpe_max"].item() == 1.0
-    assert row["sharpe_median"].item() == 0.75
+    gbm = families.filter(family="gbm")
+    # solvent_a and solvent_b; ruined, exactly_zero and no_drawdown are counted, not lost.
+    assert gbm["n"].item() == 2
+    assert gbm["insolvent"].item() == 3
+    assert gbm["sharpe_max"].item() == 1.0
+    assert gbm["sharpe_median"].item() == 0.75
+    assert gbm["pct_positive"].item() == 100.0
+
+    wiped = families.filter(family="tabular_dl")
+    assert wiped.height == 1
+    assert wiped["n"].item() == 0
+    assert wiped["insolvent"].item() == 1
+    assert wiped["sharpe_median"].item() is None
+    assert wiped["pct_positive"].item() is None
+
+    # A family with no solvent run sorts last rather than heading the table on a null.
+    assert families["family"].to_list() == ["gbm", "tabular_dl"]
+
+
+def test_equity_at_exactly_zero_is_ruin(tmp_path) -> None:
+    """``max_drawdown`` of exactly -1.0 is the boundary, and it is on the ruined side.
+
+    A drawdown of -100% means the trough reached zero. Nothing is left to earn a return,
+    so its Sharpe is no more meaningful than that of a run that went further negative.
+    """
+    case_dir = tmp_path / "case"
+    _build_registry(case_dir)
+    families = BacktestExplorer("test", case_dir=case_dir).compare_families(exclude_insolvent=True)
+
+    # `exactly_zero` carries Sharpe 7.0, so it would top the family maximum if the
+    # boundary were treated as solvent.
+    assert families.filter(family="gbm")["sharpe_max"].item() == 1.0

@@ -410,10 +410,12 @@ print(repr(explorer))
 # concentrated short costs more than the account holds. The engine has no margin call,
 # so equity compounds straight through zero and every later period is arithmetic on a
 # negative balance - which inverts the sign of gains and losses and makes the reported
-# Sharpe meaningless rather than merely bad. `max_drawdown` below -100% is exactly that
-# condition: the trough is negative, so the ratio to the peak falls past -1.
+# Sharpe meaningless rather than merely bad. `max_drawdown` reaching -100% is exactly
+# that condition: the trough is at or past zero, so the ratio to the peak reaches -1.
+# The boundary counts as ruin - equity of exactly zero earns nothing afterwards - which
+# is the convention notebook 12 applies to the allocation stage.
 all_runs = explorer.best(stage="signal", top_n=9999)
-ruined = all_runs.filter(pl.col("max_drawdown") < -1.0)
+ruined = all_runs.filter(pl.col("max_drawdown") <= -1.0)
 print(f"runs whose equity went negative: {ruined.height} of {all_runs.height}")
 if ruined.height:
     print(
@@ -427,7 +429,7 @@ if ruined.height:
 # ranking the full set would let the table name one of them best. `all_runs` is
 # already ordered by Sharpe descending, so the head of the filtered frame is the
 # solvent top ten. The figures below filter identically.
-top = all_runs.filter(pl.col("max_drawdown") >= -1.0).head(10)
+top = all_runs.filter(pl.col("max_drawdown") > -1.0).head(10)
 
 # `best` reports `signal.method`, which is the same string for every entry scheme in
 # this sweep, so on its own the table cannot tell a five-name portfolio from a fifty-
@@ -465,13 +467,21 @@ print(top.select("source", "names_per_side", "sharpe", "cagr", "max_drawdown"))
 #
 # The label is held fixed across every row, so what separates the families here
 # is the model and its checkpoint, not the target they were fitted to.
+#
+# The Sharpe columns are computed over the runs that stayed solvent, and `insolvent`
+# counts the runs of that family that did not. Both are needed to read the table: the
+# statistics would be meaningless with the ruined runs in them, and dropping those runs
+# without counting them would rank a family by its survivors, so a family that went to
+# zero in most of its runs would show the Sharpe of the few that did not. Read a median
+# as conditional on the count beside it.
 
 # %% tags=["results"]
 families = explorer.compare_families(stage="signal", exclude_insolvent=True)
 print(families)
 print(
-    f"Insolvent runs are excluded from these aggregates; {ruined.height:,} of the "
-    f"{all_runs.height:,} registered signal-stage runs went negative."
+    f"Sharpe statistics are computed over solvent runs only; the `insolvent` column "
+    f"counts the rest. Across all families, {ruined.height:,} of {all_runs.height:,} "
+    f"registered signal-stage runs went to zero or past it."
 )
 
 # %%
@@ -482,7 +492,7 @@ fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 # Solvent runs only. A path that went bankrupt still has a Sharpe and an IC, and
 # plotting them puts a number with no meaning into the distribution the reader is
 # asked to read a conclusion off.
-all_signal = explorer.best(stage="signal", top_n=9999).filter(pl.col("max_drawdown") >= -1.0)
+all_signal = explorer.best(stage="signal", top_n=9999).filter(pl.col("max_drawdown") > -1.0)
 if not all_signal.is_empty():
     axes[0].hist(all_signal["sharpe"].to_numpy(), bins=30, color=COLORS["blue"], edgecolor="white")
     axes[0].axvline(0, color=COLORS["amber"], linestyle="--", linewidth=1)
