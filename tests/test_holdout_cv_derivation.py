@@ -13,6 +13,7 @@ a derivation that read the fixture, which is the shape of test that passes on wr
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -513,3 +514,142 @@ def test_a_date_only_val_end_covers_the_whole_final_session_on_an_intraday_panel
     assert val_end > pd.Timestamp("2025-12-31 23:00", tz=tz), (
         f"val_end={val_end} excludes the final session's own bars"
     )
+
+
+# --- Coverage, the check a derived holdout fold can actually meet -------------------------
+#
+# The two refusals above are the right answer for a validation fold, whose geometry the stage-04
+# artifact recorded. They are unanswerable for a holdout fold: it is derived when the lock is
+# taken, so the artifact never declares it, and regenerating the artifact to declare it changes
+# the sha256 the lock pins - the digest the selection was made under. Every latent-factor and
+# every fold-scoped-feature holdout is refused on that circularity.
+#
+# `require_fold_scoped_temporal_holdout_coverage` asks the question the data can answer: does the
+# artifact hold rows spanning the dates this fold will train and evaluate on? These tests pin
+# both that it accepts a covered fold and that it is no weaker than the id check it replaces.
+
+
+def _coverage_split(**overrides: Any) -> dict[str, Any]:
+    return {
+        "fold": 2,
+        "train_start": "2017-01-05T00:00:00",
+        "train_end": "2020-12-16T00:00:00",
+        "val_start": "2021-01-01T00:00:00",
+        "val_end": "2021-12-31T00:00:00",
+        **overrides,
+    }
+
+
+def test_a_covered_holdout_fold_is_accepted_and_a_gap_in_it_is_not() -> None:
+    """The accept case and the four ways coverage fails, on one artifact."""
+    import polars as pl
+
+    from case_studies.research.cv import require_fold_scoped_temporal_holdout_coverage
+
+    split = _coverage_split()
+    dates = [date(2019, 1, 2), date(2021, 1, 4), date(2021, 12, 30)]
+    artifact = pl.DataFrame({"fold": [2, 2, 2], "timestamp": dates})
+    source = pl.Series("timestamp", dates)
+
+    require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+
+    # A val_end past the last session is the calendar's doing, not a gap: the endpoint required
+    # is the last SOURCE observation inside the window, not the boundary itself.
+    require_fold_scoped_temporal_holdout_coverage(
+        _coverage_split(val_end="2022-01-01T00:00:00"), artifact, source_timeline=source
+    )
+
+    with pytest.raises(ValueError, match="temporal date coverage"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact.head(2), source_timeline=source
+        )
+    with pytest.raises(ValueError, match="no holdout fold"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact.with_columns(pl.lit(1).alias("fold")), source_timeline=source
+        )
+    with pytest.raises(ValueError, match="no requested training rows"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact.tail(2), source_timeline=source
+        )
+    with pytest.raises(ValueError, match="no observations in the holdout evaluation window"):
+        require_fold_scoped_temporal_holdout_coverage(
+            split, artifact, source_timeline=source.head(1)
+        )
+
+
+def test_a_hole_in_the_middle_of_a_covered_range_is_still_a_gap() -> None:
+    """Endpoints alone are not coverage: the join is per date, so an interior hole nulls rows."""
+    import polars as pl
+
+    from case_studies.research.cv import require_fold_scoped_temporal_holdout_coverage
+
+    source = pl.Series("timestamp", pl.date_range(date(2021, 1, 1), date(2021, 1, 20), eager=True))
+    split = _coverage_split(
+        train_start="2021-01-01T00:00:00",
+        train_end="2021-01-10T00:00:00",
+        val_start="2021-01-11T00:00:00",
+        val_end="2021-01-20T00:00:00",
+    )
+    missing = source.filter(~source.is_in([date(2021, 1, 5), date(2021, 1, 15)]))
+    artifact = pl.DataFrame({"fold": [2] * missing.len(), "timestamp": missing})
+
+    with pytest.raises(ValueError, match="temporal date coverage"):
+        require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+
+
+def test_an_artifact_one_session_short_of_the_window_end_is_refused() -> None:
+    """The quiet one: everything else passes and the holdout evaluates a shorter period."""
+    import polars as pl
+
+    from case_studies.research.cv import require_fold_scoped_temporal_holdout_coverage
+
+    source = pl.Series("timestamp", pl.date_range(date(2021, 1, 1), date(2021, 1, 21), eager=True))
+    split = _coverage_split(
+        train_start="2021-01-01T00:00:00",
+        train_end="2021-01-01T00:00:00",
+        val_start="2021-01-02T00:00:00",
+        val_end="2021-01-21T00:00:00",
+    )
+    short = source.filter(source != date(2021, 1, 21))
+    artifact = pl.DataFrame({"fold": [2] * short.len(), "timestamp": short})
+
+    with pytest.raises(ValueError, match="evaluation endpoint"):
+        require_fold_scoped_temporal_holdout_coverage(split, artifact, source_timeline=source)
+
+
+def test_coverage_refuses_both_cases_the_fold_id_check_refuses() -> None:
+    """Coverage replaces the id check on the holdout path, so it must not be weaker than it.
+
+    The two cases are `_VALIDATION_FOLD_0`'s: a holdout fold that reuses a validation fold's id
+    (which joins features fitted years before the holdout window), and one with a fresh id the
+    artifact never recorded (which joins nothing). Both are refused here on the data rather than
+    on the label, which is why the same check can also pass a fold the artifact does cover.
+    """
+    import polars as pl
+
+    from case_studies.research.cv import require_fold_scoped_temporal_holdout_coverage
+
+    fold_0_dates = pl.date_range(date(2010, 1, 31), date(2015, 12, 31), "1mo", eager=True)
+    artifact = pl.DataFrame({"fold": [0] * fold_0_dates.len(), "timestamp": fold_0_dates})
+    source = pl.Series(
+        "timestamp", pl.date_range(date(2010, 1, 31), date(2021, 12, 31), "1mo", eager=True)
+    )
+    holdout = {
+        "train_start": "2010-01-31T00:00:00",
+        "train_end": "2019-12-31T00:00:00",
+        "val_start": "2020-01-31T00:00:00",
+        "val_end": "2021-12-31T00:00:00",
+    }
+
+    # Reused id: the rows exist, but stop in 2015 and cover neither the training tail nor the
+    # evaluation window.
+    with pytest.raises(ValueError, match=r"fold 0 train: temporal date coverage 72/120"):
+        require_fold_scoped_temporal_holdout_coverage(
+            {**holdout, "fold": 0}, artifact, source_timeline=source
+        )
+
+    # Fresh id: nothing to join at all.
+    with pytest.raises(ValueError, match="no holdout fold 8"):
+        require_fold_scoped_temporal_holdout_coverage(
+            {**holdout, "fold": 8}, artifact, source_timeline=source
+        )
