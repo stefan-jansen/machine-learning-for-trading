@@ -477,6 +477,7 @@ with sqlite3.connect(str(_db)) as _con:
             SELECT
                 t.family,
                 bm.sharpe,
+                bm.max_drawdown,
                 bm.sharpe_ci95_lo,
                 bm.sharpe_ci95_hi
             FROM backtest_metrics bm
@@ -485,28 +486,43 @@ with sqlite3.connect(str(_db)) as _con:
             JOIN training_runs t  ON p.training_hash = t.training_hash
             WHERE b.stage = 'signal'
               AND p.split = 'validation'
-              AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
             """
         ).fetchall(),
-        schema=["family", "sharpe", "sharpe_ci95_lo", "sharpe_ci95_hi"],
+        schema=["family", "sharpe", "max_drawdown", "sharpe_ci95_lo", "sharpe_ci95_hi"],
         orient="row",
     )
 
+# The statistics are taken over the runs that stayed solvent, and the rest are counted
+# beside them - the same treatment `11_backtest` gives its family table, so the two agree
+# rather than reporting different medians for the same family. A run whose equity reached
+# zero has no capital left to earn a return, so its Sharpe is arithmetic on nothing and
+# would move a median it has no claim on; dropping those runs without counting them would
+# instead rank a family by its survivors. Runs with no recorded drawdown are counted apart,
+# because a failure that was never measured is not a bankruptcy. The rows are not filtered
+# on Sharpe: a bankrupt run can carry a null one, and dropping it in SQL would remove it
+# before `insolvent` counts it.
+_solvent = pl.col("max_drawdown") > -1.0
+_solvent_mask = _solvent.fill_null(False)
 family_summary = (
     _famdf.group_by("family")
     .agg(
-        n=pl.len(),
-        sharpe_median=pl.col("sharpe").median(),
-        sharpe_q25=pl.col("sharpe").quantile(0.25),
-        sharpe_q75=pl.col("sharpe").quantile(0.75),
-        sharpe_max=pl.col("sharpe").max(),
-        pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+        n=_solvent.sum(),
+        insolvent=(pl.col("max_drawdown") <= -1.0).sum(),
+        unknown=pl.col("max_drawdown").is_null().sum(),
+        sharpe_median=pl.col("sharpe").filter(_solvent_mask).median(),
+        sharpe_q25=pl.col("sharpe").filter(_solvent_mask).quantile(0.25),
+        sharpe_q75=pl.col("sharpe").filter(_solvent_mask).quantile(0.75),
+        sharpe_max=pl.col("sharpe").filter(_solvent_mask).max(),
+        pct_positive=(pl.col("sharpe").filter(_solvent_mask) > 0).mean() * 100,
     )
-    .sort("sharpe_median", descending=True)
+    .sort("sharpe_median", descending=True, nulls_last=True)
 )
-print("Family-level equal-weight baseline Sharpe summary:")
-print(family_summary)
+print("Family-level equal-weight baseline Sharpe summary, over the solvent runs:")
+# Nine columns is past the default width, and the column polars elides first is the median -
+# the one the text above asks the reader to compare against the maximum.
+with pl.Config(tbl_cols=-1, tbl_width_chars=160):
+    print(family_summary)
 
 # %%
 fig, ax = plt.subplots(figsize=(9, 4))
