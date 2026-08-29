@@ -21,7 +21,10 @@ from case_studies.utils.latent_factors.adapter import (
 )
 from case_studies.utils.latent_factors.cae import run_cae_fold
 from case_studies.utils.latent_factors.cv import load_fold_extras, run_latent_factor_cv
-from case_studies.utils.latent_factors.holdout import rekey_holdout_spec
+from case_studies.utils.latent_factors.holdout import (
+    holdout_training_floor,
+    rekey_holdout_spec,
+)
 from case_studies.utils.latent_factors.ipca import run_ipca_fold
 from case_studies.utils.latent_factors.panel import (
     compute_managed_portfolios,
@@ -44,6 +47,7 @@ __all__ = [
     "prepare_ragged_panel_data",
     "rank_normalize_cross_section",
     "reconstruct_locked_request",
+    "holdout_training_floor",
     "rekey_holdout_spec",
     "run_cae_fold",
     "run_ipca_fold",

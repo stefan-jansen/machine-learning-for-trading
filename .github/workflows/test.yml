@@ -921,7 +921,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
-    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 30.
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 33.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
@@ -963,6 +963,7 @@ jobs:
             tests/test_insight_chapter.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_family_hook_dispatch.py \
             tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
