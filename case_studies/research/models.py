@@ -112,6 +112,53 @@ def validate_locked_model_run(
     return digest
 
 
+def _boundary_in(value: Any, dtype: Any, date_col: str, name: str) -> Any:
+    """Read one locked-holdout boundary into the dataset's own date dtype.
+
+    Parse, do not cast. Polars will not read a full ISO datetime string into `Date` - it
+    returns null rather than truncating - and a `strict=False` cast turns that parse failure
+    into a null indistinguishable from a boundary that was never recorded. The refusal then
+    named the symptom, "locked holdout CV contains an invalid boundary", for what was a
+    disagreement about rendering: `build_holdout_cv` wrote `2023-11-29T00:00:00` and every
+    case study with a `Date` column - which is every daily panel - could not read it back.
+    A comment here used to say the preset path was safe because it passes ISO strings; both
+    renderings are ISO strings, which is why that read as covering a case it did not.
+    """
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError(
+                f"locked holdout boundary {name}={value!r} is not an ISO date or datetime"
+            ) from error
+        if name == "val_end":
+            # A configured end DATE means the whole of that date, and every fold filter
+            # here is `timestamp <= val_end`. On a daily panel the bar already sits at
+            # midnight and the two agree; on an intraday panel every bar of the final
+            # session sorts after midnight, so reading it as an instant drops the whole
+            # session - 38,610 rows on nasdaq100_microstructure the last time this was
+            # got wrong. `_inclusive_end_of` is that rule and reads the configured
+            # string, because "2021-12-31" and "2021-12-31 00:00:00" parse to the same
+            # instant and only the first one means the day. Do not restate it here.
+            from utils.modeling import _inclusive_end_of
+
+            parsed = _inclusive_end_of(value)
+            if dtype == pl.Date:
+                parsed = parsed.date()
+    if dtype == pl.Date and isinstance(parsed, datetime):
+        if parsed.time() != time(0, 0):
+            raise ValueError(
+                f"locked holdout boundary {name}={value!r} carries a time of day, "
+                f"which {date_col} cannot represent"
+            )
+        parsed = parsed.date()
+    read = pl.DataFrame({date_col: [parsed]}).with_columns(pl.col(date_col).cast(dtype)).item()
+    if read is None:
+        raise ValueError(f"locked holdout boundary {name}={value!r} does not read as {dtype}")
+    return read
+
+
 def locked_holdout_split(
     spec: dict[str, Any], dataset: pl.DataFrame, date_col: str, case_study: str
 ) -> dict[str, Any]:
@@ -149,13 +196,9 @@ def locked_holdout_split(
     fold["fold"] = int(fold["fold"])
     dtype = dataset.schema[date_col]
     boundaries = {
-        name: pl.DataFrame({date_col: [fold[name]]})
-        .with_columns(pl.col(date_col).cast(dtype, strict=False))
-        .item()
+        name: _boundary_in(fold[name], dtype, date_col, name)
         for name in ("train_start", "train_end", "val_start", "val_end")
     }
-    if any(value is None for value in boundaries.values()):
-        raise ValueError("locked holdout CV contains an invalid boundary")
     if boundaries["train_start"] > boundaries["train_end"]:
         raise ValueError("locked holdout training interval is empty")
     if boundaries["train_end"] >= boundaries["val_start"]:

@@ -251,6 +251,7 @@ def selection_adjusted_leader_table(
     *,
     stage: str = "signal",
     label: str | None = None,
+    prediction_hashes: set[str] | None = None,
 ) -> pl.DataFrame:
     """Per-family rank-1 backtest with selection-adjusted statistics.
 
@@ -260,7 +261,8 @@ def selection_adjusted_leader_table(
     ``expected_max_sharpe``) carry the **effective-rank (ER) DSR** — the
     library maintainer's recommended default. ``dsr_mp`` and ``dsr_raw``
     are surfaced alongside for sensitivity. Non-leader family rows have
-    NULL selection-bias columns.
+    NULL selection-bias columns. When ``prediction_hashes`` is supplied,
+    leaders are selected only from that population.
 
     Returns columns:
         family, config_name, label,
@@ -283,6 +285,7 @@ def selection_adjusted_leader_table(
 
     sql = f"""
         SELECT
+            b.prediction_hash,
             t.family,
             t.config_name,
             t.label,
@@ -324,6 +327,10 @@ def selection_adjusted_leader_table(
     rows = _query(db, sql, tuple(params))
     if rows.is_empty():
         return _empty_frame(_SELECTION_ADJUSTED_SCHEMA)
+    if prediction_hashes is not None:
+        rows = rows.filter(pl.col("prediction_hash").is_in(prediction_hashes))
+        if rows.is_empty():
+            return _empty_frame(_SELECTION_ADJUSTED_SCHEMA)
 
     # Force Float64 dtype on numeric columns that can come back as all-NULL
     # under the LEFT JOIN (polars infers Null dtype otherwise, which breaks
@@ -348,7 +355,7 @@ def selection_adjusted_leader_table(
         rows = rows.with_columns(casts)
 
     leaders = rows.sort("sharpe", descending=True, nulls_last=True).group_by("family").first()
-    return leaders.sort("sharpe", descending=True, nulls_last=True)
+    return leaders.drop("prediction_hash").sort("sharpe", descending=True, nulls_last=True)
 
 
 # ---------------------------------------------------------------------------

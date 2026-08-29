@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import warnings
@@ -55,6 +56,109 @@ MIN_TEMPORAL_DATE_COVERAGE = 0.95  # Allow short calendar-edge gaps, not missing
 # (6.1%) for fold 1. A stale artifact whose fold IDs have shifted presents as a
 # leading gap of roughly half the window, so this bound still rejects it.
 MAX_TEMPORAL_WARMUP_FRACTION = 0.10
+
+
+def file_sha256(path: Path) -> str:
+    """The SHA-256 digest of an input artifact, for a cache key that names its inputs."""
+    with Path(path).open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def array_sha256(array: np.ndarray) -> str:
+    """Hash an array's shape, dtype and contiguous values.
+
+    Covers what a file digest cannot: filtering, symbol limits, row order, feature
+    order and cleaning semantics, all applied after the source files were read.
+    """
+    contiguous = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode())
+    digest.update(repr(contiguous.shape).encode())
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+def canonical_sha256(payload: Mapping) -> str:
+    """Hash a nested contract with stable key ordering and date serialization."""
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def notebook_cache_signature(
+    notebook_py: Path,
+    *,
+    inputs: Mapping[str, str],
+    settings: Mapping[str, object],
+) -> dict:
+    """The signature a notebook stores beside cached fit results, so a stale one is caught.
+
+    A cache keyed on nothing but the file's existence is a correctness hazard, not a
+    convenience: change the code that produced it and the notebook silently republishes
+    the previous run's numbers under the new source. The published page then claims
+    results its own code did not compute, and nothing in the provenance stamp catches
+    it - that stamp binds the .py to the .ipynb, and both are the new ones.
+
+    So the signature carries the notebook's own source digest alongside the input
+    digests and the settings that change a fit. Any edit to the notebook invalidates
+    it, which is deliberately coarser than tracking the functions that matter: a
+    needless re-run costs time, and a missed one costs a wrong number in the book.
+    """
+    return {
+        "notebook_source_sha256": file_sha256(notebook_py),
+        "inputs": dict(inputs),
+        "settings": dict(settings),
+    }
+
+
+def conformal_quantile(scores: np.ndarray, coverage: float) -> float:
+    """The split-conformal interval half-width for ``coverage``, from calibration scores.
+
+    Split conformal prediction earns its finite-sample coverage guarantee by taking
+    the ``ceil((n + 1) * coverage)``-th smallest calibration score, and the ceiling
+    has to be taken literally. The value must be a score that is actually in the
+    calibration set, at that rank.
+
+    ``np.quantile`` cannot express this, at either of its two obvious spellings.
+    Its default interpolates between the two neighbouring scores, returning
+    something narrower than the rank by exactly the finite-sample margin the
+    ceiling exists to supply. ``method="higher"`` rounds up to a real score but
+    still maps the level onto ``n - 1`` intervals rather than ``n`` ranks, so
+    passing ``k / n`` selects rank ``k + 1`` for every ``k < n`` - measured on
+    n=100 (rank 92 for k=91) and n=1000 (rank 902 for k=901). That errs wide
+    rather than narrow, so it does not break the guarantee, but it is not the
+    interval the method defines and it is not what the surrounding prose claims.
+
+    When ``k > n`` no calibration score attains the requested coverage - a
+    calibration set of 5 cannot certify 90% - and the interval is unbounded.
+    ``method="higher"`` silently returns the largest score there, which asserts a
+    guarantee the data cannot support.
+
+    Returns ``inf`` in that case, so the interval it produces is unbounded and
+    obviously so.
+
+    An infinite score is kept and ranked, not filtered: it is a real
+    nonconformity score, it orders above every finite one, and dropping it would
+    shrink ``n`` and hand back a *narrower* interval than the calibration set
+    supports. A NaN score has no rank at all, so it is refused rather than
+    dropped, for the same reason: silently removing it changes the denominator
+    the guarantee is computed from.
+    """
+    if not 0 < coverage < 1:
+        raise ValueError(f"coverage must lie strictly between 0 and 1, got {coverage}")
+    ranked = np.asarray(scores, dtype=float)
+    n_nan = int(np.isnan(ranked).sum())
+    if n_nan:
+        raise ValueError(
+            f"{n_nan} of {ranked.size} calibration scores are NaN and cannot be ranked. "
+            "A conformal quantile is a rank in the calibration set, so dropping them would "
+            "change the sample size the coverage guarantee is computed from."
+        )
+    n = ranked.size
+    if n == 0:
+        return float("inf")
+    rank = math.ceil((n + 1) * coverage)
+    if rank > n:
+        return float("inf")
+    return float(np.partition(ranked, rank - 1)[rank - 1])
 
 
 def seed_everything(seed: int = RANDOM_SEED) -> None:

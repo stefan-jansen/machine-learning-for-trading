@@ -658,3 +658,36 @@ def test_holdout_stages_then_transitions_in_one_atomic_transaction(
     assert evaluated.state == "HOLDOUT_EVALUATED"
     with sqlite3.connect(study.root / "run_log" / "registry.db") as db:
         assert db.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone() == (1,)
+
+
+def test_a_strategy_whose_only_declared_inputs_are_runtime_resolved_matches_one_with_none() -> None:
+    """The projection has to erase runtime-resolved inputs, not leave the shape they were in.
+
+    `_locked_strategy_projection` compares a strategy being executed against the one the lock
+    recorded, and it removes `prices` and `funding_rates` first because both are resolved at run
+    time and would otherwise differ on every replay. A strategy that declared nothing else is
+    then left with `input_identity: {}`, while one that declared no input identity at all is
+    left with the key absent. The two describe the same strategy, so the comparison must not
+    separate them - and it did, which made a crypto holdout replay refuse against its own lock.
+    """
+    from case_studies.research.lifecycle import _locked_strategy_projection
+
+    runtime_only = {
+        "chapter": "ch19",
+        "input_identity": {"prices": "sha256:abc", "funding_rates": "sha256:def"},
+    }
+    nothing_declared = {"chapter": "ch19"}
+
+    assert _locked_strategy_projection(runtime_only) == _locked_strategy_projection(
+        nothing_declared
+    )
+
+    # A declared input that is NOT runtime-resolved still separates them, or the projection
+    # would erase a real difference along with the noise.
+    with_real_input = {
+        "chapter": "ch19",
+        "input_identity": {"prices": "sha256:abc", "decision_grid": "sha256:123"},
+    }
+    assert _locked_strategy_projection(with_real_input) != _locked_strategy_projection(
+        nothing_declared
+    )

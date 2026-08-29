@@ -185,6 +185,78 @@ class BacktestExplorer:
     # best: top backtests at a stage
     # -----------------------------------------------------------------
 
+    def _refuse_if_the_coverage_bar_emptied_it(
+        self,
+        stage: str,
+        label: str | None,
+        prediction_hashes: tuple[str, ...] | list[str] | None,
+    ) -> None:
+        """Raise when backtests exist at this stage but none of them is a complete run.
+
+        `full_coverage_prediction_sql` keeps only rows whose `ic_n_days` equals the maximum
+        for their `(split, family, label)`, and that maximum is the population's, not the
+        backtested subset's. That is deliberate: the bar is how a *complete* run is
+        identified - `reference/CASE_STUDY_PIPELINE.md` section 10, "a result counts only
+        when `n_null == 0` and `ic_n_days == max`" - and it exists because an incomplete run
+        manufactures a false leader. Computing the maximum over only the rows that happen to
+        have backtests would let an incomplete run set its own bar and win whenever no
+        complete run was backtested, which is the exact failure the clause was written for.
+
+        So an empty result here is a true statement: no complete run in this population has
+        a backtest at this stage. It is not, however, the same statement as "there are no
+        backtests", and returning an empty frame says the second. Under a preview reduction
+        the two diverge - etfs measured a scoped population of 6 predictions and 1 backtest
+        whose maximum coverage belonged to a prediction nothing backtested - and a notebook
+        that reads the empty frame as "nothing ran" reports on a comparison that was never
+        possible. Refuse instead, and name the gap.
+        """
+        # Every filter the real query applies EXCEPT the coverage clause, so an empty
+        # result there and a non-empty result here isolates the coverage clause as the
+        # only thing that removed the rows. Dropping one - the family exclusions, or the
+        # zero-trade filter - would report a run excluded for another reason as a coverage
+        # failure and send the reader after the wrong thing. `_filter_active_models` runs
+        # after this point in `best` and cannot be the cause of an empty query result.
+        rows = self._query(
+            f"""
+            SELECT t.family, t.label, pm.ic_n_days, p.prediction_hash
+            FROM backtest_runs b
+            JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
+            JOIN training_runs t ON p.training_hash = t.training_hash
+            LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+            LEFT JOIN prediction_metrics pm ON p.prediction_hash = pm.prediction_hash
+            WHERE b.stage = ?
+              AND p.split != 'holdout'
+              {excluded_family_sql(self.case_study, "t.family")[0]}
+              AND bm.sharpe IS NOT NULL
+              AND (bm.num_trades IS NULL OR bm.num_trades > 0)
+              {" AND t.label = ?" if label else ""}
+              {
+                " AND p.prediction_hash IN (" + ", ".join("?" for _ in prediction_hashes) + ")"
+                if prediction_hashes
+                else ""
+            }
+            """,
+            (
+                stage,
+                *excluded_family_sql(self.case_study, "t.family")[1],
+                *([label] if label else []),
+                *(prediction_hashes or ()),
+            ),
+        )
+        if rows.is_empty():
+            return
+        detail = ", ".join(
+            f"{family}/{row_label} {hash_} covers {days if days is not None else 'no'} days"
+            for family, row_label, days, hash_ in rows.rows()
+        )
+        raise RuntimeError(
+            f"every backtest at stage {stage!r} sits below its family's coverage bar, so the "
+            f"complete-run filter admits none of them: {detail}. The bar is the population's "
+            f"maximum ic_n_days, which is what makes a run complete - an incomplete run "
+            f"compared as complete manufactures a false leader. Backtest a maximum-coverage "
+            f"prediction, or say in the notebook that this population supports no comparison."
+        )
+
     def best(
         self,
         stage: str = "signal",
@@ -266,6 +338,7 @@ class BacktestExplorer:
             ),
         )
         if df.is_empty():
+            self._refuse_if_the_coverage_bar_emptied_it(stage, label, prediction_hashes)
             return pl.DataFrame(schema=_BEST_SCHEMA)
         df = self._filter_active_models(df)
         if df.is_empty():
