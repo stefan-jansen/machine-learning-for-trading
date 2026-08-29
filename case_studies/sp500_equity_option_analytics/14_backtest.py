@@ -40,6 +40,7 @@
 # %%
 """Ch16 backtest and signal evaluation for S&P 500 equity and option features."""
 
+import sqlite3
 import time
 import warnings
 
@@ -48,6 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import Study
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, serializable_backtest_spec
@@ -56,6 +58,7 @@ from case_studies.utils.backtest_runner import (
     run_backtest,
     run_plumbing_test,
 )
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.notebook_render import selection_adjusted_leader_table
 from case_studies.utils.registry import (
     backtest_dir,
@@ -195,12 +198,51 @@ except ValueError as e:
 # weight. Weekly top-5, top-10, and top-20 portfolios reveal whether a ranking
 # signal holds as the selected tail broadens.
 
+# %% [markdown]
+# **A population is immutable and the registry keeps every generation, so a candidate set built
+# straight from it counts retired members beside current ones.** Refitting a configuration under a
+# corrected estimator publishes a new snapshot that supersedes the old one; both stay readable, and
+# nothing in the registry read path filters on that - `case_studies/utils/registry/queries.py`
+# contains no occurrence of `supersed`. Without the filter both generations of a refitted
+# configuration enter the ranking as separate candidates, with near-identical scores, and the
+# published leaders are then fewer distinct strategies than they appear to be.
+#
+# `prediction_members_in_force` is that filter, and it takes two steps because neither is enough
+# alone. It unions what each name publishes now - `OfficialPopulation.one` resolves the one
+# generation in a name's chain that nothing supersedes, refusing rather than guessing if the chain
+# has forked - and then subtracts the members those names have retired. The subtraction is needed
+# because a narrowed or preview run freezes its own snapshot of whatever the catalog held that day
+# and stays in force under its own name forever, so the union alone hands a retired generation back
+# through the frozen name that still lists it.
+#
+# A registry that publishes no population at all - a fixture, or a reader's clean clone - is not
+# the same as one whose populations are empty, and the filter is skipped rather than applied to
+# nothing. It says so where it does that; the sweep below then rests on catalog admissibility.
+
+# %%
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="14_backtest")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 pred_index = load_prediction_index(
     CASE_STUDY_ID,
     label=BACKTEST_LABEL,
     split=SPLIT,
 )
+if CURRENT_MEMBERS is not None:
+    pred_index = pred_index.filter(pl.col("prediction_hash").is_in(CURRENT_MEMBERS))
 
 if pred_index.is_empty():
     msg = f"No predictions found for {CASE_STUDY_ID}/{BACKTEST_LABEL}/{SPLIT}"
@@ -362,13 +404,22 @@ print(repr(explorer))
 # ### Eligible Leaders
 #
 # Requiring maximum decision-date coverage within each family and label removes
-# partial prediction histories before ranking. The output below reports the
-# cross-label PCA leader on `fwd_ret_10d`, while the default primary label
-# advances a different, label-specific set of model configurations.
+# partial prediction histories before ranking. Which configuration comes top is read from the
+# table below rather than named here: it is a property of the run and it moves whenever the
+# populations are refitted. What the section is for is the shape - whether the families separate
+# at all, and by how much - not the identity of the row at the top.
 
 # %%
-all_baselines = explorer.best(stage="signal", top_n=9999)
-search_context = explorer.search_context(stage="signal")
+all_baselines = explorer.best(
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=sorted(CURRENT_MEMBERS) if CURRENT_MEMBERS is not None else None,
+)
+search_context = {
+    "total": len(all_baselines),
+    "median_sharpe": all_baselines["sharpe"].median(),
+    "pct_positive": 100 * all_baselines.filter(pl.col("sharpe") > 0).height / len(all_baselines),
+}
 top = all_baselines.head(10)
 
 top_k = [
@@ -413,6 +464,7 @@ primary_advancing = resolve_best_predictions(
     split=SPLIT,
     top_n=10,
     stage="signal",
+    prediction_hashes=CURRENT_MEMBERS,
 )
 primary_advancing.select(
     "family",
@@ -424,14 +476,26 @@ primary_advancing.select(
 # %% [markdown]
 # ### Family Dispersion and IC Translation
 #
-# Family medians occupy a narrow Sharpe band, but PCA creates a much higher
-# latent-factor maximum. Across all eligible baselines, daily-pooled IC has only
-# a moderate rank association with portfolio Sharpe. Concentration, turnover,
-# and return-path differences therefore remain material after model ranking
-# quality is known. The figure reports the current coefficient from the registry.
+# Family medians occupy a narrow Sharpe band while the maxima spread much wider, so which family
+# holds the highest single configuration is a weaker statement than the bars make it look - and
+# a family publishing ten checkpoints has ten chances at that maximum where one publishing a
+# single checkpoint has one. Across all eligible baselines, daily-pooled IC has only a moderate
+# rank association with portfolio Sharpe. Concentration, turnover and return-path differences
+# therefore remain material after model ranking quality is known. The figure reports the current
+# coefficient from the registry.
 
 # %%
-families = explorer.compare_families(stage="signal")
+families = (
+    all_baselines.group_by("family")
+    .agg(
+        n=pl.len(),
+        sharpe_median=pl.col("sharpe").median(),
+        sharpe_max=pl.col("sharpe").max(),
+        sharpe_q75=pl.col("sharpe").quantile(0.75),
+        pct_positive=((pl.col("sharpe") > 0).sum() / pl.len() * 100),
+    )
+    .sort("sharpe_median", descending=True)
+)
 ic_sharpe_rho = all_baselines.select(
     pl.corr("ic_mean_daily", "sharpe", method="spearman").alias("rho")
 ).item()
@@ -459,7 +523,7 @@ zero_line(ax, axis="x")
 ax.legend(frameon=False, loc="lower right")
 add_message_title(
     ax,
-    "PCA lifts the latent-factor maximum",
+    "Family medians sit close together; the maxima do not",
     "Median bars and maximum diamonds; eligible equal-weight baselines",
 )
 fig.show()
@@ -485,7 +549,7 @@ ax.scatter(
     edgecolor=COLORS["blue"],
     s=45,
     zorder=3,
-    label="PCA leader",
+    label=f"leader: {top['family'][0]}/{top['config_name'][0]}",
 )
 zero_line(ax, axis="x")
 zero_line(ax, axis="y")
@@ -513,11 +577,29 @@ fig.show()
 # DSR** asks whether it still clears once the correlated variants tried within its own family
 # and label are counted, which is the number that accounts for the search. **PBO** asks how often
 # the in-sample leader underperforms out of sample; on two validation folds it has very low
-# resolution. These diagnostics support a validation candidate, not an
-# out-of-sample claim.
+# resolution. These diagnostics support a validation candidate, not an out-of-sample claim.
+#
+# **Two of those three come from `cohort_metrics`, and this stage does not populate it.**
+# `selection_adjusted_leader_table` LEFT JOINs that table, so `dsr_pvalue`, `k_variants` and
+# `pbo` arrive null until a stage that computes cohort metrics has run - which for this case
+# study is `18_strategy_analysis` via `compute_cohort_metrics`. The guard below says so rather
+# than letting three empty columns print as though the adjustment had been made.
 
 # %%
-family_leaders = selection_adjusted_leader_table(CASE_STUDY_ID, stage="signal")
+family_leaders = selection_adjusted_leader_table(
+    CASE_STUDY_ID,
+    stage="signal",
+    prediction_hashes=CURRENT_MEMBERS,
+)
+_adjustment_cols = ["dsr_pvalue", "k_variants", "pbo"]
+_absent = [c for c in _adjustment_cols if family_leaders[c].null_count() == family_leaders.height]
+if _absent:
+    print(
+        f"selection adjustment not available at this stage: {', '.join(_absent)} are entirely "
+        f"null because cohort_metrics holds no rows for {CASE_STUDY_ID} yet. The bootstrap "
+        "interval below stands on its own; the search-adjusted reading arrives with "
+        "18_strategy_analysis."
+    )
 family_leaders.select(
     "family",
     "config_name",
@@ -525,14 +607,13 @@ family_leaders.select(
     pl.col("sharpe").round(3),
     pl.col("sharpe_ci95_lo").round(3).alias("ci_lo"),
     pl.col("sharpe_ci95_hi").round(3).alias("ci_hi"),
-    pl.col("dsr_pvalue").round(4),
-    "k_variants",
-    "pbo",
+    *[pl.col(c).round(4) if c == "dsr_pvalue" else pl.col(c) for c in _adjustment_cols],
 )
 
 # %% [markdown]
-# The interval plot separates the favorable PCA result from the other family
-# leaders, whose uncertainty still includes zero.
+# The interval plot shows which family leaders clear zero on their own return path and which do
+# not. It is a bootstrap reading only: the search adjustment that would narrow it is the one the
+# guard above reports as unavailable at this stage.
 
 # %%
 leader_plot = family_leaders.sort("sharpe")
