@@ -270,3 +270,40 @@ def test_missing_stamped_blob_is_not_called_prose(repo):
     """Cannot compare means cannot soften: an absent blob must not read as prose-only."""
     py, _ = _write_pair(repo, PY_BEFORE)
     assert provenance.drift_is_prose_only("0" * 40, py) is False
+
+
+PY_WITH_ALT = """# %% [markdown]
+# # A notebook with a figure
+
+# %%
+show_plotly_with_alt(fig, "The first description.")
+"""
+
+
+def test_changed_alt_text_is_not_classified_as_prose(repo):
+    """The hole a blanked-alt comparison would open.
+
+    `_comparable` blanks alt literals so that `alt_text_only_drift` can forgive a corrected
+    description - but that path pairs the blanking with a check that the notebook's OUTPUT
+    metadata already carries the new alt. Prose classification has no such check and keeps
+    the outputs, so if it blanked alts too, a source-only alt correction would be reported
+    as prose-only, `sync-prose` would accept it, and the notebook would be stamped current
+    while still rendering the old description.
+    """
+    py, nb_path = _write_pair(repo, PY_WITH_ALT)
+    _stamp(nb_path, py)
+    stamped = json.loads(nb_path.read_text())["metadata"][provenance.STAMP_KEY]["source_py_blob"]
+    py.write_text(
+        PY_WITH_ALT.replace("The first description.", "A corrected description."),
+        encoding="utf-8",
+    )
+    # The alt is the SECOND POSITIONAL argument, which is the only form `_blank_alts`
+    # blanks. A keyword `alt=` is left in the dump by both comparisons and so would pass
+    # this test without exercising anything.
+    before = provenance._comparable(PY_WITH_ALT)
+    after = provenance._comparable(py.read_text(encoding="utf-8"))
+    assert before == after, "blanked comparison must not see the change - else this is vacuous"
+
+    assert provenance.drift_is_prose_only(stamped, py) is False
+    with pytest.raises(SystemExit):
+        provenance.sync_prose(nb_path)

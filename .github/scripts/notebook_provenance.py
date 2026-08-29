@@ -456,7 +456,9 @@ def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
 _PAPERMILL_MARKER = re.compile(r"\s+papermill=\{.*\}(?=(?:\s+[A-Za-z_][A-Za-z0-9_-]*=)|\r?\n?$)")
 
 
-def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | None:
+def _comparable(
+    src: str, *, strip_papermill: bool = False, blank_alts: bool = True
+) -> list[tuple] | None:
     """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
 
     Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
@@ -471,6 +473,12 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
 
     A markdown cell's body is dropped: it is a comment in the ``.py`` and cannot affect
     outputs, so its text may change freely while its marker and position still count.
+
+    ``blank_alts=False`` keeps the alt literals in the dump, which is what a caller wants
+    when it is deciding whether a drift is *prose*. Blanking them is right for
+    ``alt_text_only_drift``, which pairs it with a check that the outputs already carry the
+    new alt; a caller without that check would read a corrected alt as prose and then
+    preserve output metadata still holding the old text.
     """
     out: list[tuple] = []
     for marker, kind, body in _percent_cells(src):
@@ -487,14 +495,18 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
             else:
                 out.append((marker, kind, body))
             continue
-        blanked = _blank_alts(body)
-        if blanked is None:
-            return None
+        if blank_alts:
+            blanked = _blank_alts(body)
+            if blanked is None:
+                return None
+            source = blanked[0]
+        else:
+            source = body
         try:
-            tree = ast.parse(blanked[0])
+            tree = ast.parse(source)
         except SyntaxError:
             return None
-        out.append((marker, kind, ast.dump(tree), _semicolon_flags(blanked[0], tree)))
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(source, tree)))
     return out
 
 
@@ -848,8 +860,8 @@ def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
     )
     if old.returncode != 0:
         return False  # stamped blob is gone; cannot compare, so do not soften the report
-    before = code_cells_only(_comparable(old.stdout))
-    after = code_cells_only(_comparable(py.read_text(encoding="utf-8")))
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
     return before is not None and after is not None and before == after
 
 
@@ -908,8 +920,12 @@ def sync_prose(nb_path: Path) -> str:
             f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
             "so the code cells cannot be compared. Re-run it."
         )
-    before = code_cells_only(_comparable(old.stdout))
-    after = code_cells_only(_comparable(py.read_text(encoding="utf-8")))
+    # Alt literals are NOT blanked here. This command keeps the outputs, so an alt the
+    # output metadata does not carry would be stamped as current while rendering the old
+    # text. A genuine alt correction is adjudicated by `alt_text_only_drift`, which checks
+    # the outputs already carry it, and never reaches this command.
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
     if before is None or after is None:
         raise SystemExit(f"{rel}: could not parse one of the two sources - refusing")
     if before == after:
