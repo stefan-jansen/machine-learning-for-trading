@@ -17,9 +17,9 @@
 # # Crypto perpetuals: how much friction the surviving configuration absorbs
 #
 # Every backtest so far charged one cost schedule, the one `config/setup.yaml` declares. This
-# notebook holds the configuration that survived [`14_portfolio_management`](14_portfolio_management.ipynb)
-# completely fixed - same model, same checkpoint, same entry rule, same allocator - and varies
-# only what it costs to trade.
+# notebook holds the configuration that survived the whole funnel completely fixed - same model,
+# same checkpoint, same entry rule, same allocator, same risk control - and varies only what it
+# costs to trade.
 #
 # **This stage selects nothing.** The three stages before and after it narrow a field: the
 # baseline runs everything, allocation runs the top ten configurations, the risk overlay runs the
@@ -44,7 +44,7 @@
 #
 # **Book reference**: Chapter 18 (Transaction Costs).
 #
-# **Prerequisites**: [`14_portfolio_management`](14_portfolio_management.ipynb) has frozen a
+# **Prerequisites**: [`15_risk_management`](15_risk_management.ipynb) has frozen a
 # candidate set per label.
 #
 # **What it writes**: one `stage='cost_sensitivity'` backtest per label and cost level. No
@@ -61,7 +61,7 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
-    selected_allocation_result,
+    selected_final_result,
 )
 from case_studies.research import open_study, run_backtests
 from case_studies.research.strategy import strategy_warmup_periods
@@ -92,20 +92,30 @@ case_config = get_backtest_config("crypto_perps_funding")
 # %% [markdown]
 # ## 1. The configuration under test
 #
-# `14_portfolio_management` froze one candidate set per label holding the baseline and the
-# allocation results together, admitting only results that traded every validation fold. The
-# configuration this notebook varies costs for is the highest validation Sharpe in that set.
+# **The one this case study ships, which is the winner out of risk management.** The funnel is
+# sequential and this is its last stage, so the configuration whose cost sensitivity is worth
+# measuring is the one that survived every stage before it - baseline, sizing and overlay.
+#
+# It used to read the allocation winner, which is the stage before last, and the two are the same
+# configuration only when no overlay improves on the unprotected book. When one does, the cost
+# ladder describes a configuration nobody ships, and nothing downstream contradicts it because
+# cost rows are excluded from the selection pool. Measured on `cme_futures`, where they differ:
+# pre-overlay winner at Sharpe 1.209 against post-risk rank-1 at 1.274.
+#
+# **A configuration with no overlay is a legitimate winner.**
+# [`15_risk_management`](15_risk_management.ipynb) freezes the baseline, the allocation results
+# and the overlays into one set per label, so a label whose best member carries no risk block is
+# a label where no control helped - not a label where the stage failed.
 #
 # Reading it back through the frozen set rather than re-querying the registry matters, because
 # the set is immutable and the query is not. A registry grows: a later run that adds one result
-# would change what a fresh "best allocation result" query returns, and the cost curve would then
-# describe a different configuration from the one the previous stage chose. `CandidateSet.one`
-# resolves a name to exactly one identity or raises.
+# would change what a fresh "best result" query returns, and the cost curve would then describe a
+# different configuration from the one the previous stage chose. `CandidateSet.one` resolves a
+# name to exactly one identity or raises.
 
 # %%
 chosen_by_label = {
-    label: selected_allocation_result(study, label=label, canonical=CANONICAL_RUN)
-    for label in labels
+    label: selected_final_result(study, label=label, canonical=CANONICAL_RUN) for label in labels
 }
 
 # %% [markdown]
@@ -432,6 +442,5 @@ curve.group_by("label").agg(
 # cadence fixed, and cadence is the other side of the same trade: trading less often pays less
 # friction and reacts to the model more slowly. Neither is varied here, and neither is free.
 #
-# **Next**: [`16_risk_management`](16_risk_management.ipynb) returns to the candidate set this
-# notebook read from and asks whether a position-level or portfolio-level control improves the
-# configuration that survived, at the declared cost schedule.
+# **Next**: [`19_strategy_analysis`](19_strategy_analysis.ipynb) makes the one selection the case
+# study exists to make, and says how much confidence the funnel that produced it supports.

@@ -52,7 +52,7 @@
 #
 # **What it writes**: one `stage='allocation'` backtest per surviving prediction set, entry rule
 # and allocator, and one candidate set per label holding the baseline and the allocation results
-# together. [`15_costs`](15_costs.ipynb) and [`16_risk_management`](16_risk_management.ipynb)
+# together. [`15_risk_management`](15_risk_management.ipynb) and [`16_costs`](16_costs.ipynb)
 # read those.
 
 # %%
@@ -625,8 +625,8 @@ show_plotly_with_alt(
 # A set is identified by its members, so a re-run that admits the same results returns the set
 # that already exists. A re-run that admits different ones - because something upstream was
 # corrected, or because the admission rule changed - is a second generation, and it has to name
-# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_costs`,
-# `16_risk_management` and `17_strategy_analysis` all resolve this set by name, so two live
+# the generation it replaces in `SUPERSEDES`. That is not ceremony: `15_risk_management` and
+# `19_strategy_analysis` both resolve this set by name, so two live
 # generations of one name would leave them unable to say which comparison a result came from.
 # The error raised on a changed set names the predecessor hash to pass.
 
@@ -707,8 +707,9 @@ for label in labels:
 # would be another search axis, and adding it would widen the very search the funnel narrows.
 # Costs are the flat declared schedule, which sizing interacts with directly, since an allocator
 # that spreads capital more evenly turns over more of the book at each rebalance;
-# [`15_costs`](15_costs.ipynb) varies that assumption. And every number is measured on the
-# validation folds.
+# [`16_costs`](16_costs.ipynb) varies that assumption at the end of the funnel. And every number
+# is measured on the validation folds.
 #
-# **Next**: [`15_costs`](15_costs.ipynb) holds the surviving configuration fixed and varies what
-# it costs to trade, which is the one stage in the funnel that selects nothing.
+# **Next**: [`15_risk_management`](15_risk_management.ipynb) holds the surviving configuration
+# fixed and asks whether a position-level control improves it. [`16_costs`](16_costs.ipynb) then
+# prices the winner, which is the one stage in the funnel that selects nothing.

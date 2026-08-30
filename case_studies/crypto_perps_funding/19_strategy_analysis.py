@@ -18,8 +18,8 @@
 #
 # Four notebooks narrowed a field. [`13_backtest`](13_backtest.ipynb) ran every prediction set
 # equally weighted, [`14_portfolio_management`](14_portfolio_management.ipynb) sized the survivors
-# six ways, [`15_costs`](15_costs.ipynb) asked how much friction the result absorbs, and
-# [`16_risk_management`](16_risk_management.ipynb) tried fourteen ways of leaving a position early.
+# six ways, [`15_risk_management`](15_risk_management.ipynb) tried fourteen ways of leaving a
+# position early, and [`16_costs`](16_costs.ipynb) asked how much friction the survivor absorbs.
 # This notebook makes the one choice the case study exists to make, and then says how much
 # confidence that choice supports.
 #
@@ -40,7 +40,7 @@
 #
 # **Book reference**: Chapter 20 (Strategy Synthesis).
 #
-# **Prerequisites**: [`16_risk_management`](16_risk_management.ipynb) has frozen a candidate set
+# **Prerequisites**: [`15_risk_management`](15_risk_management.ipynb) has frozen a candidate set
 # per label spanning all three selection stages.
 #
 # **What it writes**: one candidate set holding the whole selection pool. No backtests, no
@@ -78,7 +78,7 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 # The generation of `crypto-final-selection` this run replaces. Its membership is the union of
-# the four final validation sets, and those moved in `16_risk_management` when the grid their
+# the four final validation sets, and those moved in `15_risk_management` when the grid their
 # admission rule is applied to stopped being every row the registry holds for the label - so
 # this pool moves with them. Recorded here rather than passed at run time: `supersedes` is part
 # of what identifies the generation, so a re-run declaring nothing computes a different hash

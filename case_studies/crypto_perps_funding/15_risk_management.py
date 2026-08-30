@@ -49,7 +49,7 @@
 #
 # **What it writes**: one `stage='risk_overlay'` backtest per label and declared control, and one
 # candidate set per label spanning all three stages, which
-# [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects the final configuration from.
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects the final configuration from.
 
 # %%
 """Run the declared risk-overlay grid on the surviving crypto perpetuals configuration."""
@@ -121,9 +121,9 @@ CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
 # year of data. The question is whether a control improves the configuration the case study
 # already arrived at, not which control looks best somewhere in the grid.
 #
-# The set read here is the same one [`15_costs`](15_costs.ipynb) read, and this notebook is not
-# downstream of that one - cost sensitivity selects nothing, so both stages hang off the
-# allocation result independently.
+# This is the stage that reads the allocation set. [`16_costs`](16_costs.ipynb) is downstream of
+# it rather than beside it: cost sensitivity prices the configuration that survives the whole
+# funnel, so it reads the set frozen at the end of this notebook, not the one read here.
 
 # %%
 chosen_by_label = {
@@ -585,8 +585,8 @@ fig.update_layout(
 show_plotly_with_alt(
     fig,
     "Scatter plot of the change in annualized validation Sharpe against the change in maximum "
-    "drawdown, one point per label and declared risk control coloured by control type, with dashed lines through the "
-    "origin marking the no-overlay result. Points spread on both sides of the horizontal line, "
+    "drawdown, one point per label and declared risk control coloured by control type, with "
+    "dashed lines through the origin marking the no-overlay result. Points spread on both sides of the horizontal line, "
     "so the controls do not separate from no overlay on Sharpe.",
 )
 
@@ -594,7 +594,7 @@ show_plotly_with_alt(
 # ## 5. The set the final choice is made from
 #
 # One candidate set per label spanning all three stages: the equal-weight baseline, the allocation
-# results and the overlay results. [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one
+# results and the overlay results. [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects one
 # configuration from it, so no overlay is eligible only by being an overlay - a label where no
 # control improved anything selects the configuration it already had.
 #
@@ -605,7 +605,7 @@ show_plotly_with_alt(
 # what it did trade would otherwise compete for the final selection.
 #
 # `SUPERSEDES` names the generation of each set this run replaces, which the freeze refuses to do
-# implicitly. `17_strategy_analysis` resolves these four sets by name, so two live generations of
+# implicitly. `19_strategy_analysis` resolves these four sets by name, so two live generations of
 # one name would leave it unable to say which comparison a result came from. It defaults to empty,
 # because a first run has nothing to replace and a set whose members are unchanged returns the
 # existing one without consulting it. Pass it only for a re-run that admits different members;
@@ -673,5 +673,6 @@ for label in labels:
 # nowhere for this case study, so the whole regime-control family is untested here. And every
 # number is measured on the validation folds at the declared cost schedule.
 #
-# **Next**: [`17_strategy_analysis`](17_strategy_analysis.ipynb) selects one configuration from
+# **Next**: [`16_costs`](16_costs.ipynb) prices the winner this stage names, and then
+# [`19_strategy_analysis`](19_strategy_analysis.ipynb) selects one configuration from
 # the set this notebook froze and reports what it did.
