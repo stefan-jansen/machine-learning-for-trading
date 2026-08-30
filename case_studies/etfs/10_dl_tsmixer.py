@@ -40,6 +40,8 @@
 # %%
 """Fit the declared ETF mixer population on the walk-forward folds."""
 
+import sqlite3
+
 import plotly.graph_objects as go
 import polars as pl
 from IPython.display import Markdown, display
@@ -86,13 +88,32 @@ PRIMARY_LABEL = primary_label(study)
 # fits the mixer; [`09_dl_lstm`](09_dl_lstm.ipynb) fits the recurrent member on the other backend.
 #
 # **The menu declares a third architecture, `nlinear`, that no notebook fits.** It is left
-# unfitted here rather than quietly added: fitting it would widen the published population inside a
-# migration commit, and a configuration declared and never fitted is a finding rather than a
-# detail. It is why this run names its own population instead of publishing the family's.
+# unfitted rather than quietly added: fitting it would widen the published population, and a
+# configuration declared and never fitted is a finding rather than a detail. It is why this run
+# names its own population instead of publishing the family's.
+#
+# The reconciliation below is what makes that a fact rather than a comment. This is the last
+# sequence notebook to run, so by here the registry holds whatever the family fitted, and the
+# menu can be checked against it. Nothing else reconciles a declaration against what was
+# executed - which is how a declared-and-never-fitted configuration stays invisible - so the gap
+# is printed every run and goes stale the moment it is closed either way.
 
 # %%
 SEQUENCE_CONFIGS = ("tsmixer",)
 declared = load_model_configs(study, "deep_learning", config_names=list(SEQUENCE_CONFIGS))
+
+_menu = set(load_model_configs(study, "deep_learning")["config_name"].to_list())
+with sqlite3.connect(str(study.root / "run_log" / "registry.db")) as _db:
+    _fitted = {
+        row[0]
+        for row in _db.execute(
+            "SELECT DISTINCT config_name FROM training_runs WHERE family = 'deep_learning'"
+        )
+    }
+_unfitted = sorted(_menu - _fitted)
+print(f"deep_learning menu: {', '.join(sorted(_menu))}")
+print(f"fitted in this registry: {', '.join(sorted(_fitted)) or 'none'}")
+print(f"declared and never fitted: {', '.join(_unfitted) or 'none'}")
 configs = load_model_configs(
     study,
     "deep_learning",
