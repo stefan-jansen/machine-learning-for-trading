@@ -565,7 +565,17 @@ def _holdout_lineage_for(
                 raise
             locked = None
         if locked is not None:
-            holdout_training_hash = json.loads(locked["lock_json"]).get("holdout_training_hash")
+            lock = json.loads(locked["lock_json"])
+            # A lock is immutable, and the carrier it sealed can be superseded afterwards -
+            # a later refit publishes a new generation and the lock goes on naming the old
+            # one. Its holdout then evaluates a configuration the study no longer publishes,
+            # and pinning to it would carry that into reader-facing metrics. The lock records
+            # the carrier, so this is checkable: no valid holdout exists for a superseded
+            # carrier, and the callers already treat None as "no holdout pair".
+            carrier = lock.get("prediction_hash")
+            if carrier is not None and carrier in _retired_prediction_hashes(cs):
+                return None
+            holdout_training_hash = lock.get("holdout_training_hash")
             if holdout_training_hash:
                 clauses.append("p.training_hash = ?")
                 params.append(holdout_training_hash)

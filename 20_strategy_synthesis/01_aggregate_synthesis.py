@@ -231,7 +231,11 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 }
 
 
-def _locked_holdout_training_hash(db: sqlite3.Connection) -> str | None:
+# Distinguishes "the lock's carrier was superseded, so no holdout applies" from "no lock".
+_NO_LIVE_HOLDOUT = "\x00no-live-holdout"
+
+
+def _locked_holdout_training_hash(db: sqlite3.Connection, cs: str) -> str | None:
     """The holdout run this study's research lock names, if it has taken one.
 
     The lock seals a validation carrier before the holdout is touched and records both sides,
@@ -247,7 +251,16 @@ def _locked_holdout_training_hash(db: sqlite3.Connection) -> str | None:
         if "no such table" not in str(error):
             raise
         return None
-    return json.loads(row[0]).get("holdout_training_hash") if row else None
+    if not row:
+        return None
+    lock = json.loads(row[0])
+    # A lock is immutable and the carrier it sealed can be superseded afterwards, leaving the
+    # lock naming a generation the study no longer publishes. Its holdout evaluates that
+    # generation, so it is not this study's holdout any more.
+    carrier = lock.get("prediction_hash")
+    if carrier is not None and carrier in _retired(cs):
+        return _NO_LIVE_HOLDOUT
+    return lock.get("holdout_training_hash")
 
 
 def _retired(cs: str) -> frozenset[str]:
@@ -1390,7 +1403,9 @@ def _holdout_lineage_for(
         # Pin to the holdout the research lock names. Without it these queries rank by the
         # holdout's own Sharpe, which chooses the evaluation by its result and is how a
         # holdout descended from a retired carrier takes the slot.
-        locked_holdout = _locked_holdout_training_hash(db)
+        locked_holdout = _locked_holdout_training_hash(db, cs)
+        if locked_holdout == _NO_LIVE_HOLDOUT:
+            return None
         if locked_holdout is not None:
             clauses.append("p.training_hash = ?")
             params.append(locked_holdout)
@@ -2065,8 +2080,11 @@ def query_holdout_rows():
         db = sqlite3.connect(str(db_path))
         # The same holdout the paired metrics resolve to, so the reader-facing row and the
         # comparison behind it describe one evaluation rather than two.
-        _locked = _locked_holdout_training_hash(db)
-        if _locked is not None:
+        _locked = _locked_holdout_training_hash(db, cs)
+        if _locked == _NO_LIVE_HOLDOUT:
+            # The lock's carrier was superseded, so this study has no holdout to report.
+            clauses.append("1 = 0")
+        elif _locked is not None:
             clauses.append("p.training_hash = ?")
             params.append(_locked)
         where_sql = " AND ".join(clauses)

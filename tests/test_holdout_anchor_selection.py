@@ -94,13 +94,15 @@ def test_several_trained_models_refuse_rather_than_rank(monkeypatch, tmp_path) -
         _lineage()
 
 
-def _take_lock(case_dir: Path, holdout_training_hash: str) -> None:
+def _take_lock(case_dir: Path, holdout_training_hash: str, carrier: str = "carrier") -> None:
     db = sqlite3.connect(case_dir / "run_log" / "registry.db")
     db.execute(
         "INSERT INTO research_locks VALUES (?,?,?,?)",
         (
             "lk",
-            json.dumps({"holdout_training_hash": holdout_training_hash}),
+            json.dumps(
+                {"holdout_training_hash": holdout_training_hash, "prediction_hash": carrier}
+            ),
             "LOCKED",
             "2026-01-01",
         ),
@@ -128,5 +130,18 @@ def test_the_lock_names_the_holdout_even_when_another_scores_higher(monkeypatch,
 def test_no_candidates_is_not_an_error(monkeypatch, tmp_path) -> None:
     case_dir = _registry(tmp_path, [])
     _install(monkeypatch, case_dir)
+
+    assert _lineage() is None
+
+
+def test_a_lock_whose_carrier_was_superseded_yields_no_holdout(monkeypatch, tmp_path) -> None:
+    """A lock is immutable; the carrier it sealed can be refit past afterwards. Its holdout
+    then evaluates a generation the study no longer publishes, so there is no holdout pair."""
+    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
+    _take_lock(case_dir, "t1", carrier="stale_carrier")
+    monkeypatch.setattr(paired_metrics, "get_case_study_dir", lambda cs: case_dir)
+    monkeypatch.setattr(
+        paired_metrics, "_retired_prediction_hashes", lambda cs: frozenset({"stale_carrier"})
+    )
 
     assert _lineage() is None
