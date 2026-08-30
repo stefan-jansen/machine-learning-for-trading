@@ -83,6 +83,8 @@ from case_studies.research.models import (
 )
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import strategy_view
+from case_studies.utils.notebook_contracts import prediction_members_in_force
+from case_studies.utils.registry import resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
 from utils.paths import get_case_study_dir
 
@@ -136,17 +138,47 @@ study = open_study(
 
 # %%
 CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
+# The frozen set where it exists, and the rule it was frozen under where it does not.
+# 16_risk_management writes it by opening the study, which canonical regeneration refuses
+# wherever the generated directories are not symlinks - a reader's clean clone and the test
+# fixtures both - so the set is in the published run log and absent everywhere else. Reading it
+# is the stronger path: it is immutable, so it cannot follow an upstream change. Re-deriving is
+# the same rule applied live, and cannot notice that something moved. Which one ran is printed.
 try:
     CANDIDATES = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
-except (ValueError, LookupError) as exc:
-    raise RuntimeError(
-        f"no candidate set {CANDIDATE_SET_NAME!r} resolves in this registry ({exc}). "
-        "16_risk_management freezes it as its last step; run that first."
-    ) from exc
+    SELECTED = CANDIDATES.best_validation_sharpe()
+    SELECTION_SOURCE = f"frozen candidate set {CANDIDATES.hash} ({len(CANDIDATES.members)} members)"
+except (ValueError, LookupError):
+    CANDIDATES = None
+    _live = pl.concat(
+        [
+            resolve_best_backtest_runs(
+                CASE_STUDY_ID,
+                HOLDOUT_LABEL,
+                split="validation",
+                stage=stage,
+                top_n=9999,
+                prediction_hashes=prediction_members_in_force(study)[0],
+            )
+            for stage in ("signal", "allocation", "risk_overlay")
+        ],
+        how="diagonal_relaxed",
+    ).unique("backtest_hash")
+    if _live.is_empty():
+        raise RuntimeError(
+            f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
+            "validation backtests to rank, so there is no selection to carry forward"
+        ) from None
+    SELECTED = study.results.open(
+        _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
+    )
+    SELECTION_SOURCE = (
+        f"live ranking of {_live.height} eligible backtests - no frozen set in this registry"
+    )
+print(f"Selection read from the {SELECTION_SOURCE}")
 if CANDIDATES.member_kind != "backtest":
     raise RuntimeError("the holdout selection requires a backtest candidate set")
 
-SELECTED = CANDIDATES.best_validation_sharpe()
 if not SELECTED.complete:
     raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
 if SELECTED.execution_tier != "canonical":
