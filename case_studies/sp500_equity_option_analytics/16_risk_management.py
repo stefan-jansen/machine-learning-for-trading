@@ -605,13 +605,40 @@ except PermissionError as exc:
         "holdout notebooks name it when they cannot find it."
     )
 else:
+    # `open_study` activates, and activation decides which case directory this process reads and
+    # writes. If that is not the directory the pool above was resolved from, the set would be
+    # written where 17 through 20 will not look for it, and its members would be opened from a
+    # root other than the one they will be read back from - which is how a member that is
+    # complete at freeze time is incomplete at read time. Refusing is better than writing a set
+    # nobody reads.
+    if writable.root != CASE_DIR:
+        raise RuntimeError(
+            f"16 resolved its candidate field from {CASE_DIR} but opened a study rooted at "
+            f"{writable.root}. Freezing here would write the set where the holdout notebooks "
+            "will not find it, and check its members against different artifacts than they "
+            "will read."
+        )
+    members = [
+        writable.results.open(backtest_hash)
+        for backtest_hash in frozen_pool["backtest_hash"].to_list()
+    ]
+    # Named here rather than left to `create`, which reports the first partial member and stops.
+    # A field that cannot be frozen is a field the holdout stage cannot select from, so what a
+    # reader needs is how many members are unusable and why, not the first one alphabetically.
+    incomplete = [
+        (member.hash, reason) for member in members if (reason := member.completeness()) is not None
+    ]
+    if incomplete:
+        raise RuntimeError(
+            f"{len(incomplete)} of {len(members)} eligible backtests are incomplete, so the "
+            "field cannot be frozen: "
+            + "; ".join(f"{hash_} ({reason})" for hash_, reason in incomplete[:5])
+            + ("" if len(incomplete) <= 5 else f"; and {len(incomplete) - 5} more")
+        )
     holdout_candidates = CandidateSet.create(
         writable,
         name=CANDIDATE_SET_NAME,
-        members=[
-            writable.results.open(backtest_hash)
-            for backtest_hash in frozen_pool["backtest_hash"].to_list()
-        ],
+        members=members,
         comparison_contract={"comparable_fields": ["label_artifact", "feature_artifacts", "cv"]},
     )
     frozen_selection = holdout_candidates.best_validation_sharpe()

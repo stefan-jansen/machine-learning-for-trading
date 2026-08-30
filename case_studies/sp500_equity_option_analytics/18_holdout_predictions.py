@@ -200,8 +200,12 @@ else:
     SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
 
-if not SELECTED.complete:
-    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
+_why = SELECTED.completeness()
+if _why is not None:
+    raise RuntimeError(
+        f"the selected validation backtest {SELECTED.hash} is incomplete: {_why}. "
+        f"It was chosen from the {SELECTION_SOURCE}."
+    )
 if SELECTED.execution_tier != "canonical":
     raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is not canonical")
 
