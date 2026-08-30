@@ -242,25 +242,20 @@ def _retired(cs: str) -> frozenset[str]:
 
 @cache
 def _live_predictions(cs: str) -> list[str] | None:
-    """The prediction identities this case study still publishes, or None when it has no
-    lineage to narrow by.
+    """What this case study currently publishes, or None when it declares no populations.
 
-    A positive scope rather than a filter applied afterwards: `best()` applies its SQL
-    `LIMIT top_n` first, so excluding retired rows after the call lets them consume the
-    limit and hide live candidates that sit below it.
+    Membership, not the complement of retirement. A prediction no population ever listed has
+    not been retired by anyone, so ranking over "everything not retired" admits experimental
+    results the case study never published; ranking over the members in force does not.
+
+    Applied inside the query rather than to its result, because `best()` applies its SQL
+    `LIMIT top_n` first - a row filtered afterwards has already consumed a slot and can hide a
+    live candidate below the cut.
     """
-    retired = _retired(cs)
-    if not retired:
-        return None
-    db_path = get_case_study_dir(cs) / "run_log" / "registry.db"
-    if not db_path.exists():
-        return None
-    db = sqlite3.connect(str(db_path))
-    try:
-        rows = db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
-    finally:
-        db.close()
-    return [h for (h,) in rows if h not in retired]
+    from case_studies.research.population import published_members_at
+
+    published = published_members_at(get_case_study_dir(cs), member_kind="prediction")
+    return None if published is None else sorted(published)
 
 
 def _best_live(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
@@ -276,9 +271,10 @@ def _best_pinned(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) 
     SQL `LIMIT top_n`. For nasdaq the pinned cost-feasible carrier sits below
     the full-universe in-sample maxima, so a small `top_n` truncates it before
     `_apply_rung_restriction` runs. Pull all rows for restricted case studies."""
+    live = _live_predictions(cs)
     if cs in _CLUSTER_RUNG_RESTRICTIONS:
-        return explorer.best(stage=stage, top_n=1_000_000)
-    return explorer.best(stage=stage, top_n=top_n)
+        return explorer.best(stage=stage, top_n=1_000_000, prediction_hashes=live)
+    return explorer.best(stage=stage, top_n=top_n, prediction_hashes=live)
 
 
 def _apply_rung_restriction(df: pl.DataFrame, cs: str) -> pl.DataFrame:
@@ -652,7 +648,7 @@ def build_backtest_rows():
         # the registry numbers come from deprecated runs, so report None to
         # match the synthesis_dict sanitizer below.
         if _stage_applicable(cs, "allocation"):
-            alloc_candidates = explorer.best(stage="allocation", top_n=200)
+            alloc_candidates = _best_live(explorer, cs, "allocation", 200)
             if not alloc_candidates.is_empty() and "family" in alloc_candidates.columns:
                 alloc_candidates = alloc_candidates.filter(pl.col("family") != "benchmark")
             if (
@@ -1807,7 +1803,7 @@ for cs, explorer in explorers.items():
     # chapter-wide rank-1 signal rather than whichever Sharpe happens to be
     # highest under any execution regime.
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    candidates = explorer.best(stage="signal", top_n=200)
+    candidates = _best_live(explorer, cs, "signal", 200)
     if not candidates.is_empty() and "family" in candidates.columns:
         candidates = candidates.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in candidates.columns and not candidates.is_empty():
@@ -1888,7 +1884,7 @@ for cs, explorer in explorers.items():
     # pin sp500_options to the Rung-2 full-universe baseline so lineage
     # traces the same signal as the cross-case cluster diagnostics.
     label_restriction = _CLUSTER_LABEL_RESTRICTIONS.get(cs)
-    candidates = explorer.best(stage="signal", top_n=200)
+    candidates = _best_live(explorer, cs, "signal", 200)
     if not candidates.is_empty() and "family" in candidates.columns:
         candidates = candidates.filter(pl.col("family") != "benchmark")
     if label_restriction and "label" in candidates.columns and not candidates.is_empty():

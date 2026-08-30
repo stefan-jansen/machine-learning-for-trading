@@ -649,6 +649,40 @@ def published_population_names_at(
     return frozenset(name for _, name, _ in rows)
 
 
+def published_members_at(
+    case_dir: str | Path, *, member_kind: str = "prediction"
+) -> frozenset[str] | None:
+    """The members every population name in this registry currently stands behind.
+
+    The positive counterpart to :func:`superseded_members_at`. "Not retired" and "published"
+    are different sets, and only the second answers *which results may be reported*: a
+    prediction that no population ever listed has not been retired by anyone, so an exclusion
+    set admits it while a membership set does not. A reader that ranks over the exclusion set
+    can therefore surface an experimental result its case study never published.
+
+    ``None`` when the registry declares no populations at all - a fixture, or one written
+    before the mechanism existed. That is not an empty population: it means membership cannot
+    be asked here, and a caller should fall back to catalog admissibility and say so, rather
+    than narrow every query to nothing.
+
+    A forked chain leaves more than one tip standing; the union is taken, matching
+    :func:`_retired`, so a fork can only over-admit and never silently drop a live member.
+    """
+    rows, members = _lineage(Path(case_dir), member_kind)
+    if not rows:
+        return None
+    by_name: dict[str, list[tuple[str, str | None]]] = {}
+    for population_hash, name, supersedes in rows:
+        by_name.setdefault(name, []).append((population_hash, supersedes))
+    published: set[str] = set()
+    for generations in by_name.values():
+        superseded = {s for _, s in generations if s is not None}
+        for population_hash, _ in generations:
+            if population_hash not in superseded:
+                published |= members.get(population_hash, set())
+    return frozenset(published)
+
+
 def superseded_members_at(
     case_dir: str | Path, *, member_kind: str = "prediction"
 ) -> frozenset[str]:
