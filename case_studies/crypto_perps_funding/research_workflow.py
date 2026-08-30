@@ -276,14 +276,26 @@ def freeze_official_model_population(
     )
 
 
-def run_model_plan(plan: ModelPlan, *, population_name: str | None = None) -> ModelExecution:
-    """Freeze the planned checkpoint population, then execute exactly that population."""
+def run_model_plan(
+    plan: ModelPlan,
+    *,
+    population_name: str | None = None,
+    supersedes: str | None = None,
+) -> ModelExecution:
+    """Freeze the planned checkpoint population, then execute exactly that population.
+
+    ``supersedes`` names the generation of ``population_name`` this run replaces. A name that
+    already exists with different members is refused unless the run says so, and the refusal
+    prints the hash to pass here. It is the caller's statement, not something to infer: a
+    population is a declaration made before the work, so the run has to assert that it is
+    replacing one rather than discovering it after the fact.
+    """
     canonical = plan.execution_tier is ExecutionTier.CANONICAL
     population = None
     if canonical:
         if not population_name:
             raise ValueError("canonical model execution requires an official population name")
-        population = plan.create_population(name=population_name)
+        population = plan.create_population(name=population_name, supersedes=supersedes)
     elif population_name is not None:
         raise ValueError("preview model execution cannot create an official population")
     execution = plan.run()
@@ -302,6 +314,7 @@ def run_model_catalog(
     *,
     execution_tier: str,
     population_name: str | None = None,
+    supersedes: str | None = None,
     overrides: dict[str, Any] | None = None,
     preview_reductions: dict[str, Any] | None = None,
 ) -> ModelExecution:
@@ -315,6 +328,7 @@ def run_model_catalog(
             preview_reductions=preview_reductions,
         ),
         population_name=population_name,
+        supersedes=supersedes,
     )
 
 

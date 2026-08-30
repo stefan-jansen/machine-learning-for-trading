@@ -81,6 +81,12 @@ EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v1"
 SUPERSEDES: dict[str, str] = {}
+# Per-allocation-population lineage, keyed by the population's own name. `SUPERSEDES` above is
+# keyed by label and covers the one per-label set frozen at the end; this stage declares one
+# population per (label, scheme, allocator), so a single label key cannot name them. An entry
+# for a name whose members did not change is ignored, so the whole current generation can be
+# passed at once rather than discovered one refusal at a time.
+SUPERSEDES_ALLOCATION: dict[str, str] = {}
 
 # %%
 study = open_study(
@@ -268,6 +274,10 @@ for label in labels:
         signal = {key: value for key, value in scheme.items() if key != "name"}
         for allocator in allocators:
             warmup = strategy_warmup_periods({"allocation": allocator})
+            allocation_population = (
+                f"crypto-allocation-{label}-{scheme['name']}-"
+                f"{allocator['method']}-{POPULATION_SUFFIX}"
+            )
             execution = run_backtests(
                 study,
                 predictions=label_rows,
@@ -275,10 +285,8 @@ for label in labels:
                 allocation=allocator,
                 prices=prices_by_key[(label, warmup)],
                 chapter="ch17",
-                population_name=(
-                    f"crypto-allocation-{label}-{scheme['name']}-"
-                    f"{allocator['method']}-{POPULATION_SUFFIX}"
-                ),
+                population_name=allocation_population,
+                supersedes=SUPERSEDES_ALLOCATION.get(allocation_population),
             )
             print(
                 f"{label} / {scheme['name']} / {allocator['method']}: "

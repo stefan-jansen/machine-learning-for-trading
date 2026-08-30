@@ -455,7 +455,16 @@ def run_backtests(
     execution_mode: str | None = None,
     decision: DecisionArtifact | None = None,
     population_name: str | None = None,
+    supersedes: str | None = None,
 ) -> BacktestExecution:
+    """``supersedes`` names the generation of ``population_name`` this run replaces.
+
+    A name that already exists with a different member list is refused unless the caller
+    says which generation it is replacing, and the refusal prints the hash. Passing it for a
+    name whose members have not changed is a no-op: the existing population is returned
+    before the check. Passing it for a name that does not exist yet is refused, because a
+    first generation supersedes nothing.
+    """
     study.require_writable()
     if not isinstance(predictions, pl.DataFrame):
         raise TypeError("run_backtests requires a Polars prediction catalog selection")
@@ -483,6 +492,7 @@ def run_backtests(
             name=population_name,
             member_kind="backtest",
             members=ordered_hashes,
+            supersedes=supersedes,
         )
     elif population_name is not None:
         ancestry = "preview" if plan.execution_tier is ExecutionTier.PREVIEW else "exploratory"
