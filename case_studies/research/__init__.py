@@ -55,6 +55,7 @@ from .population import (
     research_name,
     superseded_members,
     superseded_members_at,
+    supersedes_for_run,
 )
 from .results import (
     HORIZON_DEPENDENT_PROTOCOL_FIELDS,
@@ -95,6 +96,7 @@ __all__ = [
     "PlannedBacktest",
     "PlannedModel",
     "OfficialPopulation",
+    "supersedes_for_run",
     "ResearchLock",
     "ResolvedModelRequest",
     "ResolvedCausalRequest",

@@ -43,6 +43,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from utils.modeling import conformal_quantile
 from utils.paths import get_case_study_dir
 
 ID_COLS: tuple[str, ...] = ("symbol", "product")
@@ -151,8 +152,7 @@ def split_conformal_coverage(
     for level in levels:
         if not 0 < level < 1:
             raise ValueError(f"invalid conformal level: {level}")
-        rank = math.ceil((n_calibration + 1) * level)
-        quantile = float("inf") if rank > n_calibration else float(calibration_residuals[rank - 1])
+        quantile = conformal_quantile(calibration_residuals, level)
         rows.append(
             {
                 "nominal_level": float(level),

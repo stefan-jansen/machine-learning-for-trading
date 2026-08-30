@@ -57,7 +57,6 @@ KNOWN_OVER_CAP = {
     "case_studies/us_equities_panel/17_portfolio_management.py": 5,
     "case_studies/us_equities_panel/18_costs.py": 5,
     "case_studies/us_equities_panel/19_risk_management.py": 4,
-    "case_studies/us_firm_characteristics/06_gbm.py": 4,
 }
 
 

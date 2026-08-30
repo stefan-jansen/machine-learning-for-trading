@@ -59,6 +59,7 @@ warnings.filterwarnings("ignore")
 # paired uncertainty consistent with the preceding pipeline stages.
 
 # %%
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
     get_backtest_config,
@@ -71,6 +72,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import precompute_weights, run_backtest
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
@@ -126,13 +128,50 @@ print(f"Case study: {CASE_STUDY_ID}; label: {RISK_LABEL}; selected lineages: {TO
 # allocators using validation Sharpe and maximum prediction coverage.
 # Historical rows from removed allocators cannot enter the corrected risk stage.
 
+# %% [markdown]
+# **The carrier is whichever strategy row ranks highest, so the pool it is drawn from decides what
+# is being overlaid.** A population is immutable and the registry keeps every generation of it, so
+# a pool built straight from `backtest_runs` counts retired members beside current ones - nothing
+# in the read path filters on supersession (`case_studies/utils/registry/queries.py` contains no
+# occurrence of `supersed`). A retired generation that outranks its own replacement would carry the
+# risk comparison, and the notebook would report an overlay on a strategy the case study no longer
+# publishes. `prediction_hashes` is passed rather than applied afterwards because it also scopes
+# the full-coverage bar the query ranks against: a retired row with a longer in-window count would
+# otherwise set a bar its live replacement cannot meet.
+
+# %%
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="17_risk_management")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, RISK_LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID,
+    RISK_LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -387,12 +426,18 @@ def paired_overlay_metrics(row: dict) -> dict:
         .join(challenger.rename({"ret": "challenger_ret"}), on="timestamp", how="inner")
         .sort("timestamp")
     )
-    nonzero = aligned.with_row_index().filter(
-        (pl.col("baseline_ret").abs() > 1e-15) | (pl.col("challenger_ret").abs() > 1e-15)
-    )
-    if nonzero.is_empty():
+    if aligned.is_empty():
         raise RuntimeError(f"Degenerate return pair for {row['risk_name']}")
-    aligned = aligned.slice(nonzero["index"].min())
+    # The leading inactive sessions are dropped inside `compute_paired_uncertainty`, over both
+    # series at once. Trimming per series is what broke this cell: an overlay sits out sessions
+    # its carrier trades, so the two sides arrived at different lengths and the paired bootstrap
+    # refused every one of them.
+    #
+    # `challenger_overlays_baseline` says which pair this is, and here it is an overlay running
+    # on top of its carrier: both are live from the carrier's first traded session, so a session
+    # the overlay sits out is a position it chose to hold and stays in. It is the effect being
+    # measured. The default would drop those rows, which is right for a strategy that has a
+    # warmup before its first signal and wrong for every rule below.
     paired = compute_paired_uncertainty(
         aligned["challenger_ret"],
         aligned["baseline_ret"],
@@ -401,15 +446,13 @@ def paired_overlay_metrics(row: dict) -> dict:
         label=RISK_LABEL,
         n_boot=2000,
         seed=42,
+        challenger_overlays_baseline=True,
     )
     if not paired:
-        # Two unrelated reasons return an empty mapping; the count separates them.
-        overlap = aligned.height
         raise RuntimeError(
-            f"Paired uncertainty failed for {row['risk_name']}: the aligned pair holds "
-            f"{overlap} observations, of which the first non-zero return leaves "
-            f"{len(aligned['challenger_ret'])}. It needs at least four, and the challenger "
-            "and baseline series must be the same length after alignment."
+            f"Paired uncertainty failed for {row['risk_name']}: the overlay and its carrier "
+            f"share {aligned.height} sessions, and too few of them fall after the first one "
+            "either side traded. A bootstrap needs at least four."
         )
     return {
         "backtest_hash": row["backtest_hash"],
