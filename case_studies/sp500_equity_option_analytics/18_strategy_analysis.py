@@ -983,17 +983,25 @@ if _sealed:
     # construction, rebalance cadence, minimum trade size and the risk rule's own parameters
     # all change what was run, and an allocator/top_k/risk-name comparison passes over every
     # one of them.
-    # `strategy_view` returns the `strategy` block only, which leaves out `backtest_config` -
+    # `strategy_view` returns the `strategy` block alone, which leaves out `backtest_config` -
     # the cost schedule, fill timing, calendar, account and cash policy, every one of which
-    # changes what was run. The comparison below is over the whole specification instead.
+    # changes what was run. Comparing the raw stored specifications instead is the opposite
+    # error: `backtest_config.metadata.preset_path` is an absolute filesystem path that
+    # differs between a host and a Docker run, which is exactly why the registry excludes it
+    # from the backtest hash (`specs.py:_HASH_EXCLUDED_METADATA`). Comparing it here would
+    # report one computation as two strategies.
     #
-    # Two fields are removed first, and only two. Both of them *name the prediction set the
-    # backtest consumed*, so they cannot agree between a validation run and a holdout run and
-    # would make every comparison fail for the one reason that carries no information:
-    # `input_identity` at the top level, and `backtest_config.metadata.prediction_hash`
-    # nested inside it. Nothing else is dropped - `metadata` also carries `chapter`,
-    # `fill_timing`, `cadence` and `preset_path`, and those are compared.
-    def _comparable_spec(spec: dict) -> dict:
+    # So the comparison is the registry's own identity projection: hash both specifications
+    # through `backtest_hash_from_parts`, which applies that projection, against the *same*
+    # placeholder prediction hash on each side. Substituting one placeholder is what removes
+    # the prediction identity from the comparison without removing anything else - and the
+    # prediction identity has to go, because it cannot agree between a validation run and a
+    # holdout run and would sink every comparison for the one reason that carries no
+    # information. The two places the stored spec still names it are stripped for the same
+    # reason: `input_identity`, and `backtest_config.metadata.prediction_hash`.
+    _PREDICTION_PLACEHOLDER = "0" * 12
+
+    def _strategy_identity(spec: dict) -> str:
         pruned = {k: v for k, v in spec.items() if k != "input_identity"}
         config = dict(pruned.get("backtest_config") or {})
         if "metadata" in config:
@@ -1001,15 +1009,20 @@ if _sealed:
                 k: v for k, v in config["metadata"].items() if k != "prediction_hash"
             }
             pruned["backtest_config"] = config
-        return pruned
+        return backtest_hash_from_parts(_PREDICTION_PLACEHOLDER, pruned)
 
-    _sealed_comparable = _comparable_spec(json.loads(_row[5]))
-    _carrier_comparable = _comparable_spec(CARRIER_BACKTEST_SPEC)
-    STRATEGY_MATCHES = _sealed_comparable == _carrier_comparable
-    _strategy_differs_on = sorted(
-        key
-        for key in set(_sealed_comparable) | set(_carrier_comparable)
-        if _sealed_comparable.get(key) != _carrier_comparable.get(key)
+    _sealed_identity = _strategy_identity(json.loads(_row[5]))
+    _carrier_identity = _strategy_identity(CARRIER_BACKTEST_SPEC)
+    STRATEGY_MATCHES = _sealed_identity == _carrier_identity
+    # Only meaningful when they differ; the identities above are what decides.
+    _strategy_differs_on = (
+        []
+        if STRATEGY_MATCHES
+        else sorted(
+            key
+            for key in set(json.loads(_row[5])) | set(CARRIER_BACKTEST_SPEC)
+            if json.loads(_row[5]).get(key) != CARRIER_BACKTEST_SPEC.get(key)
+        )
     )
 else:
     sealed_holdout = None
@@ -1033,6 +1046,14 @@ IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINI
 # `created_at` minus `elapsed_s`. Both of the derivation's error terms push the true start
 # earlier - `elapsed_s` measures the fit rather than the whole cell, and `created_at` is the
 # write that follows it - so the derived start is an upper bound on when work began.
+# Only a recorded start can establish this, and the reason is worth stating because the
+# derivation below looks like it could substitute for one and cannot. `created_at` minus
+# `elapsed_s` is an *upper* bound on when the fit began: both of its error terms push the
+# true start earlier. An upper bound can show that work began before some instant; it can
+# never show that work began after one. So `lock < derived_start` would not prove the lock
+# came first - the real start may sit anywhere earlier, including before the lock - and
+# treating it as proof would let a spent holdout read as sealed. With `started_at` NULL the
+# seal is unproven, and that is the answer, not a missing one.
 SEALED_BEFORE_SPENT = False
 SEAL_BASIS = "no sealed holdout to check"
 if sealed_holdout and sealed_holdout["lock_taken_at"]:
@@ -1041,8 +1062,13 @@ if sealed_holdout and sealed_holdout["lock_taken_at"]:
         SEALED_BEFORE_SPENT = _lock_at < pd.Timestamp(HOLDOUT_TRAINING_STARTED_AT)
         SEAL_BASIS = "training_runs.started_at, recorded"
     elif HOLDOUT_TRAINING_DERIVED_START is not None:
-        SEALED_BEFORE_SPENT = _lock_at < HOLDOUT_TRAINING_DERIVED_START
-        SEAL_BASIS = "derived from created_at - elapsed_s; started_at is NULL"
+        # Reported, never credited. It happens to fall before the lock here, which is
+        # evidence against the seal rather than for it, but the verdict does not rest on it.
+        SEAL_BASIS = (
+            "unproven - started_at is NULL, and created_at - elapsed_s bounds the start from "
+            "above only, which cannot show the run started after the lock; that bound falls "
+            f"{'before' if _lock_at > HOLDOUT_TRAINING_DERIVED_START else 'after'} the lock"
+        )
     else:
         SEAL_BASIS = "unprovable: no started_at and no elapsed_s on the holdout training run"
 
@@ -1070,12 +1096,21 @@ if sealed_holdout is not None:
         f"{CHECKPOINT_MATCHES}"
     )
     print(f"Lineage finalized by finalize_holdout: {LOCK_FINALIZED}")
+    # "began" is only said where a start was recorded. Where it was derived, the label is
+    # the bound, because calling an upper bound a start time is the whole error this check
+    # was rebuilt to remove.
+    if HOLDOUT_TRAINING_STARTED_AT is not None:
+        _when = f"holdout fit began {HOLDOUT_TRAINING_STARTED_AT}"
+    elif HOLDOUT_TRAINING_DERIVED_START is not None:
+        _when = f"holdout fit began no later than {HOLDOUT_TRAINING_DERIVED_START}"
+    else:
+        _when = "holdout fit start unrecorded"
     print(
-        f"Lock taken {sealed_holdout['lock_taken_at']}; holdout fit began "
-        f"{HOLDOUT_TRAINING_STARTED_AT or HOLDOUT_TRAINING_DERIVED_START} "
-        f"({SEAL_BASIS}); holdout row written {sealed_holdout['holdout_written_at']}"
+        f"Lock taken {sealed_holdout['lock_taken_at']}; {_when}; holdout row written "
+        f"{sealed_holdout['holdout_written_at']}"
     )
-    print(f"Lock predates the holdout run: {SEALED_BEFORE_SPENT}")
+    print(f"Seal basis: {SEAL_BASIS}")
+    print(f"Lock shown to predate the holdout run: {SEALED_BEFORE_SPENT}")
 pl.DataFrame([sealed_holdout] if sealed_holdout else [])
 
 # %%
@@ -1106,13 +1141,30 @@ print(f"Substantive identity divergence: {SUBSTANTIVE_DIVERGENCE or 'none'}")
 # accounted for, and it is empty: the model specification, the label artifact, the feature
 # names and the validation CV identity the selection was made on are the same.
 #
-# The seal itself held. The lock was taken before the holdout prediction was written, under
-# the training hash the lock itself names, so the window was not open when the selection was
-# made. That is the property `us_firm_characteristics` cannot demonstrate - it spent its
-# holdout with no lock at all (#985) - and it is why the sealed number below is reportable
-# at all rather than merely present.
+# The seal cannot be shown to have held, and getting that right took two passes. The first
+# compared the lock against `prediction_sets.created_at` and concluded it held. That proves
+# nothing: `created_at` is the registration write and lands after the fit returns, so a lock
+# taken at any point during a run already in progress still precedes it. The question is when
+# the run began.
 #
-# One thing the seal does not establish. `research_locks` still reads `LOCKED` rather than
+# `training_runs.started_at` is the field that answers it, and it is NULL on this lineage.
+# Nothing else in the registry substitutes. `created_at` minus `elapsed_s` is the obvious
+# candidate and it does not work, for a reason worth stating exactly: both of its error terms
+# push the true start earlier, so it bounds the start from *above*. An upper bound can show
+# work began before some instant; it can never show work began after one, which is the
+# direction a seal needs. Reading `lock < derived_start` as proof would let a holdout that
+# was already running when its lock was written read as properly sealed.
+#
+# Here that bound falls about ten seconds before the lock, which is evidence against the seal
+# rather than for it, and it is printed above for that reason. The verdict rests on neither
+# side of it: with `started_at` NULL the ordering is unproven, and unproven is the answer.
+#
+# What this is not. It is not evidence the holdout was visible during selection - the run is a
+# retrain on pre-holdout data of a selection already fixed. It is that the registry cannot
+# demonstrate the ordering the seal exists to guarantee, and a seal nothing can check is not
+# doing the work a seal is for.
+#
+# A second thing nothing establishes. `research_locks` still reads `LOCKED` rather than
 # `HOLDOUT_EVALUATED`, and `holdout_evaluations` holds no row for it, so `finalize_holdout`
 # never ran and nothing outside this notebook has validated that the training, prediction and
 # backtest hashes belong together. The pairing above is read from the lock's own declaration.
@@ -1226,6 +1278,7 @@ assessment = pl.DataFrame(
                 and STRATEGY_MATCHES
                 and VALIDATION_CV_MATCHES
                 and SEALED_BEFORE_SPENT
+                and LOCK_FINALIZED
                 and not SUBSTANTIVE_DIVERGENCE
                 else "INCONCLUSIVE"
             ),
