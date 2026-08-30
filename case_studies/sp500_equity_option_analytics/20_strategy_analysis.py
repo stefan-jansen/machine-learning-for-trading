@@ -577,11 +577,23 @@ risk_leader = risk_candidates.sort("sharpe", descending=True).row(0, named=True)
 carrier_baselines = baseline_pool.filter(
     pl.col("prediction_hash") == strategy_carrier["prediction_hash"]
 )
-if carrier_baselines.is_empty():
-    raise RuntimeError(
-        f"No equal-weight baseline row for carrier prediction {strategy_carrier['prediction_hash']}"
+# The equal-weight starting point is the first step of the funnel, and it is a fact about the
+# run rather than about the configuration: 14_backtest registers a baseline per prediction and
+# entry scheme it actually swept, and a reduced sweep registers fewer. Where this carrier's
+# prediction has none, the funnel starts at the allocation step instead - which is the truth
+# about what was measured, and better than refusing to report the rest of the page over a step
+# that was never run.
+baseline_row = (
+    carrier_baselines.sort("sharpe", descending=True).row(0, named=True)
+    if not carrier_baselines.is_empty()
+    else None
+)
+if baseline_row is None:
+    print(
+        f"No equal-weight baseline was registered for carrier prediction "
+        f"{strategy_carrier['prediction_hash']}, so the funnel below starts at the allocation "
+        "step and no equal-weight comparison is shown"
     )
-baseline_row = carrier_baselines.sort("sharpe", descending=True).row(0, named=True)
 
 # %% [markdown]
 # The visible carrier path retains the equal-weight starting point, the
@@ -589,17 +601,21 @@ baseline_row = carrier_baselines.sort("sharpe", descending=True).row(0, named=Tr
 # validation.
 
 # %%
-carrier_rows = [
-    {
-        "stage": "Equal weight",
-        "backtest_hash": baseline_row["backtest_hash"],
-        "sharpe": baseline_row["sharpe"],
-    }
-]
+carrier_rows = (
+    [
+        {
+            "stage": "Equal weight",
+            "backtest_hash": baseline_row["backtest_hash"],
+            "sharpe": baseline_row["sharpe"],
+        }
+    ]
+    if baseline_row is not None
+    else []
+)
 # The allocation step is the un-overlaid parent. Where the carrier is itself an overlay the two
 # differ, and naming the overlay here would show the allocation step already carrying the risk
 # rule's effect and then show the risk step adding nothing.
-if baseline_row["backtest_hash"] != NO_OVERLAY_HASH:
+if baseline_row is None or baseline_row["backtest_hash"] != NO_OVERLAY_HASH:
     carrier_rows.append(
         {
             "stage": strategy_carrier["allocator"],
@@ -783,10 +799,34 @@ with sqlite3.connect(REGISTRY_DB) as db:
     )
 cost_metrics = cost_metrics.with_columns(pl.col("backtest_hash").cast(pl.String))
 cost_surface = pl.DataFrame(cost_plans).join(cost_metrics, on="backtest_hash", how="inner")
-if len(cost_surface) != len(cost_plans):
+# Same direction as the risk surface above: nothing UNPLANNED may enter, and the declared grid
+# is a property of the configuration while what is registered is a property of the run.
+_planned_costs = {plan["backtest_hash"] for plan in cost_plans}
+with sqlite3.connect(REGISTRY_DB) as db:
+    _registered_costs = {
+        row[0]
+        for row in db.execute(
+            "SELECT backtest_hash FROM backtest_runs "
+            "WHERE prediction_hash = ? AND stage = 'cost_sensitivity'",
+            (strategy_carrier["prediction_hash"],),
+        )
+    }
+_unplanned_costs = _registered_costs - _planned_costs
+if _unplanned_costs:
     raise RuntimeError(
-        f"Expected {len(cost_plans)} cost rows for carrier "
-        f"{strategy_carrier['prediction_hash']}, found {len(cost_surface)}"
+        f"{len(_unplanned_costs)} cost row(s) on carrier "
+        f"{strategy_carrier['prediction_hash']} are not on the declared cost grid: "
+        + ", ".join(sorted(_unplanned_costs)[:5])
+    )
+if cost_surface.is_empty():
+    raise RuntimeError(
+        f"no declared cost level is registered for carrier "
+        f"{strategy_carrier['prediction_hash']}, so there is no cost surface to report"
+    )
+if len(cost_surface) != len(cost_plans):
+    print(
+        f"{len(cost_surface)} of {len(cost_plans)} declared cost levels are registered for this "
+        "carrier; the surface below covers those and says nothing about the rest"
     )
 if cost_surface.filter(pl.col("stage") != "cost_sensitivity").height:
     raise RuntimeError("A corrected cost hash has the wrong registry stage")
