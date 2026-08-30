@@ -439,13 +439,21 @@ def _infer_stage(
             # Registry not initialized yet — fall through to spec inference.
             pass
     strategy = spec.get("strategy", spec)
-    risk = strategy.get("risk", {})
-    if risk and risk.get("name") != "baseline":
-        return "risk_overlay"
-    # Cost sensitivity: explicit chapter tag of ch18, or caller should set explicitly
+    # The explicit chapter tag is read before the spec content, for the same reason the holdout
+    # split is read before either: a caller that says what a run is outranks anything inferred
+    # from what the run contains. A cost sweep re-prices a carrier without altering it, so when
+    # the carrier came from the risk stage the cloned spec still carries its risk block - and
+    # inferring from that block first would file every point of the cost curve as a new risk
+    # overlay, polluting the stage it was drawn from and leaving `stage='cost_sensitivity'` empty
+    # for the notebook that reads it back. No registered run has ever had both, because the cost
+    # sweeps only began drawing from `risk_overlay` when the stage order was fixed, so this
+    # decides a case that was previously unreachable rather than reclassifying an existing one.
     chapter = spec.get("chapter", "")
     if chapter == "ch18":
         return "cost_sensitivity"
+    risk = strategy.get("risk", {})
+    if risk and risk.get("name") != "baseline":
+        return "risk_overlay"
     if "allocation" in strategy:
         alloc = strategy["allocation"]
         if isinstance(alloc, dict) and alloc.get("method", "equal_weight") != "equal_weight":

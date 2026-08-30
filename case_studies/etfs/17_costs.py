@@ -55,6 +55,7 @@
 """Re-price the leading ETF allocation combinations across two cost-model grids."""
 
 import json
+import sqlite3
 import time
 import warnings
 
@@ -304,6 +305,15 @@ print(f"Prices: {len(prices):,} rows, {prices['symbol'].n_unique()} tradeable fu
 SWEPT_COST_HASHES: set[str] = set()
 
 
+def _stage_of(backtest_hash: str) -> str | None:
+    """The stage one backtest was actually registered under, read back from the registry."""
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as conn:
+        row = conn.execute(
+            "SELECT stage FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,)
+        ).fetchone()
+    return None if row is None else row[0]
+
+
 def sweep_costs(regime: str, grid, apply_costs) -> tuple[int, list[dict]]:
     """Re-price every leading combination at every level of one cost grid.
 
@@ -395,6 +405,25 @@ ps_done, ps_failures = sweep_costs(
         spec, per_share=PER_SHARE_COMMISSION, default_half_spread_usd=level
     ),
 )
+
+# %%
+# Every hash this sweep registered has to have landed at `cost_sensitivity`. It is checked rather
+# than assumed because the stage is inferred from the spec, and the spec being priced is a clone of
+# the carrier's - so a carrier from the risk stage brings its risk block along, and an inference
+# that read that block before the chapter tag would file the whole curve as new risk overlays. The
+# readback below would then report an empty stage, which points at the sweep rather than at the
+# classification. This names it.
+_misfiled = {
+    _hash: _stage
+    for _hash, _stage in ((_hash, _stage_of(_hash)) for _hash in sorted(SWEPT_COST_HASHES))
+    if _stage != "cost_sensitivity"
+}
+if _misfiled:
+    raise RuntimeError(
+        f"{len(_misfiled)} of {len(SWEPT_COST_HASHES)} cost-sweep backtests were registered "
+        f"under the wrong stage, e.g. {sorted(_misfiled.items())[:3]}; they carry chapter='ch18' "
+        "so `registry.store._infer_stage` should classify them as cost_sensitivity"
+    )
 
 # %%
 failures = bps_failures + ps_failures

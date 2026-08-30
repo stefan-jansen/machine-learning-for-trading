@@ -94,6 +94,31 @@ def test_backtest_hash_changes_with_resolved_config() -> None:
     )
 
 
+def test_a_cost_sweep_over_a_risk_overlaid_carrier_stays_cost_sensitivity() -> None:
+    """The chapter tag outranks the risk block, or the cost curve files itself as risk overlays.
+
+    A cost sweep re-prices a carrier without altering it, so a carrier selected from the risk
+    stage arrives here with its risk block intact and `chapter="ch18"` added. Inferring from the
+    block first filed every point of the curve as a new `risk_overlay` run - polluting the stage
+    the carrier was drawn from, and leaving `stage='cost_sensitivity'` empty for the notebook that
+    reads the curve back. Unreachable until `etfs/17_costs` began pooling `risk_overlay`.
+    """
+    spec = {
+        "version": 2,
+        "chapter": "ch18",
+        "strategy": {
+            "signal": {"method": "equal_weight_top_k", "top_k": 10},
+            "rebalance": {"mode": "engine", "cadence": "monthly_month_end"},
+            "risk": {"name": "trailing", "position_rules": [{"type": "trailing_stop"}]},
+        },
+        "backtest_config": {"commission": {"rate": 0.0006}, "slippage": {"rate": 0.0004}},
+    }
+
+    assert _infer_stage(spec) == "cost_sensitivity"
+    # The block is still there - it is the carrier being priced, not something to strip.
+    assert strategy_view(spec)["risk"]["name"] == "trailing"
+
+
 def test_stage_inference_supports_v2_specs() -> None:
     spec = {
         "version": 2,
