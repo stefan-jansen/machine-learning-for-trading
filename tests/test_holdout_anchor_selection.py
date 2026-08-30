@@ -10,6 +10,10 @@ import pytest
 
 from case_studies.utils import paired_metrics
 
+#: A training spec whose own CV declares the holdout fold - what a refit for the holdout looks
+#: like, and what `training_run_fitted_for_the_holdout` reads.
+HOLDOUT_REFIT_SPEC = json.dumps({"computation": {"cv": {"split": "holdout"}}})
+
 
 def _registry(tmp_path: Path, rows) -> Path:
     """``rows`` are (prediction_hash, training_hash, config_name, backtest_hash, sharpe)."""
@@ -20,8 +24,15 @@ def _registry(tmp_path: Path, rows) -> Path:
         "CREATE TABLE prediction_sets (prediction_hash TEXT, training_hash TEXT, split TEXT, "
         "checkpoint_kind TEXT, checkpoint_value INTEGER)"
     )
+    # `spec_json` is not decoration: `_holdout_lineage_for` reads each candidate's own CV out
+    # of it and drops any run that does not declare the holdout fold, because a model fitted on
+    # the validation folds can publish predictions over the holdout window and is not a holdout
+    # result whatever its Sharpe. Every row here is a genuine refit, so the filter admits them
+    # all and these cases go on testing what they are about - which of several refits is chosen,
+    # and on what.
     db.execute(
-        "CREATE TABLE training_runs (training_hash TEXT, family TEXT, config_name TEXT, label TEXT)"
+        "CREATE TABLE training_runs (training_hash TEXT, family TEXT, config_name TEXT, "
+        "label TEXT, spec_json TEXT)"
     )
     db.execute(
         "CREATE TABLE backtest_runs (backtest_hash TEXT, prediction_hash TEXT, stage TEXT, "
@@ -42,8 +53,8 @@ def _registry(tmp_path: Path, rows) -> Path:
             (prediction_hash, training_hash, "holdout", "epoch", 50),
         )
         db.execute(
-            "INSERT INTO training_runs VALUES (?,?,?,?)",
-            (training_hash, "gbm", config_name, "fwd_ret_21d"),
+            "INSERT INTO training_runs VALUES (?,?,?,?,?)",
+            (training_hash, "gbm", config_name, "fwd_ret_21d", HOLDOUT_REFIT_SPEC),
         )
         db.execute(
             "INSERT INTO backtest_runs VALUES (?,?,?,?)",
