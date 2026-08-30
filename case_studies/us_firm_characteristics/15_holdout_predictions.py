@@ -147,12 +147,9 @@ print(f"  trains  {fold['train_start']} -> {fold['train_end']}")
 print(f"  predicts {fold['val_start']} -> {fold['val_end']}")
 print(f"  label buffer: {holdout_spec['computation']['cv']['request']['label_buffer']}")
 
-# %% [markdown]
 # The validation folds are what the buffer is measured against, and the last of them ends
 # before the holdout opens. Printing both is what lets a reader check the gap rather than
 # take it on the derivation's word.
-
-# %% tags=["results"]
 validation_folds = validation_spec["computation"]["cv"]["folds"]
 latest_validation_end = max(str(entry["val_end"]) for entry in validation_folds)
 print(f"Validation folds: {len(validation_folds)}, latest evaluation end {latest_validation_end}")
