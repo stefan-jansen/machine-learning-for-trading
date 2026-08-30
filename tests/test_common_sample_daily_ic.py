@@ -3,6 +3,7 @@
 from datetime import date
 
 import polars as pl
+import pytest
 
 from case_studies.utils.model_analysis import common_sample_daily_ic
 
@@ -64,11 +65,37 @@ def test_disjoint_sets_yield_no_comparison():
 
 
 def test_single_entity_dates_are_dropped():
-    """One entity on a date carries no cross-sectional correlation."""
+    """One entity on a date carries no cross-sectional correlation, and is not counted.
+
+    The count describes the dates every mean was taken over, not the dates the keys had in
+    common. Reporting the second while the first is empty is how a comparison computed on
+    nothing gets published with a sample size beside it.
+    """
     one = _frame(_rows([1], ["A"], lambda d, i: 1.0))
-    ics, n_dates, _ = common_sample_daily_ic({"only": one})
-    assert n_dates == 1
+    ics, n_dates, n_rows = common_sample_daily_ic({"only": one})
     assert ics["only"] != ics["only"]  # NaN: no date survived the >= 2 entity filter
+    assert (n_dates, n_rows) == (0, 0)
+
+
+def test_a_date_undefined_for_one_model_is_dropped_for_all():
+    """The second intersection: constant scores make a date undefined, for every model.
+
+    `flat` scores every entity identically on 2020-01-02, so its rank correlation there is
+    undefined while `sloped`'s is not. Dropping that date only from `flat` would leave the two
+    means taken over different samples - the exact difference this function removes by
+    intersecting the keys - so it is dropped from both, and the reported counts follow it.
+    """
+
+    def _score(day, i):
+        return 0.0 if day == 2 else float(i)
+
+    flat = _frame(_rows([1, 2, 3], ["A", "B", "C"], _score))
+    sloped = _frame(_rows([1, 2, 3], ["A", "B", "C"], lambda d, i: float(i)))
+    ics, n_dates, n_rows = common_sample_daily_ic({"flat": flat, "sloped": sloped})
+    assert n_dates == 2  # 2020-01-01 and 2020-01-03; the middle date is undefined for `flat`
+    assert n_rows == 6  # three entities on each of the two surviving dates
+    assert ics["flat"] == pytest.approx(1.0)
+    assert ics["sloped"] == pytest.approx(1.0)
 
 
 # --- one registry, two conventions for the same trading day -------------------------

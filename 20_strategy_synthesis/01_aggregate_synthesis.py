@@ -235,32 +235,19 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 _NO_LIVE_HOLDOUT = "\x00no-live-holdout"
 
 
-def _locked_holdout_training_hash(db: sqlite3.Connection, cs: str) -> str | None:
-    """The holdout run this study's research lock names, if it has taken one.
+def _locked_holdout_prediction(db: sqlite3.Connection, cs: str) -> str | None:
+    """The holdout prediction set this study may report, from the shared resolver.
 
-    The lock seals a validation carrier before the holdout is touched and records both sides,
-    so it - not the holdout training spec, which carries nothing about its origin - is what
-    connects a retrain to the carrier it came from. A unique index makes it a singleton,
-    because the holdout is used once.
+    Both this notebook and `populate_paired_metrics` write `backtest_paired_metrics`, so they
+    have to agree on which holdout is this study's; two copies of the rule would let a Chapter
+    20 run overwrite the case study's pairs with a different lineage. The resolver lives with
+    that producer and is imported here rather than restated - including the part that matters
+    most, that the lock's `holdout_training_hash` is what was expected and
+    `holdout_evaluations` is what was produced.
     """
-    try:
-        row = db.execute(
-            "SELECT lock_json FROM research_locks ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table" not in str(error):
-            raise
-        return None
-    if not row:
-        return None
-    lock = json.loads(row[0])
-    # A lock is immutable and the carrier it sealed can be superseded afterwards, leaving the
-    # lock naming a generation the study no longer publishes. Its holdout evaluates that
-    # generation, so it is not this study's holdout any more.
-    carrier = lock.get("prediction_hash")
-    if carrier is not None and carrier in _retired(cs):
-        return _NO_LIVE_HOLDOUT
-    return lock.get("holdout_training_hash")
+    from case_studies.utils.paired_metrics import locked_holdout_prediction
+
+    return locked_holdout_prediction(db, cs)
 
 
 def _retired(cs: str) -> frozenset[str]:
@@ -1403,11 +1390,11 @@ def _holdout_lineage_for(
         # Pin to the holdout the research lock names. Without it these queries rank by the
         # holdout's own Sharpe, which chooses the evaluation by its result and is how a
         # holdout descended from a retired carrier takes the slot.
-        locked_holdout = _locked_holdout_training_hash(db, cs)
+        locked_holdout = _locked_holdout_prediction(db, cs)
         if locked_holdout == _NO_LIVE_HOLDOUT:
             return None
         if locked_holdout is not None:
-            clauses.append("p.training_hash = ?")
+            clauses.append("p.prediction_hash = ?")
             params.append(locked_holdout)
             where_sql = " AND ".join(clauses)
         # Same-lineage preference: when the caller knows the validation rank-1's
@@ -2080,12 +2067,13 @@ def query_holdout_rows():
         db = sqlite3.connect(str(db_path))
         # The same holdout the paired metrics resolve to, so the reader-facing row and the
         # comparison behind it describe one evaluation rather than two.
-        _locked = _locked_holdout_training_hash(db, cs)
+        _locked = _locked_holdout_prediction(db, cs)
         if _locked == _NO_LIVE_HOLDOUT:
-            # The lock's carrier was superseded, so this study has no holdout to report.
+            # No holdout this study can report: the lock's carrier was superseded, the lock
+            # never reached HOLDOUT_EVALUATED, or its evaluation row never landed.
             clauses.append("1 = 0")
         elif _locked is not None:
-            clauses.append("p.training_hash = ?")
+            clauses.append("p.prediction_hash = ?")
             params.append(_locked)
         where_sql = " AND ".join(clauses)
 

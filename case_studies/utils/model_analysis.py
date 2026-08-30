@@ -1340,10 +1340,21 @@ def common_sample_daily_ic(
     carry a different cross-section in each. Comparing the stored ICs then measures the samples
     as much as the models.
 
-    This intersects on exact ``(entity, date)`` keys, recomputes the daily cross-sectional
-    Spearman correlation on what survives, and returns the mean per key alongside the number of
-    dates and rows the comparison rests on. Dates left with fewer than two entities carry no
-    cross-sectional correlation and are dropped.
+    This intersects on exact ``(entity, date)`` keys and recomputes the daily cross-sectional
+    Spearman correlation on what survives.
+
+    **Intersecting the keys is not sufficient, and the second intersection is why.** A date
+    whose scores are constant within one model has no cross-sectional correlation there - the
+    rank correlation is undefined, not zero - while the other models still have one. Dropping
+    those per model leaves each mean taken over a different set of dates, which is the sample
+    difference this function exists to remove, reintroduced one step later. So every model's
+    daily IC is computed first, the dates where **all** of them are defined are intersected, and
+    every mean is taken over that set. Dates with fewer than two entities are undefined for every
+    model at once and fall out of the same intersection.
+
+    The returned counts describe the same set. Reporting the key intersection instead would
+    overstate the comparison by however many dates the second intersection removed, which is
+    exactly the number a reader would need to judge it.
 
     Column names default to what :func:`load_predictions` returns (``y_score``, ``y_true``),
     which is the only supported source for these frames.
@@ -1367,10 +1378,11 @@ def common_sample_daily_ic(
     if common is None or common.is_empty():
         return {}, 0, 0
 
-    ics: dict[str, float] = {}
+    per_day: dict[str, pl.DataFrame] = {}
+    scored_dates: pl.DataFrame | None = None
     for name, frame in keyed.items():
         sample = frame.join(common, on=[entity_col, date_col])
-        per_day = (
+        daily = (
             sample.group_by(date_col)
             .agg(
                 pl.corr(
@@ -1378,7 +1390,23 @@ def common_sample_daily_ic(
                 ).alias("ic"),
                 pl.len().alias("n"),
             )
-            .filter((pl.col("n") >= 2) & pl.col("ic").is_not_null())
+            # Both spellings of undefined. `pl.corr` returns NaN, not null, when one side has
+            # no variance - a date whose scores are all equal - and `is_not_null()` is true of
+            # NaN, so filtering on nullity alone let those dates through and carried the NaN
+            # into the mean.
+            .filter((pl.col("n") >= 2) & pl.col("ic").is_not_null() & pl.col("ic").is_not_nan())
+            .select(date_col, "ic")
         )
-        ics[name] = float(per_day["ic"].mean()) if per_day.height else float("nan")
-    return ics, common.select(date_col).n_unique(), common.height
+        per_day[name] = daily
+        dates = daily.select(date_col)
+        scored_dates = dates if scored_dates is None else scored_dates.join(dates, on=date_col)
+
+    if scored_dates is None or scored_dates.is_empty():
+        return {name: float("nan") for name in keyed}, 0, 0
+
+    ics = {
+        name: float(daily.join(scored_dates, on=date_col)["ic"].mean())
+        for name, daily in per_day.items()
+    }
+    shared_rows = common.join(scored_dates, on=date_col)
+    return ics, scored_dates.height, shared_rows.height

@@ -543,43 +543,23 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
-        # The research lock is the authority on which holdout belongs to this case study.
-        # It seals a validation carrier before the holdout is touched and records both
-        # sides - ``prediction_hash`` and ``validation_backtest_hash`` for the carrier,
-        # ``holdout_training_hash`` for the run made from it - and a unique index makes it a
-        # singleton, because the holdout is used once. So the retrain's parent *is* recorded;
-        # it is recorded here rather than on the holdout training spec, which carries nothing
-        # about where it came from.
+        # The research lock is the authority on which holdout belongs to this case study: it
+        # seals a validation carrier before the holdout is touched, and a unique index makes it
+        # a singleton, because the holdout is used once. Pinning to it is what makes the choice
+        # determinate - without it the fallback below ranks by holdout Sharpe, which chooses
+        # the evaluation by its own result, and is how a holdout descended from a retired
+        # carrier takes the slot.
         #
-        # Restricting to that training hash is what makes the choice determinate. Without it
-        # the fallback below ranks by holdout Sharpe, which chooses the evaluation by its own
-        # result - the same-lineage branch above says as much, ordering by ``backtest_hash``
-        # "to keep the choice off holdout performance either way" - and is how a holdout
-        # descended from a retired carrier takes the slot.
-        try:
-            locked = db.execute(
-                "SELECT lock_json FROM research_locks ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-        except sqlite3.OperationalError as error:
-            if "no such table" not in str(error):
-                raise
-            locked = None
-        if locked is not None:
-            lock = json.loads(locked["lock_json"])
-            # A lock is immutable, and the carrier it sealed can be superseded afterwards -
-            # a later refit publishes a new generation and the lock goes on naming the old
-            # one. Its holdout then evaluates a configuration the study no longer publishes,
-            # and pinning to it would carry that into reader-facing metrics. The lock records
-            # the carrier, so this is checkable: no valid holdout exists for a superseded
-            # carrier, and the callers already treat None as "no holdout pair".
-            carrier = lock.get("prediction_hash")
-            if carrier is not None and carrier in _retired_prediction_hashes(cs):
-                return None
-            holdout_training_hash = lock.get("holdout_training_hash")
-            if holdout_training_hash:
-                clauses.append("p.training_hash = ?")
-                params.append(holdout_training_hash)
-                where_sql = " AND ".join(clauses)
+        # `locked_holdout_prediction` resolves the exact prediction set the evaluation
+        # finalized rather than the training hash the lock expected; see its docstring for why
+        # the two are not the same question.
+        pinned = locked_holdout_prediction(db, cs)
+        if pinned == NO_LIVE_HOLDOUT:
+            return None
+        if pinned is not None:
+            clauses.append("p.prediction_hash = ?")
+            params.append(pinned)
+            where_sql = " AND ".join(clauses)
 
         # Same-lineage preference: given the validation rank-1's own prediction
         # set, prefer a holdout sharing its trained model AND its checkpoint.
@@ -845,6 +825,65 @@ def _populate_pair(
         "info_ratio": paired.get("info_ratio"),
         "p_value": paired.get("p_value"),
     }
+
+
+NO_LIVE_HOLDOUT = "\x00no-live-holdout"
+
+
+def locked_holdout_prediction(db: sqlite3.Connection, cs: str) -> str | None:
+    """The one holdout prediction set this study may report, or why there is none.
+
+    Returns the ``holdout_prediction_hash`` to pin on; :data:`NO_LIVE_HOLDOUT` when a lock
+    exists but names no holdout this study can publish; ``None`` when no lock has been taken
+    at all, which leaves the caller's query unpinned as before.
+
+    **The lock's ``holdout_training_hash`` is what was expected, not what was produced.** It is
+    written when the carrier is sealed, before the retrain runs, and one training run registers
+    one prediction set per declared checkpoint - so pinning on it alone leaves several
+    candidates and the caller then picks among them by order. ``holdout_evaluations`` records
+    what the run actually finalized, ``holdout_prediction_hash`` and ``holdout_backtest_hash``,
+    keyed by the same ``lock_hash``. That is the row to resolve through, and its absence is
+    itself the answer: a lock whose evaluation never landed has no holdout to report, and
+    publishing the closest matching row would present an unfinished one as the result.
+
+    The state is checked for the same reason. Only ``HOLDOUT_EVALUATED`` means the sealed
+    carrier was actually taken to the holdout and the evaluation completed; anything earlier is
+    a lock in progress.
+
+    A lock is also immutable, and the carrier it sealed can be superseded afterwards - a later
+    refit publishes a new generation and the lock goes on naming the old one. Its holdout then
+    evaluates a configuration the study no longer publishes, so there is no live holdout either.
+    """
+    try:
+        row = db.execute(
+            "SELECT lock_hash, state, lock_json FROM research_locks ORDER BY created_at DESC "
+            "LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return None
+    if not row:
+        return None
+    lock_hash, state, lock_json = row[0], row[1], row[2]
+    lock = json.loads(lock_json)
+    carrier = lock.get("prediction_hash")
+    if carrier is not None and carrier in _retired_prediction_hashes(cs):
+        return NO_LIVE_HOLDOUT
+    if state != "HOLDOUT_EVALUATED":
+        return NO_LIVE_HOLDOUT
+    try:
+        evaluated = db.execute(
+            "SELECT holdout_prediction_hash FROM holdout_evaluations WHERE lock_hash = ?",
+            (lock_hash,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return NO_LIVE_HOLDOUT
+    if not evaluated or not evaluated[0]:
+        return NO_LIVE_HOLDOUT
+    return str(evaluated[0])
 
 
 def populate_paired_metrics(

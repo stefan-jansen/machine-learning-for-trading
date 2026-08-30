@@ -31,6 +31,11 @@ def _registry(tmp_path: Path, rows) -> Path:
     db.execute(
         "CREATE TABLE research_locks (lock_hash TEXT, lock_json TEXT, state TEXT, created_at TEXT)"
     )
+    db.execute(
+        "CREATE TABLE holdout_evaluations (lock_hash TEXT, holdout_training_hash TEXT, "
+        "holdout_prediction_hash TEXT, holdout_backtest_hash TEXT, fitted_state_digest TEXT, "
+        "evaluated_at TEXT)"
+    )
     for prediction_hash, training_hash, config_name, backtest_hash, sharpe in rows:
         db.execute(
             "INSERT INTO prediction_sets VALUES (?,?,?,?,?)",
@@ -94,7 +99,20 @@ def test_several_trained_models_refuse_rather_than_rank(monkeypatch, tmp_path) -
         _lineage()
 
 
-def _take_lock(case_dir: Path, holdout_training_hash: str, carrier: str = "carrier") -> None:
+def _take_lock(
+    case_dir: Path,
+    holdout_training_hash: str,
+    carrier: str = "carrier",
+    *,
+    state: str = "HOLDOUT_EVALUATED",
+    evaluated_prediction: str | None = "p1",
+) -> None:
+    """Seal a carrier, and optionally record the evaluation the retrain finalized.
+
+    ``holdout_training_hash`` is what the lock *expected*; ``evaluated_prediction`` is what the
+    run actually produced. They are separate arguments because the two can disagree, and the
+    resolver has to follow the second.
+    """
     db = sqlite3.connect(case_dir / "run_log" / "registry.db")
     db.execute(
         "INSERT INTO research_locks VALUES (?,?,?,?)",
@@ -103,10 +121,15 @@ def _take_lock(case_dir: Path, holdout_training_hash: str, carrier: str = "carri
             json.dumps(
                 {"holdout_training_hash": holdout_training_hash, "prediction_hash": carrier}
             ),
-            "LOCKED",
+            state,
             "2026-01-01",
         ),
     )
+    if evaluated_prediction is not None:
+        db.execute(
+            "INSERT INTO holdout_evaluations VALUES (?,?,?,?,?,?)",
+            ("lk", holdout_training_hash, evaluated_prediction, "bx", "digest", "2026-01-02"),
+        )
     db.commit()
     db.close()
 
@@ -125,6 +148,51 @@ def test_the_lock_names_the_holdout_even_when_another_scores_higher(monkeypatch,
     _install(monkeypatch, case_dir)
 
     assert _lineage()["backtest_hash"] == "b1"
+
+
+def test_the_evaluated_prediction_wins_over_the_expected_training_hash(
+    monkeypatch, tmp_path
+) -> None:
+    """The lock names what was expected; `holdout_evaluations` names what was produced.
+
+    One training run registers one prediction set per declared checkpoint, so the lock's
+    `holdout_training_hash` leaves several candidates and pinning on it alone lets the caller
+    pick among them by row order. Here `t1` carries two checkpoints and the evaluation names the
+    second, which is the one that must be reported however the other scores.
+    """
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b1", 9.9),
+            ("p2", "t1", "cfg_a", "b2", 0.1),
+        ],
+    )
+    _take_lock(case_dir, "t1", evaluated_prediction="p2")
+    _install(monkeypatch, case_dir)
+
+    assert _lineage()["backtest_hash"] == "b2"
+
+
+def test_a_lock_that_has_not_reached_the_holdout_yields_no_holdout(monkeypatch, tmp_path) -> None:
+    """Only HOLDOUT_EVALUATED means the sealed carrier was taken to the holdout and finished.
+
+    Anything earlier is a lock in progress, and reporting the closest matching row would
+    publish an unfinished evaluation as the result.
+    """
+    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
+    _take_lock(case_dir, "t1", state="HOLDOUT_LOCKED", evaluated_prediction=None)
+    _install(monkeypatch, case_dir)
+
+    assert _lineage() is None
+
+
+def test_a_lock_with_no_evaluation_row_yields_no_holdout(monkeypatch, tmp_path) -> None:
+    """The absence of the row is the answer, not a reason to fall back to matching by spec."""
+    case_dir = _registry(tmp_path, [("p1", "t1", "cfg_a", "b1", 0.4)])
+    _take_lock(case_dir, "t1", evaluated_prediction=None)
+    _install(monkeypatch, case_dir)
+
+    assert _lineage() is None
 
 
 def test_no_candidates_is_not_an_error(monkeypatch, tmp_path) -> None:
