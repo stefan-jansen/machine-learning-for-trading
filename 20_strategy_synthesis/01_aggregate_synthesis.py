@@ -231,6 +231,25 @@ _CLUSTER_RUNG_RESTRICTIONS: dict[str, dict[str, object]] = {
 }
 
 
+def _locked_holdout_training_hash(db: sqlite3.Connection) -> str | None:
+    """The holdout run this study's research lock names, if it has taken one.
+
+    The lock seals a validation carrier before the holdout is touched and records both sides,
+    so it - not the holdout training spec, which carries nothing about its origin - is what
+    connects a retrain to the carrier it came from. A unique index makes it a singleton,
+    because the holdout is used once.
+    """
+    try:
+        row = db.execute(
+            "SELECT lock_json FROM research_locks ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return None
+    return json.loads(row[0]).get("holdout_training_hash") if row else None
+
+
 def _retired(cs: str) -> frozenset[str]:
     """Identities a later generation retired, from the same helper `populate_paired_metrics`
     uses. Both write `backtest_paired_metrics`, so a disagreement here would let a Chapter 20
@@ -255,7 +274,14 @@ def _live_predictions(cs: str) -> list[str] | None:
     from case_studies.research.population import published_members_at
 
     published = published_members_at(get_case_study_dir(cs), member_kind="prediction")
-    return None if published is None else sorted(published)
+    if published is None:
+        return None
+    if not published:
+        # `best()` tests this argument for truthiness, so an empty list would read as "no
+        # filter" and rank everything. A study that declares populations and publishes
+        # nothing has nothing to report, which is a refusal rather than a wide-open ranking.
+        raise RuntimeError(f"{cs} declares populations but publishes no prediction identities")
+    return sorted(published)
 
 
 def _best_live(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
@@ -1361,6 +1387,14 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
+        # Pin to the holdout the research lock names. Without it these queries rank by the
+        # holdout's own Sharpe, which chooses the evaluation by its result and is how a
+        # holdout descended from a retired carrier takes the slot.
+        locked_holdout = _locked_holdout_training_hash(db)
+        if locked_holdout is not None:
+            clauses.append("p.training_hash = ?")
+            params.append(locked_holdout)
+            where_sql = " AND ".join(clauses)
         # Same-lineage preference: when the caller knows the validation rank-1's
         # training_hash, prefer a holdout that shares it. This pins val→holdout
         # decay to the same trained model rather than a same-spec but
@@ -1376,7 +1410,7 @@ def _holdout_lineage_for(
                                      AND b.stage IN ('signal','allocation','risk_overlay','holdout')
                 JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
                 WHERE {where_sql} AND p.training_hash = ?
-                ORDER BY bm.sharpe DESC NULLS LAST
+                ORDER BY b.backtest_hash
                 LIMIT 1
                 """,
                 params + [prefer_training_hash],
@@ -1394,7 +1428,7 @@ def _holdout_lineage_for(
                                  AND b.stage IN ('signal','allocation','risk_overlay','holdout')
             JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
+            ORDER BY b.backtest_hash
             LIMIT 1
             """,
             params,
@@ -2028,9 +2062,15 @@ def query_holdout_rows():
         spec_clauses, spec_params = _full_strategy_clauses(val_spec)
         clauses.extend(spec_clauses)
         params.extend(spec_params)
+        db = sqlite3.connect(str(db_path))
+        # The same holdout the paired metrics resolve to, so the reader-facing row and the
+        # comparison behind it describe one evaluation rather than two.
+        _locked = _locked_holdout_training_hash(db)
+        if _locked is not None:
+            clauses.append("p.training_hash = ?")
+            params.append(_locked)
         where_sql = " AND ".join(clauses)
 
-        db = sqlite3.connect(str(db_path))
         db.row_factory = sqlite3.Row
         optional = ", ".join(
             [
@@ -2064,7 +2104,7 @@ def query_holdout_rows():
             LEFT JOIN backtest_metrics bm
                 ON b.backtest_hash = bm.backtest_hash
             WHERE {where_sql}
-            ORDER BY bm.sharpe DESC NULLS LAST
+            ORDER BY b.backtest_hash
             LIMIT 1
             """,
             params,

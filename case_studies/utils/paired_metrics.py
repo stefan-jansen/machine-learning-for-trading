@@ -543,6 +543,34 @@ def _holdout_lineage_for(
     db = sqlite3.connect(str(db_path))
     db.row_factory = sqlite3.Row
     try:
+        # The research lock is the authority on which holdout belongs to this case study.
+        # It seals a validation carrier before the holdout is touched and records both
+        # sides - ``prediction_hash`` and ``validation_backtest_hash`` for the carrier,
+        # ``holdout_training_hash`` for the run made from it - and a unique index makes it a
+        # singleton, because the holdout is used once. So the retrain's parent *is* recorded;
+        # it is recorded here rather than on the holdout training spec, which carries nothing
+        # about where it came from.
+        #
+        # Restricting to that training hash is what makes the choice determinate. Without it
+        # the fallback below ranks by holdout Sharpe, which chooses the evaluation by its own
+        # result - the same-lineage branch above says as much, ordering by ``backtest_hash``
+        # "to keep the choice off holdout performance either way" - and is how a holdout
+        # descended from a retired carrier takes the slot.
+        try:
+            locked = db.execute(
+                "SELECT lock_json FROM research_locks ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            locked = None
+        if locked is not None:
+            holdout_training_hash = json.loads(locked["lock_json"]).get("holdout_training_hash")
+            if holdout_training_hash:
+                clauses.append("p.training_hash = ?")
+                params.append(holdout_training_hash)
+                where_sql = " AND ".join(clauses)
+
         # Same-lineage preference: given the validation rank-1's own prediction
         # set, prefer a holdout sharing its trained model AND its checkpoint.
         # Both are read from that one row here rather than accepted as separate
@@ -587,17 +615,9 @@ def _holdout_lineage_for(
                 if row:
                     return dict(row)
 
-        # The fallback used to take the highest holdout Sharpe. That chooses the evaluation
-        # by its own result, and the same-lineage branch above says so in as many words: it
-        # orders by ``backtest_hash`` "to keep the choice off holdout performance either
-        # way". The fallback has to answer to the same rule.
-        #
-        # It also has no way to prefer correctly. A holdout produced by the canonical retrain
-        # registers its own training hash and records nothing about the validation carrier it
-        # came from, so when the candidates span several trained models there is no ground
-        # for picking one - and picking the best-performing one is how a holdout descended
-        # from a retired carrier would win. Several lineages here is unresolvable, not a
-        # ranking problem, so it refuses; one lineage is unambiguous and is returned.
+        # No lock, or a lock that names no holdout run: several trained models here cannot be
+        # separated on anything the registry records, and picking the best-performing one is
+        # exactly the selection the lock exists to prevent. One lineage is unambiguous.
         rows = db.execute(
             f"""
             SELECT DISTINCT t.family, t.config_name, t.label,
@@ -620,9 +640,9 @@ def _holdout_lineage_for(
     if len(lineages) > 1:
         raise ValueError(
             f"{len(rows)} holdout backtests across {len(lineages)} trained models match the "
-            f"carrier spec for {cs}, and nothing records which validation carrier each was "
-            "retrained from. Choosing between them would rank the holdout on its own result. "
-            "Record the carrier on the holdout training run, or leave one lineage registered."
+            f"carrier spec for {cs}, and no research lock names which holdout run belongs to "
+            "this study. Choosing between them would rank the holdout on its own result. "
+            "Take the lock, which records the sealed carrier and the run made from it."
         )
     row = rows[0]
     return {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -27,6 +28,9 @@ def _registry(tmp_path: Path, rows) -> Path:
         "spec_json TEXT)"
     )
     db.execute("CREATE TABLE backtest_metrics (backtest_hash TEXT, sharpe REAL)")
+    db.execute(
+        "CREATE TABLE research_locks (lock_hash TEXT, lock_json TEXT, state TEXT, created_at TEXT)"
+    )
     for prediction_hash, training_hash, config_name, backtest_hash, sharpe in rows:
         db.execute(
             "INSERT INTO prediction_sets VALUES (?,?,?,?,?)",
@@ -88,6 +92,37 @@ def test_several_trained_models_refuse_rather_than_rank(monkeypatch, tmp_path) -
 
     with pytest.raises(ValueError, match="rank the holdout on its own result"):
         _lineage()
+
+
+def _take_lock(case_dir: Path, holdout_training_hash: str) -> None:
+    db = sqlite3.connect(case_dir / "run_log" / "registry.db")
+    db.execute(
+        "INSERT INTO research_locks VALUES (?,?,?,?)",
+        (
+            "lk",
+            json.dumps({"holdout_training_hash": holdout_training_hash}),
+            "LOCKED",
+            "2026-01-01",
+        ),
+    )
+    db.commit()
+    db.close()
+
+
+def test_the_lock_names_the_holdout_even_when_another_scores_higher(monkeypatch, tmp_path) -> None:
+    """The lock records the sealed carrier and the run made from it, so the choice is
+    determinate and never falls to the holdout's own Sharpe."""
+    case_dir = _registry(
+        tmp_path,
+        [
+            ("p1", "t1", "cfg_a", "b1", 0.4),
+            ("p2", "t2", "cfg_b", "b2", 9.9),
+        ],
+    )
+    _take_lock(case_dir, "t1")
+    _install(monkeypatch, case_dir)
+
+    assert _lineage()["backtest_hash"] == "b1"
 
 
 def test_no_candidates_is_not_an_error(monkeypatch, tmp_path) -> None:

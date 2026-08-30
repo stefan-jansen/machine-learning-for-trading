@@ -217,6 +217,10 @@ def select_best_models(
     # result, so an ineligible row consumes a slot and can hide a live candidate below it.
     # None when the registry declares no populations, which leaves the ranking as it was.
     published = published_members_at(get_case_study_dir(cs_id), member_kind="prediction")
+    if published is not None and not published:
+        # `best()` tests this for truthiness, so an empty list reads as "no filter" and would
+        # rank every registered row - the opposite of what an empty population means.
+        raise ValueError(f"{cs_id} declares populations but publishes no prediction identities")
     published = None if published is None else sorted(published)
     # Pull a generous pool from each stage so dedupe-by-prediction_hash
     # still yields top_n after the cross-stage merge. When ``labels``
