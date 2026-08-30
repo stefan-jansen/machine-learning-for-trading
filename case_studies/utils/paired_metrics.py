@@ -328,19 +328,54 @@ def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
 
 
 @cache
-def _retired_identities(cs: str) -> frozenset[str]:
-    """Prediction identities a later generation of their own population retired.
+def _retired_training_hashes(cs: str) -> frozenset[str]:
+    """Training runs a later generation of their own population replaced.
 
-    Imported lazily: ``case_studies.research`` imports this module's siblings, and a
-    module-level import closes the cycle.
+    Retirement is recorded per *prediction* identity, and a prediction identity includes its
+    split, so a retired validation hash never equals its holdout sibling and cannot filter it.
+    What the two sides share is the training run, which is what a refit actually replaces.
+
+    A training run is only retired when every prediction it registered is: a population that
+    moved three of a run's checkpoints and kept the rest has not replaced the run.
+
+    ``superseded_members_at`` rather than ``superseded_members``, because the latter takes a
+    ``Study`` and every ``Study.open`` branch ends in ``activate()``, which would re-point the
+    caller at a different registry - clearing ``ML4T_OUTPUT_DIR`` and answering for a registry
+    other than the one these queries read.
     """
-    from case_studies.research import Study, superseded_members
+    from case_studies.research.population import superseded_members_at
 
-    try:
-        return superseded_members(Study.open(cs), member_kind="prediction")
-    except Exception:
-        # A case study with no population lineage retires nothing.
+    case_dir = get_case_study_dir(cs)
+    db_path = case_dir / "run_log" / "registry.db"
+    if not db_path.exists():
         return frozenset()
+    retired = superseded_members_at(case_dir, member_kind="prediction")
+    if not retired:
+        return frozenset()
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        rows = db.execute(
+            "SELECT prediction_hash, training_hash, split FROM prediction_sets"
+        ).fetchall()
+    finally:
+        db.close()
+
+    # Decided within the split the retirement is recorded on. A model population lists
+    # validation identities, so a holdout sibling is never itself listed - counting it as
+    # evidence the run survived would cancel every retirement. Within that split, a run is
+    # replaced only when all of its predictions moved: a population that moved one checkpoint
+    # and kept another has not replaced the run.
+    per_split: dict[tuple[str, str], list[bool]] = {}
+    for prediction_hash, training_hash, split in rows:
+        per_split.setdefault((training_hash, split), []).append(prediction_hash in retired)
+    replaced: set[str] = set()
+    survived: set[str] = set()
+    for (training_hash, _split), flags in per_split.items():
+        if not any(flags):
+            continue
+        (replaced if all(flags) else survived).add(training_hash)
+    return frozenset(replaced - survived)
 
 
 def _val_rank1_full_spec(
@@ -440,7 +475,7 @@ def _holdout_lineage_for(
     label_restriction: frozenset[str] | None,
     rung: dict | None,
     prefer_prediction_hash: str | None = None,
-    retired_hashes: frozenset[str] | None = None,
+    retired_training_hashes: frozenset[str] | None = None,
 ) -> dict | None:
     """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
     for the highest-Sharpe holdout backtest registered in this case study,
@@ -479,12 +514,13 @@ def _holdout_lineage_for(
         else:
             clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
             params.append(rung["exit_at_max_days"])
-    if retired_hashes:
-        # The holdout carries its own prediction identities, so the caller's live validation
-        # list cannot scope this query. What crosses both splits is the lineage: an identity a
-        # later generation retired is not what its publisher publishes, on either side.
-        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
-        params.append(json.dumps(sorted(retired_hashes)))
+    if retired_training_hashes:
+        # The holdout carries its own prediction identities, so neither the caller's live
+        # validation list nor a retired validation hash can filter it - the identity includes
+        # the split, so the two never compare equal. The training run is what both sides share
+        # and what a refit replaces, so that is what this excludes.
+        clauses.append("t.training_hash NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(retired_training_hashes)))
     spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
     clauses.extend(spec_clauses)
     params.extend(spec_params)
@@ -958,7 +994,7 @@ def populate_paired_metrics(
         label_restriction=label_restriction,
         rung=rung,
         prefer_prediction_hash=leader_phash,
-        retired_hashes=_retired_identities(cs),
+        retired_training_hashes=_retired_training_hashes(cs),
     )
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
