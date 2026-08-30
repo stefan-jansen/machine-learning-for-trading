@@ -755,3 +755,99 @@ def test_a_reduced_fold_list_numbers_the_holdout_over_a_fold_that_still_exists()
     # The hazard, stated rather than described: the truncated list yields an id that one of
     # the folds it dropped still owns.
     assert reduced_id in canonical_ids
+
+
+# crypto_perps_funding's own grid: 8-hour settlements, tz-aware, which is what every
+# intraday case study's panel looks like. Built here rather than read off the artifact so
+# the test runs on a clean checkout.
+SETTLEMENTS = pd.date_range("2020-01-01 08:00", "2025-12-31 08:00", freq="8h", tz="UTC")
+
+CRYPTO_FOLDS = [
+    {
+        "fold": 0,
+        "train_start": "2021-01-01 00:00:00+00:00",
+        "train_end": "2022-12-31 08:00:00+00:00",
+        "val_start": "2023-01-01 00:00:00+00:00",
+        "val_end": "2023-12-31 08:00:00+00:00",
+    },
+    {
+        "fold": 1,
+        "train_start": "2020-01-02 00:00:00+00:00",
+        "train_end": "2021-12-31 08:00:00+00:00",
+        "val_start": "2022-01-01 00:00:00+00:00",
+        "val_end": "2022-12-31 16:00:00+00:00",
+    },
+]
+
+
+def test_an_intraday_panel_derives_its_holdout_rather_than_raising_on_the_comparison() -> None:
+    """The boundaries are dates and the observations are tz-aware moments.
+
+    `evaluation.holdout_start` is a date, so it parses tz-naive; an intraday panel carries
+    tz-aware stamps, and pandas refuses to compare the two rather than assuming a zone. The
+    derivation raised `Cannot compare tz-naive and tz-aware timestamps` before it computed
+    anything, which is why no tz-aware case study could produce a holdout fold at all. Every
+    daily case study escaped it because its panel is tz-naive.
+    """
+    declared = load_setup_config("crypto_perps_funding")["evaluation"]
+
+    cv = build_holdout_cv(
+        _validation_spec(label="fwd_ret_8h", folds=CRYPTO_FOLDS),
+        case_study="crypto_perps_funding",
+        timeline=SETTLEMENTS,
+        label="fwd_ret_8h",
+    )
+    fold = _fold(cv)
+
+    assert pd.Timestamp(fold["val_start"]).date() == pd.Timestamp(declared["holdout_start"]).date()
+    # The declared end is a date and the panel is 8-hourly, so the interval closes on the last
+    # settlement of that day rather than at its midnight - otherwise the two settlements after
+    # midnight are dropped from the window the holdout is evaluated over.
+    assert pd.Timestamp(fold["val_end"]) == SETTLEMENTS[-1]
+    assert pd.Timestamp(fold["val_end"]).date() == pd.Timestamp(declared["holdout_end"]).date()
+    # The buffer is the case study's widest - fwd_ret_24h at 24H, three settlements - and it is
+    # counted along the panel, so the boundary is a settlement rather than a calendar date.
+    assert cv["request"]["label_buffer_steps"] == 3
+    train_end = pd.Timestamp(fold["train_end"])
+    assert train_end.tzinfo is not None
+    pre_holdout = SETTLEMENTS[SETTLEMENTS.to_series().lt(pd.Timestamp("2024-01-01", tz="UTC"))]
+    assert train_end == pre_holdout[-4]
+    assert fold["fold"] == max(entry["fold"] for entry in CRYPTO_FOLDS) + 1
+
+
+def test_a_tz_naive_panel_hashes_exactly_as_it_did_before_the_zone_was_resolved() -> None:
+    """The two locks already taken were derived on daily panels and must not move.
+
+    `research_locks` holds one LOCKED row in fx_pairs and one in
+    sp500_equity_option_analytics, each pinning a `holdout_training_hash` computed from this
+    derivation. A change that reached a tz-naive panel would invalidate both, and there is no
+    release path - `lock()` raises on a different lock_hash and no unlock exists.
+    """
+    cv = build_holdout_cv(
+        _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+    )
+
+    assert _fold(cv) == {
+        "fold": 3,
+        "train_start": "2003-05-30",
+        "train_end": "2015-11-30",
+        "val_start": "2016-01-01",
+        "val_end": "2016-12-31",
+    }
+    # The identity is what the two locks pin, so it is asserted rather than left implied by
+    # the boundaries. Measured against the derivation as it stood before the zone was resolved.
+    assert cv["identity"] == "d4175e174c170bb8"
+
+
+def test_a_daily_panel_still_closes_its_holdout_on_the_declared_date() -> None:
+    """The widening is intraday-only, and the two live locks depend on that.
+
+    A daily panel's last observation of the declared end date is midnight of it, so the
+    boundary does not move and the fold renders exactly as it did.
+    """
+    cv = build_holdout_cv(
+        _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+    )
+
+    assert _fold(cv)["val_end"] == "2016-12-31"
+    assert cv["identity"] == "d4175e174c170bb8"

@@ -96,7 +96,7 @@ def test_an_unknown_candidate_set_is_refused_by_name(
     _install_fixture_adapter(monkeypatch, prices)
     _pin_derivation_to_the_fixture(monkeypatch, lock)
 
-    with pytest.raises(ValueError, match="resolved to 0 identities"):
+    with pytest.raises(ValueError, match="resolved to 0 unsuperseded identities"):
         evaluate_holdout(study, candidate_set_name="no-such-set", timeline=TIMELINE)
 
 
