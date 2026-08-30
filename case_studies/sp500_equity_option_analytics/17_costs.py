@@ -204,33 +204,35 @@ else:
             f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
             "validation backtests to rank, so there is no selection to carry forward"
         )
-    # The same eligibility the freeze applies. `CandidateSet.create` refuses partial members,
-    # so the frozen path cannot select an incomplete backtest; `resolve_best_backtest_runs`
-    # ranks on registered metrics and has no such filter, so without this the two paths choose
-    # from different fields and the fallback can pick a row whose artifacts are not all there.
-    # Walked in Sharpe order and stopped at the first complete row, so the usual case costs
-    # one open rather than one per candidate.
-    _ranked = _live.sort("sharpe", descending=True)
-    SELECTED = None
-    _skipped = []
-    for _row in _ranked.iter_rows(named=True):
-        _candidate = _study.results.open(_row["backtest_hash"])
-        _reason = _candidate.completeness()
+    # The same eligibility the freeze applies, to the whole field and not only to its top row.
+    # `CandidateSet.create` refuses partial members, so a frozen field is complete by
+    # construction and everything downstream may assume it; `resolve_best_backtest_runs` ranks
+    # on registered metrics and applies no such filter. Checking only the selection would leave
+    # the two fields different in exactly the way that matters to a reader of `FIELD_HASHES` -
+    # 20_strategy_analysis opens every member of it. So every candidate is checked, which costs
+    # one open per row on a path that runs only where no frozen set exists.
+    _complete: list[tuple[str, object]] = []
+    _incomplete: list[str] = []
+    for _row in _live.sort("sharpe", descending=True).iter_rows(named=True):
+        _result = _study.results.open(_row["backtest_hash"])
+        _reason = _result.completeness()
         if _reason is None:
-            SELECTED = _candidate
-            break
-        _skipped.append(f"{_row['backtest_hash']} ({_reason})")
-    if SELECTED is None:
+            _complete.append((_row["backtest_hash"], _result))
+        else:
+            _incomplete.append(f"{_row['backtest_hash']} ({_reason})")
+    if not _complete:
         raise RuntimeError(
-            f"all {_ranked.height} eligible validation backtests are incomplete, so there is "
-            "no selection to carry forward: " + "; ".join(_skipped[:5])
+            f"all {_live.height} eligible validation backtests are incomplete, so there is no "
+            "selection to carry forward: " + "; ".join(_incomplete[:5])
         )
-    if _skipped:
+    if _incomplete:
         print(
-            f"Skipped {len(_skipped)} higher-Sharpe row(s) whose artifacts are incomplete: "
-            + "; ".join(_skipped[:3])
+            f"Excluded {len(_incomplete)} incomplete backtest(s) from the field: "
+            + "; ".join(_incomplete[:3])
+            + ("" if len(_incomplete) <= 3 else f"; and {len(_incomplete) - 3} more")
         )
-    FIELD_HASHES = _ranked["backtest_hash"].to_list()
+    SELECTED = _complete[0][1]
+    FIELD_HASHES = [hash_ for hash_, _ in _complete]
     FIELD_NAME = "live ranking (no frozen set in this registry)"
     SELECTION_SOURCE = f"{FIELD_NAME} over {len(FIELD_HASHES)} eligible backtests"
 print(f"Selection read from the {SELECTION_SOURCE}")
