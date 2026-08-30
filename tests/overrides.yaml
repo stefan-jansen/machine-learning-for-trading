@@ -1592,19 +1592,33 @@ case_studies/etfs/12_causal_dml:
   timeout: 120
 case_studies/etfs/13_model_analysis:
   timeout: 300
+# MAX_SYMBOLS must stay ABOVE the smallest concentration etfs declares, which is 5
+# (`config/setup.yaml` backtest.sweep.top_k_grid: [5, 10, 20]). `get_entry_schemes_for` drops
+# every k at or above the traded universe - holding 5 of 5 funds is the equal-weight benchmark,
+# not a ranked selection - so at MAX_SYMBOLS 5 the whole grid is infeasible and the sweep
+# produced zero backtests. It reported that as "0 computed, 0 served, 0 failed", which reads
+# exactly like a re-run that found everything cached, and 15 through 18 then failed on the
+# absence four notebooks away from the cause. 14 now refuses an empty scheme list outright.
+#
+# TOP_K is gone with it. It named the plumbing test's concentration, and 2 is not in the
+# declared grid; worse, setting it at all skipped the notebook's own feasibility check, which
+# runs only when TOP_K is left at 0. Unset, the notebook takes the smallest feasible k.
+#
+# 15 through 17 take the same universe: they re-price and overlay 14's backtests, and a run
+# that loaded a different number of funds would be reading a price panel the registered
+# specifications were not built against.
 case_studies/etfs/14_backtest:
   parameters:
-    MAX_SYMBOLS: 5
-    TOP_K: 2
+    MAX_SYMBOLS: 6
   timeout: 600
 case_studies/etfs/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 6
     TOP_N_PREDICTIONS: 2
   timeout: 120
 case_studies/etfs/16_costs:
   parameters:
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 6
     TOP_N_COMBOS: 2
   timeout: 120
 case_studies/etfs/17_risk_management:
@@ -1616,7 +1630,7 @@ case_studies/etfs/17_risk_management:
   # only move the same cell back under a budget nobody had measured.
   parameters:
     MAX_RISK_VARIANTS: 2
-    MAX_SYMBOLS: 5
+    MAX_SYMBOLS: 6
     TOP_N_COMBOS: 2
   timeout: 120
 case_studies/etfs/18_strategy_analysis:

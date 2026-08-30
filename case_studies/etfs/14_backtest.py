@@ -289,6 +289,27 @@ for scheme in entry_schemes:
     print(f"  {scheme['name']}: {scheme['method']} (top_k={scheme.get('top_k', '-')})")
 print(f"Grid: {n_predictions} x {n_schemes} = {total_backtests} backtests")
 
+# A grid with no entry scheme is not an empty sweep, it is a sweep that cannot happen, and the
+# loop below completes over it in no time and reports "0 computed, 0 served, 0 failed" - a line
+# indistinguishable from a re-run where everything was already registered. Every downstream
+# notebook then fails on the absence instead, several stages away from the cause.
+#
+# `get_entry_schemes_for` drops any declared concentration at or above the traded universe,
+# because holding k of k funds is the equal-weight benchmark rather than a ranking. So a
+# universe reduced below the smallest declared k removes every scheme at once, which is what a
+# reduced run does when its symbol cap is set without reference to `backtest.sweep.top_k_grid`.
+#
+# The feasibility check above it fires only when `TOP_K` is left at 0, so a run that names a
+# concentration for the plumbing test skips it and reaches here with nothing to sweep. This one
+# is about the sweep and runs either way.
+if not entry_schemes:
+    raise RuntimeError(
+        f"no entry scheme is feasible for {CASE_STUDY_ID}/{LABEL}: every concentration declared "
+        f"in backtest.sweep.top_k_grid is at or above the {n_assets} funds this run trades, so "
+        "each of them would hold the whole universe rather than a ranked selection. Raise the "
+        "symbol cap above the smallest declared concentration, or declare a smaller one."
+    )
+
 # %% [markdown]
 # A backtest that raises is recorded with the reason it raised rather than as a bare count. A sweep
 # that failed on every row would otherwise report a number and no cause, which is indistinguishable
