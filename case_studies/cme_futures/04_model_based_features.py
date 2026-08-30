@@ -83,6 +83,7 @@ from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA
 from threadpoolctl import threadpool_limits
 
+from case_studies.research.holdout import build_holdout_cv
 from case_studies.utils.artifact_digest import value_digest, write_artifact
 from case_studies.utils.temporal import (
     filtered_state_probs,
@@ -339,12 +340,70 @@ splits = generate_cv_splits(
 if MAX_FOLDS > 0:
     splits = splits[:MAX_FOLDS]
 
+# The holdout fold, appended here rather than inferred downstream. A holdout fit needs
+# FEATURES, and a split definition is not one: the three models below are fitted per fold, so
+# a fold this file never wrote has no ARIMA forecast, no HMM regime probability and no residual
+# to join, and the retrain would fit on null columns for exactly the columns this notebook
+# exists to produce. Measured before this was added: 0 of 217,605 rows in the holdout window
+# carried a value for any of the four fitted columns.
+#
+# Its geometry is not invented here. `build_holdout_cv` is the one derivation of it, and the
+# same function reconstructs the fit downstream, so writing the fold and reading it cannot
+# disagree. Two boundaries in it are easy to get wrong and neither is the obvious reading:
+# `train_end` stops the WIDEST label buffer short of the holdout - cme declares 5D on
+# `fwd_ret_5d` and 21D on `fwd_ret_21d`, so the gap is 21 sessions, because one fold serves
+# both labels and a 5-session gap would let a 21-day model train on rows whose outcome window
+# reaches inside the holdout. And `train_start` is the EARLIEST validation fold's start, not
+# `splits[0]`'s: the folds run newest first, so indexing the list would hand the final fit the
+# shortest history in the set rather than the longest.
+#
+# The fold id is `max(validation fold) + 1` rather than 0. A holdout fold carrying an id a
+# validation fold already owns joins silently against that fold's features, which were fitted
+# on a window ending before the holdout opens - nothing raises and the number is simply wrong.
+_holdout_cv = build_holdout_cv(
+    {
+        "label": PRIMARY_LABEL,
+        "computation": {
+            "cv": {
+                "folds": [
+                    {
+                        "fold": int(split["fold"]),
+                        "train_start": str(split["train_start"]),
+                        "train_end": str(split["train_end"]),
+                        "val_start": str(split["val_start"]),
+                        "val_end": str(split["val_end"]),
+                    }
+                    for split in splits
+                ]
+            }
+        },
+    },
+    case_study=CASE_STUDY_ID,
+    timeline=label_frame.select("timestamp").unique().sort("timestamp").to_series().to_list(),
+    label=PRIMARY_LABEL,
+)
+_holdout_fold = _holdout_cv["folds"][0]
+HOLDOUT_FOLD_ID = int(_holdout_fold["fold"])
+assert HOLDOUT_FOLD_ID not in {int(split["fold"]) for split in splits}, (
+    "the derived holdout fold reuses a validation fold id, so its features would join "
+    "against a fold fitted on a window that ends before the holdout opens"
+)
+splits = [
+    *splits,
+    {
+        "fold": HOLDOUT_FOLD_ID,
+        **{k: _holdout_fold[k] for k in ("train_start", "train_end", "val_start", "val_end")},
+    },
+]
+
 
 def _as_date(value) -> date:
     return pd.Timestamp(value).date()
 
 
-HOLDOUT_START = _as_date(load_evaluation_config(CASE_STUDY_ID)["holdout_start"])
+_evaluation_config = load_evaluation_config(CASE_STUDY_ID)
+HOLDOUT_START = _as_date(_evaluation_config["holdout_start"])
+HOLDOUT_END = _as_date(_evaluation_config["holdout_end"])
 _sessions = df.select("timestamp").unique().sort("timestamp")["timestamp"].to_list()
 _pre_holdout = [d for d in _sessions if d < HOLDOUT_START]
 LAST_SCORABLE_DECISION_DATE = _pre_holdout[-(LABEL_HORIZON_SESSIONS + 1)]
@@ -390,17 +449,21 @@ print(
 # forward return is bounded by where its *parameters* came from, so emitting a value
 # **for** a holdout date from parameters estimated entirely before it is legitimate.
 #
-# **This file has no holdout vintage, and section E is where that shows.** The five
-# `fft_*` columns run to the end of the calendar, because a spectral window over past
-# prices needs no fit. The four that do need one do not: `_arima_walk` cuts its input at
-# `HOLDOUT_START` (C.1) and the hidden Markov model fits and emits within its own period
-# (C.3), so `arima_carry_forecast`, `arima_carry_residual`, `hmm_carry_regime_prob` and
-# `hmm_regime_duration` are null for every holdout-dated row. That is correct for the
-# validation artifact this notebook writes - none of those parameters may see a holdout
-# session - and it means a holdout retrain would fit four of its nine model-based columns
-# on nulls. Producing a holdout vintage is a separate run of this notebook against a
-# fitting window that ends at `HOLDOUT_START` and an emission window that runs past it;
-# it is not something a later stage can derive, and it is not done here.
+# **This file carries a holdout vintage, and section E is where it shows.** The five
+# `fft_*` columns run to the end of the calendar in every period, because a spectral window
+# over past prices needs no fit. The four that do need one are null across the holdout in
+# every VALIDATION period, and populated in the holdout period alone - which is the
+# distinction the whole design rests on. Each of the two models reaches it its own way, and
+# neither lets a parameter see a holdout session: ARIMA estimates once at the cutoff before
+# the window opens and rolls those frozen coefficients forward (C.1), and the hidden Markov
+# model estimates on its period's training window, which ends 21 sessions short of the
+# boundary, then runs the filter forward across the holdout (C.3).
+#
+# An earlier version of this paragraph said the vintage was not produced here and named
+# `append_holdout_fold_if_needed` as what would produce it. That function appends a split
+# definition and fits nothing, so nothing produced it and a holdout retrain would have fitted
+# four of its nine model-based columns on nulls. Measured then: 0 of 217,605 holdout-dated
+# rows carried any of the four.
 
 # %%
 fig = go.Figure()
@@ -647,9 +710,13 @@ def _date_lit(value) -> pl.Expr:
 
 
 # %%
-def _arima_one_product(payload: tuple[str, int, pd.DataFrame]) -> pd.DataFrame:
-    """Walk one product. Module level and picklable, because it runs in a worker process."""
-    _product, n_windows, series = payload
+def _arima_one_product(payload: tuple[str, int, pd.DataFrame, int | bool]) -> pd.DataFrame:
+    """Walk one product. Module level and picklable, because it runs in a worker process.
+
+    ``refit`` is the last element rather than a module constant because the holdout walk needs
+    ``False`` where the validation walk needs ``ARIMA_REFIT_FREQ``. See ``_arima_holdout_tail``.
+    """
+    _product, n_windows, series, refit = payload
     return StatsForecast(models=[AutoARIMA(season_length=1)], freq="B", n_jobs=1).cross_validation(
         df=pd.DataFrame(
             {
@@ -661,7 +728,7 @@ def _arima_one_product(payload: tuple[str, int, pd.DataFrame]) -> pd.DataFrame:
         h=1,
         step_size=1,
         n_windows=n_windows,
-        refit=ARIMA_REFIT_FREQ,
+        refit=refit,
     )
 
 
@@ -717,6 +784,7 @@ def _arima_walk() -> pl.DataFrame:
             history.filter(pl.col("product") == product)
             .select(["product", "timestamp", "carry_zscore"])
             .to_pandas(),
+            ARIMA_REFIT_FREQ,
         )
         for product, n_windows in jobs
     ]
@@ -756,15 +824,95 @@ def _arima_walk() -> pl.DataFrame:
 
 # %% [markdown]
 # One walk, then one copy per period. The period column exists so this artifact joins the
-# fold-keyed panel the model notebooks read; for this feature every period carries the same
-# value on the same date, which is the same shape `fft_pl` takes in C.2.
+# fold-keyed panel the model notebooks read; for the validation periods every one carries the
+# same value on the same date, which is the same shape `fft_pl` takes in C.2.
+#
+# **The holdout period is the exception, and it is why this section has a second walk.** The
+# walk above cuts its INPUT at `HOLDOUT_START`, which is the whole guarantee for the validation
+# periods and is also why copying it to the holdout period emits nothing there: a period is a
+# label on rows, and rows that were never computed do not appear because a fold id was attached
+# to them. Measured before this was added, with the holdout fold present: 0 of 217,605 rows in
+# the holdout window carried an ARIMA value.
+#
+# `_arima_holdout_tail` runs the same one-step walk across the holdout window with `refit=False`,
+# so `cross_validation` estimates once, at the cutoff immediately before the first holdout
+# session - on the pre-holdout history and nothing else - and then rolls forward applying those
+# frozen coefficients. Each forecast still conditions on realized carry strictly before its own
+# date, so the walk stays causal; what it does not do is re-estimate inside the holdout, because
+# a coefficient refitted on holdout sessions is a parameter estimated on the holdout however
+# causal the forecast around it looks. That is the distinction section A draws, applied here.
+
 
 # %%
+def _arima_holdout_tail(eligible: list[str]) -> pl.DataFrame:
+    """Forecasts across the holdout window from coefficients estimated entirely before it.
+
+    ``eligible`` is the product list the validation walk actually fitted, so the holdout period
+    covers exactly the products the validation periods cover rather than a set derived twice.
+    """
+    full = (
+        carry.filter(pl.col("product").is_in(eligible))
+        .drop_nulls(subset=["carry_zscore"])
+        .sort(["product", "timestamp"])
+    )
+    payloads = []
+    for product in sorted(eligible):
+        series = full.filter(pl.col("product") == product)
+        n_holdout = series.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START)).height
+        if n_holdout == 0:
+            # Delisted before the holdout opens. Named rather than dropped silently, for the
+            # same reason the burn-in exclusions above are named.
+            print(f"  no holdout sessions, so no holdout forecast: {product}")
+            continue
+        payloads.append(
+            (
+                product,
+                n_holdout,
+                series.select(["product", "timestamp", "carry_zscore"]).to_pandas(),
+                False,
+            )
+        )
+    if not payloads:
+        return arima_walk.clear()
+    workers = max(1, min(len(payloads), (os.cpu_count() or 2) - 1))
+    print(f"  holdout tail: {len(payloads)} products across {workers} processes", flush=True)
+    with ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("fork")
+    ) as pool:
+        frames = list(pool.map(_arima_one_product, payloads))
+    cv_pl = (
+        pl.from_pandas(pd.concat(frames, ignore_index=True))
+        .rename({"unique_id": "product", "ds": "timestamp"})
+        .with_columns(pl.col("timestamp").cast(pl.Date))
+    )
+    return (
+        cv_pl.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START))
+        .with_columns(
+            arima_carry_forecast=pl.col("AutoARIMA"),
+            arima_carry_residual=pl.col("y") - pl.col("AutoARIMA"),
+        )
+        .select(["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"])
+        .sort(["product", "timestamp"])
+    )
+
+
 arima_t0 = time.time()
 arima_walk = _arima_walk()
+arima_holdout = (
+    _arima_holdout_tail(arima_walk["product"].unique().to_list())
+    if arima_walk.height
+    else arima_walk.clear()
+)
+# The holdout period carries the validation walk's pre-holdout rows AND the frozen-coefficient
+# tail. Its training window ends before the holdout opens, so it needs those rows to train on,
+# and they are the same numbers every validation period carries on the same dates.
 arima_results = (
     [
-        arima_walk.with_columns(pl.lit(split["fold"], dtype=pl.Int64).alias("fold"))
+        (
+            pl.concat([arima_walk, arima_holdout])
+            if int(split["fold"]) == HOLDOUT_FOLD_ID
+            else arima_walk
+        ).with_columns(pl.lit(split["fold"], dtype=pl.Int64).alias("fold"))
         for split in splits
     ]
     if arima_walk.height
@@ -819,16 +967,38 @@ else:
 
 # %%
 if len(arima_pl) > 0:
-    assert arima_pl["timestamp"].max() < HOLDOUT_START, "ARIMA emitted a holdout-dated row"
     _feature_cols = ["timestamp", "product", "arima_carry_forecast", "arima_carry_residual"]
     folds_present = sorted(arima_pl["fold"].unique().to_list())
-    reference_fold = folds_present[0]
+    validation_folds = [f for f in folds_present if f != HOLDOUT_FOLD_ID]
+
+    # The date bound now holds per fold class rather than over the whole frame, because the two
+    # classes are supposed to differ. A validation period that reached the holdout would be the
+    # original defect; a holdout period that did NOT reach it is the defect this section was
+    # rewritten to fix, and asserting only the first would have passed on an empty holdout.
+    _validation = arima_pl.filter(pl.col("fold") != HOLDOUT_FOLD_ID)
+    assert _validation["timestamp"].max() < HOLDOUT_START, (
+        "a validation period emitted a holdout-dated row"
+    )
+    _holdout = arima_pl.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
+    _holdout_window = _holdout.filter(pl.col("timestamp") >= _date_lit(HOLDOUT_START))
+    assert _holdout_window.height > 0, (
+        f"period {HOLDOUT_FOLD_ID} is the holdout period and emitted nothing inside the holdout "
+        "window, so a holdout retrain would fit this column on nulls"
+    )
+    assert _holdout_window["arima_carry_forecast"].null_count() == 0, (
+        f"period {HOLDOUT_FOLD_ID} emitted holdout-dated rows carrying no forecast"
+    )
+    assert _holdout["timestamp"].max() <= HOLDOUT_END, (
+        "the holdout period emitted a row past the end of the holdout window"
+    )
+
+    reference_fold = validation_folds[0]
     reference = (
         arima_pl.filter(pl.col("fold") == reference_fold)
         .select(_feature_cols)
         .sort(["product", "timestamp"])
     )
-    for fold in folds_present[1:]:
+    for fold in validation_folds[1:]:
         other = (
             arima_pl.filter(pl.col("fold") == fold)
             .select(_feature_cols)
@@ -838,9 +1008,26 @@ if len(arima_pl) > 0:
             f"period {fold} disagrees with period {reference_fold} on a feature that is "
             "computed once and copied, so the copies have drifted"
         )
+    # The holdout period is the validation walk plus its own tail, so its pre-holdout rows must
+    # be identical to the copies - anything else means the two walks disagree about history.
+    _holdout_pre = (
+        _holdout.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START))
+        .select(_feature_cols)
+        .sort(["product", "timestamp"])
+    )
+    assert _holdout_pre.equals(reference), (
+        f"period {HOLDOUT_FOLD_ID} disagrees with the validation periods before the holdout "
+        "opens, so its tail was appended to a different history"
+    )
     print(
-        f"One walk, copied to {len(folds_present)} periods, which agree exactly; the last date "
-        f"emitted anywhere is {arima_pl['timestamp'].max()}, before the holdout opens on "
+        f"One walk, copied to {len(validation_folds)} validation periods, which agree exactly; "
+        f"the last date any of them emits is {_validation['timestamp'].max()}, before the "
+        f"holdout opens on {HOLDOUT_START}."
+    )
+    print(
+        f"Period {HOLDOUT_FOLD_ID} carries that same history plus {_holdout_window.height:,} "
+        f"forecasts from {_holdout_window['timestamp'].min()} to "
+        f"{_holdout_window['timestamp'].max()}, on coefficients estimated before "
         f"{HOLDOUT_START}."
     )
     print("Product-sessions carrying an ARIMA value, per period, in each window:")
@@ -1196,14 +1383,45 @@ held_carry = (
     .with_columns(pl.col("carry_pct").forward_fill(limit=HOLD_LAST_SETTLE_SESSIONS).over("product"))
 )
 
-portfolio_carry = (
-    held_carry.group_by("timestamp")
-    .agg(
-        pl.col("carry_pct").mean().alias("portfolio_carry"),
-        pl.col("carry_pct").is_not_null().sum().alias("products_in_basket"),
+
+def _portfolio_series(source: pl.DataFrame) -> pl.DataFrame:
+    """One carry observation per session, from a complete product grid with the hold applied."""
+    grid = source.select("timestamp").unique().join(source.select("product").unique(), how="cross")
+    held = (
+        grid.join(source, on=["product", "timestamp"], how="left")
+        .sort(["product", "timestamp"])
+        .with_columns(
+            pl.col("carry_pct").forward_fill(limit=HOLD_LAST_SETTLE_SESSIONS).over("product")
+        )
     )
-    .sort("timestamp")
-    .drop_nulls()
+    return (
+        held.group_by("timestamp")
+        .agg(
+            pl.col("carry_pct").mean().alias("portfolio_carry"),
+            pl.col("carry_pct").is_not_null().sum().alias("products_in_basket"),
+        )
+        .sort("timestamp")
+        .drop_nulls()
+    )
+
+
+portfolio_carry = _portfolio_series(pre_holdout_carry)
+
+# The same series, uncut, and it is used for one thing: the forward path of the holdout period.
+# The estimate never touches it - `_fit_hmm_fold` fits on `[train_start, train_end]`, which ends
+# before the holdout opens for every period including that one - so the parameters are identical
+# whichever frame is passed, and the validation periods index exactly what they indexed before.
+# What the uncut frame adds is sessions to run the filter ACROSS, which is what was missing:
+# `portfolio_carry` stops at the boundary, so the holdout period's evaluation window was empty,
+# `_fit_hmm_fold` returned early on `len(test_carry) < 20`, and the period got no regime
+# probability at all. `HOLD_LAST_SETTLE_SESSIONS` is still measured on the cut series above,
+# because a constant chosen by looking at the holdout is a parameter estimated on the holdout.
+portfolio_carry_full = _portfolio_series(carry)
+assert portfolio_carry_full.filter(pl.col("timestamp") < _date_lit(HOLDOUT_START)).equals(
+    portfolio_carry
+), (
+    "the uncut portfolio series disagrees with the cut one before the holdout opens, so the "
+    "holdout period would be filtered over a different history than it was estimated on"
 )
 
 print(f"The model reads one observation on each of {len(portfolio_carry):,} sessions.")
@@ -1344,7 +1562,8 @@ hmm_fold_params = []
 
 for split in splits:
     print(f"\nPeriod {split['fold']}:")
-    result, params = _fit_hmm_fold(portfolio_carry, split, split["fold"])
+    _series = portfolio_carry_full if int(split["fold"]) == HOLDOUT_FOLD_ID else portfolio_carry
+    result, params = _fit_hmm_fold(_series, split, split["fold"])
     if result is not None:
         hmm_results.append(result)
         hmm_fold_params.append(params)
@@ -1848,23 +2067,48 @@ assert sorted(FITTED_COLUMNS + FFT_COLUMNS) == sorted(temporal_cols), (
 )
 
 held_out = temporal_features.filter(pl.col("timestamp") >= HOLDOUT_START)
+held_out_validation = held_out.filter(pl.col("fold") != HOLDOUT_FOLD_ID)
+held_out_holdout = held_out.filter(pl.col("fold") == HOLDOUT_FOLD_ID)
 holdout_counts = pl.DataFrame(
     {
         "feature": temporal_cols,
         "family": ["estimated" if c in FITTED_COLUMNS else "spectral" for c in temporal_cols],
-        "values_on_holdout_dates": [
-            held_out.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
+        "validation_periods": [
+            held_out_validation.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
+        ],
+        "holdout_period": [
+            held_out_holdout.select(pl.col(c).is_not_null().sum()).item() for c in temporal_cols
         ],
     }
 )
-for col, n_held in zip(
-    holdout_counts["feature"], holdout_counts["values_on_holdout_dates"], strict=True
+# The check runs per period class, because the two classes are required to differ and a single
+# rule over the whole frame cannot say so. Until the holdout period was written this asserted
+# `n_held == 0` over every row, which is why a run that emitted an EMPTY holdout period passed
+# it: the assertion could only catch an estimate leaking into a validation period, never a
+# holdout period that had nothing in it. Both directions are checked now.
+for col, n_validation, n_holdout in zip(
+    holdout_counts["feature"],
+    holdout_counts["validation_periods"],
+    holdout_counts["holdout_period"],
+    strict=True,
 ):
-    if col in FITTED_COLUMNS:
-        assert n_held == 0, f"{col} comes from an estimate and has {n_held} holdout-dated values"
+    if col not in FITTED_COLUMNS:
+        continue
+    assert n_validation == 0, (
+        f"{col} comes from an estimate and has {n_validation} holdout-dated values in a "
+        "validation period, so a parameter fitted before the holdout is being read after it"
+    )
+    assert n_holdout > 0, (
+        f"{col} comes from an estimate and has no value in the holdout period, so a holdout "
+        "retrain would fit this column on nulls - which is the whole reason the period exists"
+    )
 
 print(f"The key {key} is unique across all {len(temporal_features):,} rows")
 print(f"Rows dated on or after the holdout opens: {len(held_out):,} of {len(temporal_features):,}")
+print(
+    f"  in the validation periods: {len(held_out_validation):,} rows, carrying spectral values "
+    f"only; in period {HOLDOUT_FOLD_ID}: {len(held_out_holdout):,} rows, carrying both families."
+)
 holdout_counts
 
 # %% [markdown]
