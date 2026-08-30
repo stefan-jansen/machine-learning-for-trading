@@ -949,6 +949,7 @@ jobs:
           unset ML4T_OUTPUT_DIR
           python -m pytest \
             tests/test_crypto_modeling_lineage.py \
+            tests/test_common_sample_daily_ic.py \
             tests/test_cv_cached_results.py \
             tests/test_darts_state.py \
             tests/test_darts_temporal.py \
@@ -961,9 +962,11 @@ jobs:
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
+            tests/test_latent_epoch_ic_over_dates.py \
             tests/test_latent_factors_identity.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_lightning_announcement_silence.py \
             tests/test_family_hook_dispatch.py \
             tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \

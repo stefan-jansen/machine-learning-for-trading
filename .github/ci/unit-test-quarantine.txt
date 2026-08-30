@@ -44,7 +44,16 @@
 # dispatches to. It tests two pure functions and needs none of that, but the
 # module cannot be imported without it.
 # ---------------------------------------------------------------------------
+# The three files the etfs deep-learning and latent-factor pass added are behind
+# the same boundary. `test_common_sample_daily_ic` tests one pure polars
+# function, but `case_studies/utils/model_analysis.py` imports lightgbm at
+# module scope; `test_latent_epoch_ic_over_dates` imports torch directly; and
+# `test_lightning_announcement_silence` reaches pytorch_lightning through
+# `case_studies/utils/darts_forecasting.py`. All three were red on `test-unit`
+# at collection, and all three run in `test-unit-image`.
+# ---------------------------------------------------------------------------
 tests/test_crypto_modeling_lineage.py
+tests/test_common_sample_daily_ic.py
 tests/test_cv_cached_results.py
 tests/test_darts_state.py
 tests/test_darts_temporal.py
@@ -58,9 +67,11 @@ tests/test_gbm_identity.py
 tests/test_gbm_runtime.py
 tests/test_holdout_expected_keys.py
 tests/test_insight_chapter.py
+tests/test_latent_epoch_ic_over_dates.py
 tests/test_latent_factors_identity.py
 tests/test_latent_factors_no_leak.py
 tests/test_latent_input_identity.py
+tests/test_lightning_announcement_silence.py
 tests/test_family_hook_dispatch.py
 # Imports `_install_fixture_adapter` and `_locked_study` from
 # test_locked_holdout_execution, so it inherits that module's torch dependency
