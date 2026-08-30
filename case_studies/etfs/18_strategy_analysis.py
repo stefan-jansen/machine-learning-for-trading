@@ -322,6 +322,68 @@ def _fmt(val: float | None, fmt: str = ".4f") -> str:
     return "-" if val is None else format(val, fmt)
 
 
+# The stage transitions below are read off `champion_lineage`, which takes the highest-Sharpe
+# backtest at each stage independently. Two consecutive entries therefore share a prediction and
+# nothing else: `populate_paired_metrics` says so where it builds them - "the pair is a stage
+# comparison, not a demonstrated parent and child". Nothing in `backtest_paired_metrics` records
+# which axes moved, so a difference produced by three simultaneous changes and one produced by a
+# single change are stored identically and read alike.
+#
+# The cost stage makes that concrete rather than theoretical. `cost_sensitivity` is a monotone
+# grid - the same strategy priced at seventeen cost levels - so its Sharpe maximum is the
+# zero-cost point by construction, in this case study and in every other. Taking it as "the cost
+# stage's leader" makes the allocation-to-cost transition a comparison of the same returns with
+# friction switched off, and reports the saving as a gain the cost model contributed. Its interval
+# is tight and its p-value is zero because the two series are nearly identical, which is a
+# property of the comparison rather than evidence for it.
+#
+# So each transition prints the axes that actually differ, and the reading is qualified when more
+# than one of them moved.
+_COST_KEYS = ("commission", "slippage")
+
+
+def _axes(backtest_hash: str) -> dict:
+    """The comparable axes of one registered backtest, read from its stored specification."""
+    with sqlite3.connect(str(CASE_DIR / "run_log" / "registry.db")) as db:
+        row = db.execute(
+            "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,)
+        ).fetchone()
+    if row is None or not row[0]:
+        return {}
+    spec = json.loads(row[0])
+    config = spec.get("backtest_config", {})
+    strategy = spec.get("strategy", {})
+    axes = {
+        "allocator": strategy.get("allocation", {}).get("method"),
+        "concentration": strategy.get("signal", {}).get("top_k"),
+        "risk overlay": (strategy.get("risk") or {}).get("name"),
+    }
+    for key in _COST_KEYS:
+        axes[key] = json.dumps(config.get(key, {}), sort_keys=True)
+    return axes
+
+
+def _priced(axes: dict) -> bool:
+    """Whether this backtest charges anything at all to trade."""
+    for key in _COST_KEYS:
+        model = json.loads(axes.get(key) or "{}")
+        if any(type(v) in (int, float) and v > 0 for v in model.values()):
+            return True
+    return False
+
+
+def _changed(challenger_hash: str, benchmark_hash: str) -> list[str]:
+    """Which axes differ between a transition's two sides, in reading order."""
+    chal, bench = _axes(challenger_hash), _axes(benchmark_hash)
+    if not chal or not bench:
+        return []
+    moved = [name for name in chal if chal[name] != bench[name]]
+    # The two cost keys always move together here and name one decision, so they read as one.
+    if set(_COST_KEYS) <= set(moved):
+        moved = [m for m in moved if m not in _COST_KEYS] + ["cost model"]
+    return moved
+
+
 # %% [markdown]
 # ## §1 What the strategy phase inherits
 #
@@ -560,14 +622,42 @@ for stage_name, kind in transitions:
     print(f"  p_value = {r['p_value']:.3f}")
     print(f"  prob_challenger_wins = {r['prob_challenger_wins']:.3f}")
     print(f"  CI status: {ci_status(r['sharpe_diff_ci95_lo'], r['sharpe_diff_ci95_hi'])}")
+    moved = _changed(stage_info["backtest_hash"], r["benchmark_hash"])
+    print(f"  axes that differ: {', '.join(moved) if moved else 'none'}")
+    chal_axes, bench_axes = _axes(stage_info["backtest_hash"]), _axes(r["benchmark_hash"])
+    if "cost model" in moved and _priced(bench_axes) and not _priced(chal_axes):
+        # Read the other way round, which is the direction the comparison supports.
+        print(
+            f"  the challenger is the frictionless member of the cost grid and the benchmark is "
+            f"priced, so what this measures is the price of friction: {r['sharpe_diff']:.3f} "
+            f"Sharpe, not a gain the cost stage produced"
+        )
+    if len(moved) > 1:
+        print(
+            f"  {len(moved)} axes moved at once, so none of the difference is attributable to "
+            f"{stage_name} specifically"
+        )
     print()
 
 # %% [markdown]
-# **Each transition is a paired test, not a subtraction.** The pipeline adds one thing at a time -
-# a weighting scheme, then a cost model, then a risk rule - and the question at each step is
-# whether the Sharpe moved by more than the noise. Subtracting one stage's Sharpe from the next
-# gives a number with no interval, which cannot answer that. The paired bootstrap resamples both
-# return series together and gives the difference its own interval.
+# **Each transition is a paired test, not a subtraction.** Subtracting one stage's Sharpe from the
+# next gives a number with no interval, which cannot say whether the difference is larger than the
+# noise. The paired bootstrap resamples both return series together and gives the difference its
+# own interval.
+#
+# **It is not a decomposition, and the printed axes are how to tell.** Each side is its stage's
+# highest-Sharpe backtest for this prediction, chosen independently, so consecutive entries share
+# the prediction and need share nothing else. Where one axis moved, the difference belongs to that
+# axis. Where two moved, the chain records how the search proceeded and not where the Sharpe came
+# from, and no part of the number is attributable to the stage it is filed under.
+#
+# **The cost stage is the case to read carefully.** `cost_sensitivity` prices one strategy across a
+# grid, so its Sharpe maximum is the zero-cost point and always will be. Read as a stage
+# transition it says the cost model added Sharpe; what it measures is the same returns with
+# friction switched off. Its interval is narrow and its p-value zero because the two series differ
+# only by the fees, which makes the comparison precise rather than important. The line beneath it
+# states the size the other way round, as the price of trading. [`16_costs`](16_costs.ipynb) is
+# where that grid is read as the curve it is.
 #
 # **`prob_challenger_wins` and the interval say different things.** The interval asks whether the
 # difference is resolved at the conventional level; the probability asks in what fraction of
