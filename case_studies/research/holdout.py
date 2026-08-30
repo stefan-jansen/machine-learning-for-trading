@@ -754,12 +754,19 @@ class HoldoutSelection:
 
         One holdout prediction can carry more than one backtest - a cost sibling, an allocation
         variant, anything a later notebook chose to run against it - so the prediction alone does
-        not identify the result this selection determines. Matching on the resolved strategy
-        block is what identifies it: that is the projection the replay preserves and the one
-        ``19_strategy_analysis`` checks, so selecting on it here cannot admit a backtest that
-        check would then reject. Resolving by prediction alone would silently return an unrelated
-        strategy when exactly one existed, and fail as an ambiguity when several did.
+        not identify the result this selection determines. Nor does the ``strategy`` block on its
+        own: a cost sibling changes commission and slippage, which live under ``backtest_config``,
+        so it shares the whole strategy block with the run it was derived from.
+
+        The comparison is therefore ``_locked_strategy_projection``, which is the specification
+        with exactly the fields that must differ between the two intervals removed - the
+        prediction hash, the price and funding digests, the decision artifact's own hashes - and
+        everything else kept, costs included. That is not a projection chosen here: it is the one
+        :meth:`StrategyReplay.run` asserts the reconstructed holdout specification still matches,
+        so the backtest this selects is the one that replay produces, and nothing else can be.
         """
+        from .lifecycle import _locked_strategy_projection
+
         prediction = self.holdout_prediction
         if prediction is None:
             return None
@@ -768,13 +775,13 @@ class HoldoutSelection:
         )
         if rows.is_empty():
             return None
-        selected_strategy = self.validation_backtest.spec().get("strategy")
+        expected = _locked_strategy_projection(self.validation_backtest.spec())
         matched = []
         for backtest_hash in sorted(set(rows.get_column("backtest_hash"))):
             opened = self.study.results.open(backtest_hash)
             if not isinstance(opened, BacktestResult):
                 raise TypeError("the holdout lineage resolved a non-backtest result")
-            if opened.spec().get("strategy") == selected_strategy:
+            if _locked_strategy_projection(opened.spec()) == expected:
                 matched.append(opened)
         if not matched:
             return None

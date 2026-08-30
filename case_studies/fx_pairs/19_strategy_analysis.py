@@ -429,8 +429,11 @@ if holdout_training.hash != selection.holdout_training_hash:
     raise ValueError("the holdout training identity differs from the derived one")
 if holdout_training.spec() != selection.holdout_training_spec:
     raise ValueError("the holdout training specification differs from the derived one")
-if holdout_backtest.spec().get("strategy") != selected_validation.spec().get("strategy"):
-    raise ValueError("the holdout strategy differs from the selected validation strategy")
+# The strategy is not re-checked here. `HoldoutSelection.holdout_backtest` resolves by the
+# replay's own projection - the specification minus the fields that must differ between the two
+# intervals - so a backtest whose strategy differed would not have been returned in the first
+# place, and asserting it again would be an assertion that cannot fail. What is checked is the
+# price identity, which the projection deliberately excludes and which nothing upstream requires.
 if not holdout_backtest.spec().get("input_identity", {}).get("prices"):
     raise ValueError("the holdout backtest lacks canonical price identity")
 
