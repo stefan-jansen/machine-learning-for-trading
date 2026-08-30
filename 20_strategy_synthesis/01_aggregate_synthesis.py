@@ -38,6 +38,7 @@
 import json
 import sqlite3
 import warnings
+from functools import cache
 
 import polars as pl
 import yaml
@@ -237,6 +238,34 @@ def _retired(cs: str) -> frozenset[str]:
     from case_studies.utils.paired_metrics import _retired_prediction_hashes
 
     return _retired_prediction_hashes(cs)
+
+
+@cache
+def _live_predictions(cs: str) -> list[str] | None:
+    """The prediction identities this case study still publishes, or None when it has no
+    lineage to narrow by.
+
+    A positive scope rather than a filter applied afterwards: `best()` applies its SQL
+    `LIMIT top_n` first, so excluding retired rows after the call lets them consume the
+    limit and hide live candidates that sit below it.
+    """
+    retired = _retired(cs)
+    if not retired:
+        return None
+    db_path = get_case_study_dir(cs) / "run_log" / "registry.db"
+    if not db_path.exists():
+        return None
+    db = sqlite3.connect(str(db_path))
+    try:
+        rows = db.execute("SELECT prediction_hash FROM prediction_sets").fetchall()
+    finally:
+        db.close()
+    return [h for (h,) in rows if h not in retired]
+
+
+def _best_live(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
+    """`explorer.best` narrowed to what the case study still publishes."""
+    return explorer.best(stage=stage, top_n=top_n, prediction_hashes=_live_predictions(cs))
 
 
 def _best_pinned(explorer: "BacktestExplorer", cs: str, stage: str, top_n: int) -> pl.DataFrame:
@@ -899,13 +928,10 @@ for cs, explorer in explorers.items():
     # Cross-stage rank-1 (signal/allocation/risk_overlay), mirroring
     # holdout.py::HOLDOUT_SELECTION_STAGES. Dedup by prediction_hash so the
     # leader corresponds to a distinct trained model.
-    retired = _retired(cs)
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
-    if retired and "prediction_hash" in cand.columns:
-        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired)))
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         paired_skips.append({"case_study": cs, "reason": "no_signal_stage_candidates"})
         continue
@@ -1118,13 +1144,10 @@ def _val_rank1_full_spec(cs: str) -> dict | None:
     explorer = explorers.get(cs)
     if explorer is None:
         return None
-    retired = _retired(cs)
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in ("signal", "allocation", "risk_overlay")],
+        [_best_live(explorer, cs, s, 2000) for s in ("signal", "allocation", "risk_overlay")],
         how="diagonal_relaxed",
     )
-    if retired and "prediction_hash" in cand.columns:
-        cand = cand.filter(~pl.col("prediction_hash").is_in(list(retired)))
     if cand.is_empty() or "backtest_hash" not in cand.columns:
         return None
     if "family" in cand.columns:
@@ -1561,7 +1584,7 @@ for cs, explorer in explorers.items():
     # val rank-1 is the highest-Sharpe validation backtest across the three
     # stages; see `_val_rank1_full_spec`.
     cand = pl.concat(
-        [explorer.best(stage=s, top_n=2000) for s in _PAIRED_STAGES],
+        [_best_live(explorer, cs, s, 2000) for s in _PAIRED_STAGES],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
