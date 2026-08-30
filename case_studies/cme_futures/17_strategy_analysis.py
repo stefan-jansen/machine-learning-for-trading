@@ -133,7 +133,7 @@ pool_size
 # %% [markdown]
 # ## What each selection stage contributed
 #
-# The three stages run in sequence, each on the survivors of the one before. The signal stage
+# The three stages run in sequence, each on the survivors of the one before. The baseline stage
 # carries every configuration and checkpoint at equal weight. Allocation runs on the strongest
 # distinct configurations from that stage, and the risk overlay on the strongest result so far for
 # each horizon. Later stages therefore hold far fewer candidates than the first, and the spread
@@ -144,9 +144,10 @@ pool_size
 # chosen on the same validation Sharpe the table reports, so the pool shrinks from 496 to 60 to 14
 # by selecting on the quantity being summarized. On `fwd_ret_21d` the median rises from -0.392 to
 # 0.192 to 1.010 along that shrinking pool, and almost all of that movement is the selection, not
-# the allocators or the risk rules. What the stages do support is the comparison within a row: the
-# fourteen risk overlays share one model, one signal, and one sizing rule, and they still span
-# 0.322 to 1.274, which is the range the position rule alone is responsible for.
+# the position sizing methods or the risk rules. What the stages do support is the comparison
+# within a row: the fourteen risk overlays share one model, one signal and one sizing rule,
+# and they still span 0.322 to 1.274, which is the range the position rule alone is
+# responsible for.
 
 # %%
 stage_summary = (

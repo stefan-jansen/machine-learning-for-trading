@@ -1516,6 +1516,33 @@ def _seed_temporal_json(results_dir: Path, cs_id: str) -> None:
     )
 
 
+def _drop_legacy_conformal_widths(cs_dir: Path) -> None:
+    """Remove seeded conformal widths that predate the `calibration_version` column.
+
+    `case_studies/utils/conformal.py` refuses a widths artifact without that column - the
+    calibration it records cannot be identified, so a sizing decision made from it cannot be
+    attributed to a version. It also regenerates the artifact when the file is absent, so
+    deleting a legacy one is exactly the "preserve and regenerate" the refusal asks for.
+
+    The fixture data ships some of these: ml4t/third-edition-test-data holds pre-column
+    widths written 2026-08-25, and the first notebook to size with `conformal_weighted`
+    fails on them rather than on anything it did. Dropping them here keeps that repo and
+    this one from having to move together for a column that the code can rebuild.
+    """
+    import polars as _pl
+
+    widths = cs_dir / "run_log" / "predictions"
+    if not widths.is_dir():
+        return
+    for path in widths.glob("*/conformal_widths.parquet"):
+        try:
+            columns = _pl.read_parquet(path).columns
+        except Exception:  # unreadable is handled downstream as "no prior widths"
+            continue
+        if "calibration_version" not in columns:
+            path.unlink()
+
+
 def _seed_demo_predictions(cs_dir: Path, cs_id: str, primary_label: str) -> None:
     """Seed demo prediction parquets for live-simulation notebooks (Ch25).
 
@@ -1754,6 +1781,7 @@ def seed_results(output_dir: Path, case_study_ids: list[str]) -> None:
         _drop_stale_conformal_widths(cs_dir)
         _normalize_prediction_timestamp_zone(cs_dir)
         _record_prediction_artifact_digests(cs_dir)
+        _drop_legacy_conformal_widths(cs_dir)
 
         # Backfill daily_returns.parquet for ALL backtest hashes in registry
         # so downstream notebooks (e.g., 17/01_portfolio_metrics) that resolve a

@@ -18,9 +18,9 @@
 #
 # This notebook closes the corrected v3.1 validation pipeline without reopening
 # the 2021 holdout. It traces one primary-label carrier from the equal-weight
-# baseline through allocation, costs, and fixed risk controls, then separates
-# that result from the historical IPCA holdout observation already stored in
-# the registry.
+# baseline through allocation, costs, and fixed risk controls, then reads the
+# sealed holdout the research lock already records and reports exactly how the
+# fit it was spent on differs from the one the carrier publishes.
 #
 # **Learning objectives**
 #
@@ -52,6 +52,7 @@ import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
+import pandas as pd
 import polars as pl
 
 warnings.filterwarnings("ignore")
@@ -732,38 +733,40 @@ risk_diagnostics
 # stability analysis, so the cohort statistics rest on a thin sample.
 
 # %% [markdown]
-# ## 4. Holdout status: preserved observation, unresolved current carrier
+# ## 4. Holdout status: a sealed evaluation of a superseded fit
 #
-# The 2021 holdout has already been observed on an IPCA risk-adjusted-return
-# lineage. The corrected carrier uses a different family, label, allocation,
-# and risk rule, so a run on it would make the holdout another selection round.
-# This notebook therefore checks that no holdout prediction exists for the
-# corrected lineage's own training run, and reports the stored IPCA row only as
-# historical context.
+# The 2021 holdout has been taken once, and the research lock records what it
+# was spent on. Reading the lock rather than guessing at the lineage is the
+# point of this section: the holdout is used once, so the only honest question
+# is what the sealed record already says, not what a second run would say.
+#
+# The lock names one holdout training run, one holdout prediction set and one
+# holdout backtest. The comparison below puts that fit beside the carrier
+# section 1 selected and reports every field of the training identity they
+# agree on and every field they do not. `sealed_vs_published` is that diff, and
+# it is what decides whether this is the carrier's holdout or another fit's.
 
 # %%
+# The obvious check - "does a holdout prediction exist for the carrier's own training hash?" -
+# can never answer yes, so it was never a check. The CV geometry is inside the training
+# identity and `build_holdout_cv` refuses to derive a holdout CV equal to the validation one,
+# so a holdout retrain always earns a training hash distinct from its validation twin. Across
+# the nine registries on 2026-08-30, 6,105 prediction sets resolve to exactly one training
+# hash carrying two splits, and it is not in this case study. Asking the lock instead is what
+# makes the question answerable.
 with sqlite3.connect(REGISTRY_DB) as db:
     current_training_hash = db.execute(
-        """
-        SELECT p.training_hash
-        FROM prediction_sets p
-        WHERE p.prediction_hash = ?
-        """,
+        "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
         (strategy_carrier["prediction_hash"],),
     ).fetchone()[0]
-    current_holdout_count = db.execute(
+    lock_rows = db.execute(
+        "SELECT lock_hash, lock_json, state, created_at FROM research_locks ORDER BY created_at"
+    ).fetchall()
+    holdout_rows = db.execute(
         """
-        SELECT COUNT(*)
-        FROM prediction_sets
-        WHERE training_hash = ? AND split = 'holdout'
-        """,
-        (current_training_hash,),
-    ).fetchone()[0]
-    historical_rows = db.execute(
-        """
-        SELECT b.backtest_hash, t.family, t.config_name, t.label,
+        SELECT b.backtest_hash, p.prediction_hash, p.training_hash, t.family, t.label,
                b.spec_json, bm.sharpe, bm.sharpe_ci95_lo,
-               bm.sharpe_ci95_hi, bm.max_drawdown
+               bm.sharpe_ci95_hi, bm.max_drawdown, p.created_at
         FROM backtest_runs b
         JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
@@ -772,42 +775,491 @@ with sqlite3.connect(REGISTRY_DB) as db:
         ORDER BY bm.sharpe DESC
         """
     ).fetchall()
-
-# %%
-if current_holdout_count != 0:
-    raise RuntimeError("A holdout prediction unexpectedly exists for the corrected carrier")
-if not historical_rows:
-    raise RuntimeError("The preserved historical holdout row is missing")
-
-historical_holdout = []
-for row in historical_rows:
-    spec = json.loads(row[4])
-    strategy = strategy_view(spec)
-    historical_holdout.append(
-        {
-            "backtest_hash": row[0],
-            "family": row[1],
-            "config": row[2],
-            "label": row[3],
-            "allocator": strategy.get("allocation", {}).get("method"),
-            "risk": strategy.get("risk", {}).get("name"),
-            "sharpe": row[5],
-            "sharpe_ci_lo": row[6],
-            "sharpe_ci_hi": row[7],
-            "max_drawdown": row[8],
-            "status": "historical, not comparable to corrected carrier",
-        }
+    published_full_spec = json.loads(
+        db.execute(
+            "SELECT spec_json FROM training_runs WHERE training_hash = ?",
+            (current_training_hash,),
+        ).fetchone()[0]
+    )
+    # The carrier's own checkpoint. A training run publishes several, and they share the
+    # training hash, so a comparison that stops at the training identity can call two
+    # different checkpoints of one fit the same thing.
+    CARRIER_CHECKPOINT = db.execute(
+        "SELECT checkpoint_kind, checkpoint_value FROM prediction_sets WHERE prediction_hash = ?",
+        (strategy_carrier["prediction_hash"],),
+    ).fetchone()
+    # When the holdout fit actually ran, as opposed to when its row was written.
+    _holdout_timing = (
+        db.execute(
+            "SELECT started_at, elapsed_s, created_at FROM training_runs WHERE training_hash = ?",
+            (json.loads(lock_rows[0][1])["holdout_training_hash"],),
+        ).fetchone()
+        if lock_rows
+        else None
+    )
+    # `finalize_holdout` is what turns a staged lineage into a recorded one, and it is the
+    # only writer of this table. Read it rather than inferring finality from a hash match.
+    finalized_rows = db.execute(
+        "SELECT lock_hash, holdout_training_hash, holdout_prediction_hash, holdout_backtest_hash "
+        "FROM holdout_evaluations"
+    ).fetchall()
+    # Holdout PREDICTIONS, asked for on their own. `holdout_rows` above joins through
+    # `backtest_runs` and `backtest_metrics`, so a prediction registered against the holdout
+    # window with no backtest yet does not appear in it - and that prediction is what spends
+    # the window. Deciding "has a holdout been taken" from the join therefore answers "no"
+    # for a case study that has already spent one and merely has not backtested it.
+    holdout_prediction_rows = db.execute(
+        "SELECT prediction_hash, training_hash, created_at FROM prediction_sets "
+        "WHERE split = 'holdout' ORDER BY created_at"
+    ).fetchall()
+    # The strategy the funnel actually ends on, compared whole rather than on three fields.
+    CARRIER_BACKTEST_SPEC = json.loads(
+        db.execute(
+            "SELECT spec_json FROM backtest_runs WHERE backtest_hash = ?",
+            (carrier.row(len(carrier) - 1, named=True)["backtest_hash"],),
+        ).fetchone()[0]
     )
 
-print(f"Matching holdout predictions for corrected carrier: {current_holdout_count}")
-pl.DataFrame(historical_holdout)
+# Whether this registry can answer the question at all, decided before anything is compared.
+# Three registries reach this cell and they differ in exactly the way that matters: this case
+# study's own holds one lock and one sealed holdout, a reader's clean clone holds neither, and
+# the CI fixture holds three holdout backtests and no lock at all while seeding `training_runs`
+# with a flat `{family, config_name, label}` spec. Indexing `["computation"]` or `lock_rows[0]`
+# unconditionally raised on the last two, which is the failure this whole section exists to
+# remove, one level up: an absent measurement reported as something other than an absence.
+#
+# An unsealed holdout is reported rather than refused. Holdout rows with no lock naming them
+# are a real condition - `us_firm_characteristics` is in it, with one holdout prediction and
+# no lock - and it means the registry cannot say which selection the window was spent on. But
+# a case study in that state still has a terminal notebook to render, and refusing here would
+# leave it unable to say so.
+if len(lock_rows) > 1:
+    raise RuntimeError(f"{len(lock_rows)} research locks; a holdout resolves to exactly one")
+# Spent is decided by the prediction, not by the backtest. The backtest is what makes the
+# result readable; the prediction is what consumed the window.
+HOLDOUT_SPENT = bool(holdout_prediction_rows)
+HOLDOUT_UNSEALED = HOLDOUT_SPENT and not lock_rows
+# A lock with no holdout prediction against it is the opposite case and a legitimate one:
+# `fx_pairs` holds exactly that, a window sealed and not yet spent. It is not an error and
+# not a result.
+LOCK_PENDING = bool(lock_rows) and not HOLDOUT_SPENT
+if HOLDOUT_UNSEALED:
+    print(
+        f"{len(holdout_prediction_rows)} holdout prediction set(s) and no research lock "
+        "naming them. The window was spent, and nothing records which selection it was "
+        "spent on, so no out-of-sample claim can be attached to the carrier below."
+        + (
+            ""
+            if holdout_rows
+            else " None of them carries a backtest yet, so there is no result to read either."
+        )
+    )
+if LOCK_PENDING:
+    print(
+        f"Research lock {lock_rows[0][0]} is {lock_rows[0][2]} and no holdout prediction has "
+        "been registered against it. The window is sealed and unspent: there is no "
+        "out-of-sample result to report, and that is the intended state rather than a gap."
+    )
+
+lock = json.loads(lock_rows[0][1]) if lock_rows else {}
+LOCK_HASH, LOCK_STATE = (lock_rows[0][0], lock_rows[0][2]) if lock_rows else (None, None)
+LOCK_TAKEN_AT = lock_rows[0][3] if lock_rows else None
+HOLDOUT_TRAINING_STARTED_AT = _holdout_timing[0] if _holdout_timing else None
+HOLDOUT_TRAINING_DERIVED_START = (
+    pd.Timestamp(_holdout_timing[2]) - pd.Timedelta(seconds=float(_holdout_timing[1]))
+    if _holdout_timing and _holdout_timing[1] is not None and _holdout_timing[2] is not None
+    else None
+)
+# Two separate questions, and only the first is about this notebook's own reading. A lock at
+# `LOCKED` means `stage_holdout`/`finalize_holdout` never ran, so `_validated_holdout_lineage`
+# never checked the triple and `holdout_evaluations` holds no row pinning it. The holdout
+# artifacts can still be read - they are in the registry, under the training hash the lock
+# names - but nothing outside this notebook has validated that pairing, and the status below
+# must not read as though something had.
+FINALIZED = {row[0]: row[1:] for row in finalized_rows}
+LOCK_FINALIZED = LOCK_HASH is not None and LOCK_HASH in FINALIZED
+if LOCK_HASH is not None and not LOCK_FINALIZED:
+    print(
+        f"Lock {LOCK_HASH} is {LOCK_STATE}, not HOLDOUT_EVALUATED, and holdout_evaluations "
+        "holds no row for it. The holdout lineage below is read from the lock's declaration "
+        "and has not been validated by finalize_holdout."
+    )
+SEALED_TRAINING_HASH = lock.get("holdout_training_hash")
+sealed_spec = (lock.get("holdout_training_spec") or {}).get("computation") or {}
+published_spec = published_full_spec.get("computation") or {}
+# A pending lock is excluded here deliberately: there is a lock and a spec, so every field
+# below could be compared, but there is no holdout result to compare them for. Assessing a
+# window that has not been spent would produce a verdict about nothing.
+HOLDOUT_ASSESSABLE = bool(lock_rows and sealed_spec and published_spec) and not LOCK_PENDING
+if not HOLDOUT_ASSESSABLE:
+    print(
+        "Holdout status not assessable from this registry: "
+        + (
+            "the lock is sealed and unspent, so there is no holdout result yet"
+            if LOCK_PENDING
+            else "no research lock, and holdout rows that none of them seals"
+            if HOLDOUT_UNSEALED
+            else "it holds no research lock, so no holdout has been taken here"
+            if not lock_rows
+            else "the recorded training specifications carry no computation block to compare"
+        )
+    )
+
+# %%
+# Every field of the training identity, so agreement and disagreement are both shown rather
+# than only the half that supports a conclusion. A bare true/false is not enough here: a
+# holdout retrain is *supposed* to differ from its validation twin on the window it fits and
+# the rows it predicts, and reporting those beside a genuine divergence would make the two
+# look alike. Each disagreement therefore carries why it disagrees, and only
+# `SUBSTANTIVE_DIVERGENCE` decides the status below.
+_BY_CONSTRUCTION = {
+    "cv": "holdout window rather than the validation folds - this is what a holdout is",
+    "expected_prediction_keys": "one fold over the holdout rather than two over validation",
+}
+
+
+def _artifact_roles(spec: dict, field: str) -> dict[str, str]:
+    entries = spec[field]["files"] if field == "input_data_spec" else spec[field]
+    return {entry["role"]: entry["sha256"] for entry in entries}
+
+
+def _divergence(field: str) -> str:
+    """Why this identity field differs, or the empty string when it does not."""
+    if published_spec.get(field) == sealed_spec.get(field):
+        return ""
+    if field in _BY_CONSTRUCTION:
+        return _BY_CONSTRUCTION[field]
+    if field in {"feature_artifacts", "input_data_spec"}:
+        pub, sealed = _artifact_roles(published_spec, field), _artifact_roles(sealed_spec, field)
+        moved = sorted(role for role in set(pub) & set(sealed) if pub[role] != sealed[role])
+        if moved:
+            return f"input artifacts changed: {', '.join(moved)}"
+        added = sorted(set(sealed) - set(pub)) or sorted(set(pub) - set(sealed))
+        return f"same input digests; only the recorded role set differs ({', '.join(added)})"
+    if field == "source_identity":
+        return "identity-recording scheme changed; no shared key holds a different value"
+    return "differs"
+
+
+# Empty when the comparison cannot be made, so the frame below is a real answer - nothing to
+# compare - rather than a table of fields trivially agreeing because both sides are absent.
+_identity_fields = sorted(set(published_spec) | set(sealed_spec)) if HOLDOUT_ASSESSABLE else []
+_reasons = {field: _divergence(field) for field in _identity_fields}
+sealed_vs_published = pl.DataFrame(
+    {
+        "identity_field": _identity_fields,
+        "agrees": [not _reasons[f] for f in _identity_fields],
+        "why_it_differs": [_reasons[f] or "-" for f in _identity_fields],
+    },
+    schema={"identity_field": pl.String, "agrees": pl.Boolean, "why_it_differs": pl.String},
+).sort(["agrees", "identity_field"])
+
+# The fields that differ for a reason other than the holdout window and the recording change.
+# Empty means the sealed fit and the published one specify the same computation.
+SUBSTANTIVE_DIVERGENCE = sorted(
+    field
+    for field, why in _reasons.items()
+    if why and (why == "differs" or why.startswith("input artifacts changed"))
+)
+# The selection geometry the lock sealed, against the one the carrier publishes. This is the
+# validation CV, not the holdout CV in `sealed_spec`, so it is read from the lock itself.
+VALIDATION_CV_MATCHES = HOLDOUT_ASSESSABLE and (
+    (lock.get("cv") or {}).get("identity") == (published_spec.get("cv") or {}).get("identity")
+)
+
+# %%
+# When the lineage was finalized, the sealed triple is whatever `holdout_evaluations` pins,
+# not whatever happens to share the training hash. Only when it was not finalized does the
+# lock's declared training hash become the best available key, and the print above says so.
+if LOCK_FINALIZED:
+    _pinned_backtest = FINALIZED[LOCK_HASH][2]
+    _sealed = [row for row in holdout_rows if row[0] == _pinned_backtest]
+else:
+    _sealed = [row for row in holdout_rows if row[2] == SEALED_TRAINING_HASH]
+# Refuse only where the registry contradicts itself. A finalized lineage pins a backtest
+# hash, so that backtest not being there is damage. An unfinalized lock naming a training
+# hash whose holdout has been predicted but not yet backtested is not damage - it is a run
+# caught between two writes, and reporting it is more use than raising on it.
+if LOCK_FINALIZED and not _sealed:
+    raise RuntimeError(
+        f"holdout_evaluations pins backtest {FINALIZED[LOCK_HASH][2]} for lock {LOCK_HASH}, "
+        "and the registry does not hold it: the finalized lineage cannot be read back"
+    )
+# An empty `_sealed` has two quite different causes and they call for different readings.
+# Either the lock's own fit was predicted and not yet backtested - a run between two writes -
+# or the holdout artifacts that do exist belong to a different training hash than the lock
+# names, which is a mismatched evaluation and a much stronger statement about the registry.
+# Reporting both as "no backtest computes the result" would bury the second in the first.
+_sealed_predicted = [row for row in holdout_prediction_rows if row[1] == SEALED_TRAINING_HASH]
+_other_fits = sorted({row[1] for row in holdout_prediction_rows} - {SEALED_TRAINING_HASH})
+if HOLDOUT_ASSESSABLE and not _sealed:
+    if _sealed_predicted and _other_fits:
+        # Both at once, which neither of the single branches below would have said. The
+        # milder fact was taking precedence and hiding the sharper one.
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, its holdout prediction "
+            "exists with no backtest on it, AND the window was also spent on other fits "
+            f"({', '.join(_other_fits)}) that the lock does not seal."
+        )
+    elif _sealed_predicted:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, its holdout prediction "
+            "exists, and no backtest runs on it. The window is spent and its result has not "
+            "been computed."
+        )
+    elif _other_fits:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH}, and every holdout "
+            f"artifact in this registry belongs to another fit ({', '.join(_other_fits)}). "
+            "The window was spent on something the lock does not seal."
+        )
+    else:
+        print(
+            f"The lock names holdout training {SEALED_TRAINING_HASH} and the registry holds "
+            "no holdout artifact for it."
+        )
+if len(_sealed) > 1:
+    raise RuntimeError(f"{len(_sealed)} holdout backtests run on the sealed fit; expected one")
+
+_carrier_strategy = {
+    "allocator": strategy_carrier["allocator"],
+    "risk": risk_leader["risk_name"],
+    "top_k": strategy_carrier["top_k"],
+}
+if _sealed:
+    _row = _sealed[0]
+    _sealed_strategy = strategy_view(json.loads(_row[5]))
+    sealed_holdout = {
+        "lock_hash": LOCK_HASH,
+        "lock_state": LOCK_STATE,
+        "backtest_hash": _row[0],
+        "prediction_hash": _row[1],
+        "training_hash": _row[2],
+        "family": _row[3],
+        "label": _row[4],
+        "allocator": _sealed_strategy.get("allocation", {}).get("method"),
+        "top_k": _sealed_strategy.get("allocation", {}).get("top_k"),
+        "risk": _sealed_strategy.get("risk", {}).get("name"),
+        "sharpe": _row[6],
+        "sharpe_ci_lo": _row[7],
+        "sharpe_ci_hi": _row[8],
+        "max_drawdown": _row[9],
+        "lock_taken_at": LOCK_TAKEN_AT,
+        "holdout_written_at": _row[10],
+    }
+
+    # The whole identity-bearing strategy projection, not three fields of it. Signal
+    # construction, rebalance cadence, minimum trade size and the risk rule's own parameters
+    # all change what was run, and an allocator/top_k/risk-name comparison passes over every
+    # one of them.
+    # `strategy_view` returns the `strategy` block alone, which leaves out `backtest_config` -
+    # the cost schedule, fill timing, calendar, account and cash policy, every one of which
+    # changes what was run. Comparing the raw stored specifications instead is the opposite
+    # error: `backtest_config.metadata.preset_path` is an absolute filesystem path that
+    # differs between a host and a Docker run, which is exactly why the registry excludes it
+    # from the backtest hash (`specs.py:_HASH_EXCLUDED_METADATA`). Comparing it here would
+    # report one computation as two strategies.
+    #
+    # So the comparison is the registry's own identity projection: hash both specifications
+    # through `backtest_hash_from_parts`, which applies that projection, against the *same*
+    # placeholder prediction hash on each side. Substituting one placeholder is what removes
+    # the prediction identity from the comparison without removing anything else - and the
+    # prediction identity has to go, because it cannot agree between a validation run and a
+    # holdout run and would sink every comparison for the one reason that carries no
+    # information. The two places the stored spec still names it are stripped for the same
+    # reason: `input_identity`, and `backtest_config.metadata.prediction_hash`.
+    _PREDICTION_PLACEHOLDER = "0" * 12
+
+    def _strategy_identity(spec: dict) -> str:
+        pruned = {k: v for k, v in spec.items() if k != "input_identity"}
+        config = dict(pruned.get("backtest_config") or {})
+        if "metadata" in config:
+            config["metadata"] = {
+                k: v for k, v in config["metadata"].items() if k != "prediction_hash"
+            }
+            pruned["backtest_config"] = config
+        return backtest_hash_from_parts(_PREDICTION_PLACEHOLDER, pruned)
+
+    _sealed_identity = _strategy_identity(json.loads(_row[5]))
+    _carrier_identity = _strategy_identity(CARRIER_BACKTEST_SPEC)
+    STRATEGY_MATCHES = _sealed_identity == _carrier_identity
+    # Only meaningful when they differ; the identities above are what decides.
+    _strategy_differs_on = (
+        []
+        if STRATEGY_MATCHES
+        else sorted(
+            key
+            for key in set(json.loads(_row[5])) | set(CARRIER_BACKTEST_SPEC)
+            if json.loads(_row[5]).get(key) != CARRIER_BACKTEST_SPEC.get(key)
+        )
+    )
+else:
+    sealed_holdout = None
+    STRATEGY_MATCHES = False
+    _strategy_differs_on = []
+# A training run publishes a checkpoint schedule and every checkpoint shares its training
+# hash, so the identity comparison above cannot separate epoch 10 from epoch 50. The lock
+# records which one it sealed; the carrier's prediction says which one it publishes.
+SEALED_CHECKPOINT = (lock.get("checkpoint_kind"), lock.get("checkpoint_value"))
+CHECKPOINT_MATCHES = bool(
+    HOLDOUT_ASSESSABLE
+    and CARRIER_CHECKPOINT is not None
+    and tuple(CARRIER_CHECKPOINT) == SEALED_CHECKPOINT
+)
+IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINING_HASH
+# The bound is asymmetric, and both halves of that asymmetry carry information. The true
+# start is at or before `created_at - elapsed_s`, so:
+#
+#   bound AT OR BEFORE the lock  ->  the true start is at or before the lock too, and the
+#                                    ordering a seal needs is strict. DEMONSTRABLY BROKEN,
+#                                    not merely unattested.
+#   bound AFTER the lock         ->  the true start may sit on either side. Unproven.
+#
+# The first case is what this registry is in. An earlier pass reported it as "unproven",
+# which understated it: an upper bound cannot show a run started *after* an instant, but it
+# can certainly show it started *before* one, and that is the direction that fails a seal.
+SEALED_BEFORE_SPENT = False
+SEAL_STATE = "no-holdout"
+SEAL_BASIS = "no sealed holdout to check"
+if sealed_holdout and sealed_holdout["lock_taken_at"]:
+    _lock_at = pd.Timestamp(sealed_holdout["lock_taken_at"])
+    if HOLDOUT_TRAINING_STARTED_AT is not None:
+        # A recorded start answers the question in both directions, so it resolves to a
+        # verdict rather than to "we have the field". Naming the state `recorded` regardless
+        # of what it recorded left a run that provably began first reading as merely
+        # unattested, which is the softer of the two and the wrong one.
+        SEALED_BEFORE_SPENT = _lock_at < pd.Timestamp(HOLDOUT_TRAINING_STARTED_AT)
+        SEAL_STATE = "sealed" if SEALED_BEFORE_SPENT else "broken"
+        SEAL_BASIS = (
+            "training_runs.started_at is recorded, so the ordering is read rather than "
+            "bounded: the run began "
+            + ("after" if SEALED_BEFORE_SPENT else "at or before")
+            + " the lock"
+        )
+    elif HOLDOUT_TRAINING_DERIVED_START is not None:
+        # `>=`, not `>`. The true start is at or before the bound, so a bound equal to the
+        # lock puts the start at or before the lock too, and the ordering a seal needs is
+        # strict. Equality is a broken seal, not an open question.
+        if _lock_at >= HOLDOUT_TRAINING_DERIVED_START:
+            SEAL_STATE = "broken"
+            SEAL_BASIS = (
+                "started_at is NULL, but created_at - elapsed_s bounds the start from "
+                "above and that bound falls at or before the lock, so the run had already "
+                "begun when the lock was written"
+            )
+        else:
+            SEAL_STATE = "unproven"
+            SEAL_BASIS = (
+                "started_at is NULL, and created_at - elapsed_s bounds the start "
+                "from above only, which cannot show the run started after the lock"
+            )
+    else:
+        SEAL_STATE = "unprovable"
+        SEAL_BASIS = "neither started_at nor elapsed_s on the holdout training run"
+
+print(f"Published carrier training hash: {current_training_hash}")
+print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH or 'none'} (lock {LOCK_HASH})")
+print(f"Same training identity: {IDENTITY_MATCHES}")
+print(
+    "Carrier strategy: "
+    f"{_carrier_strategy['allocator']} / top {_carrier_strategy['top_k']} / "
+    f"{_carrier_strategy['risk']}"
+)
+if sealed_holdout is not None:
+    print(
+        "Sealed strategy:  "
+        f"{sealed_holdout['allocator']} / top {sealed_holdout['top_k']} / "
+        f"{sealed_holdout['risk']}"
+    )
+    print(
+        f"Same strategy: {STRATEGY_MATCHES}"
+        + (f" (differs on {', '.join(_strategy_differs_on)})" if _strategy_differs_on else "")
+    )
+    print(
+        f"Sealed checkpoint {SEALED_CHECKPOINT[0]}={SEALED_CHECKPOINT[1]}, carrier "
+        f"{CARRIER_CHECKPOINT[0]}={CARRIER_CHECKPOINT[1]} - same checkpoint: "
+        f"{CHECKPOINT_MATCHES}"
+    )
+    print(f"Lineage finalized by finalize_holdout: {LOCK_FINALIZED}")
+    # "began" is only said where a start was recorded. Where it was derived, the label is
+    # the bound, because calling an upper bound a start time is the whole error this check
+    # was rebuilt to remove.
+    if HOLDOUT_TRAINING_STARTED_AT is not None:
+        _when = f"holdout fit began {HOLDOUT_TRAINING_STARTED_AT}"
+    elif HOLDOUT_TRAINING_DERIVED_START is not None:
+        _when = f"holdout fit began no later than {HOLDOUT_TRAINING_DERIVED_START}"
+    else:
+        _when = "holdout fit start unrecorded"
+    print(
+        f"Lock taken {sealed_holdout['lock_taken_at']}; {_when}; holdout row written "
+        f"{sealed_holdout['holdout_written_at']}"
+    )
+    print(f"Seal: {SEAL_STATE} - {SEAL_BASIS}")
+    print(f"Lock shown to predate the holdout run: {SEALED_BEFORE_SPENT}")
+pl.DataFrame([sealed_holdout] if sealed_holdout else [])
+
+# %%
+# Which identity fields the sealed fit and the published one disagree on. This is the whole
+# basis for the status below, so it is printed rather than summarised.
+sealed_vs_published
+
+# %%
+# The two questions the prose below rests on, answered rather than asserted.
+print(f"Validation CV the lock sealed matches the published carrier's: {VALIDATION_CV_MATCHES}")
+print(f"Substantive identity divergence: {SUBSTANTIVE_DIVERGENCE or 'none'}")
 
 # %% [markdown]
-# The stored holdout rows above sit on an IPCA risk-adjusted-return lineage.
-# They neither validate nor refute the corrected carrier, which uses a
-# different family, label, allocation, and risk rule. The current carrier's
-# out-of-sample status is unresolved and needs a future untouched evaluation
-# window.
+# The sealed holdout is not a different strategy and not a different model. It runs the same
+# family, the same label, the same allocation and the same risk rule the carrier publishes.
+# What it is not is the same *fit*: the two training hashes printed above differ, the sealed
+# one registered on 2026-08-27 and the published one by `11e_supervised_autoencoder` two days
+# later.
+#
+# Five identity fields disagree and the table says why each does. `cv` and
+# `expected_prediction_keys` differ because a holdout retrain fits a different window and
+# predicts a different number of rows - that is what makes it a holdout rather than a third
+# validation fold, and a run where they agreed would be the broken one. `feature_artifacts`
+# and `input_data_spec` carry identical digests for every role both record; the sealed spec
+# additionally records `setup`, which moves the container digest without moving an input.
+# `source_identity` moved from a map of source-file hashes to the `latent_adapter` /
+# `latent_model` version pair. `SUBSTANTIVE_DIVERGENCE` is what is left once those are
+# accounted for, and it is empty: the model specification, the label artifact, the feature
+# names and the validation CV identity the selection was made on are the same.
+#
+# What a seal has to show, and what this registry can show. The lock must be taken before
+# the holdout *runs*, not before the row recording it is written: `prediction_sets.created_at`
+# lands after the fit returns, so a lock written at any point during a run already in progress
+# still precedes it. The field that settles the question is `training_runs.started_at`.
+#
+# Where that field is NULL, `created_at` minus `elapsed_s` is the only remaining handle, and
+# it is asymmetric. Both of its error terms push the true start earlier, so it bounds the
+# start from above - which means it can show a run began *before* some instant and can never
+# show one began *after*. A bound falling before the lock therefore demonstrates a broken
+# seal; a bound falling after it demonstrates nothing either way. The cell above prints which
+# of those cases this registry is in, along with the timestamps it was decided from.
+#
+# Whatever the state, it is not a claim about whether the holdout was visible during
+# selection. The run is a retrain on pre-holdout data of a selection already fixed. It is a
+# claim about whether the registry can demonstrate the ordering the seal exists to guarantee,
+# and a seal nothing can check is not doing the work a seal is for.
+#
+# A second thing a lock alone does not establish. `finalize_holdout` is what validates that a
+# training, prediction and backtest hash belong together and records the triple in
+# `holdout_evaluations`; a lock left at `LOCKED` has had none of that done to it, and the
+# pairing is then read from the lock's own declaration rather than from anything that checked
+# it. `Lineage finalized by finalize_holdout` above says which case this registry is in, and
+# the gate requires it for any status above INCONCLUSIVE.
+#
+# Taken together these decide what the Sharpe above can be used for. A sealed holdout on the
+# published fit, finalized, with the lock demonstrably first, is an out-of-sample result. Any
+# of those missing and it is a number with a provenance qualification attached - reportable,
+# because suppressing it would be its own distortion, and not a basis for an out-of-sample
+# claim. `_holdout_qualifier` below names every condition that is short, and the gate's
+# evidence column carries that list rather than a verdict the reader has to take on trust.
+#
+# None of it can be repaired by running the holdout again. It is spent once, and re-taking it
+# to close a bookkeeping gap would turn the window into another selection round, which is the
+# one thing it must not become.
 
 # %% [markdown]
 # ## 5. Publication assessment
@@ -816,8 +1268,35 @@ pl.DataFrame(historical_holdout)
 # allocation, cost, and risk hash exists and the selected risk result
 # reproduces exactly. Closed is not the same as favorable. The gate table below
 # reports each check on its own terms, and the paired risk interval is the one
-# to read carefully. The remaining gap is not a computation failure: it is the
-# deliberate absence of a second use of the already-observed holdout.
+# to read carefully. The remaining gap is not a computation failure and not a
+# missing holdout: it is that the holdout was spent on a fit whose training
+# identity this case study has since replaced.
+
+
+# %%
+def _holdout_qualifier() -> str:
+    """Everything short of a clean pass, named. Empty when nothing is short."""
+    short = []
+    if not CHECKPOINT_MATCHES:
+        short.append("a different checkpoint of the fit")
+    if not STRATEGY_MATCHES:
+        short.append(f"strategy differs on {', '.join(_strategy_differs_on) or 'unknown keys'}")
+    if not VALIDATION_CV_MATCHES:
+        short.append("a different validation CV")
+    if not SEALED_BEFORE_SPENT:
+        short.append(
+            "the run demonstrably began at or before the lock"
+            if SEAL_STATE == "broken"
+            else f"the lock is not shown to predate the run ({SEAL_STATE})"
+        )
+    if SUBSTANTIVE_DIVERGENCE:
+        short.append(f"identity diverges on {', '.join(SUBSTANTIVE_DIVERGENCE)}")
+    if not IDENTITY_MATCHES:
+        short.append("a superseded training identity")
+    if not LOCK_FINALIZED:
+        short.append("a lineage finalize_holdout never recorded")
+    return "; " + ("; ".join(short) if short else "same fit, checkpoint, strategy and lineage")
+
 
 # %%
 final_row = carrier.row(len(carrier) - 1, named=True)
@@ -858,9 +1337,58 @@ assessment = pl.DataFrame(
             ),
         },
         {
-            "gate": "Matching untouched holdout",
-            "status": "UNRESOLVED",
-            "evidence": "not run; 2021 holdout already observed on IPCA",
+            # Not "did a holdout run" - it did - but whether the fit it ran on is the one
+            # published. `STRATEGY_MATCHES` and `IDENTITY_MATCHES` are computed in section 4
+            # and carry the two halves of that question.
+            "gate": "Holdout on the published fit",
+            # PASS needs every one of them: the same fit, the same checkpoint of it, the
+            # same backtest, a lock demonstrably taken before the run, and a lineage
+            # `finalize_holdout` has recorded. QUALIFIED is the weaker claim - the same
+            # computation under a training identity the case study has since replaced. Short
+            # of either, INCONCLUSIVE, and `_holdout_qualifier` names what is short.
+            "status": (
+                "UNSEALED"
+                if HOLDOUT_UNSEALED
+                else "PENDING"
+                if LOCK_PENDING
+                else "NOT ASSESSED"
+                if sealed_holdout is None
+                else "PASS"
+                if IDENTITY_MATCHES
+                and CHECKPOINT_MATCHES
+                and STRATEGY_MATCHES
+                and SEALED_BEFORE_SPENT
+                and LOCK_FINALIZED
+                else "QUALIFIED"
+                if CHECKPOINT_MATCHES
+                and STRATEGY_MATCHES
+                and VALIDATION_CV_MATCHES
+                and SEALED_BEFORE_SPENT
+                and LOCK_FINALIZED
+                and not SUBSTANTIVE_DIVERGENCE
+                else "INCONCLUSIVE"
+            ),
+            "evidence": (
+                f"{len(holdout_prediction_rows)} holdout prediction(s) sealed by no lock"
+                if HOLDOUT_UNSEALED
+                else f"lock {LOCK_HASH} sealed and unspent"
+                if LOCK_PENDING
+                else (
+                    "no research lock in this registry; no holdout has been taken"
+                    if not HOLDOUT_SPENT
+                    else f"sealed fit unbacktested; window also spent on {', '.join(_other_fits)}"
+                    if _other_fits and _sealed_predicted
+                    else f"the window was spent on another fit ({', '.join(_other_fits)})"
+                    if _other_fits
+                    else "the window is spent and no backtest computes its result"
+                )
+                if sealed_holdout is None
+                else (
+                    f"sealed {sealed_holdout['sharpe']:.3f} ["
+                    f"{sealed_holdout['sharpe_ci_lo']:.3f}, "
+                    f"{sealed_holdout['sharpe_ci_hi']:.3f}]" + _holdout_qualifier()
+                )
+            ),
         },
         {
             "gate": "Deployment claim",
@@ -889,8 +1417,12 @@ assessment
 # 4. The cost curve is read from its lower bound, not its point path. The cell
 #    under the cost chart reports where each first reaches zero, and the lower
 #    bound's crossing is the one a cost claim has to respect.
-# 5. The existing IPCA holdout rows are historical and not comparable to the
-#    corrected carrier. No matching holdout was run, because the 2021 window
-#    has already been observed.
+# 5. The 2021 holdout was taken, once, and the research lock names what it was
+#    spent on: the same model, label, allocation and risk rule the carrier
+#    publishes, fitted two days earlier under the previous identity-recording
+#    scheme. Section 4 reports that Sharpe with its interval and the exact
+#    identity fields the sealed fit and the published one disagree on. It is an
+#    out-of-sample number for a fit the case study no longer publishes, and it
+#    cannot be closed by a second run without spending the window twice.
 # 6. Publication may present v3.1 as a corrected validation record, but it must
 #    label out-of-sample efficacy unresolved and make no deployment claim.

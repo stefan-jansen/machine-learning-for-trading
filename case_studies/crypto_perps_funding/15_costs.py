@@ -14,610 +14,424 @@
 # ---
 
 # %% [markdown]
-# # Cost Survival: Crypto Perpetual Futures
+# # Crypto perpetuals: how much friction the surviving configuration absorbs
 #
-# How much execution friction can the frozen validation carrier absorb after its long-short book and
-# funding cash flows are reconstructed correctly? This notebook reads the registered cost grid,
-# replays its selected risk-parity carrier without registration, and separates three records: frozen
-# v3.0 price P&L, corrected price P&L, and corrected perpetual-futures total return.
+# Every backtest so far charged one cost schedule, the one `config/setup.yaml` declares. This
+# notebook holds the configuration that survived [`14_portfolio_management`](14_portfolio_management.ipynb)
+# completely fixed - same model, same checkpoint, same entry rule, same allocator - and varies
+# only what it costs to trade.
 #
-# **Learning objectives**
+# **This stage selects nothing.** The three stages before and after it narrow a field: the
+# baseline runs everything, allocation runs the top ten configurations, the risk overlay runs the
+# top one. Cost sensitivity runs the top one too, but it is not choosing between candidates - it
+# is asking a question about the one already chosen, and the answer is a curve rather than a
+# ranking. Nothing downstream reads a ranking from here.
 #
-# - Interpret transaction cost as commission plus slippage on each traded notional
-# - Reconstruct the exact registered cost grid without writing new registry rows
-# - Distinguish execution-cost decay from funding settlement
-# - Estimate breakeven cost from the corrected curve rather than a stale point estimate
+# The reason a curve is the right output is that a single cost assumption is a guess. The declared
+# schedule is one point on it, and a result that holds only at that point is a result about the
+# guess rather than about the strategy. What the curve shows is how far the
+# assumption can move before the conclusion does.
 #
-# **Book reference**: Chapter 18, Transaction Costs
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Prerequisites**: [`14_portfolio_management`](14_portfolio_management.ipynb) and the frozen
-# `run_log/registry.db`
+# - Read a cost level in basis points as a charge on traded notional, and say why turnover, not
+#   the rate, is what converts it into a change in Sharpe.
+# - Distinguish a per-trade execution charge, which scales with the rate, from a funding cash
+#   flow, which is a property of holding the position and does not.
+# - Read a cost-decay curve for a breakeven rather than reading a single point estimate.
+# - Say why a uniform grid is a sensitivity axis and not a faithful reproduction of the declared
+#   fee structure.
+#
+# **Book reference**: Chapter 18 (Transaction Costs).
+#
+# **Prerequisites**: [`14_portfolio_management`](14_portfolio_management.ipynb) has frozen a
+# candidate set per label.
+#
+# **What it writes**: one `stage='cost_sensitivity'` backtest per label and cost level. No
+# candidate set, because nothing here is selected from.
 
 # %%
-"""Read-only transaction-cost replay with official funding settlement."""
+"""Sweep the declared cost grid across the surviving crypto perpetuals configuration."""
 
-import json
 import sqlite3
-import warnings
-from collections import defaultdict
-from copy import deepcopy
-from datetime import UTC, datetime
+from contextlib import closing
 
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.crypto_perps_funding.funding_data import load_funding_rates
-from case_studies.utils.backtest_loaders import (
-    get_backtest_config,
-    get_rebalance_step,
-    load_backtest_prices_for,
-    thin_to_rebalance_dates,
-    warmup_periods_for,
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    selected_allocation_result,
 )
-from case_studies.utils.backtest_presets import (
-    build_backtest_spec,
-    set_backtest_costs_bps,
-)
-from case_studies.utils.backtest_runner import precompute_weights, run_backtest
-from case_studies.utils.cv_window import canonical_window
-from case_studies.utils.registry import read_predictions
-from utils.paths import get_case_study_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from case_studies.research import open_study, run_backtests
+from case_studies.research.strategy import strategy_warmup_periods
+from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
+from case_studies.utils.sweep_config import get_cost_grid_bps
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY = "crypto_perps_funding"
-LABEL = "fwd_ret_24h"
-SEED = 42
-BAR_HOURS = 8
-MAX_SYMBOLS = 0
-EXPECTED_COST_CELLS = 11
-COST_LEVELS_BPS = ""
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+POPULATION_SUFFIX = "v1"
 
 # %%
-set_global_seeds(SEED)
-FROZEN_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
-REGISTRY_PATH = FROZEN_CASE_DIR / "run_log" / "registry.db"
-config = get_backtest_config(CASE_STUDY)
-
-print(f"Registry: {REGISTRY_PATH.name} (read-only analysis)")
+study = open_study(
+    "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
+)
+labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
+# A canonical run reads the funnel's frozen sets and publishes its own; a preview run against a
+# private workspace reads and writes only what it produced there.
+CANONICAL_RUN = EXECUTION_TIER == "canonical" and not WORKSPACE
+case_config = get_backtest_config("crypto_perps_funding")
 
 # %% [markdown]
-# ## Freeze the allocation carrier and its cost grid
+# ## 1. The configuration under test
 #
-# The allocation cohort fixes the model, prediction artifact, and risk-parity specification before
-# cost analysis. The registered cost stage then contributes its exact 11 commission-plus-slippage
-# levels per traded notional. Duplicate hashes at the same cost would fail closed.
-
-
-# %%
-def _allocation_carrier(registry_path) -> dict:
-    """Load the frozen allocation leader."""
-    leader_query = """
-        SELECT b.prediction_hash, b.backtest_hash, b.spec_json, m.sharpe
-        FROM cohort_metrics c
-        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
-        JOIN backtest_metrics m USING (backtest_hash)
-        WHERE c.cohort_type = 'stagelabel'
-          AND c.stage = 'allocation' AND c.label = ?
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        leader_row = connection.execute(leader_query, (LABEL,)).fetchone()
-    if leader_row is None:
-        raise RuntimeError("No frozen allocation leader for the selected label")
-    prediction_hash, backtest_hash, spec_json, sharpe = leader_row
-    return {
-        "prediction_hash": prediction_hash,
-        "backtest_hash": backtest_hash,
-        "spec": json.loads(spec_json),
-        "stored_sharpe": sharpe,
-    }
-
-
-# %% [markdown]
-# Carrier identity includes the selected artifact, registered backtest, and complete strategy.
-
+# `14_portfolio_management` froze one candidate set per label holding the baseline and the
+# allocation results together, admitting only results that traded every validation fold. The
+# configuration this notebook varies costs for is the highest validation Sharpe in that set.
+#
+# Reading it back through the frozen set rather than re-querying the registry matters, because
+# the set is immutable and the query is not. A registry grows: a later run that adds one result
+# would change what a fresh "best allocation result" query returns, and the cost curve would then
+# describe a different configuration from the one the previous stage chose. `CandidateSet.one`
+# resolves a name to exactly one identity or raises.
 
 # %%
-def _validate_carrier(carrier: dict, expected_strategy: dict) -> None:
-    """Reject any substitute for the frozen signed allocation carrier."""
-    if (
-        carrier["prediction_hash"] != "fb85a7d19ce1"
-        or carrier["backtest_hash"] != "7d0eb0c542fa"
-        or carrier["spec"]["strategy"] != expected_strategy
-    ):
-        raise RuntimeError("The frozen allocation carrier changed; review the cost narrative")
-
-
-# %%
-def _registered_cost_cells(
-    registry_path, prediction_hash: str, expected_strategy: dict
-) -> pl.DataFrame:
-    """Return one registered row per semantic cost level."""
-    query = """
-        SELECT b.backtest_hash, b.spec_json, m.sharpe
-        FROM backtest_runs b JOIN backtest_metrics m USING (backtest_hash)
-        WHERE b.stage = 'cost_sensitivity' AND b.prediction_hash = ?
-    """
-    with sqlite3.connect(f"file:{registry_path}?mode=ro", uri=True) as connection:
-        cost_rows = connection.execute(query, (prediction_hash,)).fetchall()
-    semantic = {}
-    for row_hash, row_spec_json, row_sharpe in cost_rows:
-        row_spec = json.loads(row_spec_json)
-        if row_spec["strategy"] != expected_strategy:
-            raise RuntimeError(f"Cost row {row_hash} does not use the frozen carrier strategy")
-        runtime = row_spec["backtest_config"]
-        commission = runtime["commission"]
-        slippage = runtime["slippage"]
-        if commission["model"] != "percentage" or slippage["model"] != "percentage":
-            raise RuntimeError(f"Cost row {row_hash} does not use percentage costs")
-        commission_bps = round(commission["rate"] * 10_000, 8)
-        slippage_bps = round(slippage["rate"] * 10_000, 8)
-        cost_bps = round(commission_bps + slippage_bps, 8)
-        if cost_bps in semantic:
-            raise RuntimeError(f"Duplicate registered cost cell at {cost_bps} bps")
-        semantic[cost_bps] = {
-            "backtest_hash": row_hash,
-            "stored_sharpe": row_sharpe,
-            "commission_bps": commission_bps,
-            "slippage_bps": slippage_bps,
-        }
-    return pl.DataFrame(
-        [{"cost_bps": cost_bps, **values} for cost_bps, values in sorted(semantic.items())]
-    )
-
-
-# %% [markdown]
-# The production grid has a fixed identity. A reduced injected grid is valid only for isolated
-# execution tests that have no registered cost rows.
-
-
-# %%
-def _validate_cost_grid(frame: pl.DataFrame, expected_cells: int, using_fallback: bool) -> None:
-    """Reject incomplete or shifted production cost grids."""
-    if frame.height != expected_cells:
-        raise RuntimeError(f"Expected {expected_cells} semantic cost cells, found {frame.height}")
-    frozen_levels = [0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 50.0]
-    if not using_fallback and frame["cost_bps"].sort().to_list() != frozen_levels:
-        raise RuntimeError("The registered cost levels differ from the frozen 11-cell grid")
-
-
-# %% [markdown]
-# The complete carrier identity prevents a same-family or same-concentration substitute from
-# changing the historical comparison silently.
-
-# %%
-carrier = _allocation_carrier(REGISTRY_PATH)
-strategy = carrier["spec"]["strategy"]
-signal = strategy["signal"]
-allocation = strategy["allocation"]
-expected_strategy = {
-    "signal": {"long_short": True, "method": "equal_weight_top_k", "top_k": 5},
-    "allocation": {
-        "long_short": True,
-        "method": "risk_parity",
-        "top_k": 5,
-        "vol_window": 240,
-    },
-    "rebalance": {
-        "cadence": "8_hour_funding_aligned",
-        "min_trade_value": 100.0,
-        "min_weight_change": 0.005,
-        "mode": "engine",
-    },
+chosen_by_label = {
+    label: selected_allocation_result(study, label=label, canonical=CANONICAL_RUN)
+    for label in labels
 }
-_validate_carrier(carrier, expected_strategy)
 
 # %% [markdown]
-# Production requires the complete registered grid. Papermill can inject a smaller unregistered
-# grid only when the isolated test registry has no cost-stage rows.
+# One row per label. `stage` says whether the surviving configuration came from the baseline or
+# from the allocation grid - equal weight remains eligible, and a label where it wins is a label
+# where no allocator beat it.
 
-# %%
-cost_cells = _registered_cost_cells(REGISTRY_PATH, carrier["prediction_hash"], strategy)
-fallback_costs = [float(value) for value in COST_LEVELS_BPS.split(",") if value.strip()]
-using_fallback_grid = cost_cells.is_empty() and bool(fallback_costs)
-if using_fallback_grid:
-    cost_cells = pl.DataFrame(
-        {
-            "cost_bps": fallback_costs,
-            "backtest_hash": [""] * len(fallback_costs),
-            "stored_sharpe": [float("nan")] * len(fallback_costs),
-            "commission_bps": [value / 2 for value in fallback_costs],
-            "slippage_bps": [value / 2 for value in fallback_costs],
-        }
-    )
-_validate_cost_grid(cost_cells, EXPECTED_COST_CELLS, using_fallback_grid)
-
-print(
-    f"Carrier: prediction={carrier['prediction_hash']} allocation={allocation['method']} "
-    f"requested_top_k={allocation['top_k']}"
+# %% tags=["results"]
+backtests = study.backtests.table(include_preview=not CANONICAL_RUN)
+selected = backtests.filter(
+    pl.col("backtest_hash").is_in([result.hash for result in chosen_by_label.values()])
+).select(
+    "label",
+    "stage",
+    "family",
+    "config_name",
+    "signal_method",
+    pl.col("allocation_method").fill_null("equal_weight").alias("allocator"),
+    "sharpe",
+    "avg_turnover",
+    "prediction_hash",
 )
-print(
-    f"Registered cost grid: {cost_cells['cost_bps'].to_list()} bps "
-    "of commission plus slippage per traded notional"
-)
+if selected.height != len(chosen_by_label):
+    raise RuntimeError("a selected result is absent from the backtest catalog")
+selected.sort("label")
 
 # %% [markdown]
-# ## Put the frozen artifact on the availability clock
+# ## 2. The grid, and what a level on it means
 #
-# The frozen prediction artifact stores the legacy bar-open timestamp. Its target is reconciled
-# against current raw prices before predictions and prices advance together by one completed 8-hour
-# bar. The corrected long-short helper caps each side at half the available cross-section.
+# `config/setup.yaml` declares the levels under `backtest.sweep.cost_grid_bps`. A level is the
+# **round-trip charge on traded notional, in basis points**, split half to commission and half to
+# slippage. That split is the convention every case study's cost sweep uses, so a curve here reads
+# against a curve elsewhere.
+#
+# **The grid is a sensitivity axis, not the declared fee structure.** The production schedule for
+# these contracts is a 4 bp commission and a 1 bp slippage allowance, which the case study takes
+# from the exchange's taker tier. Its total is 5 bps, and 5 bps is a cell on the grid - but the
+# cell splits that total evenly, so it is the same amount of friction distributed differently, not
+# the registered production point re-run. Slippage moves the fill price and commission is charged
+# on the notional that results, so the two are not interchangeable to the last dollar. Read the
+# curve as a response to a uniform cost level.
+#
+# The upper end of the grid is deliberately past anything these venues charge. A perpetual future
+# on a major exchange does not cost 50 bps to trade. The point of running it is that the curve
+# between the plausible levels and the implausible ones is where a strategy reveals whether it has
+# any margin at all.
 
 # %%
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", message="'Y' is deprecated", category=FutureWarning)
-    validation_window = canonical_window(CASE_STUDY, LABEL, split="validation")
-if validation_window is None:
-    raise RuntimeError("No canonical validation window")
-validation_start, validation_end = validation_window
+cost_grid = get_cost_grid_bps("crypto_perps_funding")
+if not cost_grid:
+    raise RuntimeError("crypto_perps_funding declares no backtest.sweep.cost_grid_bps")
+declared_total = case_config.commission_bps + case_config.slippage_bps
+print(
+    f"{len(cost_grid)} declared levels: {', '.join(f'{level:g}' for level in cost_grid)} bps.\n"
+    f"Production schedule: {case_config.commission_bps:g} bps commission + "
+    f"{case_config.slippage_bps:g} bps slippage = {declared_total:g} bps total"
+    + (" (a level on the grid)" if declared_total in cost_grid else " (not a level on the grid)")
+)
 
-frozen_predictions = read_predictions(
-    CASE_STUDY, carrier["prediction_hash"], case_dir=FROZEN_CASE_DIR
-)
-raw_prices = load_backtest_prices_for(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    max_symbols=MAX_SYMBOLS,
-    warmup_periods=warmup_periods_for(CASE_STUDY),
-)
-legacy_targets = (
-    raw_prices.sort("symbol", "timestamp")
+# %% [markdown]
+# ## 3. Running the sweep
+#
+# For each label, that result's own strategy is taken from its registered specification and
+# re-run once per cost level. Nothing in the strategy is rebuilt here: the entry rule and the
+# allocator are the fields the previous two stages resolved, read back rather than reconstructed,
+# so a change to how they are configured cannot silently produce a cost curve for something else.
+#
+# Prices are loaded with the warmup its allocator needs, which is the same window the
+# allocation stage gave it. A moment-based allocator that saw less history here would weight
+# differently, and the difference would be attributed to the cost level.
+
+# %%
+cost_runs = []
+for label in labels:
+    chosen = chosen_by_label[label]
+    strategy = chosen.spec()["strategy"]
+    allocation = strategy.get("allocation")
+    warmup = strategy_warmup_periods({"allocation": allocation} if allocation else {})
+    prices = load_backtest_prices_for(
+        "crypto_perps_funding", label, split="validation", warmup_periods=warmup
+    )
+    predictions = study.predictions.table(include_preview=not CANONICAL_RUN).filter(
+        pl.col("prediction_hash") == chosen.spec()["backtest_config"]["metadata"]["prediction_hash"]
+    )
+    if predictions.height != 1:
+        raise RuntimeError(f"{label}: the selected prediction set is not uniquely resolvable")
+    for level in cost_grid:
+        execution = run_backtests(
+            study,
+            predictions=predictions,
+            signal=strategy["signal"],
+            allocation=allocation,
+            costs={
+                "model": "percentage",
+                "commission_bps": level / 2,
+                "slippage_bps": level / 2,
+            },
+            prices=prices,
+            chapter="ch18",
+            population_name=(
+                f"crypto-cost-{label}-{level:g}bps-{POPULATION_SUFFIX}" if CANONICAL_RUN else None
+            ),
+        )
+        cost_runs.extend(result.hash for result in execution.results)
+        print(
+            f"{label} @ {level:g} bps: {len(execution.results)} backtests registered\n"
+            f"  this execution: {execution.n_computed} computed, "
+            f"{execution.n_reused} served from the registry"
+        )
+
+# %% [markdown]
+# ## 4. What came out
+#
+# Read back from the registry. `cost_bps` is recovered from each registered specification rather
+# than carried over from the loop, so the table describes what was run and not what was intended.
+
+
+# %%
+def funding_metrics(study_root) -> pl.DataFrame:
+    """Settled funding per registered backtest.
+
+    The prediction and backtest catalogs project the metrics the pipeline shares across
+    case studies, and funding is not one of them - it exists only where the instrument
+    settles it. Reading it here keeps the column available without widening a shared
+    catalog for one case study's economics.
+    """
+    with closing(
+        sqlite3.connect(f"file:{study_root / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+    ) as db:
+        rows = db.execute(
+            "SELECT backtest_hash, funding_pnl, funding_events, funding_settlements "
+            "FROM backtest_metrics"
+        ).fetchall()
+    return pl.DataFrame(
+        rows,
+        schema=["backtest_hash", "funding_pnl", "funding_events", "funding_settlements"],
+        orient="row",
+    )
+
+
+# %%
+commission_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.commission.rate")
+slippage_rate = pl.col("spec_json").str.json_path_match("$.backtest_config.slippage.rate")
+# Named by hash, and not read back as "every cost_sensitivity row for these labels". The
+# registry keeps every generation, so a run whose selected configuration changed - because the
+# candidate set it came from was superseded - leaves the previous configuration's cost cells in
+# place, and the row-count check below then fails on a valid re-run while the curve it did draw
+# would have mixed two configurations.
+curve = (
+    study.backtests.table(include_preview=not CANONICAL_RUN)
+    .filter(pl.col("backtest_hash").is_in(cost_runs))
     .with_columns(
-        pl.col("close").shift(-3).over("symbol").alias("end_close"),
-        pl.col("timestamp").shift(-3).over("symbol").alias("end_timestamp"),
+        ((commission_rate.cast(pl.Float64) + slippage_rate.cast(pl.Float64)) * 10_000)
+        .round(6)
+        .alias("cost_bps")
     )
-    .filter(pl.col("end_timestamp") == pl.col("timestamp") + pl.duration(hours=24))
-    .select(
-        pl.col("timestamp").dt.replace_time_zone("UTC"),
-        "symbol",
-        (pl.col("end_close") / pl.col("close") - 1).alias("current_raw_target"),
-    )
+    .join(funding_metrics(STORAGE_ROOT), on="backtest_hash", how="left")
+    .sort("label", "cost_bps")
 )
-alignment = frozen_predictions.join(legacy_targets, on=["timestamp", "symbol"], how="inner")
-target_correlation = alignment.select(pl.corr("y_true", "current_raw_target")).item()
-if target_correlation < 0.99:
-    raise ValueError("Frozen prediction timestamps do not match the legacy raw-price clock")
-print(f"Frozen target/current raw-price correlation: {target_correlation:.6f}")
+if curve.filter(pl.col("funding_pnl").is_null()).height:
+    raise RuntimeError("a registered cost cell has no settled funding recorded")
+if curve.filter(~pl.col("complete")).height:
+    raise RuntimeError("the cost sweep registered an incomplete result")
+expected = len(labels) * len(cost_grid)
+if curve.height != expected:
+    raise RuntimeError(f"expected {expected} cost cells, the registry holds {curve.height}")
 
-# %%
-predictions = frozen_predictions.with_columns(
-    pl.col("timestamp") + pl.duration(hours=BAR_HOURS)
-).filter(pl.col("timestamp").dt.date() <= validation_end)
-prices = raw_prices.with_columns(pl.col("timestamp") + pl.duration(hours=BAR_HOURS)).filter(
-    pl.col("timestamp").dt.date() <= validation_end
-)
-funding = (
-    load_funding_rates(symbols=prices["symbol"].unique().to_list())
-    .with_columns(pl.col("timestamp").cast(prices.schema["timestamp"]))
-    .filter(
-        (pl.col("timestamp") >= prices["timestamp"].min())
-        & (pl.col("timestamp") <= prices["timestamp"].max())
-    )
-)
-# Breadth is a property of the settlements the allocator actually sizes, not of every settlement
-# scored. The runner thins predictions to non-overlapping rebalance dates before allocating, so the
-# same thinning is applied here rather than reproduced by hand - a step applied twice thins by its
-# square, which is the failure this shares a helper to avoid.
-rebalance_panel = thin_to_rebalance_dates(
-    predictions,
-    cadence=strategy["rebalance"]["cadence"],
-    step=get_rebalance_step(CASE_STUDY, LABEL),
-)
-panel_sizes = rebalance_panel.group_by("timestamp").len().rename({"len": "n_assets"})
-capped_timestamps = panel_sizes.filter(pl.col("n_assets") < 2 * allocation["top_k"]).height
-print(
-    f"Predictions: {predictions.height:,}; prices: {prices.height:,}; "
-    f"settlements: {funding.height:,}; rebalance settlements: {panel_sizes.height:,}; "
-    f"dynamically capped: {capped_timestamps}"
+# %% [markdown]
+# One row per label and cost level. `total_commission` and `total_slippage` are the dollars the
+# engine charged; `funding_pnl` is the funding settled over the same period, which is what the
+# cost level does not touch.
+
+# %% tags=["results"]
+curve.select(
+    "label",
+    "cost_bps",
+    "sharpe",
+    "total_return",
+    "num_trades",
+    "avg_turnover",
+    "total_commission",
+    "total_slippage",
+    "funding_pnl",
 )
 
 # %% [markdown]
-# ## Reconstruct price P&L and funding settlement
+# ### The decay, and where it crosses zero
 #
-# Funding at time $t$ belongs to the position carried into $t$. Same-time fills begin exposure at
-# the next settlement. Off-grid events use the last observed mark. A second ledger removes funding
-# again and must reconstruct engine equity within floating-point noise.
+# The breakeven is the cost level at which the curve crosses zero Sharpe, found by interpolating
+# between the two levels it crosses between rather than reported as the nearest grid point. A
+# label whose curve never crosses has no breakeven to report, and that is stated rather than
+# filled in: a strategy already below zero at no cost at all does not become viable at a lower
+# cost, and one still above zero at 50 bps has more margin than the grid can measure.
 
 
 # %%
-def _as_utc(value: datetime) -> datetime:
-    """Normalize engine timestamps to timezone-aware UTC."""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-# %%
-def _replay_inputs(result):
-    """Index fills, settlements, prices, and engine equity by UTC timestamp."""
-    engine = result.engine_result
-    if engine is None:
-        raise RuntimeError("Funding replay requires an uncached engine result")
-    fills = defaultdict(list)
-    for fill in engine.fills:
-        fills[_as_utc(fill.timestamp)].append(fill)
-    rates = defaultdict(dict)
-    for row in funding.iter_rows(named=True):
-        rates[_as_utc(row["timestamp"])][row["symbol"]] = float(row["funding_rate"])
-    marks = defaultdict(dict)
-    for row in prices.select("timestamp", "symbol", "close").iter_rows(named=True):
-        marks[_as_utc(row["timestamp"])][row["symbol"]] = float(row["close"])
-    equity = {_as_utc(ts): float(value) for ts, value in engine.equity_curve}
-    return fills, rates, marks, equity
-
-
-# %%
-def _replay_equity(result):
-    """Return adjusted equity, funding P&L, settlement count, and reconstruction error."""
-    fills, rates, marks, engine_equity = _replay_inputs(result)
-    cash = float(config.initial_cash)
-    positions = defaultdict(float)
-    cumulative_funding = 0.0
-    settlements = 0
-    adjusted = []
-    reconstructed = []
-    last_marks = {}
-    for timestamp in sorted(set(engine_equity) | set(rates)):
-        last_marks.update(marks[timestamp])
-        for symbol, rate in rates.get(timestamp, {}).items():
-            settlements += 1
-            if positions.get(symbol, 0.0) != 0 and symbol in last_marks:
-                event_cash = -(positions[symbol] * last_marks[symbol]) * rate
-                cash += event_cash
-                cumulative_funding += event_cash
-        for fill in fills.get(timestamp, []):
-            quantity = float(fill.quantity) if fill.side.value == "buy" else -float(fill.quantity)
-            cash -= quantity * float(fill.price) + float(fill.commission)
-            last_marks.setdefault(fill.asset, float(fill.price))
-            positions[fill.asset] += quantity
-            if abs(positions[fill.asset]) < 1e-12:
-                del positions[fill.asset]
-        if timestamp in engine_equity:
-            marked = sum(quantity * last_marks[symbol] for symbol, quantity in positions.items())
-            adjusted.append((timestamp, cash + marked))
-            reconstructed.append((timestamp, cash - cumulative_funding + marked))
-    error = max(abs(value - engine_equity[ts]) for ts, value in reconstructed)
-    return adjusted, cumulative_funding, settlements, error
-
-
-# %%
-def _daily_sharpe(equity_curve: list[tuple[datetime, float]]) -> float:
-    """Compute validation Sharpe from end-of-day equity."""
-    daily = (
-        pl.DataFrame(equity_curve, schema=["timestamp", "equity"], orient="row")
-        .with_columns(pl.col("timestamp").dt.date().alias("date"))
-        .group_by("date")
-        .agg(pl.col("equity").sort_by("timestamp").last())
-        .sort("date")
-        .with_columns(pl.col("equity").pct_change().alias("return"))
-        .filter((pl.col("date") >= validation_start) & (pl.col("date") <= validation_end))
-    )
-    values = daily["return"].drop_nulls().to_numpy()
-    return float(values.mean() / values.std(ddof=1) * np.sqrt(365))
-
-
-# %% [markdown]
-# ## Replay the exact cost grid without registration
-#
-# The allocation weights do not depend on cost, so they are computed once and reused. Each cost cell
-# still produces its own fill path because commissions and slippage change available cash.
-
-# %%
-base_spec = build_backtest_spec(
-    CASE_STUDY,
-    config,
-    prices=prices,
-    prediction_hash=carrier["prediction_hash"],
-    initial_cash=config.initial_cash,
-    chapter="ch18",
-    signal=signal,
-    allocation=allocation,
-)
-if base_spec["strategy"] != expected_strategy:
-    raise RuntimeError("The reconstructed runtime strategy differs from the frozen carrier")
-weights = precompute_weights(
-    predictions,
-    base_spec,
-    prices,
-    label=LABEL,
-    case_study=CASE_STUDY,
-    prediction_hash=carrier["prediction_hash"],
-).sort("timestamp", "symbol")
-
-# %%
-replay_rows = []
-for index, cell in enumerate(cost_cells.iter_rows(named=True), start=1):
-    total_cost_bps = float(cell["cost_bps"])
-    spec = set_backtest_costs_bps(
-        deepcopy(base_spec),
-        commission_bps=float(cell["commission_bps"]),
-        slippage_bps=float(cell["slippage_bps"]),
-    )
-    result = run_backtest(
-        CASE_STUDY,
-        carrier["prediction_hash"],
-        spec,
-        prices=prices,
-        predictions=predictions,
-        label=LABEL,
-        register=False,
-        precomputed_weights=weights,
-        initial_cash=config.initial_cash,
-        calendar=config.calendar,
-    )
-    curve, funding_pnl, settlements, reconstruction_error = _replay_equity(result)
-    replay_rows.append(
-        {
-            "cost_bps": total_cost_bps,
-            "stored_sharpe": cell["stored_sharpe"],
-            "price_only_sharpe": float(result.metrics["sharpe"]),
-            "with_funding_sharpe": _daily_sharpe(curve),
-            "funding_pnl": funding_pnl,
-            "settlements": settlements,
-            "reconstruction_error": reconstruction_error,
-        }
-    )
-    print(
-        f"[{index:02d}/{cost_cells.height}] {total_cost_bps:>4.0f} bps: "
-        f"price={replay_rows[-1]['price_only_sharpe']:+.3f}, "
-        f"funding={replay_rows[-1]['with_funding_sharpe']:+.3f}"
-    )
-
-# %% [markdown]
-# A single fail-closed validator applies the same accounting contract to every cost cell.
-
-
-# %%
-def _validate_replay(
-    frame: pl.DataFrame, expected_settlements: int, allow_missing_stored: bool
-) -> None:
-    """Reject incomplete or non-finite cost-replay results."""
-    for metric in ("price_only_sharpe", "with_funding_sharpe", "funding_pnl"):
-        if not frame[metric].is_finite().all():
-            raise RuntimeError(f"Non-finite cost replay metric: {metric}")
-    if not allow_missing_stored and not frame["stored_sharpe"].is_finite().all():
-        raise RuntimeError("A registered cost cell has a non-finite stored Sharpe")
-    if frame.filter(pl.col("settlements") != expected_settlements).height:
-        raise RuntimeError("At least one cost replay missed an official settlement")
-    reconstruction_errors = frame["reconstruction_error"]
-    if not reconstruction_errors.is_finite().all() or reconstruction_errors.max() > 1e-6:
-        raise RuntimeError("Funding ledger does not reconstruct engine equity")
-
-
-# %%
-replay = pl.DataFrame(replay_rows).sort("cost_bps")
-_validate_replay(replay, funding.height, using_fallback_grid)
-print(f"Every replay processed all {funding.height:,} official settlement rows")
-print(
-    replay.select(
-        "cost_bps",
-        "stored_sharpe",
-        "price_only_sharpe",
-        "with_funding_sharpe",
-        "funding_pnl",
-    )
-)
-
-# %% [markdown]
-# ## Funding moves the curve, but trading friction still dominates
-#
-# The frozen curve is retained as history. The corrected curves enforce a disjoint long-short book;
-# the total-return curve additionally settles official funding. Their horizontal-zero crossings
-# determine the implementation budget.
-#
-# The two corrected curves are replayed here, so they measure the carrier only where the replay can
-# reproduce what the carrier does. The carrier is long-short at `top_k`, so it needs `2 * top_k`
-# perpetuals in a settlement to take a position on both sides - the same breadth the capped-settlement
-# count above is measured against. A cross-section that never reaches it hands the selector
-# everything it has on every settlement, the selection that the edge consists of never happens, and
-# the curve that comes back describes a different strategy. Its crossing is then not a budget, so it
-# is not reported as one even when the arithmetic produces a number; on the reduced surface used for
-# execution tests there is none to report anyway, because the replayed Sharpe is already negative at
-# zero cost. An injected test grid can separately stop short of a crossing by being shorter than the
-# registered one, and is reported unavailable for that reason instead. The frozen curve is read from
-# the registry rather than replayed, so neither condition reaches it and its crossing is still
-# required whenever the registered grid is the one in hand.
-
-
-# %%
-def _breakeven(frame: pl.DataFrame, metric: str) -> float | None:
-    """Linearly interpolate the first nonnegative-to-negative crossing."""
-    rows = frame.select("cost_bps", metric).sort("cost_bps").iter_rows()
-    previous = next(rows)
-    for current in rows:
-        x0, y0 = previous
-        x1, y1 = current
-        if y0 >= 0 > y1:
-            return float(x0 + (0 - y0) * (x1 - x0) / (y1 - y0))
-        previous = current
+def breakeven_bps(panel: pl.DataFrame) -> float | None:
+    """Cost level where validation Sharpe crosses zero, linearly between bracketing levels."""
+    rows = panel.sort("cost_bps").select("cost_bps", "sharpe").rows()
+    for (low_cost, low_sharpe), (high_cost, high_sharpe) in zip(rows, rows[1:], strict=False):
+        if (low_sharpe > 0) != (high_sharpe > 0):
+            span = low_sharpe - high_sharpe
+            if span == 0:
+                return low_cost
+            return low_cost + (high_cost - low_cost) * low_sharpe / span
     return None
 
 
 # %%
-price_breakeven = _breakeven(replay, "price_only_sharpe")
-funding_breakeven = _breakeven(replay, "with_funding_sharpe")
-stored_breakeven = _breakeven(replay, "stored_sharpe")
-required_breadth = 2 * allocation["top_k"]
-widest_panel = panel_sizes["n_assets"].max()
-selection_is_degenerate = widest_panel < required_breadth
+breakevens = {label: breakeven_bps(curve.filter(pl.col("label") == label)) for label in labels}
+for label in labels:
+    panel = curve.filter(pl.col("label") == label).sort("cost_bps")
+    crossing = breakevens[label]
+    at_zero = panel.item(0, "sharpe")
+    if crossing is not None:
+        print(f"{label}: Sharpe {at_zero:.2f} at no cost, crossing zero near {crossing:.1f} bps")
+    elif at_zero > 0:
+        print(
+            f"{label}: Sharpe {at_zero:.2f} at no cost, still above zero at {max(cost_grid):g} bps"
+        )
+    else:
+        print(f"{label}: Sharpe {at_zero:.2f} at no cost, below zero across the whole grid")
 
-if using_fallback_grid:
-    print("Frozen registry breakeven: unavailable for an unregistered test grid")
-elif stored_breakeven is None or not np.isfinite(stored_breakeven):
-    raise RuntimeError("The registered cost curve has no finite zero crossing")
-else:
-    print(f"Frozen registry breakeven: {stored_breakeven:.2f} bps")
-
-if selection_is_degenerate:
-    print(
-        f"Corrected price-only breakeven: unavailable\n"
-        f"Corrected funding-inclusive breakeven: unavailable\n"
-        f"  the widest replay cross-section is {widest_panel}, and this long-short carrier needs "
-        f"{required_breadth} to hold top-{allocation['top_k']} on both sides"
-    )
-elif using_fallback_grid:
-    for label, value in (
-        ("Corrected price-only", price_breakeven),
-        ("Corrected funding-inclusive", funding_breakeven),
-    ):
-        rendered = f"{value:.2f} bps" if value is not None and np.isfinite(value) else "unavailable"
-        print(f"{label} breakeven: {rendered} (unregistered test grid)")
-elif any(value is None or not np.isfinite(value) for value in (price_breakeven, funding_breakeven)):
-    raise RuntimeError("A replayed cost curve has no finite zero crossing")
-else:
-    print(f"Corrected price-only breakeven: {price_breakeven:.2f} bps")
-    print(f"Corrected funding-inclusive breakeven: {funding_breakeven:.2f} bps")
+# %% [markdown]
+# One line per label. The vertical marker is the declared production total; the horizontal line
+# is zero Sharpe. Where a line is already under the horizontal one at the left edge, the cost
+# level is not what is wrong with that configuration.
 
 # %%
 fig = go.Figure()
-traces = [
-    ("price_only_sharpe", "Corrected price P&L", COLORS["slate"], "solid"),
-    ("with_funding_sharpe", "Corrected with funding", COLORS["amber"], "solid"),
-]
-if not using_fallback_grid:
-    traces.insert(0, ("stored_sharpe", "Frozen registry", COLORS["neutral"], "dot"))
-for metric, name, color, dash in traces:
+palette = [COLORS["blue"], COLORS["amber"], COLORS["copper"], COLORS["slate"]]
+for index, label in enumerate(labels):
+    panel = curve.filter(pl.col("label") == label).sort("cost_bps")
     fig.add_trace(
         go.Scatter(
-            x=replay["cost_bps"],
-            y=replay[metric],
+            x=panel.get_column("cost_bps").to_list(),
+            y=panel.get_column("sharpe").to_list(),
             mode="lines+markers",
-            name=name,
-            line={"color": color, "dash": dash},
+            name=label,
+            line={"color": palette[index % len(palette)]},
         )
     )
-fig.add_hline(y=0, line_color=COLORS["neutral"], line_width=1)
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
+fig.add_vline(
+    x=declared_total,
+    line_width=1,
+    line_dash="dot",
+    line_color=COLORS["neutral"],
+    annotation_text=f"declared {declared_total:g} bps",
+    annotation_position="top",
+)
 fig.update_layout(
     title={
-        "text": "Funding extends the cost budget, but the edge still decays quickly"
-        "<br><sup>Frozen risk-parity carrier, validation window; cost per traded notional</sup>",
+        "text": "Validation Sharpe against round-trip cost"
+        "<br><sup>One line per label, each holding its surviving configuration fixed</sup>",
         "x": 0.02,
         "xanchor": "left",
     },
-    xaxis_title="Commission plus slippage (bps per traded notional)",
+    xaxis_title="Round-trip cost on traded notional (bps)",
     yaxis_title="Annualized validation Sharpe",
-    legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
+    height=520,
+    width=1000,
 )
-fig.show()
+show_plotly_with_alt(
+    fig,
+    "Line chart of annualized validation Sharpe against round-trip trading cost in basis points, "
+    "one line per label. A dashed horizontal line marks zero Sharpe and a dotted vertical line "
+    "marks the declared production cost total. Every line slopes downward as cost rises, and the "
+    "spacing between the lines at the left edge is larger than the amount any of them falls "
+    "across the whole grid.",
+)
 
 # %% [markdown]
-# The frozen curve crosses zero at 18.47 bps per traded notional. The corrected price-only curve
-# crosses at 18.70 bps, while official funding extends the interpolated budget to 19.60 bps. At the
-# registered 5 bps assumption, the corrected Sharpe moves from +2.741 price-only to +2.849 including
-# funding. These are validation measurements on the frozen carrier, not corrected holdout results.
-
-# %% [markdown]
-# ## Key takeaways
+# ### What the cost level moves and what it does not
 #
-# 1. The registered cost stage is frozen v3.0 history; this notebook does not write replacement
-#    hashes.
-# 2. Correcting the disjoint-book and point-in-time volatility fallback changes the entire cost
-#    curve, not only its zero-cost endpoint.
-# 3. Official funding is position-dependent and therefore changes along the cost curve as execution
-#    friction changes available cash and fills.
-# 4. Breakeven cost is an interpolated validation measurement, not an exchange-wide execution claim.
-# 5. The current v3.1 surface selects a separate 24-hour carrier. This frozen replay diagnoses the
-#    historical cost curve but does not establish current-carrier or holdout performance.
-# 6. The next notebook applies position-level risk rules to the same frozen carrier without writing
-#    to the registry.
+# Two things are charged against this book, and only one of them is on the horizontal axis above.
+# Commission and slippage are paid per trade, so they scale with the rate and with how much of the
+# book turns over. Funding settles on the position that is held at each 8-hourly timestamp, so it
+# is a cost of carrying the position rather than of establishing it, and the cost level does not
+# reach it at all.
+#
+# That is why the funding column below is flat across the grid while the execution columns are
+# not, and it is the reason a cost sweep on perpetual futures answers a narrower question than it
+# does on an equity book: the friction a perpetuals strategy pays is only partly execution.
+
+# %% tags=["results"]
+curve.group_by("label").agg(
+    levels=pl.len(),
+    sharpe_at_zero=pl.col("sharpe").filter(pl.col("cost_bps") == 0).first(),
+    sharpe_at_max=pl.col("sharpe").filter(pl.col("cost_bps") == max(cost_grid)).first(),
+    execution_cost_range=(
+        (pl.col("total_commission") + pl.col("total_slippage")).max()
+        - (pl.col("total_commission") + pl.col("total_slippage")).min()
+    ),
+    funding_range=pl.col("funding_pnl").max() - pl.col("funding_pnl").min(),
+    median_turnover=pl.col("avg_turnover").median(),
+).sort("label")
+
+# %% [markdown]
+# ## 5. What to notice
+#
+# **Turnover is the multiplier.** A cost level is a rate, and a rate charges nothing until
+# something trades. Two configurations at the same cost level lose different amounts of Sharpe,
+# and the difference is how much of the book each one replaces at every rebalance. This is the
+# link back to the previous stage: an allocator that spreads capital more evenly turns the book
+# over more, so a sizing choice made on a Sharpe measured at one cost level is partly a bet on
+# that cost level.
+#
+# **A breakeven is a property of the curve, not of a point.** The declared schedule is one
+# assumption among the ones a reader might hold. Reporting the Sharpe at that assumption and
+# stopping tells nobody whether the result would survive an execution desk that does slightly
+# worse. The distance between the declared level and the crossing is the margin, and a strategy
+# with no margin is one whose published result depends on the cost model being exactly right.
+#
+# **Funding does not appear on this axis.** Every level here re-runs the same funding settlement,
+# because funding is charged on the position at each 8-hourly timestamp and has nothing to do with
+# the trading rate. A perpetuals strategy therefore has two independent friction terms, and this
+# notebook varies one. A strategy could be robust to execution cost and still be defeated by the
+# funding it pays to hold the book.
+#
+# **Known limitations.** The grid is uniform across contracts, and real spreads on these venues
+# are not - the majors clear far tighter than the alts, so a uniform level over-charges the liquid
+# part of the book and under-charges the rest. The sweep also varies cost with the rebalance
+# cadence fixed, and cadence is the other side of the same trade: trading less often pays less
+# friction and reacts to the model more slowly. Neither is varied here, and neither is free.
+#
+# **Next**: [`16_risk_management`](16_risk_management.ipynb) returns to the candidate set this
+# notebook read from and asks whether a position-level or portfolio-level control improves the
+# configuration that survived, at the declared cost schedule.

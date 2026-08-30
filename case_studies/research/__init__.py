@@ -57,7 +57,13 @@ from .population import (
     superseded_members_at,
     supersedes_for_run,
 )
-from .results import BacktestResult, PredictionResult, Result, TrainingResult
+from .results import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    BacktestResult,
+    PredictionResult,
+    Result,
+    TrainingResult,
+)
 from .strategy import Strategy, strategy_warmup_periods
 from .workspace import Study, open_study
 
@@ -83,6 +89,7 @@ __all__ = [
     "ModelExecution",
     "ModelPlan",
     "ModelRun",
+    "HORIZON_DEPENDENT_PROTOCOL_FIELDS",
     "HoldoutExecution",
     "PredictionResult",
     "PredictionCatalog",

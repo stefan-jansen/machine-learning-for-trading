@@ -255,7 +255,8 @@ CREATE TABLE IF NOT EXISTS candidate_sets (
     member_kind              TEXT NOT NULL,
     comparison_contract_json TEXT NOT NULL,
     created_at               TEXT NOT NULL,
-    git_commit               TEXT
+    git_commit               TEXT,
+    supersedes_hash          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_set_members (
@@ -434,13 +435,22 @@ def _infer_stage(
             # Registry not initialized yet — fall through to spec inference.
             pass
     strategy = spec.get("strategy", spec)
-    risk = strategy.get("risk", {})
-    if risk and risk.get("name") != "baseline":
-        return "risk_overlay"
-    # Cost sensitivity: explicit chapter tag of ch18, or caller should set explicitly
+    # The explicit tag is read before the risk block, because it states what the caller is
+    # doing while the risk block only says what the strategy contains. Once cost sensitivity
+    # runs on the winner of the risk stage - which is the order the backtest sequence now
+    # takes, risk before costs - every cost row carries an overlay, and inferring from the
+    # overlay first made `cost_sensitivity` unreachable for exactly the runs that are cost
+    # sensitivity. Measured on sp500_equity_option_analytics: a 17-point cost surface over a
+    # `trailing_5pct` carrier registered all 17 rows as `risk_overlay`.
+    #
+    # This did not bite while costs and risk were parallel branches off allocation, because a
+    # cost run then carried no overlay and fell through to the tag.
     chapter = spec.get("chapter", "")
     if chapter == "ch18":
         return "cost_sensitivity"
+    risk = strategy.get("risk", {})
+    if risk and risk.get("name") != "baseline":
+        return "risk_overlay"
     if "allocation" in strategy:
         alloc = strategy["allocation"]
         if isinstance(alloc, dict) and alloc.get("method", "equal_weight") != "equal_weight":
@@ -743,6 +753,15 @@ def _migrate_registry(db: sqlite3.Connection) -> None:
     # specification, so it moves no causal hash and invalidates no registered row.
     if "causal_runs" in tables and not _table_has_column(db, "causal_runs", "supersedes_hash"):
         db.execute("ALTER TABLE causal_runs ADD COLUMN supersedes_hash TEXT")
+
+    # The candidate-set equivalent of the line above. A candidate set is derived from a
+    # registry that moves, so re-running the stage that freezes it produces a second set
+    # under the same name; without a declared predecessor the name resolves to two live
+    # identities and every reader of it raises.
+    if "candidate_sets" in tables and not _table_has_column(
+        db, "candidate_sets", "supersedes_hash"
+    ):
+        db.execute("ALTER TABLE candidate_sets ADD COLUMN supersedes_hash TEXT")
 
     # Migration 3: tall → wide metric tables
     if "prediction_metrics" in tables:
