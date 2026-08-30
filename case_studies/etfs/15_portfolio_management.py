@@ -419,6 +419,13 @@ allocation_rows = (
         how="inner",
     )
 )
+# Dropped here rather than at each reader. An allocator that ran part of the grid is excluded
+# from the allocator comparison above for a reason that holds everywhere: its average is taken
+# over an easier subset. Filtering only the concentration table left its partial rows moving the
+# prediction-source spread below - which is then compared against a span computed on the filtered
+# frame - and standing among the leading combinations at the end.
+if INCOMPLETE_ALLOCATORS:
+    allocation_rows = allocation_rows.filter(~pl.col("allocator").is_in(INCOMPLETE_ALLOCATORS))
 if allocation_rows.is_empty():
     raise RuntimeError("no allocation row carries both a stored specification and a source")
 
@@ -443,7 +450,6 @@ print(
 
 concentration = (
     allocation_rows.drop_nulls(["top_k", "allocator"])
-    .filter(~pl.col("allocator").is_in(INCOMPLETE_ALLOCATORS))
     .group_by("top_k", "allocator")
     .agg(pl.col("sharpe").mean().alias("avg_sharpe"))
     .sort("top_k", "allocator")
@@ -457,9 +463,18 @@ print(concentration.pivot(on="allocator", index="top_k", values="avg_sharpe"))
 # ### The leading combinations
 
 # %% tags=["results"]
-explorer.best(
-    stage="allocation", top_n=10, label=LABEL, prediction_hashes=ADVANCED_PREDICTIONS
-).select("source", "signal_method", "sharpe", "cagr", "max_drawdown")
+# Ranked over the whole advanced allocation stage, then narrowed to the allocators whose grid
+# completed - so a truncated allocator cannot lead the table on the easier subset it finished.
+# The ranking is taken deep and cut to ten afterwards rather than asked for ten and filtered,
+# which would return fewer than ten rows whenever an excluded row was inside the top ten.
+_leaders = explorer.best(
+    stage="allocation", top_n=100000, label=LABEL, prediction_hashes=ADVANCED_PREDICTIONS
+)
+if INCOMPLETE_ALLOCATORS:
+    _leaders = _leaders.join(
+        allocation_rows.select("backtest_hash"), on="backtest_hash", how="semi"
+    )
+_leaders.head(10).select("source", "signal_method", "sharpe", "cagr", "max_drawdown")
 
 # %% [markdown]
 # ## 4. What to notice
