@@ -16,10 +16,10 @@
 # %% [markdown]
 # # Strategy Analysis - FX Pairs
 #
-# This notebook reads the immutable validation candidate set, the research lock created from that
-# set, and the lock's single holdout evaluation. Selection uses validation backtest Sharpe with the
-# backtest identity as the deterministic tie-breaker. Cost sensitivity is excluded from selection,
-# and no holdout result can change the locked choice.
+# This notebook locks the selection made from the immutable validation candidate set, spends the
+# single holdout evaluation that lock authorizes, and then reads both back. Selection uses
+# validation backtest Sharpe with the backtest identity as the deterministic tie-breaker. Cost
+# sensitivity is excluded from selection, and no holdout result can change the locked choice.
 #
 # **Learning objectives**
 #
@@ -30,11 +30,11 @@
 #
 # **Book reference**: Chapters 16-20
 #
-# **Prerequisites**: canonical validation populations, the final candidate set from
-# `16_risk_management`, and one finalized holdout evaluation.
+# **Prerequisites**: canonical validation populations and the final candidate set from
+# `16_risk_management`.
 
 # %%
-"""Read-only assessment of one locked FX validation and holdout lineage."""
+"""Lock one FX validation selection, spend its holdout once, and assess both lineages."""
 
 import json
 import sqlite3
@@ -48,6 +48,7 @@ import polars as pl
 
 from case_studies.research import (
     BacktestResult,
+    CandidateSet,
     LifecycleState,
     OfficialPopulation,
     PredictionResult,
@@ -55,6 +56,7 @@ from case_studies.research import (
     TrainingResult,
     open_study,
 )
+from case_studies.research.holdout import evaluate_holdout
 from case_studies.utils.backtest_presets import cost_view
 from case_studies.utils.registry import load_backtest_metrics, load_paired_metrics
 from utils.style import COLORS
@@ -63,22 +65,56 @@ from utils.style import COLORS
 CASE_STUDY_ID = "fx_pairs"
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
-RESEARCH_LOCK_HASH = ""
+CANDIDATE_SET_NAME = "fx_pairs:holdout-candidates"
 
 # %% [markdown]
-# ## Reopen the selection record and research lock
+# ## Lock the selection and spend the holdout, once
 #
-# The lock hash is the authorization token produced by the one-shot holdout workflow and must be
-# supplied by that workflow when this notebook runs. The lock resolves the exact candidate-set
-# generation it recorded, so a later generation may reuse the reader-facing name without making
-# this analysis ambiguous.
+# `evaluate_holdout` is the whole one-shot sequence: read the rank-1 validation backtest out of
+# the frozen candidate set, derive the one holdout interval that retrains it, lock that selection,
+# and execute. It is the sequence rather than five primitives assembled here because nine case
+# studies assembling them separately is how nine versions of it appear.
+#
+# The holdout is spent once and re-running this notebook must not spend it again, so an
+# already-evaluated lifecycle returns its recorded lineage and executes nothing. `evaluated_now`
+# is how the two are told apart, and it is why this page reproduces: a re-run reads back exactly
+# the numbers it published before.
+#
+# Selection is not a parameter. `lifecycle.lock` refuses any selection that is not the candidate
+# set's highest validation backtest Sharpe, so the rank-1 member is the only thing that can be
+# locked, and the lock hash is produced here rather than supplied - a value that arrives only as
+# a run-time override could never be stamped by a production run, which passes none.
+#
+# The holdout interval is derived from the panel's own observation grid, not from calendar
+# arithmetic: the training window ends a whole label buffer counted in observations before the
+# holdout opens, so the last training label's outcome cannot resolve inside the holdout.
 
 # %% tags=["results"]
-if not RESEARCH_LOCK_HASH:
-    raise ValueError("RESEARCH_LOCK_HASH is required after the holdout transaction completes")
-
 study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None)
-research_lock = study.lifecycle.open(RESEARCH_LOCK_HASH)
+
+# The label the selection was made on decides which observation grid the holdout interval is
+# stepped back along, so it is read from the selected lineage rather than assumed. FX carries
+# three labels on one daily grid, which is exactly the coincidence that would let an assumption
+# here survive untested.
+_candidates = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
+_selected_for_lock = _candidates.best_validation_sharpe()
+_selected_prediction = Result.open(study, _selected_for_lock.registry_record()["prediction_hash"])
+_selected_training = Result.open(study, _selected_prediction.registry_record()["training_hash"])
+locked_label = str(_selected_training.spec()["label"])
+observation_timeline = (
+    pl.read_parquet(study.root / "labels" / f"{locked_label}.parquet")
+    .get_column("timestamp")
+    .unique()
+    .sort()
+    .to_list()
+)
+
+holdout_outcome = evaluate_holdout(
+    study,
+    candidate_set_name=CANDIDATE_SET_NAME,
+    timeline=observation_timeline,
+)
+research_lock = holdout_outcome.lock
 validation_set = research_lock.candidate_set()
 
 if validation_set.member_kind != "backtest":
@@ -95,12 +131,19 @@ if selected_validation.hash != research_lock.record["validation_backtest_hash"]:
 
 pl.DataFrame(
     {
-        "field": ["candidate set", "candidate count", "selected validation", "research lock"],
+        "field": [
+            "candidate set",
+            "candidate count",
+            "selected validation",
+            "research lock",
+            "evaluated by this run",
+        ],
         "value": [
             validation_set.hash,
             str(len(validation_set.members)),
             selected_validation.hash,
             research_lock.hash,
+            str(holdout_outcome.evaluated_now),
         ],
     }
 )
