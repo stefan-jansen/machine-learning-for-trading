@@ -62,10 +62,15 @@ import polars as pl
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
     allocation_pool,
-    candidate_set_supersedes,
     selected_allocation_result,
 )
-from case_studies.research import Result, open_study, population_supersedes, run_backtests
+from case_studies.research import (
+    Result,
+    candidate_set_supersedes,
+    open_study,
+    population_supersedes,
+    run_backtests,
+)
 from case_studies.research.strategy import strategy_warmup_periods
 from case_studies.utils.backtest_loaders import load_backtest_prices_for
 from case_studies.utils.strategy_analysis import rank_returns_on_common_support

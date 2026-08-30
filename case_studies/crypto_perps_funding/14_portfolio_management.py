@@ -63,11 +63,11 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
-    candidate_set_supersedes,
 )
 from case_studies.research import (
     CandidateSet,
     Result,
+    candidate_set_supersedes,
     open_study,
     population_supersedes,
     run_backtests,

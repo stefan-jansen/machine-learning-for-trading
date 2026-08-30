@@ -57,12 +57,12 @@ import polars as pl
 
 from case_studies.crypto_perps_funding.research_workflow import (
     ALL_LABELS,
-    candidate_set_supersedes,
 )
 from case_studies.research import (
     HORIZON_DEPENDENT_PROTOCOL_FIELDS,
     CandidateSet,
     Result,
+    candidate_set_supersedes,
     open_study,
 )
 from case_studies.utils.uncertainty import (
