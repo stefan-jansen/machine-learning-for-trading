@@ -628,7 +628,17 @@ def substitute_continuous_return_for_classification(
         return predictions
 
     eval_label = str(mapping[label])
-    eval_path = _Path(CASE_STUDIES_DIR) / case_study / "labels" / f"{eval_label}.parquet"
+    # `get_case_study_dir`, not `CASE_STUDIES_DIR`. The setup file above is configuration and
+    # lives in the repository; a label parquet is generated output and lives wherever
+    # `ML4T_OUTPUT_DIR` puts it, which is what every other reader of one resolves. Reading it
+    # from the checkout meant this path could only work where the artifacts happened to sit
+    # beside the source: a run under output isolation raised FileNotFoundError for a label it
+    # had just written. Measured in CI on `crypto_perps_funding` 13_backtest, where the first
+    # classification label reached - `fwd_dir_8h` - looked for `fwd_ret_8h.parquet` under
+    # /app/case_studies/... while the labels were in the isolated output root.
+    from utils.paths import get_case_study_dir as _case_dir
+
+    eval_path = _case_dir(case_study) / "labels" / f"{eval_label}.parquet"
     if not eval_path.exists():
         raise FileNotFoundError(
             f"Continuous-return label {eval_label!r} expected at {eval_path} "
@@ -1704,9 +1714,14 @@ def _run_htm_daily_mtm(
     registry write path treats it identically to any other backtest.
     """
     from case_studies.sp500_options._htm_backtest import run_htm_daily_mtm
-    from utils import CASE_STUDIES_DIR, ML4T_DATA_PATH
+    from utils import ML4T_DATA_PATH
+    from utils.paths import get_case_study_dir
 
-    cs_dir = CASE_STUDIES_DIR / case_study
+    # The same reason the classification eval label above resolves this way: a label parquet is
+    # generated output, so it is read from wherever ML4T_OUTPUT_DIR puts it. The two paths are
+    # the same directory whenever the artifacts sit beside the source, which is why reading the
+    # checkout was never wrong in production and always wrong under isolation.
+    cs_dir = get_case_study_dir(case_study)
     labels_dir = cs_dir / "labels"
     raw_options_dir = ML4T_DATA_PATH / "equities" / "market" / "sp500" / "options_straddles_raw"
 
@@ -2216,11 +2231,19 @@ def _apply_allocation(
                 "conformal_weighted allocation requires prediction_hash; "
                 "caller must pass it through _apply_allocation."
             )
-        from case_studies.utils.conformal import load_conformal_widths
+        from case_studies.utils.conformal import (
+            CALIBRATION_VERSION,
+            DEFAULT_ALPHA,
+            DEFAULT_MIN_CALIBRATION_N,
+            load_conformal_widths,
+        )
 
-        alpha = float(alloc_spec.get("alpha", 0.20))
-        min_calibration_n = int(alloc_spec.get("min_calibration_n", 30))
-        calibration_version = str(alloc_spec.get("calibration_version", "walk_forward_v2"))
+        alpha = float(alloc_spec.get("alpha", DEFAULT_ALPHA))
+        min_calibration_n = int(alloc_spec.get("min_calibration_n", DEFAULT_MIN_CALIBRATION_N))
+        # The default has to track the constant. Pinning the string here meant a version
+        # bump left this branch asking for widths that the writer no longer produces, and
+        # the failure surfaced as "no widths for calibration_version" on a fresh artifact.
+        calibration_version = str(alloc_spec.get("calibration_version", CALIBRATION_VERSION))
         widths = conformal_widths
         if widths is None:
             widths = load_conformal_widths(
@@ -2229,6 +2252,7 @@ def _apply_allocation(
                 alpha=alpha,
                 min_calibration_n=min_calibration_n,
                 calibration_version=calibration_version,
+                label=label or None,
             )
         # Conformal widths are keyed by the timestamps stored in predictions.parquet,
         # which keep their original time zone; `normalize_prediction_columns` has

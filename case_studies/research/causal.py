@@ -151,9 +151,15 @@ class CausalResult:
                     if "refutation_n_successful" in columns
                     else "NULL AS refutation_n_successful"
                 )
+                placebo_column = (
+                    "refutation_placebo_json"
+                    if "refutation_placebo_json" in columns
+                    else "NULL AS refutation_placebo_json"
+                )
                 row = db.execute(
                     "SELECT n_obs, dml_effect, dml_se_hac, p_value_hac, naive_effect, "
-                    f"confounding_bias_pct, refutation_p, {draws_column}, spec_json "
+                    f"confounding_bias_pct, refutation_p, {draws_column}, spec_json, "
+                    f"{placebo_column} "
                     "FROM causal_runs WHERE causal_hash = ?",
                     (causal_hash,),
                 ).fetchone()
@@ -174,6 +180,11 @@ class CausalResult:
                     "confounding_bias_pct": row[5],
                     "refutation_p": row[6],
                     "refutation_n_successful": row[7],
+                    # The draws behind refutation_p, so a reader can render the
+                    # permutation distribution rather than describing a figure that is
+                    # not there. An empty list rather than None when the column exists
+                    # but the run predates it, so callers need one check, not two.
+                    "placebo_effects": json.loads(row[9]) if row[9] else [],
                     # Derived here so every reader gets the same verdict from the same
                     # rule. A p-value alone cannot say whether the draws could have
                     # rejected at all, so a caller that re-applies a bare threshold

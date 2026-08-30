@@ -39,6 +39,14 @@ KNOWN_OVER_CAP = {
     "case_studies/cme_futures/06_linear.py": 4,
     "case_studies/cme_futures/07_gbm.py": 6,
     "case_studies/crypto_perps_funding/07_gbm.py": 6,
+    # Written 2026-08-23 and over the cap on the day this list was measured, but on an
+    # unmerged branch, so the sweep could not see it. Same debt as the entries above
+    # rather than new drift. The four cells are the prediction catalog, the decision
+    # clock, the coverage check and the sweep result; the first three fold into one
+    # cell about what is being backtested. Paid off on the notebook's next canonical
+    # run, which waits on #636 - crypto_perps_funding cannot re-execute 13 until the
+    # 196 moved deep-learning prediction identities are migrated.
+    "case_studies/crypto_perps_funding/13_backtest.py": 4,
     "case_studies/etfs/06_linear.py": 4,
     "case_studies/etfs/07_gbm.py": 8,
     "case_studies/fx_pairs/06_linear.py": 4,

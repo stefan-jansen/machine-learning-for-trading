@@ -119,9 +119,15 @@ def _locked_study(
     return study, lock, holdout_prices
 
 
-def test_lock_reopens_its_candidate_set_when_the_name_has_two_generations(
+def test_lock_reopens_its_candidate_set_after_the_name_is_superseded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A later generation moves the name; it must not move what the lock refers to.
+
+    The lock stores a set hash, and this is the case that distinguishes storing a hash from
+    storing a name: after the replacement is published, the name resolves to it, while the
+    holdout evidence still has to be traceable to the comparison it was actually made in.
+    """
     study, lock, _ = _locked_study(tmp_path, monkeypatch)
     locked = lock.candidate_set()
     selected = Result.open(study, locked.members[0])
@@ -133,10 +139,12 @@ def test_lock_reopens_its_candidate_set_when_the_name_has_two_generations(
         signal={"method": "equal_weight_top_k", "top_k": 2},
         execution_mode="vectorized",
     ).run(prices=_prices())
-    CandidateSet.create(study, "locked-selection", [replacement])
+    superseding = CandidateSet.create(
+        study, "locked-selection", [replacement], supersedes=locked.hash
+    )
 
-    with pytest.raises(ValueError, match="resolved to 2 identities"):
-        CandidateSet.one(study, name="locked-selection")
+    assert superseding.hash != locked.hash
+    assert CandidateSet.one(study, name="locked-selection").hash == superseding.hash
     assert lock.candidate_set().hash == locked.hash
 
 

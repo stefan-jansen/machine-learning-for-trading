@@ -14,464 +14,435 @@
 # ---
 
 # %% [markdown]
-# # Crypto Perpetuals: Current Strategy Analysis
+# # Crypto perpetuals: what the search actually found
 #
-# This capstone binds the corrected v3.1 model, backtest, and cohort lineage for the 24-hour return
-# label. It records the validation-selected carrier and its single authorized holdout result.
+# Four notebooks narrowed a field. [`13_backtest`](13_backtest.ipynb) ran every prediction set
+# equally weighted, [`14_portfolio_management`](14_portfolio_management.ipynb) sized the survivors
+# six ways, [`15_costs`](15_costs.ipynb) asked how much friction the result absorbs, and
+# [`16_risk_management`](16_risk_management.ipynb) tried fourteen ways of leaving a position early.
+# This notebook makes the one choice the case study exists to make, and then says how much
+# confidence that choice supports.
 #
-# **Learning objectives**
+# **The second half is the part that matters.** A funnel that ranks several hundred backtests on
+# one validation period will always return a highest number. Whether that number is evidence
+# depends on how many candidates it was the highest of, how wide its own confidence interval is,
+# and how much of it is left after correcting for having been selected. Reporting the selected
+# row without those three is the failure this notebook is built to avoid.
 #
-# - compare the current 24-hour model families on a common decision-time panel;
-# - distinguish predictive IC leadership from strategy-level carrier selection;
-# - interpret validation Sharpe together with selection-adjusted uncertainty;
-# - interpret the fixed carrier's validation-to-holdout deterioration without reselection.
+# **Learning objectives.** By the end of this notebook you will be able to:
 #
-# **Book reference**: Chapter 20, strategy synthesis and evidence handoff.
+# - Select one configuration across labels, and say why the label is part of the configuration
+#   rather than a separate axis.
+# - Read a Sharpe ratio as an interval rather than a point, and say what the interval covers.
+# - Apply a selection-bias correction and say what the corrected number means when the raw one is
+#   already negative.
+# - Separate what a perpetual-futures strategy earns from price movement and from funding.
 #
-# **Prerequisites**: the signed current 24-hour linear and GBM producers and completed validation
-# baseline, allocation, cost, risk, and cohort surfaces.
+# **Book reference**: Chapter 20 (Strategy Synthesis).
 #
-# **Scope**: the executed cells preserve the deterministic pre-holdout selection record. The final
-# publication cell reports the signed one-shot holdout evidence without training, reselection,
-# registry mutation, or another backtest.
+# **Prerequisites**: [`16_risk_management`](16_risk_management.ipynb) has frozen a candidate set
+# per label spanning all three selection stages.
+#
+# **What it writes**: one candidate set holding the whole selection pool. No backtests, no
+# training, no holdout evaluation.
 
 # %%
-"""Read-only synthesis of the current Crypto 24-hour validation carrier."""
+"""Select and assess one crypto perpetuals configuration from the frozen validation pool."""
 
-import hashlib
-import json
 import sqlite3
-import subprocess
-from datetime import datetime
+from contextlib import closing
 
 import plotly.graph_objects as go
 import polars as pl
-import yaml
-from IPython.display import Markdown, display
-from ml4t.diagnostic.metrics import compute_ic_uncertainty, cross_sectional_ic_series
 
-from case_studies.utils.notebook_contracts import defined_ic
-from utils.paths import REPO_ROOT, get_case_study_dir, get_case_study_source_dir
-from utils.reproducibility import set_global_seeds
-from utils.style import COLORS
+from case_studies.crypto_perps_funding.research_workflow import (
+    ALL_LABELS,
+    candidate_set_supersedes,
+)
+from case_studies.research import (
+    HORIZON_DEPENDENT_PROTOCOL_FIELDS,
+    CandidateSet,
+    Result,
+    open_study,
+)
+from case_studies.utils.uncertainty import (
+    compute_backtest_uncertainty,
+    compute_cohort_metrics,
+    load_daily_returns_with_timestamp,
+    periods_per_year_from_setup,
+)
+from utils.style import COLORS, show_plotly_with_alt
 
 # %% tags=["parameters"]
-CASE_STUDY = "crypto_perps_funding"
-PRIMARY_LABEL = "fwd_ret_24h"
-LABEL_HORIZON_HOURS = 24
-SEED = 42
+LABELS: list[str] = []
+EXECUTION_TIER = "canonical"
+WORKSPACE: str = ""
+# The generation of `crypto-final-selection` this run replaces. Its membership is the union of
+# the four final validation sets, and those moved in `16_risk_management` when the grid their
+# admission rule is applied to stopped being every row the registry holds for the label - so
+# this pool moves with them. Recorded here rather than passed at run time: `supersedes` is part
+# of what identifies the generation, so a re-run declaring nothing computes a different hash
+# from the row on record and is refused (ml4t/agent-workspace#879).
+SUPERSEDES: str = "8270e5b544f9"
 
 # %%
-SURFACE_POLICY = "current_v31_only"
-INPUT_FINGERPRINT = "4288331d8f6a21a516a293d06ae805e8f599a1d1d2af17d3f98ddac8a3b005fa"
-EXPECTED_CURRENT_MD5 = "465f1cff82be197ea55b6e1e0145d3cf"
-EXPECTED_CURRENT_COUNTS = {
-    "training_runs": 91,
-    "prediction_sets": 138,
-    "backtest_runs": 698,
-    "cohort_metrics": 23,
-}
-EXPECTED_PRODUCER_BLOBS = {
-    "06_linear.py": "c1343570c423283334c633a9f220b98c4e65d294",
-    "06_linear.ipynb": "5744f22ca3718576f19d7611575b8c06db70d166",
-    "07_gbm.py": "4cc22e580706f794c915b31a7593ddc63d980059",
-    "07_gbm.ipynb": "7891203023e3ee413258b3e2c528da8e94f71f98",
-}
-EXPECTED_LEADERS = {
-    "gbm": ("leaves_7_mae", "491ea02ecf58", None),
-    "linear": ("ridge_a100.0", "3cbcb5c8a9dc", None),
-}
-EXPECTED_CARRIER = {
-    "backtest_hash": "e56dd4ed5e10",
-    "prediction_hash": "53599526d2aa",
-    "family": "linear",
-    "config_name": "ridge_a10.0",
-    "stage": "risk_overlay",
-}
-
-# %%
-set_global_seeds(SEED)
-CURRENT_CASE_DIR = get_case_study_dir(CASE_STUDY, create=False)
-SOURCE_CASE_DIR = get_case_study_source_dir(CASE_STUDY)
-CURRENT_REGISTRY = CURRENT_CASE_DIR / "run_log" / "registry.db"
-PREDICTION_DIR = CURRENT_CASE_DIR / "run_log" / "predictions"
-setup = yaml.safe_load((SOURCE_CASE_DIR / "config" / "setup.yaml").read_text())
-HOLDOUT_START = datetime.fromisoformat(setup["evaluation"]["holdout_start"])
-
-# %% [markdown]
-# ## Bind the completed pre-holdout surface
-#
-# The executed record below fixed the producer identities, registry counts, and empty holdout before
-# evaluation. Every SQLite connection was read-only. The final publication cell preserves this
-# chronology instead of rerunning these pre-holdout checks against the post-evaluation registry.
-
-
-# %%
-def _md5(path) -> str:
-    """Return an artifact identity digest without opening the file for mutation."""
-    digest = hashlib.md5(usedforsecurity=False)
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-# %%
-def _git_blob(name: str) -> str:
-    """Return the committed Git blob for one current producer file."""
-    path = f"case_studies/{CASE_STUDY}/{name}"
-    # -c safe.directory trusts this checkout for this one invocation: CI containers mount the
-    # workspace with a different owner than the container user, which makes bare `git` refuse to
-    # run ("detected dubious ownership") even though the checkout itself is exactly what the test
-    # is running from.
-    return subprocess.check_output(
-        ["git", "-c", f"safe.directory={REPO_ROOT}", "rev-parse", f"HEAD:{path}"],
-        cwd=REPO_ROOT,
-        text=True,
-    ).strip()
-
-
-# %%
-def _registry_boundary(path) -> tuple[dict[str, int], dict[str, int]]:
-    """Return current table counts and holdout counts."""
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-        counts = {
-            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in EXPECTED_CURRENT_COUNTS
-        }
-        holdout = {
-            "predictions": int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM prediction_sets WHERE split = 'holdout'"
-                ).fetchone()[0]
-            ),
-            "backtests": int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM backtest_runs br JOIN prediction_sets ps "
-                    "USING (prediction_hash) WHERE ps.split = 'holdout'"
-                ).fetchone()[0]
-            ),
-        }
-    return counts, holdout
-
-
-# %%
-actual_producer_blobs = {name: _git_blob(name) for name in EXPECTED_PRODUCER_BLOBS}
-if actual_producer_blobs != EXPECTED_PRODUCER_BLOBS:
-    raise RuntimeError("A signed 24-hour producer changed")
-
-current_md5_before = _md5(CURRENT_REGISTRY)
-if current_md5_before != EXPECTED_CURRENT_MD5:
-    raise RuntimeError("The current registry changed before strategy synthesis")
-
-current_counts, holdout_counts = _registry_boundary(CURRENT_REGISTRY)
-if current_counts != EXPECTED_CURRENT_COUNTS:
-    raise RuntimeError(f"Current surface changed: {current_counts}")
-if holdout_counts != {"predictions": 0, "backtests": 0}:
-    raise RuntimeError(f"Holdout was accessed before carrier freeze: {holdout_counts}")
-
-print(f"Current surface: {current_counts}")
-print("Holdout remains sealed: 0 predictions, 0 backtests")
-print("Signed 24-hour producer identities and current registry digest pass")
-
-# %% [markdown]
-# ## Compare the current 24-hour model leaders
-#
-# Complete validation predictions are aligned on common timestamp-symbol keys. The chart recomputes
-# decision-time rank IC and HAC intervals on that shared panel.
-
-
-# %%
-def _model_metrics() -> pl.DataFrame:
-    """Load complete current validation metrics for the 24-hour producers."""
-    query = """
-        SELECT t.family, t.config_name, p.prediction_hash, p.checkpoint_value,
-               pm.ic_mean_daily, pm.ic_n_days
-        FROM prediction_metrics pm
-        JOIN prediction_sets p USING (prediction_hash)
-        JOIN training_runs t USING (training_hash)
-        WHERE t.label = ? AND p.split = 'validation'
-          AND t.family IN ('linear', 'gbm')
-          AND json_extract(t.spec_json, '$.params.input_fingerprint') = ?
-          AND pm.ic_mean_daily IS NOT NULL AND pm.ic_n_days IS NOT NULL
-          AND p.prediction_hash NOT IN (
-              SELECT prediction_hash FROM fold_metrics WHERE ic IS NULL
-          )
-    """
-    with sqlite3.connect(f"file:{CURRENT_REGISTRY}?mode=ro", uri=True) as connection:
-        return pl.read_database(
-            query,
-            connection,
-            execute_options={"parameters": (PRIMARY_LABEL, INPUT_FINGERPRINT)},
-        )
-
-
-# %%
-def _select_leaders(metrics: pl.DataFrame) -> pl.DataFrame:
-    """Select one complete physical validation artifact per family."""
-    if set(metrics["family"].unique()) != set(EXPECTED_LEADERS):
-        raise RuntimeError("A current 24-hour family is missing")
-    complete = metrics.filter(pl.col("ic_n_days") == pl.col("ic_n_days").max().over("family"))
-    leaders = (
-        complete.sort(["family", "ic_mean_daily"], descending=[False, True])
-        .group_by("family", maintain_order=True)
-        .first()
-        .sort("family")
-    )
-    identities = {
-        row["family"]: (row["config_name"], row["prediction_hash"], row["checkpoint_value"])
-        for row in leaders.iter_rows(named=True)
-    }
-    if identities != EXPECTED_LEADERS:
-        raise RuntimeError(f"Current model leader identity changed: {identities}")
-    return leaders
-
-
-# %%
-def _read_prediction(row: dict) -> pl.DataFrame:
-    """Load one physical leader and enforce the 24-hour validation boundary."""
-    frame = pl.read_parquet(PREDICTION_DIR / row["prediction_hash"] / "predictions.parquet")
-    renames = {
-        old: new
-        for old, new in {"actual": "y_true", "prediction": "y_score", "fold": "fold_id"}.items()
-        if old in frame.columns
-    }
-    if renames:
-        frame = frame.rename(renames)
-    if isinstance(frame.schema["timestamp"], pl.Datetime):
-        frame = frame.with_columns(pl.col("timestamp").dt.replace_time_zone(None))
-    frame = frame.with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
-    frame = frame.filter(
-        pl.col("timestamp") + pl.duration(hours=LABEL_HORIZON_HOURS) < HOLDOUT_START
-    )
-    required = ["timestamp", "symbol", "fold_id", "y_true", "y_score"]
-    frame = frame.select(required).drop_nulls(required)
-    if frame.select(pl.struct(required[:3]).is_duplicated().any()).item():
-        raise RuntimeError(f"Duplicate physical keys for {row['family']}")
-    return frame.with_columns(
-        pl.lit(row["family"]).alias("family"),
-        pl.lit(row["config_name"]).alias("config_name"),
-    )
-
-
-# %%
-def _align_common_panel(frames: list[pl.DataFrame]) -> list[pl.DataFrame]:
-    """Intersect economic keys and require identical realized targets."""
-    by_family = {frame["family"][0]: frame for frame in frames}
-    keys = by_family["linear"].select("timestamp", "symbol")
-    keys = keys.join(
-        by_family["gbm"].select("timestamp", "symbol"),
-        on=["timestamp", "symbol"],
-        how="inner",
-    ).sort(["timestamp", "symbol"])
-    if keys.height != 35_264 or keys["timestamp"].n_unique() != 2_179:
-        raise RuntimeError("The signed 24-hour common panel changed")
-    aligned = [by_family[family].join(keys, on=["timestamp", "symbol"]) for family in by_family]
-    reference = aligned[0].select(
-        "timestamp", "symbol", pl.col("y_true").cast(pl.Float32).alias("reference")
-    )
-    for frame in aligned[1:]:
-        mismatch = (
-            frame.select(
-                "timestamp", "symbol", pl.col("y_true").cast(pl.Float32).alias("candidate")
-            )
-            .join(reference, on=["timestamp", "symbol"])
-            .filter(pl.col("candidate") != pl.col("reference"))
-        )
-        if mismatch.height:
-            raise RuntimeError("Realized targets disagree across current leaders")
-    return aligned
-
-
-# %%
-def _ic_summary(frame: pl.DataFrame) -> dict[str, float | int | str]:
-    """Compute sorted decision-time rank IC with HAC uncertainty."""
-    daily = defined_ic(
-        cross_sectional_ic_series(
-            frame,
-            frame,
-            pred_col="y_score",
-            ret_col="y_true",
-            date_col="timestamp",
-            entity_col="symbol",
-            method="spearman",
-            min_obs=5,
-        )
-    ).sort("timestamp")
-    uncertainty = compute_ic_uncertainty(daily.select("ic"), horizon=1, n_boot=500)
-    return {
-        "family": frame["family"][0],
-        "config_name": frame["config_name"][0],
-        "ic": float(uncertainty["mean_ic"]),
-        "ci_lo": float(uncertainty["ci_hac_lower"]),
-        "ci_hi": float(uncertainty["ci_hac_upper"]),
-        "p_hac": float(uncertainty["p_hac"]),
-        "n_dates": daily.height,
-    }
-
-
-# %%
-leaders = _select_leaders(_model_metrics())
-physical = [_read_prediction(row) for row in leaders.iter_rows(named=True)]
-comparison = pl.DataFrame([_ic_summary(frame) for frame in _align_common_panel(physical)]).sort(
-    "ic", descending=True
+study = open_study(
+    "crypto_perps_funding", execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None
 )
-expected_ic = {"gbm": 0.032016495168429665, "linear": 0.013479304841861045}
-for row in comparison.iter_rows(named=True):
-    if abs(row["ic"] - expected_ic[row["family"]]) > 1e-12:
-        raise RuntimeError(f"Signed common-panel IC changed for {row['family']}")
-print(comparison)
+labels = list(LABELS) if LABELS else list(ALL_LABELS)
+# Where this run's own results are written and read back from: the released case directory on a
+# canonical run, the isolated preview directory otherwise. `study.root` is the released one in
+# both tiers, so a preview that reads it is reading somebody else's registry.
+STORAGE_ROOT = study.storage_root(study.execution_tier)
+periods_per_year = periods_per_year_from_setup("crypto_perps_funding")
+
+# %% [markdown]
+# ## 1. One pool, four labels
+#
+# Each label has its own frozen set spanning the baseline, allocation and overlay stages. The
+# object of selection is **one configuration for the case study**, not one per label, so the four
+# sets are compared as a single pool and the label comes from the row that is selected.
+#
+# The four labels are not interchangeable inputs to one experiment. `fwd_ret_8h` and
+# `fwd_ret_24h` are continuous returns over different horizons; `fwd_dir_8h` and `fwd_dir_8h_3c`
+# are the 8-hour move coded into two and three classes. Three things about the protocol move with
+# the horizon and nothing else does: the label artifact, the purge interval inside the
+# cross-validation split, and the feature artifacts, because the model-based features are fit per
+# label. A candidate set spanning the four has to declare those three as the axis it spans, which
+# is what `comparable_fields` does below, and `HORIZON_DEPENDENT_PROTOCOL_FIELDS` is the one
+# definition of that list rather than a copy of it. Everything else must still match: the set
+# refuses a member whose split or execution tier disagrees.
 
 # %%
-fig = go.Figure(
+pool_members = []
+for label in labels:
+    candidates = CandidateSet.one(study, name=f"crypto-final-validation-{label}")
+    pool_members.extend(Result.open(study, member) for member in candidates.members)
+POOL_NAME = "crypto-final-selection"
+pool = CandidateSet.create(
+    study,
+    POOL_NAME,
+    pool_members,
+    comparison_contract={"comparable_fields": list(HORIZON_DEPENDENT_PROTOCOL_FIELDS)},
+    # Resolved rather than offered, for the reason `14` and `16` record: the declaration is
+    # committed source and a reader's clean clone has no generation for it to replace.
+    supersedes=candidate_set_supersedes(study, name=POOL_NAME, declared=SUPERSEDES),
+)
+print(f"{len(pool.members)} candidates across {len(labels)} labels")
+
+# %% [markdown]
+# ## 2. The selection
+#
+# Highest validation Sharpe in the pool, which is the rule the whole funnel has applied at every
+# stage. It is applied here across labels for the first time.
+
+# %%
+selected = pool.best_validation_sharpe()
+catalog = study.backtests.table().filter(pl.col("backtest_hash").is_in(pool.members))
+if catalog.height != len(pool.members):
+    raise RuntimeError("the backtest catalog does not describe every candidate")
+
+# %% [markdown]
+# The selected configuration, and the pool it was selected from. The stage column says how far
+# down the funnel the selection came from: a baseline row means neither sizing nor an overlay
+# improved on equal weight for that ranking.
+
+# %% tags=["results"]
+keyed = catalog.with_columns(
+    pl.col("allocation_method").fill_null("equal_weight").alias("allocator"),
+    pl.col("risk_method").fill_null("none").alias("overlay"),
+)
+keyed.filter(pl.col("backtest_hash") == selected.hash).select(
+    "label",
+    "family",
+    "config_name",
+    "checkpoint_kind",
+    "checkpoint_value",
+    "stage",
+    "signal_method",
+    "allocator",
+    "overlay",
+    "sharpe",
+    "max_drawdown",
+    "total_return",
+    "num_trades",
+)
+
+# %% [markdown]
+# What it was selected from, by stage. The spread within each stage is the more useful number
+# than any single row: it says how much of the difference between candidates is available to be
+# picked up by chance.
+
+# %% tags=["results"]
+keyed.group_by("stage").agg(
+    candidates=pl.len(),
+    labels=pl.col("label").n_unique(),
+    best_sharpe=pl.col("sharpe").max(),
+    median_sharpe=pl.col("sharpe").median(),
+    worst_sharpe=pl.col("sharpe").min(),
+    above_zero=(pl.col("sharpe") > 0).sum(),
+).sort("stage")
+
+# %% [markdown]
+# ## 3. How much confidence the selection supports
+#
+# Three separate questions, and they have different answers.
+#
+# **How precise is this one number?** A stationary block bootstrap on the selected result's
+# own daily return series gives a ninety-five percent interval, with the block length taken
+# from the label's rebalance step so that the resampling respects the holding period. That
+# interval describes sampling variation in one series and says nothing about the search.
+#
+# **How much of it is selection?** The selected Sharpe is the maximum over the whole pool, and the
+# maximum of many draws is above the truth even when every draw is worthless. The **deflated
+# Sharpe ratio** subtracts what the maximum would have been under a null of no skill. Three
+# variants are computed: a raw one that treats every candidate as an independent trial, and two
+# that discount correlated candidates - which matters here, because a hundred backtests on twenty
+# prediction sets are anything but independent.
+#
+# **How long would it take to know?** `min_trl` is the number of periods the selected strategy
+# would need to run for its Sharpe to reach significance at the conventional five percent level.
+# Where it exceeds the data available, the honest statement is that the validation period cannot
+# settle the question.
+#
+# The alignment below intersects the candidates on timestamp. That is only safe because both
+# earlier stages admitted to their candidate sets on **folds traded** rather than on periods
+# observed - a result that sat out a fold would align perfectly here and be scored on a different
+# period, which is exactly the comparison the funnel is meant to prevent.
+
+# %%
+selected_returns = load_daily_returns_with_timestamp("crypto_perps_funding", selected.hash)
+if selected_returns is None:
+    raise RuntimeError("the selected result has no registered return series")
+selected_label = keyed.filter(pl.col("backtest_hash") == selected.hash).item(0, "label")
+interval = compute_backtest_uncertainty(
+    selected_returns,
+    periods_per_year=periods_per_year,
+    case_study="crypto_perps_funding",
+    label=selected_label,
+)
+
+# %%
+returns_by_hash = {}
+for member in pool.members:
+    frame = load_daily_returns_with_timestamp("crypto_perps_funding", member)
+    if frame is None:
+        raise RuntimeError(f"pool member {member} has no registered return series")
+    returns_by_hash[member] = frame
+cohort = compute_cohort_metrics(returns_by_hash, periods_per_year=periods_per_year)
+if not cohort:
+    raise RuntimeError("cohort alignment failed across the selection pool")
+
+# %% [markdown]
+# The alignment intersects the pool on timestamp, and the intersection has to be the whole of
+# the shortest member's own series. If it is shorter than that, members disagree about *which*
+# dates they cover rather than about how many, and the corrections below would be computed on a
+# period none of them was measured over. The check is exact and carries no tolerance.
+#
+# When the intersection is clean, the ranking on it can still differ from the registered one by a
+# place, because each registered Sharpe was computed on that result's own series and these are
+# computed on the common one. That is a real difference, and it stops this notebook rather than
+# being reported alongside the result.
+#
+# The reason is that `compute_cohort_metrics` computes its Sharpe, its Rademacher bound and all
+# three deflated Sharpes for whichever member leads the common period, while the interval and
+# the PSR below are computed for the registered selection. When those are the same result the
+# table reads as one strategy, which is what it claims to be. When they are not, the same table
+# would carry two strategies' numbers under one heading, and nothing in it would say so.
+
+# %%
+aligned_periods = int(cohort["n_periods"]) if "n_periods" in cohort else None
+shortest = min(frame.height for frame in returns_by_hash.values())
+longest = max(frame.height for frame in returns_by_hash.values())
+if aligned_periods is not None and aligned_periods < shortest:
+    raise RuntimeError(
+        f"the pool intersects to {aligned_periods} periods but its shortest member has "
+        f"{shortest}, so members cover different dates rather than different amounts"
+    )
+print(
+    f"members span {shortest} to {longest} periods and intersect on "
+    f"{aligned_periods if aligned_periods is not None else shortest}"
+)
+if cohort["leader_hash"] != selected.hash:
+    raise RuntimeError(
+        f"on the common period the highest Sharpe is {cohort['leader_hash']}, not the "
+        f"registered selection {selected.hash}. The cohort statistics below describe the "
+        "common-period leader and the interval describes the selection, so publishing them "
+        "together would report two strategies as one. Re-select on the aligned period."
+    )
+
+# %% [markdown]
+# The selected configuration read three ways. `sharpe` is what it scored; `ras_sharpe` is a lower
+# bound that holds across the whole search; the three `dsr_*` rows are the selection-corrected
+# Sharpe under different assumptions about how independent the candidates were.
+
+# %% tags=["results"]
+pl.DataFrame(
+    [
+        {
+            "metric": name,
+            "value": {**interval, **cohort}.get(key),
+        }
+        for name, key in [
+            ("candidates (K)", "k_variants"),
+            ("selected Sharpe", "leader_sharpe"),
+            ("Sharpe, 95% interval low", "sharpe_ci95_lo"),
+            ("Sharpe, 95% interval high", "sharpe_ci95_hi"),
+            ("probabilistic Sharpe p-value", "psr_pvalue"),
+            ("bootstrap block length", "bootstrap_block_length"),
+            ("expected max Sharpe under the null", "expected_max_sharpe_raw"),
+            ("deflated Sharpe, raw K", "dsr_raw"),
+            ("deflated Sharpe, Marchenko-Pastur K", "dsr_mp"),
+            ("deflated Sharpe, effective-rank K", "dsr_er"),
+            ("Rademacher-adjusted Sharpe", "ras_leader"),
+            ("periods needed for significance, effective-rank K", "min_trl_periods_er"),
+        ]
+        if key in {**interval, **cohort}
+    ]
+)
+
+# %% [markdown]
+# ## 4. What the selected strategy did
+#
+# The cumulative return of the selected configuration across the validation folds, against the
+# zero line. Funding is settled inside the engine at each 8-hourly timestamp on the position held
+# before that timestamp's fills, so the curve already includes it.
+
+# %%
+returns = returns_by_hash[selected.hash].sort("timestamp")
+column = next(name for name in returns.columns if name != "timestamp")
+equity = returns.with_columns(cumulative=(1.0 + pl.col(column)).cum_prod() - 1.0)
+fig = go.Figure()
+fig.add_trace(
     go.Scatter(
-        x=comparison["ic"],
-        y=[{"gbm": "GBM", "linear": "Linear"}[value] for value in comparison["family"]],
-        mode="markers+text",
-        text=[f"{value:+.3f}" for value in comparison["ic"]],
-        textposition="top center",
-        marker={"size": 11, "color": COLORS["amber"]},
-        error_x={
-            "type": "data",
-            "symmetric": False,
-            "array": (comparison["ci_hi"] - comparison["ic"]).to_list(),
-            "arrayminus": (comparison["ic"] - comparison["ci_lo"]).to_list(),
-        },
+        x=equity.get_column("timestamp").to_list(),
+        y=equity.get_column("cumulative").to_list(),
+        mode="lines",
+        name="selected configuration",
+        line={"color": COLORS["blue"]},
     )
 )
-fig.add_vline(x=0, line_width=1, line_color=COLORS["slate"])
+fig.add_hline(y=0, line_width=1, line_dash="dash", line_color=COLORS["neutral"])
 fig.update_layout(
     title={
-        "text": "GBM leads the current 24-hour predictive comparison"
-        "<br><sup>Mean decision-time rank IC with HAC 95% intervals</sup>"
+        "text": "Cumulative validation return of the selected configuration"
+        "<br><sup>Net of the declared cost schedule and of settled funding</sup>",
+        "x": 0.02,
+        "xanchor": "left",
     },
-    xaxis_title="Mean decision-time rank IC",
-    yaxis={"title": "Current model family", "autorange": "reversed"},
-    showlegend=False,
+    xaxis_title="Date",
+    yaxis_title="Cumulative return",
+    height=480,
+    width=1000,
 )
-fig.show()
-
-# %% [markdown]
-# ## Freeze the single current carrier
-#
-# Predictive IC does not select the strategy. The prescribed validation funnel ranks completed
-# strategy backtests, and its cross-stage label cohort fixes one carrier before holdout.
-
-
-# %%
-def _current_carrier() -> dict:
-    """Load and validate the single current cross-stage 24-hour carrier."""
-    query = """
-        SELECT c.leader_hash, c.k_variants, c.dsr_er, c.dsr_er_pvalue,
-               b.stage, b.prediction_hash, b.spec_json,
-               m.sharpe, m.sharpe_ci95_lo, m.sharpe_ci95_hi,
-               m.sortino, m.total_return, m.max_drawdown,
-               t.family, t.config_name, t.label, p.split
-        FROM cohort_metrics c
-        JOIN backtest_runs b ON b.backtest_hash = c.leader_hash
-        JOIN backtest_metrics m USING (backtest_hash)
-        JOIN prediction_sets p USING (prediction_hash)
-        JOIN training_runs t USING (training_hash)
-        WHERE c.cohort_type = 'label' AND c.label = ?
-    """
-    with sqlite3.connect(f"file:{CURRENT_REGISTRY}?mode=ro", uri=True) as connection:
-        connection.row_factory = sqlite3.Row
-        row = connection.execute(query, (PRIMARY_LABEL,)).fetchone()
-    if row is None:
-        raise RuntimeError("The current 24-hour carrier cohort is missing")
-    carrier = dict(row)
-    identity = {
-        "backtest_hash": carrier["leader_hash"],
-        "prediction_hash": carrier["prediction_hash"],
-        "family": carrier["family"],
-        "config_name": carrier["config_name"],
-        "stage": carrier["stage"],
-    }
-    if identity != EXPECTED_CARRIER:
-        raise RuntimeError(f"The fixed current carrier changed: {identity}")
-    if carrier["label"] != PRIMARY_LABEL or carrier["split"] != "validation":
-        raise RuntimeError("The current carrier is not a 24-hour validation artifact")
-    strategy = json.loads(carrier["spec_json"])["strategy"]
-    if strategy["signal"] != {
-        "long_short": True,
-        "method": "quintile_long_short",
-        "n_quantiles": 5,
-        "top_k": 20,
-    } or strategy["risk"] != {
-        "name": "time_exit_10",
-        "position_rules": [{"bars": 10, "type": "time_exit"}],
-    }:
-        raise RuntimeError("The fixed current carrier strategy changed")
-    return carrier
-
-
-# %%
-carrier = _current_carrier()
-carrier_summary = pl.DataFrame(
-    {
-        "backtest_hash": [carrier["leader_hash"]],
-        "model": [f"{carrier['family']}/{carrier['config_name']}"],
-        "prediction_hash": [carrier["prediction_hash"]],
-        "risk_rule": ["time_exit_10"],
-        "validation_sharpe": [carrier["sharpe"]],
-        "sharpe_ci95_lo": [carrier["sharpe_ci95_lo"]],
-        "sharpe_ci95_hi": [carrier["sharpe_ci95_hi"]],
-        "total_return": [carrier["total_return"]],
-        "max_drawdown": [carrier["max_drawdown"]],
-        "k_variants": [carrier["k_variants"]],
-        "dsr_er_pvalue": [carrier["dsr_er_pvalue"]],
-    }
-)
-print(carrier_summary)
-
-display(
-    Markdown(
-        f"The current validation funnel fixes **{carrier['leader_hash']}** as the single 24-hour "
-        f"carrier: **{carrier['family']}/{carrier['config_name']}**, top-20, with a 10-bar time "
-        f"exit. Validation Sharpe is **{carrier['sharpe']:+.3f} "
-        f"[{carrier['sharpe_ci95_lo']:+.3f}, {carrier['sharpe_ci95_hi']:+.3f}]**. The "
-        f"effective-rank DSR p-value is **{carrier['dsr_er_pvalue']:.3f}** across "
-        f"**{carrier['k_variants']}** variants, so selection uncertainty tempers the positive "
-        "point estimate. At this pre-holdout boundary, no holdout result had been observed."
-    )
+show_plotly_with_alt(
+    fig,
+    "Line chart of the cumulative validation return of the selected configuration over the two "
+    "validation folds, with a dashed horizontal line at zero, net of declared costs and settled "
+    "funding.",
 )
 
 # %% [markdown]
-# ## Pre-holdout publication boundary
+# ### Where the money came from
 #
-# GBM leads predictive IC, while the prescribed strategy funnel selects Ridge after mapping scores
-# into trades, costs, and risk rules. Those are different objectives, not conflicting rankings.
-# This executed section fixed the carrier before the one-time holdout evaluation.
+# A perpetual-futures strategy has two sources of return that behave differently, and a total
+# return hides which one it used. Price P&L is the contract moving; funding is the periodic
+# payment between longs and shorts, settled every eight hours on whatever position is held. A
+# strategy whose return is mostly funding is a carry strategy whether or not it was built as one,
+# and it will behave completely differently when the funding rate changes sign.
+#
+# The shared backtest catalog projects the metrics every case study has in common, and funding
+# is not among them - it exists only where the instrument settles it. Reading it from the
+# registry keeps the column available without widening a shared catalog for one case study's
+# economics.
 
-# %%
-handoff = pl.DataFrame(
-    {
-        "surface": ["Current v3.1 24-hour carrier"],
-        "establishes": ["Model comparison, validation strategy, cost, risk, and cohort result"],
-        "does_not_establish": ["Holdout performance"],
-        "state": ["Carrier fixed; holdout sealed"],
-    }
+# %% tags=["results"]
+with closing(
+    sqlite3.connect(f"file:{STORAGE_ROOT / 'run_log' / 'registry.db'}?mode=ro", uri=True)
+) as db:
+    funding_row = db.execute(
+        "SELECT funding_pnl, funding_events, funding_settlements FROM backtest_metrics "
+        "WHERE backtest_hash = ?",
+        (selected.hash,),
+    ).fetchone()
+if funding_row is None:
+    raise RuntimeError("the selected result has no registered metrics row")
+record = keyed.filter(pl.col("backtest_hash") == selected.hash)
+pl.DataFrame(
+    [
+        {
+            "funding_pnl": funding_row[0],
+            "funding_events": funding_row[1],
+            "funding_settlements": funding_row[2],
+            "total_commission": record.item(0, "total_commission"),
+            "total_slippage": record.item(0, "total_slippage"),
+            "total_return": record.item(0, "total_return"),
+        }
+    ]
 )
-print(handoff)
-
-current_md5_after = _md5(CURRENT_REGISTRY)
-if current_md5_after != current_md5_before:
-    raise RuntimeError("Strategy analysis mutated the current registry")
-
-print(f"Current registry unchanged: {current_md5_after}")
-print(f"Fixed carrier before holdout: {carrier['leader_hash']}")
-print("PASS current-only 24-hour strategy-analysis boundary")
 
 # %% [markdown]
-# ## Final current-lineage conclusion
+# ## 5. The holdout is untouched
 #
-# The single authorized holdout evaluation used the fixed validation carrier `e56dd4ed5e10`
-# without testing another model, label, allocation, cost, or risk configuration. It produced
-# holdout prediction `db01160096af` and backtest `741abbfe4f77`.
+# `config/setup.yaml` reserves 2024 and 2025 as a holdout, and nothing in this case study has
+# been fitted, selected or measured on it. The registry holds no holdout prediction set, so there
+# is no holdout number to report and none is implied by anything above.
 #
-# The validation edge did not survive the 2024-2025 holdout. Holdout IC was **-0.0189**, with a
-# HAC 95% interval of **[-0.0348, -0.0031]**. The fixed strategy returned **-54.2%**, with a Sharpe
-# ratio of **-0.448** and a 95% interval of **[-1.488, 0.649]**; maximum drawdown was **-68.8%**.
-# These results replace the positive validation result as the final current-lineage economic
-# conclusion. The holdout failure is accepted as evidence of regime deterioration, not a reason to
-# reselect or test alternatives.
+# It takes three steps, in this order and only once: refit the selected configuration on
+# training plus validation, predict the holdout window, and run that one configuration through
+# the same backtest specification. What makes it a holdout is that the selection is
+# already fixed - the pool above is frozen and immutable, so the configuration cannot be
+# re-chosen after the holdout result is seen. Every step of the funnel exists to make that
+# sentence true.
+
+# %%
+holdout_predictions = study.predictions.table().filter(pl.col("split") == "holdout")
+print(
+    f"{holdout_predictions.height} holdout prediction sets in the registry; "
+    f"selection pool {pool.hash} is frozen at {len(pool.members)} members"
+)
+
+# %% [markdown]
+# ## 6. What to notice
+#
+# **The funnel narrows the search, it does not remove it.** Every stage ran fewer configurations
+# than the one before, which is why the pool is in the hundreds rather than the thousands. It is
+# still a search, and the correction in section 3 is the price of having run it. A case study
+# that reported only the highest Sharpe would be reporting the largest of several hundred draws
+# as though it were one measurement.
+#
+# **Every uncorrected statistic here says the selection is real, and the correction says it is
+# not.** The selected configuration posts a validation Sharpe of 1.59. Its bootstrap interval is
+# [0.30, 2.81] and excludes zero; its probabilistic Sharpe p-value is 0.0100; it needs 366 periods
+# to reach significance and it has 729. Read on their own, all four say the strategy works. The
+# deflated Sharpe is -0.15, and under either shrunk trial count it is still below zero. The
+# disagreement is not a contradiction: the interval and the p-value are computed for one series
+# and answer whether *this* return stream differs from zero, while the deflation asks whether the
+# best of 2,807 differs from what the best of 2,807 worthless strategies would have produced. The
+# largest of 2,807 draws lands near 1.6 whether or not any of them has an edge, so 1.59 is what
+# this search returns when nothing works.
+#
+# That is the whole reason the pool is frozen before it is read. A case study free to stop at the
+# interval would have reported a Sharpe of 1.59 significant at the 1% level, with each supporting
+# number correctly computed.
+#
+# **The interval and the correction answer different questions.** The bootstrap interval widens
+# with a shorter series; the deflation grows with more candidates. A long backtest of one strategy
+# has a tight interval and no deflation. A short backtest of five hundred has both problems, and
+# two validation folds of 8-hourly crypto data is closer to the second.
+#
+# The Rademacher-adjusted Sharpe of 1.11 stays positive where the deflated Sharpe does not, and
+# the two are not interchangeable. It penalizes the complexity of the strategy class by what the
+# same procedure achieves on permuted returns; the deflation penalizes the number of draws taken.
+# On a pool this size the count dominates, so where they disagree the deflation is the one being
+# asked the question this stage exists to ask.
+#
+# **Funding is a separate return stream, not a cost line.** It is reported beside commission and
+# slippage above because all three reduce or increase the same total, but it is the only one that
+# depends on holding rather than trading, and the only one that can be positive.
+#
+# **Known limitations.** Everything above is measured on two validation folds spanning 2022 and
+# 2023, on nineteen perpetual contracts, at one declared cost schedule. The pool contains only
+# configurations that traded both folds, so nothing here says how a strategy that trades
+# selectively would compare - by construction it could not have been ranked against these. And
+# the holdout has not been used, so no statement here has been checked out of sample.

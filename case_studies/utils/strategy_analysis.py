@@ -247,8 +247,10 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
 
     Cross-stage validation rank-1 is selected over stage IN (signal,
     allocation, risk_overlay) with LABEL_RESTRICTIONS applied where defined.
-    When a ``walk_forward_v2`` conformal candidate is present, every candidate
-    is re-ranked on exact common timestamp support. Holdout match is by
+    When a conformal candidate is present at any calibration version, every
+    candidate - conformal or not - is re-ranked on exact common timestamp
+    support, because a conformal allocator abstains until it is calibrated and
+    books zeros over the abstention. Holdout match is by
     training_hash on the rank-1's prediction set. Use this in every strategy_analysis notebook
     rather than hardcoding hashes - hardcoded hashes go stale every time the
     sweep is rebuilt, and queries that forget LABEL_RESTRICTIONS surface the
@@ -345,23 +347,28 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
     finally:
         db.close()
 
-    def _is_strict_conformal(row: tuple[Any, ...]) -> bool:
+    def _is_conformal(row: tuple[Any, ...]) -> bool:
+        # Every conformal calibration abstains, and the version decides only for how long.
+        # `walk_forward_v2` sits out the earliest fold entirely, because it calibrates from
+        # whole earlier folds and the earliest has none. `walk_forward_v3` calibrates from the
+        # fold's own elapsed history, which shortens the abstention to a warm-up - three
+        # decisions on an 8-hourly grid - and does not remove it. A candidate that holds
+        # nothing for its first N decisions books N returns of exactly zero and is ranked
+        # against allocators measured over the full span, so the field has to be re-ranked on
+        # common support either way.
+        #
+        # Reading the version here decided two things and was right about neither. As the
+        # trigger it switched the alignment off for a field of v3 candidates, which still need
+        # it. As the eligibility test it discarded every v3 conformal candidate from a field
+        # that also held a v2 one, which removes a live result from the comparison rather than
+        # aligning it. The version is now read by neither: the property that matters is that a
+        # conformal candidate is present, and it is asked directly.
         strategy = json.loads(row[8]).get("strategy", {})
         allocation = strategy.get("allocation") or {}
-        return (
-            allocation.get("method") == "conformal_weighted"
-            and allocation.get("calibration_version") == "walk_forward_v2"
-        )
+        return allocation.get("method") == "conformal_weighted"
 
-    strict_conformal_present = any(_is_strict_conformal(row) for row in candidates)
-    if strict_conformal_present:
-        candidates = [
-            row
-            for row in candidates
-            if (json.loads(row[8]).get("strategy", {}).get("allocation") or {}).get("method")
-            != "conformal_weighted"
-            or _is_strict_conformal(row)
-        ]
+    conformal_present = any(_is_conformal(row) for row in candidates)
+    if conformal_present:
         from case_studies.utils.uncertainty import periods_per_year_from_setup
 
         common_ranking = rank_backtests_on_common_support(
@@ -425,6 +432,133 @@ def resolve_canonical_rank1_lineage(case_study: str) -> dict[str, Any]:
         "holdout_prediction_hash": ho_ph,
         "holdout_sharpe": ho_sharpe,
     }
+
+
+INSOLVENT_MAX_DRAWDOWN = -1.0
+"""Drawdown at or past which a run's equity reached zero.
+
+A long-short book with no margin call keeps compounding through zero, so every
+metric a run reports after that point is arithmetic on a balance that no longer
+exists - including a Sharpe high enough to top a ranking.
+"""
+
+
+def resolve_solvent_carrier(case_study: str, *, require_solvent: bool = True) -> dict[str, Any]:
+    """The configuration downstream notebooks run, with its spec and drawdown.
+
+    Cost sensitivity, holdout prediction and holdout backtest all have to run the
+    configuration the case study reports, and that configuration is
+    ``resolve_canonical_rank1_lineage``'s validation rank-1. Each notebook ranking
+    the registry for itself is a standing divergence class rather than a
+    hypothetical one: the canonical resolver re-ranks strict-conformal
+    candidates on exact common timestamp support and applies LABEL_RESTRICTIONS,
+    UNIVERSE_RESTRICTIONS and CARRIER_PINS, and a plain Sharpe ranking beside it
+    does none of those. When the two disagree, the cost curve describes a strategy
+    the chapter does not report and the strategy-analysis notebook finds no cost
+    rows for the carrier it selected.
+
+    Solvency is checked here rather than inside the canonical resolver because the
+    two questions are different: the resolver decides which configuration the case
+    study is about, and this decides whether that configuration is one anything can
+    be measured on. An insolvent or unmeasured carrier raises. It deliberately does
+    not fall through to the runner-up - that would hand downstream notebooks a
+    configuration the chapter does not report, which is the divergence this
+    function exists to close. Selecting past a bankrupt rank-1 is a decision for
+    whoever owns the sweep, taken by fixing the sweep or pinning a carrier.
+
+    Returns ``resolve_canonical_rank1_lineage``'s dict with ``spec_json`` and
+    ``max_drawdown`` for the validation rank-1 added.
+    """
+    import sqlite3
+
+    from utils.paths import get_case_study_dir
+
+    lineage = resolve_canonical_rank1_lineage(case_study)
+    backtest_hash = lineage["val_backtest_hash"]
+
+    db_path = get_case_study_dir(case_study) / "run_log" / "registry.db"
+    db = sqlite3.connect(str(db_path))
+    try:
+        row = db.execute(
+            """
+            SELECT b.spec_json, bm.max_drawdown
+            FROM backtest_runs b
+            LEFT JOIN backtest_metrics bm ON bm.backtest_hash = b.backtest_hash
+            WHERE b.backtest_hash = ?
+            """,
+            (backtest_hash,),
+        ).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        raise RuntimeError(
+            f"Canonical rank-1 {backtest_hash} for {case_study} is not in backtest_runs "
+            f"of {db_path}. The resolver and this lookup read the same registry, so this "
+            "means the registry changed under the process."
+        )
+    spec_json, max_drawdown = row
+
+    if require_solvent:
+        if max_drawdown is None:
+            raise RuntimeError(
+                f"Canonical rank-1 {backtest_hash} for {case_study} has no recorded "
+                "max_drawdown, so it cannot be shown to have survived. Re-run the backtest "
+                "so its metrics are registered, rather than sweeping a run whose equity path "
+                "is unknown."
+            )
+        if max_drawdown <= INSOLVENT_MAX_DRAWDOWN:
+            raise RuntimeError(
+                f"Canonical rank-1 {backtest_hash} for {case_study} reached zero equity "
+                f"(max_drawdown={max_drawdown:.4f}). Its Sharpe of {lineage['val_sharpe']:.3f} "
+                "is computed on a balance that no longer exists, so nothing measured "
+                "downstream of it means anything. Fix the sweep, or pin a carrier in "
+                "CARRIER_PINS, rather than selecting past this row silently."
+            )
+
+    _assert_carrier_calibration_is_current(case_study, backtest_hash, spec_json)
+
+    return {**lineage, "spec_json": spec_json, "max_drawdown": max_drawdown}
+
+
+def _assert_carrier_calibration_is_current(
+    case_study: str, backtest_hash: str, spec_json: str | None
+) -> None:
+    """Refuse a carrier whose conformal calibration the code will not run.
+
+    Selection ranks on Sharpe and knows nothing about calibration versions, so a
+    backtest fitted under a retired contract stays selectable after the contract is
+    corrected. Nothing downstream can execute it - ``run_backtest`` refuses a
+    non-current ``calibration_version`` outright - so the first sign is a whole stage
+    failing on a configuration that ranked first. On ``us_firm_characteristics``,
+    2026-08-30, all 52 conformal backtests were the retired version and 11 of 11 cost
+    levels died; the v3 refit happened to win on merit, so the wrong carrier was never
+    actually carried, but nothing would have caught it if it had not.
+
+    This raises rather than selecting past the row. Excluding retired rows inside the
+    resolver would change which configuration seven case studies report, silently, and
+    that is a decision for whoever owns the sweep - taken by re-running the stage under
+    the current calibration, not by a filter nobody sees.
+    """
+    import json
+
+    from case_studies.utils.conformal import CALIBRATION_VERSION
+
+    if not spec_json:
+        return
+    try:
+        allocation = (json.loads(spec_json).get("strategy") or {}).get("allocation") or {}
+    except (TypeError, ValueError):
+        return
+    recorded = allocation.get("calibration_version")
+    if recorded is None or recorded == CALIBRATION_VERSION:
+        return
+    raise RuntimeError(
+        f"Canonical rank-1 {backtest_hash} for {case_study} was fitted under conformal "
+        f"calibration {recorded!r}, and the current contract is {CALIBRATION_VERSION!r}. "
+        "Nothing downstream can execute it. Re-run the allocation stage so the sweep "
+        "holds current-calibration candidates, rather than measuring costs or a holdout "
+        "on a configuration that cannot be reproduced."
+    )
 
 
 # ---------------------------------------------------------------------------
