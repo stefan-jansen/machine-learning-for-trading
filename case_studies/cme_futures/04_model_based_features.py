@@ -388,7 +388,15 @@ assert HOLDOUT_FOLD_ID not in {int(split["fold"]) for split in splits}, (
     "the derived holdout fold reuses a validation fold id, so its features would join "
     "against a fold fitted on a window that ends before the holdout opens"
 )
-splits = [
+# Two lists, deliberately, and the names say which is which. `splits` stays the five
+# walk-forward periods it has always been, because everything that *describes* the
+# evaluation design reads it: the period table, the timeline figure, section D's regime
+# summary and - the one that matters - section F's IC screen, which would otherwise join
+# the holdout fold's evaluation window and take a statistic over rows it must not read.
+# `artifact_splits` is that list plus the holdout period, and only the code that builds
+# the file reads it. Appending to `splits` instead put the holdout fold into all of them
+# at once.
+artifact_splits = [
     *splits,
     {
         "fold": HOLDOUT_FOLD_ID,
@@ -913,7 +921,7 @@ arima_results = (
             if int(split["fold"]) == HOLDOUT_FOLD_ID
             else arima_walk
         ).with_columns(pl.lit(split["fold"], dtype=pl.Int64).alias("fold"))
-        for split in splits
+        for split in artifact_splits
     ]
     if arima_walk.height
     else []
@@ -1031,7 +1039,7 @@ if len(arima_pl) > 0:
         f"{HOLDOUT_START}."
     )
     print("Product-sessions carrying an ARIMA value, per period, in each window:")
-    for split in splits:
+    for split in artifact_splits:
         for window, start_date, end_date in (
             ("train", split["train_start"], split["train_end"]),
             ("valid", split["val_start"], split["val_end"]),
@@ -1199,7 +1207,9 @@ for product in ARIMA_PRODUCTS:
 # %%
 if fft_results:
     fft_base = pl.concat(fft_results)
-    fft_pl = pl.concat([fft_base.with_columns(pl.lit(s["fold"]).alias("fold")) for s in splits])
+    fft_pl = pl.concat(
+        [fft_base.with_columns(pl.lit(s["fold"]).alias("fold")) for s in artifact_splits]
+    )
     print(f"\nSpectral features computed on {len(fft_base):,} distinct product-sessions")
     print(
         f"Copied across periods: {len(fft_pl):,} rows, "
@@ -1560,7 +1570,7 @@ def _fit_hmm_fold(portfolio_df: pl.DataFrame, split: dict[str, str], fold_idx: i
 hmm_results = []
 hmm_fold_params = []
 
-for split in splits:
+for split in artifact_splits:
     print(f"\nPeriod {split['fold']}:")
     _series = portfolio_carry_full if int(split["fold"]) == HOLDOUT_FOLD_ID else portfolio_carry
     result, params = _fit_hmm_fold(_series, split, split["fold"])
@@ -1605,7 +1615,7 @@ else:
 
 # %%
 if hmm_fold_params:
-    splits_by_fold = {s["fold"]: s for s in splits}
+    splits_by_fold = {s["fold"]: s for s in artifact_splits}
     for params in hmm_fold_params:
         split = splits_by_fold[params["fold"]]
         assert params["train_last"] <= _as_date(split["train_end"]), (
@@ -1951,7 +1961,7 @@ if len(hmm_param_df) > 0:
 
 # %%
 base_grid = df.select(["timestamp", "product", "position"]).unique()
-base = pl.concat([base_grid.with_columns(pl.lit(s["fold"]).alias("fold")) for s in splits])
+base = pl.concat([base_grid.with_columns(pl.lit(s["fold"]).alias("fold")) for s in artifact_splits])
 
 if len(arima_pl) > 0:
     base = base.join(arima_pl, on=["product", "timestamp", "fold"], how="left")
@@ -2140,6 +2150,28 @@ record = write_artifact(
         "load_cme_futures": value_digest(
             df.select(["product", "position", "timestamp", "raw_close"])
         )
+    },
+    # The fold set, stated rather than left to be inferred. The frame carries fold ids and
+    # never says what their boundaries were, so a reader that finds no `fold_geometry`
+    # falls back to `generate_cv_splits` - which returns the five walk-forward periods and
+    # nothing else. The holdout period would then sit in the parquet, invisible to every
+    # consumer of it, and the holdout path this file exists to feed would read a file it
+    # could not see the relevant half of.
+    metadata={
+        "fold_geometry": [
+            {
+                # Coerced to one type before `_json_ready` renders it. The two producers hold
+                # boundaries differently - `generate_cv_splits` returns pandas Timestamps and
+                # `build_holdout_cv` returns ISO date strings - so passing them through as
+                # held writes "2022-12-22T00:00:00" for the walk-forward periods and
+                # "2023-11-29" for the holdout period, in one file. Both parse through
+                # `pd.Timestamp`, and a stricter reader gets a file where
+                # `date.fromisoformat` succeeds on one period and raises on the rest.
+                field: (split[field] if field == "fold" else pd.Timestamp(split[field]))
+                for field in ("fold", "train_start", "train_end", "val_start", "val_end")
+            }
+            for split in artifact_splits
+        ]
     },
 )
 print(
