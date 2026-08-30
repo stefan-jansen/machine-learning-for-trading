@@ -89,9 +89,15 @@ HOLDOUT_CONFORMAL_EMBARGO_STEPS: dict[str, int] = {
     "us_equities_panel/fwd_ret_5d": 5,
     "us_equities_panel/fwd_ret_1d": 1,
     "us_equities_panel/fwd_ret_21d": 21,
-    "us_firm_characteristics/fwd_ret_1m_win": 1,
-    "us_firm_characteristics/fwd_ret_1m": 1,
-    "us_firm_characteristics/fwd_class_1m": 1,
+    # Zero because the horizon is zero. us_firm_characteristics dates each row by the month
+    # the return was earned, and `labels.horizons` in its setup.yaml declares `0D` for all
+    # three, so the outcome is already realised at the observation and no residual reaches
+    # into the holdout window. The entries were 1, which is not a conservative reading of
+    # this table - the table records the label horizon, and a value above it discards the
+    # last month of calibration for a leak the label cannot have.
+    "us_firm_characteristics/fwd_ret_1m_win": 0,
+    "us_firm_characteristics/fwd_ret_1m": 0,
+    "us_firm_characteristics/fwd_class_1m": 0,
 }
 
 

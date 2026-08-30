@@ -144,16 +144,15 @@ print(f"Holdout prediction: {HOLDOUT_PREDICTION_HASH}")
 # residuals of the validation prediction set, which is what the allocator would have had
 # standing at the start of the window.
 #
-# One validation observation is dropped at the boundary, and on this case study that is a
-# margin rather than a requirement. The rule the embargo exists for is that a residual
-# observed at `t` measures a return realising over `(t, t+h]`, so with `h > 0` the last
-# residuals of the validation span reach into the holdout window and would size holdout
-# positions with holdout price information. This panel declares `h = 0D`: each row is
-# dated by the month the return was earned, so the outcome is already realised at the
-# observation and nothing reaches forward. The step count comes from the reviewed table in
-# `conformal.py` rather than from a choice here, and that table records one observation for
-# this label - stricter than the declared horizon, which costs one month of calibration and
-# cannot leak.
+# No validation observation is dropped at the boundary, and the reason is the label rather
+# than a choice. The embargo exists because a residual observed at `t` measures a return
+# realising over `(t, t+h]`, so with `h > 0` the last residuals of the validation span
+# reach into the holdout window and would size holdout positions with holdout price
+# information. This panel declares `h = 0D` - each row is dated by the month the return
+# was earned - so the outcome is already realised at the observation and nothing reaches
+# forward. The step count comes from the reviewed table in `conformal.py`, which records
+# the label horizon; it carried 1 for these labels, which discarded the last month of
+# calibration against a leak the label cannot have.
 
 # %% tags=["results"]
 allocation = strategy_view(json.loads(carrier["spec_json"])).get("allocation") or {}
@@ -187,6 +186,16 @@ else:
 #
 # The run registers under `stage='holdout'`, which the registry derives from the
 # prediction set's split rather than from anything asserted here.
+#
+# One thing the hash does not cover: a conformal carrier reads its widths from an artifact
+# beside the prediction set, and the backtest identity covers the allocator's declared
+# parameters but not the calibration those widths were built from. Change the embargo and
+# the hash does not move, so a registered run would be served back against inputs that no
+# longer exist - and the registry refuses the overwrite rather than accepting either, which
+# is how that state announces itself. Re-calibrating this case study's holdout therefore
+# means deleting the registered run first, the same rule section 3 of
+# [`15_holdout_predictions`](15_holdout_predictions.ipynb) applies to a superseded
+# generation.
 
 # %% tags=["results"]
 prices = load_backtest_prices_for(CASE_STUDY_ID, LABEL, split="holdout", max_symbols=MAX_SYMBOLS)

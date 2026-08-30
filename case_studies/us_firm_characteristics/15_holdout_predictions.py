@@ -77,6 +77,33 @@ study = open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKS
 CASE_DIR = get_case_study_dir(CASE_STUDY_ID)
 
 
+def _delete_holdout_generation(case_dir, prediction_hash):
+    """Remove one holdout prediction set and everything registered against it.
+
+    Called only when ``REPLACE_HOLDOUT`` says a generation is superseded. The rows go
+    rather than being marked, because a superseded holdout evaluation that is still
+    readable is still a number someone can quote, and the point of replacing it is that it
+    should not be one.
+    """
+    with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
+        backtests = [
+            row[0]
+            for row in conn.execute(
+                "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ?",
+                (prediction_hash,),
+            )
+        ]
+        for backtest_hash in backtests:
+            conn.execute(
+                "DELETE FROM backtest_paired_metrics WHERE challenger_hash = ? "
+                "OR benchmark_hash = ?",
+                (backtest_hash, backtest_hash),
+            )
+            conn.execute("DELETE FROM backtest_metrics WHERE backtest_hash = ?", (backtest_hash,))
+            conn.execute("DELETE FROM backtest_runs WHERE backtest_hash = ?", (backtest_hash,))
+        conn.execute("DELETE FROM prediction_sets WHERE prediction_hash = ?", (prediction_hash,))
+
+
 def _registered_holdout_generations(case_dir):
     """Every holdout prediction set in the registry, and whether its model was refitted.
 
@@ -208,35 +235,44 @@ print(f"Holdout training ends {fold['train_end']}, holdout opens {fold['val_star
 # holdout fold is not one of the validation folds. A run that came back with the
 # validation training hash would mean the refit did not happen.
 #
-# **Re-running this notebook on a DIFFERENT configuration is refused unless it is asked
-# for.** The holdout window is re-usable but it is not free: every configuration evaluated
-# on it is one more look at a period the case study reports as unseen, and a second
-# configuration evaluated silently would make that report false. So the check below is on
-# the carrier, not on the notebook. Re-running with the carrier unchanged reproduces the
-# same training identity and the same prediction set - the derivation is deterministic and
-# the identity covers it - and the fit is served from the registry. Re-running after the
-# selection has moved refuses, names both configurations, and points at
-# `REPLACE_HOLDOUT`. Setting that parameter is the deliberate act: it says the earlier
-# generation was wrong rather than that its window is now spare.
+# **The window carries one configuration at a time.** The holdout is re-runnable, and that
+# is not the same as free: every configuration evaluated on it is another look at a period
+# the case study reports as unseen, and two evaluated quietly would make that report false.
+#
+# So the check below is on the carrier rather than on the notebook, and it has exactly two
+# outcomes. With the carrier unchanged this is an idempotent replay: the derivation is
+# deterministic and the training identity covers it, so the same identity comes back and
+# the fit is served from the registry. With the carrier changed it refuses, names both
+# configurations, and stops.
+#
+# `REPLACE_HOLDOUT` is the only way past that, and it is a replacement rather than an
+# addition: the superseded generation's rows are deleted, so the registry never holds two
+# refits of the holdout window and no downstream resolver has to choose between them.
+# Deleting is what makes the earlier evaluation cost something to discard. It is also the
+# only honest shape - a run that had been observed and then quietly kept alongside its
+# replacement would let a reader take whichever number they preferred.
 
 # %%
-existing_generations = [
+holdout_training_hash = training_hash_from_spec(holdout_spec)
+superseded = [
     row
     for row in _registered_holdout_generations(CASE_DIR)
-    if row["refitted"] and row["training_hash"] != training_hash_from_spec(holdout_spec)
+    if row["refitted"] and row["training_hash"] != holdout_training_hash
 ]
-if existing_generations and not REPLACE_HOLDOUT:
+if superseded and not REPLACE_HOLDOUT:
     raise RuntimeError(
-        "the holdout already carries a refit of a different configuration: "
+        "the holdout window already carries a refit of a different configuration: "
         + ", ".join(
             f"{row['prediction_hash']} ({row['config_name']}, training {row['training_hash']})"
-            for row in existing_generations
+            for row in superseded
         )
-        + f". This run would evaluate {carrier['config_name']} "
-        f"(training {training_hash_from_spec(holdout_spec)}) on the same window. Set "
-        "REPLACE_HOLDOUT=True to say the earlier generation is superseded, or leave the "
-        "selection where it was."
+        + f". This run would evaluate {carrier['config_name']} (training "
+        f"{holdout_training_hash}) on the same window. Set REPLACE_HOLDOUT=True to discard "
+        "the earlier generation, or leave the selection where it was."
     )
+for row in superseded:
+    print(f"REPLACING holdout generation {row['prediction_hash']} ({row['config_name']})")
+    _delete_holdout_generation(CASE_DIR, row["prediction_hash"])
 
 # %% tags=["results"]
 request = reconstruct_locked_model_request(
