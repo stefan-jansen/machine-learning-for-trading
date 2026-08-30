@@ -451,7 +451,7 @@ def test_unusable_parameters_rejects_a_union_annotated_declaration(tmp_path: Pat
     The notebook reads the name and never rebinds it, so every other test in this helper
     passes it. What fails is earlier than any of them: papermill splits the cell's lines on
     `=` rather than parsing them, cannot read the `|`, and injects nothing. Measured
-    2026-08-30 on `etfs/16_costs`, where `TOP_N_COMBOS: 2` had been silently discarded.
+    2026-08-30 on `etfs/17_costs`, where `TOP_N_COMBOS: 2` had been silently discarded.
     """
     py = _paired_notebook(
         tmp_path,

@@ -512,7 +512,7 @@ print(
 # for in turnover.
 #
 # It says nothing about accuracy. A ranking that turns over quickly is not better or worse than one
-# that does not; it is a different thing to hold, and [`16_costs`](16_costs.ipynb) is where the
+# that does not; it is a different thing to hold, and [`17_costs`](17_costs.ipynb) is where the
 # holding cost is priced.
 
 # %%
@@ -583,7 +583,7 @@ show_plotly_with_alt(
 # intended. The day-over-day rank correlation says how far that gets: between **0.92 and 0.98** on
 # every one of the eight folds. Two things follow, and they point in opposite directions for a
 # reader deciding what to do with this model. A strategy trading it turns over slowly, which
-# [`16_costs`](16_costs.ipynb) will price as an advantage. And the 1,995 daily correlations behind
+# [`17_costs`](17_costs.ipynb) will price as an advantage. And the 1,995 daily correlations behind
 # `ic_mean` are nowhere near 1,995 independent readings, because consecutive dates are scoring
 # almost the same ordering against a different day of returns, so `ic_std / sqrt(ic_n_days)`
 # understates the uncertainty on `ic_mean` here much as it did for the forecast that was frozen

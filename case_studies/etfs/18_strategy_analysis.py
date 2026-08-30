@@ -41,7 +41,7 @@
 # **Book reference**: Chapter 20, §20.1 (the §9 handoff feeds Ch20's
 # cross-case-study aggregation).
 #
-# **Prerequisites**: case-study pipeline through `17_risk_management`;
+# **Prerequisites**: case-study pipeline through `17_costs`;
 # the locked registry (`case_studies/etfs/run_log/registry.db`).
 #
 # **Scope**: no training and no re-backtesting. It does write two derived tables,
@@ -678,7 +678,7 @@ for stage_name, kind in transitions:
 # transition it says the cost model added Sharpe; what it measures is the same returns with
 # friction switched off. Its interval is narrow and its p-value zero because the two series differ
 # only by the fees, which makes the comparison precise rather than important. The line beneath it
-# states the size the other way round, as the price of trading. [`16_costs`](16_costs.ipynb) is
+# states the size the other way round, as the price of trading. [`17_costs`](17_costs.ipynb) is
 # where that grid is read as the curve it is.
 #
 # **`prob_challenger_wins` and the interval say different things.** The interval asks whether the
@@ -1046,7 +1046,7 @@ else:
 # responds, with bands marking the most-liquid end of the universe and the typical one.
 #
 # The reading that matters is the distance between the declared cost and where the curve crosses
-# zero, not the Sharpe at any single level. [`16_costs`](16_costs.ipynb) computes that crossing
+# zero, not the Sharpe at any single level. [`17_costs`](17_costs.ipynb) computes that crossing
 # directly and reports it as a bound when the grid does not reach it.
 
 # %%
@@ -1173,7 +1173,7 @@ print("See Chapter 18 for the transaction-cost framework.")
 # spread between configurations at one cost level is wider than the effect of moving several
 # levels, friction is not what decides this strategy's fate and the choice of configuration is.
 # That is the ordinary situation for a monthly strategy, and it is a statement about the cadence
-# rather than about the model. [`16_costs`](16_costs.ipynb) computes the crossing directly.
+# rather than about the model. [`17_costs`](17_costs.ipynb) computes the crossing directly.
 
 # %% [markdown]
 # ## §6 The holdout, opened once
@@ -1572,7 +1572,7 @@ fig_attr.show()
 # The artifacts are written by the stages above, not by this notebook, so the presence check
 # below is about ordering rather than about a healthy repository. Running 18 against a registry
 # where [`14_backtest`](14_backtest.ipynb) through
-# [`17_risk_management`](17_risk_management.ipynb) have not run leaves `TOP_HASH` naming a
+# [`16_risk_management`](16_risk_management.ipynb) have not run leaves `TOP_HASH` naming a
 # directory that holds no `trades.parquet`, and the tear sheet fails on a missing file. Nothing
 # is broken and nothing needs repairing: run the backtest stages first.
 

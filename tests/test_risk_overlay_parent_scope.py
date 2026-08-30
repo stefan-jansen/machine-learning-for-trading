@@ -1,6 +1,6 @@
 """A risk overlay belongs to one allocation, not to every allocation of its prediction.
 
-`17_risk_management` sweeps the top allocation *combinations* - a prediction appears once per
+`etfs/16_risk_management` sweeps the top allocation *combinations* - a prediction appears once per
 allocator and `top_k` - and then reads the overlays back. Scoping that read on the prediction
 hash alone pulls in overlays sitting on combinations the sweep did not advance, and those rank
 beside the ones it did.

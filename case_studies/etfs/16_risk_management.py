@@ -47,8 +47,10 @@
 # stage supplies the combinations the overlays are applied to.
 #
 # **What it writes**: one row in `backtest_runs` per combination and risk control, at
-# `stage='risk_overlay'`. [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole
-# pipeline, this stage included.
+# `stage='risk_overlay'` - and no row for the un-overlaid strategy, which is why
+# [`17_costs`](17_costs.ipynb) pools this stage with `allocation` and `signal` rather than reading
+# it alone. [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole pipeline, this
+# stage included.
 
 # %%
 """Apply position and portfolio risk overlays to the leading ETF allocation combinations."""
@@ -107,10 +109,11 @@ WORKSPACE: str = ""
 # %% [markdown]
 # ## 1. What the overlays are applied to
 #
-# The combinations are the allocation-stage leaders, the same ones [`16_costs`](16_costs.ipynb)
-# re-prices. Nothing is re-selected here either: the prediction, the concentration and the
-# allocator are held exactly as registered, and the only thing added is the rule. That is what makes
-# each overlay's Sharpe comparable with the baseline it came from.
+# The combinations are the allocation-stage leaders. Nothing is re-selected here: the prediction,
+# the concentration and the allocator are held exactly as registered, and the only thing added is
+# the rule. That is what makes each overlay's Sharpe comparable with the baseline it came from -
+# and what lets [`17_costs`](17_costs.ipynb), which runs after this stage, decide between an
+# overlaid and an un-overlaid carrier on the measurement rather than on the order of the chain.
 #
 # **Position rules need a bar-by-bar engine.** A stop-loss has to be evaluated on every bar of the
 # holding period to know whether it fired, so a case study whose backtests are computed as a
@@ -487,6 +490,6 @@ show_plotly_with_alt(
 # is not consulted.
 
 # %% [markdown]
-# **Next**: [`18_strategy_analysis`](18_strategy_analysis.ipynb) reads the whole pipeline -
-# signal, allocation, costs and this overlay stage - as one progression, and is where the holdout
-# is finally opened.
+# **Next**: [`17_costs`](17_costs.ipynb) prices whichever carrier wins across the baseline, the
+# allocation sweep and this overlay stage, and [`18_strategy_analysis`](18_strategy_analysis.ipynb)
+# then reads the whole progression and opens the holdout.

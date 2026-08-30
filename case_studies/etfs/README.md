@@ -78,8 +78,8 @@ uv run python case_studies/etfs/12_causal_dml.py
 uv run python case_studies/etfs/13_model_analysis.py
 uv run python case_studies/etfs/14_backtest.py
 uv run python case_studies/etfs/15_portfolio_management.py
-uv run python case_studies/etfs/16_costs.py
-uv run python case_studies/etfs/17_risk_management.py
+uv run python case_studies/etfs/16_risk_management.py
+uv run python case_studies/etfs/17_costs.py
 uv run python case_studies/etfs/18_strategy_analysis.py
 ```
 

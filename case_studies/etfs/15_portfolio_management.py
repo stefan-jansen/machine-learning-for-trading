@@ -47,8 +47,9 @@
 # prediction sets this sweep starts from.
 #
 # **What it writes**: one row in `backtest_runs` per prediction set, concentration level and
-# allocator, at `stage='allocation'`. [`16_costs`](16_costs.ipynb) takes the leading combinations
-# from here into the cost sweep.
+# allocator, at `stage='allocation'`. [`16_risk_management`](16_risk_management.ipynb) overlays
+# risk rules on the leading combinations from here, and [`17_costs`](17_costs.ipynb) then prices
+# the winner of both.
 
 # %%
 """Sweep portfolio allocators and concentration levels over the leading ETF predictions."""
@@ -502,10 +503,11 @@ _leaders.head(10).select("source", "signal_method", "sharpe", "cagr", "max_drawd
 #
 # **Known limitations.** Every Sharpe here is gross of the cost differences between schemes: a
 # scheme that rebalances weights within a stable basket trades more than one that does not, and
-# nothing in this stage charges it for that. [`16_costs`](16_costs.ipynb) is where that is priced.
+# nothing in this stage charges it for that. [`17_costs`](17_costs.ipynb) is where that is priced.
 # The volatility windows are declared rather than tuned. And this is measured on validation folds
 # throughout; the holdout is not consulted.
 
 # %% [markdown]
-# **Next**: [`16_costs`](16_costs.ipynb) walks a cost grid over the leading combinations here and
-# finds where the strategy's edge runs out.
+# **Next**: [`16_risk_management`](16_risk_management.ipynb) overlays position and portfolio risk
+# rules on the leading combinations here, and [`17_costs`](17_costs.ipynb) then walks a cost grid
+# over whichever of the two the measurement favours.

@@ -588,8 +588,8 @@ print_stage_dsr_summary(explorer, top_n=20, head=10, prediction_hashes=LIVE_PRED
 # registers its own backtest of the same prediction. Tracking one prediction across them is how the
 # rest of the case study answers where value is added and where it is spent. Only the signal stage
 # exists at this point; the rows below fill in as [`15_portfolio_management`](
-# 15_portfolio_management.ipynb), [`16_costs`](16_costs.ipynb) and
-# [`17_risk_management`](17_risk_management.ipynb) run.
+# 15_portfolio_management.ipynb), [`17_costs`](17_costs.ipynb) and
+# [`16_risk_management`](16_risk_management.ipynb) run.
 
 # %%
 best_prediction = top["prediction_hash"][0]

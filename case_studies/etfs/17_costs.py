@@ -44,13 +44,12 @@
 #
 # **Book reference**: Chapter 18, Sections 18.2 to 18.5.
 #
-# **Prerequisites**: [`15_portfolio_management`](15_portfolio_management.ipynb), whose allocation
-# stage supplies the combinations this sweep re-prices.
+# **Prerequisites**: [`16_risk_management`](16_risk_management.ipynb), and through it
+# [`15_portfolio_management`](15_portfolio_management.ipynb) and [`14_backtest`](14_backtest.ipynb).
+# This is the last stage that selects, so it runs after all three and draws from all of them.
 #
 # **What it writes**: one row in `backtest_runs` per combination and cost level, at
 # `stage='cost_sensitivity'`, under both regimes.
-# [`17_risk_management`](17_risk_management.ipynb) takes the same allocation-stage combinations and
-# adds risk overlays to them.
 
 # %%
 """Re-price the leading ETF allocation combinations across two cost-model grids."""
@@ -106,10 +105,19 @@ WORKSPACE: str = ""
 # %% [markdown]
 # ## 1. What is being re-priced, and under what
 #
-# The combinations are the allocation-stage leaders by Sharpe. They are re-priced rather than
-# re-selected: the prediction, the concentration and the allocator are held exactly as registered,
-# and the only thing that moves is the cost model. That is what makes the curve below a statement
-# about cost sensitivity and not about which strategy happens to do best under friction.
+# The combinations are the highest-Sharpe validation runs across every stage a carrier can come
+# from - the equal-weight baseline, the allocation sweep and the risk overlay - not the allocation
+# stage alone. Each later stage is an alternative to the one before it rather than an improvement
+# on it by construction: where every allocator lands below the equal-weight parent it was built
+# from, an allocation-only rule would carry forward a strategy the earlier notebook measured as
+# worse than doing nothing, and where every risk control hurts, an overlay-only rule would charge
+# costs against an overlay the sweep just found unhelpful. Which stage wins is decided by
+# measurement here and printed below, not by which stages this query happens to name.
+#
+# They are re-priced rather than re-selected: the prediction, the concentration and the allocator
+# are held exactly as registered, and the only thing that moves is the cost model. That is what
+# makes the curve below a statement about cost sensitivity and not about which strategy happens to
+# do best under friction.
 #
 # The per-share commission is read from `setup.yaml` with no default. Elsewhere in the fleet that
 # key is exploratory and a missing value can fall back; here it is the headline regime, so a
@@ -156,34 +164,124 @@ if not LIVE_PREDICTIONS:
     )
 print(f"Live prediction sets: {len(LIVE_PREDICTIONS):,}")
 
+# %%
+# The stages the sweep may draw its carrier from. This is not a free choice: it is exactly the set
+# `resolve_canonical_rank1_lineage` selects over (`case_studies/utils/strategy_analysis.py:355`),
+# and the two have to agree. Pool anything narrower and they can name different configurations -
+# the curve below would then describe a strategy `18_strategy_analysis` does not report, and that
+# notebook would find no cost rows for the carrier it did select.
+#
+# Breadth is also what keeps the risk question empirical. The risk stage files one row per named
+# control and none for the un-overlaid strategy, so a pool of `risk_overlay` alone would force an
+# overlay onto the carrier even where every control hurt it - letting the shape of a query decide
+# what the sweep is supposed to measure. `signal` and `allocation` are how an un-overlaid
+# configuration wins when it deserves to.
+#
+# `cost_sensitivity` stays out: pooling it would let a cost-charged run re-enter the selection it
+# is a consequence of.
+#
+# `holdout` is the one member of the resolver's list that is absent here, and not by choice. That
+# resolver reads `backtest_runs` with raw SQL; this path goes through
+# `registry.store._stage_filter_clause`, whose `VALID_STAGES` is
+# {signal, allocation, risk_overlay, cost_sensitivity} and which raises on anything else. Naming
+# it here would not widen the pool, it would raise before the first stage was read. The two
+# selections still agree, because the resolver asks for validation-split rows and a holdout-stage
+# backtest is not one.
+PRE_COST_STAGES = ("signal", "allocation", "risk_overlay")
+
+
+def resolve_pre_cost_runs(top_n: int) -> pl.DataFrame:
+    """The highest-Sharpe validation runs across every stage the carrier may come from.
+
+    Each stage is asked for its whole ranked list and the pool is sorted afterwards, rather than
+    taking `top_n` from each and merging them: truncating first lets one stage's leader hold a
+    slot that a better run in another stage should have had, and at `top_n=1` that drops a whole
+    stage from consideration instead of falling through to the next candidate.
+
+    No solvency filter, unlike `us_firm_characteristics/14_costs`, which drops runs whose equity
+    reached zero before sweeping them - its long-short book has no margin call, so a run can
+    compound through zero and carry a Sharpe computed on a balance that no longer exists. That
+    boundary belongs with the stages that apply it, and this case study's backtest stages apply
+    none. Measured on this registry 2026-08-30: 1,289 backtests, none with `max_drawdown` at or
+    past -100% and none missing it, so the filter would exclude nothing here while introducing a
+    criterion the stages it draws from never used.
+    """
+    ranked = [
+        frame.with_columns(pl.lit(stage).alias("pool_stage"))
+        for stage, frame in (
+            (
+                stage,
+                resolve_best_backtest_runs(
+                    CASE_STUDY_ID,
+                    LABEL,
+                    split="validation",
+                    stage=stage,
+                    top_n=1_000_000,
+                    prediction_hashes=set(LIVE_PREDICTIONS),
+                ),
+            )
+            for stage in PRE_COST_STAGES
+        )
+        if not frame.is_empty()
+    ]
+    if not ranked:
+        return pl.DataFrame()
+    return (
+        pl.concat(ranked)
+        .sort("sharpe", descending=True)
+        .unique("backtest_hash", maintain_order=True)
+        .head(top_n)
+    )
+
+
 # %% tags=["results"]
-top_combos = resolve_best_backtest_runs(
-    CASE_STUDY_ID,
-    LABEL,
-    split="validation",
-    stage="allocation",
-    top_n=TOP_N_COMBOS,
-    prediction_hashes=set(LIVE_PREDICTIONS),
-)
+top_combos = resolve_pre_cost_runs(TOP_N_COMBOS)
 if top_combos.is_empty():
     raise RuntimeError(
-        "no allocation-stage backtests are registered, so there is nothing to re-price; "
-        "run 15_portfolio_management first"
+        "no backtests are registered at any of "
+        f"{', '.join(PRE_COST_STAGES)}, so there is nothing to re-price; run 14_backtest, "
+        "15_portfolio_management and 16_risk_management first"
     )
 # `resolve_best_backtest_runs` returns the stored specification and the Sharpe, and nothing
 # about the model behind it - the family and configuration are projected away. The model is
 # read from the explorer and joined on `backtest_hash`, which both carry.
-sources = dict(
-    BacktestExplorer(CASE_STUDY_ID)
-    .best(stage="allocation", top_n=100000, label=LABEL, prediction_hashes=LIVE_PREDICTIONS)
-    .select("backtest_hash", "source")
-    .iter_rows()
-)
+sources: dict[str, str] = {}
+for _stage in PRE_COST_STAGES:
+    sources.update(
+        BacktestExplorer(CASE_STUDY_ID)
+        .best(stage=_stage, top_n=100000, label=LABEL, prediction_hashes=LIVE_PREDICTIONS)
+        .select("backtest_hash", "source")
+        .iter_rows()
+    )
+# The stage each selected run came from is printed rather than assumed, because which one wins is
+# the question the pool exists to leave open.
 for row in top_combos.iter_rows(named=True):
     allocator = strategy_view(json.loads(row["spec_json"])).get("allocation", {}).get("method")
     print(
-        f"  Sharpe={row['sharpe']:+.3f}  {sources.get(row['backtest_hash'], 'unknown source')}  "
+        f"  Sharpe={row['sharpe']:+.3f}  stage={row['pool_stage']}  "
+        f"{sources.get(row['backtest_hash'], 'unknown source')}  "
         f"alloc={allocator}  backtest={row['backtest_hash'][:8]}"
+    )
+
+# Whether the overlay earned its place, reported rather than assumed. The risk stage files a row
+# per named control and none for the un-overlaid strategy, so the two sides have to be read
+# separately and differenced. A negative difference is the stage saying its controls did not help,
+# which is a result and not a failure.
+_best: dict[str, float | None] = {}
+for _stage in ("risk_overlay", "allocation"):
+    _frame = resolve_best_backtest_runs(
+        CASE_STUDY_ID, LABEL, split="validation", stage=_stage, top_n=1
+    )
+    _best[_stage] = None if _frame.is_empty() else _frame["sharpe"][0]
+if _best["risk_overlay"] is None:
+    print("  Risk overlay: no run registered, so the carrier above is un-overlaid.")
+elif _best["allocation"] is None:
+    print(f"  Risk overlay: {_best['risk_overlay']:+.3f}, with no allocation run to compare it to.")
+else:
+    _delta = _best["risk_overlay"] - _best["allocation"]
+    print(
+        f"  Best overlaid {_best['risk_overlay']:+.3f} vs best un-overlaid "
+        f"{_best['allocation']:+.3f}, difference {_delta:+.3f}"
     )
 
 # %%
@@ -512,10 +610,10 @@ show_plotly_with_alt(
 # **Known limitations.** The sweep applies one flat rate to every fund while the production stages
 # price each from the tiered map, so this is sensitivity to a level rather than a re-pricing.
 # Nothing here models impact, so a larger book than the declared initial cash would face costs this
-# curve does not contain. The combinations re-priced are the allocation-stage leaders, so the curve
+# curve does not contain. The combinations re-priced are the leaders of their pool, so the curve
 # describes how the strategies that already did well degrade, not how the whole population does.
 # And every point is measured on validation folds; the holdout is not consulted.
 
 # %% [markdown]
-# **Next**: [`17_risk_management`](17_risk_management.ipynb) adds position and portfolio risk rules
-# to the same combinations and asks whether they improve the drawdown without spending the Sharpe.
+# **Next**: [`18_strategy_analysis`](18_strategy_analysis.ipynb) takes the carrier this sweep
+# priced and reports it end to end.
