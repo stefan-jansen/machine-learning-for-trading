@@ -926,6 +926,40 @@ def _comparable_computation(spec: dict) -> dict:
     return computation
 
 
+HOLDOUT_WINDOW = canonical_window(CASE_STUDY, carrier_source[2], split="holdout")
+if HOLDOUT_WINDOW is None:
+    raise RuntimeError(f"{CASE_STUDY} declares no holdout window for {carrier_source[2]!r}")
+# Top-level identity fields, which sit beside `computation` rather than inside it and so survive
+# any projection of it. A fit at a different seed or in a different execution tier is a different
+# computation wearing the same configuration name.
+IDENTITY_FIELDS = ("family", "label", "config_name", "seed", "execution_tier", "identity_version")
+
+
+def _declares_the_holdout_interval(spec: dict) -> bool:
+    """Whether this fit evaluates the window the case study declares, over one fold.
+
+    The CV is dropped from the specification comparison because a holdout refit is expected to
+    differ there. Dropping it wholesale would then accept any interval at all, so the interval is
+    checked against `config/setup.yaml` here instead: one fold, evaluated over exactly the
+    declared holdout window, with training that ends before it opens. What this does not
+    re-derive is the training START, which depends on the feature artifact's own coverage -
+    `18_holdout_predictions` derives and checks that, and this reads the result.
+    """
+    cv = spec["computation"].get("cv") or {}
+    if cv.get("split") != "holdout":
+        return False
+    folds = cv.get("folds")
+    if not isinstance(folds, list) or len(folds) != 1:
+        return False
+    fold = folds[0]
+    declared_start, declared_end = (str(value) for value in HOLDOUT_WINDOW)
+    if str(fold.get("val_start"))[:10] != declared_start[:10]:
+        return False
+    if str(fold.get("val_end"))[:10] != declared_end[:10]:
+        return False
+    return str(fold.get("train_end"))[:10] < declared_start[:10]
+
+
 def is_this_carriers_holdout(row) -> bool:
     """The carrier's own configuration, refitted for the holdout, at the selected checkpoint.
 
@@ -949,8 +983,12 @@ def is_this_carriers_holdout(row) -> bool:
         CARRIER_TRAINING_SPEC
     ):
         return False
-    holdout_cv = json.loads(row[13])["computation"].get("cv") or {}
-    if holdout_cv.get("split") != "holdout":
+    candidate_spec = json.loads(row[13])
+    if any(
+        candidate_spec.get(field) != CARRIER_TRAINING_SPEC.get(field) for field in IDENTITY_FIELDS
+    ):
+        return False
+    if not _declares_the_holdout_interval(candidate_spec):
         return False
     return _comparable_backtest(json.loads(row[5])) == CARRIER_BACKTEST
 
@@ -967,7 +1005,19 @@ if len(matching) > 1:
     )
 holdout_result = matching[-1] if matching else None
 
+# Every holdout lineage on this label, not only the ones that match. A row belonging to some
+# other configuration still means the 2021 window was read, and the notebook that publishes the
+# out-of-sample claim is the one that has to say so - counting only matches would report a
+# second-or-later read as clean evidence because the earlier read is invisible to it.
+WINDOW_READS = {row[2] for row in holdout_rows}
 print(f"Carrier: {carrier_source[0]}/{carrier_source[1]} on {carrier_source[2]}")
+if len(WINDOW_READS) > 1:
+    print(
+        f"The 2021 window carries {len(WINDOW_READS)} holdout training identities "
+        f"({', '.join(sorted(WINDOW_READS))}), so it has been read on more than one "
+        "configuration. Whichever of them this page reports, it is not a first read of an "
+        "unseen window, and the out-of-sample claim below has to be discounted accordingly."
+    )
 print(f"Holdout rows in the registry: {len(holdout_rows)}; matching this carrier: {len(matching)}")
 if holdout_result is None:
     print(
@@ -1064,20 +1114,30 @@ assessment = pl.DataFrame(
         },
         {
             # Not a gate on whether the holdout was permitted to run - it is repeatable and
-            # nothing here polices that. The question is whether a holdout result exists for
-            # the configuration this funnel selected, and what it says.
+            # nothing here polices that. Two questions instead: is there a holdout result for
+            # the configuration this funnel selected, and had the window already been read?
+            # A result whose lower bound clears zero still cannot PASS on a window that was
+            # read before, because a second read of a seen window is not out of sample
+            # whatever number it produces.
             "gate": "Holdout on the selected configuration",
             "status": (
-                "PASS"
-                if holdout_result is not None and holdout_result[7] > 0
+                "NOT RUN"
+                if holdout_result is None
                 else "INCONCLUSIVE"
-                if holdout_result is not None
-                else "NOT RUN"
+                if len(WINDOW_READS) > 1 or holdout_result[7] <= 0
+                else "PASS"
             ),
             "evidence": (
                 "no holdout backtest for this configuration"
                 if holdout_result is None
-                else (f"{holdout_result[6]:.3f} [{holdout_result[7]:.3f}, {holdout_result[8]:.3f}]")
+                else (
+                    f"{holdout_result[6]:.3f} [{holdout_result[7]:.3f}, {holdout_result[8]:.3f}]"
+                    + (
+                        f"; window read on {len(WINDOW_READS)} configurations, so not a first read"
+                        if len(WINDOW_READS) > 1
+                        else ""
+                    )
+                )
             ),
         },
         {

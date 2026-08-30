@@ -65,6 +65,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.cv_window import canonical_window
 from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
@@ -164,8 +165,46 @@ print(
 # exactly: the two specifications must differ in those fields and agree
 # everywhere else.
 
+
 # %%
-REKEYED_FIELDS = ("cv", "expected_prediction_keys", "macro_context")
+def _without(value, path: tuple[str, ...]):
+    """``value`` with ``path`` removed, leaving every sibling in place."""
+    if not isinstance(value, dict) or path[0] not in value:
+        return value
+    pruned = dict(value)
+    if len(path) == 1:
+        pruned.pop(path[0])
+    else:
+        pruned[path[0]] = _without(pruned[path[0]], path[1:])
+    return pruned
+
+
+# Exactly what a holdout refit re-keys, subfield-precise: dropping the whole `macro_context`
+# would accept an SDF fit on different macro inputs, and dropping all of `model` would reject
+# the legitimate holdout of any configuration whose parameters resolve per fold.
+REKEYED_PATHS = (
+    ("cv",),
+    ("expected_prediction_keys",),
+    ("model", "effective_params_by_fold"),
+    ("macro_context", "resolved_fold_digest"),
+    ("task", "imbalance", "effective_class_weights_by_fold"),
+)
+
+
+def _comparable_computation(spec: dict) -> dict:
+    computation = spec["computation"]
+    for path in REKEYED_PATHS:
+        computation = _without(computation, path)
+    return computation
+
+
+# Beside `computation` rather than inside it, so they survive any projection of it.
+IDENTITY_FIELDS = ("seed", "execution_tier", "identity_version")
+# Dropping the CV from the comparison would otherwise accept any interval at all, so the
+# interval is checked against the case study's own declaration instead.
+HOLDOUT_WINDOW = canonical_window(CASE_STUDY_ID, HOLDOUT_LABEL, split="holdout")
+if HOLDOUT_WINDOW is None:
+    raise RuntimeError(f"{CASE_STUDY_ID} declares no holdout window for {HOLDOUT_LABEL!r}")
 
 with sqlite3.connect(REGISTRY_DB) as db:
     holdout_rows = db.execute(
@@ -193,20 +232,28 @@ def carries_the_same_configuration(candidate: dict) -> tuple[bool, str]:
         return False, "different label"
     if candidate.get("config_name") != VALIDATION_SPEC.get("config_name"):
         return False, "different configuration"
-    left = {
-        key: value for key, value in candidate["computation"].items() if key not in REKEYED_FIELDS
-    }
-    right = {
-        key: value
-        for key, value in VALIDATION_SPEC["computation"].items()
-        if key not in REKEYED_FIELDS
-    }
+    left = _comparable_computation(candidate)
+    right = _comparable_computation(VALIDATION_SPEC)
     if left != right:
         moved = sorted(key for key in set(left) | set(right) if left.get(key) != right.get(key))
         return False, f"computation differs beyond the re-keyed fields: {moved}"
-    if candidate["computation"].get("cv", {}).get("split") != "holdout":
+    if any(candidate.get(field) != VALIDATION_SPEC.get(field) for field in IDENTITY_FIELDS):
+        return False, "a top-level identity field differs (seed, tier or identity version)"
+    cv = candidate["computation"].get("cv") or {}
+    if cv.get("split") != "holdout":
         return False, "the fit does not declare the holdout split"
-    return True, "refit of this carrier over the holdout interval"
+    folds = cv.get("folds")
+    if not isinstance(folds, list) or len(folds) != 1:
+        return False, "a holdout fit must carry exactly one fold"
+    fold = folds[0]
+    declared_start, declared_end = (str(value)[:10] for value in HOLDOUT_WINDOW)
+    if str(fold.get("val_start"))[:10] != declared_start:
+        return False, f"evaluated from {fold.get('val_start')}, not the declared {declared_start}"
+    if str(fold.get("val_end"))[:10] != declared_end:
+        return False, f"evaluated to {fold.get('val_end')}, not the declared {declared_end}"
+    if str(fold.get("train_end"))[:10] >= declared_start:
+        return False, "training runs into the holdout window"
+    return True, "refit of this carrier over the declared holdout interval"
 
 
 matches, rejected = [], []
@@ -336,18 +383,6 @@ BACKTEST_VARYING_PATHS = (
     ("backtest_config", "metadata", "prediction_hash"),
     ("backtest_config", "metadata", "preset_path"),
 )
-
-
-def _without(value, path: tuple[str, ...]):
-    """``value`` with ``path`` removed, leaving every sibling in place."""
-    if not isinstance(value, dict) or path[0] not in value:
-        return value
-    pruned = dict(value)
-    if len(path) == 1:
-        pruned.pop(path[0])
-    else:
-        pruned[path[0]] = _without(pruned[path[0]], path[1:])
-    return pruned
 
 
 def _comparable_backtest(spec: dict) -> dict:
