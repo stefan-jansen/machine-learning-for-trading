@@ -29,6 +29,7 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
@@ -806,7 +807,7 @@ class BacktestExplorer:
             return df
 
         # Take best Sharpe per stage
-        stage_order = {"signal": 0, "allocation": 1, "cost_sensitivity": 2, "risk_overlay": 3}
+        stage_order = {s: i for i, s in enumerate(STAGE_SEQUENCE)}
         best_per_stage = df.sort("sharpe", descending=True).group_by("stage").first()
 
         # Sort by pipeline order
@@ -1445,7 +1446,7 @@ class BacktestExplorer:
             return {}
 
         result: dict[str, dict] = {}
-        stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+        stage_order = list(STAGE_SEQUENCE)
 
         for stage_name in stage_order:
             stage_df = df.filter(pl.col("stage") == stage_name)
@@ -1487,6 +1488,11 @@ class BacktestExplorer:
                 pos_rules = risk.get("position_rules", [])
                 entry["risk_type"] = pos_rules[0].get("type", "") if pos_rules else ""
 
+            # The stage-defining block, kept so a consumer can test whether a later
+            # stage's entry is actually built on this one. `champion_lineage` picks the
+            # best backtest at each stage independently, so two entries can be siblings
+            # rather than parent and child - see `stage_carrier_blocks`.
+            entry["_strategy"] = strategy
             result[stage_name] = entry
 
         return result

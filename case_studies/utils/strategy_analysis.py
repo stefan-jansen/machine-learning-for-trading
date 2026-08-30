@@ -30,6 +30,7 @@ import polars as pl
 
 from case_studies.utils.carrier_pins import CARRIER_PINS
 from case_studies.utils.notebook_contracts import degenerate_prediction_sql
+from case_studies.utils.uncertainty import STAGE_SEQUENCE
 
 # ---------------------------------------------------------------------------
 # Canonical rank-1 resolution (LABEL_RESTRICTIONS-aware)
@@ -836,7 +837,7 @@ def plot_sharpe_waterfall(
     -------
     plt.Figure
     """
-    stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+    stage_order = list(STAGE_SEQUENCE)
     stage_labels = {
         "signal": "Signal",
         "allocation": "Allocation",
