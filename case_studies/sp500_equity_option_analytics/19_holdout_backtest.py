@@ -53,7 +53,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import Study
+from case_studies.research import CandidateSet, Study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -70,9 +70,7 @@ from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
     read_predictions,
-    resolve_best_backtest_runs,
 )
-from case_studies.utils.sweep_config import get_allocators
 from case_studies.utils.uncertainty import load_daily_returns_with_timestamp
 from utils.paths import get_case_study_dir
 from utils.style import COLORS, FIGSIZE, add_message_title
@@ -103,73 +101,52 @@ for _note in _population_notes:
     print(_note)
 
 # %% [markdown]
-# ## 1. The strategy, read back from the selection that produced it
+# ## 1. The strategy, read out of the frozen candidate set
 #
-# The rule is the one [`16_risk_management`](16_risk_management.ipynb) and
-# [`17_costs`](17_costs.ipynb) apply: rank the risk-overlay rows together with
-# the allocation rows they were overlaid on, and take the highest validation
-# Sharpe. This notebook does not receive the winner as a parameter, because a
-# holdout run that could be pointed at a strategy of the reader's choosing would
-# be a way to search the holdout.
+# [`16_risk_management`](16_risk_management.ipynb) freezes the field it ranked
+# over, and both this notebook and
+# [`18_holdout_predictions`](18_holdout_predictions.ipynb) read the selection out
+# of that set rather than re-deriving it. The set is immutable, so the two
+# resolve the same configuration without either being told what it is; handing
+# it over in a parameter or a file would add a way for them to disagree.
+#
+# A holdout run that could be pointed at a strategy of the reader's choosing
+# would be a way to search the holdout. This one cannot be.
 
 # %%
-active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-candidate_pool = pl.concat(
-    [
-        resolve_best_backtest_runs(
-            CASE_STUDY_ID,
-            HOLDOUT_LABEL,
-            split="validation",
-            stage=stage,
-            top_n=9999,
-            prediction_hashes=CURRENT_MEMBERS,
-        )
-        for stage in ("risk_overlay", "allocation")
-    ],
-    how="diagonal_relaxed",
-).unique("backtest_hash")
-if candidate_pool.is_empty():
-    raise RuntimeError("No full-coverage risk-overlay or allocation candidates to carry forward")
+CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
+try:
+    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
+except (ValueError, LookupError) as exc:
+    raise RuntimeError(
+        f"no candidate set {CANDIDATE_SET_NAME!r} resolves in this registry ({exc}). "
+        "16_risk_management freezes it as its last step; run that first."
+    ) from exc
 
-candidate_hashes = candidate_pool["prediction_hash"].unique().to_list()
+SELECTED = CANDIDATES.best_validation_sharpe()
+if not SELECTED.complete:
+    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
+CARRIER_SPEC = SELECTED.spec()
+CARRIER_STRATEGY = strategy_view(CARRIER_SPEC)
+carrier_record = SELECTED.registry_record()
+CARRIER_PREDICTION_HASH = carrier_record["prediction_hash"]
+
 with sqlite3.connect(REGISTRY_DB) as db:
-    source_rows = db.execute(
-        f"""
-        SELECT p.prediction_hash, t.family, t.config_name
-        FROM prediction_sets p
-        JOIN training_runs t ON p.training_hash = t.training_hash
-        WHERE p.prediction_hash IN ({",".join("?" for _ in candidate_hashes)})
-        """,
-        candidate_hashes,
-    ).fetchall()
-source_by_hash = {
-    prediction_hash: model_source(family, config_name)
-    for prediction_hash, family, config_name in source_rows
-}
-
-eligible_rows = []
-for row in candidate_pool.iter_rows(named=True):
-    strategy = strategy_view(json.loads(row["spec_json"]))
-    allocator = strategy.get("allocation", {}).get("method", "equal_weight")
-    if allocator == "equal_weight" or allocator in active_allocators:
-        eligible_rows.append(
-            {
-                **row,
-                "source": source_by_hash[row["prediction_hash"]],
-                "allocator": allocator,
-                "top_k": strategy.get("signal", {}).get("top_k"),
-                "risk": (strategy.get("risk") or {}).get("name"),
-            }
-        )
-if not eligible_rows:
-    raise RuntimeError("No eligible strategy lineage in the risk-overlay or allocation pools")
-
-CARRIER = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).row(0, named=True)
+    _carrier_source = db.execute(
+        "SELECT t.family, t.config_name FROM prediction_sets p "
+        "JOIN training_runs t USING(training_hash) WHERE p.prediction_hash = ?",
+        (CARRIER_PREDICTION_HASH,),
+    ).fetchone()
 print(
-    f"Selected {CARRIER['source']} with {CARRIER['allocator']} allocation, "
-    f"top-{CARRIER['top_k']}, "
-    + (f"risk overlay {CARRIER['risk']}" if CARRIER["risk"] else "no risk overlay")
-    + f", validation Sharpe {CARRIER['sharpe']:.3f}"
+    f"Candidate set {CANDIDATES.hash} with {len(CANDIDATES.members)} members selects "
+    f"{model_source(*_carrier_source)} with "
+    f"{(CARRIER_STRATEGY.get('allocation') or {}).get('method', 'equal_weight')} allocation, "
+    f"top-{(CARRIER_STRATEGY.get('signal') or {}).get('top_k')}, "
+    + (
+        f"risk overlay {(CARRIER_STRATEGY.get('risk') or {}).get('name')}"
+        if (CARRIER_STRATEGY.get("risk") or {}).get("name")
+        else "no risk overlay"
+    )
 )
 
 # %% [markdown]
@@ -201,7 +178,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
         "SELECT t.training_hash, t.spec_json, p.checkpoint_kind, p.checkpoint_value "
         "FROM prediction_sets p JOIN training_runs t USING(training_hash) "
         "WHERE p.prediction_hash = ?",
-        (CARRIER["prediction_hash"],),
+        (CARRIER_PREDICTION_HASH,),
     ).fetchone()
 
 carrier_training_hash, carrier_spec_json, carrier_kind, carrier_value = carrier_training
@@ -339,7 +316,7 @@ holdout_strategy_spec = clone_backtest_spec(
     ensure_backtest_spec(
         CASE_STUDY_ID,
         bt_config,
-        json.loads(CARRIER["spec_json"]),
+        CARRIER_SPEC,
         prices=prices,
         prediction_hash=HOLDOUT_PREDICTION_HASH,
         initial_cash=bt_config.initial_cash,
@@ -348,7 +325,7 @@ holdout_strategy_spec = clone_backtest_spec(
 HOLDOUT_BACKTEST_HASH = backtest_hash_from_parts(HOLDOUT_PREDICTION_HASH, holdout_strategy_spec)
 
 carried = strategy_view(holdout_strategy_spec)
-validation_carried = strategy_view(json.loads(CARRIER["spec_json"]))
+validation_carried = CARRIER_STRATEGY
 if carried != validation_carried:
     moved = sorted(
         key
@@ -420,7 +397,7 @@ with sqlite3.connect(REGISTRY_DB) as db:
         WHERE b.backtest_hash IN (?, ?)
         """,
         connection=db,
-        execute_options={"parameters": [HOLDOUT_BACKTEST_HASH, CARRIER["backtest_hash"]]},
+        execute_options={"parameters": [HOLDOUT_BACKTEST_HASH, SELECTED.hash]},
     )
 if comparison.height != 2:
     raise RuntimeError("one of the two backtests has no registered metrics")

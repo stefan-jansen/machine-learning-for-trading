@@ -52,7 +52,6 @@ import sqlite3
 import warnings
 
 import matplotlib.pyplot as plt
-import pandas as pd
 import polars as pl
 
 warnings.filterwarnings("ignore")
@@ -62,7 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
-from case_studies.research import Study
+from case_studies.research import CandidateSet, Study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -76,17 +75,12 @@ from case_studies.utils.registry import (
     backtest_hash_from_parts,
     load_backtest_fold_metrics,
     read_predictions,
-    resolve_best_backtest_runs,
-    resolve_best_predictions,
 )
 from case_studies.utils.sweep_config import (
-    get_allocators,
-    get_checkpoints_per_config,
     get_cost_grid_bps,
     get_cost_grid_half_spread_usd,
     get_per_share_commission,
     get_position_risk_controls,
-    get_top_n_predictions,
 )
 from case_studies.utils.uncertainty import (
     compute_cohort_metrics,
@@ -155,83 +149,67 @@ if CURRENT_MEMBERS is not None:
     print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
 
 # %%
-top_predictions = resolve_best_predictions(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    stage="signal",
-    top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
-    checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY),
-    coverage_window="canonical",
-    prediction_hashes=CURRENT_MEMBERS,
+CANDIDATE_SET_NAME = f"{CASE_STUDY}:holdout-candidates"
+try:
+    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
+except (ValueError, LookupError) as exc:
+    raise RuntimeError(
+        f"no candidate set {CANDIDATE_SET_NAME!r} resolves in this registry ({exc}). "
+        "16_risk_management freezes it as its last step; run that first."
+    ) from exc
+
+SELECTED = CANDIDATES.best_validation_sharpe()
+if not SELECTED.complete:
+    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
+if SELECTED.execution_tier != "canonical":
+    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is not canonical")
+
+# Every later comparison in this notebook is drawn from the frozen set rather than re-queried,
+# so the field the carrier is judged against is the field it was selected from. Sharpe lives in
+# `backtest_metrics` rather than on the run row, so it is joined here once.
+# `members` is a tuple of hashes, not of results, so each is opened once here.
+_member_hashes = list(CANDIDATES.members)
+with sqlite3.connect(REGISTRY_DB) as db:
+    _member_metrics = dict(
+        db.execute(
+            "SELECT backtest_hash, sharpe FROM backtest_metrics WHERE backtest_hash IN "
+            f"({','.join('?' for _ in _member_hashes)})",
+            _member_hashes,
+        ).fetchall()
+    )
+_candidate_rows = []
+for _member_hash in _member_hashes:
+    _member = _study.results.open(_member_hash)
+    _spec = _member.spec()
+    _view = strategy_view(_spec)
+    _candidate_rows.append(
+        {
+            "backtest_hash": _member.hash,
+            "prediction_hash": _member.registry_record()["prediction_hash"],
+            "spec_json": json.dumps(_spec),
+            "sharpe": _member_metrics.get(_member.hash),
+            "allocator": (_view.get("allocation") or {}).get("method", "equal_weight"),
+            "top_k": (_view.get("signal") or {}).get("top_k"),
+            "risk": (_view.get("risk") or {}).get("name"),
+        }
+    )
+candidate_frame = pl.DataFrame(_candidate_rows)
+if candidate_frame.filter(pl.col("sharpe").is_null()).height:
+    raise RuntimeError("a frozen candidate carries no registered Sharpe")
+
+strategy_carrier = candidate_frame.filter(pl.col("backtest_hash") == SELECTED.hash).row(
+    0, named=True
 )
-selected_prediction_hashes = top_predictions["prediction_hash"].to_list()
-active_allocators = {item["method"] for item in get_allocators(CASE_STUDY)}
-baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    stage="signal",
-    top_n=9999,
-    coverage_window="canonical",
-    prediction_hashes=CURRENT_MEMBERS,
-).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
-allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    stage="allocation",
-    top_n=9999,
-    coverage_window="canonical",
-    prediction_hashes=CURRENT_MEMBERS,
-).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
-# The risk stage belongs in the pool because it is now the last stage that ranks. When costs and
-# risk were parallel branches off allocation, the strategy this notebook named and the strategy
-# the pipeline advanced were the same row; with risk before costs they are not, and a pool of
-# `signal` and `allocation` alone would name the best UN-OVERLAID configuration while
-# `17_costs`, `18_holdout_predictions` and `19_holdout_backtest` all carried the overlaid one.
-# The union - rather than the risk rows alone - is what keeps "no overlay helped" a possible
-# answer here too: the risk stage registers a row per named control and none for the strategy
-# it was overlaid on.
-risk_pool = resolve_best_backtest_runs(
-    CASE_STUDY,
-    LABEL,
-    split="validation",
-    stage="risk_overlay",
-    top_n=9999,
-    coverage_window="canonical",
-    prediction_hashes=CURRENT_MEMBERS,
-).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
-candidate_pool = pl.concat(
-    [baseline_pool, allocation_pool, risk_pool], how="diagonal_relaxed"
-).unique("backtest_hash")
-
-# %% [markdown]
-# The carrier is the top validation strategy in the union of the equal-weight baseline, the
-# active alternative allocators, and the risk overlays applied to them - the same pool
-# `16_risk_management` onwards rank over, so the strategy named here is the strategy the
-# holdout was run on.
-
-# %%
-eligible_strategies = []
-for row in candidate_pool.iter_rows(named=True):
-    strategy = strategy_view(json.loads(row["spec_json"]))
-    allocator = strategy.get("allocation", {}).get("method", "equal_weight")
-    if allocator == "equal_weight" or allocator in active_allocators:
-        eligible_strategies.append(
-            {
-                **row,
-                "allocator": allocator,
-                "top_k": strategy.get("signal", {}).get("top_k"),
-                # None where the row carries no overlay, which is a legitimate winner and has to
-                # be distinguishable from any named control rather than defaulting to one.
-                "risk": (strategy.get("risk") or {}).get("name"),
-            }
-        )
-if not eligible_strategies:
-    raise RuntimeError("No eligible corrected baseline or allocation rows found")
-strategy_carrier = (
-    pl.DataFrame(eligible_strategies).sort("sharpe", descending=True).row(0, named=True)
+# The equal-weight rows inside the frozen set, which is where the carrier's starting point comes
+# from. Drawing it from the set rather than re-querying keeps baseline and lineage under one
+# eligibility rule - the one the set was frozen under.
+baseline_pool = candidate_frame.filter(
+    (pl.col("allocator") == "equal_weight") & pl.col("risk").is_null()
+)
+print(
+    f"Candidate set {CANDIDATES.hash}: {len(CANDIDATES.members)} members "
+    f"({baseline_pool.height} equal-weight baselines), selected {SELECTED.hash} "
+    f"at validation Sharpe {strategy_carrier['sharpe']:.3f}"
 )
 
 # %% [markdown]

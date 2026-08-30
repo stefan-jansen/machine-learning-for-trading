@@ -66,23 +66,24 @@
 # %%
 """S&P 500 Equity+Options: refit the selected configuration and predict the holdout."""
 
-import json
+import hashlib
 import sqlite3
 import warnings
+from pathlib import Path
 
 import polars as pl
 
 warnings.filterwarnings("ignore")
 
-from case_studies.research import open_study
+from case_studies.research import CandidateSet, open_study
 from case_studies.research.holdout import build_holdout_training_spec
-from case_studies.research.models import reconstruct_locked_model_request
+from case_studies.research.models import (
+    reconstruct_locked_model_request,
+    validate_locked_model_run,
+)
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import strategy_view
-from case_studies.utils.notebook_contracts import prediction_members_in_force
-from case_studies.utils.registry import model_source, resolve_best_backtest_runs
 from case_studies.utils.registry.specs import training_hash_from_spec
-from case_studies.utils.sweep_config import get_allocators
 from utils.paths import get_case_study_dir
 
 # %% tags=["parameters"]
@@ -118,105 +119,114 @@ study = open_study(
     workspace=WORKSPACE or None,
     entry_point="18_holdout_predictions",
 )
-CURRENT_MEMBERS, _population_notes = prediction_members_in_force(study)
-for _note in _population_notes:
-    print(_note)
-
 # %% [markdown]
-# ## 1. Which configuration the pipeline arrived at
+# ## 1. Read the selection out of the frozen candidate set
 #
-# The rule is the one [`17_costs`](17_costs.ipynb) applies, applied again rather
-# than carried across in a variable: rank the risk-overlay rows together with
-# the allocation rows they were overlaid on, and take the highest validation
-# Sharpe. Reading it from the registry a second time is what makes the two
-# notebooks agree by construction. If they ever disagreed, the assertion below
-# would say so rather than this notebook silently refitting something else.
+# The configuration this notebook refits is not chosen here and is not a
+# parameter. [`16_risk_management`](16_risk_management.ipynb) is the last stage
+# that ranks, and it writes the field it ranked over as an immutable candidate
+# set. This reads the highest validation Sharpe out of that set.
 #
-# The union matters for the same reason it does there. The risk stage registers
-# a row per named control and none for the un-overlaid strategy, so a pool drawn
-# from `stage="risk_overlay"` alone would force an overlay onto the carrier even
-# where every control hurt it.
+# The distinction matters more than it looks. Re-deriving the ranking here would
+# also give the right answer today, and would keep giving an answer after
+# something upstream moved - silently refitting a different configuration than
+# the one the case study reported selecting. A frozen set cannot do that. If it
+# no longer describes the pipeline, the resolution fails and says so, and the
+# repair is to re-run 16 and look at what changed.
 
 # %%
-active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
-candidate_pool = pl.concat(
-    [
-        resolve_best_backtest_runs(
-            CASE_STUDY_ID,
-            HOLDOUT_LABEL,
-            split="validation",
-            stage=stage,
-            top_n=9999,
-            prediction_hashes=CURRENT_MEMBERS,
-        )
-        for stage in ("risk_overlay", "allocation")
-    ],
-    how="diagonal_relaxed",
-).unique("backtest_hash")
-if candidate_pool.is_empty():
+CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
+try:
+    CANDIDATES = CandidateSet.one(study, name=CANDIDATE_SET_NAME)
+except (ValueError, LookupError) as exc:
     raise RuntimeError(
-        "No full-coverage risk-overlay or allocation candidates: notebooks 15 and 16 have not "
-        "run against the populations in force, so there is no selection to carry to the holdout"
-    )
+        f"no candidate set {CANDIDATE_SET_NAME!r} resolves in this registry ({exc}). "
+        "16_risk_management freezes it as its last step; run that first."
+    ) from exc
+if CANDIDATES.member_kind != "backtest":
+    raise RuntimeError("the holdout selection requires a backtest candidate set")
 
-candidate_hashes = candidate_pool["prediction_hash"].unique().to_list()
-with sqlite3.connect(REGISTRY_DB) as db:
-    source_rows = db.execute(
-        f"""
-        SELECT p.prediction_hash, t.family, t.config_name
-        FROM prediction_sets p
-        JOIN training_runs t ON p.training_hash = t.training_hash
-        WHERE p.prediction_hash IN ({",".join("?" for _ in candidate_hashes)})
-        """,
-        candidate_hashes,
-    ).fetchall()
-source_by_hash = {
-    prediction_hash: model_source(family, config_name)
-    for prediction_hash, family, config_name in source_rows
-}
+SELECTED = CANDIDATES.best_validation_sharpe()
+if not SELECTED.complete:
+    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is incomplete")
+if SELECTED.execution_tier != "canonical":
+    raise RuntimeError(f"the selected validation backtest {SELECTED.hash} is not canonical")
 
-eligible_rows = []
-for row in candidate_pool.iter_rows(named=True):
-    strategy = strategy_view(json.loads(row["spec_json"]))
-    allocator = strategy.get("allocation", {}).get("method", "equal_weight")
-    if allocator == "equal_weight" or allocator in active_allocators:
-        eligible_rows.append(
-            {
-                **row,
-                "source": source_by_hash[row["prediction_hash"]],
-                "allocator": allocator,
-                "top_k": strategy.get("signal", {}).get("top_k"),
-                "risk": (strategy.get("risk") or {}).get("name"),
-            }
-        )
-if not eligible_rows:
-    raise RuntimeError("No eligible strategy lineage in the risk-overlay or allocation pools")
+selected_record = SELECTED.registry_record()
+selected_prediction = study.results.open(selected_record["prediction_hash"])
+validation_training = study.results.open(selected_prediction.registry_record()["training_hash"])
+VALIDATION_SPEC = validation_training.spec()
+_prediction_record = selected_prediction.registry_record()
+CHECKPOINT_KIND = _prediction_record["checkpoint_kind"]
+CHECKPOINT_VALUE = _prediction_record["checkpoint_value"]
 
-CARRIER = pl.DataFrame(eligible_rows).sort("sharpe", descending=True).row(0, named=True)
+_strategy = strategy_view(SELECTED.spec())
 print(
-    f"Selected {CARRIER['source']} with {CARRIER['allocator']} allocation, "
-    f"top-{CARRIER['top_k']}, "
-    + (f"risk overlay {CARRIER['risk']}" if CARRIER["risk"] else "no risk overlay")
-    + f", validation Sharpe {CARRIER['sharpe']:.3f}"
+    f"Candidate set {CANDIDATES.hash} with {len(CANDIDATES.members)} members selects "
+    f"{VALIDATION_SPEC['family']}/{VALIDATION_SPEC.get('config_name')} with "
+    f"{(_strategy.get('allocation') or {}).get('method', 'equal_weight')} allocation, "
+    f"top-{(_strategy.get('signal') or {}).get('top_k')}, "
+    + (
+        f"risk overlay {(_strategy.get('risk') or {}).get('name')}"
+        if (_strategy.get("risk") or {}).get("name")
+        else "no risk overlay"
+    )
 )
 
 # %% [markdown]
-# The strategy specification travels to [`19_holdout_backtest`](19_holdout_backtest.ipynb)
-# through the registry rather than through this notebook. What 18 needs from the
-# carrier is narrower: the model that produced its signal, and which checkpoint
-# of that model the selection was made on.
+# ### The artifacts the selected fit pinned must be the artifacts on disk
+#
+# A training identity pins its input artifacts by content hash. A candidate set
+# frozen against a retired feature artifact still resolves, and the refit then
+# fails several minutes later with a message about a specification mismatch
+# rather than about a stale file. Checking here costs one hash per artifact and
+# names the role that moved.
+
 
 # %%
-selected_prediction = study.results.open(CARRIER["prediction_hash"])
-selected_record = selected_prediction.registry_record()
-validation_training = study.results.open(selected_record["training_hash"])
-VALIDATION_SPEC = validation_training.spec()
-CHECKPOINT_KIND = selected_record["checkpoint_kind"]
-CHECKPOINT_VALUE = selected_record["checkpoint_value"]
+def _sha256(path: Path) -> str:
+    """The content hash a training identity records for one input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return f"sha256:{digest.hexdigest()}"
 
+
+# Role-agnostic on purpose. Mapping a recorded role back to a path needs the resolver of
+# whichever family produced the fit, and this notebook carries whichever family won. What is
+# checkable without that mapping is the weaker, sufficient statement: every hash the fit pinned
+# is the hash of some artifact currently on disk. A retired artifact fails it, which is the case
+# this exists for.
+_on_disk = {
+    _sha256(_path): _path
+    for _pattern in ("features/*.parquet", "labels/*.parquet", "config/setup.yaml")
+    for _path in sorted(CASE_DIR.glob(_pattern))
+    if _path.is_file()
+}
+_pinned = {
+    entry["role"]: entry["sha256"]
+    for entry in VALIDATION_SPEC["computation"].get("feature_artifacts", [])
+}
+_moved = [
+    f"{_role} (pinned {_sha[:19]}...)" for _role, _sha in _pinned.items() if _sha not in _on_disk
+]
+if _moved:
+    raise RuntimeError(
+        f"the selected fit {validation_training.hash} pins artifacts that are not among the "
+        f"{len(_on_disk)} on disk, so a refit would not be the configuration that was "
+        "selected. Re-run the stage that produces them, then 16_risk_management to re-freeze "
+        "the candidate set:\n  " + "\n  ".join(_moved)
+    )
+print(f"All {len(_pinned)} pinned input artifacts match the files on disk")
+
+# %%
 pl.DataFrame(
     {
         "field": [
+            "candidate set",
+            "candidate count",
+            "selected validation backtest",
             "family",
             "configuration",
             "label",
@@ -225,6 +235,9 @@ pl.DataFrame(
             "checkpoint",
         ],
         "value": [
+            CANDIDATES.hash,
+            str(len(CANDIDATES.members)),
+            SELECTED.hash,
             str(VALIDATION_SPEC["family"]),
             str(VALIDATION_SPEC.get("config_name") or ""),
             str(VALIDATION_SPEC["label"]),
@@ -343,10 +356,12 @@ print(
 # sets for a later notebook to choose between, and choosing among them on the
 # holdout is the thing this window exists to prevent.
 #
-# A re-run that derives the same specification finds the prediction already in
-# the registry and reads it rather than fitting again. That is a cache, not a
-# seal: change the selection above and the identity changes with it, and this
-# fits.
+# A re-run that derives the same specification resolves the registered result
+# rather than fitting again. That is a cache, not a seal: change the selection
+# above and the identity changes with it, and this fits. The fitted state is
+# validated on both paths, because a reused prediction is state an earlier
+# process left on disk and the registry row is the thing being checked, not the
+# evidence for it.
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
@@ -360,26 +375,43 @@ if len(existing) > 1:
         "publishes exactly the selected checkpoint, so this registry has rows from an older rule"
     )
 
+# Reconstructed on both paths, not only when the refit has to run. A reused prediction is
+# persisted state from an earlier process, and accepting it because a registry row exists would
+# skip the one check worth keeping: that the weights on disk are what this specification
+# produces. The runner reuses a complete identity rather than refitting, so this costs a
+# resolution and not a training run.
 request = reconstruct_locked_model_request(
     study,
     HOLDOUT_SPEC,
     checkpoint_kind=CHECKPOINT_KIND,
     checkpoint_value=CHECKPOINT_VALUE,
 )
-if existing:
-    HOLDOUT_PREDICTION = study.results.open(existing[0][0])
-    FITTED_NOW = False
-    print(f"Holdout prediction {HOLDOUT_PREDICTION.hash} already registered; read, not refitted")
-else:
-    model_run = request.run()
-    if len(model_run.predictions) != 1:
-        raise RuntimeError(
-            f"the refit published {len(model_run.predictions)} prediction sets; the holdout fit "
-            "must publish exactly the selected checkpoint"
-        )
-    HOLDOUT_PREDICTION = model_run.predictions[0]
-    FITTED_NOW = True
-    print(f"Holdout prediction {HOLDOUT_PREDICTION.hash} fitted and registered")
+model_run = request.run()
+if model_run.training.hash != HOLDOUT_TRAINING_HASH:
+    raise RuntimeError(
+        f"the refit produced training {model_run.training.hash}, not the derived identity "
+        f"{HOLDOUT_TRAINING_HASH}"
+    )
+if len(model_run.predictions) != 1:
+    raise RuntimeError(
+        f"the refit published {len(model_run.predictions)} prediction sets; the holdout fit "
+        "must publish exactly the selected checkpoint"
+    )
+HOLDOUT_PREDICTION = model_run.predictions[0]
+FITTED_NOW = not existing
+FITTED_STATE_DIGEST = validate_locked_model_run(request, model_run)
+if not FITTED_STATE_DIGEST:
+    raise RuntimeError("the holdout model produced no fitted-state digest")
+if existing and existing[0][0] != HOLDOUT_PREDICTION.hash:
+    raise RuntimeError(
+        f"holdout prediction {existing[0][0]} was already registered for training "
+        f"{HOLDOUT_TRAINING_HASH}, but this run resolved {HOLDOUT_PREDICTION.hash}"
+    )
+print(
+    f"Holdout prediction {HOLDOUT_PREDICTION.hash} "
+    + ("fitted and registered" if FITTED_NOW else "reused")
+    + f"; fitted state {FITTED_STATE_DIGEST[:12]}"
+)
 
 holdout_record = HOLDOUT_PREDICTION.registry_record()
 if holdout_record["training_hash"] != HOLDOUT_TRAINING_HASH:
