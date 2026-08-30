@@ -727,10 +727,12 @@ print(
 # FX Pairs enters the pipeline negative (-0.00) and stays marginal through
 # allocation. US Firms and Crypto Perps post the highest signal-stage Sharpes
 # (2.75, 2.09), and US Firms carries that signal forward to a 1.77 holdout.
-# ETFs progresses 0.89 → 1.03 → 1.08 → 1.21 across signal → allocation →
-# cost_sensitivity → risk_overlay, with each stage adding incremental Sharpe
-# for that case study. Of the six case studies whose val rank-1 lands at the
-# risk-overlay stage, every managed Sharpe exceeds 1. NASDAQ-100 is excluded
+# The lineage table below traces each rank-1 prediction across the stages in
+# the order the backtests run: baseline, allocation, risk overlay, then the
+# cost sweep charged against whatever survived. A Sharpe that rises from one
+# column to the next is what that stage added, and only where the later stage
+# carries the earlier one's configuration - the paired rows above say which
+# transitions meet that test. NASDAQ-100 is excluded
 # from that comparison in v3.0 because its timing-corrected broad cost and risk
 # grids are deferred to v3.1.
 
@@ -1745,8 +1747,9 @@ extra_paired_df
 # Summary by `benchmark_kind` shows which extension pair types landed for
 # which CSs. ``equal_weight_holdout_side_artifact`` and ``val_rank1_self``
 # are universal (modulo holdout availability); stage-transition pairs
-# (``signal_leader``, ``allocation_leader``, ``cost_sensitivity_leader``)
-# vary by CS pipeline coverage. CSs pinned at the signal stage (e.g.
+# (one ``<stage>_leader`` per stage that has a successor in
+# ``STAGE_SEQUENCE``: ``signal_leader``, ``allocation_leader``,
+# ``risk_overlay_leader``) vary by CS pipeline coverage. CSs pinned at the signal stage (e.g.
 # ``sp500_options`` Rung-2) will surface zero stage-transition rows.
 
 # %% [markdown]
@@ -1868,7 +1871,7 @@ for cs, explorer in explorers.items():
         "pred_hash": pred_hash,
         "signal_source": signal_source,
     }
-    stage_order = ["signal", "allocation", "cost_sensitivity", "risk_overlay"]
+    stage_order = list(STAGE_SEQUENCE)
     for stage in stage_order:
         if stage == "signal":
             # Use the scope-filtered best_signal directly; progression() does
@@ -1901,10 +1904,7 @@ if not lineage_df.is_empty():
         lineage_df.select(
             "case_study",
             "signal_source",
-            "signal_sharpe",
-            "allocation_sharpe",
-            "cost_sensitivity_sharpe",
-            "risk_overlay_sharpe",
+            *[f"{stage}_sharpe" for stage in STAGE_SEQUENCE],
         )
     )
 
