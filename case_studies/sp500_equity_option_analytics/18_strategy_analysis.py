@@ -1063,9 +1063,9 @@ if sealed_holdout and sealed_holdout["lock_taken_at"]:
         SEAL_STATE = "sealed" if SEALED_BEFORE_SPENT else "broken"
         SEAL_BASIS = (
             "training_runs.started_at is recorded, so the ordering is read rather than "
-            "bounded: the lock was taken "
-            + ("before" if SEALED_BEFORE_SPENT else "at or after")
-            + " the run began"
+            "bounded: the run began "
+            + ("after" if SEALED_BEFORE_SPENT else "at or before")
+            + " the lock"
         )
     elif HOLDOUT_TRAINING_DERIVED_START is not None:
         # `>=`, not `>`. The true start is at or before the bound, so a bound equal to the
@@ -1216,7 +1216,7 @@ def _holdout_qualifier() -> str:
         short.append("a different validation CV")
     if not SEALED_BEFORE_SPENT:
         short.append(
-            "the run demonstrably began before the lock"
+            "the run demonstrably began at or before the lock"
             if SEAL_STATE == "broken"
             else f"the lock is not shown to predate the run ({SEAL_STATE})"
         )
