@@ -1462,6 +1462,7 @@ if "sdf" in lf_extras:
 import json as _json
 import sqlite3
 
+from case_studies.utils.registry.store import IDENTITY_VERSION as CAUSAL_IDENTITY_VERSION
 from case_studies.utils.registry.store import current_causal_identities
 
 _db_path = CASE_DIR / "run_log" / "registry.db"
@@ -1473,24 +1474,53 @@ if _db_path.exists():
         _cur = _con.execute(
             "SELECT causal_hash, label, treatment, dml_effect, dml_se_hac, p_value_hac, "
             "naive_effect, confounding_bias_pct, refutation_p, n_obs, embargo, "
-            "confounders_json FROM causal_runs WHERE label = ? ORDER BY causal_hash",
+            "confounders_json, spec_json, supersedes_hash "
+            "FROM causal_runs WHERE label = ? ORDER BY causal_hash",
             (PRIMARY_LABEL,),
         )
-        for row in _cur.fetchall():
-            d = dict(zip([c[0] for c in _cur.description], row))
+        _fetched = _cur.fetchall()
+        _cols = [c[0] for c in _cur.description]
+        # Which hash each superseding row retires, so a retired row can be named as retired
+        # rather than as unstamped.
+        _retired_by = {
+            dict(zip(_cols, row))["supersedes_hash"]: dict(zip(_cols, row))["causal_hash"]
+            for row in _fetched
+            if dict(zip(_cols, row))["supersedes_hash"]
+        }
+        for row in _fetched:
+            d = dict(zip(_cols, row))
+            _spec_json, _supersedes = d.pop("spec_json"), d.pop("supersedes_hash")
             d["confounders"] = _json.loads(d.pop("confounders_json"))
             if d["causal_hash"] in _resolvable:
                 causal_rows.append(d)
             else:
-                causal_unresolvable.append(d["causal_hash"])
+                causal_unresolvable.append((d["causal_hash"], _spec_json, _supersedes))
 
 if causal_unresolvable:
+    # Why each one is excluded, rather than one explanation applied to all of them.
+    # `current_causal_identities` drops a row for any of three reasons and they call for
+    # different repairs: a stale identity version needs the notebook converted to the
+    # resolver, a preview row is correctly invisible to a canonical read and needs nothing,
+    # and a superseded row is retired evidence that a later run deliberately replaced. One
+    # message covering all three sends a reader to fix something that is not broken.
+    _why = []
+    for _hash, _spec_json, _supersedes in causal_unresolvable:
+        _spec = _json.loads(_spec_json or "{}")
+        if _hash in _retired_by:
+            _why.append(f"{_hash}: superseded by {_retired_by[_hash]}")
+        elif _spec.get("identity_version") != CAUSAL_IDENTITY_VERSION:
+            _why.append(
+                f"{_hash}: identity version {_spec.get('identity_version') or 'absent'}, "
+                f"not {CAUSAL_IDENTITY_VERSION} - registered through `register_causal_run`, "
+                "which cannot stamp one"
+            )
+        elif str(_spec.get("execution_tier", "canonical")) != "canonical":
+            _why.append(f"{_hash}: {_spec.get('execution_tier')} tier, not canonical")
+        else:
+            _why.append(f"{_hash}: excluded by the resolver for a reason not classified here")
     print(
         f"{len(causal_unresolvable)} causal row(s) for {PRIMARY_LABEL} do not resolve and are "
-        f"not reported below: {', '.join(causal_unresolvable)}. They were registered through "
-        "`register_causal_run`, which stamps no identity version, so `CausalResult.one` "
-        "returns nothing for them. Converting 12_causal_dml to `resolve_causal_request` is "
-        "what makes them readable."
+        "not reported below. " + "; ".join(_why) + "."
     )
 
 
