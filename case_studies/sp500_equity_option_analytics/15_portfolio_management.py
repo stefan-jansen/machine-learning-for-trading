@@ -50,6 +50,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -58,6 +59,7 @@ from case_studies.utils.backtest_loaders import (
 from case_studies.utils.backtest_presets import build_backtest_spec
 from case_studies.utils.backtest_runner import run_backtest
 from case_studies.utils.conformal import ensure_conformal_calibration_identity
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     read_predictions,
@@ -102,6 +104,19 @@ print(
     f"top configs: {TOP_N}; checkpoints/config: {CHECKPOINTS_PER_CONFIG}"
 )
 
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="15_portfolio_management")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+
 # %% [markdown]
 # ## 1. Advance the leading baselines
 #
@@ -118,6 +133,7 @@ top_preds = resolve_best_predictions(
     stage="signal",
     top_n=TOP_N,
     checkpoints_per_config=CHECKPOINTS_PER_CONFIG,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 if len(top_preds) != TOP_N:
     raise RuntimeError(f"Expected {TOP_N} advancing configurations, found {len(top_preds)}")
@@ -126,9 +142,9 @@ selected_hashes = top_preds["prediction_hash"].to_list()
 top_preds.select("source", "prediction_hash", "sharpe")
 
 # %% [markdown]
-# The primary-label funnel advances NLinear, SDF, CAE, IPCA, LSTM, PatchTST,
-# and four regularized linear configurations. These are the inputs to the
-# allocation comparison, not conclusions from it.
+# The table above is authoritative: each row is one current configuration's
+# best full-coverage checkpoint. These are inputs to the allocation comparison,
+# not conclusions from it.
 
 # %%
 prices = load_backtest_prices_for(
@@ -317,12 +333,16 @@ baseline_sharpe = top_preds.filter(pl.col("prediction_hash") == winner.predictio
 allocation_delta = winner.metrics["sharpe"] - baseline_sharpe
 
 print(
-    f"Winner: {winner.source}; allocator={winner_allocator}; top_k={winner_top_k}; "
-    f"Sharpe={winner.metrics['sharpe']:.3f} "
-    f"[{winner.metrics['sharpe_ci95_lo']:.3f}, {winner.metrics['sharpe_ci95_hi']:.3f}]"
+    f"Selected allocation: {winner.source}; allocator={winner_allocator}; "
+    f"top_k={winner_top_k}; validation Sharpe={winner.metrics['sharpe']:.3f}"
 )
 print(f"Equal-weight baseline={baseline_sharpe:.3f}; allocation delta={allocation_delta:+.3f}")
 top_rows.select("source", "prediction_hash", "sharpe", "cagr", "max_drawdown")
+
+# %% [markdown]
+# The point estimate is conditional on selecting this row from the full allocation sweep. An
+# ordinary interval for this one return path would omit that search, so it is not reported as
+# uncertainty about the selected allocation.
 
 # %% [markdown]
 # The curve below asks whether the allocation result depends on how many names are

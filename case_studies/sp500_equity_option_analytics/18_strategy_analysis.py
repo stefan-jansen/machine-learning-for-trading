@@ -61,6 +61,7 @@ warnings.filterwarnings("ignore")
 # registry artifacts without launching another training or evaluation run.
 
 # %%
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import get_backtest_config
 from case_studies.utils.backtest_presets import (
     clone_backtest_spec,
@@ -69,6 +70,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.cv_window import canonical_window
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     load_backtest_fold_metrics,
@@ -125,6 +127,32 @@ print(f"Case study: {CASE_STUDY}; corrected label: {LABEL}; mode: registry read-
 # carry a few decision dates from before it that inflate their raw count without
 # covering any more of the modeling window.
 
+# %% [markdown]
+# **The advancing configurations are drawn from the populations in force, not from every generation
+# the registry holds.** A population is immutable and refitting one publishes a snapshot that
+# supersedes the old, with both left readable; nothing in the read path filters on that
+# (`case_studies/utils/registry/queries.py` contains no occurrence of `supersed`). Unfiltered, a
+# retired generation competes for a slot against its own replacement, and the funnel below reports
+# fewer distinct strategies than it appears to. The set is passed into the query rather than
+# applied to its output because it also scopes the full-coverage bar the ranking is measured
+# against.
+
+# %%
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY, entry_point="18_strategy_analysis")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+if CURRENT_MEMBERS is not None:
+    print(f"{len(CURRENT_MEMBERS):,} prediction sets in the populations in force")
+
 # %%
 top_predictions = resolve_best_predictions(
     CASE_STUDY,
@@ -134,6 +162,7 @@ top_predictions = resolve_best_predictions(
     top_n=get_top_n_predictions(CASE_STUDY, "allocation"),
     checkpoints_per_config=get_checkpoints_per_config(CASE_STUDY),
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 )
 selected_prediction_hashes = top_predictions["prediction_hash"].to_list()
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY)}
@@ -144,6 +173,7 @@ baseline_pool = resolve_best_backtest_runs(
     stage="signal",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 allocation_pool = resolve_best_backtest_runs(
     CASE_STUDY,
@@ -152,6 +182,7 @@ allocation_pool = resolve_best_backtest_runs(
     stage="allocation",
     top_n=9999,
     coverage_window="canonical",
+    prediction_hashes=CURRENT_MEMBERS,
 ).filter(pl.col("prediction_hash").is_in(selected_prediction_hashes))
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"

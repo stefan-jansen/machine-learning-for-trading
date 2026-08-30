@@ -49,6 +49,7 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 
+from case_studies.research import Study
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
     load_backtest_prices_for,
@@ -62,6 +63,7 @@ from case_studies.utils.backtest_presets import (
     strategy_view,
 )
 from case_studies.utils.backtest_runner import run_backtest
+from case_studies.utils.notebook_contracts import prediction_members_in_force
 from case_studies.utils.registry import (
     backtest_hash_from_parts,
     model_source,
@@ -112,6 +114,19 @@ print(
     f"configured one-way cost: {DEFAULT_ONE_WAY_BPS:.1f} bps"
 )
 
+# `Study.at` is the read-only form: one root, no activation. These notebooks only read the
+# populations - their backtests reach the registry by their own paths - and every other way in
+# ends in `activate()`, which rewrites `ML4T_OUTPUT_DIR` process-wide. `open_study` with the
+# canonical tier routes to `Study.regenerate`, which refuses unless `features`, `labels` and
+# `run_log` are symlinks: true in a maintainer worktree, false in every clean clone and CI run.
+# `CASE_DIR` is already the directory this notebook resolved, including under a preview, so
+# asking it directly answers for the registry the rest of the notebook reads.
+_study = Study.at(CASE_DIR, case_study=CASE_STUDY_ID, entry_point="16_costs")
+_members, _population_notes = prediction_members_in_force(_study)
+for _note in _population_notes:
+    print(_note)
+CURRENT_MEMBERS = _members
+
 # %% [markdown]
 # ## 1. Advance the leading eligible strategy
 #
@@ -122,10 +137,20 @@ print(
 # %%
 active_allocators = {item["method"] for item in get_allocators(CASE_STUDY_ID)}
 baseline_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, COST_LABEL, split="validation", stage="signal", top_n=9999
+    CASE_STUDY_ID,
+    COST_LABEL,
+    split="validation",
+    stage="signal",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 allocation_pool = resolve_best_backtest_runs(
-    CASE_STUDY_ID, COST_LABEL, split="validation", stage="allocation", top_n=9999
+    CASE_STUDY_ID,
+    COST_LABEL,
+    split="validation",
+    stage="allocation",
+    top_n=9999,
+    prediction_hashes=CURRENT_MEMBERS,
 )
 candidate_pool = pl.concat([baseline_pool, allocation_pool], how="diagonal_relaxed").unique(
     "backtest_hash"
@@ -376,11 +401,10 @@ print(f"Loaded all {len(cost_results)} planned cost results")
 # smoothly across the grid says the result degrades with cost rather than depending on one cost
 # assumption being right; a curve with a cliff would say the opposite.
 #
-# The interval matters more than the point estimate here. The cell below reports where each
-# first reaches zero inside the declared grid, and the lower bound's crossing is the one that
-# bounds what the curve supports - the point curve can stay above zero across the whole grid
-# while the band already straddles it. Bootstrap noise makes the lower bound non-monotonic
-# beyond its first crossing, so a later cost where it appears to recover is not a recovery.
+# The bands below are conditional diagnostics for the selected lineage's return path. They do not
+# include the uncertainty introduced by selecting that lineage from the preceding signal and
+# allocation sweeps, so neither their bounds nor their zero crossings support a claim about the
+# selection procedure. The printout reports the crossings only to describe this path's sensitivity.
 
 # %%
 bps_results = cost_results.filter(pl.col("regime") == "bps").sort("cost_value")
@@ -399,7 +423,7 @@ def _crossing(column: str) -> str:
 
 
 print(
-    f"Lower bound first reaches zero: {_crossing('sharpe_ci95_lo')}; "
+    f"Conditional lower bound first reaches zero: {_crossing('sharpe_ci95_lo')}; "
     f"point Sharpe first reaches zero: {_crossing('sharpe')}; "
     f"grid runs to {bps_results['cost_value'].max():.0f} bps one-way"
 )
@@ -428,8 +452,8 @@ ax_bps.set_xlabel("One-way cost per traded notional (bps)")
 ax_bps.set_ylabel("Annualized validation Sharpe")
 add_message_title(
     ax_bps,
-    "How far the cost grid has to go before the signal stops paying",
-    f"Amber line: configured {DEFAULT_ONE_WAY_BPS:.1f} bps; band: 95% block bootstrap",
+    "Cost sensitivity for the selected validation lineage",
+    f"Amber line: configured {DEFAULT_ONE_WAY_BPS:.1f} bps; band: conditional bootstrap",
 )
 
 ax_ps.plot(
@@ -453,7 +477,7 @@ ax_ps.set_xlabel(
 add_message_title(
     ax_ps,
     "The same lineage under a flat per-share convention",
-    "Exploratory flat-dollar convention; band: 95% block bootstrap",
+    "Exploratory flat-dollar convention; band: conditional bootstrap",
 )
 
 fig.show()
@@ -469,11 +493,9 @@ fig.show()
 #    the round trip is twice it. What matters is not the Sharpe at that point but how steeply the
 #    curve falls either side of it, because the declared value is itself an assumption.
 #
-# 3. **Read the bootstrap band, not only the point curve.** The cost at which the band's lower
-#    bound first reaches zero is the one that bounds what can be claimed, and the printout above
-#    reports it against the cost at which the point estimate reaches zero, which may lie beyond
-#    the declared grid. A point Sharpe still above zero with a band straddling it is not a
-#    strategy shown to clear that cost.
+# 3. **The bootstrap band is conditional on the selected lineage.** It describes uncertainty in
+#    that return path at each cost, but it does not repeat the model and allocation selection.
+#    The curve is therefore a sensitivity diagnostic, not selection-adjusted evidence.
 #
 # 4. **The per-share convention is exploratory here and is not a second opinion.** A flat dollar
 #    half-spread applied to split-adjusted historical prices conflates split adjustment with

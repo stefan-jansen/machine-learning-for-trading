@@ -26,6 +26,10 @@ ROWS = [
     ("no_drawdown", "gbm", 8.0, None),
     # A family with nothing left. It has no Sharpe to report, and must not vanish.
     ("wiped", "tabular_dl", 5.0, -2.0),
+    # Bankrupt with no Sharpe at all. The query must not drop it for that: dropping it
+    # would remove the run before `insolvent` counts it, and a family in which every run
+    # ended this way would leave the comparison without a trace.
+    ("wiped_no_sharpe", "tabular_dl", None, -4.0),
 ]
 
 
@@ -129,6 +133,9 @@ def test_default_keeps_every_run_and_its_columns(tmp_path) -> None:
     gbm = families.filter(family="gbm")
     assert gbm["n"].item() == 5
     assert gbm["sharpe_max"].item() == 9.0
+    # The default path still drops a run with no Sharpe, which is what its callers have
+    # always aggregated: `wiped_no_sharpe` is absent, so tabular_dl counts one run.
+    assert families.filter(family="tabular_dl")["n"].item() == 1
 
 
 def test_exclude_insolvent_reports_the_ruined_rather_than_dropping_them(tmp_path) -> None:
@@ -158,7 +165,10 @@ def test_exclude_insolvent_reports_the_ruined_rather_than_dropping_them(tmp_path
     wiped = families.filter(family="tabular_dl")
     assert wiped.height == 1
     assert wiped["n"].item() == 0
-    assert wiped["insolvent"].item() == 1
+    # Both of its runs are counted, including the one with no Sharpe. Were that run
+    # dropped by the query, this family would show a single failure instead of two - and
+    # a family whose runs ALL ended without a Sharpe would not appear here at all.
+    assert wiped["insolvent"].item() == 2
     assert wiped["unknown"].item() == 0
     assert wiped["sharpe_median"].item() is None
     assert wiped["pct_positive"].item() is None
