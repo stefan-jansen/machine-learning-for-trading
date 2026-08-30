@@ -456,7 +456,9 @@ def _semicolon_flags(code: str, tree: ast.Module) -> tuple[bool, ...]:
 _PAPERMILL_MARKER = re.compile(r"\s+papermill=\{.*\}(?=(?:\s+[A-Za-z_][A-Za-z0-9_-]*=)|\r?\n?$)")
 
 
-def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | None:
+def _comparable(
+    src: str, *, strip_papermill: bool = False, blank_alts: bool = True
+) -> list[tuple] | None:
     """Cells of *src* reduced to what an alt-text edit is allowed to leave alone.
 
     Per cell: the marker line, the kind, and for a code cell an alt-blanked AST dump
@@ -471,6 +473,12 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
 
     A markdown cell's body is dropped: it is a comment in the ``.py`` and cannot affect
     outputs, so its text may change freely while its marker and position still count.
+
+    ``blank_alts=False`` keeps the alt literals in the dump, which is what a caller wants
+    when it is deciding whether a drift is *prose*. Blanking them is right for
+    ``alt_text_only_drift``, which pairs it with a check that the outputs already carry the
+    new alt; a caller without that check would read a corrected alt as prose and then
+    preserve output metadata still holding the old text.
     """
     out: list[tuple] = []
     for marker, kind, body in _percent_cells(src):
@@ -487,14 +495,18 @@ def _comparable(src: str, *, strip_papermill: bool = False) -> list[tuple] | Non
             else:
                 out.append((marker, kind, body))
             continue
-        blanked = _blank_alts(body)
-        if blanked is None:
-            return None
+        if blank_alts:
+            blanked = _blank_alts(body)
+            if blanked is None:
+                return None
+            source = blanked[0]
+        else:
+            source = body
         try:
-            tree = ast.parse(blanked[0])
+            tree = ast.parse(source)
         except SyntaxError:
             return None
-        out.append((marker, kind, ast.dump(tree), _semicolon_flags(blanked[0], tree)))
+        out.append((marker, kind, ast.dump(tree), _semicolon_flags(source, tree)))
     return out
 
 
@@ -836,6 +848,34 @@ def code_cells_only(comparable: list[tuple] | None) -> list[tuple] | None:
     return [cell for cell in comparable if cell[1] == "code" or len(cell) != 2]
 
 
+def drift_is_prose_only(stamped_blob: str, py: Path) -> bool:
+    """Whether a stale-reading drift changes no code cell, so ``sync-prose`` resolves it.
+
+    The gate compares whole-file blobs, so any edit to the ``.py`` reads as stale. That is
+    the right default - it is one hash and it cannot be argued with - but it makes the
+    report say "re-run" to an author who moved a paragraph, and a re-run of
+    ``us_equities_panel`` is 52 hours to relocate a heading. This does not forgive the
+    drift: the ``.ipynb`` still carries the old prose and still has to be brought forward.
+    It only decides which of the two ways of doing that the report should name.
+
+    Same comparison ``sync_prose`` gates itself on, so a notebook this calls prose-only is
+    exactly one ``sync-prose`` away from passing, and one it calls executable really does
+    need the run.
+    """
+    old = subprocess.run(
+        ["git", "cat-file", "blob", stamped_blob],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if old.returncode != 0:
+        return False  # stamped blob is gone; cannot compare, so do not soften the report
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
+    return before is not None and after is not None and before == after
+
+
 def _output_counts(nb: dict) -> list[int]:
     """Outputs per code cell, in order. The unit a prose sync must leave untouched."""
     return [len(c.get("outputs", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code"]
@@ -891,8 +931,12 @@ def sync_prose(nb_path: Path) -> str:
             f"{rel} is stamped against blob {stamped_blob[:12]}, which is not in this repo, "
             "so the code cells cannot be compared. Re-run it."
         )
-    before = code_cells_only(_comparable(old.stdout))
-    after = code_cells_only(_comparable(py.read_text(encoding="utf-8")))
+    # Alt literals are NOT blanked here. This command keeps the outputs, so an alt the
+    # output metadata does not carry would be stamped as current while rendering the old
+    # text. A genuine alt correction is adjudicated by `alt_text_only_drift`, which checks
+    # the outputs already carry it, and never reaches this command.
+    before = code_cells_only(_comparable(old.stdout, blank_alts=False))
+    after = code_cells_only(_comparable(py.read_text(encoding="utf-8"), blank_alts=False))
     if before is None or after is None:
         raise SystemExit(f"{rel}: could not parse one of the two sources - refusing")
     if before == after:
@@ -1044,11 +1088,34 @@ def _cmd_check(args: argparse.Namespace) -> int:
         for r in lost:
             print(f"  {r}")
     if stale:
-        print(
-            "STALE (paired .py changed since the notebook was executed — re-run in the canonical env):"
-        )
+        prose, executable = [], []
         for r in stale:
-            print(f"  {r}")
+            nb_path = REPO_ROOT / r
+            py = paired_py(nb_path)
+            stamped = (
+                json.loads(nb_path.read_text(encoding="utf-8"))
+                .get("metadata", {})
+                .get(STAMP_KEY, {})
+                .get("source_py_blob")
+            )
+            if py is not None and stamped and drift_is_prose_only(stamped, py):
+                prose.append(r)
+            else:
+                executable.append(r)
+        if prose:
+            print(
+                "STALE, prose only (no code cell moved - fold it in, do NOT re-run:\n"
+                "  uv run python .github/scripts/notebook_provenance.py sync-prose <nb.py>):"
+            )
+            for r in prose:
+                print(f"  {r}")
+        if executable:
+            print(
+                "STALE (a code cell changed since the notebook was executed - re-run in the "
+                "canonical env):"
+            )
+            for r in executable:
+                print(f"  {r}")
     if testmode:
         print(
             "TEST-MODE (committed a run with papermill parameter overrides — must be production):"

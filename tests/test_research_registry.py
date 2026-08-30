@@ -615,3 +615,72 @@ def test_fitted_states_come_back_in_fold_order_not_filename_order(tmp_path: Path
 
     assert isinstance(reopened, TrainingResult)
     assert [state["fold"] for state in reopened.fitted_states()] == list(range(12))
+
+
+def test_the_refusal_names_the_partial_member_and_the_sense_it_is_partial_in(
+    tmp_path: Path,
+) -> None:
+    """`partial results cannot enter a candidate set` used to name neither."""
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    partial = study.results.publish_predictions(
+        training,
+        checkpoint_kind="epoch",
+        checkpoint_value=1,
+        split="validation",
+        predictions=frame.head(1),
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+        allow_partial=True,
+    )
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "partial", [partial])
+    message = str(raised.value)
+    assert partial.hash in message, "the refusal must say which member"
+    assert "coverage" in message or "fold_metrics" in message, (
+        f"the refusal must say in which sense, got: {message}"
+    )
+
+
+def test_the_catalog_column_is_necessary_and_not_sufficient(tmp_path: Path) -> None:
+    """The registry column can say complete where the on-disk check says otherwise.
+
+    This is the disagreement that made a notebook's own guard pass at one cell and the
+    freeze refuse the same rows at another. The column reads the registry only; deleting
+    the artifact leaves every registry row it inspects untouched.
+    """
+    study = _study(tmp_path)
+    training = study.results.register_training(_training_spec())
+    frame = _predictions()
+    prediction = study.results.publish_predictions(
+        training,
+        checkpoint_kind="final",
+        checkpoint_value=None,
+        split="validation",
+        predictions=frame,
+        expected_keys=frame.select("symbol", "timestamp", "fold_id"),
+    )
+    assert prediction.complete
+    assert study.results.partial_members([prediction.hash]) == []
+
+    artifact = (
+        study.storage_root("canonical")
+        / "run_log"
+        / "predictions"
+        / prediction.hash
+        / "predictions.parquet"
+    )
+    assert artifact.is_file()
+    artifact.unlink()
+
+    reopened = Result.open(study, prediction.hash)
+    reason = reopened.completeness()
+    assert reason is not None, "an absent artifact is not a complete result"
+    assert str(artifact) in reason, f"the reason must name the file, got: {reason}"
+
+    partial = study.results.partial_members([prediction.hash])
+    assert [member_hash for member_hash, _ in partial] == [prediction.hash]
+
+    with pytest.raises(ValueError) as raised:
+        CandidateSet.create(study, "gone", [reopened])
+    assert prediction.hash in str(raised.value)

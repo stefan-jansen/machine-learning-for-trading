@@ -182,12 +182,17 @@ def _sample_stats(returns: np.ndarray, periods_per_year: int) -> _Stats:
     mu = float(np.mean(returns))
     sd = float(np.std(returns, ddof=1))
     sharpe = (mu / sd * np.sqrt(periods_per_year)) if sd > 0 else 0.0
-    downside = returns[returns < 0]
-    if len(downside) > 1:
-        dsd = float(np.sqrt(np.mean(downside**2)))
-        sortino = (mu / dsd * np.sqrt(periods_per_year)) if dsd > 0 else 0.0
-    else:
-        sortino = 0.0
+    # Downside deviation averages the squared shortfall over EVERY period, not over the
+    # periods that fell. Dividing by the count of negative returns instead inflates the
+    # ratio by sqrt(n / n_negative), and since `backtest_metrics.sortino` is written by
+    # the engine's standard definition, that made the point estimate and the interval
+    # around it two different estimators: on us_firm_characteristics' validation rank-1,
+    # 99 periods with 20 negative, a stored 13.876 against a bootstrap CI of
+    # [4.22, 9.65] - the point outside its own interval, and a forest plot that could
+    # not be drawn.
+    shortfall = np.minimum(returns, 0.0)
+    dsd = float(np.sqrt(np.mean(shortfall**2)))
+    sortino = (mu / dsd * np.sqrt(periods_per_year)) if dsd > 0 else 0.0
     cum = np.cumprod(1.0 + returns)
     total_return = float(cum[-1] - 1.0)
     n_years = len(returns) / periods_per_year
@@ -1269,14 +1274,21 @@ def _sharpe_per_column(matrix: np.ndarray, periods_per_year: float) -> np.ndarra
 
 
 def _sortino(arr: np.ndarray, periods_per_year: float) -> float:
+    """The same Sortino ratio `_sample_stats` reports, for a cohort leader.
+
+    This file held three downside deviations: the shortfall over all periods, the root
+    mean square of the negative returns alone, and their standard deviation about their
+    own mean. Only the first is the Sortino ratio the engine writes to
+    `backtest_metrics.sortino`, so a `leader_sortino` computed either other way was not
+    comparable to the numbers it was being read beside.
+    """
+    if arr.size < 2:
+        return float("nan")
     mu = float(np.mean(arr))
-    downside = arr[arr < 0]
-    if downside.size < 2:
+    dsd = float(np.sqrt(np.mean(np.minimum(arr, 0.0) ** 2)))
+    if dsd <= 1e-12:
         return float("nan")
-    d_std = float(np.std(downside, ddof=1))
-    if d_std <= 1e-12:
-        return float("nan")
-    return mu / d_std * float(np.sqrt(periods_per_year))
+    return mu / dsd * float(np.sqrt(periods_per_year))
 
 
 __all__ = [

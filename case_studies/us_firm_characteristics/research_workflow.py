@@ -18,7 +18,12 @@ from utils.paths import REPO_ROOT
 CASE_STUDY = "us_firm_characteristics"
 PREVIEW_DIR_NAME = ".preview"
 PREDICTIVE_FAMILIES = ("linear", "gbm", "tabular_dl", "latent_factors")
-_MODEL_OVERRIDES = {
+# Runtime a model needs and its family's declaration does not give it. `setup.yaml` puts the
+# latent-factor family on CUDA, which is right for the three neural members; IPCA is alternating
+# least squares over the panel and has no GPU implementation, so it runs on bounded CPU workers.
+# Both keys are inside the hashed computation rather than provenance beside it, so this decides
+# what the result is. `08a_ipca` reads the same mapping - one home for the declaration.
+MODEL_RUNTIME_OVERRIDES = {
     ("latent_factors", "ipca"): {"device": "cpu", "fold_workers": 4},
 }
 
@@ -157,7 +162,7 @@ def model_requests(
             **row,
             execution_tier=execution_tier,
             overrides={
-                **_MODEL_OVERRIDES.get((row["family"], row["config_name"]), {}),
+                **MODEL_RUNTIME_OVERRIDES.get((row["family"], row["config_name"]), {}),
                 **dict(overrides or {}),
             },
             preview_reductions=dict(preview_reductions or {}),

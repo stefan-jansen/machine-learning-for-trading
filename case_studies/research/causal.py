@@ -194,11 +194,38 @@ class CausalResult:
 
     @property
     def complete(self) -> bool:
+        """Whether this row holds everything the run it records was asked to produce.
+
+        The refutation is part of that whenever one was asked for. A run whose placebo
+        refits mostly failed registers with a null ``refutation_p`` and a null draw
+        count, and calling that complete has two consequences, neither visible at the
+        row: a reader formats and divides nulls, and - worse - the runner's cache probe
+        serves this row to every later run, so the first failure is also the last fit.
+        Nothing after it ever recomputes the refutation that went missing.
+
+        ``n_placebo`` is read from the spec rather than inferred from the metrics,
+        because "no refutation was asked for" and "one was asked for and did not arrive"
+        are different states that look identical in the columns. A configuration
+        declaring no placebos is complete without a p-value; one declaring a hundred is
+        not.
+
+        The p-value is the test, and ``refutation_n_successful`` deliberately is not.
+        That column arrived with a migration and is listed in
+        ``MIGRATION_BACKFILLED_COLUMNS``, so a row written before it existed carries NULL
+        there whatever its run did. Requiring it would read a schema fact as a missing
+        refutation and declare every pre-migration row incomplete, which is the opposite
+        error: it would send runs back to refit results that are already on record. A
+        reader that needs the count - to derive the p-value's floor, or a verdict - has
+        to handle its absence itself, which is what ``refutation_class`` already does.
+        """
+        refutation = (self.spec.get("computation") or {}).get("refutation") or {}
+        requested = int(refutation.get("n_placebo") or 0)
         return (
             self.spec.get("identity_version") in SUPPORTED_IDENTITY_VERSIONS
             and self.metrics.get("n_obs", 0) > 0
             and self.metrics.get("dml_effect") is not None
             and self.metrics.get("dml_se_hac") is not None
+            and (requested == 0 or self.metrics.get("refutation_p") is not None)
         )
 
 

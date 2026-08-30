@@ -240,6 +240,54 @@ def test_every_registered_model_family_owns_locked_reconstruction() -> None:
         assert callable(getattr(module, "validate_locked_run", None)), binding.name
 
 
+def test_the_families_that_can_take_a_holdout_lock_are_the_ones_that_can_re_key_a_spec() -> None:
+    """Which families can lock, stated as a fact rather than discovered at lock time.
+
+    `_rekey_holdout_spec` dispatches to a per-family `rekey_holdout_spec` and raises
+    NotImplementedError for a family that has none, so a missing hook is not a degraded lock -
+    it is no lock at all, and the case study cannot close. That was the state of
+    sp500_equity_option_analytics, whose selected configuration is an `sae`: four holdout
+    attempts on 2026-08-26 all died before spending the holdout, and no fifth could have
+    succeeded. This pins the two families that have the hook, so removing one is a test failure
+    rather than a case study that stops months later.
+    """
+    from case_studies.research.models import _family_module
+
+    implemented = {
+        binding.name
+        for binding in registered_adapters("model")
+        if callable(getattr(binding.load(), "rekey_holdout_spec", None))
+    }
+    assert {"linear", "latent_factors"} <= implemented
+
+    module = _family_module("latent_factors")
+    signature = inspect.signature(module.rekey_holdout_spec)
+    assert list(signature.parameters) == ["study", "spec", "validation_spec"]
+    assert signature.parameters["validation_spec"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_the_latent_hook_refuses_a_specification_from_another_family() -> None:
+    """A hook reached through family dispatch still checks what it was handed.
+
+    The dispatch keys on `spec["family"]`, so a spec whose family says latent_factors while its
+    model says something else would otherwise be re-keyed by rules that do not describe it, and
+    the lock would record an eligibility manifest for a model that was never fitted.
+    """
+    from case_studies.utils.latent_factors.holdout import rekey_holdout_spec
+
+    spec = {
+        "family": "latent_factors",
+        "label": "fwd_ret_5d",
+        "computation": {"model": {"class": "lasso"}},
+    }
+    with pytest.raises(ValueError, match=r"family='latent_factors' model='lasso'"):
+        rekey_holdout_spec(SimpleNamespace(), spec, validation_spec={})
+
+    spec = {"family": "gbm", "label": "fwd_ret_5d", "computation": {"model": {"class": "sae"}}}
+    with pytest.raises(ValueError, match=r"family='gbm' model='sae'"):
+        rekey_holdout_spec(SimpleNamespace(), spec, validation_spec={})
+
+
 def test_latent_holdout_retry_preserves_conflicting_fold_diagnostics(tmp_path: Path) -> None:
     from case_studies.utils.latent_factors import adapter
 

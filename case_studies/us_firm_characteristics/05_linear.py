@@ -89,10 +89,12 @@ from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -169,14 +171,15 @@ configs
 # set of members than the canonical population does. A population is immutable once written, so
 # such a run must publish under its own name: on a fresh workspace it would otherwise register an
 # incomplete snapshot under the canonical one, and where the full population already exists the
-# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
-# either knob, and says so here rather than several cells later in a message about hashes.
+# registry refuses it. The comparison is over `(label, config_name)` pairs rather than row counts,
+# because a subset can match the canonical population on height while declaring different members,
+# and it says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "linear").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "linear", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run fits {configs.height} of the declared label-configuration pairs, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 
 
@@ -217,6 +220,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="05_linear",
 )
 resolved = tuple(request.resolve() for request in requests)
 
@@ -257,6 +261,16 @@ plan.select(
 # intermediate states worth scoring: there is one fit and therefore one checkpoint per
 # configuration, and no learning curve to plot.
 #
+# **This notebook resolves its requests before running them, and that decides how the fitting is
+# ordered.** There are two paths through `run_model_population`. Handing it unresolved requests,
+# or the plan built from them, reaches the family's batch runner, which walks folds on the outside
+# and configurations on the inside so one prepared fold is live at a time. Handing it resolved
+# requests - what the cell below passes - fits one configuration at a time, each preparing the
+# folds it needs. Resolving first is what let the plan above show `eligible_entities` and the real
+# fold boundaries, because those numbers exist only once the data has been read;
+# [`07_tabular_dl`](07_tabular_dl.ipynb) is the notebook where that trade goes the other way, and
+# it says so there.
+#
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # is going to produce. The list is computed from the resolved specifications before the first fit
 # and written down, and afterwards every member must exist and be complete. That is what makes
@@ -267,19 +281,47 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "us_firm_characteristics-linear-validation-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A preview
+# run, a reader's first canonical run against an empty `run_log/`, and a run under a caller-chosen
+# `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is passed anyway. The
+# resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study, resolved, population_name=population_name, supersedes=supersedes
 )
 
-fitted = sum(len(item["fitted_folds"]) for item in execution.diagnostics)
-reused = sum(len(item["reused_folds"]) for item in execution.diagnostics)
-print(f"{len(execution.runs)} configurations: {fitted} folds fitted, {reused} reused")
+# The runner is shared across model families and its paths do not all record the same
+# diagnostics, so the split below is printed only when every run recorded it. Every linear path
+# records it: a batch fit, a single request and a configuration served whole from the registry
+# each carry `fitted_folds` and `reused_folds`, so on this population the split is what prints.
+# The guard is for the runner rather than for this notebook. A TabM configuration served whole
+# from the registry records `reused` and no fold lists, and the latent-factor runner records
+# nothing at all. Indexing the keys raises `KeyError` on those, and defaulting them to zero is
+# worse: it reports every fold as served from the registry, which is the opposite of what
+# nothing-recorded means, and it does so in a number a reader cannot tell from a measurement.
+with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
+print(f"{len(execution.runs)} configurations, fitted or served from the registry")
+if with_folds and len(with_folds) == len(execution.diagnostics):
+    fitted = sum(len(item["fitted_folds"]) for item in with_folds)
+    served = sum(len(item["reused_folds"]) for item in with_folds)
+    print(f"folds fitted: {fitted}, folds served from the registry: {served}")
+else:
+    print(
+        f"{len(with_folds)} of {len(execution.diagnostics)} runs recorded fold counts, "
+        "so the fitted-against-served split is not reported"
+    )
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# `reused` is not zero on a second run. Every identity is re-derived from the inputs, the
-# registry already holds the matching rows, and the runner returns the stored result rather than
-# fitting again - so re-running this notebook unchanged costs the time it takes to read the data.
+# On a second run every configuration is served from the registry. Each identity is re-derived
+# from the inputs, the registry already holds the matching rows, and the runner returns the
+# stored result rather than fitting again - so re-running this notebook unchanged costs the time
+# it takes to read the data rather than the time it took to fit.
 #
 # ### Running configurations of your own
 #
@@ -591,10 +633,8 @@ side_text = "; ".join(
     f"{row['label']} has {row['n_positive']} of {row['configurations']} above zero"
     for row in by_label.sort("label").iter_rows(named=True)
 )
-# Whether the panels overlap is also a fact about the frame, and "the spread inside a panel is
-# small next to the distance between panels" is the kind of magnitude claim that goes stale on
-# the next run. Each label covers [worst_ic, best_ic]; this asks whether any two of those
-# intervals meet.
+# Whether the panels overlap is a fact about the frame too. Each label covers
+# [worst_ic, best_ic], and this asks whether any two of those intervals meet.
 ranges = by_label.sort("best_ic").select("label", "worst_ic", "best_ic").rows(named=True)
 touching = [
     (lower, upper)
@@ -606,8 +646,12 @@ separation_text = (
     "every label below it"
     if not touching
     else "; ".join(
+        # The shared interval starts at the higher of the two floors, not at the upper label's.
+        # Sorting by `best_ic` fixes which ceiling is lower but says nothing about the floors, so
+        # taking `upper["worst_ic"]` reported a wider overlap than the two grids actually share
+        # whenever the upper label reached further down.
         f"{upper['label']} and {lower['label']} overlap between "
-        f"{upper['worst_ic']:.4f} and {lower['best_ic']:.4f}"
+        f"{max(upper['worst_ic'], lower['worst_ic']):.4f} and {lower['best_ic']:.4f}"
         for lower, upper in touching
     )
 )

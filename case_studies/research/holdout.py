@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import time as dt_time
 from typing import Any
 
 import pandas as pd
@@ -408,12 +409,28 @@ def widest_label_buffer(case_study: str, setup: Mapping[str, Any]) -> tuple[str,
     return widest[1], widest[2]
 
 
+def _boundary_iso(moment: pd.Timestamp) -> str:
+    """Render a fold boundary the way the panel it describes carries its dates.
+
+    A midnight boundary is a date, and writing it as `2023-11-29T00:00:00` says the panel
+    has a time of day that it does not. Every daily panel stores its dates as `Date`, and
+    Polars reads a full ISO datetime into `Date` as null rather than truncating it, so the
+    datetime rendering could not be read back by the consumer it was written for. The time
+    is kept when there is one - `crypto_perps_funding` and `nasdaq100_microstructure` are
+    intraday and their boundaries are not midnight.
+    """
+    if moment.time() == dt_time(0, 0):
+        return moment.date().isoformat()
+    return moment.isoformat()
+
+
 def build_holdout_cv(
     validation_spec: Mapping[str, Any],
     *,
     case_study: str,
     timeline: Sequence[Any],
     label: str | None = None,
+    train_start_floor: Any | None = None,
 ) -> dict[str, Any]:
     """Derive the one holdout CV interval that retrains the selected validation configuration.
 
@@ -430,6 +447,18 @@ def build_holdout_cv(
     would hand the retrain the shortest window it could have had rather than the longest.
     :func:`utils.cv_splits.earliest_train_start` is that read, and this calls it rather than
     repeating it.
+
+    ``train_start_floor`` bounds that below, and exists because "the whole history available"
+    is a claim about the FEATURES, not about the calendar. A configuration fitted on fold-scoped
+    model-based features has no history before the fold that produced them: stage 04 emits each
+    fold over a rolling window, so on sp500_equity_option_analytics the deriver asks for
+    2017-01-05..2020-12-16 and the artifact's holdout fold begins 2019-01-02, leaving 495 of 977
+    training dates covered. Fitting the other 482 on null columns is not the configuration that
+    was ranked - every validation fold saw a fully populated three-year window - so the holdout
+    would evaluate an estimator nobody selected. Clamping to the producer's geometry applies the
+    same rule correctly rather than contradicting it: take everything available, where available
+    is what the features actually span. Families with no fold-scoped features supply no floor and
+    are unaffected. ml4t/agent-workspace#977 has the measurement and the rejected alternative.
 
     Training ends one label buffer before the holdout opens, using the same buffer the
     validation folds were built with. That gap is what stops the last training label's outcome
@@ -464,6 +493,14 @@ def build_holdout_cv(
     folds = _validation_folds(validation_spec)
     validation_cv = dict(validation_spec["computation"]["cv"])
     train_start = earliest_train_start(folds)
+    floor_applied = None
+    if train_start_floor is not None:
+        floor = pd.Timestamp(train_start_floor)
+        if floor > train_start:
+            # Recorded, not silent: the clamp changes the interval the lock is taken over, so a
+            # reader of the spec has to be able to see that the window is the producer's and why.
+            floor_applied = _boundary_iso(floor)
+            train_start = floor
 
     # Both resolvers fall back to setup.yaml's own labels block, and return None without it
     # for every case study whose label carries no separate spec artifact - which is all nine
@@ -539,10 +576,10 @@ def build_holdout_cv(
 
     fold = {
         "fold": max(int(entry["fold"]) for entry in folds) + 1,
-        "train_start": train_start.isoformat(),
-        "train_end": train_end.isoformat(),
-        "val_start": pd.Timestamp(holdout_start).isoformat(),
-        "val_end": pd.Timestamp(holdout_end).isoformat(),
+        "train_start": _boundary_iso(train_start),
+        "train_end": _boundary_iso(train_end),
+        "val_start": _boundary_iso(pd.Timestamp(holdout_start)),
+        "val_end": _boundary_iso(pd.Timestamp(holdout_end)),
     }
     identity = value_digest(pl.DataFrame([fold]))
     if identity == validation_cv.get("identity"):
@@ -559,6 +596,9 @@ def build_holdout_cv(
             "observation_cadence": str(cadence),
             "periods_per_year": periods_per_year,
             "holdout_window": [str(holdout_start), str(holdout_end)],
+            # Present only when it moved the boundary, so a spec that needed no clamp hashes
+            # exactly as it did before this existed and no recorded lock is disturbed.
+            **({"train_start_floor": floor_applied} if floor_applied else {}),
         },
     }
 
@@ -629,6 +669,7 @@ def evaluate_holdout(
         validation_spec,
         case_study=str(case_study if case_study is not None else study.case_study),
         timeline=timeline,
+        train_start_floor=_holdout_training_floor(study, validation_spec),
     )
     _rekey_holdout_spec(study, holdout_spec, validation_spec)
 
@@ -697,6 +738,21 @@ _FOLD_DERIVED_FIELDS = (
     ("model", "effective_params_by_fold"),
     ("macro_context", "resolved_fold_digest"),
 )
+
+
+def _holdout_training_floor(study: Any, validation_spec: Mapping[str, Any]) -> Any | None:
+    """Ask the family how far back its features actually reach, or None if nothing bounds it.
+
+    Dispatches through ``_family_module`` exactly as ``_rekey_holdout_spec`` does. Absence is the
+    answer for most families and is not an error: a configuration whose features are defined over
+    the whole panel has no floor, and returning None leaves the derivation exactly as it was.
+    Only a family whose features are fold-scoped can answer, because only it knows which artifact
+    holds them.
+    """
+    from .models import _family_module
+
+    hook = getattr(_family_module(validation_spec.get("family")), "holdout_training_floor", None)
+    return None if hook is None else hook(study, validation_spec=validation_spec)
 
 
 def _rekey_holdout_spec(study: Any, spec: dict[str, Any], validation_spec: dict[str, Any]) -> None:
