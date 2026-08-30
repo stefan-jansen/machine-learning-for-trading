@@ -18,9 +18,9 @@
 #
 # This notebook closes the corrected v3.1 validation pipeline without reopening
 # the 2021 holdout. It traces one primary-label carrier from the equal-weight
-# baseline through allocation, costs, and fixed risk controls, then separates
-# that result from the historical IPCA holdout observation already stored in
-# the registry.
+# baseline through allocation, costs, and fixed risk controls, then reads the
+# sealed holdout the research lock already records and reports exactly how the
+# fit it was spent on differs from the one the carrier publishes.
 #
 # **Learning objectives**
 #
@@ -732,36 +732,38 @@ risk_diagnostics
 # stability analysis, so the cohort statistics rest on a thin sample.
 
 # %% [markdown]
-# ## 4. Holdout status: preserved observation, unresolved current carrier
+# ## 4. Holdout status: a sealed evaluation of a superseded fit
 #
-# The 2021 holdout has already been observed on an IPCA risk-adjusted-return
-# lineage. The corrected carrier uses a different family, label, allocation,
-# and risk rule, so a run on it would make the holdout another selection round.
-# This notebook therefore checks that no holdout prediction exists for the
-# corrected lineage's own training run, and reports the stored IPCA row only as
-# historical context.
+# The 2021 holdout has been taken once, and the research lock records what it
+# was spent on. Reading the lock rather than guessing at the lineage is the
+# point of this section: the holdout is used once, so the only honest question
+# is what the sealed record already says, not what a second run would say.
+#
+# The lock names one holdout training run, one holdout prediction set and one
+# holdout backtest. The comparison below puts that fit beside the carrier
+# section 1 selected and reports every field of the training identity they
+# agree on and every field they do not. `sealed_vs_published` is that diff, and
+# it is what decides whether this is the carrier's holdout or another fit's.
 
 # %%
+# The obvious check - "does a holdout prediction exist for the carrier's own training hash?" -
+# can never answer yes, so it was never a check. The CV geometry is inside the training
+# identity and `build_holdout_cv` refuses to derive a holdout CV equal to the validation one,
+# so a holdout retrain always earns a training hash distinct from its validation twin. Across
+# the nine registries on 2026-08-30, 6,105 prediction sets resolve to exactly one training
+# hash carrying two splits, and it is not in this case study. Asking the lock instead is what
+# makes the question answerable.
 with sqlite3.connect(REGISTRY_DB) as db:
     current_training_hash = db.execute(
-        """
-        SELECT p.training_hash
-        FROM prediction_sets p
-        WHERE p.prediction_hash = ?
-        """,
+        "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?",
         (strategy_carrier["prediction_hash"],),
     ).fetchone()[0]
-    current_holdout_count = db.execute(
+    lock_rows = db.execute(
+        "SELECT lock_hash, lock_json, state FROM research_locks ORDER BY created_at"
+    ).fetchall()
+    holdout_rows = db.execute(
         """
-        SELECT COUNT(*)
-        FROM prediction_sets
-        WHERE training_hash = ? AND split = 'holdout'
-        """,
-        (current_training_hash,),
-    ).fetchone()[0]
-    historical_rows = db.execute(
-        """
-        SELECT b.backtest_hash, t.family, t.config_name, t.label,
+        SELECT b.backtest_hash, p.prediction_hash, p.training_hash, t.family, t.label,
                b.spec_json, bm.sharpe, bm.sharpe_ci95_lo,
                bm.sharpe_ci95_hi, bm.max_drawdown
         FROM backtest_runs b
@@ -772,42 +774,167 @@ with sqlite3.connect(REGISTRY_DB) as db:
         ORDER BY bm.sharpe DESC
         """
     ).fetchall()
+    published_spec = json.loads(
+        db.execute(
+            "SELECT spec_json FROM training_runs WHERE training_hash = ?",
+            (current_training_hash,),
+        ).fetchone()[0]
+    )["computation"]
+
+if len(lock_rows) != 1:
+    raise RuntimeError(f"expected exactly one research lock, found {len(lock_rows)}")
+LOCK_HASH, _lock_payload, LOCK_STATE = lock_rows[0]
+lock = json.loads(_lock_payload)
+sealed_spec = lock["holdout_training_spec"]["computation"]
+SEALED_TRAINING_HASH = lock["holdout_training_hash"]
+
+# Every field of the training identity, so agreement and disagreement are both shown rather
+# than only the half that supports a conclusion. A bare true/false is not enough here: a
+# holdout retrain is *supposed* to differ from its validation twin on the window it fits and
+# the rows it predicts, and reporting those beside a genuine divergence would make the two
+# look alike. Each disagreement therefore carries why it disagrees, and only
+# `SUBSTANTIVE_DIVERGENCE` decides the status below.
+_BY_CONSTRUCTION = {
+    "cv": "holdout window rather than the validation folds - this is what a holdout is",
+    "expected_prediction_keys": "one fold over the holdout rather than two over validation",
+}
+
+
+def _artifact_roles(spec: dict, field: str) -> dict[str, str]:
+    entries = spec[field]["files"] if field == "input_data_spec" else spec[field]
+    return {entry["role"]: entry["sha256"] for entry in entries}
+
+
+def _divergence(field: str) -> str:
+    """Why this identity field differs, or the empty string when it does not."""
+    if published_spec.get(field) == sealed_spec.get(field):
+        return ""
+    if field in _BY_CONSTRUCTION:
+        return _BY_CONSTRUCTION[field]
+    if field in {"feature_artifacts", "input_data_spec"}:
+        pub, sealed = _artifact_roles(published_spec, field), _artifact_roles(sealed_spec, field)
+        moved = sorted(role for role in set(pub) & set(sealed) if pub[role] != sealed[role])
+        if moved:
+            return f"input artifacts changed: {', '.join(moved)}"
+        added = sorted(set(sealed) - set(pub)) or sorted(set(pub) - set(sealed))
+        return f"same input digests; only the recorded role set differs ({', '.join(added)})"
+    if field == "source_identity":
+        return "identity-recording scheme changed; no shared key holds a different value"
+    return "differs"
+
+
+_identity_fields = sorted(set(published_spec) | set(sealed_spec))
+_reasons = {field: _divergence(field) for field in _identity_fields}
+sealed_vs_published = pl.DataFrame(
+    {
+        "identity_field": _identity_fields,
+        "agrees": [not _reasons[f] for f in _identity_fields],
+        "why_it_differs": [_reasons[f] or "-" for f in _identity_fields],
+    }
+).sort(["agrees", "identity_field"])
+
+# The fields that differ for a reason other than the holdout window and the recording change.
+# Empty means the sealed fit and the published one specify the same computation.
+SUBSTANTIVE_DIVERGENCE = sorted(
+    field
+    for field, why in _reasons.items()
+    if why and (why == "differs" or why.startswith("input artifacts changed"))
+)
+# The selection geometry the lock sealed, against the one the carrier publishes. This is the
+# validation CV, not the holdout CV in `sealed_spec`, so it is read from the lock itself.
+VALIDATION_CV_MATCHES = lock["cv"]["identity"] == published_spec["cv"]["identity"]
 
 # %%
-if current_holdout_count != 0:
-    raise RuntimeError("A holdout prediction unexpectedly exists for the corrected carrier")
-if not historical_rows:
-    raise RuntimeError("The preserved historical holdout row is missing")
-
-historical_holdout = []
-for row in historical_rows:
-    spec = json.loads(row[4])
-    strategy = strategy_view(spec)
-    historical_holdout.append(
-        {
-            "backtest_hash": row[0],
-            "family": row[1],
-            "config": row[2],
-            "label": row[3],
-            "allocator": strategy.get("allocation", {}).get("method"),
-            "risk": strategy.get("risk", {}).get("name"),
-            "sharpe": row[5],
-            "sharpe_ci_lo": row[6],
-            "sharpe_ci_hi": row[7],
-            "max_drawdown": row[8],
-            "status": "historical, not comparable to corrected carrier",
-        }
+_sealed = [row for row in holdout_rows if row[2] == SEALED_TRAINING_HASH]
+if not _sealed:
+    raise RuntimeError(
+        f"the research lock names holdout training {SEALED_TRAINING_HASH}, and no holdout "
+        "backtest in the registry runs on it: the sealed evaluation cannot be read back"
     )
+if len(_sealed) != 1:
+    raise RuntimeError(f"{len(_sealed)} holdout backtests run on the sealed fit; expected one")
 
-print(f"Matching holdout predictions for corrected carrier: {current_holdout_count}")
-pl.DataFrame(historical_holdout)
+_row = _sealed[0]
+_sealed_strategy = strategy_view(json.loads(_row[5]))
+_carrier_strategy = {
+    "allocator": strategy_carrier["allocator"],
+    "risk": risk_leader["risk_name"],
+    "top_k": strategy_carrier["top_k"],
+}
+sealed_holdout = {
+    "lock_hash": LOCK_HASH,
+    "lock_state": LOCK_STATE,
+    "backtest_hash": _row[0],
+    "prediction_hash": _row[1],
+    "training_hash": _row[2],
+    "family": _row[3],
+    "label": _row[4],
+    "allocator": _sealed_strategy.get("allocation", {}).get("method"),
+    "top_k": _sealed_strategy.get("allocation", {}).get("top_k"),
+    "risk": _sealed_strategy.get("risk", {}).get("name"),
+    "sharpe": _row[6],
+    "sharpe_ci_lo": _row[7],
+    "sharpe_ci_hi": _row[8],
+    "max_drawdown": _row[9],
+}
+STRATEGY_MATCHES = (
+    sealed_holdout["allocator"] == _carrier_strategy["allocator"]
+    and sealed_holdout["risk"] == _carrier_strategy["risk"]
+    and sealed_holdout["top_k"] == _carrier_strategy["top_k"]
+)
+IDENTITY_MATCHES = current_training_hash == SEALED_TRAINING_HASH
+
+print(f"Published carrier training hash: {current_training_hash}")
+print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH}  (lock {LOCK_HASH}, {LOCK_STATE})")
+print(f"Same training identity: {IDENTITY_MATCHES}")
+print(
+    "Sealed strategy: "
+    f"{sealed_holdout['allocator']} / top {sealed_holdout['top_k']} / {sealed_holdout['risk']}"
+)
+print(
+    "Carrier strategy: "
+    f"{_carrier_strategy['allocator']} / top {_carrier_strategy['top_k']} / "
+    f"{_carrier_strategy['risk']}"
+)
+print(f"Same strategy: {STRATEGY_MATCHES}")
+pl.DataFrame([sealed_holdout])
+
+# %%
+# Which identity fields the sealed fit and the published one disagree on. This is the whole
+# basis for the status below, so it is printed rather than summarised.
+sealed_vs_published
+
+# %%
+# The two questions the prose below rests on, answered rather than asserted.
+print(f"Validation CV the lock sealed matches the published carrier's: {VALIDATION_CV_MATCHES}")
+print(f"Substantive identity divergence: {SUBSTANTIVE_DIVERGENCE or 'none'}")
 
 # %% [markdown]
-# The stored holdout rows above sit on an IPCA risk-adjusted-return lineage.
-# They neither validate nor refute the corrected carrier, which uses a
-# different family, label, allocation, and risk rule. The current carrier's
-# out-of-sample status is unresolved and needs a future untouched evaluation
-# window.
+# The sealed holdout is not a different strategy and not a different model. It runs the same
+# family, the same label, the same allocation and the same risk rule the carrier publishes.
+# What it is not is the same *fit*: the two training hashes printed above differ, the sealed
+# one registered on 2026-08-27 and the published one by `11e_supervised_autoencoder` two days
+# later.
+#
+# Five identity fields disagree and the table says why each does. `cv` and
+# `expected_prediction_keys` differ because a holdout retrain fits a different window and
+# predicts a different number of rows - that is what makes it a holdout rather than a third
+# validation fold, and a run where they agreed would be the broken one. `feature_artifacts`
+# and `input_data_spec` carry identical digests for every role both record; the sealed spec
+# additionally records `setup`, which moves the container digest without moving an input.
+# `source_identity` moved from a map of source-file hashes to the `latent_adapter` /
+# `latent_model` version pair. `SUBSTANTIVE_DIVERGENCE` is what is left once those are
+# accounted for, and it is empty: the model specification, the label artifact, the feature
+# names and the validation CV identity the selection was made on are the same.
+#
+# That is enough to report the number and not enough to claim it. A different training hash
+# with no supersession row linking it to the published one is, by the registry's own rule, a
+# generation this case study no longer publishes, and the sealed fit's weights were never
+# re-derived under the current identity scheme. They cannot be: a holdout is spent once, and
+# re-taking this one to close the bookkeeping gap would turn the window into another
+# selection round, which is the one thing it must not become. So the Sharpe above is the
+# out-of-sample result for a fit that specifies the same computation as the published carrier
+# and carries a different identity, and it is reported on exactly those terms.
 
 # %% [markdown]
 # ## 5. Publication assessment
@@ -816,8 +943,9 @@ pl.DataFrame(historical_holdout)
 # allocation, cost, and risk hash exists and the selected risk result
 # reproduces exactly. Closed is not the same as favorable. The gate table below
 # reports each check on its own terms, and the paired risk interval is the one
-# to read carefully. The remaining gap is not a computation failure: it is the
-# deliberate absence of a second use of the already-observed holdout.
+# to read carefully. The remaining gap is not a computation failure and not a
+# missing holdout: it is that the holdout was spent on a fit whose training
+# identity this case study has since replaced.
 
 # %%
 final_row = carrier.row(len(carrier) - 1, named=True)
@@ -858,9 +986,28 @@ assessment = pl.DataFrame(
             ),
         },
         {
-            "gate": "Matching untouched holdout",
-            "status": "UNRESOLVED",
-            "evidence": "not run; 2021 holdout already observed on IPCA",
+            # Not "did a holdout run" - it did - but whether the fit it ran on is the one
+            # published. `STRATEGY_MATCHES` and `IDENTITY_MATCHES` are computed in section 4
+            # and carry the two halves of that question.
+            "gate": "Holdout on the published fit",
+            "status": (
+                "PASS"
+                if IDENTITY_MATCHES
+                else "QUALIFIED"
+                if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
+                else "INCONCLUSIVE"
+            ),
+            "evidence": (
+                f"sealed {sealed_holdout['sharpe']:.3f} "
+                f"[{sealed_holdout['sharpe_ci_lo']:.3f}, {sealed_holdout['sharpe_ci_hi']:.3f}]"
+                + (
+                    "; same training identity"
+                    if IDENTITY_MATCHES
+                    else "; same computation, different identity"
+                    if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
+                    else f"; diverges on {', '.join(SUBSTANTIVE_DIVERGENCE) or 'strategy'}"
+                )
+            ),
         },
         {
             "gate": "Deployment claim",
@@ -889,8 +1036,12 @@ assessment
 # 4. The cost curve is read from its lower bound, not its point path. The cell
 #    under the cost chart reports where each first reaches zero, and the lower
 #    bound's crossing is the one a cost claim has to respect.
-# 5. The existing IPCA holdout rows are historical and not comparable to the
-#    corrected carrier. No matching holdout was run, because the 2021 window
-#    has already been observed.
+# 5. The 2021 holdout was taken, once, and the research lock names what it was
+#    spent on: the same model, label, allocation and risk rule the carrier
+#    publishes, fitted two days earlier under the previous identity-recording
+#    scheme. Section 4 reports that Sharpe with its interval and the exact
+#    identity fields the sealed fit and the published one disagree on. It is an
+#    out-of-sample number for a fit the case study no longer publishes, and it
+#    cannot be closed by a second run without spending the window twice.
 # 6. Publication may present v3.1 as a corrected validation record, but it must
 #    label out-of-sample efficacy unresolved and make no deployment claim.

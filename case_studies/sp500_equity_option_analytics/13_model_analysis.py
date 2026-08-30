@@ -491,14 +491,17 @@ predictive_families = primary_coverage.filter(pl.col("evidence") == "predictive"
 structural_families = primary_coverage.filter(pl.col("evidence") == "structural")[
     "family"
 ].to_list()
+# Counted over the rows that resolve, not over every row the table holds. A registration a
+# reader cannot resolve is not coverage, and listing `causal_dml` as a family on the strength
+# of one would put a family in the map whose evidence Section 7 then declines to show.
 _causal_db = CASE_DIR / "run_log" / "registry.db"
 if _causal_db.exists():
     import sqlite3
 
+    from case_studies.utils.registry.store import current_causal_identities
+
     with sqlite3.connect(_causal_db) as _coverage_con:
-        _causal_primary_count = _coverage_con.execute(
-            "SELECT COUNT(*) FROM causal_runs WHERE label = ?", (PRIMARY_LABEL,)
-        ).fetchone()[0]
+        _causal_primary_count = len(current_causal_identities(_coverage_con, label=PRIMARY_LABEL))
 else:
     _causal_primary_count = 0
 causal_families = ["causal_dml"] if _causal_primary_count else []
@@ -1211,10 +1214,50 @@ if regime_df.height > 0:
 # vol-normalized horizons (Section 6: PCA on both labels).
 
 # %%
-# Load latent factor diagnostics
+# `load_fold_extras` reads `run_log/training/<training_hash>/fold_extras.json`, so it takes a
+# training hash and not an estimator name. Passing the name resolved to a directory that never
+# exists, every lookup returned None, the filter emptied the dict, and each `if "<model>" in
+# lf_extras` block below silently printed nothing while the prose beside it described the
+# figures. Nothing raised, because a missing extras file is a legitimate answer for a model
+# that stores none.
+#
+# The hash has to come from the published member rather than from any run of the estimator: 44
+# latent-factor training runs are registered here and all of them wrote fold extras, so picking
+# by estimator alone would show a superseded fit's diagnostics beside the current fit's score.
+# `_declared` is the population in force per model, which is the same set the leaderboard above
+# is ranked over, and the member taken is the one whose IC the summary prints.
 lf_models = ["pca", "ipca", "cae", "sdf", "sae"]
-lf_extras = {m: load_fold_extras(CASE_STUDY, m) for m in lf_models}
+
+
+def _published_training_hash(model: str) -> str | None:
+    """The training run behind the best-scoring published member of ``model``."""
+    members = _declared.get(model) if _declared else None
+    if not members:
+        return None
+    scored = raw_metrics.filter(
+        pl.col("prediction_hash").is_in(list(members)), pl.col("label") == PRIMARY_LABEL
+    ).sort("ic_mean_daily", descending=True, nulls_last=True)
+    if scored.height == 0:
+        return None
+    best = scored.row(0, named=True)["prediction_hash"]
+    with sqlite3.connect(CASE_DIR / "run_log" / "registry.db") as _db:
+        found = _db.execute(
+            "SELECT training_hash FROM prediction_sets WHERE prediction_hash = ?", (best,)
+        ).fetchone()
+    return found[0] if found else None
+
+
+lf_training = {m: _published_training_hash(m) for m in lf_models}
+lf_extras = {m: load_fold_extras(CASE_STUDY, h) for m, h in lf_training.items() if h}
 lf_extras = {m: e for m, e in lf_extras.items() if e is not None}
+_lf_silent = sorted(m for m in lf_models if m not in lf_extras)
+if _lf_silent:
+    # Named rather than left to an empty figure. A model whose extras cannot be read has no
+    # diagnostic below it, and the reader is told which one and why instead of seeing a gap.
+    print(
+        "No fold extras for: "
+        + ", ".join(f"{m} (training {lf_training[m] or 'unresolved'})" for m in _lf_silent)
+    )
 
 # Print IC summary from registry
 lf_metrics = all_labels_metrics.filter(
@@ -1403,23 +1446,52 @@ if "sdf" in lf_extras:
 
 # %%
 # Load primary-label causal DML evidence from the dedicated registry table.
+#
+# `causal_runs` is keyed on `causal_hash`, and the identity covers the fold and placebo
+# geometry, the seed, the horizon, the row cap and the development cutoff. Re-running the
+# causal notebook under any different design writes a *second* row for the same label rather
+# than replacing the first, so selecting on `label` alone can list two estimates with nothing
+# to tell them apart and count a superseded run into a gate the declared run does not clear.
+# `current_causal_identities` is the reader's own rule for which rows resolve - current
+# identity version, matching tier, not superseded - and it is what this block filters to.
+#
+# A row that resolves to nothing is reported rather than dropped in silence. A registration
+# written through `register_causal_run` carries no `identity_version`, so it lands in the
+# table and answers no reader; showing it here as the case study's causal evidence would
+# present as findable something the resolver does not return.
 import json as _json
 import sqlite3
 
+from case_studies.utils.registry.store import current_causal_identities
+
 _db_path = CASE_DIR / "run_log" / "registry.db"
 causal_rows = []
+causal_unresolvable = []
 if _db_path.exists():
     with sqlite3.connect(_db_path) as _con:
+        _resolvable = set(current_causal_identities(_con, label=PRIMARY_LABEL))
         _cur = _con.execute(
-            "SELECT label, treatment, dml_effect, dml_se_hac, p_value_hac, "
+            "SELECT causal_hash, label, treatment, dml_effect, dml_se_hac, p_value_hac, "
             "naive_effect, confounding_bias_pct, refutation_p, n_obs, embargo, "
-            "confounders_json FROM causal_runs WHERE label = ? ORDER BY label",
+            "confounders_json FROM causal_runs WHERE label = ? ORDER BY causal_hash",
             (PRIMARY_LABEL,),
         )
         for row in _cur.fetchall():
             d = dict(zip([c[0] for c in _cur.description], row))
             d["confounders"] = _json.loads(d.pop("confounders_json"))
-            causal_rows.append(d)
+            if d["causal_hash"] in _resolvable:
+                causal_rows.append(d)
+            else:
+                causal_unresolvable.append(d["causal_hash"])
+
+if causal_unresolvable:
+    print(
+        f"{len(causal_unresolvable)} causal row(s) for {PRIMARY_LABEL} do not resolve and are "
+        f"not reported below: {', '.join(causal_unresolvable)}. They were registered through "
+        "`register_causal_run`, which stamps no identity version, so `CausalResult.one` "
+        "returns nothing for them. Converting 12_causal_dml to `resolve_causal_request` is "
+        "what makes them readable."
+    )
 
 
 def _fmt(val, spec):
