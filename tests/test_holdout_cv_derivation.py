@@ -800,6 +800,10 @@ def test_an_intraday_panel_derives_its_holdout_rather_than_raising_on_the_compar
     fold = _fold(cv)
 
     assert pd.Timestamp(fold["val_start"]).date() == pd.Timestamp(declared["holdout_start"]).date()
+    # The declared end is a date and the panel is 8-hourly, so the interval closes on the last
+    # settlement of that day rather than at its midnight - otherwise the two settlements after
+    # midnight are dropped from the window the holdout is evaluated over.
+    assert pd.Timestamp(fold["val_end"]) == SETTLEMENTS[-1]
     assert pd.Timestamp(fold["val_end"]).date() == pd.Timestamp(declared["holdout_end"]).date()
     # The buffer is the case study's widest - fwd_ret_24h at 24H, three settlements - and it is
     # counted along the panel, so the boundary is a settlement rather than a calendar date.
@@ -832,4 +836,18 @@ def test_a_tz_naive_panel_hashes_exactly_as_it_did_before_the_zone_was_resolved(
     }
     # The identity is what the two locks pin, so it is asserted rather than left implied by
     # the boundaries. Measured against the derivation as it stood before the zone was resolved.
+    assert cv["identity"] == "d4175e174c170bb8"
+
+
+def test_a_daily_panel_still_closes_its_holdout_on_the_declared_date() -> None:
+    """The widening is intraday-only, and the two live locks depend on that.
+
+    A daily panel's last observation of the declared end date is midnight of it, so the
+    boundary does not move and the fold renders exactly as it did.
+    """
+    cv = build_holdout_cv(
+        _validation_spec(), case_study="us_firm_characteristics", timeline=MONTH_ENDS
+    )
+
+    assert _fold(cv)["val_end"] == "2016-12-31"
     assert cv["identity"] == "d4175e174c170bb8"

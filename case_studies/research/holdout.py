@@ -541,6 +541,21 @@ def build_holdout_cv(
     buffer, buffer_label = widest_label_buffer(case_study, setup)
     holdout_open = _on_panel_clock(pd.Timestamp(holdout_start), panel_zone)
     holdout_close = _on_panel_clock(pd.Timestamp(holdout_end), panel_zone)
+    # `evaluation.holdout_end` is a DATE, and a date on an intraday panel means the whole of that
+    # day. Parsed, it is that date at midnight, and every window filter downstream is
+    # `timestamp <= val_end`, so the final session sorts after the boundary and is dropped from
+    # the interval the holdout is evaluated over. `utils/modeling.py::_inclusive_end_of` says the
+    # same thing with a nanosecond sentinel; this says it with an observation the panel actually
+    # holds, which is what `train_end` already is and what makes the fold readable as a pair of
+    # settlements rather than one settlement and a fencepost.
+    #
+    # A daily panel is untouched by construction: its last observation of that date IS midnight,
+    # so the widening condition is false and the rendering does not move. That matters because
+    # this value is inside the hashed fold, and `fx_pairs` and `sp500_equity_option_analytics`
+    # each hold a research lock derived from it. ml4t/agent-workspace#986.
+    within_close = [value for value in observations if value.date() <= holdout_close.date()]
+    if within_close and within_close[-1] > holdout_close:
+        holdout_close = within_close[-1]
 
     # Counted in OBSERVATIONS and stepped back along the panel's own dates, never subtracted as
     # calendar time. `utils/cv_splits.py` already carries this bug's epitaph: "21D" as a
