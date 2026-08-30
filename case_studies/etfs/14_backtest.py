@@ -94,10 +94,12 @@ warnings.filterwarnings("ignore")
 CASE_STUDY_ID = "etfs"
 LABEL = ""
 SPLIT = "validation"
-TOP_K = 0  # 0 = the smallest feasible k from setup.yaml backtest.sweep.top_k_grid
+# Zero means the smallest feasible k from setup.yaml backtest.sweep.top_k_grid.
+TOP_K = 0
 MAX_SYMBOLS = 0
 FORCE_REBACKTEST = False
-TOP_N_PREDICTIONS: int | None = None
+# None means every live prediction set; an int caps the shortlist.
+TOP_N_PREDICTIONS = None
 # Both names stay bound here although nothing below reads them: that is what makes the harness
 # force preview and supply a workspace (`tests/pm_helpers.py:954`). Without them the canonical
 # branch regenerates in place, which needs symlinks a CI checkout does not have.
