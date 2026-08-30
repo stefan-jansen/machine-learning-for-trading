@@ -1041,11 +1041,12 @@ IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINI
 # The bound is asymmetric, and both halves of that asymmetry carry information. The true
 # start is at or before `created_at - elapsed_s`, so:
 #
-#   bound BEFORE the lock  ->  the true start is before the lock too. The seal is
-#                              DEMONSTRABLY BROKEN, not merely unattested.
-#   bound AT OR AFTER it   ->  the true start may sit on either side. Unproven.
+#   bound AT OR BEFORE the lock  ->  the true start is at or before the lock too, and the
+#                                    ordering a seal needs is strict. DEMONSTRABLY BROKEN,
+#                                    not merely unattested.
+#   bound AFTER the lock         ->  the true start may sit on either side. Unproven.
 #
-# The first case is what this registry is in. An earlier pass here reported it as "unproven",
+# The first case is what this registry is in. An earlier pass reported it as "unproven",
 # which understated it: an upper bound cannot show a run started *after* an instant, but it
 # can certainly show it started *before* one, and that is the direction that fails a seal.
 SEALED_BEFORE_SPENT = False
@@ -1054,18 +1055,28 @@ SEAL_BASIS = "no sealed holdout to check"
 if sealed_holdout and sealed_holdout["lock_taken_at"]:
     _lock_at = pd.Timestamp(sealed_holdout["lock_taken_at"])
     if HOLDOUT_TRAINING_STARTED_AT is not None:
+        # A recorded start answers the question in both directions, so it resolves to a
+        # verdict rather than to "we have the field". Naming the state `recorded` regardless
+        # of what it recorded left a run that provably began first reading as merely
+        # unattested, which is the softer of the two and the wrong one.
         SEALED_BEFORE_SPENT = _lock_at < pd.Timestamp(HOLDOUT_TRAINING_STARTED_AT)
-        SEAL_STATE = "recorded"
+        SEAL_STATE = "sealed" if SEALED_BEFORE_SPENT else "broken"
         SEAL_BASIS = (
-            "training_runs.started_at is recorded, so the ordering is read rather than bounded"
+            "training_runs.started_at is recorded, so the ordering is read rather than "
+            "bounded: the lock was taken "
+            + ("before" if SEALED_BEFORE_SPENT else "at or after")
+            + " the run began"
         )
     elif HOLDOUT_TRAINING_DERIVED_START is not None:
-        if _lock_at > HOLDOUT_TRAINING_DERIVED_START:
+        # `>=`, not `>`. The true start is at or before the bound, so a bound equal to the
+        # lock puts the start at or before the lock too, and the ordering a seal needs is
+        # strict. Equality is a broken seal, not an open question.
+        if _lock_at >= HOLDOUT_TRAINING_DERIVED_START:
             SEAL_STATE = "broken"
             SEAL_BASIS = (
                 "started_at is NULL, but created_at - elapsed_s bounds the start from "
-                "above and that bound falls before the lock, so the run had already begun when "
-                "the lock was written"
+                "above and that bound falls at or before the lock, so the run had already "
+                "begun when the lock was written"
             )
         else:
             SEAL_STATE = "unproven"
