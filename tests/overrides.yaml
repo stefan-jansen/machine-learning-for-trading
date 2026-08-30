@@ -1607,18 +1607,31 @@ case_studies/etfs/13_model_analysis:
 # 15 through 17 take the same universe: they re-price and overlay 14's backtests, and a run
 # that loaded a different number of funds would be reading a price panel the registered
 # specifications were not built against.
+#
+# It stays at 5, matching the rest of the chain, because raising it here fixes nothing and
+# hides the cause. Measured: at 12 the schemes become feasible and all 12 backtests run, and
+# every one records `sharpe=0.0, num_trades=0.0, total_return=0.0`. The predictions 06 and 07
+# fit cover FIVE symbols, so a top-5 selection holds the entire ranked cross-section at every
+# rebalance, the basket never changes and nothing is ever traded. What bounds the ranking is
+# the prediction universe, not the price panel - and only the price panel was raised.
+#
+# So the fixture cannot exercise this sweep at all while the model notebooks fit five symbols
+# and the smallest concentration etfs declares is five. Fixing it means raising `max_symbols`
+# across 04 through 12 and re-measuring every timeout against it, which is a fixture-scale
+# change with its own runtime budget - filed rather than made here. At 5 the notebook refuses
+# up front and names both numbers, which is the honest failure.
 case_studies/etfs/14_backtest:
   parameters:
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
   timeout: 600
 case_studies/etfs/15_portfolio_management:
   parameters:
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
     TOP_N_PREDICTIONS: 2
   timeout: 120
 case_studies/etfs/16_costs:
   parameters:
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
     TOP_N_COMBOS: 2
   timeout: 120
 case_studies/etfs/17_risk_management:
@@ -1630,7 +1643,7 @@ case_studies/etfs/17_risk_management:
   # only move the same cell back under a budget nobody had measured.
   parameters:
     MAX_RISK_VARIANTS: 2
-    MAX_SYMBOLS: 6
+    MAX_SYMBOLS: 5
     TOP_N_COMBOS: 2
   timeout: 120
 case_studies/etfs/18_strategy_analysis:
