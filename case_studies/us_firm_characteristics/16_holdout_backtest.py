@@ -79,17 +79,14 @@ bt_config = get_backtest_config(CASE_STUDY_ID)
 
 
 def _registered_holdout_backtests(case_dir, prediction_hash):
-    """The backtests already registered against one holdout prediction set."""
+    """The backtest hashes already registered against one holdout prediction set."""
     with sqlite3.connect(str(case_dir / "run_log" / "registry.db")) as conn:
         rows = conn.execute(
-            "SELECT backtest_hash, spec_json FROM backtest_runs WHERE prediction_hash = ? "
+            "SELECT backtest_hash FROM backtest_runs WHERE prediction_hash = ? "
             "ORDER BY backtest_hash",
             (prediction_hash,),
         ).fetchall()
-    return [
-        {"backtest_hash": backtest_hash, "strategy": json.loads(spec_json).get("strategy")}
-        for backtest_hash, spec_json in rows
-    ]
+    return [{"backtest_hash": backtest_hash} for (backtest_hash,) in rows]
 
 
 def _delete_holdout_backtest(case_dir, backtest_hash):
@@ -258,21 +255,20 @@ if allocation.get("method") == "conformal_weighted":
 
 # The window carries one backtest at a time, for the same reason `15` lets it carry one
 # prediction generation at a time. `15`'s guard is on the model - the training identity and
-# the checkpoint - and it cannot see this one: a changed allocator, risk overlay or cost
-# assumption produces the same holdout predictions and a different result from them. So the
-# strategy is checked here, against what is already registered on this prediction set.
-_registered = _registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)
-_this_strategy = spec.get("strategy")
-superseded_backtests = [row for row in _registered if row["strategy"] != _this_strategy]
-if superseded_backtests and not REPLACE_HOLDOUT:
-    raise RuntimeError(
-        "the holdout window already carries a backtest of a different strategy: "
-        + ", ".join(row["backtest_hash"] for row in superseded_backtests)
-        + ". Set REPLACE_HOLDOUT=True to discard it, or leave the selection where it was."
-    )
-for row in superseded_backtests:
-    print(f"REPLACING holdout backtest {row['backtest_hash']}")
-    _delete_holdout_backtest(CASE_DIR, row["backtest_hash"])
+# the checkpoint - and it cannot see this one: a changed allocator, overlay, cost level or
+# calibration produces the same holdout predictions and a different result from them.
+#
+# The test is the backtest hash, not a field-by-field comparison. Every input that changes
+# the result is in that hash by construction, and a guard naming fields instead has to be
+# right about all of them - it was written first as a `strategy` comparison and missed the
+# cost configuration and the embargo identity sitting outside that block.
+#
+# Which means the run has to happen before the question can be asked, since the hash is
+# what the run returns. So a refused run is undone: the row it registered is deleted and
+# the registry is left exactly as it was found.
+before = {
+    row["backtest_hash"] for row in _registered_holdout_backtests(CASE_DIR, HOLDOUT_PREDICTION_HASH)
+}
 
 result = run_backtest(
     CASE_STUDY_ID,
@@ -285,6 +281,20 @@ result = run_backtest(
     initial_cash=bt_config.initial_cash,
     calendar=bt_config.calendar,
 )
+superseded_backtests = sorted(before - {result.backtest_hash})
+if superseded_backtests and not REPLACE_HOLDOUT:
+    _delete_holdout_backtest(CASE_DIR, result.backtest_hash)
+    raise RuntimeError(
+        "the holdout window already carries a backtest of a different configuration: "
+        + ", ".join(superseded_backtests)
+        + f". This run would add {result.backtest_hash}; it has been removed again and the "
+        "registry is as it was. Set REPLACE_HOLDOUT=True to discard the earlier one, or "
+        "leave the selection where it was."
+    )
+for backtest_hash in superseded_backtests:
+    print(f"REPLACING holdout backtest {backtest_hash}")
+    _delete_holdout_backtest(CASE_DIR, backtest_hash)
+
 print(f"Holdout backtest: {result.backtest_hash}")
 
 # %% [markdown]
