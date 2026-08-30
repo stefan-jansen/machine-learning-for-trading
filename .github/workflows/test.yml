@@ -897,7 +897,7 @@ jobs:
           print(f"{len(cases)} tests ran against the test-data checkout, none skipped")
           PY
   # ---------------------------------------------------------------------------
-  # The 30 test files that need the modelling environment.
+  # The 35 test files that need the modelling environment.
   #
   # These ran in NO job. .github/ci/unit-test-quarantine.txt excluded them from
   # test-unit's sweep for needing torch, and said they "belong in a job that runs
@@ -921,7 +921,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test-unit-image:
     runs-on: ubuntu-latest
-    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 30.
+    # The 26 files measured on 2026-08-24 ran in 3m21s; the list now contains 36.
     # --timeout=900 bounds a hung test but not a hung
     # import, collection or image pull, which would otherwise fall through to
     # GitHub's six-hour default.
@@ -961,8 +961,10 @@ jobs:
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
+            tests/test_latent_factors_identity.py \
             tests/test_latent_factors_no_leak.py \
             tests/test_latent_input_identity.py \
+            tests/test_family_hook_dispatch.py \
             tests/test_holdout_evaluation_driver.py \
             tests/test_locked_holdout_execution.py \
             tests/test_model_analysis_selection.py \
@@ -978,6 +980,8 @@ jobs:
             tests/test_sequence_identity_roundtrip.py \
             tests/test_tabular_dl.py \
             tests/test_tabular_dl_adapter.py \
+            tests/test_holdout_expected_keys.py \
+            tests/test_tabular_dl_identity.py \
             tests/test_tabular_dl_runtime.py \
             tests/test_training_identity_migration.py \
             -q --tb=short --timeout=900 --timeout-method=thread -rf

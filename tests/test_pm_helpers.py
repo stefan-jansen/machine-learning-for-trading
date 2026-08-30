@@ -1280,3 +1280,49 @@ def test_unusable_parameters_catches_a_preview_mapping_rebound_above_every_reade
     assert set(problems) == set(PREVIEW_TRANSLATED_PARAMETERS)
     for name, reason in problems.items():
         assert "PREVIEW_REDUCTIONS" in reason, name
+
+
+def test_a_complete_causal_mapping_is_not_given_a_fold_key_its_resolver_rejects(
+    tmp_path: Path,
+) -> None:
+    """`MAX_FOLDS` must not reach a mapping that already states its fold count as `n_folds`.
+
+    `_QUICK_PARAMS` sets `MAX_FOLDS` for every model notebook, and the translation used to
+    add `folds` to any mapping that lacked that exact key. A causal override declares the four
+    fields `resolve_causal_request` requires and none of them is named `folds`, so the default
+    fired and the request was refused with "unsupported DML preview reductions: ['folds']"
+    before any fit. The consumer's own field set is the assertion, so this stays true if that
+    set changes.
+    """
+    from case_studies.utils.causal import _DML_PREVIEW_FIELDS
+
+    declared = {
+        "PREVIEW_REDUCTIONS": {
+            "max_samples": 5000,
+            "max_symbols": 5,
+            "n_folds": 2,
+            "n_placebo": 25,
+        },
+        "MAX_FOLDS": 2,
+        "MAX_SYMBOLS": 5,
+    }
+    resolved = injected_parameters(
+        REPO_ROOT / "case_studies/cme_futures/11_causal_dml.py",
+        declared,
+        tmp_path,
+        research_preview=True,
+    )
+    reductions = resolved["PREVIEW_REDUCTIONS"]
+    assert set(reductions) == _DML_PREVIEW_FIELDS
+    assert reductions["n_folds"] == 2
+
+
+def test_a_model_mapping_without_a_fold_count_still_gets_one(tmp_path: Path) -> None:
+    """The translation still applies where the notebook states no fold count of its own."""
+    resolved = injected_parameters(
+        REPO_ROOT / "case_studies/cme_futures/10a_pca.py",
+        {"PREVIEW_REDUCTIONS": {"max_samples": 5000}, "MAX_FOLDS": 2},
+        tmp_path,
+        research_preview=True,
+    )
+    assert resolved["PREVIEW_REDUCTIONS"]["folds"] == [0, 1]

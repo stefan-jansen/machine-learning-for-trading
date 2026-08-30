@@ -10,6 +10,10 @@ from ml4t.models.configs import IPCAConfig
 
 from case_studies.utils.latent_factors.library_bridge import run_ipca_fold_with_library
 
+# Bumped when a change to this module would change a fitted IPCA result. It enters
+# every ipca training identity through `adapter._source_identity`, which declares behaviour
+# rather than hashing these bytes - see that function for why.
+
 
 def run_ipca_fold(
     chars_train: np.ndarray,

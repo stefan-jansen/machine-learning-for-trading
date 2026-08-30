@@ -61,6 +61,7 @@ from case_studies.utils.registry import (
     register_prediction_set,
     register_training_run,
 )
+from case_studies.utils.registry.completeness import evaluate_prediction_coverage
 from utils.modeling import (
     RANDOM_SEED,
     load_configs,
@@ -385,6 +386,83 @@ def build_holdout_split(mds, setup: dict) -> dict:
         "val_start": holdout_start,
         "val_end": holdout_end,
     }
+
+
+def _align_expected_timestamps(expected: pl.DataFrame, predictions: pl.DataFrame) -> pl.DataFrame:
+    """Put the expected keys in the predictions' timestamp representation.
+
+    `evaluate_prediction_coverage` compares keys by casting them to strings, so a
+    `Date` and a `Datetime("ms")` holding the same day compare as different keys -
+    "2016-01-29" against "2016-01-29 00:00:00.000". Every family runner builds its
+    expected frame from the frame it predicted into, so the two always agree there and
+    this never arises; here the expectation comes from the dataset and the predictions
+    come back through pandas, which promotes a date to a millisecond timestamp.
+
+    Only the representation is aligned. A prediction on the wrong day still fails to
+    join, which is the comparison this exists to make.
+    """
+    if "timestamp" not in predictions.columns:
+        return expected
+    target = predictions.schema["timestamp"]
+    if expected.schema["timestamp"] == target:
+        return expected
+    return expected.with_columns(pl.col("timestamp").cast(target))
+
+
+def _holdout_expected_keys(mds, holdout_split: dict) -> pl.DataFrame:
+    """The prediction keys a holdout retrain is expected to cover.
+
+    Built from the dataset and the split alone, before any model runs, so that
+    ``evaluate_prediction_coverage`` compares the produced predictions against a
+    declaration made independently of them. Taking the keys off the predictions
+    themselves would make coverage complete by construction and record a fact about
+    nothing.
+
+    This is the widest set any family could answer for: every row inside the holdout
+    window whose label is finite. `_train_linear` and `_train_gbm` predict exactly this
+    set - they mask the window by date and drop the null labels. The sequence, latent
+    factor and tabular runners answer for less of it by design: a gap-free lookback
+    drops the first rows of each entity, an evaluation label may be missing where the
+    training label is not, and the latent path can require an entity to persist across
+    the window.
+
+    So the caller adjudicates against this frame only what the frame can settle. A key
+    outside the window, a key predicted twice, and a null or non-finite score are wrong
+    whatever the family. Predicting fewer keys than the window holds is not, and is
+    reported rather than charged to the candidate.
+    """
+    date_col = mds.date_col
+    label_col = mds.label_col
+    entity_col = mds.entity_cols[0] if mds.entity_cols else None
+    day = pl.col(date_col).cast(pl.Utf8).str.slice(0, 10)
+    label = pl.col(label_col).cast(pl.Float64, strict=False)
+    window = mds.dataset.filter(
+        (day >= str(holdout_split["val_start"])[:10])
+        & (day <= str(holdout_split["val_end"])[:10])
+        & label.is_not_null()
+        & label.is_finite()
+    )
+    if window.is_empty():
+        raise ValueError(
+            f"holdout window [{holdout_split['val_start']}..{holdout_split['val_end']}] "
+            f"holds no rows with a finite {label_col}"
+        )
+    symbol = (
+        pl.col(entity_col).cast(pl.Utf8)
+        if entity_col and entity_col in window.columns
+        else pl.lit("unknown", dtype=pl.Utf8)
+    )
+    expected = window.select(
+        symbol.alias("symbol"),
+        pl.col(date_col).alias("timestamp"),
+        pl.lit(int(holdout_split["fold"]), dtype=pl.Int32).alias("fold_id"),
+    )
+    if expected.n_unique(["symbol", "timestamp", "fold_id"]) != expected.height:
+        raise ValueError(
+            "holdout window produced duplicate expected prediction keys; the dataset is "
+            "not one row per entity and date inside the window"
+        )
+    return expected
 
 
 def load_existing_holdout(cs_id: str) -> dict:
@@ -1134,6 +1212,12 @@ def generate_holdout(
             f"holdout=[{holdout_split['val_start']}..{holdout_split['val_end']}]"
         )
 
+        # Declared before the model runs, and outside every rejection handler below: a
+        # failure to state what the holdout should cover is a defect in this driver, not
+        # evidence about the candidate, and must not be charged to one as a fallback.
+        expected_keys = _holdout_expected_keys(mds, holdout_split)
+        _log(f"    Expected holdout keys: {expected_keys.height:,}")
+
         train_fn = TRAIN_DISPATCH.get(family)
         if train_fn is None:
             _log(f"    SKIP: unsupported family ({family})")
@@ -1184,6 +1268,69 @@ def generate_holdout(
             gc.collect()
             continue
 
+        # Coverage is adjudicated here rather than inside `register_prediction_set`,
+        # because a candidate whose predictions are malformed is a candidate to fall back
+        # from, and reaching registration with one would end the run instead. Registering
+        # below can then treat any failure of its own as the infrastructure error it is.
+        #
+        # Only what the window can settle is charged to the candidate. Predicting fewer
+        # keys than the window holds is what the sequence, latent-factor and tabular
+        # runners do by design, and rejecting them for it would demote the selection for
+        # a reason that is not about the model - the defect this whole path was fixed for,
+        # arriving from the other side.
+        expected_keys = _align_expected_timestamps(expected_keys, predictions)
+        coverage = evaluate_prediction_coverage(expected_keys, predictions)
+        malformed = (
+            coverage.n_extra or coverage.n_duplicates or coverage.n_null or coverage.n_non_finite
+        )
+        if malformed:
+            _log(f"    REJECT: holdout predictions are malformed: {coverage.as_dict()}")
+            fallback_attempts.append(
+                {
+                    "ordinal": ordinal,
+                    "family": family,
+                    "config_name": candidate["config_name"],
+                    "label": label,
+                    "val_sharpe": candidate["val_sharpe"],
+                    "reason": (
+                        f"malformed_predictions: {coverage.n_extra} keys outside the "
+                        f"holdout window, {coverage.n_duplicates} predicted twice, "
+                        f"{coverage.n_null} null and {coverage.n_non_finite} non-finite "
+                        f"scores, against {coverage.n_expected} eligible keys"
+                    ),
+                }
+            )
+            del predictions
+            gc.collect()
+            continue
+
+        if coverage.n_missing:
+            # Not a rejection, and not something to register either.
+            #
+            # `register_backtest_run` requires `prediction_coverage.status = 'complete'`
+            # (registration.py:1176), so a short holdout registered with `allow_partial`
+            # produces a prediction set whose backtest is then refused - the run fails
+            # later and further from the cause. And falling back would demote the
+            # selection on evidence this path cannot read: it cannot tell a family whose
+            # runner narrows the window by design - a gap-free lookback, an evaluation
+            # label missing where the training label is not, an entity required to
+            # persist - from a fit that is genuinely short.
+            #
+            # The holdout is used once, so an ambiguity about which candidate deserves it
+            # stops here and asks, rather than resolving itself quietly. Supporting these
+            # families means their runner declaring its own eligible key frame, which is
+            # the open half of ml4t/agent-workspace#938.
+            raise RuntimeError(
+                f"{family}/{candidate['config_name']} predicted "
+                f"{coverage.n_actual:,} of the {coverage.n_expected:,} keys eligible in "
+                f"the holdout window, {coverage.n_missing:,} short. This path declares the "
+                "window itself as the expectation, which is exact for the linear and GBM "
+                "runners and too wide for any family that narrows eligibility. It cannot "
+                "tell that case from a short fit, and the holdout is spent once, so it "
+                "stops rather than falling back to another candidate. The runner has to "
+                "declare its own eligible keys - ml4t/agent-workspace#938."
+            )
+
         # Backtest gate: even with non-degenerate predictions, the engine may
         # produce an empty result (e.g., monthly + classification empty port_ret).
         # Treat run_backtest failure as a fallback trigger.
@@ -1202,18 +1349,25 @@ def generate_holdout(
         pre_registered_hash: str | None = None
 
         if needs_pre_registration:
+            # Registration sits outside the handler below. It failed here once for a
+            # reason that was nothing to do with the candidate - the call omitted
+            # `expected_keys`, which every versioned training identity requires - and the
+            # handler recorded that as two candidates rejected and handed the holdout to
+            # rank-3. An error the registry raises about the call is not evidence about
+            # the model, and must stop the run rather than demote the selection.
+            register_training_run(cs_id, spec=candidate["training_spec"])
+            pre_registered_hash = register_prediction_set(
+                cs_id,
+                candidate["training_hash"],
+                checkpoint_value=candidate["checkpoint_value"],
+                checkpoint_kind=candidate["checkpoint_kind"],
+                split="holdout",
+                predictions=predictions,
+                expected_keys=expected_keys,
+                task_type=mds.task_type,
+                class_values=mds.class_values or None,
+            )
             try:
-                register_training_run(cs_id, spec=candidate["training_spec"])
-                pre_registered_hash = register_prediction_set(
-                    cs_id,
-                    candidate["training_hash"],
-                    checkpoint_value=candidate["checkpoint_value"],
-                    checkpoint_kind=candidate["checkpoint_kind"],
-                    split="holdout",
-                    predictions=predictions,
-                    task_type=mds.task_type,
-                    class_values=mds.class_values or None,
-                )
                 embargo = holdout_conformal_embargo_steps(cs_id, label)
                 alpha = float(alloc_spec.get("alpha", 0.20))
                 widths = compute_holdout_conformal_widths(
@@ -1233,11 +1387,11 @@ def generate_holdout(
                 )
             except (Exception, _PolarsPanicException) as e:  # noqa: BLE001
                 _log(f"    REJECT: conformal widths setup raised {type(e).__name__}: {e}")
-                # Only the prediction set is rolled back. A training_runs row
-                # written by register_training_run before register_prediction_set
-                # failed is content-addressed by training_hash and idempotent:
-                # with no prediction set or backtest referencing it, it is inert
-                # and is reused (not duplicated) if this candidate is retried.
+                # Only the prediction set is rolled back - the one registered just
+                # above, which the widths were to be keyed on. The `training_runs` row
+                # written with it is content-addressed by training_hash and idempotent:
+                # with no prediction set or backtest referencing it, it is inert and is
+                # reused rather than duplicated if this candidate is retried.
                 if pre_registered_hash:
                     _delete_pre_registered_prediction(cs_id, pre_registered_hash)
                 fallback_attempts.append(
@@ -1348,6 +1502,7 @@ def generate_holdout(
             checkpoint_kind=best["checkpoint_kind"],
             split="holdout",
             predictions=predictions,
+            expected_keys=expected_keys,
             metrics=metrics_payload,
             task_type=mds.task_type,
             class_values=mds.class_values or None,

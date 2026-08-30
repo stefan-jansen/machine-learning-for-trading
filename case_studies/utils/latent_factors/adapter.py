@@ -18,7 +18,10 @@ import numpy as np
 import polars as pl
 import torch
 
-from case_studies.research.cv import require_fold_scoped_temporal_compatibility
+from case_studies.research.cv import (
+    require_fold_scoped_temporal_compatibility,
+    require_fold_scoped_temporal_holdout_coverage,
+)
 from case_studies.research.identity import ResolvedSpec
 from case_studies.research.models import ModelRun
 from case_studies.utils.artifact_digest import value_digest
@@ -32,6 +35,11 @@ from case_studies.utils.latent_factors.cv import (
 from case_studies.utils.latent_factors.library_bridge import (
     predict_latent_fold_from_artifact,
 )
+from case_studies.utils.latent_factors.versions import (
+    _LATENT_MODELS,
+    LATENT_ADAPTER_VERSION,
+    LATENT_MODEL_VERSIONS,
+)
 from case_studies.utils.registry import prediction_hash_from_parts, training_hash_from_spec
 from case_studies.utils.runtime import cpu_seconds
 from utils.modeling import RANDOM_SEED
@@ -41,9 +49,6 @@ if TYPE_CHECKING:
     from case_studies.utils.latent_factors.case_study import LatentFactorCaseStudyContext
 
 
-_LATENT_MODELS = {"cae", "ipca", "pca", "sae", "sdf"}
-LATENT_ADAPTER_VERSION = 1
-LATENT_MODEL_VERSIONS = {model: 1 for model in _LATENT_MODELS}
 _PREVIEW_FIELDS = {
     "folds",
     "max_iter",
@@ -122,7 +127,9 @@ def _runtime_identity() -> dict[str, str | None]:
     }
 
 
-def _runtime_provenance(study: Study, device: str) -> dict[str, Any]:
+def _runtime_provenance(
+    study: Study, device: str, *, notebook: str | None = None
+) -> dict[str, Any]:
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(study.release_root), "rev-parse", "HEAD"],
@@ -145,6 +152,14 @@ def _runtime_provenance(study: Study, device: str) -> dict[str, Any]:
     if device == "cuda":
         record["cuda_runtime"] = torch.version.cuda
         record["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+    # `notebook_path` says which notebook produced a row; `entry_point` says which module ran.
+    # Different questions, and the module is legitimately shared - several notebooks call this one,
+    # so `entry_point` cannot name a notebook and should not try. Both sit in
+    # `registry/specs.py:_V2_PROVENANCE_FIELDS`, so neither reaches the training identity. Absent
+    # when the caller names no notebook: a holdout reconstruction is not a notebook run, and a
+    # wrong notebook name would be worse than none.
+    if notebook:
+        record["notebook_path"] = notebook
     return record
 
 
@@ -497,7 +512,7 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     }
     if tier is ExecutionTier.PREVIEW:
         computation["preview_reductions"] = reductions
-    runtime_provenance = _runtime_provenance(study, device)
+    runtime_provenance = _runtime_provenance(study, device, notebook=request.get("notebook"))
     spec = ResolvedSpec.create(
         family="latent_factors",
         label=label_ref.name,
@@ -580,7 +595,17 @@ def reconstruct_locked_request(
             )
     split = locked_holdout_split(spec, case.dataset, case.date_col, study.case_study)
     if case.temporal_by_fold is not None and case.temporal_keys and case.temporal_feature_names:
-        require_fold_scoped_temporal_compatibility([split], case.temporal_artifact_splits)
+        # Coverage, not fold-boundary compatibility. The holdout fold is derived when the lock is
+        # taken, so a stage-04 artifact built before any lock never declares it, and it cannot be
+        # rebuilt to declare it without changing the sha256 the lock pins. What the run needs is
+        # rows spanning the dates it trains and evaluates on; that is what this asserts, and it
+        # is the same check `rekey_holdout_spec` ran before the lock was taken.
+        require_fold_scoped_temporal_holdout_coverage(
+            split,
+            case.temporal_by_fold,
+            source_timeline=case.dataset.get_column(case.date_col),
+            date_col=case.date_col,
+        )
     case.splits = [split]
     expected = _prepare_expected_keys(case, model_name)
     validate_locked_expected_keys(spec, expected)

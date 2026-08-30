@@ -89,16 +89,19 @@
 
 import plotly.graph_objects as go
 import polars as pl
+from IPython.display import display
 from plotly.subplots import make_subplots
 
 from case_studies.research import (
     declared_labels,
     load_model_configs,
     model_requests,
+    narrows_declared_catalog,
     open_study,
     primary_label,
     resolved_model_plan,
     run_model_population,
+    supersedes_for_run,
 )
 from utils.style import COLORS, show_plotly_with_alt
 
@@ -153,14 +156,15 @@ configs
 # set of members than the canonical population does. A population is immutable once written, so
 # such a run must publish under its own name: on a fresh workspace it would otherwise register an
 # incomplete snapshot under the canonical one, and where the full population already exists the
-# registry refuses it. Comparing the loaded rows against the complete declared catalog catches
-# either knob, and says so here rather than several cells later in a message about hashes.
+# registry refuses it. The comparison is over `(label, config_name)` pairs rather than row counts,
+# because a subset can match the canonical population on height while declaring different members,
+# and it says so here rather than several cells later in a message about hashes.
 
 # %%
-if configs.height < load_model_configs(study, "gbm").height and not POPULATION_NAME:
+if narrows_declared_catalog(study, "gbm", configs) and not POPULATION_NAME:
     raise ValueError(
-        f"this run fits {configs.height} of the declared configurations, so it cannot publish "
-        "the canonical population; pass POPULATION_NAME to give it its own"
+        f"this run fits {configs.height} of the declared label-configuration pairs, so it cannot "
+        "publish the canonical population; pass POPULATION_NAME to give it its own"
     )
 
 
@@ -190,6 +194,7 @@ requests = model_requests(
     configs,
     execution_tier=EXECUTION_TIER,
     preview_reductions=PREVIEW_REDUCTIONS,
+    notebook="06_gbm",
 )
 resolved = tuple(request.resolve() for request in requests)
 
@@ -224,10 +229,21 @@ plan.select(
 # one series per checkpoint covering the whole validation period, and each becomes its own
 # registered prediction set with its own identity.
 #
-# Preparation happens once per fold and is shared by every configuration, because slicing the
-# window and cleaning the rows depends on the data and not on the model. The run walks folds on
-# the outside and configurations on the inside for the same reason: one prepared fold is held at a
-# time rather than the whole set, which is what keeps a panel this size inside memory.
+# **This notebook resolves its requests before running them, and that decides how the fitting is
+# ordered.** There are two paths through `run_model_population` and they are not interchangeable.
+# Handing it unresolved requests, or the plan built from them, reaches the family's batch runner,
+# which walks folds on the outside and configurations on the inside so that one prepared fold is
+# live at a time. Handing it resolved requests - what the cell above produces, and what the plan
+# table two cells up is built from - fits one configuration at a time, each preparing the folds it
+# needs.
+#
+# The trade is visible in what you have already read. Resolving first is what let the plan show
+# `eligible_entities` and the real fold boundaries rather than the identities alone, because those
+# numbers exist only once the data has been read; the cost is that each configuration prepares its
+# own folds instead of sharing one prepared set. On this panel that is affordable and the plan is
+# worth seeing. On a panel where it is not, the notebook passes the plan and gives up the entity
+# count - [`07_tabular_dl`](07_tabular_dl.ipynb) is the case where that choice goes the other way,
+# and it says so there.
 #
 # **What the call publishes is a population**: a named, immutable list of the prediction sets it
 # will produce, written down before the first fit. Afterwards every member must exist and be
@@ -235,17 +251,47 @@ plan.select(
 
 # %%
 population_name = POPULATION_NAME or "us_firm_characteristics-gbm-validation-v1"
+# The declared hash is only meaningful where a generation of this name already exists. A preview
+# run, a reader's first canonical run against an empty `run_log/`, and a run under a caller-chosen
+# `POPULATION_NAME` are all refused by `OfficialPopulation.create` if it is passed anyway. The
+# resolution lives in shared code so no notebook branches on the tier.
+supersedes = supersedes_for_run(
+    study,
+    population_name=population_name,
+    declared=SUPERSEDES_POPULATION,
+    execution_tier=EXECUTION_TIER,
+)
 execution, population = run_model_population(
-    study, resolved, population_name=population_name, supersedes=SUPERSEDES_POPULATION or None
+    study, resolved, population_name=population_name, supersedes=supersedes
 )
 
-print(f"{len(execution.runs)} configurations fitted")
+# The runner is shared across model families and its paths do not all record the same
+# diagnostics, so the split below is printed only when every run recorded it. Every GBM path
+# records it: a batch fit, a single request and a configuration served whole from the registry
+# each carry `fitted_folds` and `reused_folds`, so on this population the split is what prints.
+# The guard is for the runner rather than for this notebook. A TabM configuration served whole
+# from the registry records `reused` and no fold lists, and the latent-factor runner records
+# nothing at all. Indexing the keys raises `KeyError` on those, and defaulting them to zero is
+# worse: it reports every fold as served from the registry, which is the opposite of what
+# nothing-recorded means, and it does so in a number a reader cannot tell from a measurement.
+with_folds = [item for item in execution.diagnostics if "fitted_folds" in item]
+print(f"{len(execution.runs)} configurations, fitted or served from the registry")
+if with_folds and len(with_folds) == len(execution.diagnostics):
+    fitted = sum(len(item["fitted_folds"]) for item in with_folds)
+    served = sum(len(item["reused_folds"]) for item in with_folds)
+    print(f"folds fitted: {fitted}, folds served from the registry: {served}")
+else:
+    print(
+        f"{len(with_folds)} of {len(execution.diagnostics)} runs recorded fold counts, "
+        "so the fitted-against-served split is not reported"
+    )
 print(f"population {population.name}: {len(population.members)} prediction sets")
 
 # %% [markdown]
-# Re-running this notebook unchanged costs the time it takes to read the data. Every identity is
-# re-derived from the inputs, the registry already holds the matching rows, and the runner returns
-# the stored result rather than fitting again.
+# On a second run every configuration is served from the registry. Each identity is re-derived
+# from the inputs, the registry already holds the matching rows, and the runner returns the
+# stored result rather than fitting again - so re-running this notebook unchanged costs the time
+# it takes to read the data rather than the time it took to fit.
 #
 # ### Running configurations of your own
 #
@@ -575,9 +621,20 @@ show_plotly_with_alt(
 )
 
 # %% [markdown]
-# The frame below is the claim the chart makes, computed rather than read off it: for each target,
-# the range each objective covers and whether the groups overlap. Complete separation is a
-# stronger statement than a difference in means, and it is the one the chart appears to show.
+# ### Which of the two axes moved the result
+#
+# The two frames below are the claims the charts make, computed rather than read off them, and
+# they sit together because they are read against each other.
+#
+# `by_objective` gives, for each target, the range each objective covers and whether the groups
+# overlap. Complete separation is a stronger statement than a difference in means, and it is the
+# one the chart appears to show.
+#
+# `checkpoint_vs_grid` puts the range a configuration's IC covers across its own ten checkpoints
+# against the spread across that target's whole grid at fixed training length. That is the
+# quantity that decides whether choosing a stopping point is a decision worth making carefully or
+# one being made by noise. Both are computed inside a target, because comparing a within-run range
+# against a spread taken across targets would compare two different things.
 
 # %% tags=["results"]
 by_objective = (
@@ -593,18 +650,6 @@ by_objective = (
     )
     .sort(["label", "ic_median"], descending=[False, True])
 )
-by_objective
-
-# %% [markdown]
-# ### How much the checkpoint moves a configuration
-#
-# One number per target and configuration: the range its IC covers across its own ten checkpoints,
-# against the spread across that target's whole grid at fixed training length. This is the
-# quantity that decides whether choosing a stopping point is a decision worth making carefully or
-# one being made by noise. Both are computed inside a target, because comparing a within-run range
-# against a spread taken across targets would compare two different things.
-
-# %% tags=["results"]
 spread = (
     curves.group_by("label", "config_name")
     .agg(
@@ -630,6 +675,7 @@ checkpoint_vs_grid = (
     .sort("label")
 )
 print(f"compared at {final_iteration} boosting iterations")
+display(by_objective)
 checkpoint_vs_grid
 
 # %% [markdown]

@@ -46,6 +46,82 @@ def require_fold_scoped_temporal_compatibility(
         )
 
 
+def require_fold_scoped_temporal_holdout_coverage(
+    requested_fold: dict[str, Any],
+    temporal_by_fold: Any,
+    *,
+    source_timeline: Any,
+    date_col: str = "timestamp",
+    fold_col: str = "fold",
+) -> None:
+    """Require an existing temporal fold to cover the holdout's training and evaluation windows.
+
+    ``require_fold_scoped_temporal_compatibility`` asks whether the artifact declares a fold with
+    the requested geometry. For a holdout that question has no good answer. The holdout fold is
+    derived when the lock is taken, so the artifact - built during stage 04, before any lock -
+    never declares it, and the artifact cannot be rebuilt to add it: the lock pins the feature
+    file by whole-file sha256, so writing the fold in changes the digest the selection was made
+    under. Compatibility therefore refuses every holdout lock on a case study with fold-scoped
+    model-based features.
+
+    Coverage is the question that can be answered. The model-based features are joined by
+    ``(entity, date)``, so what the holdout run actually needs is not a fold labelled for it but
+    rows spanning the dates it will train and evaluate on. This checks exactly that, against the
+    fold the derived holdout CV names, and it is strictly the stronger check where both apply:
+    a fold with matching boundaries but missing rows passes compatibility and fails here.
+    """
+    import polars as pl
+
+    from utils.modeling import validate_temporal_fold_coverage
+
+    columns = [fold_col, date_col]
+    if isinstance(temporal_by_fold, pl.LazyFrame):
+        frame = temporal_by_fold.select(columns).collect()
+    elif isinstance(temporal_by_fold, pl.DataFrame):
+        frame = temporal_by_fold.select(columns)
+    else:
+        frame = pl.from_pandas(temporal_by_fold.loc[:, columns])
+    fold_id = int(requested_fold["fold"])
+    dates = frame.filter(pl.col(fold_col) == fold_id).get_column(date_col)
+    if dates.is_empty():
+        raise ValueError(f"fold-scoped temporal artifact has no holdout fold {fold_id}")
+    dtype = dates.dtype
+
+    def boundary(name: str) -> Any:
+        value = requested_fold[name]
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        return pl.Series([value]).cast(dtype, strict=False).item()
+
+    train_start, train_end = boundary("train_start"), boundary("train_end")
+    val_start, val_end = boundary("val_start"), boundary("val_end")
+    if not dates.is_between(train_start, train_end, closed="both").any():
+        raise ValueError("fold-scoped temporal holdout has no requested training rows")
+    if isinstance(source_timeline, pl.Series):
+        source_dates = source_timeline.cast(dtype, strict=False)
+    else:
+        source_dates = pl.Series(source_timeline).cast(dtype, strict=False)
+    expected = source_dates.filter(source_dates.is_between(val_start, val_end, closed="both"))
+    if expected.is_empty():
+        raise ValueError("source data has no observations in the holdout evaluation window")
+
+    source_frame = pl.DataFrame({date_col: source_dates})
+    temporal_frame = frame.rename({fold_col: "fold"}) if fold_col != "fold" else frame
+    validate_temporal_fold_coverage(
+        source_frame,
+        temporal_frame,
+        [requested_fold],
+        date_col=date_col,
+    )
+
+    # The endpoint, specifically: a temporal artifact that stops one session short of the holdout
+    # window's last observation would otherwise pass every check above, and the holdout would be
+    # evaluated on a shorter period than the one the lock declares.
+    evaluation = dates.filter(dates.is_between(val_start, val_end, closed="both"))
+    if evaluation.is_empty() or not evaluation.eq(expected.max()).any():
+        raise ValueError("fold-scoped temporal holdout does not cover the evaluation endpoint")
+
+
 @dataclass(frozen=True)
 class EligibilityManifest:
     entity_schema: dict[str, Any]
