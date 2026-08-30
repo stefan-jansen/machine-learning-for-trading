@@ -159,16 +159,26 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY}:holdout-candidates"
 # fixtures both - so the set is in the published run log and absent everywhere else. Reading it
 # is the stronger path: it is immutable, so it cannot follow an upstream change. Re-deriving is
 # the same rule applied live, and cannot notice that something moved. Which one ran is printed.
+# Only the RESOLUTION is guarded. Once a frozen set resolves it is authoritative, so anything
+# it then refuses - an incomplete rank-1 member, a set of the wrong member kind - has to
+# propagate. Catching those too would silently replace the recorded selection with a live one
+# at the very moment the recorded one is telling you something is wrong with it.
 try:
     CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
-    SELECTED = CANDIDATES.best_validation_sharpe()
+except (ValueError, LookupError):
+    CANDIDATES = None
+
+if CANDIDATES is not None:
     if CANDIDATES.member_kind != "backtest":
-        raise RuntimeError("the holdout selection requires a backtest candidate set")
+        raise RuntimeError(
+            f"candidate set {CANDIDATES.hash} holds {CANDIDATES.member_kind} members; "
+            "the holdout selection requires backtests"
+        )
+    SELECTED = CANDIDATES.best_validation_sharpe()
     FIELD_HASHES = list(CANDIDATES.members)
     FIELD_NAME = f"frozen candidate set {CANDIDATES.hash}"
     SELECTION_SOURCE = f"{FIELD_NAME} ({len(FIELD_HASHES)} members)"
-except (ValueError, LookupError):
-    CANDIDATES = None
+else:
     _live = pl.concat(
         [
             resolve_best_backtest_runs(
@@ -187,7 +197,7 @@ except (ValueError, LookupError):
         raise RuntimeError(
             f"no candidate set {CANDIDATE_SET_NAME!r} in this registry and no eligible "
             "validation backtests to rank, so there is no selection to carry forward"
-        ) from None
+        )
     SELECTED = _study.results.open(
         _live.sort("sharpe", descending=True).row(0, named=True)["backtest_hash"]
     )
