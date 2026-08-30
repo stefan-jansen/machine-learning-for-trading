@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -326,6 +327,22 @@ def _full_strategy_clauses(spec: dict | None) -> tuple[list[str], list[object]]:
     return clauses, params
 
 
+@cache
+def _retired_identities(cs: str) -> frozenset[str]:
+    """Prediction identities a later generation of their own population retired.
+
+    Imported lazily: ``case_studies.research`` imports this module's siblings, and a
+    module-level import closes the cycle.
+    """
+    from case_studies.research import Study, superseded_members
+
+    try:
+        return superseded_members(Study.open(cs), member_kind="prediction")
+    except Exception:
+        # A case study with no population lineage retires nothing.
+        return frozenset()
+
+
 def _val_rank1_full_spec(
     cs: str,
     explorer: BacktestExplorer,
@@ -333,6 +350,7 @@ def _val_rank1_full_spec(
     label_restriction: frozenset[str] | None,
     rung: dict | None,
     carrier_pin_predicate: pl.Expr | None,
+    prediction_hashes: list[str] | None = None,
 ) -> dict | None:
     """Return the val rank-1 *full strategy* spec for ``cs`` — the
     highest-Sharpe validation backtest across (signal, allocation,
@@ -343,7 +361,10 @@ def _val_rank1_full_spec(
     under the case study's label / rung restrictions.
     """
     cand = pl.concat(
-        [_best_for_rung(explorer, s, rung) for s in ("signal", "allocation", "risk_overlay")],
+        [
+            _best_for_rung(explorer, s, rung, prediction_hashes=prediction_hashes)
+            for s in ("signal", "allocation", "risk_overlay")
+        ],
         how="diagonal_relaxed",
     )
     if cand.is_empty() or "backtest_hash" not in cand.columns:
@@ -419,6 +440,7 @@ def _holdout_lineage_for(
     label_restriction: frozenset[str] | None,
     rung: dict | None,
     prefer_prediction_hash: str | None = None,
+    retired_hashes: frozenset[str] | None = None,
 ) -> dict | None:
     """Return ``{backtest_hash, prediction_hash, family, config_name, label}``
     for the highest-Sharpe holdout backtest registered in this case study,
@@ -457,6 +479,12 @@ def _holdout_lineage_for(
         else:
             clauses.append("json_extract(b.spec_json, '$.strategy.signal.exit_at_max_days') = ?")
             params.append(rung["exit_at_max_days"])
+    if retired_hashes:
+        # The holdout carries its own prediction identities, so the caller's live validation
+        # list cannot scope this query. What crosses both splits is the lineage: an identity a
+        # later generation retired is not what its publisher publishes, on either side.
+        clauses.append("p.prediction_hash NOT IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(sorted(retired_hashes)))
     spec_clauses, spec_params = _full_strategy_clauses(strategy_spec)
     clauses.extend(spec_clauses)
     params.extend(spec_params)
@@ -529,7 +557,14 @@ def _holdout_lineage_for(
     return dict(row) if row else None
 
 
-def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str) -> str | None:
+def _val_backtest_for_lineage(
+    cs: str,
+    family: str,
+    config_name: str,
+    label: str,
+    *,
+    prediction_hashes: list[str] | None = None,
+) -> str | None:
     """Return the highest-Sharpe validation signal-stage backtest_hash for the
     given (family, config_name, label) lineage, or None if absent.
 
@@ -554,10 +589,18 @@ def _val_backtest_for_lineage(cs: str, family: str, config_name: str, label: str
               AND t.family = ?
               AND t.config_name = ?
               AND t.label = ?
+              {scope}
             ORDER BY bm.sharpe DESC NULLS LAST
             LIMIT 1
-            """,
-            (family, config_name, label),
+            """.format(
+                scope=(
+                    " AND p.prediction_hash IN (SELECT value FROM json_each(?))"
+                    if prediction_hashes is not None
+                    else ""
+                )
+            ),
+            (family, config_name, label)
+            + ((json.dumps(list(prediction_hashes)),) if prediction_hashes is not None else ()),
         ).fetchone()
     finally:
         db.close()
@@ -903,6 +946,7 @@ def populate_paired_metrics(
         label_restriction=label_restriction,
         rung=rung,
         carrier_pin_predicate=carrier_pin_predicate,
+        prediction_hashes=live,
     )
     # The carrier's training hash and checkpoint are both resolved inside
     # ``_holdout_lineage_for`` from this one prediction hash, so the same-lineage
@@ -914,6 +958,7 @@ def populate_paired_metrics(
         label_restriction=label_restriction,
         rung=rung,
         prefer_prediction_hash=leader_phash,
+        retired_hashes=_retired_identities(cs),
     )
     ho_hash = ho_lineage["backtest_hash"] if ho_lineage else None
     ho_label = ho_lineage["label"] if ho_lineage else leader_label
@@ -966,7 +1011,9 @@ def populate_paired_metrics(
             val_self_hash = leader_hash
             val_self_returns = chal_full
         else:
-            val_self_hash = _val_backtest_for_lineage(cs, ho_family, ho_config, ho_label)
+            val_self_hash = _val_backtest_for_lineage(
+                cs, ho_family, ho_config, ho_label, prediction_hashes=live
+            )
             val_self_returns = _aligned_returns(cs, val_self_hash) if val_self_hash else None
         if val_self_hash is not None and val_self_returns is not None:
             rows.append(
