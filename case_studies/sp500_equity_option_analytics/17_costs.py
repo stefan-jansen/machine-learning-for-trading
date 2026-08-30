@@ -155,16 +155,24 @@ CANDIDATE_SET_NAME = f"{CASE_STUDY_ID}:holdout-candidates"
 # fixtures both - so the set is in the published run log and absent everywhere else. Reading it
 # is the stronger path: it is immutable, so it cannot follow an upstream change. Re-deriving is
 # the same rule applied live, and cannot notice that something moved. Which one ran is printed.
-# Only the RESOLUTION is guarded. Once a frozen set resolves it is authoritative, so anything
-# it then refuses - an incomplete rank-1 member, a set of the wrong member kind - has to
-# propagate. Catching those too would silently replace the recorded selection with a live one
-# at the very moment the recorded one is telling you something is wrong with it.
+# Whether the name is recorded at all is asked of the registry directly, rather than inferred
+# from an exception. `CandidateSet.one` raises ValueError for two unrelated conditions - the
+# name resolves to no unsuperseded set, and it resolves to several - and only the first means
+# "this registry has no frozen selection". Catching both would send an AMBIGUOUS set, which is
+# a refit that left two generations live and needs a person to say which supersedes which,
+# silently down the live-ranking path. So the fallback is chosen on absence, and every way a
+# recorded set can be wrong propagates from the unguarded call below.
 try:
-    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
-except (ValueError, LookupError):
-    CANDIDATES = None
+    with sqlite3.connect(REGISTRY_DB) as _db:
+        _recorded_sets = _db.execute(
+            "SELECT COUNT(*) FROM candidate_sets WHERE name = ?", (CANDIDATE_SET_NAME,)
+        ).fetchone()[0]
+except sqlite3.OperationalError:
+    # No `candidate_sets` table: a registry that predates them, or a reader's clean clone.
+    _recorded_sets = 0
 
-if CANDIDATES is not None:
+if _recorded_sets:
+    CANDIDATES = CandidateSet.one(_study, name=CANDIDATE_SET_NAME)
     if CANDIDATES.member_kind != "backtest":
         raise RuntimeError(
             f"candidate set {CANDIDATES.hash} holds {CANDIDATES.member_kind} members; "
