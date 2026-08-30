@@ -774,20 +774,55 @@ with sqlite3.connect(REGISTRY_DB) as db:
         ORDER BY bm.sharpe DESC
         """
     ).fetchall()
-    published_spec = json.loads(
+    published_full_spec = json.loads(
         db.execute(
             "SELECT spec_json FROM training_runs WHERE training_hash = ?",
             (current_training_hash,),
         ).fetchone()[0]
-    )["computation"]
+    )
 
-if len(lock_rows) != 1:
-    raise RuntimeError(f"expected exactly one research lock, found {len(lock_rows)}")
-LOCK_HASH, _lock_payload, LOCK_STATE = lock_rows[0]
-lock = json.loads(_lock_payload)
-sealed_spec = lock["holdout_training_spec"]["computation"]
-SEALED_TRAINING_HASH = lock["holdout_training_hash"]
+# Whether this registry can answer the question at all, decided before anything is compared.
+# Three registries reach this cell and they differ in exactly the way that matters: this case
+# study's own holds one lock and one sealed holdout, a reader's clean clone holds neither, and
+# the CI fixture holds three holdout backtests and no lock at all while seeding `training_runs`
+# with a flat `{family, config_name, label}` spec. Indexing `["computation"]` or `lock_rows[0]`
+# unconditionally raised on the last two, which is the failure this whole section exists to
+# remove, one level up: an absent measurement reported as something other than an absence.
+#
+# An unsealed holdout is reported rather than refused. Holdout rows with no lock naming them
+# are a real condition - `us_firm_characteristics` is in it, with one holdout prediction and
+# no lock - and it means the registry cannot say which selection the window was spent on. But
+# a case study in that state still has a terminal notebook to render, and refusing here would
+# leave it unable to say so.
+if len(lock_rows) > 1:
+    raise RuntimeError(f"{len(lock_rows)} research locks; a holdout resolves to exactly one")
+HOLDOUT_UNSEALED = bool(holdout_rows) and not lock_rows
+if HOLDOUT_UNSEALED:
+    print(
+        f"{len(holdout_rows)} holdout backtest(s) and no research lock naming them. The "
+        "window was spent, and nothing records which selection it was spent on, so no "
+        "out-of-sample claim can be attached to the carrier below."
+    )
 
+lock = json.loads(lock_rows[0][1]) if lock_rows else {}
+LOCK_HASH, LOCK_STATE = (lock_rows[0][0], lock_rows[0][2]) if lock_rows else (None, None)
+SEALED_TRAINING_HASH = lock.get("holdout_training_hash")
+sealed_spec = (lock.get("holdout_training_spec") or {}).get("computation") or {}
+published_spec = published_full_spec.get("computation") or {}
+HOLDOUT_ASSESSABLE = bool(lock_rows and sealed_spec and published_spec)
+if not HOLDOUT_ASSESSABLE:
+    print(
+        "Holdout status not assessable from this registry: "
+        + (
+            "no research lock, and holdout rows that none of them seals"
+            if HOLDOUT_UNSEALED
+            else "it holds no research lock, so no holdout has been taken here"
+            if not lock_rows
+            else "the recorded training specifications carry no computation block to compare"
+        )
+    )
+
+# %%
 # Every field of the training identity, so agreement and disagreement are both shown rather
 # than only the half that supports a conclusion. A bare true/false is not enough here: a
 # holdout retrain is *supposed* to differ from its validation twin on the window it fits and
@@ -823,14 +858,17 @@ def _divergence(field: str) -> str:
     return "differs"
 
 
-_identity_fields = sorted(set(published_spec) | set(sealed_spec))
+# Empty when the comparison cannot be made, so the frame below is a real answer - nothing to
+# compare - rather than a table of fields trivially agreeing because both sides are absent.
+_identity_fields = sorted(set(published_spec) | set(sealed_spec)) if HOLDOUT_ASSESSABLE else []
 _reasons = {field: _divergence(field) for field in _identity_fields}
 sealed_vs_published = pl.DataFrame(
     {
         "identity_field": _identity_fields,
         "agrees": [not _reasons[f] for f in _identity_fields],
         "why_it_differs": [_reasons[f] or "-" for f in _identity_fields],
-    }
+    },
+    schema={"identity_field": pl.String, "agrees": pl.Boolean, "why_it_differs": pl.String},
 ).sort(["agrees", "identity_field"])
 
 # The fields that differ for a reason other than the holdout window and the recording change.
@@ -842,62 +880,70 @@ SUBSTANTIVE_DIVERGENCE = sorted(
 )
 # The selection geometry the lock sealed, against the one the carrier publishes. This is the
 # validation CV, not the holdout CV in `sealed_spec`, so it is read from the lock itself.
-VALIDATION_CV_MATCHES = lock["cv"]["identity"] == published_spec["cv"]["identity"]
+VALIDATION_CV_MATCHES = HOLDOUT_ASSESSABLE and (
+    (lock.get("cv") or {}).get("identity") == (published_spec.get("cv") or {}).get("identity")
+)
 
 # %%
 _sealed = [row for row in holdout_rows if row[2] == SEALED_TRAINING_HASH]
-if not _sealed:
+if HOLDOUT_ASSESSABLE and not _sealed:
     raise RuntimeError(
         f"the research lock names holdout training {SEALED_TRAINING_HASH}, and no holdout "
         "backtest in the registry runs on it: the sealed evaluation cannot be read back"
     )
-if len(_sealed) != 1:
+if len(_sealed) > 1:
     raise RuntimeError(f"{len(_sealed)} holdout backtests run on the sealed fit; expected one")
 
-_row = _sealed[0]
-_sealed_strategy = strategy_view(json.loads(_row[5]))
 _carrier_strategy = {
     "allocator": strategy_carrier["allocator"],
     "risk": risk_leader["risk_name"],
     "top_k": strategy_carrier["top_k"],
 }
-sealed_holdout = {
-    "lock_hash": LOCK_HASH,
-    "lock_state": LOCK_STATE,
-    "backtest_hash": _row[0],
-    "prediction_hash": _row[1],
-    "training_hash": _row[2],
-    "family": _row[3],
-    "label": _row[4],
-    "allocator": _sealed_strategy.get("allocation", {}).get("method"),
-    "top_k": _sealed_strategy.get("allocation", {}).get("top_k"),
-    "risk": _sealed_strategy.get("risk", {}).get("name"),
-    "sharpe": _row[6],
-    "sharpe_ci_lo": _row[7],
-    "sharpe_ci_hi": _row[8],
-    "max_drawdown": _row[9],
-}
-STRATEGY_MATCHES = (
-    sealed_holdout["allocator"] == _carrier_strategy["allocator"]
-    and sealed_holdout["risk"] == _carrier_strategy["risk"]
-    and sealed_holdout["top_k"] == _carrier_strategy["top_k"]
-)
-IDENTITY_MATCHES = current_training_hash == SEALED_TRAINING_HASH
+if _sealed:
+    _row = _sealed[0]
+    _sealed_strategy = strategy_view(json.loads(_row[5]))
+    sealed_holdout = {
+        "lock_hash": LOCK_HASH,
+        "lock_state": LOCK_STATE,
+        "backtest_hash": _row[0],
+        "prediction_hash": _row[1],
+        "training_hash": _row[2],
+        "family": _row[3],
+        "label": _row[4],
+        "allocator": _sealed_strategy.get("allocation", {}).get("method"),
+        "top_k": _sealed_strategy.get("allocation", {}).get("top_k"),
+        "risk": _sealed_strategy.get("risk", {}).get("name"),
+        "sharpe": _row[6],
+        "sharpe_ci_lo": _row[7],
+        "sharpe_ci_hi": _row[8],
+        "max_drawdown": _row[9],
+    }
+    STRATEGY_MATCHES = (
+        sealed_holdout["allocator"] == _carrier_strategy["allocator"]
+        and sealed_holdout["risk"] == _carrier_strategy["risk"]
+        and sealed_holdout["top_k"] == _carrier_strategy["top_k"]
+    )
+else:
+    sealed_holdout = None
+    STRATEGY_MATCHES = False
+IDENTITY_MATCHES = HOLDOUT_ASSESSABLE and current_training_hash == SEALED_TRAINING_HASH
 
 print(f"Published carrier training hash: {current_training_hash}")
-print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH}  (lock {LOCK_HASH}, {LOCK_STATE})")
+print(f"Sealed holdout training hash:    {SEALED_TRAINING_HASH or 'none'} (lock {LOCK_HASH})")
 print(f"Same training identity: {IDENTITY_MATCHES}")
-print(
-    "Sealed strategy: "
-    f"{sealed_holdout['allocator']} / top {sealed_holdout['top_k']} / {sealed_holdout['risk']}"
-)
 print(
     "Carrier strategy: "
     f"{_carrier_strategy['allocator']} / top {_carrier_strategy['top_k']} / "
     f"{_carrier_strategy['risk']}"
 )
-print(f"Same strategy: {STRATEGY_MATCHES}")
-pl.DataFrame([sealed_holdout])
+if sealed_holdout is not None:
+    print(
+        "Sealed strategy:  "
+        f"{sealed_holdout['allocator']} / top {sealed_holdout['top_k']} / "
+        f"{sealed_holdout['risk']}"
+    )
+    print(f"Same strategy: {STRATEGY_MATCHES}")
+pl.DataFrame([sealed_holdout] if sealed_holdout else [])
 
 # %%
 # Which identity fields the sealed fit and the published one disagree on. This is the whole
@@ -991,21 +1037,32 @@ assessment = pl.DataFrame(
             # and carry the two halves of that question.
             "gate": "Holdout on the published fit",
             "status": (
-                "PASS"
+                "UNSEALED"
+                if HOLDOUT_UNSEALED
+                else "NOT ASSESSED"
+                if sealed_holdout is None
+                else "PASS"
                 if IDENTITY_MATCHES
                 else "QUALIFIED"
                 if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
                 else "INCONCLUSIVE"
             ),
             "evidence": (
-                f"sealed {sealed_holdout['sharpe']:.3f} "
-                f"[{sealed_holdout['sharpe_ci_lo']:.3f}, {sealed_holdout['sharpe_ci_hi']:.3f}]"
-                + (
-                    "; same training identity"
-                    if IDENTITY_MATCHES
-                    else "; same computation, different identity"
-                    if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
-                    else f"; diverges on {', '.join(SUBSTANTIVE_DIVERGENCE) or 'strategy'}"
+                f"{len(holdout_rows)} holdout backtest(s) sealed by no lock"
+                if HOLDOUT_UNSEALED
+                else "no research lock in this registry; no holdout has been taken"
+                if sealed_holdout is None
+                else (
+                    f"sealed {sealed_holdout['sharpe']:.3f} ["
+                    f"{sealed_holdout['sharpe_ci_lo']:.3f}, "
+                    f"{sealed_holdout['sharpe_ci_hi']:.3f}]"
+                    + (
+                        "; same training identity"
+                        if IDENTITY_MATCHES
+                        else "; same computation, different identity"
+                        if STRATEGY_MATCHES and VALIDATION_CV_MATCHES and not SUBSTANTIVE_DIVERGENCE
+                        else f"; diverges on {', '.join(SUBSTANTIVE_DIVERGENCE) or 'strategy'}"
+                    )
                 )
             ),
         },
