@@ -805,9 +805,11 @@ risk_diagnostics
 # when the lock was taken, a field-by-field identity diff between the sealed and published
 # fits, and a `holdout_evaluations` lineage read. All of it existed to make the holdout
 # unrepeatable and to adjudicate what to do when the carrier changed underneath it. The
-# holdout is repeatable: if it is run on the wrong configuration, the rows are deleted and
-# it is run again. Machinery whose purpose is to prevent that is machinery whose purpose is
-# to preserve a stale answer, so it is gone rather than parked.
+# holdout is repeatable: if it is run on the wrong configuration, it is run again on the
+# right one. Machinery whose purpose is to prevent that is machinery whose purpose is to
+# preserve a stale answer, so it is gone rather than parked. What replaces it is a count: the
+# earlier rows stay, and a window carrying more than one holdout fit is reported as one that
+# has been read more than once.
 #
 # What remains worth checking is not whether the holdout was allowed to run, but whether the
 # rows on disk describe the configuration this funnel actually selected. That is one join
@@ -984,8 +986,9 @@ print(f"Holdout rows in the registry: {len(holdout_rows)}; matching this carrier
 if holdout_result is None:
     print(
         "No holdout backtest for this configuration. Run 18_holdout_predictions and "
-        "19_holdout_backtest; if the rows present describe a configuration the funnel no "
-        "longer selects, delete them first."
+        "19_holdout_backtest. Any holdout rows already present describe a configuration the "
+        "funnel no longer selects; leave them where they are, because they are the record "
+        "that the window was read on that configuration."
     )
 else:
     print(
@@ -1135,9 +1138,10 @@ assessment
 #    several folds and a holdout Sharpe is one period, so the two are different
 #    measurements and a gap between them is not by itself evidence that
 #    validation was optimistic. If the holdout rows ever describe a
-#    configuration the funnel no longer selects, they are deleted and the two
-#    holdout notebooks are re-run - there is no mechanism here preventing that,
-#    and there should not be.
+#    configuration the funnel no longer selects, the two holdout notebooks are
+#    re-run on the one it does - nothing here prevents that, and nothing should.
+#    The superseded rows stay: they are the only record that the window was read
+#    before, and this page counts them and says so.
 # 6. What the record supports is a validation result on a stated configuration
 #    plus one out-of-sample draw on it. One draw with a wide interval is not a
 #    deployment claim, and this notebook makes none.
