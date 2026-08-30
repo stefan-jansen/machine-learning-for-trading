@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -953,7 +954,12 @@ class BacktestExplorer:
     # cost_sensitivity: breakeven analysis from registry
     # -----------------------------------------------------------------
 
-    def cost_sensitivity(self, *, prediction_hash: str | None = None) -> pl.DataFrame:
+    def cost_sensitivity(
+        self,
+        *,
+        prediction_hash: str | None = None,
+        backtest_hashes: Iterable[str] | None = None,
+    ) -> pl.DataFrame:
         """Load cost sensitivity results from the cost_sensitivity stage.
 
         Only the bps (``commission.model='percentage'``) regime is returned;
@@ -970,6 +976,15 @@ class BacktestExplorer:
             studies with a pinned carrier (e.g. nasdaq's cost-feasible
             ensemble) must scope to the carrier so the full-universe
             cost-defeat demonstration rows do not pool into the headline.
+        backtest_hashes : iterable of str, optional
+            When provided, restrict to exactly these cost rows. A prediction is
+            not a strategy: several configurations share one prediction set, and
+            a superseded generation stays in the registry under the same
+            prediction hash as the one that replaced it - on
+            us_firm_characteristics the retired ``walk_forward_v2`` conformal
+            sweep and its ``walk_forward_v3`` replacement both do. Scoping by
+            prediction then draws two generations as one curve. Pass the hashes
+            the sweep registered when the curve must describe one strategy.
 
         Returns
         -------
@@ -977,7 +992,16 @@ class BacktestExplorer:
             Columns: cost_bps, sharpe, max_drawdown, allocator
         """
         pred_clause = "" if prediction_hash is None else " AND b.prediction_hash = ?"
-        params = () if prediction_hash is None else (prediction_hash,)
+        params: tuple = () if prediction_hash is None else (prediction_hash,)
+        hash_clause = ""
+        if backtest_hashes is not None:
+            selected = tuple(dict.fromkeys(backtest_hashes))
+            if not selected:
+                # An empty selection is an empty curve, not an unscoped one. Falling through
+                # to no clause would return every cost row in the registry.
+                return pl.DataFrame()
+            hash_clause = f" AND b.backtest_hash IN ({', '.join('?' for _ in selected)})"
+            params = params + selected
         df = self._query(
             f"""
             SELECT
@@ -990,7 +1014,7 @@ class BacktestExplorer:
               AND bm.sharpe IS NOT NULL
               AND (bm.num_trades IS NULL OR bm.num_trades > 0)
               AND json_extract(b.spec_json, '$.backtest_config.commission.model') = 'percentage'
-              {pred_clause}
+              {pred_clause}{hash_clause}
             """,
             params,
         )

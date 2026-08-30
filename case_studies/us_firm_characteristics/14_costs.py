@@ -199,6 +199,7 @@ n_done = 0
 n_failed = 0
 n_reused = 0
 failures: Counter[str] = Counter()
+swept_hashes: list[str] = []
 reusable_before = {
     _hash
     for _hash in load_existing_backtest_hashes(CASE_STUDY_ID, stage="cost_sensitivity")
@@ -241,6 +242,7 @@ for cost_bps in COST_GRID_BPS:
             calendar=bt_config.calendar,
         )
 
+        swept_hashes.append(result.backtest_hash)
         if result.backtest_hash in reusable_before:
             n_reused += 1
         print(
@@ -308,13 +310,20 @@ from case_studies.utils.backtest_explorer import BacktestExplorer
 explorer = BacktestExplorer(CASE_STUDY_ID)
 
 # %% [markdown]
-# The read is scoped to the prediction the sweep above carried. The cost-sensitivity
-# table accumulates across runs and labels, and the selection feeding this notebook
-# moves whenever an upstream stage is re-run, so an unscoped read pools the current
-# curve with every curve that preceded it and draws them as one series per allocator.
+# The read is scoped to the backtests the sweep above registered, not to the prediction
+# they were run on. The cost-sensitivity table accumulates across runs and labels, and the
+# selection feeding this notebook moves whenever an upstream stage is re-run, so an
+# unscoped read pools the current curve with every curve that preceded it and draws them
+# as one series per allocator.
+#
+# A prediction is not a strategy, so scoping by prediction is not enough here. The retired
+# `walk_forward_v2` conformal sweep and the `walk_forward_v3` one that replaced it were run
+# on the same prediction set, both are in the registry, and both are `conformal_weighted` -
+# so a read scoped by prediction returns twenty-two rows under one allocator name and draws
+# two generations as one line.
 
 # %%
-cost_df = explorer.cost_sensitivity(prediction_hash=pred_hash)
+cost_df = explorer.cost_sensitivity(backtest_hashes=swept_hashes)
 
 # %% [markdown]
 # The figure below shows the slope; this is the curve it is drawn from. A reader
