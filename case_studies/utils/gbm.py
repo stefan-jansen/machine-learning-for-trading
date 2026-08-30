@@ -1925,6 +1925,122 @@ def resolve_model_request(study: Study, request: dict[str, Any]):
     )
 
 
+def _gbm_fold_invariant_params(
+    recorded: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """The parameters every recorded fold agreed on, and whether the Huber delta varied.
+
+    Almost every LightGBM parameter comes from the preset and is the same on every fold.
+    The one exception is ``alpha`` under a ``huber`` objective without a declared alpha:
+    :func:`_scaled_huber_alpha` resolves it from the fold's own training labels, so it is a
+    different number on every fold and cannot be carried across one.
+
+    Anything else differing between folds means the recorded parameters were not produced by
+    the rule this understands, and re-keying them would invent a configuration nobody ran. So
+    it refuses and names the parameters, rather than picking one fold's values.
+    """
+    if not isinstance(recorded, dict) or not recorded:
+        raise ValueError("GBM training spec records no effective parameters to re-key")
+    witness = dict(recorded[sorted(recorded)[0]])
+    divergent = {
+        name
+        for fold_params in recorded.values()
+        for name in set(witness) | set(fold_params)
+        if witness.get(name) != fold_params.get(name)
+    }
+    unexpected = divergent - {"alpha"}
+    if unexpected:
+        raise ValueError(
+            f"GBM parameters differ across the recorded folds in {sorted(unexpected)}. Only the "
+            "Huber delta is derived per fold, so there is no rule here that reproduces these on "
+            "the holdout fold, and carrying one fold's values forward would evaluate a "
+            "configuration that was never ranked."
+        )
+    return witness, "alpha" in divergent
+
+
+def rekey_holdout_spec(
+    study: Study,
+    spec: dict[str, Any],
+    *,
+    validation_spec: dict[str, Any],
+) -> None:
+    """Recompute the fold-derived fields against the holdout fold, in place.
+
+    ``spec`` arrives with its CV already replaced by the single derived holdout fold, and with
+    ``expected_prediction_keys`` and ``effective_params_by_fold`` still describing the
+    VALIDATION folds. :func:`reconstruct_locked_request` checks both against the holdout fold
+    before it will build a request, so carrying them forward produces a spec that fails at
+    execution. They have to be recomputed.
+
+    The eligibility manifest is recomputed from the dataset over the holdout window, by the
+    same call the validation request used.
+
+    The parameters are re-keyed rather than re-derived from the preset, which is the same
+    choice :func:`reconstruct_locked_request` makes and for the same reason: a request can
+    carry overrides the spec does not record separately, so a preset reloaded by name is not
+    guaranteed to be the configuration that ran. What the spec does record is every fold's
+    resolved parameters, and those are enough - see :func:`_gbm_fold_invariant_params` for
+    what varies across folds and what refuses.
+    """
+    from case_studies.research.models import locked_holdout_split
+    from utils.modeling import load_modeling_dataset
+
+    computation = spec["computation"]
+    label_ref = study.labels.get(spec["label"], execution_tier=ExecutionTier.CANONICAL)
+    mds = load_modeling_dataset(study.case_study, label_ref.name, max_symbols=0)
+    if mds.date_col != "timestamp" or not mds.entity_cols:
+        raise ValueError("GBM holdout re-keying requires timestamp and an entity key")
+
+    split = locked_holdout_split(spec, mds.dataset, mds.date_col, study.case_study)
+    expected = _gbm_expected_keys_from_dataset(mds, [split])
+    computation["expected_prediction_keys"] = {
+        "digest": value_digest(expected, ("symbol", "timestamp", "fold")),
+        "n_rows": expected.height,
+        "n_folds": expected.get_column("fold").n_unique(),
+    }
+
+    model = computation.get("model")
+    if not isinstance(model, dict) or "effective_params_by_fold" not in model:
+        return
+    recorded = model["effective_params_by_fold"]
+    if isinstance(recorded, dict):
+        declared = {
+            str(int(fold["fold"]))
+            for fold in validation_spec["computation"]["cv"]["folds"]
+            if isinstance(fold, dict)
+        }
+        stray = set(recorded) - declared
+        if stray:
+            raise ValueError(
+                f"GBM spec records parameters for folds {sorted(stray)}, which the validation CV "
+                "does not declare. These are not the validation folds this re-keys from."
+            )
+    params, alpha_is_fold_derived = _gbm_fold_invariant_params(recorded)
+
+    if alpha_is_fold_derived:
+        scale = model.get("huber_alpha_scale")
+        if params.get("objective") != "huber" or scale is None:
+            raise ValueError(
+                "GBM alpha varies across the recorded folds but the spec declares no "
+                "huber_alpha_scale to re-derive it from, so the holdout delta cannot be "
+                "computed by the rule that produced the validation ones"
+            )
+        # The same selection the request planner derives its own thresholds from
+        # (`_gbm_sampled_training_labels`), and for the reason recorded there: reading the
+        # labels through fold preparation casts them to LightGBM's float32, which quantizes
+        # to a different delta than the float64 labels validation resolved its alpha from,
+        # and one declared configuration would then carry two identities. It also reads the
+        # labels without materializing the fold's feature matrix.
+        labels = training_labels_for_split(mds, split, train_sample_frac=1.0, seed=RANDOM_SEED)
+        if not len(labels):
+            raise ValueError("GBM holdout fold has no training labels to re-derive the Huber delta")
+        params["alpha"] = _scaled_huber_alpha(float(scale), labels)
+
+    _validate_lightgbm_params(params)
+    model["effective_params_by_fold"] = {str(int(split["fold"])): params}
+
+
 def reconstruct_locked_request(
     study: Study,
     spec: dict[str, Any],

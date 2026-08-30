@@ -958,6 +958,7 @@ jobs:
             tests/test_dl_device_contract.py \
             tests/test_dl_force_retrain_identity.py \
             tests/test_gbm_classification_target.py \
+            tests/test_gbm_holdout_rekey.py \
             tests/test_gbm_identity.py \
             tests/test_gbm_runtime.py \
             tests/test_insight_chapter.py \
