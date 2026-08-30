@@ -608,10 +608,13 @@ def _papermill_visible(py_path: Path) -> set[str] | None:
     ipynb = py_path.with_suffix(".ipynb")
     if not ipynb.exists():
         return None
-    try:
-        from papermill import inspect_notebook
-    except ImportError:
-        return None
+    # Deliberately not guarded with a try/import/return-None. papermill is a declared dependency
+    # (`pyproject.toml`), and every job that runs this installs it. Swallowing its absence would
+    # turn the corpus sweep into a check that passes because it asked nobody, which is the exact
+    # shape of failure this helper exists to catch - `test-unit` did not install papermill when
+    # this was written, and a tolerant import would have hidden that instead of surfacing it.
+    from papermill import inspect_notebook
+
     try:
         return set(inspect_notebook(str(ipynb)))
     except Exception:

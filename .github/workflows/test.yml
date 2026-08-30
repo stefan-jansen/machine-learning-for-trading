@@ -475,6 +475,13 @@ jobs:
         # files are behind it too, and installing it would cost gigabytes on
         # every commit. Those stay quarantined and named in the file below.
         #
+        # papermill is here for one assertion and it is not optional. `unusable_parameters`
+        # asks papermill itself which names it can see in a parameters cell, because two valid
+        # Python declarations are invisible to its line-based parser and the override is then
+        # dropped in silence. Driving the real parser is what keeps that check from going stale
+        # against a restatement of its rules - and without the package the helper has no one to
+        # ask, so the corpus sweep would pass while checking nothing. Pinned to the version in
+        # `uv.lock`, as jupytext above is.
         # pyarrow is what polars converts through in `DataFrame.to_pandas`, which
         # `load_modeling_dataset` calls on the fold-tagged temporal artifact. The
         # variant-geometry guard hangs off exactly that frame, so without pyarrow
@@ -485,7 +492,7 @@ jobs:
           uv venv --python 3.14
           uv pip install pytest pytest-timeout numpy pandas polars pyyaml python-dotenv plotly gymnasium requests \
             scipy statsmodels scikit-learn matplotlib hmmlearn pyarrow \
-            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 ml4t-backtest ml4t-data ml4t-engineer databento
+            "ml4t-diagnostic>=0.1.2" jupytext==1.19.3 papermill==2.7.0 ml4t-backtest ml4t-data ml4t-engineer databento
       - name: Run download-logic unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}

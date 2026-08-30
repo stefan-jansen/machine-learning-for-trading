@@ -62,7 +62,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import open_study, split_retired_members
+from case_studies.research import open_study, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     VECTORIZED_CASE_STUDIES,
@@ -134,11 +134,12 @@ print(f"Backtest mode: {'vectorized' if IS_VECTORIZED else 'engine'}")
 # **The population the baselines are drawn from.** A refit publishes a second generation under the
 # same population name and leaves the one it replaced in the registry, backtests and all. An
 # overlay applied to a retired baseline measures a rule against a strategy its own publisher no
-# longer stands behind, and the comparison reads exactly like a valid one.
+# longer stands behind, and the comparison reads exactly like a valid one. The same is true of a
+# baseline no population ever listed: nobody retired it, so only a membership test excludes it.
 
 # %%
 LIVE_PREDICTIONS = (
-    split_retired_members(
+    split_unpublished_members(
         open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
         load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
     )

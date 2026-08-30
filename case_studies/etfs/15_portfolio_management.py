@@ -61,7 +61,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import open_study, split_retired_members
+from case_studies.research import open_study, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import build_backtest_spec, strategy_view
@@ -124,12 +124,16 @@ print(f"Case study: {CASE_STUDY_ID}, label: {LABEL}")
 # complete, current under a schema version that has not moved, and carrying whatever backtests the
 # previous sweep registered for it. Ranking over both lets an identity its own publisher has
 # retired take a slot from a live one, which is not a reporting error - the retired row is what
-# every stage after this one then builds on. `split_retired_members` reads the population lineage,
-# and the surviving members are what every reader below is scoped to.
+# every stage after this one then builds on. `split_unpublished_members` reads the population
+# lineage, and the surviving members are what every reader below is scoped to.
+#
+# It keeps what a population currently lists, rather than dropping what one has retired. The two
+# differ by the identities no population ever listed, which nobody retired and an exclusion set
+# therefore admits.
 
 # %%
 LIVE_PREDICTIONS = (
-    split_retired_members(
+    split_unpublished_members(
         open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
         load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
     )

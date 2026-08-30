@@ -64,7 +64,7 @@ import polars as pl
 import yaml
 from plotly.subplots import make_subplots
 
-from case_studies.research import open_study, split_retired_members
+from case_studies.research import open_study, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import get_backtest_config, load_backtest_prices_for
 from case_studies.utils.backtest_presets import (
@@ -147,12 +147,13 @@ print(f"Half-spread grid (¢): {[round(v * 100, 2) for v in COST_GRID_HALF_SPREA
 # %% [markdown]
 # **The population the leaders are drawn from.** A refit publishes a second generation under the
 # same population name and leaves the one it replaced in the registry, backtests and all. Reading
-# the leaders without asking the population lineage lets a retired identity be re-priced here and
-# carried onward as though it were what the model notebook publishes.
+# the leaders without asking the population lineage lets a retired identity - or one no population
+# ever listed - be re-priced here and carried onward as though it were what the model notebook
+# publishes.
 
 # %%
 LIVE_PREDICTIONS = (
-    split_retired_members(
+    split_unpublished_members(
         open_study(CASE_STUDY_ID, execution_tier=EXECUTION_TIER, workspace=WORKSPACE or None),
         load_prediction_index(CASE_STUDY_ID, label=LABEL, split="validation"),
     )
@@ -268,10 +269,19 @@ for row in top_combos.iter_rows(named=True):
 # per named control and none for the un-overlaid strategy, so the two sides have to be read
 # separately and differenced. A negative difference is the stage saying its controls did not help,
 # which is a result and not a failure.
+#
+# Both sides are restricted to the same live population the carrier was selected from. Without
+# that, a retired or unpublished generation can supply either Sharpe, and the difference would
+# then compare a number the sweep would never carry against one it might.
 _best: dict[str, float | None] = {}
 for _stage in ("risk_overlay", "allocation"):
     _frame = resolve_best_backtest_runs(
-        CASE_STUDY_ID, LABEL, split="validation", stage=_stage, top_n=1
+        CASE_STUDY_ID,
+        LABEL,
+        split="validation",
+        stage=_stage,
+        top_n=1,
+        prediction_hashes=set(LIVE_PREDICTIONS),
     )
     _best[_stage] = None if _frame.is_empty() else _frame["sharpe"][0]
 if _best["risk_overlay"] is None:

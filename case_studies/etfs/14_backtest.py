@@ -62,7 +62,7 @@ import warnings
 import plotly.graph_objects as go
 import polars as pl
 
-from case_studies.research import open_study, split_retired_members
+from case_studies.research import open_study, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.backtest_loaders import (
     get_backtest_config,
@@ -237,28 +237,35 @@ if random_sharpe is not None:
 # them. Sweeping both does not fail. It backtests twice, ranks a retired identity against a live
 # one, and carries whichever wins into every stage downstream.
 #
-# `split_retired_members` asks the population lineage instead of the catalog, and the retired
-# side is printed rather than counted, so a reader can see which configurations left the sweep
-# and why. Retirement is decided per member within a population name, so a refit that moved
-# three of ten identities retires three and leaves seven.
+# `split_unpublished_members` asks the population lineage instead of the catalog, and the
+# excluded side is printed rather than counted, so a reader can see which configurations left the
+# sweep and why.
+#
+# It asks membership, not retirement, and the difference is the rows no population ever listed.
+# Nobody retired an experimental fit, so an exclusion set admits it and it can outrank a
+# published identity and be carried into every stage downstream. Measured on this registry:
+# 682 validation prediction sets, 134 superseded, 498 published - and 50 that are live by
+# exclusion and listed by no population at all. Where a registry declares no populations, which
+# is a fixture or a study written before the mechanism, membership cannot be asked and the
+# exclusion split stands in rather than narrowing every candidate to nothing.
 
 # %%
 pred_index = load_prediction_index(CASE_STUDY_ID, label=LABEL, split=SPLIT)
 if pred_index.is_empty():
     raise RuntimeError(f"no predictions registered for {CASE_STUDY_ID}/{LABEL}/{SPLIT}")
 
-candidates = split_retired_members(study, pred_index)
+candidates = split_unpublished_members(study, pred_index)
 pred_index = candidates.live
 if pred_index.is_empty():
     raise RuntimeError(
-        f"every registered prediction set for {CASE_STUDY_ID}/{LABEL}/{SPLIT} belongs to a "
-        "retired generation, so there is nothing live to sweep"
+        f"no registered prediction set for {CASE_STUDY_ID}/{LABEL}/{SPLIT} is listed by a "
+        "current population, so there is nothing published to sweep"
     )
 print(f"Registered prediction sets: {candidates.live.height + candidates.retired.height:,}")
 if candidates.retired.is_empty():
-    print("Retired by a later generation: none")
+    print("Not published by any current population: none")
 else:
-    print(f"Retired by a later generation: {candidates.retired.height:,}")
+    print(f"Not published by any current population: {candidates.retired.height:,}")
     print(
         candidates.retired.group_by("family", "config_name")
         .agg(n=pl.len(), ic_max=pl.col("ic_mean").max())

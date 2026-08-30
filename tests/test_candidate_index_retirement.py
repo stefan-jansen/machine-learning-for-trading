@@ -21,7 +21,11 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from case_studies.research import OfficialPopulation, split_retired_members
+from case_studies.research import (
+    OfficialPopulation,
+    split_retired_members,
+    split_unpublished_members,
+)
 from case_studies.research.workspace import Study
 from tests.test_research_workspace import _seed_release
 
@@ -127,3 +131,58 @@ def test_an_empty_index_stays_empty_and_keeps_its_schema(study: Study) -> None:
 def test_a_missing_identity_column_is_refused(study: Study) -> None:
     with pytest.raises(ValueError, match="prediction_hash"):
         split_retired_members(study, pl.DataFrame({"family": ["linear"]}))
+
+
+# --- membership answers what exclusion cannot -----------------------------------------
+#
+# "Not retired" and "published" differ by the identities no population ever listed. Nobody
+# retired an experimental fit, so `split_retired_members` admits it and a sweep can rank it into
+# a slot and carry it downstream as though the case study published it. Measured on the etfs
+# registry 2026-08-30: of 682 validation prediction sets, 134 are superseded and 498 are
+# published, leaving 50 that are live by exclusion and listed by no population at all.
+
+UNLISTED = "dddd55556666"
+
+
+def test_a_prediction_no_population_lists_is_not_a_candidate(study: Study) -> None:
+    _publish(study, GEN_A)
+
+    split = split_unpublished_members(study, _index(*GEN_A, UNLISTED))
+
+    assert split.live["prediction_hash"].to_list() == list(GEN_A)
+    assert split.retired["prediction_hash"].to_list() == [UNLISTED]
+
+
+def test_the_exclusion_split_admits_the_row_membership_rejects(study: Study) -> None:
+    """The two answers differ, which is the whole reason for the second one.
+
+    Asserted against `split_retired_members` on the same index rather than described, so this
+    goes on failing if the exclusion split is ever changed to answer the membership question
+    and the distinction quietly disappears.
+    """
+    _publish(study, GEN_A)
+    index = _index(*GEN_A, UNLISTED)
+
+    assert UNLISTED in split_retired_members(study, index).live["prediction_hash"].to_list()
+    assert UNLISTED not in split_unpublished_members(study, index).live["prediction_hash"].to_list()
+
+
+def test_a_retired_generation_is_excluded_by_membership_too(study: Study) -> None:
+    first = _publish(study, GEN_A)
+    _publish(study, GEN_B, supersedes=first.hash)
+
+    live = split_unpublished_members(study, _index(*GEN_A, *GEN_B)).live["prediction_hash"]
+
+    assert sorted(set(live.to_list())) == sorted(set(GEN_B))
+
+
+def test_with_no_population_declared_every_candidate_survives(study: Study) -> None:
+    """Membership cannot be asked, so the exclusion split stands in rather than refusing all.
+
+    A fixture registry, or a study written before populations existed, declares none. Narrowing
+    to an empty membership set there would refuse every candidate and report it as though the
+    case study published nothing.
+    """
+    index = _index(*GEN_A, UNLISTED)
+
+    assert split_unpublished_members(study, index).live.height == index.height

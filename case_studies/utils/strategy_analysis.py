@@ -176,6 +176,44 @@ class HoldoutSelfBacktest:
         return self.backtest_hash is not None
 
 
+def _locked_holdout_backtest(db, val_backtest_hash: str) -> str | None:
+    """The finalized holdout backtest for a sealed carrier, or None when there is not one.
+
+    None covers every state that is not "this carrier was sealed and its holdout completed":
+    no lock tables at all (a study that never took one), no lock naming this validation run, a
+    lock still in progress, and a lock whose evaluation row is missing or half written. The
+    caller falls through to lineage matching in each case, which is what keeps studies that
+    produce their holdout without a lock working unchanged.
+    """
+    import sqlite3
+
+    try:
+        # One row at most: `idx_research_singleton` is UNIQUE on a constant, so a registry holds
+        # a single lock. It is read rather than assumed to be the right one.
+        row = db.execute("SELECT lock_hash, state, lock_json FROM research_locks").fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return None
+    if row is None:
+        return None
+    lock_hash, state, lock_json = row
+    if state != "HOLDOUT_EVALUATED":
+        return None
+    if json.loads(lock_json).get("validation_backtest_hash") != val_backtest_hash:
+        return None
+    try:
+        evaluated = db.execute(
+            "SELECT holdout_backtest_hash FROM holdout_evaluations WHERE lock_hash = ?",
+            (lock_hash,),
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table" not in str(error):
+            raise
+        return None
+    return str(evaluated[0]) if evaluated and evaluated[0] else None
+
+
 def resolve_holdout_self_backtest(
     case_study: str,
     val_backtest_hash: str,
@@ -222,6 +260,26 @@ def resolve_holdout_self_backtest(
             )
         val_pred_hash, val_spec_json = row
         val_strategy = json.loads(val_spec_json).get("strategy", {})
+
+        # The lock is asked first, because for a canonically evaluated holdout the lineage below
+        # cannot find one. `research.holdout.evaluate_holdout` seals the carrier and then retrains
+        # it over a holdout CV interval built by `build_holdout_cv`, so the holdout prediction set
+        # hangs off a DIFFERENT `training_hash` than the validation one by construction. Matching
+        # on the validation `training_hash` therefore returns nothing and the notebook reports the
+        # holdout as unevaluated after it was finalized - and unevaluated is exactly the state a
+        # reader cannot distinguish from "not run yet".
+        #
+        # `holdout_evaluations` records what the run actually finalized rather than what the lock
+        # expected, which matters because one training run registers one prediction set per
+        # declared checkpoint: `holdout_training_hash` alone would leave several candidates and
+        # the caller picking among them by row order.
+        #
+        # The lock is required to name THIS carrier. A study can hold a lock over a different
+        # validation run - an earlier generation's, or another label's - and returning its holdout
+        # would answer a question about a configuration the caller did not ask about.
+        locked = _locked_holdout_backtest(db, val_backtest_hash)
+        if locked is not None:
+            return HoldoutSelfBacktest(locked)
 
         train_row = db.execute(
             """

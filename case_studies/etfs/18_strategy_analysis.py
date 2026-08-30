@@ -80,7 +80,7 @@ from ml4t.diagnostic.integration import (
     generate_tearsheet_from_run_artifacts,
 )
 
-from case_studies.research import open_study, split_retired_members
+from case_studies.research import open_study, split_unpublished_members
 from case_studies.utils.backtest_explorer import BacktestExplorer
 from case_studies.utils.benchmark import load_benchmark_metrics, load_benchmark_returns
 from case_studies.utils.cohort_metrics import compute_and_register
@@ -155,7 +155,7 @@ print(explorer)
 
 # %%
 LIVE_PREDICTIONS = (
-    split_retired_members(
+    split_unpublished_members(
         study,
         load_prediction_index(CASE_STUDY, label=PRIMARY_LABEL, split="validation"),
     )

@@ -523,6 +523,49 @@ def split_retired_members(
     return RetirementSplit(live=index.filter(~is_retired), retired=index.filter(is_retired))
 
 
+def split_unpublished_members(
+    study: Study,
+    index: pl.DataFrame,
+    *,
+    member_kind: str = "prediction",
+    column: str = "prediction_hash",
+) -> RetirementSplit:
+    """Divide a candidate index on whether its case study publishes each identity.
+
+    :func:`split_retired_members` asks the exclusion question - has this identity's publisher
+    moved past it - and that is the weaker of the two. "Not retired" and "published" differ by
+    the identities no population ever listed: an experimental fit, a one-off, a row written
+    before its notebook declared a population. Nobody retired them, so an exclusion set admits
+    them, and a sweep ranking over that set can carry one into every stage downstream as though
+    it were what the case study publishes. Measured on the etfs registry 2026-08-30: of 682
+    validation prediction sets, 134 are superseded and 498 are published, leaving 50 that are
+    live by exclusion and listed by no population at all.
+
+    So membership is asked first, through :func:`published_members_at`, and the exclusion
+    question is the fallback rather than the answer. ``published_members_at`` returns ``None``
+    where the registry declares no populations - a fixture, or a study written before the
+    mechanism - and there membership cannot be asked at all; narrowing to nothing would refuse
+    every candidate, so the exclusion split stands in and the index passes through as before.
+
+    The return shape is :class:`RetirementSplit` either way, so a caller goes on printing both
+    halves. On the membership path the ``retired`` side is everything not published, which is
+    the superset that includes the never-listed rows - named for what the caller does with it,
+    which is to exclude and report it.
+    """
+    import polars as pl
+
+    if column not in index.columns:
+        raise ValueError(
+            f"candidate index has no {column!r} column, so membership cannot be decided on it; "
+            f"it carries {sorted(index.columns)}"
+        )
+    published = published_members_at(study.root, member_kind=member_kind)
+    if published is None:
+        return split_retired_members(study, index, member_kind=member_kind, column=column)
+    is_published = pl.col(column).is_in(list(published))
+    return RetirementSplit(live=index.filter(is_published), retired=index.filter(~is_published))
+
+
 def superseded_members(study: Study, *, member_kind: str = "prediction") -> frozenset[str]:
     """Identities whose own publisher has moved past them.
 
