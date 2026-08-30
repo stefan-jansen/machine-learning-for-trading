@@ -86,23 +86,12 @@ LABELS: list[str] = []
 EXECUTION_TIER = "canonical"
 WORKSPACE: str = ""
 POPULATION_SUFFIX = "v2"
-SUPERSEDES: dict[str, str] = {
-    # The four final validation sets this run replaces. Their membership moved because the
-    # grid the admission rule is applied to is now the predecessor set's members plus this
-    # run's own overlays, where it used to be every signal, allocation and risk_overlay row
-    # the registry holds for the label. A superseded generation's rows are immutable and
-    # still complete, so they passed the admission and entered a set meant to be this
-    # generation's.
-    #
-    # Recorded here rather than passed at run time: `supersedes` sits inside the hashed
-    # snapshot, so a re-run that declares nothing computes a different hash from the row on
-    # record and is refused (ml4t/agent-workspace#879). A set whose members did not move
-    # resolves by hash and ignores the declaration.
-    "crypto-final-validation-fwd_dir_8h": "e6fdadbb6f0b",
-    "crypto-final-validation-fwd_dir_8h_3c": "7cd1b20aa8c8",
-    "crypto-final-validation-fwd_ret_24h": "9b396032bd0c",
-    "crypto-final-validation-fwd_ret_8h": "2f952b3e3c11",
-}
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES: dict[str, str] = {}
 
 # %%
 study = open_study(

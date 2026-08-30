@@ -83,7 +83,12 @@ WORKSPACE: str = ""
 # this pool moves with them. Recorded here rather than passed at run time: `supersedes` is part
 # of what identifies the generation, so a re-run declaring nothing computes a different hash
 # from the row on record and is refused (ml4t/agent-workspace#879).
-SUPERSEDES: str = "8270e5b544f9"
+# Left empty, and it stays empty. The registry was reset for the stage-04 holdout rebuild, so
+# every name below is published at generation one and there is nothing to supersede. A
+# declaration is only needed when a re-run changes an existing name's membership: the refusal
+# prints the name and the hash, and it is resolved through the shared resolver rather than
+# offered straight, because a reader's clean clone has no generation for it to replace.
+SUPERSEDES: str = ""
 
 # %%
 study = open_study(
