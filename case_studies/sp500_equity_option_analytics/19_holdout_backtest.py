@@ -421,46 +421,47 @@ comparison.select(
 )
 
 # %% [markdown]
-# The Sharpe intervals are the part to read first, and they answer two different
-# questions. Whether the holdout interval spans zero says whether one year is
-# enough to establish that this strategy earns anything at all. Whether it
-# contains the validation point estimate says whether the drop between the two
-# windows is larger than this strategy's own year-to-year variability.
+# The Sharpe intervals are the part to read first, and what they support is
+# narrower than it looks.
 #
-# A holdout interval can easily do both - exclude the validation figure while
-# still spanning zero - and that combination is not a contradiction. It is what
-# a single year of weekly rebalances buys: enough resolution to say the
-# validation number is unlikely to recur, not enough to say what will.
+# Each interval describes uncertainty in *its own* estimate. The holdout's says
+# how much a single year of this strategy's weekly rebalances pins down its
+# Sharpe; where it spans zero, that year does not establish that the strategy
+# earns anything at all. The validation interval says the same for the
+# development window, and carries the additional problem that its point estimate
+# is the maximum of a search and is optimistic by an amount neither interval
+# measures.
+#
+# What neither interval gives is a test of the *difference* between the two
+# windows. That would need an interval for the gap itself, and the two are
+# measured over disjoint periods on different numbers of observations, so it
+# cannot be read off by asking whether one point estimate falls inside the
+# other's interval. The cells below therefore report both intervals and the
+# arithmetic difference, and stop there. Attributing the difference - to
+# selection bias, to a different market, or to both - is not something one
+# holdout year can do, and no notebook downstream of this one can either.
 
 # %%
 _holdout = comparison.filter(pl.col("window") == "holdout (2021)").row(0, named=True)
 _validation = comparison.filter(pl.col("window") == "validation (selected on)").row(0, named=True)
-_within = _holdout["sharpe_ci95_lo"] <= _validation["sharpe"] <= _holdout["sharpe_ci95_hi"]
-print(
-    f"Validation Sharpe {_validation['sharpe']:.3f}; holdout {_holdout['sharpe']:.3f} "
-    f"(95% CI {_holdout['sharpe_ci95_lo']:.3f} to {_holdout['sharpe_ci95_hi']:.3f}), "
-    f"a change of {_holdout['sharpe'] - _validation['sharpe']:+.3f}"
-)
 _spans_zero = _holdout["sharpe_ci95_lo"] <= 0.0 <= _holdout["sharpe_ci95_hi"]
 print(
-    "The holdout interval "
-    + ("spans zero" if _spans_zero else "excludes zero")
-    + ", so one year "
-    + (
-        "does not distinguish this strategy from no strategy at all"
-        if _spans_zero
-        else "is enough to place its Sharpe away from zero"
-    )
+    f"Validation Sharpe {_validation['sharpe']:.3f} "
+    f"[{_validation['sharpe_ci95_lo']:.3f}, {_validation['sharpe_ci95_hi']:.3f}] "
+    f"over {int(_validation['n_periods'])} sessions"
 )
 print(
-    "It "
-    + ("contains" if _within else "excludes")
-    + f" the validation figure {_validation['sharpe']:.3f}, so the drop "
+    f"Holdout Sharpe {_holdout['sharpe']:.3f} "
+    f"[{_holdout['sharpe_ci95_lo']:.3f}, {_holdout['sharpe_ci95_hi']:.3f}] "
+    f"over {int(_holdout['n_periods'])} sessions"
+)
+print(f"Arithmetic difference {_holdout['sharpe'] - _validation['sharpe']:+.3f}, untested")
+print(
+    "The holdout interval "
     + (
-        "is within what a year of this strategy's own variability produces"
-        if _within
-        else "is larger than that variability accounts for - though only just, and a difference "
-        "that large has at least two sufficient causes"
+        "spans zero, so this year does not establish that the strategy earns anything"
+        if _spans_zero
+        else "excludes zero, so this year places its Sharpe away from zero"
     )
 )
 
@@ -511,7 +512,8 @@ fig.show()
 #    different training identity and cannot be matched on a hash.
 # 3. A validation figure is the maximum of a search and is optimistic. A single
 #    holdout year is unbiased with respect to that search and is noisy, and the
-#    registered Sharpe interval is what says how noisy.
+#    registered Sharpe interval is what says how noisy. Neither interval is a
+#    test of the difference between the two, which is why none is reported.
 # 4. A drop from validation to holdout has at least two sufficient explanations
 #    - selection bias and a different market - and one window cannot separate
 #    them. Neither can any notebook downstream of this one.

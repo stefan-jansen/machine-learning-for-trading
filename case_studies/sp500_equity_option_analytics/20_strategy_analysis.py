@@ -280,7 +280,57 @@ print(
 # %%
 fixed_controls = get_position_risk_controls(CASE_STUDY)
 risk_plans = []
-base_spec = json.loads(strategy_carrier["spec_json"])
+# The carrier is drawn from a pool that now includes the risk overlays, so it may already carry
+# one. Every comparison below is against the strategy the overlay was laid over, not against the
+# overlay itself: on an overlaid carrier, reusing it as its own baseline reports a paired
+# improvement of exactly zero and silently drops the allocation-only figure the reader is shown.
+#
+# The parent is found in the frozen set rather than reconstructed by stripping the risk block.
+# Stripping does not reproduce it - the two rows also differ in the `chapter` tag that records
+# which stage registered them, and that tag is inside the backtest identity - so a reconstructed
+# hash names a row that does not exist. What identifies the parent is what it is: the member of
+# the same frozen set, on the same predictions, with the same allocator and concentration, and
+# no overlay.
+CARRIER_SPEC = json.loads(strategy_carrier["spec_json"])
+no_overlay_rows = candidate_frame.filter(
+    (pl.col("prediction_hash") == strategy_carrier["prediction_hash"])
+    & (pl.col("allocator") == strategy_carrier["allocator"])
+    & (pl.col("top_k") == strategy_carrier["top_k"])
+    & pl.col("risk").is_null()
+)
+if no_overlay_rows.height != 1:
+    raise RuntimeError(
+        f"the carrier {strategy_carrier['backtest_hash']} has {no_overlay_rows.height} "
+        "un-overlaid parents in the frozen candidate set, not one, so its overlay cannot be "
+        "scored against the strategy it was laid over"
+    )
+NO_OVERLAY = no_overlay_rows.row(0, named=True)
+NO_OVERLAY_HASH = NO_OVERLAY["backtest_hash"]
+if strategy_carrier["risk"] is None and strategy_carrier["backtest_hash"] != NO_OVERLAY_HASH:
+    raise RuntimeError(
+        "the carrier declares no overlay, so it must be its own un-overlaid parent; got "
+        f"{NO_OVERLAY_HASH} against {strategy_carrier['backtest_hash']}"
+    )
+print(
+    f"Un-overlaid parent {NO_OVERLAY_HASH} at validation Sharpe {NO_OVERLAY['sharpe']:.3f}"
+    + (
+        f"; the carrier adds {strategy_carrier['risk']} for "
+        f"{strategy_carrier['sharpe'] - NO_OVERLAY['sharpe']:+.3f}"
+        if strategy_carrier["risk"]
+        else " (the carrier itself - no overlay was selected)"
+    )
+)
+
+# Two bases, because the two surfaces were registered against two different strategies and this
+# notebook reproduces their identities rather than recomputing them.
+#
+# `risk_base` is the un-overlaid parent: `16_risk_management` laid each control over that, so a
+# variant differs from it in the position rule and nothing else. `cost_base` is the carrier
+# itself: `17_costs` stresses whatever survived the risk stage, overlay included. Planning both
+# from one spec reproduces neither set of hashes.
+risk_base = json.loads(NO_OVERLAY["spec_json"])
+cost_base = CARRIER_SPEC
+base_spec = risk_base
 execution = base_spec["backtest_config"]["execution"]
 metadata = base_spec["backtest_config"]["metadata"]
 stops = base_spec["backtest_config"]["stops"]
@@ -345,9 +395,9 @@ if risk_surface.filter(pl.col("stage") != "risk_overlay").height:
 no_overlay = {
     "risk_name": "No overlay",
     "risk_type": "none",
-    "backtest_hash": strategy_carrier["backtest_hash"],
+    "backtest_hash": NO_OVERLAY_HASH,
     "prediction_hash": strategy_carrier["prediction_hash"],
-    "sharpe": strategy_carrier["sharpe"],
+    "sharpe": NO_OVERLAY["sharpe"],
 }
 risk_candidates = pl.concat([risk_surface, pl.DataFrame([no_overlay])], how="diagonal_relaxed")
 risk_leader = risk_candidates.sort("sharpe", descending=True).row(0, named=True)
@@ -381,15 +431,18 @@ carrier_rows = [
         "sharpe": baseline_row["sharpe"],
     }
 ]
-if strategy_carrier["backtest_hash"] != baseline_row["backtest_hash"]:
+# The allocation step is the un-overlaid parent. Where the carrier is itself an overlay the two
+# differ, and naming the overlay here would show the allocation step already carrying the risk
+# rule's effect and then show the risk step adding nothing.
+if baseline_row["backtest_hash"] != NO_OVERLAY_HASH:
     carrier_rows.append(
         {
             "stage": strategy_carrier["allocator"],
-            "backtest_hash": strategy_carrier["backtest_hash"],
-            "sharpe": strategy_carrier["sharpe"],
+            "backtest_hash": NO_OVERLAY_HASH,
+            "sharpe": NO_OVERLAY["sharpe"],
         }
     )
-if risk_leader["backtest_hash"] != strategy_carrier["backtest_hash"]:
+if risk_leader["backtest_hash"] != NO_OVERLAY_HASH:
     carrier_rows.append(
         {
             "stage": risk_leader["risk_name"],
@@ -503,17 +556,20 @@ add_message_title(
 fig_stage.show()
 
 # %% [markdown]
-# ## 2. Cost survival on the same allocation lineage
+# ## 2. Cost survival on the strategy the case study selected
 #
-# The cost diagnostic is measured on the allocation lineage, before the risk rule.
-# Exact planned hashes keep alternate lineages and removed allocators out of the
-# curve.
+# The cost surface is measured on the carrier itself - the risk overlay included, where one was
+# selected - because that is the strategy `17_costs` stresses and the one this case study would
+# publish. Measuring it on the un-overlaid parent instead would report the friction of a
+# strategy nobody is proposing to trade.
+#
+# Exact planned hashes keep alternate lineages and removed allocators out of the curve.
 
 # %%
 cost_plans = []
 for cost_bps in get_cost_grid_bps(CASE_STUDY):
     spec = set_backtest_costs_bps(
-        clone_backtest_spec(base_spec),
+        clone_backtest_spec(cost_base),
         commission_bps=cost_bps / 2,
         slippage_bps=cost_bps / 2,
     )
@@ -533,7 +589,7 @@ for cost_bps in get_cost_grid_bps(CASE_STUDY):
 # %%
 for half_spread in get_cost_grid_half_spread_usd(CASE_STUDY):
     spec = set_backtest_costs_per_share(
-        clone_backtest_spec(base_spec),
+        clone_backtest_spec(cost_base),
         per_share=get_per_share_commission(CASE_STUDY),
         default_half_spread_usd=half_spread,
     )
@@ -648,7 +704,10 @@ print(
 # model and allocation search, so it is a lower bound on the total search cost.
 
 # %%
-baseline_returns = canonical_daily_returns(strategy_carrier["backtest_hash"])
+# The un-overlaid parent, not the carrier. On an overlaid carrier the two are different rows,
+# and using the carrier here would compare the winning overlay with itself and report a paired
+# difference of exactly zero.
+baseline_returns = canonical_daily_returns(NO_OVERLAY_HASH)
 leader_returns = canonical_daily_returns(risk_leader["backtest_hash"])
 if baseline_returns is None or leader_returns is None:
     raise RuntimeError("Missing daily returns for the corrected carrier")
@@ -761,7 +820,8 @@ with sqlite3.connect(REGISTRY_DB) as db:
     holdout_rows = db.execute(
         """
         SELECT b.backtest_hash, p.prediction_hash, p.training_hash, t.family, t.config_name,
-               b.spec_json, bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi, bm.max_drawdown
+               b.spec_json, bm.sharpe, bm.sharpe_ci95_lo, bm.sharpe_ci95_hi, bm.max_drawdown,
+               t.label, p.checkpoint_kind, p.checkpoint_value, t.spec_json AS training_spec_json
         FROM backtest_runs b
         JOIN backtest_metrics bm ON b.backtest_hash = bm.backtest_hash
         JOIN prediction_sets p ON b.prediction_hash = p.prediction_hash
@@ -777,37 +837,83 @@ with sqlite3.connect(REGISTRY_DB) as db:
 # holdout fold is not the validation folds. So a holdout row cannot be matched to the carrier
 # by training hash.
 #
-# Two things have to agree instead, and the model is only one of them. Family, configuration
-# and label say the same estimator was refitted, which is what
-# [`18_holdout_predictions`](18_holdout_predictions.ipynb) produces. The strategy projection -
-# allocator, concentration, risk overlay, execution and costs - says the same portfolio was
-# built from it, which is what [`19_holdout_backtest`](19_holdout_backtest.ipynb) runs. Matching
-# on the model alone would accept a holdout row for this model under some other allocator and
-# report it here as the carrier's own out-of-sample result.
+# Five things have to agree instead, and the model name is only one of them.
+#
+# - **Family, configuration and label** say the same estimator was fitted against the same
+#   target, which is what [`18_holdout_predictions`](18_holdout_predictions.ipynb) refits.
+# - **The training specification outside the re-keyed fields** says the same computation over
+#   the same pinned artifacts. Names alone would accept a fit against a retired feature
+#   artifact, which is a different estimator wearing the same label.
+# - **The checkpoint** says the same point on the training schedule that selection was made at.
+#   A model publishing ten checkpoints would otherwise offer ten holdout results.
+# - **The strategy projection** - allocator, concentration, risk overlay, execution and costs -
+#   says the same portfolio was built from those predictions, which is what
+#   [`19_holdout_backtest`](19_holdout_backtest.ipynb) runs.
+#
+# Matching on the model alone would accept a holdout row for this model under some other
+# allocator, or against a stale artifact, and report either as the carrier's own out-of-sample
+# result.
 
 # %%
-carrier_source = None
 with sqlite3.connect(REGISTRY_DB) as db:
-    row = db.execute(
-        "SELECT family, config_name, label FROM training_runs WHERE training_hash = ?",
+    carrier_source = db.execute(
+        "SELECT family, config_name, label, spec_json FROM training_runs WHERE training_hash = ?",
         (carrier_training_hash,),
     ).fetchone()
-    if row is not None:
-        carrier_source = row
+    carrier_checkpoint = db.execute(
+        "SELECT checkpoint_kind, checkpoint_value FROM prediction_sets WHERE prediction_hash = ?",
+        (strategy_carrier["prediction_hash"],),
+    ).fetchone()
+if carrier_source is None or carrier_checkpoint is None:
+    raise RuntimeError(f"the carrier lineage {carrier_training_hash} is not in this registry")
 
 CARRIER_STRATEGY = strategy_view(json.loads(strategy_carrier["spec_json"]))
+CARRIER_TRAINING_SPEC = json.loads(carrier_source[3])
+# The fields a holdout refit is allowed to differ in. Everything else - the estimator, its
+# parameters, the feature artifacts it pins, the label it was fitted against - has to be
+# identical, because a holdout that changed any of them is not this configuration re-measured.
+REKEYED_FIELDS = ("cv", "expected_prediction_keys", "macro_context")
+
+
+def _comparable_computation(spec: dict) -> dict:
+    return {k: v for k, v in spec["computation"].items() if k not in REKEYED_FIELDS}
 
 
 def is_this_carriers_holdout(row) -> bool:
-    """Same estimator refitted, and the same portfolio built from it."""
-    if carrier_source is None:
+    """The carrier's own configuration, refitted for the holdout, at the selected checkpoint.
+
+    Five things have to agree and the model name is only one. Family, configuration and label
+    say the same estimator against the same target. The training specification outside the
+    re-keyed fields says the same computation over the same pinned artifacts - matching on names
+    alone would accept a fit against a retired feature artifact. The checkpoint says the same
+    point on the schedule that selection was made at. And the strategy projection says the same
+    portfolio was built from it, which is what 19_holdout_backtest runs.
+
+    The training hash itself cannot be compared: a holdout refit is a different interval and
+    therefore a different identity, always and by construction.
+    """
+    if (row[3], row[4], row[10]) != (carrier_source[0], carrier_source[1], carrier_source[2]):
         return False
-    if (row[3], row[4]) != (carrier_source[0], carrier_source[1]):
+    if (row[11], row[12]) != carrier_checkpoint:
+        return False
+    if _comparable_computation(json.loads(row[13])) != _comparable_computation(
+        CARRIER_TRAINING_SPEC
+    ):
+        return False
+    holdout_cv = json.loads(row[13])["computation"].get("cv") or {}
+    if holdout_cv.get("split") != "holdout":
         return False
     return strategy_view(json.loads(row[5])) == CARRIER_STRATEGY
 
 
 matching = [r for r in holdout_rows if is_this_carriers_holdout(r)]
+if len(matching) > 1:
+    raise RuntimeError(
+        f"{len(matching)} holdout rows match this carrier: "
+        + ", ".join(r[0] for r in matching)
+        + ". Delete the superseded ones; two holdout results for one configuration cannot both "
+        "be the out-of-sample evidence for it."
+    )
 holdout_result = matching[-1] if matching else None
 
 print(f"Carrier: {carrier_source[0]}/{carrier_source[1]} on {carrier_source[2]}")

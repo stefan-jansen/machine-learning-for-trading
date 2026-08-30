@@ -362,6 +362,48 @@ print(
 # validated on both paths, because a reused prediction is state an earlier
 # process left on disk and the registry row is the thing being checked, not the
 # evidence for it.
+#
+# ### What a second holdout lineage would mean, and why nothing here prevents one
+#
+# A holdout window read once, against a selection made without seeing it, is out
+# of sample. A window read again after the first result was observed, against a
+# selection revised in the light of it, is not - it has become a validation set
+# with extra steps, and no amount of care in this notebook repairs that.
+#
+# The earlier design took an authorization lock here and spent it, so that the
+# second read was impossible. That failed in the direction nobody wants: it made
+# a *wrong* holdout permanent too. When the fit turned out to be on a superseded
+# training identity, the repair needed a retrain the lock forbade, and the case
+# study was left publishing a result it knew to be stale.
+#
+# So this notebook is repeatable, and the discipline is placed where it can
+# actually hold: the selection is frozen upstream in
+# [`16_risk_management`](16_risk_management.ipynb) and read from that set, never
+# chosen here, and the count below makes a second lineage visible rather than
+# impossible. A reader who sees more than one holdout training identity for this
+# label is looking at a window that has been read more than once, and should
+# discount the out-of-sample claim accordingly. That is a judgement the page
+# hands to the reader with the evidence, rather than one a lock makes for them.
+
+# %%
+with sqlite3.connect(REGISTRY_DB) as db:
+    _lineages = db.execute(
+        "SELECT DISTINCT p.training_hash FROM prediction_sets p "
+        "JOIN training_runs t USING(training_hash) "
+        "WHERE p.split = 'holdout' AND t.label = ?",
+        (VALIDATION_SPEC["label"],),
+    ).fetchall()
+HOLDOUT_LINEAGES = {row[0] for row in _lineages} | {HOLDOUT_TRAINING_HASH}
+if len(HOLDOUT_LINEAGES) == 1:
+    print(f"One holdout training identity for {VALIDATION_SPEC['label']}: this one")
+else:
+    print(
+        f"{len(HOLDOUT_LINEAGES)} holdout training identities exist for "
+        f"{VALIDATION_SPEC['label']}: {', '.join(sorted(HOLDOUT_LINEAGES))}. The 2021 window has "
+        "been fitted against more than one selection, so it is no longer a clean out-of-sample "
+        "read. Delete the lineages that no longer describe the pipeline, or report the result "
+        "as what it is."
+    )
 
 # %%
 with sqlite3.connect(REGISTRY_DB) as db:
