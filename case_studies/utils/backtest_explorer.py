@@ -29,6 +29,7 @@ from case_studies.utils.notebook_contracts import (
     filter_active_model_rows,
     full_coverage_prediction_sql,
 )
+from case_studies.utils.uncertainty import cohort_member_digest
 
 # Sentinel distinguishing "no filter" from "match exit_at_max_days IS NULL".
 _UNSET = object()
@@ -839,17 +840,19 @@ class BacktestExplorer:
         # once. `top_n` bounds the rows displayed, not the cohort selected from, so this
         # is a second unbounded read rather than a group-by over `top`.
         scoped_k: dict[tuple[str, str], int] = {}
+        scoped_digest: dict[tuple[str, str], str] = {}
         if prediction_hashes:
             cohort = self.best(
                 stage=stage, top_n=_UNBOUNDED_COHORT, prediction_hashes=prediction_hashes
             )
             if not cohort.is_empty():
-                scoped_k = {
-                    (row["family"], row["label"]): row["n"]
-                    for row in cohort.group_by("family", "label")
-                    .agg(n=pl.len())
-                    .iter_rows(named=True)
-                }
+                grouped = cohort.group_by("family", "label").agg(
+                    n=pl.len(), members=pl.col("backtest_hash")
+                )
+                for row in grouped.iter_rows(named=True):
+                    key = (row["family"], row["label"])
+                    scoped_k[key] = row["n"]
+                    scoped_digest[key] = cohort_member_digest(row["members"])
 
         per_variant_psr: dict[str, float | None] = {}
         for row in top.iter_rows(named=True):
@@ -876,7 +879,7 @@ class BacktestExplorer:
         placeholders = ",".join("?" for _ in hashes)
         cm = self._query(
             f"""
-            SELECT leader_hash, k_variants,
+            SELECT leader_hash, k_variants, member_digest,
                    n_trials_effective_mp, n_trials_effective_er,
                    dsr_raw, dsr_raw_pvalue,
                    dsr_mp,  dsr_mp_pvalue,
@@ -902,11 +905,23 @@ class BacktestExplorer:
             b_hash = r["backtest_hash"]
             cmr = cm_by_hash.get(b_hash)
             is_leader = cmr is not None
-            k_scoped = scoped_k.get((r["family"], r["label"])) if prediction_hashes else None
-            # Applies only where the stored cohort is the one that was ranked. Scoping can
-            # only remove variants, so a mismatch means the stored correction was computed
-            # over strictly more trials than the reader selected from.
-            applies = is_leader and (not prediction_hashes or cmr["k_variants"] == k_scoped)
+            key = (r["family"], r["label"])
+            k_scoped = scoped_k.get(key) if prediction_hashes else None
+            # Applies only where the stored cohort IS the one that was ranked, established
+            # on the members and not on how many there are: swapping a retired member for a
+            # live one leaves `k_variants` untouched, and the correction would then be
+            # reported against a cohort it was not computed over. `member_digest` is null on
+            # rows written before it was persisted; those still fall back to the count, which
+            # at least catches the scoping that strictly removes variants, and stop doing so
+            # the first time their producer re-runs.
+            applies = is_leader and (
+                not prediction_hashes
+                or (
+                    cmr["member_digest"] == scoped_digest.get(key)
+                    if cmr["member_digest"]
+                    else cmr["k_variants"] == k_scoped
+                )
+            )
             dsr_er_p = cmr["dsr_er_pvalue"] if applies else None
             rows.append(
                 {
