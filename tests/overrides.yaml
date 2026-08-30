@@ -1451,15 +1451,22 @@ case_studies/etfs/02_labels:
 case_studies/etfs/03_financial_features:
   timeout: 300
 case_studies/etfs/04_model_based_features:
+  # No MAX_SYMBOLS, for the reason 02_labels gives: the CI fixture is already only 24
+  # ETFs, so it IS the reduction. Cutting to 5 on top of it made every downstream
+  # backtest degenerate rather than fast. etfs declares top_k_grid [5, 10, 20] against a
+  # 24-fund price panel, so all three schemes pass the feasibility filter - but the
+  # predictions they rank covered 5 symbols, so top-5, top-10 and top-20 each held the
+  # whole cross-section, the basket never changed, and 12 of 12 backtests recorded
+  # num_trades=0. Four notebooks (14, 15, 17, 18) were blocked on that as
+  # ml4t/agent-workspace#989. The selection has to have something to reject.
   parameters:
     GARCH_MIN_OBS: 50
-    MAX_SYMBOLS: 5
     N_RESTARTS: 1
-  timeout: 300
+  timeout: 900
 case_studies/etfs/05_evaluation:
-  parameters:
-    MAX_SYMBOLS: 5
-  timeout: 300
+  # Same reason as 04 above: this stage feeds the same predictions, so reducing it
+  # re-narrows the cross-section that 04 was widened to preserve.
+  timeout: 900
 case_studies/etfs/06_linear:
   timeout: 120
 case_studies/etfs/07_gbm:
